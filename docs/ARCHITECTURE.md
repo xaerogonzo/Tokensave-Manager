@@ -16,7 +16,8 @@ See `docs/ARCHITECTURE_TOKENSAVE.md` for how tokensave itself works.
 
 ```
 Token Save Manager Source/
-├── manager-config.json            Machine-specific config (paths, search roots)
+├── manager-config.json            Machine-specific config (paths, search roots)  — gitignored
+├── manager-config.example.json    Clean template with placeholder paths — committed
 ├── TOKENSAVE_GUIDE.md             Full tokensave CLI + MCP reference
 ├── BASIC_INSTRUCTIONS.md          Claude session instructions for this project
 ├── CHANGELOG.md                   Change history
@@ -24,7 +25,7 @@ Token Save Manager Source/
 ├── build.bat                      Launcher for build.ps1 (bypasses execution policy)
 │
 ├── src/
-│   ├── tokensave-manager.py       Main GUI application (~2,000 lines)
+│   ├── tokensave-manager.py       Main GUI application (~4,700 lines)
 │   └── tokensave-wrapper.py       Claude Desktop auto-detection wrapper
 │
 ├── templates/                     Data files used by the manager + shipped in dist\
@@ -39,22 +40,26 @@ Token Save Manager Source/
 │   ├── tokensave-manager.exe
 │   ├── tokensave-wrapper.exe
 │   ├── manager-config.json        Clean config (user fills in on first run)
+│   ├── manager-config.example.json
 │   ├── TOKENSAVE_GUIDE.md
-│   └── templates\                 All template files (copied by build.ps1)
+│   ├── CHANGELOG.md
+│   ├── templates\                 All template files (copied by build.ps1)
+│   └── docs\                      GITHUB_GUIDE.md, ARCHITECTURE.md, ARCHITECTURE_TOKENSAVE.md
 │
 ├── logs/
 │   └── manager.log                Rotating log (500 KB x 5 backups)
 │
 └── docs/
     ├── ARCHITECTURE.md            This file
-    └── ARCHITECTURE_TOKENSAVE.md  tokensave tool internals reference
+    ├── ARCHITECTURE_TOKENSAVE.md  tokensave tool internals reference
+    └── GITHUB_GUIDE.md            Beginner GitHub guide (concepts, setup, daily workflow, releases)
 ```
 
 ---
 
 ## `src/tokensave-manager.py` — Main Application
 
-Single-file tkinter application (~2,000 lines). Entry point is `if __name__ == "__main__": App().mainloop()`.
+Single-file tkinter application (~4,700 lines). Entry point is `if __name__ == "__main__": App().mainloop()`.
 
 ### Class hierarchy
 
@@ -101,7 +106,7 @@ App (tk.Tk)
     ├── _do_retrofit()           — prepend @include to CLAUDE.md + optional BASIC_INSTRUCTIONS + Nuitka + shadow links + git hook
     ├── _do_shadow_links()       — generate hardlinks in background thread, optionally run sync after
     ├── _do_assign_category()    — write project_categories override to config, refresh tree
-    ├── _do_git_commit()         — git add -A + git commit -m in a background thread
+    ├── _do_git_commit()         — git reset → git add -- <selected_files> → git commit -m, in a background thread; commits only the files the user ticked in GitCommitDialog, leaving the rest as working-tree changes
     ├── _do_git_set_remote()     — git remote add/set-url in background thread
     ├── _do_git_new_branch()     — git checkout -b / git branch in background thread
     ├── _do_git_switch_branch()  — git checkout <branch> with rc != 0 error dialog
@@ -126,8 +131,8 @@ AssignCategoryDialog (tk.Toplevel)  — modal: category + sub-category comboboxe
 SetRemoteDialog (tk.Toplevel)     — modal: GitHub URL entry with beginner-friendly step-by-step instructions
 NewBranchDialog (tk.Toplevel)     — modal: branch name entry + "switch immediately" checkbox
 SwitchBranchDialog (tk.Toplevel)  — modal: listbox of local branches; double-click to switch; static pick() helper for delete flow
-GitCommitDialog (tk.Toplevel)     — modal: status display + stage-all checkbox + commit message entry with auto-suggest (💡 Suggest button); right-click 📝 Git Commit…
-GitHubSetupDialog (tk.Toplevel)  — modal: step-by-step GitHub onboarding wizard; checks git identity, remote, gh CLI; handles first push + GitHub Releases; opened by 🐙 GitHub… button in Git tab header
+GitCommitDialog (tk.Toplevel)     — modal: per-file checklist of working-tree changes with colour-coded status badges (M/A/D/R/?/!) + Select All / None / Modified Only quick-pick buttons + commit message entry with auto-suggest (💡 Suggest button that updates based on which files are ticked); callback signature `(path, message, selected_files: list[str])`. Right-click → 📝 Git Commit… or Git tab → Commit…
+GitHubSetupDialog (tk.Toplevel)  — modal: step-by-step GitHub onboarding wizard. Step 1 saves git identity; Step 2 offers Sign in (primary) + Create account (secondary); Step 3 opens github.com/new; Step 4 sets remote URL; Step 5 first push. Separate Releases section shells out to `gh release create` when `shutil.which("gh")` returns a path. Scrollable canvas wraps the body Frame so it fits small windows. Opened by 🐙 GitHub… button in Git tab header.
 ```
 
 ### UI structure
@@ -156,6 +161,20 @@ GitHubSetupDialog (tk.Toplevel)  — modal: step-by-step GitHub onboarding wizar
 └─ OUTPUT log panel (4-line Text, always visible) ───────────┘
 ```
 
+### Module-level helpers
+
+| Symbol | Purpose |
+|--------|---------|
+| `GIT_EXE` | Path to `git.exe` used by every git subprocess call. Initialised from `_cfg["git_exe"]` if set, otherwise via `_detect_git()`. Rebuilt in `_on_settings_saved()` when the Settings dialog changes the git path. |
+| `_detect_git()` | Returns `shutil.which("git")` if found; falls back to common Windows install paths (`C:\Program Files\Git\cmd\git.exe`, `…\bin\git.exe`, x86 variants); final fallback is the bare string `"git"`. |
+| `_GIT_ENV_NO_PROMPT` | `dict(os.environ, GIT_TERMINAL_PROMPT="0")`. Passed as `env=` for network git commands (push/pull) to prevent infinite hangs when GCM hasn't cached credentials yet. |
+| `_is_auth_error(text)` | Pattern-match on push/pull output to decide whether to show the GCM-setup message vs a generic error. |
+| `_suggest_commit_message(status_text)` | Pure function. Parses `git status --short` lines into `(xy, fname)` tuples and produces a conventional-commit-style message (`docs:` / `feat:` / `fix:` / `chore:`). Used by `GitCommitDialog` to auto-populate the message field and by the 💡 Suggest button. |
+| `_BASELINE_GITIGNORE` | Multi-line string written by `cmd_git_init` when no `.gitignore` exists. Covers Python cache, Nuitka build output, `.tokensave/`, virtual environments, `.claude/`, and `logs/`. |
+| `_STOP_HOOK_CMD` + `_scaffold_git_hook(path)` | Merges a Claude Code Stop hook (`.claude/settings.json`) that auto-commits at the end of every Claude session. Idempotent — detects an existing `git add -A`-prefixed hook before appending. |
+| `_Tooltip(widget, text)` | Hover-tooltip helper. 650 ms delay, auto-destroys on Leave/ButtonPress. Used on every Git tab button to give plain-English explanations to beginner users. |
+| `_root_path(r)` / `_root_label(r)` | Normalise a `search_roots` entry — supports both bare strings and `{"path":…, "label":…}` dicts. |
+
 ### Configuration (`manager-config.json`)
 
 All machine-specific values live in `manager-config.json` at the project root.
@@ -169,9 +188,11 @@ Editable through the Settings dialog without touching JSON directly.
 | `template_dir` | Path to the `templates/` directory (blank = auto-detect as `<exe-dir>\templates\`) |
 | `editor_cmd` | Editor launch command, e.g. `code` or `code --new-window` (parsed via `shlex.split`) |
 | `python_exe` | pythonw.exe path (preserved in JSON; no longer shown in Settings UI) |
+| `git_exe` | Optional path to `git.exe`. Blank = auto-detect (`shutil.which` → common Windows install paths → bare `"git"`). Settings dialog gives Browse / Auto-detect / Verify (`git --version`) controls. |
 | `search_roots` | List of `str \| {"path": str, "label": str}` — scanned for tokensave projects; each root's label is its category header in the Treeview. Bare strings are backward-compatible (label defaults to `basename`). |
 | `project_categories` | Dict mapping project path → `{"category": str, "subcategory"?: str}` — per-project override of the root's category label. Edit via right-click → 📁 Assign Category…. |
 | `user_snippets` | List of `{"title": str, "text": str}` — user-defined prompt snippets |
+| `auto_commit_after_sync` | Boolean. If true, `_run()` runs `git add -A + git commit -m "chore: tokensave sync"` after every successful sync on a git-repo project. If the previous commit was the same message, it's amended (`commit --amend --no-edit`) to avoid history pile-up. |
 
 ### Nuitka onefile path resolution
 

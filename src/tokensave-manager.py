@@ -399,6 +399,57 @@ Thumbs.db
 .DS_Store
 """
 
+# ---------------------------------------------------------------------------
+
+def _ensure_gitignore(path: str) -> list:
+    """Merge _BASELINE_GITIGNORE entries into the project's .gitignore.
+
+    Non-destructive: reads existing content and only appends lines that are
+    not already present (exact-match, ignoring blank lines and comments).
+    Returns a list of human-readable result strings for logging.
+    """
+    gi_path = os.path.join(path, ".gitignore")
+
+    existing_raw = ""
+    if os.path.isfile(gi_path):
+        try:
+            with open(gi_path, encoding="utf-8", errors="replace") as f:
+                existing_raw = f.read()
+        except OSError as e:
+            return [f"Could not read .gitignore: {e}"]
+
+    # Build a set of non-blank, non-comment lines that are already present
+    existing_lines = set()
+    for ln in existing_raw.splitlines():
+        s = ln.strip()
+        if s and not s.startswith("#"):
+            existing_lines.add(s)
+
+    # Find baseline entries that are missing
+    missing = []
+    for ln in _BASELINE_GITIGNORE.splitlines():
+        s = ln.strip()
+        if s and not s.startswith("#") and s not in existing_lines:
+            missing.append(ln)
+
+    if not missing:
+        return ["✔ .gitignore already contains all baseline entries — nothing to add"]
+
+    # Append missing entries with a header comment
+    addition = "\n\n# Added by TokenSave Manager (baseline entries)\n" + "\n".join(missing) + "\n"
+    try:
+        with open(gi_path, "a", encoding="utf-8") as f:
+            f.write(addition)
+    except OSError as e:
+        return [f"Could not update .gitignore: {e}"]
+
+    return [
+        f"✔ .gitignore {'created' if not existing_raw else 'updated'} — "
+        f"added {len(missing)} missing {'entry' if len(missing) == 1 else 'entries'}:",
+        *[f"  + {ln}" for ln in missing if ln.strip()],
+    ]
+
+
 # Stop hook injected into .claude/settings.json by _scaffold_git_hook.
 # Commits whatever Claude changed at session end — skips if working tree is clean.
 _STOP_HOOK_CMD = (
@@ -2508,8 +2559,9 @@ class App(tk.Tk):
         m.add_command(label="⟳  Force Re-sync",  command=self.cmd_force_sync)
         m.add_command(label="🔍  Doctor",         command=self.cmd_doctor)
         m.add_command(label="📜  Git Log",        command=self.cmd_git_log)
-        m.add_command(label="📝  Git Commit…",    command=self.cmd_git_commit)
-        m.add_command(label="🔧  Git Init",       command=self.cmd_git_init)
+        m.add_command(label="📝  Git Commit…",        command=self.cmd_git_commit)
+        m.add_command(label="🔧  Git Init",           command=self.cmd_git_init)
+        m.add_command(label="📋  Ensure .gitignore",  command=self.cmd_ensure_gitignore)
         m.add_separator()
         m.add_command(label="📂  Open Folder",    command=self.cmd_open_folder)
         m.add_command(label="✏   Open in Editor", command=self.cmd_open_editor)
@@ -3133,6 +3185,25 @@ class App(tk.Tk):
         else:
             self.refresh()
 
+    # ── Ensure .gitignore ──────────────────────────────────────────────────────
+
+    def cmd_ensure_gitignore(self):
+        """Right-click: merge baseline .gitignore entries into the selected project.
+
+        Non-destructive — only adds entries that are not already present.
+        Works whether or not the project has a git repo yet.
+        """
+        path = self._selected_path()
+        if not path:
+            return
+        name = os.path.basename(path)
+        self._log(f"Checking .gitignore for {name}…", C["peach"])
+        results = _ensure_gitignore(path)
+        for line in results:
+            col = C["green"] if line.startswith("✔") else (
+                  C["red"]   if "Could not" in line else C["text"])
+            self._log(f"  {line}", col)
+
     # ── Git Commit ─────────────────────────────────────────────────────────────
 
     def cmd_git_commit(self):
@@ -3146,19 +3217,32 @@ class App(tk.Tk):
         is_repo = _is_git_repo(path)
         GitCommitDialog(self, path, status_out, is_repo, self._do_git_commit)
 
-    def _do_git_commit(self, path: str, message: str, stage_all: bool):
-        """Perform git add + commit in a background thread."""
+    def _do_git_commit(self, path: str, message: str, selected_files: list):
+        """Stage only `selected_files` (clearing any pre-existing staging) and
+        commit them with `message`. Files not in the list stay as un-committed
+        changes in the working tree."""
         name = os.path.basename(path)
 
         def worker():
-            if stage_all:
-                out, rc = self._shell_capture([GIT_EXE,"-C", path, "add", "-A"], path)
+            # 1. Clear the index so nothing already-staged sneaks into the
+            # commit. `git reset` without args = `git reset HEAD` — safe,
+            # only touches the index, never the working tree.
+            self._shell_capture([GIT_EXE,"-C", path, "reset"], path)
+
+            # 2. Stage exactly the picked files. `--` separates flags from
+            # paths and protects against filenames that start with "-".
+            if selected_files:
+                out, rc = self._shell_capture(
+                    [GIT_EXE,"-C", path, "add", "--"] + selected_files, path)
                 if rc != 0:
                     self.after(0, lambda: self._log(
                         f"git add failed: {out.strip()}", C["red"]))
                     return
 
-            self._log(f"Committing {name}…", C["peach"])
+            # 3. Commit. Only the staged files will be in the commit.
+            self._log(f"Committing {name} ({len(selected_files)} file"
+                      f"{'s' if len(selected_files) != 1 else ''})…",
+                      C["peach"])
             cout, crc = self._shell_capture(
                 [GIT_EXE,"-C", path, "commit", "-m", message], path)
             col = C["green"] if crc == 0 else C["red"]
@@ -4899,70 +4983,152 @@ class GitHubSetupDialog(tk.Toplevel):
 class GitCommitDialog(tk.Toplevel):
     """
     Stage and commit changes in a project's git repository.
-    Shows `git status --short` output so the user can see what will be committed,
-    then accepts a commit message and runs git add -A + git commit.
+    Shows the working-tree files as a checklist so the user can pick which
+    files to include in this commit. On commit, only checked files are staged
+    and committed; un-checked files stay as un-committed changes.
     """
+
+    # status-char meanings shown next to filenames
+    _STATUS_DESC = {
+        "M":  "modified",
+        "A":  "added",
+        "D":  "deleted",
+        "R":  "renamed",
+        "C":  "copied",
+        "U":  "conflict",
+        "?":  "untracked",
+        "!":  "ignored",
+    }
 
     def __init__(self, parent, path, status_text: str, is_repo: bool, callback):
         """
-        callback(path, message, stage_all): called on Commit.
+        callback(path, message, selected_files): called on Commit.
+        selected_files is a list of paths (relative to repo root) to stage+commit.
         status_text: output of `git status --short` (may be empty).
         is_repo: False disables the Commit button and shows a warning.
         """
         super().__init__(parent)
         self.title(f"Git Commit — {os.path.basename(path)}")
         self.configure(bg=C["base"])
-        self.resizable(False, False)
+        self.resizable(True, True)
+        self.minsize(540, 480)
         self.grab_set()
         self.transient(parent)
-        self._path = path
+        self._path     = path
         self._callback = callback
+        self._is_repo  = is_repo
+        self._status_raw = status_text
 
-        pad = dict(padx=20, pady=6)
+        # Parse status into [(xy, fname), ...] — same logic as Git tab.
+        self._files = []
+        if is_repo and status_text.strip():
+            for line in status_text.strip().splitlines():
+                if len(line) >= 3:
+                    self._files.append((line[:2], line[3:]))
 
+        # ── Header ──
         tk.Label(self,
                  text="📝  Git Commit",
                  font=("Segoe UI", 11, "bold"),
                  bg=C["base"], fg=C["blue"]).pack(anchor=tk.W, padx=20, pady=(16, 2))
-
         tk.Label(self,
                  text=os.path.basename(path),
                  font=("Segoe UI", 9), bg=C["base"],
                  fg=C["overlay0"]).pack(anchor=tk.W, padx=20, pady=(0, 10))
-
         ttk.Separator(self, orient="horizontal").pack(fill=tk.X, padx=20, pady=(0, 8))
 
-        # ── Status panel ──
-        tk.Label(self,
-                 text="Working tree status:",
+        # ── File checklist ──
+        hdr_row = tk.Frame(self, bg=C["base"])
+        hdr_row.pack(fill=tk.X, padx=20, pady=(0, 4))
+        tk.Label(hdr_row,
+                 text="Pick files to include in this commit:",
                  font=("Segoe UI", 9, "bold"),
-                 bg=C["base"], fg=C["text"]).pack(anchor=tk.W, padx=20, pady=(0, 4))
+                 bg=C["base"], fg=C["text"]).pack(side=tk.LEFT)
+        if self._files:
+            tk.Label(hdr_row,
+                     text=f"  ({len(self._files)} changed)",
+                     font=("Segoe UI", 9),
+                     bg=C["base"], fg=C["overlay0"]).pack(side=tk.LEFT)
 
-        status_frame = tk.Frame(self, bg=C["mantle"], relief=tk.FLAT, bd=1)
-        status_frame.pack(fill=tk.X, padx=20, pady=(0, 8))
+        # Scrollable checklist via canvas + frame (body parented to self so
+        # children render reliably on Windows — same pattern as the wizard).
+        list_outer = tk.Frame(self, bg=C["mantle"], relief=tk.FLAT, bd=1)
+        list_outer.pack(fill=tk.BOTH, expand=True, padx=20, pady=(0, 6))
+        self._canvas = tk.Canvas(list_outer, bg=C["mantle"],
+                                 highlightthickness=0, height=160)
+        _vsb = ttk.Scrollbar(list_outer, orient="vertical",
+                             command=self._canvas.yview)
+        self._canvas.configure(yscrollcommand=_vsb.set)
+        _vsb.pack(side=tk.RIGHT, fill=tk.Y)
+        self._canvas.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
 
-        status_body = status_text.strip() if is_repo else "⚠  Not a git repository — run 🔧 Git Init first."
-        if is_repo and not status_body:
-            status_body = "(nothing to commit — working tree clean)"
+        self._list_body = tk.Frame(self, bg=C["mantle"])
+        self._list_body_id = self._canvas.create_window(
+            (0, 0), window=self._list_body, anchor="nw")
+        self._canvas.bind("<Configure>",
+            lambda e: self._canvas.itemconfigure(self._list_body_id, width=e.width))
+        self._list_body.bind("<Configure>",
+            lambda e: self._canvas.configure(
+                scrollregion=self._canvas.bbox("all")))
 
-        self._status_txt = tk.Text(status_frame, height=5, width=52,
-                                   bg=C["mantle"], fg=C["text"],
-                                   relief=tk.FLAT, font=("Consolas", 9),
-                                   padx=8, pady=6, state=tk.NORMAL)
-        self._status_txt.insert(tk.END, status_body)
-        self._status_txt.configure(state=tk.DISABLED)
-        self._status_txt.pack(fill=tk.X)
+        def _mw(e):
+            self._canvas.yview_scroll(int(-1 * (e.delta / 120)), "units")
+        self._canvas.bind_all("<MouseWheel>", _mw)
+        self.bind("<Destroy>", lambda e: self._canvas.unbind_all("<MouseWheel>"))
 
-        # ── Stage all checkbox ──
-        self._var_stage = tk.BooleanVar(value=True)
-        tk.Checkbutton(self,
-                       text="Stage all changes  (git add -A)",
-                       variable=self._var_stage,
-                       bg=C["base"], fg=C["text"], selectcolor=C["surface0"],
-                       activebackground=C["base"], activeforeground=C["text"],
-                       font=("Segoe UI", 10)).pack(anchor=tk.W, **pad)
+        # Populate the checklist
+        self._file_vars: list = []   # parallel to self._files — list of (BooleanVar, fname)
+        if not is_repo:
+            tk.Label(self._list_body,
+                     text="⚠  Not a git repository — run 🔧 Git Init first.",
+                     bg=C["mantle"], fg=C["red"],
+                     font=("Segoe UI", 9), padx=10, pady=10).pack(anchor=tk.W)
+        elif not self._files:
+            tk.Label(self._list_body,
+                     text="(nothing to commit — working tree clean)",
+                     bg=C["mantle"], fg=C["overlay0"],
+                     font=("Segoe UI", 9), padx=10, pady=10).pack(anchor=tk.W)
+        else:
+            for xy, fname in self._files:
+                var = tk.BooleanVar(value=True)
+                self._file_vars.append((var, fname, xy))
+                row = tk.Frame(self._list_body, bg=C["mantle"])
+                row.pack(fill=tk.X, padx=4, pady=1)
+                # Status badge — colored char in a fixed-width slot
+                xy_clean = xy.strip() or "?"
+                status_char = xy_clean[0]
+                color = {
+                    "M": C["yellow"], "A": C["green"], "D": C["red"],
+                    "R": C["sky"], "C": C["sky"], "U": C["red"],
+                    "?": C["blue"], "!": C["overlay0"],
+                }.get(status_char, C["text"])
+                desc = self._STATUS_DESC.get(status_char, status_char)
+                cb = tk.Checkbutton(row, variable=var,
+                                    bg=C["mantle"], activebackground=C["mantle"],
+                                    selectcolor=C["surface0"])
+                cb.pack(side=tk.LEFT)
+                tk.Label(row, text=xy_clean, width=3, anchor=tk.W,
+                         font=("Consolas", 9, "bold"),
+                         bg=C["mantle"], fg=color).pack(side=tk.LEFT)
+                tk.Label(row, text=fname, anchor=tk.W,
+                         font=("Consolas", 9),
+                         bg=C["mantle"], fg=C["text"]).pack(side=tk.LEFT, padx=(2, 6))
+                tk.Label(row, text=f"({desc})", anchor=tk.W,
+                         font=("Segoe UI", 8, "italic"),
+                         bg=C["mantle"], fg=C["overlay0"]).pack(side=tk.LEFT)
 
-        ttk.Separator(self, orient="horizontal").pack(fill=tk.X, padx=20, pady=(4, 8))
+        # ── Quick-select buttons ──
+        if is_repo and self._files:
+            sel_row = tk.Frame(self, bg=C["base"])
+            sel_row.pack(fill=tk.X, padx=20, pady=(0, 8))
+            ttk.Button(sel_row, text="Select All",
+                       command=lambda: self._set_all(True)).pack(side=tk.LEFT, padx=(0, 6))
+            ttk.Button(sel_row, text="Select None",
+                       command=lambda: self._set_all(False)).pack(side=tk.LEFT, padx=(0, 6))
+            ttk.Button(sel_row, text="Modified Only  (skip untracked)",
+                       command=self._select_modified).pack(side=tk.LEFT)
+
+        ttk.Separator(self, orient="horizontal").pack(fill=tk.X, padx=20, pady=(2, 8))
 
         # ── Commit message ──
         msg_hdr = tk.Frame(self, bg=C["base"])
@@ -4971,49 +5137,68 @@ class GitCommitDialog(tk.Toplevel):
                  text="Commit message:",
                  font=("Segoe UI", 9, "bold"),
                  bg=C["base"], fg=C["text"]).pack(side=tk.LEFT)
-        self._status_raw = status_text  # keep for suggest
         ttk.Button(msg_hdr, text="💡 Suggest",
                    command=self._fill_suggestion).pack(side=tk.RIGHT)
 
         msg_frame = tk.Frame(self, bg=C["mantle"], relief=tk.FLAT, bd=1)
         msg_frame.pack(fill=tk.X, padx=20, pady=(0, 12))
-        self._msg_txt = tk.Text(msg_frame, height=3, width=52,
+        self._msg_txt = tk.Text(msg_frame, height=3,
                                 bg=C["mantle"], fg=C["text"],
                                 insertbackground=C["text"],
                                 relief=tk.FLAT, font=("Segoe UI", 10),
-                                padx=8, pady=6)
+                                padx=8, pady=6, wrap=tk.WORD)
         self._msg_txt.pack(fill=tk.X)
 
-        # Auto-populate with a suggestion if the field is still empty
+        # Auto-populate with a suggestion based on currently selected files
         suggestion = _suggest_commit_message(status_text) if is_repo else ""
         if suggestion:
             self._msg_txt.insert(tk.END, suggestion)
             self._msg_txt.tag_add(tk.SEL, "1.0", tk.END)  # pre-select so typing replaces it
         self._msg_txt.focus_set()
 
-        # ── Buttons ──
+        # ── Action buttons ──
         btn_row = tk.Frame(self, bg=C["base"])
         btn_row.pack(fill=tk.X, padx=20, pady=(0, 16))
-
-        self._commit_btn = ttk.Button(btn_row, text="Commit",
+        self._commit_btn = ttk.Button(btn_row, text="Commit Selected",
                                       style="Primary.TButton",
                                       command=self._apply,
-                                      state=tk.NORMAL if is_repo else tk.DISABLED)
+                                      state=tk.NORMAL if is_repo and self._files else tk.DISABLED)
         self._commit_btn.pack(side=tk.LEFT, padx=(0, 8))
         ttk.Button(btn_row, text="Cancel",
                    command=self.destroy).pack(side=tk.LEFT)
 
-        # Bind Enter in message box to commit
+        # Ctrl+Enter = commit
         self._msg_txt.bind("<Control-Return>", lambda e: self._apply())
 
         self.update_idletasks()
-        px = parent.winfo_x() + (parent.winfo_width()  - self.winfo_width())  // 2
-        py = parent.winfo_y() + (parent.winfo_height() - self.winfo_height()) // 2
-        self.geometry(f"+{px}+{py}")
+        content_h = self.winfo_reqheight() + 20
+        max_h = max(420, parent.winfo_height() - 60)
+        w = 580
+        h = min(content_h, max_h)
+        px = parent.winfo_x() + (parent.winfo_width()  - w) // 2
+        py = parent.winfo_y() + (parent.winfo_height() - h) // 2
+        self.geometry(f"{w}x{h}+{max(0, px)}+{max(0, py)}")
+
+    # ── Selection helpers ────────────────────────────────────────────────────
+
+    def _set_all(self, value: bool):
+        for var, _f, _xy in self._file_vars:
+            var.set(value)
+
+    def _select_modified(self):
+        """Select all tracked changes; uncheck untracked (??) files."""
+        for var, _f, xy in self._file_vars:
+            var.set(xy.strip() != "??")
 
     def _fill_suggestion(self):
-        """Replace the commit message field with a fresh suggestion."""
-        suggestion = _suggest_commit_message(self._status_raw)
+        """Replace the commit message field with a fresh suggestion based on
+        currently *selected* files only."""
+        selected_lines = []
+        for var, fname, xy in self._file_vars:
+            if var.get():
+                selected_lines.append(f"{xy} {fname}")
+        sub_status = "\n".join(selected_lines) if selected_lines else self._status_raw
+        suggestion = _suggest_commit_message(sub_status)
         if not suggestion:
             suggestion = "chore: update files"
         self._msg_txt.delete("1.0", tk.END)
@@ -5027,9 +5212,14 @@ class GitCommitDialog(tk.Toplevel):
             messagebox.showwarning("Empty message",
                 "Please enter a commit message.", parent=self)
             return
-        stage_all = self._var_stage.get()
+        selected_files = [fname for var, fname, _xy in self._file_vars if var.get()]
+        if not selected_files:
+            messagebox.showwarning("Nothing selected",
+                "Tick at least one file to include in this commit.",
+                parent=self)
+            return
         self.destroy()
-        self._callback(self._path, message, stage_all)
+        self._callback(self._path, message, selected_files)
 
 
 # ── Entry point ────────────────────────────────────────────────────────────────

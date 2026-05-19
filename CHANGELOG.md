@@ -3,6 +3,32 @@
 
 ## [Unreleased]
 
+### Added
+- **Git tab** — full Git management panel (Push, Pull, Commit, Undo Last Commit, New Branch, Switch Branch, Delete Branch, Set Remote, Refresh) with live status, recent commits, working-tree listbox, and colour-coded diff viewer (capped at 2000 lines)
+- **GitHub Setup wizard** (`GitHubSetupDialog`) — step-by-step first-time GitHub onboarding: git identity, sign-in/create-account, create repo, set remote, first push, plus a Releases section that shells out to `gh release create` when the GitHub CLI is on PATH
+- **Per-file staging in `GitCommitDialog`** — every changed file appears as a checkbox row with a colour-coded status badge (M/A/D/R/?/!) and a plain-English description; Select All / Select None / Modified Only quick-pick buttons; commit only staged files via `git reset` → `git add -- <files>` → `git commit`
+- **Conventional-commit message suggestions** — `_suggest_commit_message()` parses the current working-tree status (or just the *selected* subset) into messages like `"docs: update GITHUB_GUIDE.md"`, `"feat: add newfile.py"`, `"chore: update 5 files"`; the **💡 Suggest** button in `GitCommitDialog` and `GitHubSetupDialog` regenerates on demand
+- **Auto-commit-after-sync amend behaviour** — when the previous commit was already `"chore: tokensave sync"`, the next auto-commit uses `git commit --amend --no-edit` instead of stacking duplicate commits
+- **Project categories + sub-categories** — Treeview groups projects by category (root label or per-project override via right-click → 📁 Assign Category…); `project_categories` config key persists overrides
+- **`_Tooltip` class** — hover tooltips on every Git tab button (650 ms delay, plain-English explanations of what each git command does)
+- **Help tab expansion** — new sections: Project Categories, Git: What & Why, Git: Daily Workflow, Git Tab Buttons, GitHub Setup
+- **`docs/GITHUB_GUIDE.md`** — comprehensive beginner GitHub guide (~300 lines): plain-English concepts, first-time setup, daily workflow, branches, releases, common problems, glossary
+- **`manager-config.example.json`** — clean template config with placeholder paths for new users cloning the repo
+- **Git Bash auto-detection** — `_detect_git()` finds `git.exe` via `shutil.which` then common Windows install paths (`C:\Program Files\Git\cmd\`, etc.); `GIT_EXE` module variable is used by every git subprocess call; Settings dialog gains a Git exe row with Browse / Auto-detect / verify (`git --version`)
+- **`_BASELINE_GITIGNORE`** now also excludes `.claude/` and `logs/` in addition to Python cache, Nuitka output, `.tokensave/`, and venvs
+- **`_ensure_gitignore()` + right-click → 📋 Ensure .gitignore** — non-destructive merge of baseline entries into any project's `.gitignore`; reads existing content, appends only the lines that are missing, works on projects with or without a git repo; safe to run repeatedly
+- **Build pipeline docs staging** — `build.ps1` now copies `docs\GITHUB_GUIDE.md`, `docs\ARCHITECTURE.md`, and `docs\ARCHITECTURE_TOKENSAVE.md` into `dist\docs\`, plus `manager-config.example.json` and `CHANGELOG.md` next to the exes
+
+### Changed
+- `GitCommitDialog` callback signature changed from `(path, message, stage_all: bool)` to `(path, message, selected_files: list[str])` — `_do_git_commit()` updated to stage exactly the picked files and ignore everything else
+- `cmd_git_log` no longer opens a popup dialog; it switches to the Git tab and refreshes (consolidates all git info in one place)
+- Git tab action buttons packed **before** the diff viewer so they're always visible even when the window is short
+- `build.ps1` cleaned to pure ASCII (em dashes and box-drawing chars caused PowerShell parser errors on some systems)
+
+### Fixed
+- `GitHubSetupDialog` rendering — `KeyError: 'subtext0'` (palette key is `subtext`, not `subtext0`) was silently breaking the wizard build; only Step 1 ever appeared. Fixed all four occurrences plus added a diagnostic try/except so any future widget-creation error surfaces as a messagebox instead of being swallowed by `pythonw`
+- `.gitignore` now also covers `manager-config.json` (personal absolute paths) and `.claude/` (Claude Code local session settings) — prevents leaking machine-specific data when pushing to GitHub
+
 ## [0.9.0] — 2026-05-18
 
 ### Added

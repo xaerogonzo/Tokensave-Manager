@@ -20,16 +20,18 @@
 
 ```
 Token Save Manager Source/
-├── manager-config.json            Machine-specific config (all hardcoded paths live here)
+├── manager-config.json            Machine-specific config (all hardcoded paths live here)  — gitignored
+├── manager-config.example.json    Clean template with placeholder paths — committed for new users
 ├── Launch TokenSave Manager.bat   Reads python_exe from config, launches src/tokensave-manager.py
 ├── build.ps1                      Nuitka compile pipeline — produces dist\ exes
 ├── build.bat                      Double-click launcher for build.ps1
 ├── BASIC_INSTRUCTIONS.md          This file
 ├── CHANGELOG.md                   Feature history
-├── .gitignore
+├── TOKENSAVE_GUIDE.md             Full tokensave CLI + MCP reference
+├── .gitignore                     Excludes manager-config.json, .claude/, .tokensave/, dist/, etc.
 │
 ├── src/
-│   ├── tokensave-manager.py       Main GUI (~2,000 lines) — App class + dialog classes
+│   ├── tokensave-manager.py       Main GUI (~4,700 lines) — App class + dialog classes
 │   └── tokensave-wrapper.py       Claude Desktop auto-detection wrapper (MCP server launcher)
 │
 ├── templates/                     Data files used by the manager (all shipped in dist\templates\)
@@ -44,12 +46,16 @@ Token Save Manager Source/
 │   ├── tokensave-manager.exe
 │   ├── tokensave-wrapper.exe
 │   ├── manager-config.json        Clean config for new installs
+│   ├── manager-config.example.json
 │   ├── TOKENSAVE_GUIDE.md
-│   └── templates\
+│   ├── CHANGELOG.md
+│   ├── templates\
+│   └── docs\                      GITHUB_GUIDE.md, ARCHITECTURE.md, ARCHITECTURE_TOKENSAVE.md
 │
 └── docs/
     ├── ARCHITECTURE.md            Manager architecture reference (UI, data flow, threading)
-    └── ARCHITECTURE_TOKENSAVE.md  tokensave tool internals reference
+    ├── ARCHITECTURE_TOKENSAVE.md  tokensave tool internals reference
+    └── GITHUB_GUIDE.md            Beginner GitHub guide — concepts, setup, daily workflow, releases
 ```
 
 ---
@@ -65,10 +71,11 @@ Must be updated when the project moves to a new location or machine.
 | `template_dir` | Absolute path to the `templates/` directory (blank = auto-detect as `<exe-dir>\templates\`) |
 | `editor_cmd` | Command (+ optional flags) for Open in Editor, e.g. `code` or `code --new-window` |
 | `python_exe` | Path to `pythonw.exe` — used by the `.bat` launcher only; not shown in Settings UI |
+| `git_exe` | Optional absolute path to `git.exe`. Blank = auto-detect via `shutil.which("git")` + common Windows install paths. Used by every git subprocess call as `GIT_EXE`. Configurable via Settings → Git exe row (Browse / Auto-detect / Verify). |
 | `search_roots` | List of `str \| {"path": str, "label": str}` — scanned for tokensave projects. Bare strings are backward-compatible (`label` defaults to `basename`). Each root's label becomes its category header in the Treeview. |
 | `project_categories` | Dict `{path: {"category": str, "subcategory"?: str}}` — per-project category override. Set via right-click → 📁 Assign Category…; persisted here automatically. |
 | `user_snippets` | List of `{"title": str, "text": str}` dicts — user-defined Claude prompt snippets |
-| `auto_commit_after_sync` | Boolean (default `false`) — if `true`, auto-runs `git add -A + git commit` after every successful `tokensave sync` on a git-repo project |
+| `auto_commit_after_sync` | Boolean (default `false`) — if `true`, auto-runs `git add -A + git commit` after every successful `tokensave sync` on a git-repo project. If the previous commit was already `"chore: tokensave sync"`, the new auto-commit is amended onto it instead of stacking. |
 
 ---
 
@@ -78,6 +85,7 @@ Must be updated when the project moves to a new location or machine.
 |------|---------|
 | `docs/ARCHITECTURE.md` | Class structure, UI layout, data flow, threading model, config system |
 | `docs/ARCHITECTURE_TOKENSAVE.md` | How tokensave.exe works internally |
+| `docs/GITHUB_GUIDE.md` | Beginner GitHub guide — git/GitHub concepts, first-time setup, daily workflow, branches, releases, common problems, glossary. Shipped in `dist\docs\` |
 | `CHANGELOG.md` | Feature history |
 
 ---
@@ -107,11 +115,14 @@ Run by double-clicking `build.bat`.
 
 ```
 dist\
-  tokensave-manager.exe   — main GUI
-  tokensave-wrapper.exe   — MCP wrapper for Claude Desktop
-  manager-config.json     — clean (user configures on first run)
+  tokensave-manager.exe         — main GUI
+  tokensave-wrapper.exe         — MCP wrapper for Claude Desktop
+  manager-config.json           — clean (user configures on first run)
+  manager-config.example.json   — annotated template
   TOKENSAVE_GUIDE.md
-  templates\              — all 5 template files copied here
+  CHANGELOG.md
+  templates\                    — all 5 template files copied here
+  docs\                         — GITHUB_GUIDE.md, ARCHITECTURE.md, ARCHITECTURE_TOKENSAVE.md
 ```
 
 Key Nuitka flags:
@@ -157,9 +168,16 @@ See `templates/NUITKA_GOTCHAS.md` for known pitfalls (BOM in config, cp1252 subp
 - **`_scaffold_git_hook(path)`** writes/merges a Claude Code Stop hook into `.claude/settings.json`. It is idempotent — checks for an existing hook whose `command` starts with `"git add -A"` before appending, so calling it multiple times (scaffold + retrofit on the same project) never duplicates the entry.
 - **Auto-commit after sync** uses `git diff --cached --quiet` (exits 1 when staged changes exist, 0 when clean) to guard the `git commit` call — this guarantees no empty commits are created when the working tree was already clean. If the previous commit was also `"chore: tokensave sync"`, the commit is **amended** instead of creating a new one, preventing history pile-up.
 - **`_BASELINE_GITIGNORE`** is written by `cmd_git_init` when no `.gitignore` exists in the target project. It covers Python cache, Nuitka build output, tokensave index, and virtual environments. Always write it *before* any `git add -A` call to avoid committing machine-specific binary files.
-- **`_suggest_commit_message(status_text)`** is a module-level helper that generates a conventional-commit-style message from `git status --short` output. Called by `GitCommitDialog` to auto-populate the message field on open; the 💡 Suggest button calls it again on demand. Never mutates state — pure function.
-- **`GitHubSetupDialog`** is the GitHub onboarding wizard. It checks git identity (`git config --global`), remote URL, and `gh` CLI availability on open, then updates step indicators (✅/⚠️/ℹ️/⬜) live. `_sh()` calls `_app._shell_capture()` — these are fast config queries, safe to run on the main thread. The Create Release flow shells out to `gh release create` and is only shown when `shutil.which("gh")` returns a path.
+- **`_ensure_gitignore(path)`** is a module-level helper that non-destructively merges `_BASELINE_GITIGNORE` entries into an existing `.gitignore`. It reads the current file, builds a set of non-comment lines that are already present, and appends only the lines that are missing. Returns a `list[str]` of human-readable result lines (suitable for `self._log()`). Idempotent — safe to run repeatedly. Exposed via right-click → **📋 Ensure .gitignore** (`cmd_ensure_gitignore`). Works on projects with or without a git repo.
+- **`_suggest_commit_message(status_text)`** is a module-level helper that generates a conventional-commit-style message from `git status --short` output. Called by `GitCommitDialog._fill_suggestion()` — which feeds it only the *currently-selected* file lines, so suggestions reflect what's actually being committed. Pure function, never mutates state.
+- **`GitCommitDialog` does per-file staging.** Each working-tree entry is rendered as a checkbox row with a colour-coded status badge (M/A/D/R/?/!) and plain-English description. The callback signature is `(path, message, selected_files: list[str])`. `_do_git_commit()` runs `git reset` → `git add -- <selected_files>` → `git commit -m <message>` to guarantee only ticked files are committed. Files left unchecked remain as un-committed working-tree changes for a later commit. Select All / Select None / Modified Only quick-pick buttons assist common cases.
+- **`GitHubSetupDialog`** is the GitHub onboarding wizard. Step 2 offers both **Sign in to GitHub** (primary, `github.com/login`) and **Create free account** (secondary, `github.com/signup`). It checks git identity (`git config --global`), remote URL, and `gh` CLI availability on open, then updates step indicators (✅/⚠️/ℹ️/⬜) live. `_sh()` calls `_app._shell_capture()` — these are fast config queries, safe to run on the main thread. The Create Release flow shells out to `gh release create` and is only shown when `shutil.which("gh")` returns a path. `_build()` is wrapped in a diagnostic try/except so any widget-creation failure surfaces as a messagebox rather than being swallowed by `pythonw`.
+- **Catppuccin palette key is `subtext`, NOT `subtext0`.** The only subtext shade defined in `C` is `subtext` (#bac2de). Using `C["subtext0"]` raises `KeyError` and silently aborts the current widget build — verify any new dialog code against the `C = {…}` dict at the top of the file.
 - **Git tab layout order** — action buttons are packed **before** the diff viewer in `_build_git_tab()`. The diff viewer has `expand=True` and fills remaining space. This ordering is intentional: it ensures buttons are always visible even when the window is small.
+- **`cmd_git_log` does not open a popup.** It switches the notebook to the Git tab and calls `_git_refresh()` so all git information lives in one place. Never re-introduce a separate log dialog.
+- **`GIT_EXE` is the single source for the git executable path.** All git subprocess calls use `[GIT_EXE, ...]` — never bare `"git"`. `_detect_git()` resolves it from `_cfg["git_exe"]`, then `shutil.which("git")`, then common Windows install paths, then falls back to `"git"`. `_on_settings_saved()` updates the module global via `global GIT_EXE`.
+- **`_Tooltip(widget, text)`** is the hover-tooltip helper. 650 ms delay before showing, auto-destroyed on `<Leave>` or `<ButtonPress>`. Used to give plain-English explanations of every Git tab button. Add tooltips to any new button targeting beginner users.
+- **`.claude/` MUST be in `.gitignore`.** It holds Claude Code's local per-machine session settings (Stop hooks, transcripts) which should never be committed. If a user accidentally commits it, the fix is `git rm -r --cached .claude` + new commit + push. `_BASELINE_GITIGNORE` (written by `cmd_git_init`) already includes it.
 
 ---
 
