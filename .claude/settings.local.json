@@ -1,0 +1,12 @@
+{
+  "permissions": {
+    "allow": [
+      "PowerShell(pip show nuitka ordered-set zstandard pillow pystray 2>&1)",
+      "PowerShell(Get-ChildItem \"D:\\\\Claude Co worker\\\\Token Save Manager Source\\\\dist\" -Recurse | Select-Object FullName, @{N='Size';E={[math]::Round\\($_.Length/1MB,1\\)}} | Format-Table -AutoSize)",
+      "Bash(git -C \"D:\\\\Claude Co worker\\\\Token Save Manager Source\" diff --stat HEAD 2>nul || echo \"No git history / not a repo\")",
+      "Bash(powershell -ExecutionPolicy Bypass -NoProfile -File build.ps1)",
+      "Bash(python -m py_compile \"D:\\\\Claude Co worker\\\\Token Save Manager Source\\\\src\\\\tokensave-manager.py\")",
+      "Bash(python -c ' *)"
+    ]
+  }
+}

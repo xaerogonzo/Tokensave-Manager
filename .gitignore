@@ -1,0 +1,6 @@
+.tokensave
+__pycache__/
+*.pyc
+logs/
+dist/
+build/

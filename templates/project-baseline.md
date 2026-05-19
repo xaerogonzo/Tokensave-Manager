@@ -1,0 +1,81 @@
+# Project Baseline Rules
+
+<!-- This file is auto-included by every project's CLAUDE.md via @include.
+     Edit it here to update all projects simultaneously. -->
+
+---
+
+## Tokensave: Use It First
+
+Tokensave is active for this project. Before reaching for `Read`, `Grep`, or `Glob`, try a tokensave tool — it's cheaper and faster than reading raw files.
+
+| Task | First tool | Fallback |
+|---|---|---|
+| Find where a symbol is defined | `tokensave_search` | `Grep` |
+| Understand what a function calls | `tokensave_callees` | `Read` |
+| Find callers of a function | `tokensave_callers` | `Grep` |
+| Get context for a task or bug | `tokensave_context` | Read the specific file |
+| Understand what a file/module exports | `tokensave_module_api` | `Read` |
+| Explore file structure | `tokensave_files` | `Glob` |
+| Find TODOs / FIXMEs | `tokensave_todos` | `Grep` |
+| Find biggest or most-connected classes | `tokensave_hotspots`, `tokensave_god_class` | — |
+| Check code health before/after a change | `tokensave_health`, `tokensave_session_start` / `tokensave_session_end` | — |
+
+Only fall back to `Read` when you need the exact implementation body to edit it or verify precise logic. Use `tokensave_context` with `include_code: true` to pull snippets without reading whole files.
+
+---
+
+## Documentation Discipline
+
+After any code change, update the minimum set of docs necessary — **proportional to the significance of the change**. Never rewrite a whole file when a one-sentence addition covers it.
+
+| What changed | Update | Scope |
+|---|---|---|
+| Pure internal bug fix | `CHANGELOG.md` only | One-liner entry |
+| New symbol, function, or file | `CLAUDE.md` → Key Files / File Map section | One-liner; skip others unless architecture changed |
+| Architecture change (new module, layer, data flow) | `docs/ARCHITECTURE.md` targeted section | + one-liner in `CHANGELOG.md` |
+| User-visible feature or behaviour change | `README.md` targeted section | + `CHANGELOG.md` entry |
+| Breaking change | `README.md` + `CHANGELOG.md` | Clearly marked |
+
+**Rules:**
+- Edit only the section that changed — not the whole document
+- Skip a doc entirely if nothing in it is affected
+- Create any of these files if they don't exist yet (stub is fine)
+- When in doubt: add a one-liner to the relevant section rather than leaving it stale
+
+---
+
+## Code Quality
+
+- Before writing new code, check with `tokensave_search` or `tokensave_context` whether a suitable utility already exists
+- Keep functions small and single-purpose
+- Docstring/comment public functions and non-obvious logic
+- Prefer editing existing code over adding new abstractions unless the existing code is fundamentally unsuitable
+
+---
+
+## Git Discipline
+
+- Commit messages explain **why**, not just what (bad: "fix bug"; good: "fix null check in scanner — crashed on empty file list")
+- Commit logical units of work; avoid giant all-at-once dumps
+- Don't commit generated files, compiled outputs, or secrets
+
+> **TokenSave Manager** (if installed): right-click any project in the manager → **📜 Git Log** to see the last 20 commits and working-tree status without leaving the tool. Use this to orient yourself on what changed recently before diving in.
+
+---
+
+## Compiling with Nuitka
+
+If this project needs to ship as a standalone `.exe`, don't roll a build pipeline from scratch — copy the templates already proven to work, kept alongside this file:
+
+- `nuitka-build.ps1.template` → rename to `build.ps1`, edit the three placeholders (`[PROJECT_NAME]`, `[ENTRY_SCRIPT]`, `[OUTPUT_NAME]`)
+- `nuitka-build.bat.template` → rename to `build.bat` (launcher; bypasses execution policy)
+- `NUITKA_GOTCHAS.md` → read first if anything goes wrong
+
+The template defaults assume a tkinter GUI app. For CLI tools, swap in the clearly-marked CLI block inside `Build-Exe`. Both variants include:
+- Pre-flight checks (Python on PATH, Nuitka installed)
+- Orphan cleanup of stuck `*.onefile-build` / `*.build` / `*.dist` directories
+- Conditional size-sanity check (warns on undersized GUI builds; skipped for CLI)
+- PowerShell 5.1-compatible JSON writing (no BOM)
+
+Claude: when the user asks you to set up a Nuitka build pipeline, use these templates as the starting point rather than writing one freehand. They encode a long list of non-obvious gotchas that aren't worth rediscovering.
