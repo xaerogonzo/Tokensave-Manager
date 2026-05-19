@@ -81,6 +81,25 @@ def _detect_git() -> str:
     return "git"
 
 
+def _detect_gh() -> str:
+    """Return the path to gh.exe (GitHub CLI) if installed, else empty string.
+
+    Checks PATH first, then common winget/scoop install locations.
+    Returns "" when not found so callers can easily test with `if _detect_gh()`.
+    """
+    found = shutil.which("gh")
+    if found:
+        return found
+    for candidate in [
+        r"C:\Program Files\GitHub CLI\gh.exe",
+        r"C:\Program Files (x86)\GitHub CLI\gh.exe",
+        os.path.expandvars(r"%LOCALAPPDATA%\Microsoft\WinGet\Packages\GitHub.cli_Microsoft.Winget.Source_8wekyb3d8bbwe\gh.exe"),
+    ]:
+        if os.path.isfile(candidate):
+            return candidate
+    return ""
+
+
 # Resolved at startup; updated whenever Settings are saved.
 # All git subprocess calls use this variable so the user only has to
 # configure the path in one place.
@@ -1133,9 +1152,11 @@ class App(tk.Tk):
                                 command=self.cmd_git_switch_branch)
         btn_del    = ttk.Button(row2, text="🗑  Delete Branch…",
                                 command=self.cmd_git_delete_branch)
+        btn_openpr = ttk.Button(row2, text="🔗  Open PR",
+                                command=self.cmd_git_open_pr)
 
         for btn in (btn_push, btn_pull, btn_commit, btn_undo,
-                    btn_new, btn_switch, btn_del):
+                    btn_new, btn_switch, btn_del, btn_openpr):
             btn.pack(side=tk.LEFT, padx=(0, 6))
 
         _Tooltip(btn_push,
@@ -1171,11 +1192,18 @@ class App(tk.Tk):
             "Safe by default — warns you if the branch has changes\n"
             "that haven't been saved back to the main branch yet.\n"
             "You can force-delete if you're sure you don't need them.")
+        _Tooltip(btn_openpr,
+            "Open a Pull Request on GitHub for the current branch.\n\n"
+            "A Pull Request is a way to say: 'I made some changes on a\n"
+            "separate branch — please review them and merge into main.'\n\n"
+            "On master/main: shows you how to create a branch first.\n"
+            "On any other branch: opens GitHub's compare page directly.\n\n"
+            "Requires a GitHub remote and the branch to be pushed first.")
 
         self._git_all_btns       = [btn_set_remote, btn_push, btn_pull,
                                      btn_commit, btn_undo, btn_new,
-                                     btn_switch, btn_del]
-        self._git_push_pull_btns = [btn_push, btn_pull]
+                                     btn_switch, btn_del, btn_openpr]
+        self._git_push_pull_btns = [btn_push, btn_pull, btn_openpr]
 
         # Start all buttons disabled — enabled by _git_update_ui once state is known
         for btn in self._git_all_btns:
@@ -1457,6 +1485,61 @@ class App(tk.Tk):
             self.after(0, self._git_refresh)
 
         threading.Thread(target=worker, daemon=True).start()
+
+    def cmd_git_open_pr(self):
+        """Open a pull-request comparison page on GitHub for the current branch.
+
+        If on master/main, explains the branch workflow to the user first.
+        Requires a GitHub remote to be set (button is disabled otherwise).
+        """
+        path = self._git_path
+        if not path:
+            return
+
+        # Read branch + remote synchronously (both are instant)
+        branch_out, brc = self._shell_capture(
+            [GIT_EXE, "-C", path, "rev-parse", "--abbrev-ref", "HEAD"], path)
+        remote_out, rrc = self._shell_capture(
+            [GIT_EXE, "-C", path, "remote", "get-url", "origin"], path)
+
+        branch = branch_out.strip() if brc == 0 else ""
+        remote = remote_out.strip() if rrc == 0 else ""
+
+        if not remote:
+            messagebox.showwarning(
+                "No Remote",
+                "This project has no GitHub remote set.\n\n"
+                "Click 'Set Remote' in the Git tab header to add one first.",
+                parent=self)
+            return
+
+        # Normalise remote to a plain https://github.com/owner/repo URL
+        base = remote.rstrip("/").removesuffix(".git")
+        if base.startswith("git@github.com:"):
+            base = "https://github.com/" + base[len("git@github.com:"):]
+
+        is_main = branch in ("master", "main", "")
+
+        if is_main:
+            # Guide the user — they need a feature branch for a proper PR
+            go = messagebox.askyesno(
+                "You're on the main branch",
+                f"You're on '{branch}' — the main/default branch.\n\n"
+                "Pull Requests work like this:\n\n"
+                "  1. 🌿 New Branch  →  give it a name (e.g. 'my-feature')\n"
+                "  2. Make your changes, then 📝 Commit\n"
+                "  3. ⬆ Push  →  sends the branch to GitHub\n"
+                "  4. 🔗 Open PR  →  GitHub shows a 'Compare & pull request' button\n"
+                "  5. Fill in the description and click 'Create pull request'\n\n"
+                "Open the repository page on GitHub now?",
+                parent=self)
+            if go:
+                os.startfile(base)
+        else:
+            # Feature branch — open the compare URL directly
+            pr_url = f"{base}/compare/{branch}"
+            self._log(f"  Opening PR page for branch '{branch}'…", C["peach"])
+            os.startfile(pr_url)
 
     def cmd_git_undo_commit(self):
         """Undo the last commit, keeping all changes staged (git reset --soft HEAD~1)."""
@@ -3925,6 +4008,67 @@ class SettingsDialog(tk.Toplevel):
                  anchor=tk.W, padx=20, pady=(2, 0))
         # Show current detected version on open
         self.after(100, lambda: self._verify_git(cfg.get("git_exe") or GIT_EXE))
+
+        # ── GitHub CLI (gh) ──
+        ttk.Separator(self, orient="horizontal").pack(fill=tk.X, padx=20, pady=(12, 8))
+        tk.Label(self, text="GitHub CLI (gh)  —  enables 'Open PR on GitHub' and release creation",
+                 bg=C["base"], fg=C["subtext"],
+                 font=("Segoe UI", 9)).pack(anchor=tk.W, padx=20)
+        gh_row = tk.Frame(self, bg=C["base"])
+        gh_row.pack(fill=tk.X, padx=20, pady=(4, 0))
+        self._gh_status_lbl = tk.Label(gh_row, text="Checking…",
+                                       bg=C["base"], fg=C["overlay0"],
+                                       font=("Segoe UI", 8))
+        self._gh_status_lbl.pack(side=tk.LEFT, padx=(0, 12))
+
+        def _check_gh_status():
+            found = _detect_gh()
+            if found:
+                self._gh_status_lbl.config(text=f"✓  {found}", fg=C["green"])
+                self._gh_install_btn.configure(state=tk.DISABLED)
+            else:
+                self._gh_status_lbl.config(text="✗  not installed", fg=C["red"])
+                self._gh_install_btn.configure(state=tk.NORMAL)
+
+        def _install_gh():
+            self._gh_status_lbl.config(
+                text="Installing…  (this may take a minute, a UAC prompt may appear)",
+                fg=C["peach"])
+            self._gh_install_btn.configure(state=tk.DISABLED)
+            def worker():
+                try:
+                    result = subprocess.run(
+                        ["winget", "install", "--id", "GitHub.cli",
+                         "--silent", "--accept-package-agreements",
+                         "--accept-source-agreements"],
+                        capture_output=True, text=True, timeout=180,
+                        creationflags=CREATE_NO_WINDOW)
+                    if result.returncode == 0:
+                        self.after(0, lambda: self._gh_status_lbl.config(
+                            text="✓  Installed!  Restart TokenSave Manager to use gh features.",
+                            fg=C["green"]))
+                    else:
+                        err = (result.stdout + result.stderr).strip()[-120:]
+                        self.after(0, lambda: self._gh_status_lbl.config(
+                            text=f"✗  Install failed (code {result.returncode}): {err}",
+                            fg=C["red"]))
+                        self.after(0, lambda: self._gh_install_btn.configure(state=tk.NORMAL))
+                except Exception as ex:
+                    self.after(0, lambda: self._gh_status_lbl.config(
+                        text=f"✗  Error: {ex}", fg=C["red"]))
+                    self.after(0, lambda: self._gh_install_btn.configure(state=tk.NORMAL))
+            threading.Thread(target=worker, daemon=True).start()
+
+        self._gh_install_btn = ttk.Button(gh_row, text="Install via winget",
+                                          command=_install_gh)
+        self._gh_install_btn.pack(side=tk.LEFT, padx=(0, 6))
+        ttk.Button(gh_row, text="Check again",
+                   command=_check_gh_status).pack(side=tk.LEFT)
+        tk.Label(self,
+                 text="  Once installed, use the Git tab's '🔗 Open PR' button to create pull requests on GitHub.",
+                 font=("Segoe UI", 8), bg=C["base"], fg=C["overlay0"]).pack(
+                 anchor=tk.W, padx=20, pady=(2, 0))
+        self.after(150, _check_gh_status)
 
         # ── Search roots — two-column Treeview (label + path) ──
         tk.Label(self,
