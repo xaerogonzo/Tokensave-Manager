@@ -1,6 +1,30 @@
-.tokensave
+# ── Machine-specific config (contains absolute paths for this machine) ──
+manager-config.json
+
+# ── Claude Code local session settings ──
+.claude/
+
+# ── tokensave index (machine-specific binary database) ──
+.tokensave/
+
+# ── Python cache ──
 __pycache__/
 *.pyc
-logs/
+*.pyo
+
+# ── Nuitka build output ──
+*.onefile-build/
+*.build/
 dist/
 build/
+
+# ── Logs ──
+logs/
+
+# ── Virtual environments ──
+.venv/
+venv/
+
+# ── OS noise ──
+Thumbs.db
+.DS_Store

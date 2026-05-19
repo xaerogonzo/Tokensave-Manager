@@ -84,9 +84,16 @@ App (tk.Tk)
 │   ├── cmd_remove / cmd_scaffold / cmd_retrofit / cmd_settings
 │   ├── cmd_shadow_links         — right-click: open ShadowLinksDialog for selected project
 │   ├── cmd_assign_category      — right-click: open AssignCategoryDialog for selected project
+│   ├── cmd_git_push / cmd_git_pull — push/pull with GIT_TERMINAL_PROMPT=0 + auth error handling
+│   ├── cmd_git_undo_commit       — git reset --soft HEAD~1 with confirmation
+│   ├── cmd_git_set_remote        — open SetRemoteDialog; runs git remote add/set-url
+│   ├── cmd_git_new_branch        — open NewBranchDialog; git checkout -b or git branch
+│   ├── cmd_git_switch_branch     — open SwitchBranchDialog; git checkout with dirty-tree guard
+│   ├── cmd_git_delete_branch     — safe/force delete with unmerged-vs-other-error distinction
+│   ├── cmd_github_setup          — open GitHubSetupDialog for current/selected project
 │   └── _add_snippet / _edit_snippet / _delete_snippet / _on_snippet_saved
 └── Worker helpers
-    ├── _run()                   — generic tokensave CLI call (threaded, streaming); auto-commits after sync if toggle on
+    ├── _run()                   — generic tokensave CLI call (threaded, streaming); auto-commits after sync if toggle on; amends previous sync commit if last message was "chore: tokensave sync"
     ├── _run_capture()           — tokensave call returning (output, rc, elapsed); synchronous from thread
     ├── _shell_capture()         — generic shell call returning (output, rc); catches FileNotFoundError
     ├── _scaffold_project()      — write BASIC_INSTRUCTIONS + optional tokensave init + Nuitka + git hook
@@ -95,6 +102,16 @@ App (tk.Tk)
     ├── _do_shadow_links()       — generate hardlinks in background thread, optionally run sync after
     ├── _do_assign_category()    — write project_categories override to config, refresh tree
     ├── _do_git_commit()         — git add -A + git commit -m in a background thread
+    ├── _do_git_set_remote()     — git remote add/set-url in background thread
+    ├── _do_git_new_branch()     — git checkout -b / git branch in background thread
+    ├── _do_git_switch_branch()  — git checkout <branch> with rc != 0 error dialog
+    ├── _git_refresh()           — background fetch of branch/remote/status/log; calls _git_update_ui
+    ├── _git_update_ui()         — main-thread update of all Git tab widgets + button states
+    ├── _git_show_diff()         — render diff into Text widget with colour tags (capped at 2000 lines)
+    ├── _on_git_status_select()  — click file in status listbox → fetch + show diff
+    ├── _on_project_select()     — <<TreeviewSelect>> binding: update _git_path, refresh Git tab if visible
+    ├── _on_tab_changed()        — <<NotebookTabChanged>> binding: sync project + refresh Git tab
+    ├── _git_tab_is_visible()    — returns True when the Git tab is the active notebook tab
     ├── _refresh_snippet_list()  — rebuilds snippet_lb + _active_snippets_map from PROMPT_SNIPPETS + user_snippets
     ├── _show_status_popup() / _format_status_msg()
     ├── _show_git_popup()        — Toplevel with scrollable monospace git output
@@ -105,8 +122,12 @@ ScaffoldDialog (tk.Toplevel)     — modal: 4 checkboxes: BASIC_INSTRUCTIONS / t
 SettingsDialog (tk.Toplevel)      — modal: edit manager-config.json; search roots as labeled two-column Treeview; auto-commit toggle
 SnippetEditDialog (tk.Toplevel)  — modal: title + body for adding or editing a user-defined prompt snippet
 ShadowLinksDialog (tk.Toplevel)  — modal: editable extension/name map + sync toggle; right-click 🔗 Shadow Links…
-AssignCategoryDialog (tk.Toplevel) — modal: category + sub-category comboboxes with existing values; right-click 📁 Assign Category…
-GitCommitDialog (tk.Toplevel)    — modal: status display + stage-all checkbox + commit message entry; right-click 📝 Git Commit…
+AssignCategoryDialog (tk.Toplevel)  — modal: category + sub-category comboboxes with existing values; right-click 📁 Assign Category…
+SetRemoteDialog (tk.Toplevel)     — modal: GitHub URL entry with beginner-friendly step-by-step instructions
+NewBranchDialog (tk.Toplevel)     — modal: branch name entry + "switch immediately" checkbox
+SwitchBranchDialog (tk.Toplevel)  — modal: listbox of local branches; double-click to switch; static pick() helper for delete flow
+GitCommitDialog (tk.Toplevel)     — modal: status display + stage-all checkbox + commit message entry with auto-suggest (💡 Suggest button); right-click 📝 Git Commit…
+GitHubSetupDialog (tk.Toplevel)  — modal: step-by-step GitHub onboarding wizard; checks git identity, remote, gh CLI; handles first push + GitHub Releases; opened by 🐙 GitHub… button in Git tab header
 ```
 
 ### UI structure
@@ -116,6 +137,11 @@ GitCommitDialog (tk.Toplevel)    — modal: status display + stage-all checkbox 
 ├─ ttk.Notebook ─────────────────────────────────────────────┤
 │  ├─ Projects tab                                           │
 │  │   ├─ Treeview (tree+headings: Category / Sub-category / Project rows)
+│  ├─ Git tab                                                │
+│  │   ├─ Header: project name, branch, remote, Set Remote, Refresh
+│  │   ├─ Working tree Listbox + Recent commits Text (side by side)
+│  │   ├─ Diff Text widget (colour-coded +/- lines, capped at 2000 lines)
+│  │   └─ Action bar: Push, Pull, Commit, Undo Last Commit, New Branch, Switch Branch, Delete Branch
 │  │   │   Columns: Project (#0, tree col), active ★, path, last synced, scaffold ✔/—
 │  │   │   └─ Right-click on project row → context menu (per-project actions)
 │  │   │      Right-click on category/sub-category header → no menu

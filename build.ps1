@@ -11,13 +11,19 @@
 #
 # Output layout:
 #   dist\
-#     tokensave-manager.exe   - main GUI
-#     tokensave-wrapper.exe   - MCP wrapper for Claude Desktop
-#     manager-config.json     - clean config (user configures on first run)
+#     tokensave-manager.exe        - main GUI
+#     tokensave-wrapper.exe        - MCP wrapper for Claude Desktop
+#     manager-config.json          - clean config (user configures on first run)
+#     manager-config.example.json  - annotated template showing all keys
 #     TOKENSAVE_GUIDE.md
+#     CHANGELOG.md
 #     templates\
 #       claude-md-template.md
 #       project-baseline.md
+#       ...
+#     docs\
+#       GITHUB_GUIDE.md            - beginner GitHub guide
+#       ARCHITECTURE.md            - manager internals reference
 #
 # After building, zip dist\ and ship it. Users run tokensave-manager.exe directly.
 
@@ -165,30 +171,72 @@ Build-Exe "$ROOT\src\tokensave-wrapper.py" "tokensave-wrapper.exe" $cliArgs
 Write-Host ""
 Write-Host "=== Staging distribution files ===" -ForegroundColor Cyan
 
-# Write a clean config - blank paths so the app auto-detects templates\ on first run
-$cleanConfig = @{
-    tokensave_exe = ""
-    template_dir  = ""
-    python_exe    = ""
-    search_roots  = @()
+# -- Clean config (blank paths - user fills in via Settings on first run) --
+$cleanConfig = [ordered]@{
+    tokensave_exe          = ""
+    template_dir           = ""
+    python_exe             = ""
+    editor_cmd             = "code"
+    git_exe                = ""
+    search_roots           = @()
+    project_categories     = [ordered]@{}
+    user_snippets          = @()
+    auto_commit_after_sync = $false
 }
-[System.IO.File]::WriteAllText("$DIST\manager-config.json", ($cleanConfig | ConvertTo-Json -Depth 2))
-Write-Host "  [file] manager-config.json (clean - user configures via Settings)" -ForegroundColor Green
+[System.IO.File]::WriteAllText(
+    "$DIST\manager-config.json",
+    ($cleanConfig | ConvertTo-Json -Depth 3))
+Write-Host "  [file] manager-config.json" -ForegroundColor Green
 
-Copy-Item "$ROOT\TOKENSAVE_GUIDE.md" "$DIST\TOKENSAVE_GUIDE.md" -Force
-Write-Host "  [file] TOKENSAVE_GUIDE.md" -ForegroundColor Green
+# -- Example config (annotated template for reference) --
+if (Test-Path "$ROOT\manager-config.example.json") {
+    Copy-Item "$ROOT\manager-config.example.json" "$DIST\manager-config.example.json" -Force
+    Write-Host "  [file] manager-config.example.json" -ForegroundColor Green
+}
 
+# -- Root-level markdown --
+foreach ($md in @("TOKENSAVE_GUIDE.md", "CHANGELOG.md")) {
+    $src = "$ROOT\$md"
+    if (Test-Path $src) {
+        Copy-Item $src "$DIST\$md" -Force
+        Write-Host "  [file] $md" -ForegroundColor Green
+    }
+}
+
+# -- templates\ --
 $tmplDest = "$DIST\templates"
 New-Item -ItemType Directory -Force -Path $tmplDest | Out-Null
 Copy-Item "$ROOT\templates\*" $tmplDest -Force
 $count = (Get-ChildItem $tmplDest -File).Count
 Write-Host "  [dir]  templates\ ($count files)" -ForegroundColor Green
 
+# -- docs\ - user-facing guides (exclude dev-only files) --
+$docsSrc  = "$ROOT\docs"
+$docsDest = "$DIST\docs"
+New-Item -ItemType Directory -Force -Path $docsDest | Out-Null
+$docsInclude = @(
+    "GITHUB_GUIDE.md",
+    "ARCHITECTURE.md",
+    "ARCHITECTURE_TOKENSAVE.md"
+)
+$docsCopied = 0
+foreach ($name in $docsInclude) {
+    $src = "$docsSrc\$name"
+    if (Test-Path $src) {
+        Copy-Item $src "$docsDest\$name" -Force
+        Write-Host "  [doc]  docs\$name" -ForegroundColor Green
+        $docsCopied++
+    }
+}
+if ($docsCopied -eq 0) {
+    Write-Host "  [warn] no docs\ files found - skipping" -ForegroundColor Yellow
+}
+
 Write-Host ""
 Write-Host "Build complete -> $DIST" -ForegroundColor Green
 Write-Host ""
 Write-Host "Before distributing:" -ForegroundColor Yellow
-Write-Host "  1. Zip dist\ and ship." -ForegroundColor Yellow
+Write-Host "  1. Zip dist\ and ship (or create a GitHub Release - see docs\GITHUB_GUIDE.md)." -ForegroundColor Yellow
 Write-Host "  2. Users run tokensave-manager.exe and configure paths via Settings on first run." -ForegroundColor Yellow
 Write-Host ""
 

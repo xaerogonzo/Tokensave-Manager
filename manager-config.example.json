@@ -1,0 +1,14 @@
+{
+  "_readme": "Copy this file to manager-config.json and fill in your paths. See BASIC_INSTRUCTIONS.md for details.",
+  "tokensave_exe": "C:/path/to/tokensave.exe",
+  "template_dir": "",
+  "python_exe": "C:/path/to/pythonw.exe",
+  "editor_cmd": "code",
+  "git_exe": "",
+  "search_roots": [
+    {"path": "C:/path/to/your/projects", "label": "My Projects"}
+  ],
+  "project_categories": {},
+  "user_snippets": [],
+  "auto_commit_after_sync": false
+}

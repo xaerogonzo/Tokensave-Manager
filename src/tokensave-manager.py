@@ -57,6 +57,36 @@ TEMPLATE_DIR = _cfg.get("template_dir", "") or os.path.join(_BASE_DIR, "template
 SEARCH_ROOTS = _cfg.get("search_roots", [])
 
 
+def _detect_git() -> str:
+    """Return the best available path to git.exe.
+
+    Priority:
+      1. Explicit path in manager-config.json  (caller checks that first)
+      2. shutil.which("git")  — works if Git is on PATH
+      3. Common Git-for-Windows install locations
+      4. Bare "git" fallback (will fail with a clear error if not found)
+    """
+    found = shutil.which("git")
+    if found:
+        return found
+    candidates = [
+        r"C:\Program Files\Git\cmd\git.exe",
+        r"C:\Program Files\Git\bin\git.exe",
+        r"C:\Program Files (x86)\Git\cmd\git.exe",
+        r"C:\Program Files (x86)\Git\bin\git.exe",
+    ]
+    for c in candidates:
+        if os.path.isfile(c):
+            return c
+    return "git"
+
+
+# Resolved at startup; updated whenever Settings are saved.
+# All git subprocess calls use this variable so the user only has to
+# configure the path in one place.
+GIT_EXE: str = _cfg.get("git_exe") or _detect_git()
+
+
 # ── Search-root helpers (support both legacy str and new {"path":…,"label":…} format) ──
 
 def _root_path(r):
@@ -84,6 +114,138 @@ SKIP_DIRS = {
 MAX_DEPTH = 4
 CREATE_NO_WINDOW = 0x08000000
 AUTO_REFRESH_MS = 60_000  # auto-refresh project list every 60 s
+
+# Git network operations — prevents infinite hang when credentials aren't cached.
+# GIT_TERMINAL_PROMPT=0 tells git to fail immediately instead of waiting for
+# stdin. Compatible with Git Credential Manager (GCM authenticates via browser,
+# not stdin, so this env var doesn't interfere with it).
+_GIT_ENV_NO_PROMPT = {**os.environ, "GIT_TERMINAL_PROMPT": "0"}
+
+
+class _Tooltip:
+    """Hover tooltip for tkinter widgets.
+
+    Shows a small popup after `delay` ms; hides on leave or click.
+    Text wraps at ~300 px so multi-line tips stay readable.
+    """
+    _DELAY = 650   # ms before appearing
+
+    def __init__(self, widget, text: str):
+        self._widget  = widget
+        self._text    = text
+        self._job     = None
+        self._tip_win = None
+        widget.bind("<Enter>",       self._schedule,  add="+")
+        widget.bind("<Leave>",       self._cancel,    add="+")
+        widget.bind("<ButtonPress>", self._cancel,    add="+")
+
+    def _schedule(self, _event=None):
+        self._cancel()
+        self._job = self._widget.after(self._DELAY, self._show)
+
+    def _cancel(self, _event=None):
+        if self._job:
+            self._widget.after_cancel(self._job)
+            self._job = None
+        if self._tip_win:
+            self._tip_win.destroy()
+            self._tip_win = None
+
+    def _show(self):
+        self._job = None
+        try:
+            x = self._widget.winfo_rootx() + 12
+            y = self._widget.winfo_rooty() + self._widget.winfo_height() + 6
+        except Exception:
+            return
+        self._tip_win = win = tk.Toplevel(self._widget)
+        win.wm_overrideredirect(True)   # no title bar / border
+        win.wm_attributes("-topmost", True)
+        win.wm_geometry(f"+{x}+{y}")
+        win.configure(bg=C["surface1"])
+        # Thin border effect via a 1-px frame
+        outer = tk.Frame(win, bg=C["overlay0"], padx=1, pady=1)
+        outer.pack()
+        tk.Label(outer, text=self._text,
+                 font=("Segoe UI", 9),
+                 bg=C["surface1"], fg=C["text"],
+                 padx=10, pady=6,
+                 wraplength=300,
+                 justify=tk.LEFT).pack()
+
+
+def _is_auth_error(text: str) -> bool:
+    """Return True if git output looks like an authentication failure."""
+    t = text.lower()
+    return any(s in t for s in (
+        "authentication failed",
+        "could not read username",
+        "permission denied",
+        "fatal: authentication",
+        "remote: repository not found",
+        "invalid username or password",
+    ))
+
+def _suggest_commit_message(status_text: str) -> str:
+    """Generate a conventional-commit-style message from `git status --short` output.
+
+    Tries to produce something meaningful based on which files changed and how.
+    The user can always edit or replace the suggestion.
+    """
+    lines = [l for l in status_text.strip().splitlines() if len(l) >= 3]
+    if not lines:
+        return ""
+
+    files = []
+    for line in lines:
+        xy   = line[:2].strip()
+        fname = line[3:].strip()
+        # Handle renames: "old -> new" format
+        if " -> " in fname:
+            fname = fname.split(" -> ")[-1].strip()
+        files.append((xy, fname))
+
+    if not files:
+        return ""
+
+    basenames = [os.path.basename(f) for _, f in files]
+    exts      = {os.path.splitext(b)[1].lower() for b in basenames}
+    has_del   = any("D" in xy for xy, _ in files)
+    has_add   = any("A" in xy or "?" in xy for xy, _ in files)
+
+    # ── Single file ──
+    if len(files) == 1:
+        xy, fname = files[0]
+        bname = os.path.basename(fname)
+        if "D" in xy:
+            return f"chore: remove {bname}"
+        if "A" in xy or "?" in xy:
+            ext = os.path.splitext(bname)[1].lower()
+            return f"docs: add {bname}" if ext in (".md", ".txt", ".rst") else f"feat: add {bname}"
+        if bname.lower().endswith((".md", ".txt", ".rst")):
+            return f"docs: update {bname}"
+        return f"chore: update {bname}"
+
+    # ── Multiple files ──
+    doc_exts = {".md", ".txt", ".rst", ".adoc"}
+    code_exts = {".py", ".js", ".ts", ".cs", ".cpp", ".c", ".h", ".rs", ".go", ".java"}
+
+    if exts <= doc_exts:
+        return "docs: update documentation"
+
+    if exts <= code_exts:
+        if len(basenames) <= 3:
+            return f"chore: update {', '.join(basenames)}"
+        return f"chore: update {len(files)} source files"
+
+    if has_del and not has_add:
+        return f"chore: remove {len(files)} files"
+
+    # Mixed — list up to two names then summarise the rest
+    if len(basenames) <= 2:
+        return f"chore: update {', '.join(basenames)}"
+    return f"chore: update {basenames[0]}, {basenames[1]} + {len(basenames) - 2} more"
+
 
 # ── Shadow-link helpers ────────────────────────────────────────────────────────
 
@@ -194,7 +356,7 @@ def _is_git_repo(path: str) -> bool:
     """Return True if *path* is inside an initialised git repository."""
     try:
         proc = subprocess.run(
-            ["git", "-C", path, "rev-parse", "--git-dir"],
+            [GIT_EXE,"-C", path, "rev-parse", "--git-dir"],
             stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
             creationflags=CREATE_NO_WINDOW,
         )
@@ -205,7 +367,16 @@ def _is_git_repo(path: str) -> bool:
 
 # Baseline .gitignore written by cmd_git_init when none exists yet.
 _BASELINE_GITIGNORE = """\
-# Python
+# Machine-specific config (if your project uses one)
+*.local.json
+
+# Claude Code local session settings
+.claude/
+
+# tokensave index (machine-specific binary database)
+.tokensave/
+
+# Python cache
 __pycache__/
 *.pyc
 *.pyo
@@ -214,15 +385,16 @@ __pycache__/
 *.onefile-build/
 *.build/
 dist/
-
-# tokensave index (machine-specific binary)
-.tokensave/
+build/
 
 # Virtual environments
 .venv/
 venv/
 
-# OS
+# Logs
+logs/
+
+# OS noise
 Thumbs.db
 .DS_Store
 """
@@ -513,8 +685,8 @@ class App(tk.Tk):
     def __init__(self):
         super().__init__()
         self.title("TokenSave Manager")
-        self.geometry("720x560")
-        self.minsize(560, 460)
+        self.geometry("760x600")
+        self.minsize(600, 520)
         self.configure(bg=C["base"])
         self._current_proc = None
         self._stop_requested = False
@@ -668,8 +840,11 @@ class App(tk.Tk):
         self.nb.pack(fill=tk.BOTH, expand=True, padx=0, pady=0)
 
         self._build_projects_tab()
+        self._build_git_tab()
         self._build_reference_tab()
         self._build_help_tab()
+
+        self.nb.bind("<<NotebookTabChanged>>", self._on_tab_changed)
 
         log_header = tk.Frame(log_frame, bg=C["base"])
         log_header.pack(fill=tk.X, pady=(0, 4))
@@ -773,7 +948,651 @@ class App(tk.Tk):
         self.tree.tag_configure("subcategory", foreground=C["lavender"])
 
         self.tree.bind("<Button-3>", self._on_right_click)
+        self.tree.bind("<<TreeviewSelect>>", self._on_project_select)
         self._build_context_menu()
+
+    def _build_git_tab(self):
+        """Build the Git tab — shows live git state for the selected project."""
+        self._git_path           = None
+        self._git_status_files   = []   # [(xy, filepath), …]
+        self._git_all_btns       = []
+        self._git_push_pull_btns = []
+
+        tab = tk.Frame(self.nb, bg=C["base"])
+        self.nb.add(tab, text="  Git  ")
+
+        # ── Header: project info + branch + remote ──────────────────────────
+        hdr = tk.Frame(tab, bg=C["mantle"], padx=14, pady=8)
+        hdr.pack(fill=tk.X)
+
+        left = tk.Frame(hdr, bg=C["mantle"])
+        left.pack(side=tk.LEFT, fill=tk.X, expand=True)
+
+        self._git_project_lbl = tk.Label(left,
+            text="Select a project in the Projects tab",
+            font=("Segoe UI", 10, "bold"), bg=C["mantle"], fg=C["blue"])
+        self._git_project_lbl.pack(anchor=tk.W)
+
+        info_row = tk.Frame(left, bg=C["mantle"])
+        info_row.pack(anchor=tk.W, pady=(2, 0))
+
+        self._git_branch_lbl = tk.Label(info_row,
+            text="Branch: —", font=("Segoe UI", 9),
+            bg=C["mantle"], fg=C["text"])
+        self._git_branch_lbl.pack(side=tk.LEFT, padx=(0, 20))
+
+        self._git_remote_lbl = tk.Label(info_row,
+            text="Remote: No remote set", font=("Segoe UI", 9),
+            bg=C["mantle"], fg=C["overlay0"])
+        self._git_remote_lbl.pack(side=tk.LEFT)
+
+        right = tk.Frame(hdr, bg=C["mantle"])
+        right.pack(side=tk.RIGHT, anchor=tk.N)
+
+        btn_set_remote = ttk.Button(right, text="Set Remote",
+                                    command=self.cmd_git_set_remote)
+        btn_set_remote.pack(side=tk.LEFT, padx=(0, 6))
+        _Tooltip(btn_set_remote,
+            "Connect this project to a GitHub repository.\n"
+            "Paste the HTTPS URL from github.com/new.\n"
+            "Required before you can Push or Pull.")
+
+        btn_github = ttk.Button(right, text="🐙  GitHub…",
+                                command=self.cmd_github_setup)
+        btn_github.pack(side=tk.LEFT, padx=(0, 6))
+        _Tooltip(btn_github,
+            "Open the GitHub Setup wizard — walks you through creating\n"
+            "a GitHub account, connecting this project, pushing your code,\n"
+            "and publishing a Release with your built .exe file.")
+
+        btn_refresh = ttk.Button(right, text="⟳  Refresh",
+                                 command=self._git_refresh)
+        btn_refresh.pack(side=tk.LEFT)
+        _Tooltip(btn_refresh, "Re-check the project's current git state and update this tab.")
+
+        # ── Middle: status (left) + log (right) ─────────────────────────────
+        mid = tk.Frame(tab, bg=C["base"], padx=14, pady=10)
+        mid.pack(fill=tk.X)
+        mid.columnconfigure(0, weight=1, minsize=200)
+        mid.columnconfigure(1, weight=1, minsize=200)
+
+        tk.Label(mid, text="WORKING TREE",
+                 font=("Segoe UI", 8, "bold"),
+                 bg=C["base"], fg=C["overlay0"]).grid(
+                     row=0, column=0, sticky=tk.W, pady=(0, 4))
+
+        tk.Label(mid, text="RECENT COMMITS",
+                 font=("Segoe UI", 8, "bold"),
+                 bg=C["base"], fg=C["overlay0"]).grid(
+                     row=0, column=1, sticky=tk.W, padx=(8, 0), pady=(0, 4))
+
+        status_wrap = tk.Frame(mid, bg=C["mantle"])
+        status_wrap.grid(row=1, column=0, sticky=tk.NSEW, padx=(0, 4))
+
+        status_vsb = ttk.Scrollbar(status_wrap, orient="vertical")
+        self._git_status_lb = tk.Listbox(
+            status_wrap, height=7,
+            font=("Consolas", 9),
+            bg=C["mantle"], fg=C["text"],
+            selectbackground=C["surface1"],
+            activestyle="none",
+            relief=tk.FLAT, bd=0,
+            yscrollcommand=status_vsb.set)
+        status_vsb.configure(command=self._git_status_lb.yview)
+        self._git_status_lb.pack(side=tk.LEFT, fill=tk.BOTH, expand=True,
+                                  padx=6, pady=4)
+        status_vsb.pack(side=tk.RIGHT, fill=tk.Y)
+        self._git_status_lb.bind("<<ListboxSelect>>", self._on_git_status_select)
+
+        log_wrap = tk.Frame(mid, bg=C["mantle"])
+        log_wrap.grid(row=1, column=1, sticky=tk.NSEW, padx=(4, 0))
+
+        log_vsb = ttk.Scrollbar(log_wrap, orient="vertical")
+        self._git_log_txt = tk.Text(
+            log_wrap, height=7,
+            font=("Consolas", 9),
+            bg=C["mantle"], fg=C["text"],
+            relief=tk.FLAT, padx=6, pady=4,
+            wrap=tk.NONE, cursor="arrow", state=tk.DISABLED,
+            yscrollcommand=log_vsb.set)
+        log_vsb.configure(command=self._git_log_txt.yview)
+        self._git_log_txt.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
+        log_vsb.pack(side=tk.RIGHT, fill=tk.Y)
+
+        # ── Action buttons (packed before diff so they're always visible) ───
+        acts = tk.Frame(tab, bg=C["base"])
+        acts.pack(fill=tk.X, padx=14, pady=(6, 4))
+
+        row1 = tk.Frame(acts, bg=C["base"])
+        row1.pack(anchor=tk.W, pady=(0, 4))
+        row2 = tk.Frame(acts, bg=C["base"])
+        row2.pack(anchor=tk.W)
+
+        btn_push   = ttk.Button(row1, text="⬆  Push",
+                                command=self.cmd_git_push)
+        btn_pull   = ttk.Button(row1, text="⬇  Pull",
+                                command=self.cmd_git_pull)
+        btn_commit = ttk.Button(row1, text="📝  Commit…",
+                                command=self.cmd_git_commit)
+        btn_undo   = ttk.Button(row1, text="↩  Undo Last Commit",
+                                command=self.cmd_git_undo_commit)
+        btn_new    = ttk.Button(row2, text="🌿  New Branch",
+                                command=self.cmd_git_new_branch)
+        btn_switch = ttk.Button(row2, text="🔀  Switch Branch…",
+                                command=self.cmd_git_switch_branch)
+        btn_del    = ttk.Button(row2, text="🗑  Delete Branch…",
+                                command=self.cmd_git_delete_branch)
+
+        for btn in (btn_push, btn_pull, btn_commit, btn_undo,
+                    btn_new, btn_switch, btn_del):
+            btn.pack(side=tk.LEFT, padx=(0, 6))
+
+        _Tooltip(btn_push,
+            "Send your saved commits to GitHub.\n"
+            "Like uploading a backup — your work is now safe online\n"
+            "and others can see it.\n\n"
+            "Requires a remote (GitHub URL) to be set first.")
+        _Tooltip(btn_pull,
+            "Download any new commits from GitHub to this machine.\n"
+            "Use this if you made changes on another computer,\n"
+            "or if a collaborator pushed new work.\n\n"
+            "Requires a remote (GitHub URL) to be set first.")
+        _Tooltip(btn_commit,
+            "Save a snapshot of your current changes.\n"
+            "Like a save point in a game — you can always come back here.\n\n"
+            "You'll write a short message describing what you changed.\n"
+            "A suggestion is generated automatically from the file list.")
+        _Tooltip(btn_undo,
+            "Remove the most recent save point, but keep all your changes.\n"
+            "Nothing is deleted — your edits stay exactly as they were.\n\n"
+            "Useful if you committed too early or with the wrong message.")
+        _Tooltip(btn_new,
+            "Create a separate copy of the project to try out an idea.\n"
+            "Changes on this branch won't touch your main code\n"
+            "until you're ready to merge them in.")
+        _Tooltip(btn_switch,
+            "Jump to a different branch (version) of the project.\n"
+            "For example: switch from an experiment back to 'master'.\n\n"
+            "Tip: commit your changes first — switching with\n"
+            "unsaved edits will fail.")
+        _Tooltip(btn_del,
+            "Delete a branch you no longer need.\n"
+            "Safe by default — warns you if the branch has changes\n"
+            "that haven't been saved back to the main branch yet.\n"
+            "You can force-delete if you're sure you don't need them.")
+
+        self._git_all_btns       = [btn_set_remote, btn_push, btn_pull,
+                                     btn_commit, btn_undo, btn_new,
+                                     btn_switch, btn_del]
+        self._git_push_pull_btns = [btn_push, btn_pull]
+
+        # Start all buttons disabled — enabled by _git_update_ui once state is known
+        for btn in self._git_all_btns:
+            btn.configure(state=tk.DISABLED)
+
+        # ── Diff viewer (below buttons — expands to fill remaining space) ────
+        tk.Label(tab, text="DIFF  (click a file above to preview)",
+                 font=("Segoe UI", 8, "bold"),
+                 bg=C["base"], fg=C["overlay0"]).pack(
+                     anchor=tk.W, padx=14, pady=(4, 4))
+
+        diff_wrap = tk.Frame(tab, bg=C["mantle"])
+        diff_wrap.pack(fill=tk.BOTH, expand=True, padx=14, pady=(0, 8))
+
+        diff_vsb = ttk.Scrollbar(diff_wrap, orient="vertical")
+        diff_hsb = ttk.Scrollbar(diff_wrap, orient="horizontal")
+        self._git_diff_txt = tk.Text(
+            diff_wrap,
+            font=("Consolas", 9),
+            bg=C["mantle"], fg=C["text"],
+            relief=tk.FLAT, padx=6, pady=4,
+            wrap=tk.NONE, cursor="arrow", state=tk.DISABLED,
+            yscrollcommand=diff_vsb.set,
+            xscrollcommand=diff_hsb.set)
+        diff_vsb.configure(command=self._git_diff_txt.yview)
+        diff_hsb.configure(command=self._git_diff_txt.xview)
+        self._git_diff_txt.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
+        diff_vsb.pack(side=tk.RIGHT, fill=tk.Y)
+        diff_hsb.pack(side=tk.BOTTOM, fill=tk.X)
+
+        self._git_diff_txt.tag_configure("plus",   foreground=C["green"])
+        self._git_diff_txt.tag_configure("minus",  foreground=C["red"])
+        self._git_diff_txt.tag_configure("header", foreground=C["blue"])
+        self._git_diff_txt.tag_configure("meta",   foreground=C["overlay0"])
+
+    # ── Git tab data methods ────────────────────────────────────────────────
+
+    def _git_tab_is_visible(self) -> bool:
+        try:
+            return self.nb.tab(self.nb.select(), "text").strip() == "Git"
+        except (tk.TclError, AttributeError):
+            return False
+
+    def _on_project_select(self, event=None):
+        """Fires when the user clicks a row in the Projects Treeview."""
+        sel = self.tree.selection()
+        if not sel:
+            return
+        iid = sel[0]
+        if not iid.startswith("proj:"):
+            return
+        path = iid[5:]
+        if path != self._git_path:
+            self._git_path = path
+            if self._git_tab_is_visible():
+                self._git_refresh()
+
+    def _on_tab_changed(self, event=None):
+        """Fires when the user switches notebook tabs."""
+        if not self._git_tab_is_visible():
+            return
+        # Sync to currently selected project (or active project)
+        sel = self.tree.selection()
+        if sel and sel[0].startswith("proj:"):
+            self._git_path = sel[0][5:]
+        elif not self._git_path and self.active_path:
+            self._git_path = self.active_path
+        if self._git_path:
+            self._git_refresh()
+
+    def _git_refresh(self):
+        """Kick off a background thread that re-reads all git state."""
+        path = self._git_path
+        if not path:
+            return
+        name = os.path.basename(path)
+
+        def worker():
+            branch_out, brc = self._shell_capture(
+                [GIT_EXE,"-C", path, "rev-parse", "--abbrev-ref", "HEAD"], path)
+            is_repo = brc == 0
+            branch  = branch_out.strip() if is_repo else "—"
+
+            remote_out, rrc = self._shell_capture(
+                [GIT_EXE,"-C", path, "remote", "get-url", "origin"], path)
+            remote = remote_out.strip() if rrc == 0 else ""
+
+            status_out, _ = self._shell_capture(
+                [GIT_EXE,"-C", path, "status", "--short"], path)
+
+            log_out, lrc = self._shell_capture(
+                [GIT_EXE,"-C", path, "log", "--oneline", "-15"], path)
+            log_text = log_out.strip() if lrc == 0 else ""
+
+            self.after(0, lambda: self._git_update_ui(
+                path, name, is_repo, branch, remote, status_out, log_text))
+
+        threading.Thread(target=worker, daemon=True).start()
+
+    def _git_update_ui(self, path, name, is_repo, branch, remote,
+                       status_raw, log_text):
+        """Main-thread update of all Git tab widgets."""
+        self._git_project_lbl.config(text=name)
+
+        if is_repo:
+            self._git_branch_lbl.config(text=f"Branch:  {branch}",
+                                         fg=C["text"])
+        else:
+            self._git_branch_lbl.config(
+                text="Not a git repository — right-click project → 🔧 Git Init",
+                fg=C["peach"])
+
+        if remote:
+            disp = remote.replace("https://", "").replace("http://", "")
+            disp = disp.rstrip("/")
+            if disp.endswith(".git"):
+                disp = disp[:-4]
+            self._git_remote_lbl.config(text=f"Remote:  {disp}",
+                                         fg=C["overlay0"])
+        else:
+            self._git_remote_lbl.config(text="Remote:  No remote set",
+                                         fg=C["overlay0"])
+
+        # Enable/disable buttons
+        repo_state = tk.NORMAL if is_repo else tk.DISABLED
+        for btn in self._git_all_btns:
+            btn.configure(state=repo_state)
+        push_pull_state = tk.NORMAL if (is_repo and remote) else tk.DISABLED
+        for btn in self._git_push_pull_btns:
+            btn.configure(state=push_pull_state)
+
+        # Populate status listbox
+        self._git_status_lb.configure(state=tk.NORMAL)
+        self._git_status_lb.delete(0, tk.END)
+        self._git_status_files = []
+        if is_repo:
+            if status_raw.strip():
+                for line in status_raw.strip().splitlines():
+                    if len(line) >= 3:
+                        xy   = line[:2]
+                        fname = line[3:]
+                        self._git_status_lb.insert(tk.END, f"  {xy}  {fname}")
+                        self._git_status_files.append((xy.strip(), fname))
+            else:
+                self._git_status_lb.insert(tk.END, "  (working tree clean)")
+
+        # Populate log
+        self._git_log_txt.configure(state=tk.NORMAL)
+        self._git_log_txt.delete("1.0", tk.END)
+        if is_repo:
+            self._git_log_txt.insert(tk.END,
+                log_text if log_text else "(no commits yet)")
+        self._git_log_txt.configure(state=tk.DISABLED)
+
+        # Clear diff
+        self._git_diff_txt.configure(state=tk.NORMAL)
+        self._git_diff_txt.delete("1.0", tk.END)
+        if not is_repo:
+            self._git_diff_txt.insert(tk.END,
+                "This project has no git history.\n\n"
+                "Right-click the project in the Projects tab\n"
+                "→ 🔧 Git Init to set one up.")
+        self._git_diff_txt.configure(state=tk.DISABLED)
+
+    def _on_git_status_select(self, event=None):
+        """Click a file in the status listbox → show its diff below."""
+        sel = self._git_status_lb.curselection()
+        if not sel or not self._git_status_files:
+            return
+        idx = sel[0]
+        if idx >= len(self._git_status_files):
+            return
+        _, fname = self._git_status_files[idx]
+        path = self._git_path
+        if not path:
+            return
+
+        def worker():
+            # Unstaged changes
+            d1, _ = self._shell_capture(
+                [GIT_EXE,"-C", path, "diff", "--", fname], path)
+            # Staged (cached) changes
+            d2, _ = self._shell_capture(
+                [GIT_EXE,"-C", path, "diff", "--cached", "--", fname], path)
+            combined = "\n".join(filter(None, [d1.strip(), d2.strip()]))
+            if not combined:
+                combined = f"(no diff available — {fname} may be untracked or binary)"
+            self.after(0, lambda d=combined: self._git_show_diff(d))
+
+        threading.Thread(target=worker, daemon=True).start()
+
+    def _git_show_diff(self, diff_text):
+        """Render a diff string into the diff Text widget with colour tags."""
+        txt = self._git_diff_txt
+        txt.configure(state=tk.NORMAL)
+        txt.delete("1.0", tk.END)
+
+        lines = diff_text.splitlines(keepends=True)
+        CAP = 2000
+        if len(lines) > CAP:
+            lines = lines[:CAP]
+            lines.append(f"\n… [diff capped at {CAP} lines — file is very large] …\n")
+
+        for line in lines:
+            if line.startswith("+") and not line.startswith("+++"):
+                txt.insert(tk.END, line, "plus")
+            elif line.startswith("-") and not line.startswith("---"):
+                txt.insert(tk.END, line, "minus")
+            elif line.startswith("@@"):
+                txt.insert(tk.END, line, "header")
+            elif line.startswith(("---", "+++", "diff ", "index ", "new file", "deleted file")):
+                txt.insert(tk.END, line, "meta")
+            else:
+                txt.insert(tk.END, line)
+
+        txt.configure(state=tk.DISABLED)
+
+    # ── Git action commands ──────────────────────────────────────────────────
+
+    def cmd_git_push(self):
+        path = self._git_path
+        if not path:
+            return
+        name = os.path.basename(path)
+        self._log(f"Pushing {name}…", C["peach"])
+
+        def worker():
+            out, rc = self._shell_capture(
+                [GIT_EXE,"-C", path, "push", "-u", "origin", "HEAD"], path,
+                env=_GIT_ENV_NO_PROMPT)
+            col = C["green"] if rc == 0 else C["red"]
+            for line in out.strip().splitlines()[-6:]:
+                self._log(f"  {line}", col)
+            if rc != 0 and _is_auth_error(out):
+                self.after(0, lambda: messagebox.showinfo(
+                    "GitHub Authentication Required",
+                    "GitHub needs to verify your identity.\n\n"
+                    "Open a terminal in this project folder and run:\n"
+                    "    git push\n\n"
+                    "A browser window will open asking you to log in to GitHub.\n"
+                    "After that, this button will work normally.",
+                    parent=self))
+            self.after(0, self._git_refresh)
+
+        threading.Thread(target=worker, daemon=True).start()
+
+    def cmd_git_pull(self):
+        path = self._git_path
+        if not path:
+            return
+        name = os.path.basename(path)
+        self._log(f"Pulling {name}…", C["peach"])
+
+        def worker():
+            out, rc = self._shell_capture(
+                [GIT_EXE,"-C", path, "pull"], path,
+                env=_GIT_ENV_NO_PROMPT)
+            col = C["green"] if rc == 0 else C["red"]
+            for line in out.strip().splitlines()[-6:]:
+                self._log(f"  {line}", col)
+            if rc != 0:
+                if _is_auth_error(out):
+                    self.after(0, lambda: messagebox.showinfo(
+                        "GitHub Authentication Required",
+                        "GitHub needs to verify your identity.\n\n"
+                        "Open a terminal in this project folder and run:\n"
+                        "    git pull\n\n"
+                        "A browser window will open asking you to log in to GitHub.\n"
+                        "After that, this button will work normally.",
+                        parent=self))
+                elif "conflict" in out.lower():
+                    self.after(0, lambda: messagebox.showwarning(
+                        "Merge Conflicts",
+                        "Pull completed but there are merge conflicts.\n\n"
+                        "Open the project in your editor and look for files\n"
+                        "marked with conflict markers (<<<<<<).\n"
+                        "Resolve them, then use 📝 Commit… to commit the result.",
+                        parent=self))
+            self.after(0, self._git_refresh)
+
+        threading.Thread(target=worker, daemon=True).start()
+
+    def cmd_git_undo_commit(self):
+        """Undo the last commit, keeping all changes staged (git reset --soft HEAD~1)."""
+        path = self._git_path
+        if not path:
+            return
+        if not messagebox.askyesno(
+                "Undo Last Commit",
+                "Undo the last commit?\n\n"
+                "Your changes will be kept and moved back to 'staged'.\n"
+                "Nothing is deleted — you can re-commit at any time.",
+                parent=self):
+            return
+
+        def worker():
+            out, rc = self._shell_capture(
+                [GIT_EXE,"-C", path, "reset", "--soft", "HEAD~1"], path)
+            col = C["green"] if rc == 0 else C["red"]
+            msg = "Last commit undone — changes are now staged." if rc == 0 else out.strip()
+            self._log(f"  {msg}", col)
+            self.after(0, self._git_refresh)
+
+        threading.Thread(target=worker, daemon=True).start()
+
+    def cmd_git_set_remote(self):
+        """Open the Set Remote dialog to connect this project to GitHub."""
+        path = self._git_path
+        if not path:
+            return
+        # Check whether a remote already exists so the dialog can show current URL
+        out, rc = self._shell_capture(
+            [GIT_EXE,"-C", path, "remote", "get-url", "origin"], path)
+        current_url = out.strip() if rc == 0 else ""
+        SetRemoteDialog(self, path, current_url, self._do_git_set_remote)
+
+    def _do_git_set_remote(self, path: str, url: str):
+        """Callback from SetRemoteDialog — add or update the origin remote."""
+        def worker():
+            # Check if remote already exists
+            _, rc_check = self._shell_capture(
+                [GIT_EXE,"-C", path, "remote", "get-url", "origin"], path)
+            if rc_check == 0:
+                cmd = [GIT_EXE,"-C", path, "remote", "set-url", "origin", url]
+            else:
+                cmd = [GIT_EXE,"-C", path, "remote", "add", "origin", url]
+            out, rc = self._shell_capture(cmd, path)
+            col = C["green"] if rc == 0 else C["red"]
+            action = "updated" if rc_check == 0 else "added"
+            msg = f"Remote {action}: {url}" if rc == 0 else out.strip()
+            self._log(f"  {msg}", col)
+            self.after(0, self._git_refresh)
+
+        threading.Thread(target=worker, daemon=True).start()
+
+    def cmd_github_setup(self):
+        """Open the GitHub Setup wizard for the selected/current project."""
+        path = self._git_path
+        if not path:
+            # Fall back to the active project
+            path = self.active_path
+        if not path:
+            messagebox.showwarning("No project selected",
+                "Select a project first.", parent=self)
+            return
+        GitHubSetupDialog(self, path)
+
+    def cmd_git_new_branch(self):
+        """Open New Branch dialog."""
+        path = self._git_path
+        if not path:
+            return
+        NewBranchDialog(self, path, self._do_git_new_branch)
+
+    def _do_git_new_branch(self, path: str, name: str, switch: bool):
+        def worker():
+            if switch:
+                cmd = [GIT_EXE,"-C", path, "checkout", "-b", name]
+            else:
+                cmd = [GIT_EXE,"-C", path, "branch", name]
+            out, rc = self._shell_capture(cmd, path)
+            col = C["green"] if rc == 0 else C["red"]
+            action = f"Created and switched to '{name}'" if (switch and rc == 0) \
+                     else (f"Created '{name}'" if rc == 0 else out.strip())
+            self._log(f"  {action}", col)
+            self.after(0, self._git_refresh)
+
+        threading.Thread(target=worker, daemon=True).start()
+
+    def cmd_git_switch_branch(self):
+        """Open Switch Branch dialog."""
+        path = self._git_path
+        if not path:
+            return
+        # Get branch list on main thread (fast)
+        out, rc = self._shell_capture(
+            [GIT_EXE,"-C", path, "branch"], path)
+        if rc != 0:
+            messagebox.showerror("Git Error", out.strip(), parent=self)
+            return
+        branches = []
+        current  = ""
+        for line in out.strip().splitlines():
+            if line.startswith("* "):
+                current = line[2:].strip()
+            else:
+                branches.append(line.strip())
+        SwitchBranchDialog(self, path, branches, current, self._do_git_switch_branch)
+
+    def _do_git_switch_branch(self, path: str, name: str):
+        def worker():
+            out, rc = self._shell_capture(
+                [GIT_EXE,"-C", path, "checkout", name], path)
+            if rc != 0:
+                self.after(0, lambda: messagebox.showerror(
+                    "Switch Failed",
+                    "Could not switch branches.\n\n"
+                    "You may have uncommitted changes that conflict with the target branch.\n\n"
+                    "Please commit or undo your changes before switching.",
+                    parent=self))
+            else:
+                self._log(f"  Switched to branch '{name}'", C["green"])
+            self.after(0, self._git_refresh)
+
+        threading.Thread(target=worker, daemon=True).start()
+
+    def cmd_git_delete_branch(self):
+        """Delete a non-current branch with safe/force-delete distinction."""
+        path = self._git_path
+        if not path:
+            return
+        out, rc = self._shell_capture(
+            [GIT_EXE,"-C", path, "branch"], path)
+        if rc != 0:
+            messagebox.showerror("Git Error", out.strip(), parent=self)
+            return
+        # Collect non-current branches
+        non_current = []
+        for line in out.strip().splitlines():
+            if not line.startswith("* "):
+                non_current.append(line.strip())
+        if not non_current:
+            messagebox.showinfo("No Branches",
+                "There are no other branches to delete.", parent=self)
+            return
+        # Let user pick
+        branch = SwitchBranchDialog.pick(self, "Delete Branch", non_current,
+                                          parent=self)
+        if not branch:
+            return
+        if not messagebox.askyesno(
+                "Delete Branch",
+                f"Delete branch '{branch}'?\n\n"
+                "If this branch has been merged, it will be removed safely.",
+                parent=self):
+            return
+
+        def worker():
+            out, rc = self._shell_capture(
+                [GIT_EXE,"-C", path, "branch", "-d", branch], path)
+            if rc == 0:
+                self._log(f"  Deleted branch '{branch}'", C["green"])
+            else:
+                out_l = out.lower()
+                if "not fully merged" in out_l or "unmerged" in out_l:
+                    # Ask for force-delete on main thread
+                    def ask_force():
+                        if messagebox.askyesno(
+                                "Force Delete?",
+                                f"Branch '{branch}' has unmerged changes.\n\n"
+                                "Force-delete anyway?\n"
+                                "This permanently discards those commits.",
+                                parent=self):
+                            o2, r2 = self._shell_capture(
+                                [GIT_EXE,"-C", path, "branch", "-D", branch], path)
+                            col = C["green"] if r2 == 0 else C["red"]
+                            msg = f"Force-deleted '{branch}'" if r2 == 0 else o2.strip()
+                            self._log(f"  {msg}", col)
+                            self.after(0, self._git_refresh)
+                    self.after(0, ask_force)
+                else:
+                    self.after(0, lambda: messagebox.showerror(
+                        "Delete Failed",
+                        f"Could not delete branch '{branch}':\n\n{out.strip()}",
+                        parent=self))
+            self.after(0, self._git_refresh)
+
+        threading.Thread(target=worker, daemon=True).start()
 
     def _build_reference_tab(self):
         tab = tk.Frame(self.nb, bg=C["base"])
@@ -1099,6 +1918,11 @@ class App(tk.Tk):
             ("  Scaffold Column",     self._help_scaffold_column),
             ("  Auto-detect",         self._help_autodetect),
             ("  init vs sync",        self._help_init_vs_sync),
+            ("  Project Categories",  self._help_categories),
+            ("  Git: What & Why",     self._help_git_concepts),
+            ("  Git: Daily Workflow", self._help_git_workflow),
+            ("  Git Tab Buttons",     self._help_git_tab),
+            ("  GitHub Setup",        self._help_github_setup),
             ("  File Locations",      self._help_file_locations),
             ("  About",               self._help_about),
         ]
@@ -1336,6 +2160,231 @@ class App(tk.Tk):
               "has no index yet, it asks whether to run 'init' instead.")
         self._help_show(_fill)
 
+    def _help_categories(self):
+        def _fill():
+            h1, h2, p, warn, ok, dim, br, ins = self._hw()
+            h1("Project Categories")
+            p("Projects are automatically grouped under the label of the search root "
+              "folder they belong to. You can override any project's category — and add "
+              "an optional sub-category — without moving any files.")
+            br()
+            h2("How root labels work")
+            p("Each entry in Settings → Search Roots has a Label. That label becomes "
+              "the category header for all projects found inside that folder. Edit the "
+              "label in Settings to rename the whole group at once.")
+            br()
+            h2("Overriding a single project")
+            ins("  1. Right-click the project row\n", "body")
+            ins("  2. Choose  📁 Assign Category…\n", "body")
+            ins("  3. Pick or type a Category (and optional Sub-category)\n", "body")
+            ins("  4. Click OK — the project moves to the new group immediately\n", "body")
+            br()
+            p("To remove an override and return the project to its root's group, "
+              "open Assign Category… and click Clear Override.")
+            br()
+            h2("Sub-categories")
+            p("Sub-categories appear indented under their parent category (shown as "
+              "↳ Sub-category). They work like folders-within-folders. Right-click "
+              "any project at any time to move it between groups.")
+            br()
+            warn("⚠  Category headers and sub-category rows are not selectable — "
+                 "right-click and action buttons only work on project rows.")
+        self._help_show(_fill)
+
+    def _help_git_concepts(self):
+        def _fill():
+            h1, h2, p, warn, ok, dim, br, ins = self._hw()
+            h1("Git: What & Why")
+            p("Git is a tool that remembers the history of every change you make to "
+              "your project. Think of it like infinite undo — but smarter. You decide "
+              "when to save a checkpoint, and you can always go back.")
+            br()
+            h2("Commit — a save point")
+            p("A commit is a snapshot of your project at a moment in time. Each one "
+              "has a short message you write, like 'fix: typo in README' or "
+              "'feat: add dark mode'. Over time, these build up into a history "
+              "you can scroll through.")
+            br()
+            h2("Repository (repo) — the project folder + its history")
+            p("When you run Git Init on a project, git creates a hidden .git folder "
+              "inside it. That folder stores every commit ever made. The whole thing "
+              "— your files plus that history — is called a repository.")
+            br()
+            h2("Branch — a parallel version")
+            p("Imagine photocopying your project so you can experiment on the copy "
+              "without touching the original. That's a branch. When you're happy "
+              "with the experiment, you can merge it back. The default branch is "
+              "usually called 'master' or 'main'.")
+            br()
+            h2("Remote — a copy on GitHub")
+            p("A remote is a second home for your repository, stored on GitHub's "
+              "servers. It acts as a backup and lets others see your work. The "
+              "remote is usually called 'origin'.")
+            br()
+            h2("Push — upload to GitHub")
+            p("After making commits on your machine, Push sends them to GitHub. "
+              "Nothing leaves your computer until you Push — commits are purely local "
+              "until then.")
+            br()
+            h2("Pull — download from GitHub")
+            p("Pull fetches any commits from GitHub that you don't have yet and "
+              "adds them to your local history. Useful if you work on multiple "
+              "machines, or if a collaborator pushed something new.")
+            br()
+            h2("Working tree — uncommitted changes")
+            p("The working tree is the current state of your files right now, before "
+              "you've committed them. The Git tab shows a list of files that have "
+              "changed since your last commit. An 'M' means modified, '?' means "
+              "a new file git hasn't seen before, 'D' means deleted.")
+            br()
+            h2("Staging — choosing what to commit")
+            p("Git lets you pick exactly which changes to include in a commit. "
+              "The 'Stage all changes' checkbox in the Commit dialog does this "
+              "automatically — it stages everything in the working tree, which is "
+              "almost always what you want.")
+            br()
+            ok("Bottom line: commit often, push when you're done for the day.")
+        self._help_show(_fill)
+
+    def _help_git_workflow(self):
+        def _fill():
+            h1, h2, p, warn, ok, dim, br, ins = self._hw()
+            h1("Git: Daily Workflow")
+            p("Here's how a typical coding session looks when using the Git tab.")
+            br()
+            h2("Starting a session")
+            ins("  1. Switch to the Git tab\n", "body")
+            ins("  2. Click ⟳ Refresh to see the current state\n", "body")
+            ins("  3. If there's a remote set, click ⬇ Pull first — picks up any\n"
+                "     changes from GitHub before you start editing\n", "body")
+            br()
+            h2("While you're working")
+            p("Edit your files normally. The Working Tree list updates whenever "
+              "you Refresh. Click any file in the list to see exactly what changed "
+              "(green = added, red = removed).")
+            br()
+            h2("Saving your work (committing)")
+            ins("  1. Click  📝 Commit…\n", "body")
+            ins("  2. The dialog shows what files changed and suggests a message\n", "body")
+            ins("  3. Edit the message if you like — keep it short and descriptive\n", "body")
+            ins("  4. Click Commit\n", "body")
+            br()
+            p("There's no rule for how often to commit. A good rule of thumb: "
+              "commit whenever you finish one thing. Small commits are better than "
+              "one huge commit at the end of the day.")
+            br()
+            h2("Uploading to GitHub (pushing)")
+            ins("  1. Click  ⬆ Push\n", "body")
+            ins("  2. The output log shows whether it succeeded\n", "body")
+            ins("  3. Your commits are now on GitHub — backed up and shareable\n", "body")
+            br()
+            h2("Trying out an idea safely (branching)")
+            ins("  1. Click  🌿 New Branch  and give it a name (e.g. 'try-new-ui')\n", "body")
+            ins("  2. Check 'Switch to this branch immediately'\n", "body")
+            ins("  3. Make your changes and commit as normal\n", "body")
+            ins("  4. If you like it: use 🔀 Switch Branch to go back to master,\n"
+                "     then merge (currently via terminal: git merge try-new-ui)\n", "body")
+            ins("  5. If you don't like it: just switch back to master — the\n"
+                "     experiment branch stays there but your main code is untouched\n", "body")
+            br()
+            h2("Undoing mistakes")
+            p("Made a bad commit? Click  ↩ Undo Last Commit. Your changes come back "
+              "as uncommitted edits — you can fix them and recommit, or just discard.")
+            br()
+            warn("⚠  Undo Last Commit only removes the last commit. To undo older "
+                 "commits, use the terminal.")
+            br()
+            h2("Typical day in one line")
+            dim("  Pull → Edit → Commit → Edit → Commit → Push")
+        self._help_show(_fill)
+
+    def _help_git_tab(self):
+        def _fill():
+            h1, h2, p, warn, ok, dim, br, ins = self._hw()
+            h1("Git Tab")
+            p("The Git tab shows live status for whichever project is selected in the "
+              "Projects tab. It updates automatically when you switch projects or switch "
+              "to this tab.")
+            br()
+            h2("Working Tree & Diff")
+            p("The Working Tree panel lists every modified, added, or deleted file. "
+              "Click any file to see its diff below — added lines are green, removed "
+              "lines are red.")
+            br()
+            h2("Committing changes")
+            ins("  1. Make your edits (in your editor, or via Claude)\n", "body")
+            ins("  2. Click  📝 Commit… — the dialog opens with a suggested message\n", "body")
+            ins("  3. Edit the message if you like, then click Commit\n", "body")
+            br()
+            p("The suggested message is generated from the list of changed files "
+              "(e.g. 'docs: update ARCHITECTURE.md' or 'chore: update 3 source files'). "
+              "Click 💡 Suggest at any time to regenerate it.")
+            br()
+            h2("Undo Last Commit")
+            p("Removes the most recent commit but keeps all your changes staged — "
+              "nothing is deleted. Safe to use if you committed too early or with "
+              "the wrong message.")
+            br()
+            h2("Branches")
+            ins("  🌿 New Branch    — create a branch and optionally switch to it\n", "body")
+            ins("  🔀 Switch Branch — pick a branch from the list to check out\n", "body")
+            ins("  🗑 Delete Branch — safe-delete (warns if branch has unmerged changes)\n", "body")
+            br()
+            warn("⚠  Switching branches with uncommitted changes will fail. "
+                 "Commit or undo first.")
+            br()
+            h2("Push & Pull")
+            p("Push and Pull are only enabled once a remote (GitHub URL) is set. "
+              "Use  Set Remote  or the  🐙 GitHub…  wizard to connect to GitHub first.")
+        self._help_show(_fill)
+
+    def _help_github_setup(self):
+        def _fill():
+            h1, h2, p, warn, ok, dim, br, ins = self._hw()
+            h1("GitHub Setup")
+            p("The  🐙 GitHub…  button in the Git tab header opens a step-by-step "
+              "wizard for getting your project onto GitHub — even if you've never used "
+              "GitHub before.")
+            br()
+            h2("Step 1 — Git identity")
+            p("Every commit is stamped with your name and email. The wizard shows your "
+              "current global settings and lets you update them. These are stored in "
+              "your global git config and apply to every project on this machine.")
+            br()
+            h2("Step 2 — Create a GitHub account")
+            p("Free at github.com. The wizard has a button to open the sign-up page.")
+            br()
+            h2("Step 3 — Create a repository")
+            p("Go to github.com/new. Give it a name, leave it Public. "
+              "Do NOT check 'Add README' or 'Add .gitignore' — you already have those. "
+              "Copy the HTTPS URL shown after creation (e.g. "
+              "https://github.com/you/my-project.git).")
+            br()
+            h2("Step 4 — Paste the URL")
+            p("Paste the URL into the wizard and click Set. This tells git where to "
+              "send your code. The Git tab's Remote label will update immediately.")
+            br()
+            h2("Step 5 — Push")
+            p("Click ⬆ Push to GitHub. The first time, a browser window opens asking "
+              "you to log in to GitHub — this is Git Credential Manager doing its job. "
+              "Log in once and future pushes happen silently.")
+            br()
+            warn("⚠  If Push fails with an authentication error, open a terminal in "
+                 "the project folder and run:  git push\n"
+                 "This triggers the browser login. After that, the Push button works normally.")
+            br()
+            h2("📦 GitHub Releases")
+            p("A Release lets anyone download your .exe without needing Python "
+              "installed. To create one:")
+            ins("  1. Run build.bat to compile dist\\tokensave-manager.exe\n", "body")
+            ins("  2. Open  🐙 GitHub…  and scroll to the Releases section\n", "body")
+            ins("  3. Enter a version tag (e.g. v1.0.0) and a title\n", "body")
+            ins("  4. Click  📦 Create Release — the .exe files are uploaded automatically\n", "body")
+            br()
+            p("Releases require the GitHub CLI (gh). If it's not installed, "
+              "the wizard shows a link to cli.github.com.")
+        self._help_show(_fill)
+
     def _help_file_locations(self):
         def _fill():
             h1, h2, p, warn, ok, dim, br, ins = self._hw()
@@ -1419,7 +2468,7 @@ class App(tk.Tk):
             if subcat:
                 siid = f"sub:{cat}:{subcat}"
                 if not self.tree.exists(siid):
-                    self.tree.insert(parent, tk.END, iid=siid, text=subcat,
+                    self.tree.insert(parent, tk.END, iid=siid, text=f"  ↳ {subcat}",
                                      open=True, tags=("subcategory",))
                 parent = siid
 
@@ -1443,6 +2492,10 @@ class App(tk.Tk):
             self.active_badge.config(text=f"  ★ {name}  ({tag})  ")
         else:
             self.active_badge.config(text="  No project  ")
+
+        # Keep Git tab in sync when it's visible and a project is tracked
+        if self._git_tab_is_visible() and self._git_path:
+            self._git_refresh()
 
     def _build_context_menu(self):
         m = tk.Menu(self, tearoff=0,
@@ -1741,13 +2794,22 @@ class App(tk.Tk):
                             and _cfg.get("auto_commit_after_sync")
                             and _is_git_repo(cwd)):
                         self._log("  Auto-committing sync changes…", C["peach"])
-                        self._shell_capture(["git", "-C", cwd, "add", "-A"], cwd)
+                        self._shell_capture([GIT_EXE,"-C", cwd, "add", "-A"], cwd)
                         _, staged_rc = self._shell_capture(
-                            ["git", "-C", cwd, "diff", "--cached", "--quiet"], cwd)
+                            [GIT_EXE,"-C", cwd, "diff", "--cached", "--quiet"], cwd)
                         if staged_rc != 0:   # non-zero = staged changes exist
-                            cout, crc = self._shell_capture(
-                                ["git", "-C", cwd, "commit", "-m",
-                                 "chore: tokensave sync"], cwd)
+                            # Amend the previous commit if it was also a sync commit
+                            # so repeated syncs don't pile up in history
+                            last_out, _ = self._shell_capture(
+                                [GIT_EXE,"-C", cwd, "log", "-1", "--format=%s"], cwd)
+                            if last_out.strip() == "chore: tokensave sync":
+                                commit_cmd = [GIT_EXE,"-C", cwd, "commit",
+                                              "--amend", "--no-edit"]
+                                self._log("  Amending previous sync commit…", C["peach"])
+                            else:
+                                commit_cmd = [GIT_EXE,"-C", cwd, "commit",
+                                              "-m", "chore: tokensave sync"]
+                            cout, crc = self._shell_capture(commit_cmd, cwd)
                             col = C["green"] if crc == 0 else C["red"]
                             for line in cout.strip().splitlines()[-3:]:
                                 self._log(f"  {line}", col)
@@ -1801,13 +2863,17 @@ class App(tk.Tk):
             self._current_proc = None
             self.after(0, self._set_running, False)
 
-    def _shell_capture(self, cmd: list, cwd: str) -> tuple:
+    def _shell_capture(self, cmd: list, cwd: str, env=None) -> tuple:
         """Run any shell command and return (stdout+stderr, returncode).
 
         Generic helper — cmd[0] is the executable (not tokensave-specific).
         Synchronous — must be called from a background thread.
         Returns ("Error: '<exe>' not found on system PATH.", 1) if the
         executable is missing so callers always get a displayable string.
+
+        Pass env= to override the process environment (e.g. set
+        GIT_TERMINAL_PROMPT=0 for network git operations so they fail
+        immediately instead of hanging waiting for stdin auth prompts).
         """
         try:
             proc = subprocess.Popen(
@@ -1815,6 +2881,7 @@ class App(tk.Tk):
                 stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
                 text=True, encoding="utf-8", errors="replace",
                 creationflags=CREATE_NO_WINDOW,
+                env=env,
             )
             out = proc.stdout.read()
             proc.wait()
@@ -1982,70 +3049,26 @@ class App(tk.Tk):
         )
 
     def cmd_git_log(self):
-        """Show recent git log + working-tree status for the selected project.
+        """Navigate to the Git tab and show live status/log for the selected project.
 
-        Uses `git -C <path>` so it reads the project's own repo only.
-        Nothing is stored in the manager — purely a read-only display.
+        Replaces the old popup approach — all git information is now displayed
+        inline in the Git tab, which avoids dialog clutter.
         """
         path = self._selected_path()
         if not path:
             return
-        name = os.path.basename(path)
 
-        def worker():
-            log_out, log_rc = self._shell_capture(
-                ["git", "-C", path, "log", "--oneline", "-20"], path)
-            status_out, _ = self._shell_capture(
-                ["git", "-C", path, "status", "--short"], path)
+        # Point the Git tab at this project and switch to it
+        self._git_path = path
+        try:
+            for idx in range(self.nb.index("end")):
+                if self.nb.tab(idx, "text").strip() == "Git":
+                    self.nb.select(idx)
+                    break
+        except tk.TclError:
+            pass
 
-            if log_rc != 0:
-                if "not found on system PATH" in log_out:
-                    content = log_out
-                else:
-                    content = "Not a git repository.\n\nRight-click → 🔧 Git Init to initialise one."
-                    detail = log_out.strip()
-                    if detail:
-                        content += f"\n\n{detail}"
-            else:
-                parts = []
-                if log_out.strip():
-                    parts.append("── Recent commits ─────────────────────────────────────────────")
-                    parts.append(log_out.strip())
-                if status_out.strip():
-                    parts.append("")
-                    parts.append("── Working tree status ────────────────────────────────────────")
-                    parts.append(status_out.strip())
-                content = "\n".join(parts) if parts else "(no commits yet)"
-
-            self.after(0, lambda c=content: self._show_git_popup(name, c))
-
-        threading.Thread(target=worker, daemon=True).start()
-
-    def _show_git_popup(self, name, content):
-        win = tk.Toplevel(self)
-        win.title(f"Git — {name}")
-        win.configure(bg=C["base"])
-        win.resizable(True, True)
-        win.grab_set()
-
-        wrap = tk.Frame(win, bg=C["base"])
-        wrap.pack(fill=tk.BOTH, expand=True, padx=14, pady=(12, 6))
-
-        vsb = ttk.Scrollbar(wrap, orient="vertical")
-        txt = tk.Text(wrap, font=("Consolas", 9), bg=C["mantle"], fg=C["text"],
-                      relief=tk.FLAT, padx=10, pady=8, wrap=tk.NONE,
-                      cursor="arrow", state=tk.NORMAL,
-                      width=72, height=22,
-                      yscrollcommand=vsb.set)
-        vsb.configure(command=txt.yview)
-        txt.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
-        vsb.pack(side=tk.RIGHT, fill=tk.Y)
-
-        txt.insert(tk.END, content)
-        txt.configure(state=tk.DISABLED)
-
-        ttk.Button(win, text="Close", command=win.destroy).pack(pady=(0, 12))
-        win.transient(self)
+        self._git_refresh()
 
     # ── Git Init ───────────────────────────────────────────────────────────────
 
@@ -2072,7 +3095,7 @@ class App(tk.Tk):
 
         # Run git init on the main thread (instantaneous)
         self._log(f"Running git init in {name}…", C["peach"])
-        out, rc = self._shell_capture(["git", "-C", path, "init"], path)
+        out, rc = self._shell_capture([GIT_EXE,"-C", path, "init"], path)
         col = C["green"] if rc == 0 else C["red"]
         for line in out.strip().splitlines():
             self._log(f"  {line}", col)
@@ -2099,9 +3122,9 @@ class App(tk.Tk):
             parent=self,
         ):
             def do_commit():
-                self._shell_capture(["git", "-C", path, "add", "-A"], path)
+                self._shell_capture([GIT_EXE,"-C", path, "add", "-A"], path)
                 cout, crc = self._shell_capture(
-                    ["git", "-C", path, "commit", "-m", "Initial commit"], path)
+                    [GIT_EXE,"-C", path, "commit", "-m", "Initial commit"], path)
                 ccol = C["green"] if crc == 0 else C["red"]
                 for line in cout.strip().splitlines()[-4:]:
                     self.after(0, lambda l=line: self._log(f"  {l}", ccol))
@@ -2119,7 +3142,7 @@ class App(tk.Tk):
             return
         # Fetch status synchronously (fast) so the dialog can show it immediately.
         status_out, _ = self._shell_capture(
-            ["git", "-C", path, "status", "--short"], path)
+            [GIT_EXE,"-C", path, "status", "--short"], path)
         is_repo = _is_git_repo(path)
         GitCommitDialog(self, path, status_out, is_repo, self._do_git_commit)
 
@@ -2129,7 +3152,7 @@ class App(tk.Tk):
 
         def worker():
             if stage_all:
-                out, rc = self._shell_capture(["git", "-C", path, "add", "-A"], path)
+                out, rc = self._shell_capture([GIT_EXE,"-C", path, "add", "-A"], path)
                 if rc != 0:
                     self.after(0, lambda: self._log(
                         f"git add failed: {out.strip()}", C["red"]))
@@ -2137,7 +3160,7 @@ class App(tk.Tk):
 
             self._log(f"Committing {name}…", C["peach"])
             cout, crc = self._shell_capture(
-                ["git", "-C", path, "commit", "-m", message], path)
+                [GIT_EXE,"-C", path, "commit", "-m", message], path)
             col = C["green"] if crc == 0 else C["red"]
             for line in cout.strip().splitlines()[-4:]:
                 self.after(0, lambda l=line: self._log(f"  {l}", col))
@@ -2228,11 +3251,12 @@ class App(tk.Tk):
         SettingsDialog(self, _cfg, _save_config, self._on_settings_saved)
 
     def _on_settings_saved(self):
-        global TOKENSAVE, TEMPLATE_DIR, SEARCH_ROOTS
+        global TOKENSAVE, TEMPLATE_DIR, SEARCH_ROOTS, GIT_EXE
         global BASIC_INSTRUCTIONS_TEMPLATE, BASELINE_INCLUDE_LINE
         TOKENSAVE    = _cfg.get("tokensave_exe", "")
         TEMPLATE_DIR = _cfg.get("template_dir", "")
         SEARCH_ROOTS = _cfg.get("search_roots", [])
+        GIT_EXE      = _cfg.get("git_exe") or _detect_git()
         BASIC_INSTRUCTIONS_TEMPLATE = os.path.join(TEMPLATE_DIR, "claude-md-template.md")
         BASELINE_INCLUDE_LINE = f"@{TEMPLATE_DIR}\\project-baseline.md"
         self.refresh()
@@ -2783,6 +3807,41 @@ class SettingsDialog(tk.Toplevel):
             "Editor command  —  launched by 'Open in Editor' (e.g. code, code --new-window, notepad)",
             "editor_cmd", note="(flags supported)")
 
+        # ── Git executable ──
+        ttk.Separator(self, orient="horizontal").pack(fill=tk.X, padx=20, pady=(12, 8))
+        tk.Label(self, text="Git executable  —  path to git.exe",
+                 bg=C["base"], fg=C["subtext"],
+                 font=("Segoe UI", 9)).pack(anchor=tk.W, padx=20, pady=(0, 0))
+        git_row = tk.Frame(self, bg=C["base"])
+        git_row.pack(fill=tk.X, padx=20, pady=(4, 0))
+        self._git_exe_var = tk.StringVar(value=cfg.get("git_exe", ""))
+        git_entry = ttk.Entry(git_row, textvariable=self._git_exe_var, width=44)
+        git_entry.pack(side=tk.LEFT, padx=(0, 6))
+        def _browse_git():
+            p = filedialog.askopenfilename(
+                title="Select git.exe",
+                filetypes=[("Executable", "*.exe"), ("All", "*.*")],
+                initialdir=r"C:\Program Files\Git\cmd",
+                parent=self)
+            if p:
+                self._git_exe_var.set(p)
+                self._verify_git(p)
+        def _autodetect_git():
+            found = _detect_git()
+            self._git_exe_var.set(found)
+            self._verify_git(found)
+        ttk.Button(git_row, text="Browse…", command=_browse_git).pack(side=tk.LEFT, padx=(0, 6))
+        ttk.Button(git_row, text="Auto-detect", command=_autodetect_git).pack(side=tk.LEFT, padx=(0, 6))
+        self._git_status_lbl = tk.Label(git_row, text="", bg=C["base"],
+                                        font=("Segoe UI", 8), fg=C["overlay0"])
+        self._git_status_lbl.pack(side=tk.LEFT, padx=(6, 0))
+        tk.Label(self,
+                 text="  Leave blank to auto-detect from PATH or common install locations.",
+                 font=("Segoe UI", 8), bg=C["base"], fg=C["overlay0"]).pack(
+                 anchor=tk.W, padx=20, pady=(2, 0))
+        # Show current detected version on open
+        self.after(100, lambda: self._verify_git(cfg.get("git_exe") or GIT_EXE))
+
         # ── Search roots — two-column Treeview (label + path) ──
         tk.Label(self,
                  text="Search roots  —  each root's label becomes a category in the project list",
@@ -2881,6 +3940,24 @@ class SettingsDialog(tk.Toplevel):
         if sel:
             self._roots_tv.delete(sel[0])
 
+    def _verify_git(self, exe_path: str):
+        """Run 'git --version' with the given path and update the status label."""
+        if not exe_path:
+            self._git_status_lbl.config(text="(will auto-detect on save)", fg=C["overlay0"])
+            return
+        try:
+            result = subprocess.run(
+                [exe_path, "--version"],
+                capture_output=True, text=True, timeout=5,
+                creationflags=CREATE_NO_WINDOW)
+            version = result.stdout.strip() or result.stderr.strip()
+            if result.returncode == 0:
+                self._git_status_lbl.config(text=f"✓  {version}", fg=C["green"])
+            else:
+                self._git_status_lbl.config(text="✗  not found", fg=C["red"])
+        except Exception:
+            self._git_status_lbl.config(text="✗  not found", fg=C["red"])
+
     def _save(self):
         exe = self._exe_var.get().strip()
         if exe and not os.path.isfile(exe):
@@ -2898,6 +3975,7 @@ class SettingsDialog(tk.Toplevel):
             for iid in self._roots_tv.get_children()
         ]
         self._cfg["auto_commit_after_sync"] = self._var_autocommit.get()
+        self._cfg["git_exe"] = self._git_exe_var.get().strip()
         self._save_fn(self._cfg)
         self.destroy()
         self._callback()
@@ -3128,6 +4206,277 @@ class ShadowLinksDialog(tk.Toplevel):
 
 # ── Git Commit dialog ──────────────────────────────────────────────────────────
 
+# ── Git helper dialogs ────────────────────────────────────────────────────────
+
+class SetRemoteDialog(tk.Toplevel):
+    """Connect a project to a GitHub repository by entering its HTTPS URL.
+
+    Guides beginners through the three-step process: create repo on GitHub,
+    copy the URL, paste here.
+    Callback: callback(path, url)
+    """
+
+    def __init__(self, parent, path: str, current_url: str, callback):
+        super().__init__(parent)
+        self.title("Set Remote")
+        self.configure(bg=C["base"])
+        self.resizable(False, False)
+        self.grab_set()
+        self.transient(parent)
+        self._path     = path
+        self._callback = callback
+
+        tk.Label(self, text="🔗  Connect to GitHub",
+                 font=("Segoe UI", 13, "bold"),
+                 bg=C["base"], fg=C["blue"]).pack(anchor=tk.W, padx=20, pady=(16, 0))
+        tk.Label(self, text=os.path.basename(path),
+                 font=("Segoe UI", 9), bg=C["base"],
+                 fg=C["overlay0"]).pack(anchor=tk.W, padx=20, pady=(0, 8))
+
+        ttk.Separator(self, orient="horizontal").pack(fill=tk.X, padx=20, pady=(0, 10))
+
+        # Instructions
+        instr = (
+            "Steps:\n"
+            "  1.  Go to  github.com/new  and create a new repository\n"
+            "  2.  Copy the HTTPS URL from the repository page\n"
+            "        (looks like: https://github.com/you/repo-name.git)\n"
+            "  3.  Paste it in the box below and click Save"
+        )
+        tk.Label(self, text=instr,
+                 font=("Segoe UI", 9), bg=C["base"], fg=C["text"],
+                 justify=tk.LEFT).pack(anchor=tk.W, padx=20, pady=(0, 10))
+
+        tk.Label(self, text="Remote URL:", bg=C["base"], fg=C["subtext"],
+                 font=("Segoe UI", 9)).pack(anchor=tk.W, padx=20)
+        self._url_var = tk.StringVar(value=current_url)
+        ttk.Entry(self, textvariable=self._url_var,
+                  width=52).pack(anchor=tk.W, padx=20, pady=(4, 14))
+
+        ttk.Separator(self, orient="horizontal").pack(fill=tk.X, padx=20, pady=(0, 10))
+
+        btn_row = tk.Frame(self, bg=C["base"])
+        btn_row.pack(pady=(0, 16), padx=20, anchor=tk.W)
+        ttk.Button(btn_row, text="Save", style="Primary.TButton",
+                   command=self._save).pack(side=tk.LEFT, padx=(0, 8))
+        ttk.Button(btn_row, text="Cancel",
+                   command=self.destroy).pack(side=tk.LEFT)
+
+        self.update_idletasks()
+        w, h = self.winfo_reqwidth(), self.winfo_reqheight()
+        px, py = parent.winfo_x(), parent.winfo_y()
+        pw, ph = parent.winfo_width(), parent.winfo_height()
+        self.geometry(f"{w}x{h}+{px + (pw - w) // 2}+{py + (ph - h) // 2}")
+
+    def _save(self):
+        url = self._url_var.get().strip()
+        if not url:
+            messagebox.showwarning("URL required",
+                "Please enter the GitHub repository URL.", parent=self)
+            return
+        if not (url.startswith("http") or url.startswith("git@")):
+            messagebox.showwarning("Invalid URL",
+                "The URL should start with https:// or git@\n\n"
+                "Example:  https://github.com/username/repo.git",
+                parent=self)
+            return
+        self.destroy()
+        self._callback(self._path, url)
+
+
+class NewBranchDialog(tk.Toplevel):
+    """Create a new git branch, with an option to switch to it immediately.
+
+    Callback: callback(path, branch_name, switch_immediately)
+    """
+
+    def __init__(self, parent, path: str, callback):
+        super().__init__(parent)
+        self.title("New Branch")
+        self.configure(bg=C["base"])
+        self.resizable(False, False)
+        self.grab_set()
+        self.transient(parent)
+        self._path     = path
+        self._callback = callback
+
+        tk.Label(self, text="🌿  New Branch",
+                 font=("Segoe UI", 13, "bold"),
+                 bg=C["base"], fg=C["green"]).pack(anchor=tk.W, padx=20, pady=(16, 0))
+        tk.Label(self, text=os.path.basename(path),
+                 font=("Segoe UI", 9), bg=C["base"],
+                 fg=C["overlay0"]).pack(anchor=tk.W, padx=20, pady=(0, 10))
+
+        tk.Label(self, text="Branch name:", bg=C["base"], fg=C["subtext"],
+                 font=("Segoe UI", 9)).pack(anchor=tk.W, padx=20)
+        self._name_var = tk.StringVar()
+        name_entry = ttk.Entry(self, textvariable=self._name_var, width=38)
+        name_entry.pack(anchor=tk.W, padx=20, pady=(4, 10))
+        name_entry.focus_set()
+
+        self._switch_var = tk.BooleanVar(value=True)
+        tk.Checkbutton(self,
+            text="Switch to this branch immediately",
+            variable=self._switch_var,
+            bg=C["base"], fg=C["text"], selectcolor=C["surface0"],
+            activebackground=C["base"], activeforeground=C["text"],
+            font=("Segoe UI", 10)).pack(anchor=tk.W, padx=20, pady=(0, 14))
+
+        ttk.Separator(self, orient="horizontal").pack(fill=tk.X, padx=20, pady=(0, 10))
+
+        btn_row = tk.Frame(self, bg=C["base"])
+        btn_row.pack(pady=(0, 16), padx=20, anchor=tk.W)
+        ttk.Button(btn_row, text="Create", style="Primary.TButton",
+                   command=self._create).pack(side=tk.LEFT, padx=(0, 8))
+        ttk.Button(btn_row, text="Cancel",
+                   command=self.destroy).pack(side=tk.LEFT)
+
+        self.bind("<Return>", lambda _: self._create())
+
+        self.update_idletasks()
+        w, h = self.winfo_reqwidth(), self.winfo_reqheight()
+        px, py = parent.winfo_x(), parent.winfo_y()
+        pw, ph = parent.winfo_width(), parent.winfo_height()
+        self.geometry(f"{w}x{h}+{px + (pw - w) // 2}+{py + (ph - h) // 2}")
+
+    def _create(self):
+        name = self._name_var.get().strip()
+        if not name:
+            messagebox.showwarning("Name required",
+                "Enter a branch name.", parent=self)
+            return
+        if " " in name:
+            messagebox.showwarning("Invalid name",
+                "Branch names cannot contain spaces.\n"
+                "Try using a hyphen instead, e.g. my-feature",
+                parent=self)
+            return
+        self.destroy()
+        self._callback(self._path, name, self._switch_var.get())
+
+
+class SwitchBranchDialog(tk.Toplevel):
+    """Select a branch to switch to from a list of local branches.
+
+    Also used by cmd_git_delete_branch via the static pick() helper.
+    Callback: callback(path, branch_name)
+    """
+
+    def __init__(self, parent, path: str, branches: list, current: str,
+                 callback):
+        super().__init__(parent)
+        self.title("Switch Branch")
+        self.configure(bg=C["base"])
+        self.resizable(False, False)
+        self.grab_set()
+        self.transient(parent)
+        self._path     = path
+        self._callback = callback
+        self._result   = None
+
+        tk.Label(self, text="🔀  Switch Branch",
+                 font=("Segoe UI", 13, "bold"),
+                 bg=C["base"], fg=C["lavender"]).pack(anchor=tk.W, padx=20, pady=(16, 0))
+        if current:
+            tk.Label(self, text=f"Current: {current}",
+                     font=("Segoe UI", 9), bg=C["base"],
+                     fg=C["overlay0"]).pack(anchor=tk.W, padx=20, pady=(0, 8))
+
+        lb_wrap = tk.Frame(self, bg=C["mantle"])
+        lb_wrap.pack(padx=20, pady=(0, 14), fill=tk.X)
+        self._lb = tk.Listbox(lb_wrap, font=("Consolas", 10),
+                               bg=C["mantle"], fg=C["text"],
+                               selectbackground=C["surface1"],
+                               activestyle="none",
+                               relief=tk.FLAT, bd=0, height=8, width=36)
+        for b in branches:
+            self._lb.insert(tk.END, f"  {b}")
+        self._lb.pack(padx=6, pady=6)
+        self._lb.bind("<Double-Button-1>", lambda _: self._switch())
+
+        ttk.Separator(self, orient="horizontal").pack(fill=tk.X, padx=20, pady=(0, 10))
+
+        btn_row = tk.Frame(self, bg=C["base"])
+        btn_row.pack(pady=(0, 16), padx=20, anchor=tk.W)
+        ttk.Button(btn_row, text="Switch", style="Primary.TButton",
+                   command=self._switch).pack(side=tk.LEFT, padx=(0, 8))
+        ttk.Button(btn_row, text="Cancel",
+                   command=self.destroy).pack(side=tk.LEFT)
+
+        self.update_idletasks()
+        w, h = self.winfo_reqwidth(), self.winfo_reqheight()
+        px, py = parent.winfo_x(), parent.winfo_y()
+        pw, ph = parent.winfo_width(), parent.winfo_height()
+        self.geometry(f"{w}x{h}+{px + (pw - w) // 2}+{py + (ph - h) // 2}")
+
+    def _switch(self):
+        sel = self._lb.curselection()
+        if not sel:
+            messagebox.showwarning("Nothing selected",
+                "Select a branch first.", parent=self)
+            return
+        name = self._lb.get(sel[0]).strip()
+        self.destroy()
+        if self._callback:
+            self._callback(self._path, name)
+
+    @staticmethod
+    def pick(parent, title: str, branches: list, parent_widget=None) -> str:
+        """Synchronous branch picker — returns chosen branch name or ''."""
+        result = [""]
+        pw = parent_widget or parent
+
+        def cb(path, name):
+            result[0] = name
+
+        dlg = SwitchBranchDialog.__new__(SwitchBranchDialog)
+        tk.Toplevel.__init__(dlg, parent)
+        dlg.title(title)
+        dlg.configure(bg=C["base"])
+        dlg.resizable(False, False)
+        dlg.grab_set()
+        dlg.transient(parent)
+        dlg._path     = ""
+        dlg._callback = None
+        dlg._result   = result
+
+        tk.Label(dlg, text=f"Select a branch:",
+                 font=("Segoe UI", 10, "bold"),
+                 bg=C["base"], fg=C["text"]).pack(anchor=tk.W, padx=20, pady=(16, 8))
+        lb_wrap = tk.Frame(dlg, bg=C["mantle"])
+        lb_wrap.pack(padx=20, pady=(0, 14), fill=tk.X)
+        lb = tk.Listbox(lb_wrap, font=("Consolas", 10),
+                        bg=C["mantle"], fg=C["text"],
+                        selectbackground=C["surface1"],
+                        activestyle="none",
+                        relief=tk.FLAT, bd=0, height=8, width=36)
+        for b in branches:
+            lb.insert(tk.END, f"  {b}")
+        lb.pack(padx=6, pady=6)
+
+        def confirm():
+            sel = lb.curselection()
+            if sel:
+                result[0] = lb.get(sel[0]).strip()
+            dlg.destroy()
+
+        lb.bind("<Double-Button-1>", lambda _: confirm())
+        btn_row = tk.Frame(dlg, bg=C["base"])
+        btn_row.pack(pady=(0, 16), padx=20, anchor=tk.W)
+        ttk.Button(btn_row, text=title.split()[0], style="Primary.TButton",
+                   command=confirm).pack(side=tk.LEFT, padx=(0, 8))
+        ttk.Button(btn_row, text="Cancel", command=dlg.destroy).pack(side=tk.LEFT)
+
+        dlg.update_idletasks()
+        w, h = dlg.winfo_reqwidth(), dlg.winfo_reqheight()
+        px, py = pw.winfo_x(), pw.winfo_y()
+        pw2, ph = pw.winfo_width(), pw.winfo_height()
+        dlg.geometry(f"{w}x{h}+{px + (pw2 - w) // 2}+{py + (ph - h) // 2}")
+
+        parent.wait_window(dlg)
+        return result[0]
+
+
 # ── Assign Category dialog ────────────────────────────────────────────────────
 
 class AssignCategoryDialog(tk.Toplevel):
@@ -3225,6 +4574,328 @@ class AssignCategoryDialog(tk.Toplevel):
         self._callback(self._path, None, "")
 
 
+class GitHubSetupDialog(tk.Toplevel):
+    """Step-by-step GitHub setup wizard.
+
+    Walks first-time users through: git identity → GitHub account →
+    create repo → set remote URL → first push → optional GitHub Release.
+    Each step shows a live status indicator (✅ / ⬜ / ℹ️) based on the
+    current git state of the project.
+    """
+
+    def __init__(self, parent, path: str):
+        super().__init__(parent)
+        self._app  = parent   # App instance — gives access to _shell_capture, _log, etc.
+        self._path = path
+        self.title("GitHub Setup")
+        self.configure(bg=C["base"])
+        self.resizable(True, True)
+        self.minsize(480, 500)
+        self.grab_set()
+        self.transient(parent)
+
+        self._name_var      = tk.StringVar()
+        self._email_var     = tk.StringVar()
+        self._remote_var    = tk.StringVar()
+        self._tag_var       = tk.StringVar(value="v1.0.0")
+        self._rel_title_var = tk.StringVar(value="Release")
+
+        # Scrollable area: canvas + scrollbar wrap the body Frame.
+        # body is a child of self (not canvas) — keeps Windows rendering happy.
+        self._canvas = tk.Canvas(self, bg=C["base"], highlightthickness=0)
+        _vsb = ttk.Scrollbar(self, orient="vertical", command=self._canvas.yview)
+        self._canvas.configure(yscrollcommand=_vsb.set)
+        _vsb.pack(side=tk.RIGHT, fill=tk.Y)
+        self._canvas.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
+
+        self._body = tk.Frame(self, bg=C["base"])
+        self._body_id = self._canvas.create_window(
+            (0, 0), window=self._body, anchor="nw")
+        self._canvas.bind("<Configure>",
+            lambda e: self._canvas.itemconfigure(self._body_id, width=e.width))
+        self._body.bind("<Configure>",
+            lambda e: self._canvas.configure(scrollregion=self._canvas.bbox("all")))
+
+        def _mw(e):
+            self._canvas.yview_scroll(int(-1 * (e.delta / 120)), "units")
+        self._canvas.bind_all("<MouseWheel>", _mw)
+        self.bind("<Destroy>", lambda e: self._canvas.unbind_all("<MouseWheel>"))
+
+        try:
+            self._build()
+            self._refresh()
+        except Exception as ex:
+            import traceback
+            tb = traceback.format_exc()
+            messagebox.showerror(
+                "GitHub Setup — build error",
+                f"The wizard failed to render:\n\n{ex}\n\n{tb[-800:]}",
+                parent=self)
+
+        self.update_idletasks()
+        # Open at content height, but never taller than parent window.
+        content_h = self._body.winfo_reqheight() + 20
+        max_h = max(400, parent.winfo_height() - 60)
+        w, h = 520, min(content_h, max_h)
+        px = parent.winfo_x() + (parent.winfo_width()  - w) // 2
+        py = parent.winfo_y() + (parent.winfo_height() - h) // 2
+        self.geometry(f"{w}x{h}+{max(0, px)}+{max(0, py)}")
+
+    # ── shell helper (fast config/remote queries — main-thread OK) ───────────
+
+    def _sh(self, cmd) -> tuple:
+        return self._app._shell_capture(cmd, self._path)
+
+    # ── build ────────────────────────────────────────────────────────────────
+
+    def _build(self):
+        body = self._body   # all widgets pack into the scrollable canvas child frame
+        P    = dict(padx=20)
+
+        # ── Header ───────────────────────────────────────────────────────────
+        tk.Label(body, text="🐙  GitHub Setup",
+                 font=("Segoe UI", 12, "bold"),
+                 bg=C["base"], fg=C["blue"]).pack(anchor=tk.W, pady=(16, 2), **P)
+        tk.Label(body, text=os.path.basename(self._path),
+                 font=("Segoe UI", 9), bg=C["base"],
+                 fg=C["overlay0"]).pack(anchor=tk.W, pady=(0, 6), **P)
+        ttk.Separator(body, orient="horizontal").pack(fill=tk.X, padx=20, pady=(0, 10))
+
+        # ── Step 1: Git identity ─────────────────────────────────────────────
+        self._s1_icon = self._step_header(body, "1",
+            "Your name & email  (shown on every commit)")
+
+        id_frame = tk.Frame(body, bg=C["surface0"], padx=10, pady=8)
+        id_frame.pack(fill=tk.X, padx=(44, 20), pady=(2, 10))
+
+        for lbl_text, var in (("Name:", self._name_var), ("Email:", self._email_var)):
+            row = tk.Frame(id_frame, bg=C["surface0"])
+            row.pack(fill=tk.X, pady=2)
+            tk.Label(row, text=lbl_text, width=7, anchor=tk.W,
+                     bg=C["surface0"], fg=C["subtext"],
+                     font=("Segoe UI", 9)).pack(side=tk.LEFT)
+            ttk.Entry(row, textvariable=var, width=30,
+                      font=("Segoe UI", 9)).pack(side=tk.LEFT, padx=(4, 0))
+
+        ttk.Button(id_frame, text="Save Identity",
+                   command=self._save_identity).pack(anchor=tk.W, pady=(6, 0))
+
+        # ── Step 2: Sign in / create GitHub account ──────────────────────────
+        self._s2_icon = self._step_header(body, "2",
+            "Sign in to GitHub  (or create a free account)")
+        s2 = tk.Frame(body, bg=C["base"])
+        s2.pack(anchor=tk.W, padx=(44, 20), pady=(2, 4))
+        ttk.Button(s2, text="Sign in to GitHub →",
+                   command=lambda: os.startfile("https://github.com/login")).pack(
+                   side=tk.LEFT, padx=(0, 8))
+        ttk.Button(s2, text="Create free account →",
+                   command=lambda: os.startfile("https://github.com/signup")).pack(side=tk.LEFT)
+        tk.Label(body,
+                 text="If you already have an account, just sign in — no need to create one.",
+                 font=("Segoe UI", 8), bg=C["base"],
+                 fg=C["overlay0"]).pack(anchor=tk.W, padx=(44, 20), pady=(0, 10))
+
+        # ── Step 3: Create repository ────────────────────────────────────────
+        self._s3_icon = self._step_header(body, "3",
+            "Create a new repository on GitHub")
+        s3 = tk.Frame(body, bg=C["base"])
+        s3.pack(fill=tk.X, padx=(44, 20), pady=(2, 10))
+        tk.Label(s3,
+                 text="Go to github.com/new, fill in the repo name, leave it Public.\n"
+                      "Do NOT check 'Add README' or 'Add .gitignore' — you already\n"
+                      "have those. Then copy the HTTPS URL it shows you.",
+                 font=("Segoe UI", 9), bg=C["base"], fg=C["subtext"],
+                 justify=tk.LEFT).pack(anchor=tk.W, pady=(0, 6))
+        ttk.Button(s3, text="Open github.com/new →",
+                   command=lambda: os.startfile("https://github.com/new")).pack(anchor=tk.W)
+
+        # ── Step 4: Set remote URL ───────────────────────────────────────────
+        self._s4_icon = self._step_header(body, "4",
+            "Paste your repository URL here")
+        s4 = tk.Frame(body, bg=C["base"])
+        s4.pack(fill=tk.X, padx=(44, 20), pady=(2, 10))
+        url_row = tk.Frame(s4, bg=C["base"])
+        url_row.pack(fill=tk.X)
+        ttk.Entry(url_row, textvariable=self._remote_var, width=34,
+                  font=("Segoe UI", 9)).pack(side=tk.LEFT, padx=(0, 6))
+        ttk.Button(url_row, text="Set", command=self._set_remote).pack(side=tk.LEFT)
+        tk.Label(s4,
+                 text="e.g. https://github.com/you/my-project.git",
+                 font=("Segoe UI", 8), bg=C["base"],
+                 fg=C["overlay0"]).pack(anchor=tk.W, pady=(4, 0))
+
+        # ── Step 5: Push ─────────────────────────────────────────────────────
+        self._s5_icon = self._step_header(body, "5",
+            "Upload your code to GitHub")
+        s5 = tk.Frame(body, bg=C["base"])
+        s5.pack(fill=tk.X, padx=(44, 20), pady=(2, 10))
+        tk.Label(s5,
+                 text="This sends all your commits to GitHub. The first time, a\n"
+                      "browser window will open asking you to log in — that's normal.\n"
+                      "After that, pushes happen silently.",
+                 font=("Segoe UI", 9), bg=C["base"], fg=C["subtext"],
+                 justify=tk.LEFT).pack(anchor=tk.W, pady=(0, 6))
+        self._push_btn = ttk.Button(s5, text="⬆  Push to GitHub",
+                                    command=self._do_push)
+        self._push_btn.pack(anchor=tk.W)
+
+        # ── Releases section ─────────────────────────────────────────────────
+        ttk.Separator(body, orient="horizontal").pack(fill=tk.X, padx=20, pady=(10, 10))
+        tk.Label(body, text="📦  GitHub Releases  (share your built .exe)",
+                 font=("Segoe UI", 10, "bold"),
+                 bg=C["base"], fg=C["peach"]).pack(anchor=tk.W, padx=20, pady=(0, 4))
+        tk.Label(body,
+                 text="A Release lets anyone download your .exe without needing Python.\n"
+                      "Build dist\\ first (run build.bat), then tag a release here.",
+                 font=("Segoe UI", 9), bg=C["base"], fg=C["subtext"],
+                 justify=tk.LEFT).pack(anchor=tk.W, padx=20, pady=(0, 8))
+
+        gh_on_path = bool(shutil.which("gh"))
+        if gh_on_path:
+            rel_grid = tk.Frame(body, bg=C["base"])
+            rel_grid.pack(anchor=tk.W, padx=20, pady=(0, 6))
+            for col, (lbl, var, w) in enumerate([
+                    ("Tag:", self._tag_var, 9),
+                    ("Title:", self._rel_title_var, 22)]):
+                tk.Label(rel_grid, text=lbl, bg=C["base"], fg=C["text"],
+                         font=("Segoe UI", 9)).grid(
+                         row=0, column=col*2, sticky=tk.W,
+                         padx=(0 if col == 0 else 12, 4))
+                ttk.Entry(rel_grid, textvariable=var, width=w,
+                          font=("Segoe UI", 9)).grid(row=0, column=col*2+1, sticky=tk.W)
+            ttk.Button(body, text="📦  Create Release",
+                       command=self._create_release).pack(anchor=tk.W, padx=20, pady=(0, 4))
+        else:
+            tk.Label(body,
+                     text="Install GitHub CLI to enable one-click releases from here:",
+                     font=("Segoe UI", 9), bg=C["base"], fg=C["text"]).pack(anchor=tk.W, padx=20)
+            ttk.Button(body, text="Get GitHub CLI  (cli.github.com) →",
+                       command=lambda: os.startfile("https://cli.github.com")).pack(
+                       anchor=tk.W, padx=20, pady=(4, 4))
+            tk.Label(body,
+                     text="After installing, re-open this dialog to enable releases.",
+                     font=("Segoe UI", 8), bg=C["base"],
+                     fg=C["overlay0"]).pack(anchor=tk.W, padx=20, pady=(0, 4))
+
+        ttk.Separator(body, orient="horizontal").pack(fill=tk.X, padx=20, pady=(10, 10))
+        ttk.Button(body, text="Close", command=self.destroy).pack(
+            anchor=tk.E, padx=20, pady=(0, 16))
+
+    def _step_header(self, parent, num: str, text: str) -> tk.Label:
+        """Numbered step row — returns the icon label so caller can update it."""
+        row = tk.Frame(parent, bg=C["base"])
+        row.pack(fill=tk.X, padx=20, pady=(0, 2))
+        icon = tk.Label(row, text="⬜", bg=C["base"], font=("Segoe UI", 10))
+        icon.pack(side=tk.LEFT, padx=(0, 8))
+        tk.Label(row, text=f"Step {num} — {text}",
+                 font=("Segoe UI", 9, "bold"),
+                 bg=C["base"], fg=C["text"]).pack(side=tk.LEFT)
+        return icon
+
+    # ── Refresh: query git and update step icons ─────────────────────────────
+
+    def _refresh(self):
+        # Step 1 — git identity
+        name_out,  _ = self._sh([GIT_EXE,"config", "--global", "user.name"])
+        email_out, _ = self._sh([GIT_EXE,"config", "--global", "user.email"])
+        name  = name_out.strip()
+        email = email_out.strip()
+        if not self._name_var.get():
+            self._name_var.set(name)
+        if not self._email_var.get():
+            self._email_var.set(email)
+        self._s1_icon.config(text="✅" if (name and email) else "⚠️")
+
+        # Steps 2 & 3 — can't detect automatically; show info marker
+        self._s2_icon.config(text="ℹ️")
+        self._s3_icon.config(text="ℹ️")
+
+        # Step 4 — remote
+        remote_out, rrc = self._sh(
+            [GIT_EXE,"-C", self._path, "remote", "get-url", "origin"])
+        remote = remote_out.strip() if rrc == 0 else ""
+        self._remote_var.set(remote)
+        self._s4_icon.config(text="✅" if remote else "⬜")
+
+        # Step 5 — push (only enabled when remote exists)
+        self._s5_icon.config(text="⬜")
+        self._push_btn.config(state=tk.NORMAL if remote else tk.DISABLED)
+
+    # ── Actions ──────────────────────────────────────────────────────────────
+
+    def _save_identity(self):
+        name  = self._name_var.get().strip()
+        email = self._email_var.get().strip()
+        if not name or not email:
+            messagebox.showwarning("Incomplete",
+                "Please enter both a name and an email address.", parent=self)
+            return
+        self._sh([GIT_EXE,"config", "--global", "user.name",  name])
+        self._sh([GIT_EXE,"config", "--global", "user.email", email])
+        self._refresh()
+        messagebox.showinfo("Identity saved",
+            f"Git will now sign commits as:\n{name} <{email}>", parent=self)
+
+    def _set_remote(self):
+        url = self._remote_var.get().strip()
+        if not url:
+            messagebox.showwarning("No URL",
+                "Paste the HTTPS URL from your new GitHub repository.", parent=self)
+            return
+        if not (url.startswith("http") or url.startswith("git@")):
+            messagebox.showwarning("Invalid URL",
+                "The URL should start with https:// or git@", parent=self)
+            return
+        _, rrc = self._sh([GIT_EXE,"-C", self._path, "remote", "get-url", "origin"])
+        if rrc == 0:
+            self._sh([GIT_EXE,"-C", self._path, "remote", "set-url", "origin", url])
+            self._app._log(f"  Remote updated: {url}", C["green"])
+        else:
+            self._sh([GIT_EXE,"-C", self._path, "remote", "add", "origin", url])
+            self._app._log(f"  Remote added: {url}", C["green"])
+        self._refresh()
+        self._app.after(0, self._app._git_refresh)
+
+    def _do_push(self):
+        self.destroy()
+        self._app._git_path = self._path
+        self._app.cmd_git_push()
+
+    def _create_release(self):
+        tag   = self._tag_var.get().strip()
+        title = self._rel_title_var.get().strip() or tag
+        if not tag:
+            messagebox.showwarning("No tag",
+                "Enter a version tag, e.g. v1.0.0", parent=self)
+            return
+        # Collect .exe files from dist\
+        dist_dir  = os.path.join(self._path, "dist")
+        exe_files = []
+        if os.path.isdir(dist_dir):
+            exe_files = [os.path.join(dist_dir, f)
+                         for f in os.listdir(dist_dir) if f.endswith(".exe")]
+        if not exe_files:
+            if not messagebox.askyesno(
+                    "No .exe files found",
+                    "No .exe files found in dist\\\n\n"
+                    "Run build.bat first to compile them.\n\n"
+                    "Create a release without uploading any files anyway?",
+                    parent=self):
+                return
+        cmd = ["gh", "release", "create", tag,
+               "--title", title, "--generate-notes"] + exe_files
+        self.destroy()
+        self._app._log(f"Creating GitHub release {tag}…", C["peach"])
+        def worker():
+            out, rc = self._app._shell_capture(cmd, self._path)
+            col = C["green"] if rc == 0 else C["red"]
+            for line in out.strip().splitlines()[-6:]:
+                self._app._log(f"  {line}", col)
+            if rc == 0:
+                self._app._log(f"  ✓ Release {tag} created — check GitHub!", C["green"])
+        threading.Thread(target=worker, daemon=True).start()
+
+
 class GitCommitDialog(tk.Toplevel):
     """
     Stage and commit changes in a project's git repository.
@@ -3294,10 +4965,15 @@ class GitCommitDialog(tk.Toplevel):
         ttk.Separator(self, orient="horizontal").pack(fill=tk.X, padx=20, pady=(4, 8))
 
         # ── Commit message ──
-        tk.Label(self,
+        msg_hdr = tk.Frame(self, bg=C["base"])
+        msg_hdr.pack(fill=tk.X, padx=20, pady=(0, 4))
+        tk.Label(msg_hdr,
                  text="Commit message:",
                  font=("Segoe UI", 9, "bold"),
-                 bg=C["base"], fg=C["text"]).pack(anchor=tk.W, padx=20, pady=(0, 4))
+                 bg=C["base"], fg=C["text"]).pack(side=tk.LEFT)
+        self._status_raw = status_text  # keep for suggest
+        ttk.Button(msg_hdr, text="💡 Suggest",
+                   command=self._fill_suggestion).pack(side=tk.RIGHT)
 
         msg_frame = tk.Frame(self, bg=C["mantle"], relief=tk.FLAT, bd=1)
         msg_frame.pack(fill=tk.X, padx=20, pady=(0, 12))
@@ -3307,6 +4983,12 @@ class GitCommitDialog(tk.Toplevel):
                                 relief=tk.FLAT, font=("Segoe UI", 10),
                                 padx=8, pady=6)
         self._msg_txt.pack(fill=tk.X)
+
+        # Auto-populate with a suggestion if the field is still empty
+        suggestion = _suggest_commit_message(status_text) if is_repo else ""
+        if suggestion:
+            self._msg_txt.insert(tk.END, suggestion)
+            self._msg_txt.tag_add(tk.SEL, "1.0", tk.END)  # pre-select so typing replaces it
         self._msg_txt.focus_set()
 
         # ── Buttons ──
@@ -3328,6 +5010,16 @@ class GitCommitDialog(tk.Toplevel):
         px = parent.winfo_x() + (parent.winfo_width()  - self.winfo_width())  // 2
         py = parent.winfo_y() + (parent.winfo_height() - self.winfo_height()) // 2
         self.geometry(f"+{px}+{py}")
+
+    def _fill_suggestion(self):
+        """Replace the commit message field with a fresh suggestion."""
+        suggestion = _suggest_commit_message(self._status_raw)
+        if not suggestion:
+            suggestion = "chore: update files"
+        self._msg_txt.delete("1.0", tk.END)
+        self._msg_txt.insert(tk.END, suggestion)
+        self._msg_txt.tag_add(tk.SEL, "1.0", tk.END)
+        self._msg_txt.focus_set()
 
     def _apply(self):
         message = self._msg_txt.get("1.0", tk.END).strip()

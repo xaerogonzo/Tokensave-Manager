@@ -86,7 +86,7 @@ Must be updated when the project moves to a new location or machine.
 
 | File | Role |
 |------|------|
-| `src/tokensave-manager.py` | Entire GUI — `App(tk.Tk)` + `RetrofitDialog`, `ScaffoldDialog`, `SettingsDialog`, `SnippetEditDialog`, `ShadowLinksDialog`, `AssignCategoryDialog`, `GitCommitDialog` |
+| `src/tokensave-manager.py` | Entire GUI — `App(tk.Tk)` + `RetrofitDialog`, `ScaffoldDialog`, `SettingsDialog`, `SnippetEditDialog`, `ShadowLinksDialog`, `AssignCategoryDialog`, `SetRemoteDialog`, `NewBranchDialog`, `SwitchBranchDialog`, `GitCommitDialog`, `GitHubSetupDialog` |
 | `src/tokensave-wrapper.py` | MCP server wrapper for Claude Desktop — reads same `manager-config.json` |
 | `manager-config.json` | Single source of truth for all machine-specific paths |
 | `templates/project-baseline.md` | @included by every retrofitted project's CLAUDE.md — edit here to update all |
@@ -149,9 +149,17 @@ See `templates/NUITKA_GOTCHAS.md` for known pitfalls (BOM in config, cp1252 subp
 - **`search_roots` dual format** — `_root_path(r)` and `_root_label(r)` are the only places that should read a root entry. Never access `r["path"]` or `r` directly elsewhere; bare strings and dicts must both be handled transparently.
 - **`project_categories`** is the sole source of truth for per-project category overrides. `refresh()` reads it directly from `_cfg` — no in-memory cache. `_do_assign_category()` always calls `_save_config(_cfg)` after mutating it.
 - **Category/sub-category Treeview rows** use `iid="cat:<name>"` / `iid="sub:<cat>:<sub>"`. Project rows use `iid="proj:<path>"`. `_selected_path()` and `_on_right_click()` both guard by checking `iid.startswith("proj:")` — never assume the selected row is a project row.
+- **Git tab state** — `self._git_path` tracks the project currently shown in the Git tab. `_on_project_select()` (bound to `<<TreeviewSelect>>`) and `_on_tab_changed()` (bound to `<<NotebookTabChanged>>`) keep it in sync. Never read `self._git_path` without a `if not self._git_path: return` guard.
+- **`_GIT_ENV_NO_PROMPT`** must be passed as `env=` to `_shell_capture()` for all network git commands (push, pull). It sets `GIT_TERMINAL_PROMPT=0`, preventing an infinite hang when credentials aren't cached. Compatible with Git Credential Manager (GCM authenticates via browser, not stdin).
+- **`_is_auth_error(text)`** is the single check for GitHub authentication failures. Use it after every push/pull rc != 0 to decide whether to show the GCM setup message vs. a generic error.
+- **`_git_show_diff()`** caps rendering at 2000 lines to prevent main-thread stutter on large generated files.
+- **`SwitchBranchDialog.pick()`** is a static synchronous picker used by `cmd_git_delete_branch`. It blocks via `parent.wait_window()` and returns the selected branch name or `""`.
 - **`_scaffold_git_hook(path)`** writes/merges a Claude Code Stop hook into `.claude/settings.json`. It is idempotent — checks for an existing hook whose `command` starts with `"git add -A"` before appending, so calling it multiple times (scaffold + retrofit on the same project) never duplicates the entry.
-- **Auto-commit after sync** uses `git diff --cached --quiet` (exits 1 when staged changes exist, 0 when clean) to guard the `git commit` call — this guarantees no empty commits are created when the working tree was already clean.
+- **Auto-commit after sync** uses `git diff --cached --quiet` (exits 1 when staged changes exist, 0 when clean) to guard the `git commit` call — this guarantees no empty commits are created when the working tree was already clean. If the previous commit was also `"chore: tokensave sync"`, the commit is **amended** instead of creating a new one, preventing history pile-up.
 - **`_BASELINE_GITIGNORE`** is written by `cmd_git_init` when no `.gitignore` exists in the target project. It covers Python cache, Nuitka build output, tokensave index, and virtual environments. Always write it *before* any `git add -A` call to avoid committing machine-specific binary files.
+- **`_suggest_commit_message(status_text)`** is a module-level helper that generates a conventional-commit-style message from `git status --short` output. Called by `GitCommitDialog` to auto-populate the message field on open; the 💡 Suggest button calls it again on demand. Never mutates state — pure function.
+- **`GitHubSetupDialog`** is the GitHub onboarding wizard. It checks git identity (`git config --global`), remote URL, and `gh` CLI availability on open, then updates step indicators (✅/⚠️/ℹ️/⬜) live. `_sh()` calls `_app._shell_capture()` — these are fast config queries, safe to run on the main thread. The Create Release flow shells out to `gh release create` and is only shown when `shutil.which("gh")` returns a path.
+- **Git tab layout order** — action buttons are packed **before** the diff viewer in `_build_git_tab()`. The diff viewer has `expand=True` and fills remaining space. This ordering is intentional: it ensures buttons are always visible even when the window is small.
 
 ---
 
