@@ -626,7 +626,17 @@ C = {
 # ── Helpers ────────────────────────────────────────────────────────────────────
 
 def find_projects():
+    """Discover projects under every configured search root.
+
+    A folder qualifies if it contains either:
+      - a tokensave index  (.tokensave/tokensave.db)  — full tokensave features
+      - a git repository   (.git/)                    — git features only
+
+    Both types are shown in the Projects tab; tokensave-only commands show a
+    friendly 'not indexed yet' prompt for git-only projects.
+    """
     projects = []
+    seen: set = set()
     for root in SEARCH_ROOTS:
         rpath  = _root_path(root)
         rlabel = _root_label(root)
@@ -638,18 +648,42 @@ def find_projects():
             if depth >= MAX_DEPTH:
                 dirnames.clear()
                 continue
-            has_ts = ".tokensave" in dirnames
-            dirnames[:] = [d for d in dirnames if d not in SKIP_DIRS and not d.startswith(".")]
+
+            # Check for markers BEFORE filtering dirnames
+            has_ts  = ".tokensave" in dirnames
+            has_git = ".git"       in dirnames
+
+            # Strip hidden dirs and known noise from further traversal
+            dirnames[:] = [d for d in dirnames if d not in SKIP_DIRS
+                           and not d.startswith(".")]
+
+            if not (has_ts or has_git):
+                continue
+            if dirpath in seen:
+                continue
+            seen.add(dirpath)
+
+            # mtime: tokensave db age if available, else last git commit
             if has_ts:
-                db = os.path.join(dirpath, ".tokensave", "tokensave.db")
-                if os.path.isfile(db):
-                    projects.append({
-                        "path":       dirpath,
-                        "name":       os.path.basename(dirpath),
-                        "db":         db,
-                        "mtime":      os.path.getmtime(db),
-                        "root_label": rlabel,
-                    })
+                db    = os.path.join(dirpath, ".tokensave", "tokensave.db")
+                mtime = os.path.getmtime(db) if os.path.isfile(db) else os.path.getmtime(dirpath)
+            else:
+                db    = None
+                git_dir    = os.path.join(dirpath, ".git")
+                commit_msg = os.path.join(git_dir, "COMMIT_EDITMSG")
+                mtime = (os.path.getmtime(commit_msg)
+                         if os.path.isfile(commit_msg)
+                         else os.path.getmtime(git_dir))
+
+            projects.append({
+                "path":          dirpath,
+                "name":          os.path.basename(dirpath),
+                "db":            db,
+                "mtime":         mtime,
+                "root_label":    rlabel,
+                "has_tokensave": has_ts,
+                "has_git":       has_git,
+            })
     return sorted(projects, key=lambda p: p["mtime"], reverse=True)
 
 
@@ -1012,6 +1046,7 @@ class App(tk.Tk):
         self.tree.tag_configure("active",      foreground=C["green"])
         self.tree.tag_configure("normal",      foreground=C["text"])
         self.tree.tag_configure("scaffold",    foreground=C["peach"])
+        self.tree.tag_configure("git_only",    foreground=C["overlay1"])
         self.tree.tag_configure("pending",     foreground=C["yellow"])
         self.tree.tag_configure("category",    foreground=C["blue"],
                                                font=("Segoe UI", 9, "bold"))
@@ -2610,13 +2645,23 @@ class App(tk.Tk):
             for p in projs:
                 is_active    = (p["path"] == self.active_path)
                 has_scaffold = self._has_scaffold(p["path"])
-                tag  = "active" if is_active else ("scaffold" if not has_scaffold else "normal")
+                has_ts       = p.get("has_tokensave", True)
+                if is_active:
+                    tag = "active"
+                elif not has_ts:
+                    tag = "git_only"
+                elif not has_scaffold:
+                    tag = "scaffold"
+                else:
+                    tag = "normal"
+                # synced column: show tokensave index age, or "—" for git-only projects
+                synced_str = fmt_age(p["mtime"]) if has_ts else "—"
                 piid = f"proj:{p['path']}"
                 self.tree.insert(parent, tk.END, iid=piid,
                                  text=p["name"],
                                  values=("★" if is_active else "",
                                          p["path"],
-                                         fmt_age(p["mtime"]),
+                                         synced_str,
                                          "✔" if has_scaffold else "—"),
                                  tags=(tag,))
 
@@ -2853,9 +2898,30 @@ class App(tk.Tk):
 
     # ── Commands ───────────────────────────────────────────────────────────────
 
+    def _require_tokensave(self, path: str) -> bool:
+        """Return True if the project has a tokensave index.
+
+        If not, shows a friendly info dialog explaining how to add one and
+        returns False so the caller can bail out gracefully.
+        """
+        if os.path.isfile(os.path.join(path, ".tokensave", "tokensave.db")):
+            return True
+        name = os.path.basename(path)
+        messagebox.showinfo(
+            "Not indexed with tokensave",
+            f"'{name}' is a git project but doesn't have a tokensave index yet.\n\n"
+            "Tokensave builds a code-graph that lets Claude navigate your project "
+            "efficiently without reading every file.\n\n"
+            "To add it:  right-click → ⚙ Retrofit…  and tick "
+            "'Add tokensave @include + init'.",
+            parent=self)
+        return False
+
     def cmd_set_active(self):
         path = self._selected_path()
         if not path:
+            return
+        if not self._require_tokensave(path):
             return
         set_pinned(path)
         self._log(f"Pinned → {path}", C["green"])
@@ -3028,32 +3094,34 @@ class App(tk.Tk):
         path = self._selected_path()
         if not path:
             return
-        if not os.path.isdir(os.path.join(path, ".tokensave")):
-            if messagebox.askyesno(
-                "Not yet indexed",
-                f"{os.path.basename(path)} has no tokensave index yet.\n\n"
-                "Run 'tokensave init' now to build it?\n"
-                "(Do this once you have code worth indexing.)",
-                parent=self,
-            ):
-                self._run(["init"], cwd=path, label=os.path.basename(path))
+        if not self._require_tokensave(path):
             return
         self._run(["sync"], cwd=path, label=os.path.basename(path))
 
     def cmd_sync_all(self):
         if not self.projects:
-            messagebox.showinfo("No Projects", "No indexed projects found.", parent=self)
+            messagebox.showinfo("No Projects", "No projects found.", parent=self)
             return
-        count = len(self.projects)
+        ts_projects = [p for p in self.projects if p.get("has_tokensave", True)]
+        if not ts_projects:
+            messagebox.showinfo(
+                "No indexed projects",
+                "None of your projects have a tokensave index yet.\n\n"
+                "Right-click any project → ⚙ Retrofit… to add one.",
+                parent=self)
+            return
+        count = len(ts_projects)
+        skipped = len(self.projects) - count
+        skip_note = f"\n({skipped} git-only project{'s' if skipped != 1 else ''} will be skipped)" if skipped else ""
         if not messagebox.askyesno(
             "Sync All",
-            f"Sync all {count} indexed project{'s' if count != 1 else ''}?\n\n"
+            f"Sync {count} indexed project{'s' if count != 1 else ''}?{skip_note}\n\n"
             "Runs sequentially — may take a while for large projects.",
             parent=self,
         ):
             return
 
-        projects_snapshot = list(self.projects)
+        projects_snapshot = list(ts_projects)
 
         def worker():
             self._stop_requested = False
@@ -3116,6 +3184,8 @@ class App(tk.Tk):
     def cmd_status(self):
         path = self._selected_path()
         if not path:
+            return
+        if not self._require_tokensave(path):
             return
         name = os.path.basename(path)
 
@@ -3339,6 +3409,8 @@ class App(tk.Tk):
         path = self._selected_path()
         if not path:
             return
+        if not self._require_tokensave(path):
+            return
         if messagebox.askyesno(
             "Force Re-sync",
             f"Full re-index of {os.path.basename(path)}?\n\n"
@@ -3351,6 +3423,8 @@ class App(tk.Tk):
     def cmd_doctor(self):
         path = self._selected_path()
         if not path:
+            return
+        if not self._require_tokensave(path):
             return
         self._run(["doctor"], cwd=path, label=os.path.basename(path))
 
