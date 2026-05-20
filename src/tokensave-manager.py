@@ -1046,7 +1046,7 @@ class App(tk.Tk):
         self.tree.tag_configure("active",      foreground=C["green"])
         self.tree.tag_configure("normal",      foreground=C["text"])
         self.tree.tag_configure("scaffold",    foreground=C["peach"])
-        self.tree.tag_configure("git_only",    foreground=C["overlay1"])
+        self.tree.tag_configure("git_only",    foreground=C["overlay0"])
         self.tree.tag_configure("pending",     foreground=C["yellow"])
         self.tree.tag_configure("category",    foreground=C["blue"],
                                                font=("Segoe UI", 9, "bold"))
