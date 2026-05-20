@@ -180,6 +180,9 @@ GitHubSetupDialog (tk.Toplevel)  — modal: step-by-step GitHub onboarding wizar
 | `_offer_commit_after_change(path, summary_label)` (App method) | After destructive manager ops (Ensure .gitignore, Shadow Links, Scaffold, Retrofit), checks `_is_git_repo` + `git status --porcelain` and offers a `messagebox.askyesno` → `_open_commit_dialog(path)` flow. Silent no-op when not a repo or working tree is clean. |
 | `_open_commit_dialog(path)` (App method) | Path-explicit version of `cmd_git_commit`. Both `cmd_git_commit` (from Projects tab right-click) and `_offer_commit_after_change` delegate here. |
 | `_git_op_in_flight` + `_git_begin_op()` / `_git_end_op()` (App method) | Locking pattern that disables every Git tab button during an in-flight operation. Honoured by `_git_update_ui()` so incidental refreshes don't bypass the lock. All 8 git command methods wrap their workers with begin/end in a `try`/`finally`. |
+| `_GITIGNORE_TEMPLATES` | Module-level dict mapping category name → list of patterns. The Baseline category is built from `_BASELINE_GITIGNORE` via `_baseline_patterns()` at module load (single source of truth). Used by `GitignoreDialog`'s template-inject buttons. |
+| `_read_gitignore_lines(path)` / `_write_gitignore_lines(path, lines)` | Pure file-IO for the gitignore editor. Read returns `[]` if missing, uses `utf-8-sig` to tolerate PowerShell-written BOMs. Write is atomic (`.tmp` + rename) and always ends with a trailing newline. |
+| `GitignoreDialog(tk.Toplevel)` | User-facing `.gitignore` editor. Opened via right-click → 📋 Manage .gitignore…. Canvas-backed scrollable Frame for per-row removal buttons; real-strikethrough font (`tkfont.Font(overstrike=1)`) for marked-removed rows; template inject buttons (push, not stateful); custom-entry field with sanity check; live Pending changes Text widget. Save → `_write_gitignore_lines` → `_offer_commit_after_change`. |
 
 ### Configuration (`manager-config.json`)
 

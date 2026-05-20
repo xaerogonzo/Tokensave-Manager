@@ -299,7 +299,7 @@ Right-click any project row in the Projects tab to get the full per-project acti
 | 📜 Git Log | Switch to Git tab and refresh |
 | 📝 Git Commit… | Open commit dialog for this project |
 | 🔧 Git Init | Initialise a git repo + write baseline `.gitignore` + optional initial commit |
-| 📋 Ensure .gitignore | Non-destructively add any missing baseline `.gitignore` entries |
+| 📋 Manage .gitignore… | Open the gitignore editor — view current entries, inject template patterns (Python / Node / Rust / IDE / OS / Nuitka / etc.), add custom entries, or remove existing ones |
 | 📂 Open Folder | Open in Windows Explorer |
 | ✏ Open in Editor | Launch in configured editor |
 | ⎘ Copy Path | Copy full project path to clipboard |
