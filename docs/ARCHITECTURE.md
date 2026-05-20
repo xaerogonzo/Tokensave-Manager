@@ -174,6 +174,12 @@ GitHubSetupDialog (tk.Toplevel)  — modal: step-by-step GitHub onboarding wizar
 | `_STOP_HOOK_CMD` + `_scaffold_git_hook(path)` | Merges a Claude Code Stop hook (`.claude/settings.json`) that auto-commits at the end of every Claude session. Idempotent — detects an existing `git add -A`-prefixed hook before appending. |
 | `_Tooltip(widget, text)` | Hover-tooltip helper. 650 ms delay, auto-destroys on Leave/ButtonPress. Used on every Git tab button to give plain-English explanations to beginner users. |
 | `_root_path(r)` / `_root_label(r)` | Normalise a `search_roots` entry — supports both bare strings and `{"path":…, "label":…}` dicts. |
+| `_parse_git_status_v2(text)` | Pure function. Parses `git status --porcelain=v2 --branch` output into `{"dirty": bool, "ahead": int, "behind": int, "has_remote": bool}`. Used by the async Git column refresh. |
+| `_format_git_status_cell(status, has_git)` | Pure function. Returns `(display_text, override_tag)` for the Projects-tab Git column. Encodes the icon vocabulary: ✓ / ● / ↑N / ↓N / ●↑N / — / …. |
+| `_kick_off_git_status_refresh()` (App method) | Background-thread walk over `self.projects` that runs `git status --porcelain=v2 --branch` for each git project and updates the Treeview Git column via `_update_git_status_cell(piid, status)`. Mtime-cached per project on `.git/index` so unchanged projects are skipped. Only one refresh in flight at a time. |
+| `_offer_commit_after_change(path, summary_label)` (App method) | After destructive manager ops (Ensure .gitignore, Shadow Links, Scaffold, Retrofit), checks `_is_git_repo` + `git status --porcelain` and offers a `messagebox.askyesno` → `_open_commit_dialog(path)` flow. Silent no-op when not a repo or working tree is clean. |
+| `_open_commit_dialog(path)` (App method) | Path-explicit version of `cmd_git_commit`. Both `cmd_git_commit` (from Projects tab right-click) and `_offer_commit_after_change` delegate here. |
+| `_git_op_in_flight` + `_git_begin_op()` / `_git_end_op()` (App method) | Locking pattern that disables every Git tab button during an in-flight operation. Honoured by `_git_update_ui()` so incidental refreshes don't bypass the lock. All 8 git command methods wrap their workers with begin/end in a `try`/`finally`. |
 
 ### Configuration (`manager-config.json`)
 

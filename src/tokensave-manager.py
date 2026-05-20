@@ -384,6 +384,78 @@ def _is_git_repo(path: str) -> bool:
         return False
 
 
+def _parse_git_status_v2(text: str) -> dict:
+    """Parse `git status --porcelain=v2 --branch` output.
+
+    Returns a dict with keys:
+      dirty      — True if any working-tree or index changes exist
+      ahead      — int, commits ahead of upstream (0 if no upstream)
+      behind     — int, commits behind upstream
+      has_remote — True if `# branch.upstream <name>` line is present
+
+    Pure function — never raises; bad input returns the empty default.
+    """
+    result = {"dirty": False, "ahead": 0, "behind": 0, "has_remote": False}
+    for line in text.splitlines():
+        if line.startswith("# branch.upstream "):
+            result["has_remote"] = True
+        elif line.startswith("# branch.ab "):
+            # Format: "# branch.ab +N -M"
+            try:
+                parts = line.split()
+                # parts: ['#', 'branch.ab', '+N', '-M']
+                result["ahead"]  = int(parts[2].lstrip("+"))
+                result["behind"] = int(parts[3].lstrip("-"))
+            except (ValueError, IndexError):
+                pass
+        elif line and line[0] in ("1", "2", "u", "?"):
+            # Tracked-modified (1), renamed/copied (2), unmerged (u), untracked (?)
+            result["dirty"] = True
+    return result
+
+
+def _format_git_status_cell(status: dict | None, has_git: bool) -> tuple:
+    """Return (display_text, tag_name) for the Git column on the Projects tab.
+
+    status: dict from _parse_git_status_v2, or None if not yet computed
+    has_git: True if the project has a .git/ directory at all
+
+    Tags map to colours in _build_projects_tab via tree.tag_configure.
+    """
+    if not has_git:
+        return ("—", "git_none")
+    if status is None:
+        return ("…", "git_pending")
+    if not status["has_remote"]:
+        # Repo exists but no remote — can't be ahead/behind
+        if status["dirty"]:
+            return ("●", "git_dirty")
+        return ("✓", "git_clean")
+    dirty  = status["dirty"]
+    ahead  = status["ahead"]
+    behind = status["behind"]
+    if not dirty and ahead == 0 and behind == 0:
+        return ("✓", "git_clean")
+    parts = []
+    if dirty:
+        parts.append("●")
+    if ahead:
+        parts.append(f"↑{ahead}")
+    if behind:
+        parts.append(f"↓{behind}")
+    text = "".join(parts)
+    # Tag priority: mixed (dirty + remote drift) > behind > ahead > dirty
+    if dirty and (ahead or behind):
+        tag = "git_mixed"
+    elif behind:
+        tag = "git_behind"
+    elif ahead:
+        tag = "git_ahead"
+    else:
+        tag = "git_dirty"
+    return (text, tag)
+
+
 # Baseline .gitignore written by cmd_git_init when none exists yet.
 _BASELINE_GITIGNORE = """\
 # Machine-specific config (if your project uses one)
@@ -1022,7 +1094,7 @@ class App(tk.Tk):
 
         self.tree = ttk.Treeview(
             tree_wrap,
-            columns=("active", "path", "synced", "scaffold"),
+            columns=("active", "path", "synced", "git", "scaffold"),
             show="tree headings",
             selectmode="browse",
         )
@@ -1030,12 +1102,14 @@ class App(tk.Tk):
         self.tree.heading("active",   text="")
         self.tree.heading("path",     text="Path")
         self.tree.heading("synced",   text="Last Synced")
+        self.tree.heading("git",      text="Git")
         self.tree.heading("scaffold", text="Scaffold")
 
         self.tree.column("#0",       width=170, stretch=False)
         self.tree.column("active",   width=28,  stretch=False, anchor=tk.CENTER)
-        self.tree.column("path",     width=270)
+        self.tree.column("path",     width=250)
         self.tree.column("synced",   width=90,  stretch=False, anchor=tk.CENTER)
+        self.tree.column("git",      width=60,  stretch=False, anchor=tk.CENTER)
         self.tree.column("scaffold", width=70,  stretch=False, anchor=tk.CENTER)
 
         vsb = ttk.Scrollbar(tree_wrap, orient="vertical", command=self.tree.yview)
@@ -1048,6 +1122,17 @@ class App(tk.Tk):
         self.tree.tag_configure("scaffold",    foreground=C["peach"])
         self.tree.tag_configure("git_only",    foreground=C["overlay0"])
         self.tree.tag_configure("pending",     foreground=C["yellow"])
+        # Git status override tags — applied AFTER the baseline tag so they
+        # take precedence (tkinter Treeview resolves tag properties from the
+        # last matching tag in the tuple). When a row has e.g. tags=("normal",
+        # "git_dirty"), the foreground comes from git_dirty.
+        self.tree.tag_configure("git_clean",   foreground=C["green"])
+        self.tree.tag_configure("git_dirty",   foreground=C["yellow"])
+        self.tree.tag_configure("git_ahead",   foreground=C["sky"])
+        self.tree.tag_configure("git_behind",  foreground=C["red"])
+        self.tree.tag_configure("git_mixed",   foreground=C["peach"])
+        self.tree.tag_configure("git_pending", foreground=C["overlay0"])
+        self.tree.tag_configure("git_none",    foreground=C["overlay0"])
         self.tree.tag_configure("category",    foreground=C["blue"],
                                                font=("Segoe UI", 9, "bold"))
         self.tree.tag_configure("subcategory", foreground=C["lavender"])
@@ -1062,6 +1147,7 @@ class App(tk.Tk):
         self._git_status_files   = []   # [(xy, filepath), …]
         self._git_all_btns       = []
         self._git_push_pull_btns = []
+        self._git_op_in_flight   = False   # True while a push/pull/commit is running
 
         tab = tk.Frame(self.nb, bg=C["base"])
         self.nb.add(tab, text="  Git  ")
@@ -1338,6 +1424,22 @@ class App(tk.Tk):
 
         threading.Thread(target=worker, daemon=True).start()
 
+    def _git_begin_op(self):
+        """Mark a git operation as in flight and disable all Git tab buttons.
+
+        Call this synchronously on the main thread BEFORE spawning the worker.
+        Pair with `self.after(0, self._git_end_op)` in the worker's `finally`.
+        """
+        self._git_op_in_flight = True
+        for btn in self._git_all_btns:
+            btn.configure(state=tk.DISABLED)
+
+    def _git_end_op(self):
+        """Clear the in-flight flag and refresh the Git tab to re-enable buttons
+        based on current repo/remote state."""
+        self._git_op_in_flight = False
+        self._git_refresh()
+
     def _git_update_ui(self, path, name, is_repo, branch, remote,
                        status_raw, log_text):
         """Main-thread update of all Git tab widgets."""
@@ -1362,13 +1464,20 @@ class App(tk.Tk):
             self._git_remote_lbl.config(text="Remote:  No remote set",
                                          fg=C["overlay0"])
 
-        # Enable/disable buttons
-        repo_state = tk.NORMAL if is_repo else tk.DISABLED
-        for btn in self._git_all_btns:
-            btn.configure(state=repo_state)
-        push_pull_state = tk.NORMAL if (is_repo and remote) else tk.DISABLED
-        for btn in self._git_push_pull_btns:
-            btn.configure(state=push_pull_state)
+        # Enable/disable buttons. If a git operation is in flight, ALL buttons
+        # stay disabled regardless of repo/remote state — prevents double-click
+        # races (e.g. two concurrent pushes where the second one fails with
+        # non-fast-forward).
+        if getattr(self, "_git_op_in_flight", False):
+            for btn in self._git_all_btns:
+                btn.configure(state=tk.DISABLED)
+        else:
+            repo_state = tk.NORMAL if is_repo else tk.DISABLED
+            for btn in self._git_all_btns:
+                btn.configure(state=repo_state)
+            push_pull_state = tk.NORMAL if (is_repo and remote) else tk.DISABLED
+            for btn in self._git_push_pull_btns:
+                btn.configure(state=push_pull_state)
 
         # Populate status listbox
         self._git_status_lb.configure(state=tk.NORMAL)
@@ -1462,26 +1571,31 @@ class App(tk.Tk):
         path = self._git_path
         if not path:
             return
+        if self._git_op_in_flight:
+            return   # belt-and-suspenders — button is also disabled
         name = os.path.basename(path)
         self._log(f"Pushing {name}…", C["peach"])
+        self._git_begin_op()
 
         def worker():
-            out, rc = self._shell_capture(
-                [GIT_EXE,"-C", path, "push", "-u", "origin", "HEAD"], path,
-                env=_GIT_ENV_NO_PROMPT)
-            col = C["green"] if rc == 0 else C["red"]
-            for line in out.strip().splitlines()[-6:]:
-                self._log(f"  {line}", col)
-            if rc != 0 and _is_auth_error(out):
-                self.after(0, lambda: messagebox.showinfo(
-                    "GitHub Authentication Required",
-                    "GitHub needs to verify your identity.\n\n"
-                    "Open a terminal in this project folder and run:\n"
-                    "    git push\n\n"
-                    "A browser window will open asking you to log in to GitHub.\n"
-                    "After that, this button will work normally.",
-                    parent=self))
-            self.after(0, self._git_refresh)
+            try:
+                out, rc = self._shell_capture(
+                    [GIT_EXE,"-C", path, "push", "-u", "origin", "HEAD"], path,
+                    env=_GIT_ENV_NO_PROMPT)
+                col = C["green"] if rc == 0 else C["red"]
+                for line in out.strip().splitlines()[-6:]:
+                    self._log(f"  {line}", col)
+                if rc != 0 and _is_auth_error(out):
+                    self.after(0, lambda: messagebox.showinfo(
+                        "GitHub Authentication Required",
+                        "GitHub needs to verify your identity.\n\n"
+                        "Open a terminal in this project folder and run:\n"
+                        "    git push\n\n"
+                        "A browser window will open asking you to log in to GitHub.\n"
+                        "After that, this button will work normally.",
+                        parent=self))
+            finally:
+                self.after(0, self._git_end_op)
 
         threading.Thread(target=worker, daemon=True).start()
 
@@ -1489,35 +1603,40 @@ class App(tk.Tk):
         path = self._git_path
         if not path:
             return
+        if self._git_op_in_flight:
+            return
         name = os.path.basename(path)
         self._log(f"Pulling {name}…", C["peach"])
+        self._git_begin_op()
 
         def worker():
-            out, rc = self._shell_capture(
-                [GIT_EXE,"-C", path, "pull"], path,
-                env=_GIT_ENV_NO_PROMPT)
-            col = C["green"] if rc == 0 else C["red"]
-            for line in out.strip().splitlines()[-6:]:
-                self._log(f"  {line}", col)
-            if rc != 0:
-                if _is_auth_error(out):
-                    self.after(0, lambda: messagebox.showinfo(
-                        "GitHub Authentication Required",
-                        "GitHub needs to verify your identity.\n\n"
-                        "Open a terminal in this project folder and run:\n"
-                        "    git pull\n\n"
-                        "A browser window will open asking you to log in to GitHub.\n"
-                        "After that, this button will work normally.",
-                        parent=self))
-                elif "conflict" in out.lower():
-                    self.after(0, lambda: messagebox.showwarning(
-                        "Merge Conflicts",
-                        "Pull completed but there are merge conflicts.\n\n"
-                        "Open the project in your editor and look for files\n"
-                        "marked with conflict markers (<<<<<<).\n"
-                        "Resolve them, then use 📝 Commit… to commit the result.",
-                        parent=self))
-            self.after(0, self._git_refresh)
+            try:
+                out, rc = self._shell_capture(
+                    [GIT_EXE,"-C", path, "pull"], path,
+                    env=_GIT_ENV_NO_PROMPT)
+                col = C["green"] if rc == 0 else C["red"]
+                for line in out.strip().splitlines()[-6:]:
+                    self._log(f"  {line}", col)
+                if rc != 0:
+                    if _is_auth_error(out):
+                        self.after(0, lambda: messagebox.showinfo(
+                            "GitHub Authentication Required",
+                            "GitHub needs to verify your identity.\n\n"
+                            "Open a terminal in this project folder and run:\n"
+                            "    git pull\n\n"
+                            "A browser window will open asking you to log in to GitHub.\n"
+                            "After that, this button will work normally.",
+                            parent=self))
+                    elif "conflict" in out.lower():
+                        self.after(0, lambda: messagebox.showwarning(
+                            "Merge Conflicts",
+                            "Pull completed but there are merge conflicts.\n\n"
+                            "Open the project in your editor and look for files\n"
+                            "marked with conflict markers (<<<<<<).\n"
+                            "Resolve them, then use 📝 Commit… to commit the result.",
+                            parent=self))
+            finally:
+                self.after(0, self._git_end_op)
 
         threading.Thread(target=worker, daemon=True).start()
 
@@ -1581,6 +1700,8 @@ class App(tk.Tk):
         path = self._git_path
         if not path:
             return
+        if self._git_op_in_flight:
+            return
         if not messagebox.askyesno(
                 "Undo Last Commit",
                 "Undo the last commit?\n\n"
@@ -1588,14 +1709,17 @@ class App(tk.Tk):
                 "Nothing is deleted — you can re-commit at any time.",
                 parent=self):
             return
+        self._git_begin_op()
 
         def worker():
-            out, rc = self._shell_capture(
-                [GIT_EXE,"-C", path, "reset", "--soft", "HEAD~1"], path)
-            col = C["green"] if rc == 0 else C["red"]
-            msg = "Last commit undone — changes are now staged." if rc == 0 else out.strip()
-            self._log(f"  {msg}", col)
-            self.after(0, self._git_refresh)
+            try:
+                out, rc = self._shell_capture(
+                    [GIT_EXE,"-C", path, "reset", "--soft", "HEAD~1"], path)
+                col = C["green"] if rc == 0 else C["red"]
+                msg = "Last commit undone — changes are now staged." if rc == 0 else out.strip()
+                self._log(f"  {msg}", col)
+            finally:
+                self.after(0, self._git_end_op)
 
         threading.Thread(target=worker, daemon=True).start()
 
@@ -1612,20 +1736,23 @@ class App(tk.Tk):
 
     def _do_git_set_remote(self, path: str, url: str):
         """Callback from SetRemoteDialog — add or update the origin remote."""
+        self._git_begin_op()
         def worker():
-            # Check if remote already exists
-            _, rc_check = self._shell_capture(
-                [GIT_EXE,"-C", path, "remote", "get-url", "origin"], path)
-            if rc_check == 0:
-                cmd = [GIT_EXE,"-C", path, "remote", "set-url", "origin", url]
-            else:
-                cmd = [GIT_EXE,"-C", path, "remote", "add", "origin", url]
-            out, rc = self._shell_capture(cmd, path)
-            col = C["green"] if rc == 0 else C["red"]
-            action = "updated" if rc_check == 0 else "added"
-            msg = f"Remote {action}: {url}" if rc == 0 else out.strip()
-            self._log(f"  {msg}", col)
-            self.after(0, self._git_refresh)
+            try:
+                # Check if remote already exists
+                _, rc_check = self._shell_capture(
+                    [GIT_EXE,"-C", path, "remote", "get-url", "origin"], path)
+                if rc_check == 0:
+                    cmd = [GIT_EXE,"-C", path, "remote", "set-url", "origin", url]
+                else:
+                    cmd = [GIT_EXE,"-C", path, "remote", "add", "origin", url]
+                out, rc = self._shell_capture(cmd, path)
+                col = C["green"] if rc == 0 else C["red"]
+                action = "updated" if rc_check == 0 else "added"
+                msg = f"Remote {action}: {url}" if rc == 0 else out.strip()
+                self._log(f"  {msg}", col)
+            finally:
+                self.after(0, self._git_end_op)
 
         threading.Thread(target=worker, daemon=True).start()
 
@@ -1649,17 +1776,20 @@ class App(tk.Tk):
         NewBranchDialog(self, path, self._do_git_new_branch)
 
     def _do_git_new_branch(self, path: str, name: str, switch: bool):
+        self._git_begin_op()
         def worker():
-            if switch:
-                cmd = [GIT_EXE,"-C", path, "checkout", "-b", name]
-            else:
-                cmd = [GIT_EXE,"-C", path, "branch", name]
-            out, rc = self._shell_capture(cmd, path)
-            col = C["green"] if rc == 0 else C["red"]
-            action = f"Created and switched to '{name}'" if (switch and rc == 0) \
-                     else (f"Created '{name}'" if rc == 0 else out.strip())
-            self._log(f"  {action}", col)
-            self.after(0, self._git_refresh)
+            try:
+                if switch:
+                    cmd = [GIT_EXE,"-C", path, "checkout", "-b", name]
+                else:
+                    cmd = [GIT_EXE,"-C", path, "branch", name]
+                out, rc = self._shell_capture(cmd, path)
+                col = C["green"] if rc == 0 else C["red"]
+                action = f"Created and switched to '{name}'" if (switch and rc == 0) \
+                         else (f"Created '{name}'" if rc == 0 else out.strip())
+                self._log(f"  {action}", col)
+            finally:
+                self.after(0, self._git_end_op)
 
         threading.Thread(target=worker, daemon=True).start()
 
@@ -1684,19 +1814,22 @@ class App(tk.Tk):
         SwitchBranchDialog(self, path, branches, current, self._do_git_switch_branch)
 
     def _do_git_switch_branch(self, path: str, name: str):
+        self._git_begin_op()
         def worker():
-            out, rc = self._shell_capture(
-                [GIT_EXE,"-C", path, "checkout", name], path)
-            if rc != 0:
-                self.after(0, lambda: messagebox.showerror(
-                    "Switch Failed",
-                    "Could not switch branches.\n\n"
-                    "You may have uncommitted changes that conflict with the target branch.\n\n"
-                    "Please commit or undo your changes before switching.",
-                    parent=self))
-            else:
-                self._log(f"  Switched to branch '{name}'", C["green"])
-            self.after(0, self._git_refresh)
+            try:
+                out, rc = self._shell_capture(
+                    [GIT_EXE,"-C", path, "checkout", name], path)
+                if rc != 0:
+                    self.after(0, lambda: messagebox.showerror(
+                        "Switch Failed",
+                        "Could not switch branches.\n\n"
+                        "You may have uncommitted changes that conflict with the target branch.\n\n"
+                        "Please commit or undo your changes before switching.",
+                        parent=self))
+                else:
+                    self._log(f"  Switched to branch '{name}'", C["green"])
+            finally:
+                self.after(0, self._git_end_op)
 
         threading.Thread(target=worker, daemon=True).start()
 
@@ -1731,35 +1864,52 @@ class App(tk.Tk):
                 parent=self):
             return
 
+        self._git_begin_op()
+
         def worker():
-            out, rc = self._shell_capture(
-                [GIT_EXE,"-C", path, "branch", "-d", branch], path)
-            if rc == 0:
-                self._log(f"  Deleted branch '{branch}'", C["green"])
-            else:
+            try:
+                out, rc = self._shell_capture(
+                    [GIT_EXE,"-C", path, "branch", "-d", branch], path)
+                if rc == 0:
+                    self._log(f"  Deleted branch '{branch}'", C["green"])
+                    self.after(0, self._git_end_op)
+                    return
                 out_l = out.lower()
                 if "not fully merged" in out_l or "unmerged" in out_l:
-                    # Ask for force-delete on main thread
-                    def ask_force():
-                        if messagebox.askyesno(
-                                "Force Delete?",
-                                f"Branch '{branch}' has unmerged changes.\n\n"
-                                "Force-delete anyway?\n"
-                                "This permanently discards those commits.",
-                                parent=self):
-                            o2, r2 = self._shell_capture(
-                                [GIT_EXE,"-C", path, "branch", "-D", branch], path)
-                            col = C["green"] if r2 == 0 else C["red"]
-                            msg = f"Force-deleted '{branch}'" if r2 == 0 else o2.strip()
-                            self._log(f"  {msg}", col)
-                            self.after(0, self._git_refresh)
+                    # Ask for force-delete on main thread; that path will
+                    # release the in-flight lock when it finishes (or the
+                    # user cancels).
                     self.after(0, ask_force)
                 else:
                     self.after(0, lambda: messagebox.showerror(
                         "Delete Failed",
                         f"Could not delete branch '{branch}':\n\n{out.strip()}",
                         parent=self))
-            self.after(0, self._git_refresh)
+                    self.after(0, self._git_end_op)
+            except Exception:
+                self.after(0, self._git_end_op)
+                raise
+
+        def ask_force():
+            if not messagebox.askyesno(
+                    "Force Delete?",
+                    f"Branch '{branch}' has unmerged changes.\n\n"
+                    "Force-delete anyway?\n"
+                    "This permanently discards those commits.",
+                    parent=self):
+                # User cancelled — release the lock
+                self._git_end_op()
+                return
+            def force_worker():
+                try:
+                    o2, r2 = self._shell_capture(
+                        [GIT_EXE,"-C", path, "branch", "-D", branch], path)
+                    col = C["green"] if r2 == 0 else C["red"]
+                    msg = f"Force-deleted '{branch}'" if r2 == 0 else o2.strip()
+                    self._log(f"  {msg}", col)
+                finally:
+                    self.after(0, self._git_end_op)
+            threading.Thread(target=force_worker, daemon=True).start()
 
         threading.Thread(target=worker, daemon=True).start()
 
@@ -2646,24 +2796,32 @@ class App(tk.Tk):
                 is_active    = (p["path"] == self.active_path)
                 has_scaffold = self._has_scaffold(p["path"])
                 has_ts       = p.get("has_tokensave", True)
+                has_git      = p.get("has_git", False)
                 if is_active:
-                    tag = "active"
+                    base_tag = "active"
                 elif not has_ts:
-                    tag = "git_only"
+                    base_tag = "git_only"
                 elif not has_scaffold:
-                    tag = "scaffold"
+                    base_tag = "scaffold"
                 else:
-                    tag = "normal"
+                    base_tag = "normal"
                 # synced column: show tokensave index age, or "—" for git-only projects
                 synced_str = fmt_age(p["mtime"]) if has_ts else "—"
+                # Git column: placeholder "…" while the async refresh runs.
+                # Non-git projects get "—" immediately and need no async update.
+                git_text, git_tag = _format_git_status_cell(
+                    p.get("git_status"), has_git)
+                # Combine baseline + git tag (later tag wins for foreground)
+                tags = (base_tag, git_tag) if has_git else (base_tag, "git_none")
                 piid = f"proj:{p['path']}"
                 self.tree.insert(parent, tk.END, iid=piid,
                                  text=p["name"],
                                  values=("★" if is_active else "",
                                          p["path"],
                                          synced_str,
+                                         git_text,
                                          "✔" if has_scaffold else "—"),
-                                 tags=(tag,))
+                                 tags=tags)
 
         if self.active_path:
             name = os.path.basename(self.active_path)
@@ -2675,6 +2833,85 @@ class App(tk.Tk):
         # Keep Git tab in sync when it's visible and a project is tracked
         if self._git_tab_is_visible() and self._git_path:
             self._git_refresh()
+
+        # Kick off background refresh of the Git status column so the
+        # "…" placeholders get replaced with real ✓ / ● / ↑N / ↓N indicators.
+        self._kick_off_git_status_refresh()
+
+    def _kick_off_git_status_refresh(self):
+        """Background-walk every git project and update its Git column cell.
+
+        Cheap mtime-of-.git/index check first: if the index hasn't changed
+        since the last computed status, reuse the cached result.
+        """
+        # Cancel any in-flight refresh; only one at a time
+        if getattr(self, "_git_status_refresh_running", False):
+            self._git_status_refresh_cancel = True
+        self._git_status_refresh_cancel  = False
+        self._git_status_refresh_running = True
+
+        projects_snapshot = list(self.projects)
+
+        def worker():
+            try:
+                for p in projects_snapshot:
+                    if self._git_status_refresh_cancel:
+                        return
+                    if not p.get("has_git"):
+                        continue
+                    path = p["path"]
+                    # mtime cache: skip if .git/index hasn't changed since last
+                    idx_path = os.path.join(path, ".git", "index")
+                    try:
+                        idx_mtime = os.path.getmtime(idx_path)
+                    except OSError:
+                        idx_mtime = 0
+                    cached = p.get("git_status")
+                    cached_mtime = p.get("_git_idx_mtime", -1)
+                    if cached is not None and idx_mtime == cached_mtime:
+                        continue  # nothing new
+                    try:
+                        out, _rc = self._shell_capture(
+                            [GIT_EXE, "-C", path,
+                             "status", "--porcelain=v2", "--branch"],
+                            path)
+                        status = _parse_git_status_v2(out)
+                    except Exception:
+                        continue
+                    p["git_status"]    = status
+                    p["_git_idx_mtime"] = idx_mtime
+                    piid = f"proj:{path}"
+                    self.after(0, self._update_git_status_cell, piid, status)
+                    # Yield to UI thread between checks
+                    time.sleep(0.05)
+            finally:
+                self._git_status_refresh_running = False
+
+        threading.Thread(target=worker, daemon=True).start()
+
+    # Set of tag names used as Git-status overrides on project rows.
+    # _update_git_status_cell strips these (but never the baseline "git_only"
+    # tag which uses a different meaning — git project with no tokensave).
+    _GIT_STATUS_TAGS = {
+        "git_clean", "git_dirty", "git_ahead", "git_behind",
+        "git_mixed", "git_pending", "git_none",
+    }
+
+    def _update_git_status_cell(self, piid: str, status: dict):
+        """Main-thread: update a single row's Git column value + override tag."""
+        if not self.tree.exists(piid):
+            return
+        text, tag = _format_git_status_cell(status, has_git=True)
+        try:
+            self.tree.set(piid, "git", text)
+        except tk.TclError:
+            return
+        # Preserve baseline tag (e.g. "active", "git_only", "scaffold", "normal"),
+        # swap the prior status-override tag for the new one.
+        existing = list(self.tree.item(piid, "tags") or ())
+        existing = [t for t in existing if t not in self._GIT_STATUS_TAGS]
+        existing.append(tag)
+        self.tree.item(piid, tags=tuple(existing))
 
     def _build_context_menu(self):
         m = tk.Menu(self, tearoff=0,
@@ -2891,10 +3128,16 @@ class App(tk.Tk):
                     self._current_proc = None
                     self.after(0, self._set_running, False)
                     self.after(0, self.refresh)
+                    # Offer to commit the new BASIC_INSTRUCTIONS.md /
+                    # Nuitka templates / hook files (if this is a git repo)
+                    self.after(0, lambda: self._offer_commit_after_change(
+                        path, "scaffold files"))
 
             threading.Thread(target=worker, daemon=True).start()
         else:
             self.refresh()
+            # Even without tokensave init, file writes still happened
+            self._offer_commit_after_change(path, "scaffold files")
 
     # ── Commands ───────────────────────────────────────────────────────────────
 
@@ -3356,6 +3599,8 @@ class App(tk.Tk):
             col = C["green"] if line.startswith("✔") else (
                   C["red"]   if "Could not" in line else C["text"])
             self._log(f"  {line}", col)
+        # If the file was actually modified, offer to commit it now
+        self._offer_commit_after_change(path, ".gitignore")
 
     # ── Git Commit ─────────────────────────────────────────────────────────────
 
@@ -3364,44 +3609,86 @@ class App(tk.Tk):
         path = self._selected_path()
         if not path:
             return
+        self._open_commit_dialog(path)
+
+    def _open_commit_dialog(self, path: str):
+        """Open GitCommitDialog for a given project path. Reused by
+        `cmd_git_commit` (Projects-tab right-click) AND by the
+        offer-commit-after-change flow that runs after Ensure .gitignore,
+        Shadow Links, Scaffold, and Retrofit."""
         # Fetch status synchronously (fast) so the dialog can show it immediately.
         status_out, _ = self._shell_capture(
             [GIT_EXE,"-C", path, "status", "--short"], path)
         is_repo = _is_git_repo(path)
         GitCommitDialog(self, path, status_out, is_repo, self._do_git_commit)
 
+    def _offer_commit_after_change(self, path: str, summary_label: str):
+        """After a destructive manager action (Ensure .gitignore, Shadow Links,
+        Scaffold, Retrofit), check whether the working tree is now dirty and
+        offer the user a commit dialog if so.
+
+        Silent no-ops:
+          - Not a git repo (nothing to commit to)
+          - Working tree is still clean (the operation didn't actually change anything)
+        """
+        if not _is_git_repo(path):
+            return
+        # Check whether the working tree is actually dirty
+        status_out, _ = self._shell_capture(
+            [GIT_EXE, "-C", path, "status", "--porcelain"], path)
+        if not status_out.strip():
+            self._log("  Working tree clean — nothing to commit.", C["overlay0"])
+            return
+        name = os.path.basename(path)
+        if messagebox.askyesno(
+                "Commit this change?",
+                f"Manager updated {summary_label} in {name}.\n\n"
+                "Commit this change now?\n\n"
+                "Click 'Yes' to open the Commit dialog with the changed files "
+                "ready to stage. Click 'No' to leave the working tree dirty.",
+                parent=self):
+            self._open_commit_dialog(path)
+        else:
+            self._log(f"  Working tree left dirty — commit when you're ready.",
+                      C["yellow"])
+
     def _do_git_commit(self, path: str, message: str, selected_files: list):
         """Stage only `selected_files` (clearing any pre-existing staging) and
         commit them with `message`. Files not in the list stay as un-committed
         changes in the working tree."""
         name = os.path.basename(path)
+        # Lock Git tab buttons during the commit (prevents double-click races).
+        self._git_begin_op()
 
         def worker():
-            # 1. Clear the index so nothing already-staged sneaks into the
-            # commit. `git reset` without args = `git reset HEAD` — safe,
-            # only touches the index, never the working tree.
-            self._shell_capture([GIT_EXE,"-C", path, "reset"], path)
+            try:
+                # 1. Clear the index so nothing already-staged sneaks into the
+                # commit. `git reset` without args = `git reset HEAD` — safe,
+                # only touches the index, never the working tree.
+                self._shell_capture([GIT_EXE,"-C", path, "reset"], path)
 
-            # 2. Stage exactly the picked files. `--` separates flags from
-            # paths and protects against filenames that start with "-".
-            if selected_files:
-                out, rc = self._shell_capture(
-                    [GIT_EXE,"-C", path, "add", "--"] + selected_files, path)
-                if rc != 0:
-                    self.after(0, lambda: self._log(
-                        f"git add failed: {out.strip()}", C["red"]))
-                    return
+                # 2. Stage exactly the picked files. `--` separates flags from
+                # paths and protects against filenames that start with "-".
+                if selected_files:
+                    out, rc = self._shell_capture(
+                        [GIT_EXE,"-C", path, "add", "--"] + selected_files, path)
+                    if rc != 0:
+                        self.after(0, lambda: self._log(
+                            f"git add failed: {out.strip()}", C["red"]))
+                        return
 
-            # 3. Commit. Only the staged files will be in the commit.
-            self._log(f"Committing {name} ({len(selected_files)} file"
-                      f"{'s' if len(selected_files) != 1 else ''})…",
-                      C["peach"])
-            cout, crc = self._shell_capture(
-                [GIT_EXE,"-C", path, "commit", "-m", message], path)
-            col = C["green"] if crc == 0 else C["red"]
-            for line in cout.strip().splitlines()[-4:]:
-                self.after(0, lambda l=line: self._log(f"  {l}", col))
-            self.after(0, self.refresh)
+                # 3. Commit. Only the staged files will be in the commit.
+                self._log(f"Committing {name} ({len(selected_files)} file"
+                          f"{'s' if len(selected_files) != 1 else ''})…",
+                          C["peach"])
+                cout, crc = self._shell_capture(
+                    [GIT_EXE,"-C", path, "commit", "-m", message], path)
+                col = C["green"] if crc == 0 else C["red"]
+                for line in cout.strip().splitlines()[-4:]:
+                    self.after(0, lambda l=line: self._log(f"  {l}", col))
+                self.after(0, self.refresh)
+            finally:
+                self.after(0, self._git_end_op)
 
         threading.Thread(target=worker, daemon=True).start()
 
@@ -3546,6 +3833,9 @@ class App(tk.Tk):
                     f"{name}:\n\n{summary}"
                     + (f"\n\nSync {'completed' if rc == 0 else 'failed'}." if run_sync and created > 0 else ""),
                     parent=self))
+                # Shadow Links wrote hardlinks + .gitignore entries — offer commit
+                self.after(0, lambda: self._offer_commit_after_change(
+                    path, "shadow links + .gitignore"))
             except Exception as e:
                 log.exception(f"SHADOW LINKS failed: {path}")
                 self._log(f"  Error: {e}", C["red"])
@@ -3718,6 +4008,10 @@ class App(tk.Tk):
                 else:
                     msg = f"{name}:\n\n  Everything was already up to date — nothing changed."
                 self.after(0, lambda: messagebox.showinfo("Retrofit complete", msg, parent=self))
+                # If anything actually changed, offer to commit
+                if actions_taken:
+                    self.after(0, lambda: self._offer_commit_after_change(
+                        path, "retrofit additions"))
 
             except Exception as e:
                 log.exception(f"RETROFIT failed: {path}")
