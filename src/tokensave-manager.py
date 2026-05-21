@@ -446,6 +446,39 @@ def _is_git_repo(path: str) -> bool:
         return False
 
 
+def _find_tracked_but_ignored(path: str) -> list:
+    """Return a list of paths that are TRACKED by git in `path` but ALSO
+    match a pattern in `.gitignore`.
+
+    Uses `git ls-files -ci --exclude-standard`:
+      -c  show cached (tracked) files
+      -i  filter to those that are ignored
+      --exclude-standard  use the project's actual .gitignore rules
+
+    Returns paths relative to the repo root, one per line, empty string
+    filtered out. Returns [] if the call fails (not a repo, git missing,
+    etc.) — caller can treat empty as "nothing to do".
+
+    This is the canonical way to find the "stale tracking" problem: a
+    file that was committed before being added to .gitignore. Git will
+    keep tracking it until `git rm --cached <file>` is run, even though
+    .gitignore implies the user no longer wants it in the repo.
+    """
+    try:
+        proc = subprocess.run(
+            [GIT_EXE, "-C", path,
+             "ls-files", "-ci", "--exclude-standard"],
+            capture_output=True, text=True, timeout=10,
+            encoding="utf-8", errors="replace",
+            creationflags=CREATE_NO_WINDOW,
+        )
+    except (FileNotFoundError, subprocess.TimeoutExpired):
+        return []
+    if proc.returncode != 0:
+        return []
+    return [ln for ln in proc.stdout.splitlines() if ln.strip()]
+
+
 def _is_local_git_repo(path: str) -> bool:
     """Return True only if *path* itself is a git repo root.
 
@@ -3166,7 +3199,8 @@ class App(tk.Tk):
         m.add_command(label="📜  Git Log",        command=self.cmd_git_log)
         m.add_command(label="📝  Git Commit…",        command=self.cmd_git_commit)
         m.add_command(label="🔧  Git Init",           command=self.cmd_git_init)
-        m.add_command(label="📋  Manage .gitignore…", command=self.cmd_manage_gitignore)
+        m.add_command(label="📋  Manage .gitignore…",      command=self.cmd_manage_gitignore)
+        m.add_command(label="🧹  Untrack Ignored Files…",  command=self.cmd_untrack_ignored)
         m.add_separator()
         m.add_command(label="📂  Open Folder",    command=self.cmd_open_folder)
         m.add_command(label="✏   Open in Editor", command=self.cmd_open_editor)
@@ -3864,6 +3898,79 @@ class App(tk.Tk):
         if not path:
             return
         GitignoreDialog(self, path)
+
+    def cmd_untrack_ignored(self):
+        """Right-click: open the Untrack Ignored Files dialog.
+
+        Finds every file that's tracked by git AND matches a pattern in
+        .gitignore (the 'stale tracking' problem) and offers a checklist
+        for selective untracking via `git rm --cached`.
+        """
+        path = self._selected_path()
+        if not path:
+            return
+        if not _is_local_git_repo(path):
+            messagebox.showinfo("Not a git repo",
+                f"{os.path.basename(path)} is not a git repository — "
+                "tracking isn't a concept here.",
+                parent=self)
+            return
+        files = _find_tracked_but_ignored(path)
+        if not files:
+            messagebox.showinfo("Nothing to untrack",
+                f"No tracked-but-ignored files found in "
+                f"{os.path.basename(path)}.\n\n"
+                "Either nothing is tracked yet, or all tracked files "
+                "are consistent with your .gitignore — which is the "
+                "healthy state.",
+                parent=self)
+            return
+        UntrackIgnoredDialog(self, path, files)
+
+    def _do_untrack_ignored(self, path: str, files: list):
+        """Worker: run `git rm --cached -- <files>` in a background thread.
+
+        Files are removed from the index (`git rm --cached`) but the
+        working-tree copies are preserved — this is the safe "stop
+        tracking but keep the file" operation. After completion, offers
+        a commit prompt so the user can record the untracking in history.
+        """
+        if not files:
+            return
+        name = os.path.basename(path)
+        self._log(f"Untracking {len(files)} file"
+                  f"{'s' if len(files) != 1 else ''} in {name}…",
+                  C["peach"])
+
+        def worker():
+            try:
+                # `git rm --cached` accepts multiple paths after the `--` arg
+                # separator. We always pass --cached so the working tree is
+                # never touched (only the index).
+                out, rc = self._shell_capture(
+                    [GIT_EXE, "-C", path, "rm", "-r", "--cached", "--"] + files,
+                    path)
+                col = C["green"] if rc == 0 else C["red"]
+                # Log a few output lines for visibility
+                for line in out.strip().splitlines()[-6:]:
+                    self._log(f"  {line}", col)
+                if rc != 0:
+                    return
+                self._log(
+                    f"  ✓ Untracked {len(files)} file"
+                    f"{'s' if len(files) != 1 else ''} — "
+                    "local copies preserved",
+                    C["green"])
+            finally:
+                self.after(0, self.refresh)
+                # Offer to commit the untracking in the same flow.
+                # Builds on the existing post-action commit prompt.
+                self.after(0, lambda: self._offer_commit_after_change(
+                    path,
+                    f"untrack {len(files)} ignored file"
+                    f"{'s' if len(files) != 1 else ''}"))
+
+        threading.Thread(target=worker, daemon=True).start()
 
     # ── Git Commit ─────────────────────────────────────────────────────────────
 
@@ -6076,6 +6183,150 @@ class GitHubSetupDialog(tk.Toplevel):
         threading.Thread(target=worker, daemon=True).start()
 
 
+class UntrackIgnoredDialog(tk.Toplevel):
+    """Checklist dialog for untracking files that are tracked-but-ignored.
+
+    Shows every file returned by `git ls-files -ci --exclude-standard`
+    (i.e. files in git's index whose path matches the project's .gitignore)
+    with a checkbox. Untrack Selected runs `git rm --cached -- <files>`
+    which removes them from the index without touching the working tree,
+    so the local copies stay where they are.
+
+    Triggered:
+      - manually via right-click → 🧹 Untrack Ignored Files…
+      - automatically via GitignoreDialog._on_save when new ignore rules
+        match files that were already tracked
+
+    On success, calls _offer_commit_after_change on the parent App so the
+    user can immediately commit the untracking as one atomic change.
+    """
+
+    def __init__(self, parent, path: str, files: list, *,
+                 reason: str = "tracked but listed in .gitignore"):
+        super().__init__(parent)
+        self._app   = parent
+        self._path  = path
+        self._files = files
+        name = os.path.basename(path)
+        self.title(f"Untrack Ignored Files — {name}")
+        self.configure(bg=C["base"])
+        self.resizable(True, True)
+        self.minsize(540, 380)
+        self.grab_set()
+        self.transient(parent)
+
+        # ── Header ──
+        hdr = tk.Frame(self, bg=C["base"], padx=18, pady=14)
+        hdr.pack(fill=tk.X)
+        tk.Label(hdr, text="🧹  Untrack Ignored Files", bg=C["base"],
+                 fg=C["blue"], font=("Segoe UI", 12, "bold")).pack(anchor=tk.W)
+        tk.Label(hdr, text=name, bg=C["base"], fg=C["overlay0"],
+                 font=("Segoe UI", 9)).pack(anchor=tk.W, pady=(2, 0))
+
+        # ── Explanation ──
+        expl = tk.Frame(self, bg=C["base"])
+        expl.pack(fill=tk.X, padx=18, pady=(0, 6))
+        tk.Label(expl,
+                 text=(
+                   f"The following files are {reason}.\n\n"
+                   "Untracking removes them from git's index (i.e. git stops "
+                   "treating them as part of the project) but leaves the "
+                   "files on your disk. Future modifications won't appear "
+                   "in git status — which is what your .gitignore intends.\n\n"
+                   "This is the standard fix for the 'I added a path to "
+                   ".gitignore but git keeps showing it as modified' problem."
+                 ),
+                 bg=C["base"], fg=C["text"], font=("Segoe UI", 9),
+                 justify=tk.LEFT, anchor=tk.W,
+                 wraplength=500).pack(anchor=tk.W)
+
+        # ── File checklist (scrollable) ──
+        tk.Label(self, text="FILES TO UNTRACK",
+                 bg=C["base"], fg=C["overlay0"],
+                 font=("Segoe UI", 8, "bold")).pack(anchor=tk.W, padx=18, pady=(8, 2))
+        list_outer = tk.Frame(self, bg=C["mantle"])
+        list_outer.pack(fill=tk.BOTH, expand=True, padx=18, pady=(0, 8))
+        self._canvas = tk.Canvas(list_outer, bg=C["mantle"],
+                                 highlightthickness=0, height=180)
+        _vsb = ttk.Scrollbar(list_outer, orient="vertical",
+                              command=self._canvas.yview)
+        self._canvas.configure(yscrollcommand=_vsb.set)
+        _vsb.pack(side=tk.RIGHT, fill=tk.Y)
+        self._canvas.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
+
+        self._list_body = tk.Frame(self, bg=C["mantle"])
+        self._list_body_id = self._canvas.create_window(
+            (0, 0), window=self._list_body, anchor="nw")
+        self._canvas.bind("<Configure>",
+            lambda e: self._canvas.itemconfigure(self._list_body_id, width=e.width))
+        self._list_body.bind("<Configure>",
+            lambda e: self._canvas.configure(scrollregion=self._canvas.bbox("all")))
+
+        self._file_vars: list = []
+        if not files:
+            tk.Label(self._list_body,
+                     text="  (no tracked-but-ignored files found)",
+                     bg=C["mantle"], fg=C["overlay0"],
+                     font=("Consolas", 9, "italic"),
+                     padx=10, pady=10).pack(anchor=tk.W)
+        else:
+            for fname in files:
+                row = tk.Frame(self._list_body, bg=C["mantle"])
+                row.pack(fill=tk.X, padx=4, pady=1)
+                var = tk.BooleanVar(value=True)
+                self._file_vars.append((var, fname))
+                cb = tk.Checkbutton(row, variable=var, bg=C["mantle"],
+                                     activebackground=C["mantle"],
+                                     selectcolor=C["surface0"])
+                cb.pack(side=tk.LEFT)
+                tk.Label(row, text=fname, anchor=tk.W,
+                         font=("Consolas", 9),
+                         bg=C["mantle"], fg=C["text"]).pack(side=tk.LEFT, padx=(4, 6))
+
+        # ── Quick-select buttons ──
+        if files:
+            sel_row = tk.Frame(self, bg=C["base"])
+            sel_row.pack(fill=tk.X, padx=18, pady=(0, 8))
+            ttk.Button(sel_row, text="Select All",
+                       command=lambda: self._set_all(True)).pack(side=tk.LEFT, padx=(0, 6))
+            ttk.Button(sel_row, text="Select None",
+                       command=lambda: self._set_all(False)).pack(side=tk.LEFT)
+
+        # ── Action buttons ──
+        btn_row = tk.Frame(self, bg=C["base"])
+        btn_row.pack(fill=tk.X, padx=18, pady=(0, 14))
+        self._action_btn = ttk.Button(btn_row, text="Untrack Selected",
+                                       command=self._apply,
+                                       state=tk.NORMAL if files else tk.DISABLED)
+        self._action_btn.pack(side=tk.LEFT, padx=(0, 8))
+        ttk.Button(btn_row, text="Cancel",
+                   command=self.destroy).pack(side=tk.LEFT)
+
+        # Centre
+        self.update_idletasks()
+        w, h = 580, 520
+        try:
+            px = parent.winfo_x() + (parent.winfo_width()  - w) // 2
+            py = parent.winfo_y() + (parent.winfo_height() - h) // 2
+            self.geometry(f"{w}x{h}+{max(0, px)}+{max(0, py)}")
+        except tk.TclError:
+            self.geometry(f"{w}x{h}")
+
+    def _set_all(self, value: bool):
+        for var, _f in self._file_vars:
+            var.set(value)
+
+    def _apply(self):
+        selected = [fname for var, fname in self._file_vars if var.get()]
+        if not selected:
+            messagebox.showwarning("Nothing selected",
+                "Tick at least one file to untrack.", parent=self)
+            return
+        path = self._path
+        self.destroy()
+        self._app._do_untrack_ignored(path, selected)
+
+
 class GitignoreDialog(tk.Toplevel):
     """View and edit a project's .gitignore through a structured dialog.
 
@@ -6450,9 +6701,35 @@ class GitignoreDialog(tk.Toplevel):
         change_str = "  ".join(bits) if bits else "(no diff)"
         self._app._log(
             f"  Saved .gitignore  ({change_str})", C["green"])
-        # Trigger the existing commit-after-change prompt
         path = self._path
         self.destroy()
+        # After the .gitignore write, check whether the new rules now match
+        # files that were ALREADY tracked. If so, offer to untrack them in
+        # the same flow — otherwise the user hits the confusing 'git keeps
+        # showing this as modified after I added it to gitignore' problem.
+        # Only relevant when at least one addition was made AND this is a
+        # local git repo; pure removals or non-git projects skip this.
+        if added_n > 0 and _is_local_git_repo(path):
+            stale = _find_tracked_but_ignored(path)
+            if stale:
+                ask = messagebox.askyesno(
+                    "Untrack files that match your new rules?",
+                    f"Your .gitignore now matches "
+                    f"{len(stale)} file{'s' if len(stale) != 1 else ''} "
+                    "that {} already tracked by git:\n\n".format(
+                        "are" if len(stale) != 1 else "is")
+                    + "\n".join(f"  • {f}" for f in stale[:10])
+                    + ("\n  ..." if len(stale) > 10 else "")
+                    + "\n\nUntracking removes them from git's index but "
+                    "keeps the local files. This is the standard fix for "
+                    "'I added it to .gitignore but git keeps showing it.'\n\n"
+                    "Open the Untrack Ignored Files dialog now?",
+                    parent=self._app)
+                if ask:
+                    UntrackIgnoredDialog(self._app, path, stale,
+                        reason="now matched by your updated .gitignore")
+                    return  # untrack flow handles commit prompt itself
+        # Otherwise: trigger the existing commit-after-change prompt
         self._app._offer_commit_after_change(path, ".gitignore")
 
 

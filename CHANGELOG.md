@@ -3,6 +3,18 @@
 
 ## [Unreleased]
 
+## [1.0.1] — 2026-05-21
+
+Patch release. Fixes the three bugs hit during the very first post-v1.0 retrofit attempt: a status-text parsing off-by-one that ate leading dots, a baseline `.gitignore` that over-corrected on `.codegraph/`, and the missing "Untrack ignored files" flow that left users stuck whenever a path was both tracked and ignored.
+
+### Added
+- **`🧹 Untrack Ignored Files…` right-click action** — finds every path that's currently tracked by git AND matches a pattern in the project's `.gitignore` (via `git ls-files -ci --exclude-standard`), and offers a checklist for selective untracking. New module helper `_find_tracked_but_ignored(path)`. New `UntrackIgnoredDialog` class. The untrack worker runs `git rm -r --cached -- <files>` so local copies are preserved (`--cached` keeps the working tree untouched). After the operation, the existing commit-after-change flow offers to commit the untracking as one atomic change
+- **Auto-prompt for stale tracking after `.gitignore` save** — when `GitignoreDialog._on_save` writes new ignore patterns AND at least one already-tracked file now matches, a confirmation dialog appears: *"Your .gitignore now matches N files that are already tracked by git. Untrack them now?"*. Click Yes → `UntrackIgnoredDialog` opens pre-populated with the matched files. Solves the "I added .gitignore rule but git keeps showing it as modified" UX trap automatically
+
+### Fixed
+- **`git status --short` parsing dropped the leading character of the first file** when that file's status was working-tree-modified (`" M file"`). Three sites (`GitCommitDialog`, `_suggest_commit_message`, `_git_update_ui`) all called `status_text.strip().splitlines()` — the `.strip()` ate the leading space from the first line, shifting columns and making `line[3:]` skip one character too many. For dotfiles this dropped the leading dot, so `.claude/settings.json` displayed as `claude/settings.json` and `git add` failed with `pathspec did not match any files`. Fixed by removing the over-eager `.strip()` and splitting first, then filtering blanks per-line
+- **`_BASELINE_GITIGNORE` no longer blanket-ignores `.codegraph/`** — CodeGraph deliberately wants `.codegraph/config.json` to be tracked (per-project indexing configuration, shared across machines). The previous blanket pattern over-corrected and would have made the config file invisible to git on every retrofitted project. Now only the SQLite DB files (`.codegraph/codegraph.db` and `codegraph.db-*` for the WAL/SHM journals) are ignored. Existing projects on the old baseline keep their old rule — use Manage .gitignore to update if needed; CodeGraph's own `.codegraph/.gitignore` already handles the DB correctly so this is mostly cosmetic
+
 ## [1.0.0] — 2026-05-21
 
 First stable release. The manager has matured into a general Claude Code project manager rather than a tokensave-only wrapper: it now does full git management (branch / commit / push / pull / PR), structured .gitignore editing, and supports both tokensave and CodeGraph as equal-citizen code-graph backends. Drops the alpha tag.

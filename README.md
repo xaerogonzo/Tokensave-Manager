@@ -385,6 +385,7 @@ Right-click any project row in the Projects tab to get the full per-project acti
 | 🧠 CodeGraph Status | Show CodeGraph stats (file count, node count, backend) |
 | 🧠 Remove CodeGraph Index | Delete `.codegraph/` — source untouched, re-initialise via Init |
 | 📋 Manage .gitignore… | Open the gitignore editor — view current entries, inject template patterns (Python / Node / Rust / IDE / OS / Nuitka / etc.), add custom entries, or remove existing ones |
+| 🧹 Untrack Ignored Files… | Find files that are tracked by git but also match a `.gitignore` rule (the "stale tracking" problem), select which to untrack via `git rm --cached`. Local files are preserved — only git's index is updated |
 | 📂 Open Folder | Open in Windows Explorer |
 | ✏ Open in Editor | Launch in configured editor |
 | ⎘ Copy Path | Copy full project path to clipboard |
