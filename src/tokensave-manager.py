@@ -263,17 +263,22 @@ def _suggest_commit_message(status_text: str) -> str:
     Tries to produce something meaningful based on which files changed and how.
     The user can always edit or replace the suggestion.
     """
-    lines = [l for l in status_text.strip().splitlines() if len(l) >= 3]
+    # BUG FIX (see GitCommitDialog parsing): never strip() the full
+    # status_text before splitlines() — strip eats the leading space from
+    # the first line, shifting columns and silently dropping the first
+    # character of the filename when the first entry is a working-tree
+    # modification (which starts with a single leading space).
+    lines = [l for l in status_text.splitlines() if len(l) >= 4]
     if not lines:
         return ""
 
     files = []
     for line in lines:
         xy   = line[:2].strip()
-        fname = line[3:].strip()
+        fname = line[3:]
         # Handle renames: "old -> new" format
         if " -> " in fname:
-            fname = fname.split(" -> ")[-1].strip()
+            fname = fname.split(" -> ")[-1]
         files.append((xy, fname))
 
     if not files:
@@ -1657,14 +1662,22 @@ class App(tk.Tk):
         self._git_status_lb.delete(0, tk.END)
         self._git_status_files = []
         if is_repo:
-            if status_raw.strip():
-                for line in status_raw.strip().splitlines():
-                    if len(line) >= 3:
-                        xy   = line[:2]
-                        fname = line[3:]
-                        self._git_status_lb.insert(tk.END, f"  {xy}  {fname}")
-                        self._git_status_files.append((xy.strip(), fname))
-            else:
+            # BUG FIX: do NOT call status_raw.strip() before splitlines() —
+            # status lines for working-tree changes start with a leading space
+            # (" M file.py"), and strip() eats that leading space from the
+            # FIRST line only, shifting column 0..1 (status) and 3+ (path) so
+            # the path silently loses its first character. Use splitlines()
+            # directly and skip blanks individually.
+            has_lines = False
+            for line in status_raw.splitlines():
+                if len(line) < 4:
+                    continue
+                has_lines = True
+                xy   = line[:2]
+                fname = line[3:]
+                self._git_status_lb.insert(tk.END, f"  {xy}  {fname}")
+                self._git_status_files.append((xy.strip(), fname))
+            if not has_lines:
                 self._git_status_lb.insert(tk.END, "  (working tree clean)")
 
         # Populate log
@@ -6478,10 +6491,18 @@ class GitCommitDialog(tk.Toplevel):
         self._status_raw = status_text
 
         # Parse status into [(xy, fname), ...] — same logic as Git tab.
+        # CRITICAL: do NOT call .strip() on status_text BEFORE splitlines().
+        # `git status --short` lines have a 2-char status (XY) + 1 space +
+        # path. For working-tree-modified files the first char is a space
+        # (" M file.py"). Calling strip() on the whole multi-line string
+        # eats that leading space from the FIRST line only, shifting its
+        # columns by 1, which caused `line[3:]` to drop the first character
+        # of the path — e.g. ".claude/settings.json" became
+        # "claude/settings.json" and git add failed with pathspec error.
         self._files = []
-        if is_repo and status_text.strip():
-            for line in status_text.strip().splitlines():
-                if len(line) >= 3:
+        if is_repo:
+            for line in status_text.splitlines():
+                if len(line) >= 4:
                     self._files.append((line[:2], line[3:]))
 
         # ── Header ──
