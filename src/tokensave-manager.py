@@ -4059,45 +4059,64 @@ class App(tk.Tk):
             self._log(f"  Working tree left dirty — commit when you're ready.",
                       C["yellow"])
 
-    def _do_git_commit(self, path: str, message: str, selected_files: list):
-        """Stage selected_files (idempotently) and commit ONLY those paths.
+    def _do_git_commit(self, path: str, message: str, selected: list):
+        """Stage and commit the picked files. `selected` is a list of
+        (filename, xy) tuples from the GitCommitDialog.
 
-        Critical design point: we use `git commit -- <paths>` (path-specific
-        commit) instead of plain `git commit`. The plain form commits the
-        ENTIRE index, which would force us to pre-`git reset` everything to
-        avoid accidentally committing unrelated staged work. That `git reset`
-        was destructive: it would UNDO any prior `git rm --cached` (i.e.
-        untracking work from 🧹 Untrack Ignored Files), trapping the user in
-        a cycle where tracked-but-ignored files re-staged themselves every
-        time they clicked Commit.
+        Key design points learned the hard way:
 
-        Path-specific commit avoids that entirely — it commits exactly the
-        files passed after `--`, regardless of what else is in the index.
-        Other staged work (including a queued `git rm --cached` for a path
-        NOT in selected_files) stays staged.
+        1. NO `git reset` at start. The original implementation reset the
+           index "to prevent stale staging from sneaking in", but that
+           UNDOES any intentional staging — most importantly the
+           `git rm --cached` queued by 🧹 Untrack Ignored Files. Result
+           was a cycle where untracked-but-ignored files re-staged
+           themselves every commit attempt.
 
-        Files left unchecked in the dialog remain as un-committed changes
-        in the working tree (or as staged changes — `git status` will
-        continue to show them).
+        2. Don't blindly `git add` every selected file. Files that are
+           already staged (xy column 1 == ' ', meaning no working-tree
+           change) don't need re-adding. For staged DELETIONS (xy = "D ")
+           specifically, calling git add UN-DOES the deletion and tries
+           to re-add the file — which fails if the file matches a
+           .gitignore rule. Filter to only git-add files with actual
+           working-tree changes (xy[1] != ' ').
+
+        3. Use `git commit -m <msg> -- <paths>` (path-specific commit)
+           instead of plain `git commit -m <msg>`. The plain form
+           commits the entire index; path-specific commits only the
+           listed paths regardless of other staged work. This is what
+           makes (1) work cleanly.
         """
+        if not selected:
+            return
+        # Backward-compat: callers passing legacy list-of-strings still
+        # work; treat unknown XY as needs-add (worst case is a redundant
+        # git add, which is idempotent).
+        if selected and isinstance(selected[0], str):
+            selected = [(fname, "??") for fname in selected]
+
         name = os.path.basename(path)
+        all_paths = [fname for fname, _xy in selected]
+        # xy[1] == ' ' means "no working-tree change" — file is fully
+        # captured in the index already (could be a staged D, A, M, R,
+        # etc.). Those don't need git add. Everything else does.
+        files_to_add = [fname for fname, xy in selected
+                        if len(xy) >= 2 and xy[1] != ' ']
+
         # Lock Git tab buttons during the commit (prevents double-click races).
         self._git_begin_op()
 
         def worker():
             try:
-                # 1. Stage exactly the picked files. `git add` is idempotent
-                # so re-staging an already-staged file is harmless. `--`
-                # separates flags from paths and protects against filenames
-                # that start with "-".
-                if selected_files:
+                # 1. Stage only the files that have working-tree changes.
+                # Already-staged files (including queued `git rm --cached`
+                # deletions) are left alone.
+                if files_to_add:
                     out, rc = self._shell_capture(
-                        [GIT_EXE,"-C", path, "add", "--"] + selected_files, path)
+                        [GIT_EXE,"-C", path, "add", "--"] + files_to_add, path)
                     if rc != 0:
-                        # Detect the "tracked-but-ignored" case and surface a
-                        # specific recovery suggestion rather than a raw git
-                        # error. This happens when a path is in the index AND
-                        # matches a .gitignore rule — git refuses to add it.
+                        # Detect the "tracked-but-ignored" case (a file is
+                        # in the index AND matches .gitignore) and surface
+                        # an actionable recovery message.
                         if "ignored by one of your .gitignore files" in out:
                             offending = []
                             for ln in out.splitlines():
@@ -4122,16 +4141,14 @@ class App(tk.Tk):
                                 f"git add failed: {out.strip()}", C["red"]))
                         return
 
-                # 2. Commit ONLY the selected paths. The `--` after the
-                # message separates path args from refs/options; without it,
-                # git might try to interpret a path like `master` or
-                # `HEAD~1` as a ref.
-                self._log(f"Committing {name} ({len(selected_files)} file"
-                          f"{'s' if len(selected_files) != 1 else ''})…",
+                # 2. Commit ONLY the selected paths (includes any
+                # already-staged ones that we didn't re-add — like
+                # untracking-deletions queued via `git rm --cached`).
+                self._log(f"Committing {name} ({len(all_paths)} file"
+                          f"{'s' if len(all_paths) != 1 else ''})…",
                           C["peach"])
-                commit_cmd = [GIT_EXE,"-C", path, "commit", "-m", message]
-                if selected_files:
-                    commit_cmd += ["--"] + selected_files
+                commit_cmd = [GIT_EXE,"-C", path, "commit", "-m", message,
+                              "--"] + all_paths
                 cout, crc = self._shell_capture(commit_cmd, path)
                 col = C["green"] if crc == 0 else C["red"]
                 for line in cout.strip().splitlines()[-4:]:
@@ -7049,14 +7066,21 @@ class GitCommitDialog(tk.Toplevel):
             messagebox.showwarning("Empty message",
                 "Please enter a commit message.", parent=self)
             return
-        selected_files = [fname for var, fname, _xy in self._file_vars if var.get()]
-        if not selected_files:
+        # Pass xy alongside fname so the worker can distinguish
+        # already-staged files (e.g. `git rm --cached` deletions from the
+        # 🧹 Untrack flow) from files that still need `git add`. Without
+        # this, calling git add on a staged deletion un-does the deletion
+        # and re-encounters any matching .gitignore rule, blocking the
+        # commit.
+        selected = [(fname, xy) for var, fname, xy in self._file_vars
+                    if var.get()]
+        if not selected:
             messagebox.showwarning("Nothing selected",
                 "Tick at least one file to include in this commit.",
                 parent=self)
             return
         self.destroy()
-        self._callback(self._path, message, selected_files)
+        self._callback(self._path, message, selected)
 
 
 # ── Entry point ────────────────────────────────────────────────────────────────

@@ -5,14 +5,18 @@
 
 ## [1.0.2] — 2026-05-21
 
-Patch release. Fixes a critical workflow regression where `_do_git_commit`'s opening `git reset` undid any prior `git rm --cached` from the new Untrack Ignored Files flow, trapping users in a cycle where tracked-but-ignored files re-staged themselves every time they clicked Commit.
+Patch release. Fixes the **three-headed commit bug** that made the v1.0 / v1.0.1 Untrack-Ignored-Files workflow unusable in practice. Each fix peels off one layer of the onion:
 
 ### Fixed
-- **`_do_git_commit` no longer runs `git reset` before staging.** The original reset was there to "clear the index so nothing already-staged sneaks into the commit" — but the cost was destroying intentional stagings like `git rm --cached` (the untracking operation the new 🧹 flow performs). The new behaviour: `git add` the selected paths idempotently, then commit with explicit path arguments — `git commit -m <msg> -- <paths>` — so only those paths land in the commit regardless of what else might be in the index. This is the standard git pattern for path-specific commits and makes the index-reset unnecessary.
-- **Better error surfacing when `git add` hits an ignored file.** Previously the manager logged `git add failed: <raw git output>` with no actionable advice. Now it specifically detects `ignored by one of your .gitignore files` in the output and surfaces a dedicated dialog: *"Some of the files you selected are already tracked AND match a .gitignore rule. Fix: right-click → 🧹 Untrack Ignored Files…"* with the affected paths listed.
+- **`_do_git_commit` no longer runs `git reset` before staging.** The original reset was there to "clear the index so nothing already-staged sneaks into the commit" — but the cost was destroying intentional stagings like `git rm --cached` (the untracking operation the new 🧹 flow performs). The new behaviour: skip the reset entirely, use `git commit -m <msg> -- <paths>` (path-specific commit) so only the listed paths land in the new commit regardless of what else might be in the index. Standard git pattern; makes the index-reset unnecessary.
+- **`_do_git_commit` no longer blindly `git add`s every selected file.** Files that are already fully staged (xy column 1 == `' '`, e.g. a `git rm --cached` queued by 🧹 Untrack Ignored Files appears as `D ` — staged-delete with no working-tree change) don't need re-adding. Worse: calling `git add` on a staged DELETION un-does the deletion and tries to re-add the file, which fails if the file matches a `.gitignore` rule — leading to the exact failure mode the 🧹 flow was supposed to prevent. Fix: GitCommitDialog now passes `(fname, xy)` tuples to the worker, and the worker only calls `git add` on files whose xy column 1 is not space.
+- **Better error surfacing when `git add` does hit an ignored file** (e.g. user explicitly ticked an already-tracked-but-ignored file in the dialog). Previously the manager just logged `git add failed: <raw git output>`. Now it detects `ignored by one of your .gitignore files` in the output and shows a dedicated dialog with the affected paths listed and a one-line action to fix it.
 
 ### Added
-- **Pre-flight tracked-but-ignored check in `_open_commit_dialog`.** Before opening the commit dialog, the manager runs `_find_tracked_but_ignored(path)`. If any matches exist, it shows a 3-way choice: **Yes** → open Untrack Ignored Files first (recommended, since the commit would otherwise fail); **No** → open the commit dialog anyway; **Cancel** → close, do nothing. This proactively breaks the cycle instead of waiting for the commit attempt to fail.
+- **Pre-flight tracked-but-ignored check in `_open_commit_dialog`.** Before opening the commit dialog, the manager runs `_find_tracked_but_ignored(path)`. If any matches exist, it shows a 3-way choice: **Yes** → open Untrack Ignored Files first (recommended); **No** → open the commit dialog anyway; **Cancel** → close, do nothing. This proactively breaks the cycle instead of waiting for the commit attempt to fail.
+
+### Internal contract changes
+- `GitCommitDialog` callback signature is now `callback(path, message, selected: list[tuple[str, str]])` — each tuple is `(fname, xy)`. The old `list[str]` form is still accepted for backward-compat (unknown XY is treated as needs-add, which is harmless because git add is idempotent).
 
 ## [1.0.1] — 2026-05-21
 
