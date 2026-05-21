@@ -1,14 +1,21 @@
 # TokenSave Manager
 
-A Windows GUI for managing [tokensave](https://github.com/aovestdipaperino/tokensave) MCP integrations across multiple projects. Built with Python + tkinter, styled with Catppuccin Mocha.
+A Windows GUI for managing your Claude Code / Claude Desktop projects: code-graph indexing, git operations, project scaffolding, and `.gitignore` editing — all from one place. Built with Python + tkinter, styled with Catppuccin Mocha.
 
-If you use Claude Code or Claude Desktop across several projects, TokenSave Manager is the control panel: switch active projects, sync indexes, scaffold new projects with Claude instruction templates, manage git history — all without touching the command line.
+The manager supports **two code-graph backends as equal citizens**: [tokensave](https://github.com/aovestdipaperino/tokensave) (bundled) and [CodeGraph](https://github.com/colbymchenry/codegraph) (optional, installed via npm). A single project can use either or both — they don't conflict.
+
+If you use Claude across several projects, this is the control panel: switch active projects, sync indexes, scaffold new projects with Claude instruction templates, manage git history and `.gitignore`, create GitHub releases — all without touching the command line.
 
 ---
 
 ## Table of Contents
 
-- [What is tokensave?](#what-is-tokensave)
+- [Code Intelligence — tokensave + CodeGraph](#code-intelligence--tokensave--codegraph)
+  - [What is a code-graph tool?](#what-is-a-code-graph-tool)
+  - [tokensave](#tokensave)
+  - [CodeGraph](#codegraph)
+  - [Side-by-side](#side-by-side)
+  - [When to use which (or both)](#when-to-use-which-or-both)
 - [Features](#features)
 - [Requirements](#requirements)
 - [Installation](#installation)
@@ -29,25 +36,86 @@ If you use Claude Code or Claude Desktop across several projects, TokenSave Mana
 
 ---
 
-## What is tokensave?
+## Code Intelligence — tokensave + CodeGraph
 
-[tokensave](https://github.com/aovestdipaperino/tokensave) is an MCP server and code-graph tool that saves Claude tokens by giving it a structured map of your codebase instead of making it read raw files. It runs as a local daemon, indexes your project into a SQLite database (`.tokensave/tokensave.db`), and exposes tools like `tokensave_context`, `tokensave_search`, and `tokensave_callers` that Claude can call to navigate your code efficiently.
+The manager treats two different code-graph tools as equal citizens. You can use either, both, or neither on any given project. This section explains what they do, how they differ, and how to pick.
 
-**TokenSave Manager** is the GUI wrapper around that tool — it handles the tedious parts so you don't need to run CLI commands.
+### What is a code-graph tool?
+
+When Claude Code or Claude Desktop explores a codebase to answer your questions, it normally spawns Explore agents that scan files with `grep`, `glob`, and `Read` — burning tokens on every tool call.
+
+A **code-graph tool** pre-indexes your project into a local SQLite database (symbols, function calls, imports, class hierarchies, etc.) and exposes that knowledge to Claude via the [Model Context Protocol (MCP)](https://modelcontextprotocol.io/). Instead of grep-and-read loops, Claude queries the graph directly with tools like `<tool>_search`, `<tool>_callers`, `<tool>_context`.
+
+Real numbers from the field: a tested benchmark on a 25k-file codebase answered a cross-cutting question in **6 tool calls and 35 seconds with a code-graph** vs. **37 tool calls and 2 m 8 s without**. That's ~84% fewer calls and 73% faster — and the savings compound across a session.
+
+Both tools below produce these results. The differences are in distribution, sync model, and ecosystem fit.
+
+### tokensave
+
+- **Source**: [github.com/aovestdipaperino/tokensave](https://github.com/aovestdipaperino/tokensave)
+- **Distributed as**: standalone Windows `.exe` (bundle whatever the project ships)
+- **DB location**: `.tokensave/tokensave.db` inside each indexed project
+- **MCP tools**: `tokensave_search`, `tokensave_context`, `tokensave_callers`, `tokensave_callees`, `tokensave_impact`, `tokensave_node`, `tokensave_files`, `tokensave_status`, `tokensave_changelog`, `tokensave_health`, plus ~40 others (TODOs, dead code, doc coverage, etc.)
+- **Sync model**: explicit. You run `tokensave sync` (or use the manager's ↺ Sync button). The manager can also auto-commit after sync, and Sync All processes every indexed project sequentially.
+- **Manager integration**: deep. The dedicated `tokensave-wrapper.exe` auto-selects which project to serve to Claude Desktop based on a pin file. The manager scaffolds and retrofits projects with full tokensave templates. Sync age is shown in the **Last Synced** column.
+- **Why pick it**: comes bundled, no extra install, mature toolset, fine-grained sync control, rich auxiliary tools (TODOs, dead-code finder, complexity reports). The pin-based project switching is unique — it tells Claude Desktop "use THIS project" without restarting your config.
+
+### CodeGraph
+
+- **Source**: [github.com/colbymchenry/codegraph](https://github.com/colbymchenry/codegraph)
+- **Distributed as**: npm package `@colbymchenry/codegraph` (TypeScript, requires Node.js 18+)
+- **DB location**: `.codegraph/codegraph.db` inside each indexed project
+- **MCP tools**: `codegraph_search`, `codegraph_context`, `codegraph_callers`, `codegraph_callees`, `codegraph_impact`, `codegraph_node`, `codegraph_files`, `codegraph_status`
+- **Sync model**: automatic. A native OS file watcher (FSEvents / inotify / ReadDirectoryChangesW) re-indexes changed files in real time **while CodeGraph's MCP server is running inside an active Claude Code session**. Manual `🧠 CodeGraph Sync` from the manager is still useful for catching up after editing with Claude Code closed.
+- **Manager integration**: per-project lifecycle. The manager handles **Init / Sync / Status / Remove Index** through the right-click menu. The CG column shows ✓ for initialised projects. The Settings dialog can install codegraph globally via `npm install -g`.
+- **Why pick it**: zero-touch auto-sync, very fast on huge codebases (the maintainer's benchmark indexed the Swift compiler — 25,874 files, 272,898 nodes — in under 4 minutes), framework-aware routing for 13 web frameworks (Django, Flask, FastAPI, Express, Laravel, Rails, Spring, etc.), broader install reach (also configures Cursor, Codex CLI, opencode if you use them).
+
+### Side-by-side
+
+|  | **tokensave** | **CodeGraph** |
+|---|---|---|
+| **Distribution** | Standalone Windows `.exe` (bundled) | npm package, requires Node.js 18+ |
+| **DB location** | `.tokensave/tokensave.db` | `.codegraph/codegraph.db` |
+| **Languages** | Multi-language via custom extractors | 19+ via tree-sitter (TS, JS, Py, Go, Rust, Java, C#, PHP, Ruby, C, C++, Swift, Kotlin, Scala, Dart, Svelte, Vue, Liquid, Pascal/Delphi) |
+| **Sync model** | Explicit (`sync`, `sync --force`) | Auto-watch + manual fallback |
+| **Sync surface in manager** | "Last Synced" column shows age; ↺ Sync / ⟳ Force / 📊 Status / 🔍 Doctor right-click actions | "CG" column shows ✓ / —; 🧠 Init / Sync / Status / Remove right-click actions |
+| **Claude Desktop pin** | ✅ via `tokensave-wrapper.exe` | ❌ (relies on per-project Claude Code config instead) |
+| **Framework routes** | ❌ | ✅ Django / Flask / FastAPI / Express / Laravel / Rails / Spring / Gin / Axum / ASP.NET / Vapor / React Router / SvelteKit |
+| **Auxiliary analysis** | Rich: TODOs, dead code, doc coverage, complexity, hotspots, god classes | Core graph queries only |
+| **Manager handles install** | N/A (point at the `.exe`) | "Install via npm" button in Settings |
+| **MCP-config wizard** | Manager has its own (Retrofit dialog) | CodeGraph ships its own (`npx @colbymchenry/codegraph`) |
+
+### When to use which (or both)
+
+**Use tokensave alone** if you want the bundled experience with no Node.js dependency, you value the pin-based project switching for Claude Desktop, or you regularly use the auxiliary analysis tools (dead-code, TODOs, etc.).
+
+**Use CodeGraph alone** if you live primarily in Claude Code (not Desktop), you want zero-touch auto-sync, your projects are huge (10k+ files), or you work with the web frameworks CodeGraph natively understands.
+
+**Use both** if you're undecided, want to A/B compare their answers on the same project, or want to expose both toolsets to Claude simultaneously — they namespace their MCP tools differently (`tokensave_*` vs `codegraph_*`) so they never collide. The manager treats them as fully independent: a project's row shows tokensave's sync age in **Last Synced** AND ✓ in **CG** at the same time.
+
+The manager's design philosophy: **never force a choice you don't want to make**. Adding CodeGraph never breaks tokensave, removing it never breaks anything else, and a project can move between the two states freely.
 
 ---
 
 ## Features
 
 ### Project Management
-- **Automatic project discovery** — scans configured search roots for any folder containing a tokensave index (`.tokensave/tokensave.db`)
-- **One-click project switching** — set any project as the active one for Claude Desktop; a pin file tells the wrapper which project to serve
-- **Sync / Force Re-sync** — run `tokensave sync` or `tokensave sync --force` on any project from the GUI
-- **Sync All** — syncs every indexed project sequentially with `[1/n]` progress logging and a final summary
-- **Status + Doctor** — run `tokensave status` and `tokensave doctor` without leaving the app
-- **Auto-refresh** — project list silently re-scans every 60 seconds; skips if a sync is running
+- **Automatic project discovery** — scans configured search roots for any folder containing a tokensave index (`.tokensave/`), a CodeGraph index (`.codegraph/`), or a git repository (`.git/`). All three types appear in the list and are visually distinguished
+- **One-click project switching** — set any tokensave project as the active one for Claude Desktop; a pin file tells `tokensave-wrapper.exe` which project to serve
+- **Project status at a glance** — three indicator columns:
+  - **Last Synced** — age of the tokensave index (`2h ago`, `3d ago`)
+  - **CG** — ✓ if CodeGraph has indexed this project, — otherwise
+  - **Git** — ✓ clean, ● uncommitted changes, ↑N commits ahead, ↓N behind, ●↑N mixed
+- **Auto-refresh** — project list silently re-scans every 60 seconds; skips if a sync is running. Git statuses are computed asynchronously with `.git/index` mtime caching so unchanged projects skip the subprocess call
 - **System tray** — close or minimise sends the manager to the tray; right-click to Show or Quit
 - **Single-instance lock** — launching a second copy focuses the existing window
+
+### Code Intelligence — tokensave AND CodeGraph
+- **Two backends, one UI** — right-click a project to run tokensave's `↺ Sync / 📊 Status / ⟳ Force Re-sync / 🔍 Doctor` and CodeGraph's `🧠 CodeGraph Init / Sync / Status / Remove Index` from the same menu. The manager handles both lifecycles independently
+- **Sync All** — syncs every tokensave-indexed project sequentially with `[i/n]` progress logging; git-only and CodeGraph-only projects are skipped with a note
+- **Friendly install nudges** — clicking a CodeGraph action on a project without the tool installed opens a dialog explaining how to install (Settings → CodeGraph → Install via npm)
+- **CodeGraph install button** — Settings → CodeGraph has an **"Install via npm"** button that runs `npm install -g @colbymchenry/codegraph` in the background. Windows `EPERM`/`EACCES` failures (the common system-wide-Node trap) surface a specific hint about reinstalling Node per-user or running as admin
+- **Auto-detected paths** — both `tokensave_exe` and `codegraph_exe` auto-detect on save; `.cmd`-first Windows shim resolution handles npm-installed binaries correctly
 
 ### Project Organisation
 - **Category grouping** — each search root has a configurable label that becomes a category header in the project list. Projects under `D:\Doom Mods` appear under a "Doom Mods" header, etc.
@@ -58,7 +126,7 @@ If you use Claude Code or Claude Desktop across several projects, TokenSave Mana
 - **Scaffold new project** — picks a folder and optionally writes a `BASIC_INSTRUCTIONS.md` (Claude session instructions), runs `tokensave init`, adds a Nuitka build pipeline, and/or adds an auto-commit Stop hook for Claude Code sessions
 - **Retrofit existing project** — adds tokensave MCP rules to an existing `CLAUDE.md` via `@include`, optionally with all the same extras as Scaffold
 - **Shadow Links** — generates NTFS hardlinks of source files with a secondary extension (e.g. `.zsc` → `.zsc.cpp`) so editors with limited language support can still parse them. Right-click → **🔗 Shadow Links…**
-- **Ensure .gitignore** — right-click → **📋 Ensure .gitignore** non-destructively merges baseline entries (Python cache, Nuitka output, `.tokensave/`, `.claude/`, virtual environments, etc.) into any project's `.gitignore` without overwriting anything custom
+- **Manage .gitignore dialog** — right-click → **📋 Manage .gitignore…** opens a full editor: scrollable list of current entries with per-row `×` remove (real strikethrough font on marked rows), one-click template injection for 11 categories (Baseline, Python, Node.js, Rust, Java/JVM, .NET, VS Code, JetBrains, macOS, Windows, Nuitka), custom-entry field with dedup + sanity check, live `+`/`−` diff preview before saving. Atomic file write; the existing commit-after-change flow then offers to commit the result. The baseline category includes `.tokensave/`, `.codegraph/`, `.claude/`, Python cache, Nuitka output, virtual environments, and OS noise — all auto-protected so binary index DBs never get committed
 
 ### Git Integration (no command line needed)
 - **Git tab** — live view of any project's git state: current branch, remote URL, working tree changes, recent commits, colour-coded diff viewer
@@ -69,15 +137,19 @@ If you use Claude Code or Claude Desktop across several projects, TokenSave Mana
 - **Open PR on GitHub** — on a feature branch, opens the GitHub compare page directly in your browser. On master/main, walks you through the branch workflow step by step
 - **Set Remote** — step-by-step dialog for connecting a project to a GitHub repository
 - **GitHub Setup wizard** — full onboarding: set git identity, sign in / create account, create repo on GitHub, set remote, first push, create a release
+- **Commit prompts after manager actions** — when Ensure .gitignore / Shadow Links / Scaffold / Retrofit / 🧠 CodeGraph Init modifies files in a git project, a "Commit this change now?" dialog appears so the working tree never sits silently dirty. Uses a strict local-repo check (`os.path.exists(.git)` — supports git worktrees) so projects nested inside an unrelated parent repo don't get ghost prompts
+- **Button locking during git operations** — every Git tab button greys out while a push / pull / commit / branch operation is in flight, then re-enables when the worker finishes. Prevents the classic double-push race
 - **Auto-commit after sync** — optional toggle (Settings) that runs `git add -A + git commit` automatically after every successful tokensave sync; amends the previous commit if it was also a sync commit, to avoid history pile-up
 - **Auto-commit Stop hook** — optional per-project Claude Code hook that commits whatever Claude changed at the end of each session
 
 ### Settings & Tools
-- **Settings dialog** — configure all paths (tokensave.exe, template dir, editor command, git.exe) and search roots through a GUI; changes apply immediately
+- **Settings dialog** — configure all paths (`tokensave_exe`, `template_dir`, `editor_cmd`, `git_exe`, `codegraph_exe`) and search roots through a GUI; changes apply immediately. Validates and auto-detects on save
 - **GitHub CLI installer** — Settings dialog includes a **"Install via winget"** button that installs the GitHub CLI (`gh`) in the background; shows a green checkmark when found on PATH
+- **CodeGraph installer** — Settings dialog includes a **"Install via npm"** button that installs `@colbymchenry/codegraph` globally. Runs on a background thread so the GUI never freezes; surfaces Windows EPERM/EACCES errors with actionable hints
 - **Git auto-detection** — finds `git.exe` via PATH or common Windows install locations automatically
+- **CodeGraph auto-detection** — finds `codegraph.cmd` in `%APPDATA%\npm\` or wherever npm placed it; probes `.cmd` before bare names since Windows `subprocess.run` requires the extension on shim files
 - **Reference tab** — CLI cheatsheet + 12 built-in Claude prompt snippets (codebase overview, symbol search, impact analysis, health check, etc.) with copy-to-clipboard; add your own custom snippets
-- **Help tab** — full operational guide covering every feature, the git workflow, GitHub setup, project categories, and more
+- **Help tab** — full operational guide covering every feature, including a dedicated CodeGraph section, the git workflow, GitHub setup, project categories, and more
 - **Output log** — always-visible coloured log panel at the bottom of the window; all subprocess output appears here in real time
 
 ---
@@ -154,11 +226,17 @@ When you launch for the first time (or when config paths are invalid), the **Set
 |-------|-------------|
 | **Editor command** | `code` for VS Code, `code --new-window`, `notepad`, etc. |
 | **Git exe** | Leave blank to auto-detect, or click **Auto-detect** |
-| **GitHub CLI** | Click **Install via winget** if not already installed |
+| **GitHub CLI** | Click **Install via winget** if not already installed (enables 🔗 Open PR + the Releases section in GitHub Setup) |
+| **CodeGraph** | Click **Install via npm** if you want the alternative code-graph backend (requires Node.js 18+) |
 
-After saving, the manager scans your search roots and shows any folder that has been initialised with `tokensave init` (i.e. has a `.tokensave/tokensave.db`).
+After saving, the manager scans your search roots and shows any folder that has been initialised with `tokensave init` (`.tokensave/`), `codegraph init` (`.codegraph/`), OR contains a `.git/` repository.
 
-If a folder doesn't appear, right-click it → **+ Scaffold** → tick "Run tokensave init", or use **⚙ Retrofit Existing** from the toolbar.
+If a folder doesn't appear, it probably has none of those markers. Either:
+- Right-click it → **+ Scaffold** → tick "Run tokensave init" to bootstrap a tokensave project
+- Right-click → **🧠 CodeGraph Init** to bootstrap a CodeGraph project
+- Right-click → **🔧 Git Init** to make it a git repo (then it'll appear with git features available)
+
+You can also use **⚙ Retrofit Existing** from the toolbar to add tokensave rules + templates to an existing project.
 
 ---
 
@@ -177,9 +255,11 @@ The main tab. Shows all discovered tokensave projects grouped by category.
 ```
 
 **Columns:**
-- **Project** — project folder name; `★` marks the active project
+- **Project** — project folder name; `★` marks the active (pinned) project for Claude Desktop
 - **Path** — full folder path
-- **Last Synced** — age of the tokensave index (how long ago the last sync ran)
+- **Last Synced** — age of the tokensave index (how long ago the last sync ran); `—` for projects without tokensave
+- **CG** — `✓` if CodeGraph has indexed this project (`.codegraph/codegraph.db` exists); `—` otherwise. CodeGraph auto-syncs while its MCP server is running, so unlike tokensave there's no meaningful "last synced age" to show
+- **Git** — at-a-glance git status: `✓` clean (all pushed, no changes), `●` uncommitted changes (yellow row), `↑N` N commits ahead of remote (sky row), `↓N` N commits behind (red row), `●↑N` mixed (peach row), `—` not a git repo. Computed asynchronously after `refresh()` with `.git/index` mtime caching so unchanged projects skip the subprocess call
 - **Scaffold** — `✔` means `BASIC_INSTRUCTIONS.md` exists; `—` means Claude has no instructions for this project yet
 
 **Toolbar buttons:**
@@ -361,6 +441,7 @@ All settings live in `manager-config.json` at the project root (not committed to
   "python_exe":             "C:/Python312/pythonw.exe",
   "editor_cmd":             "code",
   "git_exe":                "",
+  "codegraph_exe":          "",
   "search_roots": [
     {"path": "D:/My Projects",  "label": "My Projects"},
     {"path": "D:/Work",         "label": "Work"},
@@ -383,6 +464,7 @@ All settings live in `manager-config.json` at the project root (not committed to
 | `python_exe` | Source only | Path to `pythonw.exe`, used by the `.bat` launcher |
 | `editor_cmd` | No | Editor launch command. Supports flags: `code`, `code --new-window`, `notepad` |
 | `git_exe` | No | Path to `git.exe`. Leave blank to auto-detect via PATH |
+| `codegraph_exe` | No | Path to the CodeGraph CLI (usually `codegraph.cmd` in `%APPDATA%\npm\`). Leave blank to auto-detect. Empty when CodeGraph isn't installed — all CodeGraph features show a friendly "install via npm" nudge in that case |
 | `search_roots` | Yes | Folders to scan. Bare strings or `{"path": "...", "label": "..."}` dicts. Each label becomes a category header |
 | `project_categories` | No | Per-project category overrides — managed via the right-click menu |
 | `user_snippets` | No | Custom prompt snippets shown in the Reference tab |
