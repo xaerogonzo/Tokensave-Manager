@@ -543,8 +543,13 @@ _BASELINE_GITIGNORE = """\
 # tokensave index (machine-specific binary database)
 .tokensave/
 
-# CodeGraph index (machine-specific binary database)
-.codegraph/
+# CodeGraph SQLite index — machine-specific binary database.
+# IMPORTANT: do NOT blanket-ignore .codegraph/ — CodeGraph deliberately
+# expects .codegraph/config.json to be TRACKED (per-project indexing
+# configuration intended to be shared across machines). CodeGraph itself
+# writes a .codegraph/.gitignore that handles binary-DB exclusion.
+.codegraph/codegraph.db
+.codegraph/codegraph.db-*
 
 # Python cache
 __pycache__/
