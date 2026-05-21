@@ -7,6 +7,16 @@ manager-config.json
 # ── tokensave index (machine-specific binary database) ──
 .tokensave/
 
+# ── CodeGraph SQLite index (machine-specific binary database) ──
+# Note: .codegraph/config.json and .codegraph/.gitignore ARE tracked —
+# they're per-project indexing config meant to be shared across machines.
+# Only the binary DB files are excluded.
+.codegraph/codegraph.db
+.codegraph/codegraph.db-*
+
+# ── Release artifacts (uploaded as GitHub Release assets, not in git) ──
+TokenSave-Manager-v*-windows.zip
+
 # ── Python cache ──
 __pycache__/
 *.pyc
