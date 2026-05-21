@@ -87,6 +87,7 @@ If you use Claude Code or Claude Desktop across several projects, TokenSave Mana
 - **Windows 10 / 11** (NTFS required for shadow links; everything else works on any NTFS volume)
 - **tokensave.exe** — the tokensave binary (not bundled; [get it here](https://github.com/aovestdipaperino/tokensave))
 - **Git for Windows** — [git-scm.com/download/win](https://git-scm.com/download/win) — required for all Git tab features
+- **Node.js 18+** (optional) — only needed if you want to use [CodeGraph](https://github.com/colbymchenry/codegraph) as an alternative or complementary code-graph tool. The manager has an "Install via npm" button in Settings → CodeGraph that runs `npm install -g @colbymchenry/codegraph` for you
 
 **For running from source only:**
 - Python 3.10 or later
@@ -299,6 +300,10 @@ Right-click any project row in the Projects tab to get the full per-project acti
 | 📜 Git Log | Switch to Git tab and refresh |
 | 📝 Git Commit… | Open commit dialog for this project |
 | 🔧 Git Init | Initialise a git repo + write baseline `.gitignore` + optional initial commit |
+| 🧠 CodeGraph Init | Initialise CodeGraph + build the initial graph (`codegraph init --index`) |
+| 🧠 CodeGraph Sync | Incremental update of CodeGraph's index for the project |
+| 🧠 CodeGraph Status | Show CodeGraph stats (file count, node count, backend) |
+| 🧠 Remove CodeGraph Index | Delete `.codegraph/` — source untouched, re-initialise via Init |
 | 📋 Manage .gitignore… | Open the gitignore editor — view current entries, inject template patterns (Python / Node / Rust / IDE / OS / Nuitka / etc.), add custom entries, or remove existing ones |
 | 📂 Open Folder | Open in Windows Explorer |
 | ✏ Open in Editor | Launch in configured editor |

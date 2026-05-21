@@ -178,6 +178,7 @@ $cleanConfig = [ordered]@{
     python_exe             = ""
     editor_cmd             = "code"
     git_exe                = ""
+    codegraph_exe          = ""
     search_roots           = @()
     project_categories     = [ordered]@{}
     user_snippets          = @()

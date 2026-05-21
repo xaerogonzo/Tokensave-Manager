@@ -5,6 +5,7 @@
   "python_exe": "C:/path/to/pythonw.exe",
   "editor_cmd": "code",
   "git_exe": "",
+  "codegraph_exe": "",
   "search_roots": [
     {"path": "C:/path/to/your/projects", "label": "My Projects"}
   ],

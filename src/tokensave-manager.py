@@ -101,10 +101,61 @@ def _detect_gh() -> str:
     return ""
 
 
+def _detect_npm() -> str:
+    """Return the path to npm, else empty string.
+
+    On Windows npm is a `.cmd` shim, not a `.exe` — `subprocess.run` with
+    a bare `.cmd` raises FileNotFoundError unless the absolute path
+    (including the .cmd extension) is supplied. So we probe `.cmd` first.
+    """
+    for name in ("npm.cmd", "npm"):
+        found = shutil.which(name)
+        if found:
+            return found
+    for candidate in [
+        os.path.expandvars(r"%APPDATA%\npm\npm.cmd"),
+        os.path.expandvars(r"%ProgramFiles%\nodejs\npm.cmd"),
+    ]:
+        if os.path.isfile(candidate):
+            return candidate
+    return ""
+
+
+def _detect_codegraph() -> str:
+    """Return the path to the codegraph CLI, else empty string.
+
+    Same Windows-.cmd-first priority as _detect_npm because codegraph is
+    installed by npm as a .cmd shim. Returns "" (not the bare command
+    name) so callers can test `if CODEGRAPH_EXE:` cleanly without
+    accidentally invoking a bare command via subprocess.
+    """
+    for name in ("codegraph.cmd", "codegraph"):
+        found = shutil.which(name)
+        if found:
+            return found
+    for candidate in [
+        os.path.expandvars(r"%APPDATA%\npm\codegraph.cmd"),
+        os.path.expandvars(r"%USERPROFILE%\AppData\Roaming\npm\codegraph.cmd"),
+    ]:
+        if os.path.isfile(candidate):
+            return candidate
+    return ""
+
+
+def _is_codegraph_project(path: str) -> bool:
+    """True iff `path` has been initialised by CodeGraph (the .codegraph/
+    SQLite database exists)."""
+    return os.path.isfile(os.path.join(path, ".codegraph", "codegraph.db"))
+
+
 # Resolved at startup; updated whenever Settings are saved.
 # All git subprocess calls use this variable so the user only has to
 # configure the path in one place.
 GIT_EXE: str = _cfg.get("git_exe") or _detect_git()
+
+# Resolved at startup; rebuilt in _on_settings_saved. Empty string when not
+# installed (codegraph is optional, distributed via npm — not bundled).
+CODEGRAPH_EXE: str = _cfg.get("codegraph_exe") or _detect_codegraph()
 
 
 # ── Search-root helpers (support both legacy str and new {"path":…,"label":…} format) ──
@@ -373,7 +424,12 @@ def update_gitignore_for_shadows(path: str, ext_map: dict):
 
 
 def _is_git_repo(path: str) -> bool:
-    """Return True if *path* is inside an initialised git repository."""
+    """Return True if *path* is inside an initialised git repository.
+
+    NOTE: this walks UPWARD via `git rev-parse --git-dir` — so a project
+    folder inside a parent git repo will also return True. For the strict
+    'this folder IS a repo root' check, use _is_local_git_repo instead.
+    """
     try:
         proc = subprocess.run(
             [GIT_EXE,"-C", path, "rev-parse", "--git-dir"],
@@ -383,6 +439,20 @@ def _is_git_repo(path: str) -> bool:
         return proc.returncode == 0
     except FileNotFoundError:
         return False
+
+
+def _is_local_git_repo(path: str) -> bool:
+    """Return True only if *path* itself is a git repo root.
+
+    Strict local check — does NOT walk upward. Use this whenever the
+    intent is 'should we treat this folder as its own version-controlled
+    project?' (e.g. commit-prompt flows, .gitignore writes).
+
+    Uses os.path.exists rather than os.path.isdir because git worktrees
+    store `.git` as a flat text file pointing to the main repo's .git/.
+    os.path.isdir would miss those; os.path.exists handles both.
+    """
+    return os.path.exists(os.path.join(path, ".git"))
 
 
 def _parse_git_status_v2(text: str) -> dict:
@@ -467,6 +537,9 @@ _BASELINE_GITIGNORE = """\
 
 # tokensave index (machine-specific binary database)
 .tokensave/
+
+# CodeGraph index (machine-specific binary database)
+.codegraph/
 
 # Python cache
 __pycache__/
@@ -789,12 +862,14 @@ C = {
 def find_projects():
     """Discover projects under every configured search root.
 
-    A folder qualifies if it contains either:
+    A folder qualifies if it contains any of:
       - a tokensave index  (.tokensave/tokensave.db)  — full tokensave features
+      - a CodeGraph index  (.codegraph/codegraph.db)  — full CodeGraph features
       - a git repository   (.git/)                    — git features only
 
-    Both types are shown in the Projects tab; tokensave-only commands show a
-    friendly 'not indexed yet' prompt for git-only projects.
+    All three types are shown in the Projects tab. Each tool's commands show a
+    friendly 'not initialised yet' prompt when called on a project that doesn't
+    have its index — keeping tokensave and CodeGraph as equal citizens.
     """
     projects = []
     seen: set = set()
@@ -813,28 +888,34 @@ def find_projects():
             # Check for markers BEFORE filtering dirnames
             has_ts  = ".tokensave" in dirnames
             has_git = ".git"       in dirnames
+            has_cg  = ".codegraph" in dirnames
 
             # Strip hidden dirs and known noise from further traversal
             dirnames[:] = [d for d in dirnames if d not in SKIP_DIRS
                            and not d.startswith(".")]
 
-            if not (has_ts or has_git):
+            if not (has_ts or has_git or has_cg):
                 continue
             if dirpath in seen:
                 continue
             seen.add(dirpath)
 
-            # mtime: tokensave db age if available, else last git commit
+            # mtime: tokensave db age if available, else last git commit,
+            # else codegraph db mtime (last full-build), else dirpath
             if has_ts:
                 db    = os.path.join(dirpath, ".tokensave", "tokensave.db")
                 mtime = os.path.getmtime(db) if os.path.isfile(db) else os.path.getmtime(dirpath)
-            else:
+            elif has_git:
                 db    = None
                 git_dir    = os.path.join(dirpath, ".git")
                 commit_msg = os.path.join(git_dir, "COMMIT_EDITMSG")
                 mtime = (os.path.getmtime(commit_msg)
                          if os.path.isfile(commit_msg)
                          else os.path.getmtime(git_dir))
+            else:   # codegraph-only
+                db    = None
+                cg_db = os.path.join(dirpath, ".codegraph", "codegraph.db")
+                mtime = os.path.getmtime(cg_db) if os.path.isfile(cg_db) else os.path.getmtime(dirpath)
 
             projects.append({
                 "path":          dirpath,
@@ -844,6 +925,7 @@ def find_projects():
                 "root_label":    rlabel,
                 "has_tokensave": has_ts,
                 "has_git":       has_git,
+                "has_codegraph": has_cg,
             })
     return sorted(projects, key=lambda p: p["mtime"], reverse=True)
 
@@ -1183,7 +1265,7 @@ class App(tk.Tk):
 
         self.tree = ttk.Treeview(
             tree_wrap,
-            columns=("active", "path", "synced", "git", "scaffold"),
+            columns=("active", "path", "synced", "cg", "git", "scaffold"),
             show="tree headings",
             selectmode="browse",
         )
@@ -1191,13 +1273,15 @@ class App(tk.Tk):
         self.tree.heading("active",   text="")
         self.tree.heading("path",     text="Path")
         self.tree.heading("synced",   text="Last Synced")
+        self.tree.heading("cg",       text="CG")
         self.tree.heading("git",      text="Git")
         self.tree.heading("scaffold", text="Scaffold")
 
         self.tree.column("#0",       width=170, stretch=False)
         self.tree.column("active",   width=28,  stretch=False, anchor=tk.CENTER)
-        self.tree.column("path",     width=250)
+        self.tree.column("path",     width=220)
         self.tree.column("synced",   width=90,  stretch=False, anchor=tk.CENTER)
+        self.tree.column("cg",       width=36,  stretch=False, anchor=tk.CENTER)
         self.tree.column("git",      width=60,  stretch=False, anchor=tk.CENTER)
         self.tree.column("scaffold", width=70,  stretch=False, anchor=tk.CENTER)
 
@@ -2331,6 +2415,7 @@ class App(tk.Tk):
             ("  Git: Daily Workflow", self._help_git_workflow),
             ("  Git Tab Buttons",     self._help_git_tab),
             ("  GitHub Setup",        self._help_github_setup),
+            ("  CodeGraph",           self._help_codegraph),
             ("  File Locations",      self._help_file_locations),
             ("  About",               self._help_about),
         ]
@@ -2793,6 +2878,44 @@ class App(tk.Tk):
               "the wizard shows a link to cli.github.com.")
         self._help_show(_fill)
 
+    def _help_codegraph(self):
+        def _fill():
+            h1, h2, p, warn, ok, dim, br, ins = self._hw()
+            h1("CodeGraph (alternative code-graph tool)")
+            p("CodeGraph is a separate MCP server that does what tokensave does — "
+              "builds a per-project code-graph index and exposes it to Claude Code. "
+              "The two don't conflict; a project can have both at once.")
+            br()
+            h2("When to use which")
+            ins("  • tokensave — bundled with the manager; full-featured; manual sync\n", "body")
+            ins("  • CodeGraph — auto-syncs while its MCP server is running; faster\n", "body")
+            ins("                for very large codebases (e.g. 25k-file repos)\n", "body")
+            br()
+            warn("⚠  About CodeGraph's auto-sync: the file watcher only runs while "
+                 "CodeGraph's MCP server is active inside an open Claude Code session. "
+                 "If you edit code with Claude Code closed, those edits won't be "
+                 "picked up automatically until the next session — at which point "
+                 "the watcher catches up. You can also right-click → 🧠 CodeGraph Sync "
+                 "to force an incremental update manually.")
+            br()
+            h2("Install")
+            ins("  Settings → CodeGraph → Install via npm  ", "body")
+            ins("(requires Node.js 18+)\n", "dim")
+            br()
+            h2("Use")
+            ins("  Right-click any project → 🧠 CodeGraph Init  →  then 🧠 Sync / Status\n", "body")
+            ins("  CG column in the Projects tab shows ✓ for initialised projects.\n", "body")
+            br()
+            h2("Why the manager doesn't run `codegraph install`")
+            p("CodeGraph registers itself with Claude Code (and Cursor / Codex / "
+              "opencode if you use them) via its own one-time installer: "
+              "`npx @colbymchenry/codegraph`. The TokenSave Manager intentionally "
+              "stays out of that flow — we handle per-project lifecycle only "
+              "(init / sync / status / remove). This means tokensave and CodeGraph "
+              "can both write their own sections into your global ~/.claude.json "
+              "without fighting each other.")
+        self._help_show(_fill)
+
     def _help_file_locations(self):
         def _fill():
             h1, h2, p, warn, ok, dim, br, ins = self._hw()
@@ -2886,6 +3009,7 @@ class App(tk.Tk):
                 has_scaffold = self._has_scaffold(p["path"])
                 has_ts       = p.get("has_tokensave", True)
                 has_git      = p.get("has_git", False)
+                has_cg       = p.get("has_codegraph", False)
                 if is_active:
                     base_tag = "active"
                 elif not has_ts:
@@ -2896,6 +3020,8 @@ class App(tk.Tk):
                     base_tag = "normal"
                 # synced column: show tokensave index age, or "—" for git-only projects
                 synced_str = fmt_age(p["mtime"]) if has_ts else "—"
+                # CG column: simple ✓/— marker (codegraph auto-syncs; no age shown)
+                cg_text = "✓" if has_cg else "—"
                 # Git column: placeholder "…" while the async refresh runs.
                 # Non-git projects get "—" immediately and need no async update.
                 git_text, git_tag = _format_git_status_cell(
@@ -2908,6 +3034,7 @@ class App(tk.Tk):
                                  values=("★" if is_active else "",
                                          p["path"],
                                          synced_str,
+                                         cg_text,
                                          git_text,
                                          "✔" if has_scaffold else "—"),
                                  tags=tags)
@@ -3012,6 +3139,12 @@ class App(tk.Tk):
         m.add_command(label="📊  Status",         command=self.cmd_status)
         m.add_command(label="⟳  Force Re-sync",  command=self.cmd_force_sync)
         m.add_command(label="🔍  Doctor",         command=self.cmd_doctor)
+        m.add_separator()
+        m.add_command(label="🧠  CodeGraph Init",          command=self.cmd_codegraph_init)
+        m.add_command(label="🧠  CodeGraph Sync",          command=self.cmd_codegraph_sync)
+        m.add_command(label="🧠  CodeGraph Status",        command=self.cmd_codegraph_status)
+        m.add_command(label="🧠  Remove CodeGraph Index",  command=self.cmd_codegraph_remove)
+        m.add_separator()
         m.add_command(label="📜  Git Log",        command=self.cmd_git_log)
         m.add_command(label="📝  Git Commit…",        command=self.cmd_git_commit)
         m.add_command(label="🔧  Git Init",           command=self.cmd_git_init)
@@ -3039,10 +3172,14 @@ class App(tk.Tk):
         self._ctx_menu.tk_popup(event.x_root, event.y_root)
 
     def _insert_pending_row(self, path, name):
-        """Add a placeholder row while tokensave init is running."""
+        """Add a placeholder row while tokensave init is running.
+
+        Six columns: active, path, synced, cg, git, scaffold — must match
+        the Treeview definition in _build_projects_tab.
+        """
         self.tree.insert("", 0,
             text=name,
-            values=("", path, "(indexing…)", "—"),
+            values=("", path, "(indexing…)", "—", "—", "—"),
             tags=("pending",))
 
     def _check_config(self):
@@ -3247,6 +3384,31 @@ class App(tk.Tk):
             "To add it:  right-click → ⚙ Retrofit…  and tick "
             "'Add tokensave @include + init'.",
             parent=self)
+        return False
+
+    def _require_codegraph_installed(self) -> bool:
+        """Return True if the CodeGraph CLI is installed and resolvable.
+
+        If not, shows a friendly install nudge dialog with an 'Open Settings'
+        button that scrolls Settings to the CodeGraph section. Returns False
+        so callers can bail out gracefully.
+        """
+        if CODEGRAPH_EXE and os.path.isfile(CODEGRAPH_EXE):
+            return True
+        # Custom yes/no dialog so we can label the buttons "Open Settings" / "Cancel"
+        result = messagebox.askyesno(
+            "CodeGraph is not installed",
+            "CodeGraph is not installed on this machine.\n\n"
+            "CodeGraph is an alternative code-graph tool that builds a "
+            "per-project SQLite index for Claude Code to query. It complements "
+            "tokensave — both can be enabled on the same project.\n\n"
+            "Open Settings now to install it?",
+            parent=self)
+        if result:
+            dlg = SettingsDialog(self, _cfg, _save_config, self._on_settings_saved)
+            # Defer the scroll so the dialog has been mapped and sized first
+            if hasattr(dlg, "_scroll_to_codegraph"):
+                dlg.after(50, dlg._scroll_to_codegraph)
         return False
 
     def cmd_set_active(self):
@@ -3707,14 +3869,18 @@ class App(tk.Tk):
 
     def _offer_commit_after_change(self, path: str, summary_label: str):
         """After a destructive manager action (Ensure .gitignore, Shadow Links,
-        Scaffold, Retrofit), check whether the working tree is now dirty and
-        offer the user a commit dialog if so.
+        Scaffold, Retrofit, CodeGraph Init), check whether the working tree is
+        now dirty and offer the user a commit dialog if so.
+
+        Uses _is_local_git_repo (strict — does NOT walk upward) so a project
+        nested inside an unrelated parent git repo never triggers a ghost
+        commit-prompt against the wrong repository.
 
         Silent no-ops:
-          - Not a git repo (nothing to commit to)
-          - Working tree is still clean (the operation didn't actually change anything)
+          - Path is not a git repo root locally (nothing to commit here)
+          - Working tree is still clean (the operation didn't change anything)
         """
-        if not _is_git_repo(path):
+        if not _is_local_git_repo(path):
             return
         # Check whether the working tree is actually dirty
         status_out, _ = self._shell_capture(
@@ -3798,6 +3964,125 @@ class App(tk.Tk):
             return
         self._run(["doctor"], cwd=path, label=os.path.basename(path))
 
+    # ── CodeGraph commands ─────────────────────────────────────────────────
+
+    def cmd_codegraph_init(self):
+        """Right-click: initialise CodeGraph in the selected project.
+
+        Uses `--index` so init also builds the initial graph in one step
+        (matches the experience of tokensave init).
+        """
+        path = self._selected_path()
+        if not path:
+            return
+        if not self._require_codegraph_installed():
+            return
+        if _is_codegraph_project(path):
+            messagebox.showinfo("Already initialised",
+                f"{os.path.basename(path)} already has CodeGraph initialised.",
+                parent=self)
+            return
+        name = os.path.basename(path)
+        self._log(f"Running codegraph init in {name}…", C["peach"])
+
+        def worker():
+            out, rc = self._shell_capture(
+                [CODEGRAPH_EXE, "init", "--index", path], path)
+            col = C["green"] if rc == 0 else C["red"]
+            for line in out.strip().splitlines()[-8:]:
+                self._log(f"  {line}", col)
+            self.after(0, self.refresh)
+            # Offer to commit the new .codegraph/config.json if this is a
+            # local git repo — uses _is_local_git_repo so a parent-directory
+            # repo doesn't ghost-trigger the prompt.
+            self.after(0, lambda: self._offer_commit_after_change(
+                path, "CodeGraph init files"))
+
+        threading.Thread(target=worker, daemon=True).start()
+
+    def cmd_codegraph_sync(self):
+        """Right-click: incrementally sync CodeGraph's index.
+
+        Note: CodeGraph auto-syncs via its native file watcher while its
+        MCP server is running inside a Claude Code session. This manual
+        sync is useful for catching up after editing files with Claude
+        Code closed.
+        """
+        path = self._selected_path()
+        if not path:
+            return
+        if not self._require_codegraph_installed():
+            return
+        if not _is_codegraph_project(path):
+            messagebox.showinfo("Not initialised",
+                f"{os.path.basename(path)} hasn't been initialised with "
+                "CodeGraph yet.\n\nRight-click → 🧠 CodeGraph Init first.",
+                parent=self)
+            return
+        name = os.path.basename(path)
+        self._log(f"Running codegraph sync in {name}…", C["peach"])
+
+        def worker():
+            out, rc = self._shell_capture(
+                [CODEGRAPH_EXE, "sync", path], path)
+            col = C["green"] if rc == 0 else C["red"]
+            for line in out.strip().splitlines()[-8:]:
+                self._log(f"  {line}", col)
+            self.after(0, self.refresh)
+
+        threading.Thread(target=worker, daemon=True).start()
+
+    def cmd_codegraph_status(self):
+        """Right-click: show CodeGraph stats for the selected project."""
+        path = self._selected_path()
+        if not path:
+            return
+        if not self._require_codegraph_installed():
+            return
+        if not _is_codegraph_project(path):
+            messagebox.showinfo("Not initialised",
+                f"{os.path.basename(path)} hasn't been initialised with "
+                "CodeGraph yet.\n\nRight-click → 🧠 CodeGraph Init first.",
+                parent=self)
+            return
+        name = os.path.basename(path)
+        self._log(f"Running codegraph status in {name}…", C["peach"])
+
+        def worker():
+            out, rc = self._shell_capture(
+                [CODEGRAPH_EXE, "status", path], path)
+            col = C["green"] if rc == 0 else C["red"]
+            for line in out.strip().splitlines():
+                self._log(f"  {line}", col)
+
+        threading.Thread(target=worker, daemon=True).start()
+
+    def cmd_codegraph_remove(self):
+        """Right-click: delete the .codegraph/ directory after confirmation."""
+        path = self._selected_path()
+        if not path:
+            return
+        name = os.path.basename(path)
+        cg_dir = os.path.join(path, ".codegraph")
+        if not os.path.isdir(cg_dir):
+            messagebox.showinfo("Nothing to remove",
+                f"{name} has no CodeGraph index.", parent=self)
+            return
+        if not messagebox.askyesno(
+                "Remove CodeGraph index?",
+                f"Delete the CodeGraph index for {name}?\n\n"
+                f"This removes .codegraph/ from the project folder. Your "
+                "source files are not touched. You can re-create the index "
+                "later via 🧠 CodeGraph Init.",
+                parent=self):
+            return
+        try:
+            shutil.rmtree(cg_dir)
+            self._log(f"  Removed .codegraph/ from {name}", C["green"])
+        except OSError as e:
+            self._log(f"  Could not remove .codegraph/: {e}", C["red"])
+        self.refresh()
+
     def cmd_open_folder(self):
         path = self._selected_path()
         if not path:
@@ -3862,12 +4147,13 @@ class App(tk.Tk):
         SettingsDialog(self, _cfg, _save_config, self._on_settings_saved)
 
     def _on_settings_saved(self):
-        global TOKENSAVE, TEMPLATE_DIR, SEARCH_ROOTS, GIT_EXE
+        global TOKENSAVE, TEMPLATE_DIR, SEARCH_ROOTS, GIT_EXE, CODEGRAPH_EXE
         global BASIC_INSTRUCTIONS_TEMPLATE, BASELINE_INCLUDE_LINE
-        TOKENSAVE    = _cfg.get("tokensave_exe", "")
-        TEMPLATE_DIR = _cfg.get("template_dir", "")
-        SEARCH_ROOTS = _cfg.get("search_roots", [])
-        GIT_EXE      = _cfg.get("git_exe") or _detect_git()
+        TOKENSAVE     = _cfg.get("tokensave_exe", "")
+        TEMPLATE_DIR  = _cfg.get("template_dir", "")
+        SEARCH_ROOTS  = _cfg.get("search_roots", [])
+        GIT_EXE       = _cfg.get("git_exe") or _detect_git()
+        CODEGRAPH_EXE = _cfg.get("codegraph_exe") or _detect_codegraph()
         BASIC_INSTRUCTIONS_TEMPLATE = os.path.join(TEMPLATE_DIR, "claude-md-template.md")
         BASELINE_INCLUDE_LINE = f"@{TEMPLATE_DIR}\\project-baseline.md"
         self.refresh()
@@ -4521,6 +4807,165 @@ class SettingsDialog(tk.Toplevel):
                  anchor=tk.W, padx=20, pady=(2, 0))
         self.after(150, _check_gh_status)
 
+        # ── CodeGraph (alternative code-graph tool) ──
+        ttk.Separator(self, orient="horizontal").pack(fill=tk.X, padx=20, pady=(12, 8))
+        self._cg_section = tk.Frame(self, bg=C["base"])
+        self._cg_section.pack(fill=tk.X)
+        tk.Label(self._cg_section,
+                 text="CodeGraph (codegraph)  —  optional alternative code-graph tool",
+                 bg=C["base"], fg=C["subtext"],
+                 font=("Segoe UI", 9)).pack(anchor=tk.W, padx=20)
+
+        cg_path_row = tk.Frame(self._cg_section, bg=C["base"])
+        cg_path_row.pack(fill=tk.X, padx=20, pady=(4, 0))
+        self._cg_exe_var = tk.StringVar(value=cfg.get("codegraph_exe", ""))
+        self._cg_exe_entry = ttk.Entry(cg_path_row, textvariable=self._cg_exe_var,
+                                        width=44)
+        self._cg_exe_entry.pack(side=tk.LEFT, padx=(0, 6))
+
+        def _browse_cg():
+            p = filedialog.askopenfilename(
+                title="Select codegraph executable",
+                filetypes=[("Executable", "*.cmd;*.exe;*.bat"), ("All", "*.*")],
+                initialdir=os.path.expandvars(r"%APPDATA%\npm"),
+                parent=self)
+            if p:
+                self._cg_exe_var.set(p)
+                self._verify_codegraph(p)
+
+        def _autodetect_cg():
+            found = _detect_codegraph()
+            if found:
+                self._cg_exe_var.set(found)
+                self._verify_codegraph(found)
+            else:
+                self._cg_status_lbl.config(text="✗  not installed",
+                                            fg=C["red"])
+
+        ttk.Button(cg_path_row, text="Browse…",
+                   command=_browse_cg).pack(side=tk.LEFT, padx=(0, 6))
+        ttk.Button(cg_path_row, text="Auto-detect",
+                   command=_autodetect_cg).pack(side=tk.LEFT, padx=(0, 6))
+
+        cg_install_row = tk.Frame(self._cg_section, bg=C["base"])
+        cg_install_row.pack(fill=tk.X, padx=20, pady=(6, 0))
+        self._cg_status_lbl = tk.Label(cg_install_row, text="Checking…",
+                                        bg=C["base"], fg=C["overlay0"],
+                                        font=("Segoe UI", 8), justify=tk.LEFT,
+                                        wraplength=420, anchor=tk.W)
+        self._cg_status_lbl.pack(side=tk.LEFT, padx=(0, 12), fill=tk.X, expand=True)
+
+        cg_btn_row = tk.Frame(self._cg_section, bg=C["base"])
+        cg_btn_row.pack(fill=tk.X, padx=20, pady=(4, 0))
+
+        npm_path = _detect_npm()
+
+        def _check_cg_status():
+            found = _detect_codegraph()
+            if found:
+                self._cg_status_lbl.config(text=f"✓  {found}", fg=C["green"])
+                self._cg_install_btn.configure(state=tk.DISABLED)
+                if not self._cg_exe_var.get():
+                    self._cg_exe_var.set(found)
+            else:
+                self._cg_status_lbl.config(text="✗  not installed",
+                                            fg=C["red"])
+                # Only re-enable Install if npm is actually available
+                if _detect_npm():
+                    self._cg_install_btn.configure(state=tk.NORMAL)
+                else:
+                    self._cg_install_btn.configure(state=tk.DISABLED)
+
+        def _cg_finish_install(ok: bool, msg: str):
+            """Main-thread callback after the install worker finishes."""
+            if ok:
+                # Re-detect so the resolved path shows up immediately
+                path = _detect_codegraph()
+                if path:
+                    self._cg_exe_var.set(path)
+                    self._cg_status_lbl.config(
+                        text=f"✓  Installed — {path}", fg=C["green"])
+                else:
+                    self._cg_status_lbl.config(
+                        text="✓  Installed.  Click 'Check again' to confirm.",
+                        fg=C["green"])
+                self._cg_install_btn.configure(state=tk.NORMAL)
+            else:
+                self._cg_status_lbl.config(text=msg, fg=C["red"])
+                self._cg_install_btn.configure(state=tk.NORMAL)
+                # Multi-line failures also pop up in a messagebox so the
+                # error isn't lost when the user clicks elsewhere
+                if "\n" in msg:
+                    messagebox.showerror("CodeGraph install failed",
+                                          msg, parent=self)
+
+        def _install_cg():
+            npm = _detect_npm()
+            if not npm:
+                self._cg_status_lbl.config(
+                    text="✗  npm not found — install Node.js 18+ first "
+                         "(https://nodejs.org)",
+                    fg=C["red"])
+                return
+            self._cg_install_btn.configure(state=tk.DISABLED)
+            self._cg_status_lbl.config(
+                text="Installing…  (this may take a couple of minutes)",
+                fg=C["yellow"])
+
+            def worker():
+                try:
+                    result = subprocess.run(
+                        [npm, "install", "-g", "@colbymchenry/codegraph"],
+                        capture_output=True, text=True, timeout=300,
+                        creationflags=CREATE_NO_WINDOW,
+                        encoding="utf-8", errors="replace")
+                except subprocess.TimeoutExpired:
+                    self.after(0, lambda: _cg_finish_install(
+                        ok=False, msg="Install timed out after 5 minutes."))
+                    return
+                except FileNotFoundError as e:
+                    self.after(0, lambda: _cg_finish_install(
+                        ok=False, msg=f"npm not found: {e}"))
+                    return
+
+                if result.returncode == 0:
+                    self.after(0, lambda: _cg_finish_install(
+                        ok=True, msg="✓ Installed successfully."))
+                else:
+                    err_text = (result.stderr or result.stdout or "").strip()
+                    # EPERM / EACCES is the common Windows failure when Node
+                    # was installed system-wide and the manager isn't elevated.
+                    hint = ""
+                    if "EPERM" in err_text or "EACCES" in err_text:
+                        hint = ("\n\nThis usually happens when Node.js was "
+                                "installed system-wide. Either run TokenSave "
+                                "Manager as administrator OR reinstall "
+                                "Node.js as a per-user install (the Node "
+                                "installer offers this option).")
+                    tail = "\n".join(err_text.splitlines()[-8:]) or "(no output)"
+                    self.after(0, lambda: _cg_finish_install(
+                        ok=False,
+                        msg=f"✗  Install failed (exit {result.returncode}):\n\n{tail}{hint}"))
+
+            threading.Thread(target=worker, daemon=True).start()
+
+        self._cg_install_btn = ttk.Button(cg_btn_row, text="Install via npm",
+                                           command=_install_cg)
+        self._cg_install_btn.pack(side=tk.LEFT, padx=(0, 6))
+        ttk.Button(cg_btn_row, text="Check again",
+                   command=_check_cg_status).pack(side=tk.LEFT, padx=(0, 6))
+
+        if not npm_path:
+            self._cg_install_btn.configure(state=tk.DISABLED)
+
+        tk.Label(self._cg_section,
+                 text="  npm install -g @colbymchenry/codegraph  —  requires Node.js 18+ on PATH.\n"
+                      "  Per-project actions live in the right-click menu (🧠 CodeGraph …).",
+                 font=("Segoe UI", 8), bg=C["base"], fg=C["overlay0"],
+                 justify=tk.LEFT).pack(anchor=tk.W, padx=20, pady=(4, 0))
+
+        self.after(200, _check_cg_status)
+
         # ── Search roots — two-column Treeview (label + path) ──
         tk.Label(self,
                  text="Search roots  —  each root's label becomes a category in the project list",
@@ -4637,6 +5082,43 @@ class SettingsDialog(tk.Toplevel):
         except Exception:
             self._git_status_lbl.config(text="✗  not found", fg=C["red"])
 
+    def _verify_codegraph(self, exe_path: str):
+        """Run 'codegraph --version' with the given path; update status label."""
+        if not exe_path:
+            self._cg_status_lbl.config(text="(will auto-detect on save)",
+                                        fg=C["overlay0"])
+            return
+        try:
+            result = subprocess.run(
+                [exe_path, "--version"],
+                capture_output=True, text=True, timeout=10,
+                creationflags=CREATE_NO_WINDOW)
+            version = (result.stdout or result.stderr).strip()
+            if result.returncode == 0:
+                self._cg_status_lbl.config(text=f"✓  {version or 'OK'}",
+                                            fg=C["green"])
+                self._cg_install_btn.configure(state=tk.DISABLED)
+            else:
+                self._cg_status_lbl.config(text="✗  not found at that path",
+                                            fg=C["red"])
+        except Exception:
+            self._cg_status_lbl.config(text="✗  not found at that path",
+                                        fg=C["red"])
+
+    def _scroll_to_codegraph(self):
+        """Pull the CodeGraph section into view + focus its path entry.
+
+        SettingsDialog is non-scrollable (resizable=False, no canvas wrapper),
+        so all sections are always rendered. focus_set on the path entry is
+        enough — no yview math needed. Wrapped in try/except so any future
+        layout change that introduces scrolling fails gracefully rather than
+        crashing the install-nudge flow.
+        """
+        try:
+            self._cg_exe_entry.focus_set()
+        except (AttributeError, tk.TclError):
+            pass
+
     def _save(self):
         exe = self._exe_var.get().strip()
         if exe and not os.path.isfile(exe):
@@ -4654,7 +5136,8 @@ class SettingsDialog(tk.Toplevel):
             for iid in self._roots_tv.get_children()
         ]
         self._cfg["auto_commit_after_sync"] = self._var_autocommit.get()
-        self._cfg["git_exe"] = self._git_exe_var.get().strip()
+        self._cfg["git_exe"]       = self._git_exe_var.get().strip()
+        self._cfg["codegraph_exe"] = self._cg_exe_var.get().strip()
         self._save_fn(self._cfg)
         self.destroy()
         self._callback()
