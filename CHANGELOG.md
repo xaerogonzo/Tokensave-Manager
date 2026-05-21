@@ -3,6 +3,17 @@
 
 ## [Unreleased]
 
+## [1.0.2] — 2026-05-21
+
+Patch release. Fixes a critical workflow regression where `_do_git_commit`'s opening `git reset` undid any prior `git rm --cached` from the new Untrack Ignored Files flow, trapping users in a cycle where tracked-but-ignored files re-staged themselves every time they clicked Commit.
+
+### Fixed
+- **`_do_git_commit` no longer runs `git reset` before staging.** The original reset was there to "clear the index so nothing already-staged sneaks into the commit" — but the cost was destroying intentional stagings like `git rm --cached` (the untracking operation the new 🧹 flow performs). The new behaviour: `git add` the selected paths idempotently, then commit with explicit path arguments — `git commit -m <msg> -- <paths>` — so only those paths land in the commit regardless of what else might be in the index. This is the standard git pattern for path-specific commits and makes the index-reset unnecessary.
+- **Better error surfacing when `git add` hits an ignored file.** Previously the manager logged `git add failed: <raw git output>` with no actionable advice. Now it specifically detects `ignored by one of your .gitignore files` in the output and surfaces a dedicated dialog: *"Some of the files you selected are already tracked AND match a .gitignore rule. Fix: right-click → 🧹 Untrack Ignored Files…"* with the affected paths listed.
+
+### Added
+- **Pre-flight tracked-but-ignored check in `_open_commit_dialog`.** Before opening the commit dialog, the manager runs `_find_tracked_but_ignored(path)`. If any matches exist, it shows a 3-way choice: **Yes** → open Untrack Ignored Files first (recommended, since the commit would otherwise fail); **No** → open the commit dialog anyway; **Cancel** → close, do nothing. This proactively breaks the cycle instead of waiting for the commit attempt to fail.
+
 ## [1.0.1] — 2026-05-21
 
 Patch release. Fixes the three bugs hit during the very first post-v1.0 retrofit attempt: a status-text parsing off-by-one that ate leading dots, a baseline `.gitignore` that over-corrected on `.codegraph/`, and the missing "Untrack ignored files" flow that left users stuck whenever a path was both tracked and ignored.

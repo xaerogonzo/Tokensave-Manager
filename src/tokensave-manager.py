@@ -3985,8 +3985,41 @@ class App(tk.Tk):
         """Open GitCommitDialog for a given project path. Reused by
         `cmd_git_commit` (Projects-tab right-click) AND by the
         offer-commit-after-change flow that runs after Ensure .gitignore,
-        Shadow Links, Scaffold, and Retrofit."""
-        # Fetch status synchronously (fast) so the dialog can show it immediately.
+        Shadow Links, Scaffold, and Retrofit.
+
+        Pre-flight check: if the project has tracked-but-ignored files,
+        offer to run Untrack Ignored Files FIRST. Otherwise the commit
+        attempt would inevitably hit git's "paths are ignored" error and
+        the user would have to come back and untrack anyway.
+        """
+        if _is_local_git_repo(path):
+            stale = _find_tracked_but_ignored(path)
+            if stale:
+                n = len(stale)
+                preview = "\n".join(f"  • {f}" for f in stale[:5])
+                if n > 5:
+                    preview += f"\n  • …and {n - 5} more"
+                choice = messagebox.askyesnocancel(
+                    "Tracked-but-ignored files detected",
+                    f"{n} file{'s' if n != 1 else ''} in this project "
+                    f"{'are' if n != 1 else 'is'} tracked by git BUT also "
+                    "match a .gitignore rule. Committing in this state "
+                    "usually surfaces git's 'paths are ignored' error and "
+                    "blocks the commit.\n\n"
+                    f"Affected:\n{preview}\n\n"
+                    "Yes  → run 🧹 Untrack Ignored Files first (recommended)\n"
+                    "No   → open the commit dialog anyway\n"
+                    "Cancel → close, do nothing",
+                    parent=self)
+                if choice is None:   # Cancel
+                    return
+                if choice:           # Yes — untrack first, that flow then
+                                     # offers a fresh commit prompt of its own
+                    UntrackIgnoredDialog(self, path, stale,
+                        reason="tracked but listed in .gitignore "
+                               "(blocks commit until untracked)")
+                    return
+        # No conflicts, OR user chose to proceed anyway
         status_out, _ = self._shell_capture(
             [GIT_EXE,"-C", path, "status", "--short"], path)
         is_repo = _is_git_repo(path)
@@ -4027,36 +4060,79 @@ class App(tk.Tk):
                       C["yellow"])
 
     def _do_git_commit(self, path: str, message: str, selected_files: list):
-        """Stage only `selected_files` (clearing any pre-existing staging) and
-        commit them with `message`. Files not in the list stay as un-committed
-        changes in the working tree."""
+        """Stage selected_files (idempotently) and commit ONLY those paths.
+
+        Critical design point: we use `git commit -- <paths>` (path-specific
+        commit) instead of plain `git commit`. The plain form commits the
+        ENTIRE index, which would force us to pre-`git reset` everything to
+        avoid accidentally committing unrelated staged work. That `git reset`
+        was destructive: it would UNDO any prior `git rm --cached` (i.e.
+        untracking work from 🧹 Untrack Ignored Files), trapping the user in
+        a cycle where tracked-but-ignored files re-staged themselves every
+        time they clicked Commit.
+
+        Path-specific commit avoids that entirely — it commits exactly the
+        files passed after `--`, regardless of what else is in the index.
+        Other staged work (including a queued `git rm --cached` for a path
+        NOT in selected_files) stays staged.
+
+        Files left unchecked in the dialog remain as un-committed changes
+        in the working tree (or as staged changes — `git status` will
+        continue to show them).
+        """
         name = os.path.basename(path)
         # Lock Git tab buttons during the commit (prevents double-click races).
         self._git_begin_op()
 
         def worker():
             try:
-                # 1. Clear the index so nothing already-staged sneaks into the
-                # commit. `git reset` without args = `git reset HEAD` — safe,
-                # only touches the index, never the working tree.
-                self._shell_capture([GIT_EXE,"-C", path, "reset"], path)
-
-                # 2. Stage exactly the picked files. `--` separates flags from
-                # paths and protects against filenames that start with "-".
+                # 1. Stage exactly the picked files. `git add` is idempotent
+                # so re-staging an already-staged file is harmless. `--`
+                # separates flags from paths and protects against filenames
+                # that start with "-".
                 if selected_files:
                     out, rc = self._shell_capture(
                         [GIT_EXE,"-C", path, "add", "--"] + selected_files, path)
                     if rc != 0:
-                        self.after(0, lambda: self._log(
-                            f"git add failed: {out.strip()}", C["red"]))
+                        # Detect the "tracked-but-ignored" case and surface a
+                        # specific recovery suggestion rather than a raw git
+                        # error. This happens when a path is in the index AND
+                        # matches a .gitignore rule — git refuses to add it.
+                        if "ignored by one of your .gitignore files" in out:
+                            offending = []
+                            for ln in out.splitlines():
+                                ln = ln.strip()
+                                if (ln and not ln.startswith("hint:")
+                                        and not ln.startswith("The following")
+                                        and not ln.startswith("warning:")):
+                                    offending.append(ln)
+                            self.after(0, lambda: messagebox.showwarning(
+                                "Tracked-but-ignored files",
+                                "Some of the files you selected are already "
+                                "tracked by git AND match a .gitignore rule. "
+                                "Git refuses to re-add them in this state.\n\n"
+                                f"Affected paths:\n  " + "\n  ".join(offending[:10])
+                                + ("\n  …" if len(offending) > 10 else "")
+                                + "\n\nFix: right-click the project → "
+                                "🧹 Untrack Ignored Files… → untrack those "
+                                "paths first. Then commit the result.",
+                                parent=self))
+                        else:
+                            self.after(0, lambda: self._log(
+                                f"git add failed: {out.strip()}", C["red"]))
                         return
 
-                # 3. Commit. Only the staged files will be in the commit.
+                # 2. Commit ONLY the selected paths. The `--` after the
+                # message separates path args from refs/options; without it,
+                # git might try to interpret a path like `master` or
+                # `HEAD~1` as a ref.
                 self._log(f"Committing {name} ({len(selected_files)} file"
                           f"{'s' if len(selected_files) != 1 else ''})…",
                           C["peach"])
-                cout, crc = self._shell_capture(
-                    [GIT_EXE,"-C", path, "commit", "-m", message], path)
+                commit_cmd = [GIT_EXE,"-C", path, "commit", "-m", message]
+                if selected_files:
+                    commit_cmd += ["--"] + selected_files
+                cout, crc = self._shell_capture(commit_cmd, path)
                 col = C["green"] if crc == 0 else C["red"]
                 for line in cout.strip().splitlines()[-4:]:
                     self.after(0, lambda l=line: self._log(f"  {l}", col))
