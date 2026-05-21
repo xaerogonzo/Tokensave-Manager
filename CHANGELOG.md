@@ -3,6 +3,10 @@
 
 ## [Unreleased]
 
+## [1.0.0] — 2026-05-21
+
+First stable release. The manager has matured into a general Claude Code project manager rather than a tokensave-only wrapper: it now does full git management (branch / commit / push / pull / PR), structured .gitignore editing, and supports both tokensave and CodeGraph as equal-citizen code-graph backends. Drops the alpha tag.
+
 ### Added
 - **CodeGraph support — equal citizen alongside tokensave** — right-click → 🧠 CodeGraph Init / Sync / Status / Remove Index works on any project. CodeGraph is an npm-distributed alternative MCP server (`@colbymchenry/codegraph`) that mirrors tokensave's role but auto-syncs via a native file watcher. The two use separate SQLite DBs (`.tokensave/tokensave.db` vs `.codegraph/codegraph.db`) and can both be active on the same project. New module-level helpers: `_detect_codegraph()` (Windows-`.cmd`-first PATH probe), `_detect_npm()`, `_is_codegraph_project()`, plus `CODEGRAPH_EXE` global. `find_projects()` adds `has_codegraph` to every project dict alongside `has_tokensave` and `has_git`. Projects tab gains a new **CG** column (✓/—) between Last Synced and Git. Settings dialog gains a CodeGraph section with **"Install via npm"** button (threaded subprocess.run with EPERM/EACCES surfacing, multi-line failures also pop up in a messagebox). `.codegraph/` added to `_BASELINE_GITIGNORE` (and therefore to the GitignoreDialog's `[+ Baseline]` template) so the SQLite DB is auto-excluded from git
 - **`_is_local_git_repo(path)` helper** — strict local-only "is this folder a git repo root?" check using `os.path.exists` (supports git worktrees where `.git` is a flat pointer file, not a directory). Replaces `_is_git_repo` in `_offer_commit_after_change` to fix a latent bug: previously, a project nested inside a parent git repo would erroneously trigger commit prompts against the WRONG repository. This retroactively benefits the existing commit-prompt flows (Ensure .gitignore, Shadow Links, Scaffold, Retrofit)
