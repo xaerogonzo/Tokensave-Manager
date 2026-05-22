@@ -1592,13 +1592,15 @@ class App(tk.Tk):
                                 command=self.cmd_git_new_branch)
         btn_switch = ttk.Button(row2, text="🔀  Switch Branch…",
                                 command=self.cmd_git_switch_branch)
+        btn_merge  = ttk.Button(row2, text="⇄  Merge…",
+                                command=self.cmd_git_merge)
         btn_del    = ttk.Button(row2, text="🗑  Delete Branch…",
                                 command=self.cmd_git_delete_branch)
         btn_openpr = ttk.Button(row2, text="🔗  Open PR",
                                 command=self.cmd_git_open_pr)
 
         for btn in (btn_push, btn_pull, btn_commit, btn_undo,
-                    btn_new, btn_switch, btn_del, btn_openpr):
+                    btn_new, btn_switch, btn_merge, btn_del, btn_openpr):
             btn.pack(side=tk.LEFT, padx=(0, 6))
 
         _Tooltip(btn_push,
@@ -1629,11 +1631,18 @@ class App(tk.Tk):
             "For example: switch from an experiment back to 'master'.\n\n"
             "Tip: commit your changes first — switching with\n"
             "unsaved edits will fail.")
+        _Tooltip(btn_merge,
+            "Merge another branch INTO the branch you're currently on.\n"
+            "Use this to bring a finished feature branch back into master.\n\n"
+            "Typical workflow: switch to master → pull → merge your feature →\n"
+            "push → delete the feature branch.\n\n"
+            "Conflicts (if any) must be resolved manually in your editor.")
         _Tooltip(btn_del,
             "Delete a branch you no longer need.\n"
             "Safe by default — warns you if the branch has changes\n"
             "that haven't been saved back to the main branch yet.\n"
-            "You can force-delete if you're sure you don't need them.")
+            "After local delete, offers to also delete it from GitHub\n"
+            "if a remote copy exists.")
         _Tooltip(btn_openpr,
             "Open a Pull Request on GitHub for the current branch.\n\n"
             "A Pull Request is a way to say: 'I made some changes on a\n"
@@ -1644,7 +1653,7 @@ class App(tk.Tk):
 
         self._git_all_btns       = [btn_set_remote, btn_push, btn_pull,
                                      btn_commit, btn_undo, btn_new,
-                                     btn_switch, btn_del, btn_openpr]
+                                     btn_switch, btn_merge, btn_del, btn_openpr]
         self._git_push_pull_btns = [btn_push, btn_pull, btn_openpr]
 
         # Start all buttons disabled — enabled by _git_update_ui once state is known
@@ -2162,6 +2171,92 @@ class App(tk.Tk):
 
         threading.Thread(target=worker, daemon=True).start()
 
+    def cmd_git_merge(self):
+        """Merge another branch INTO the current branch.
+
+        Typical use: while on master, merge a finished feature branch back in.
+        Working tree must be clean (uncommitted changes will block the merge).
+        Conflicts must be resolved manually.
+        """
+        path = self._git_path
+        if not path:
+            return
+        if self._git_op_in_flight:
+            return
+
+        # Get branch list and current branch (synchronous — fast)
+        out, rc = self._shell_capture(
+            [GIT_EXE,"-C", path, "branch"], path)
+        if rc != 0:
+            messagebox.showerror("Git Error", out.strip(), parent=self)
+            return
+        non_current = []
+        current = ""
+        for line in out.strip().splitlines():
+            if line.startswith("* "):
+                current = line[2:].strip()
+            else:
+                non_current.append(line.strip())
+        if not non_current:
+            messagebox.showinfo("No Other Branches",
+                "There are no other branches to merge from.", parent=self)
+            return
+
+        proj = os.path.basename(path)
+        source = SwitchBranchDialog.pick(self,
+            f"Merge into {current} — {proj}",
+            non_current, parent=self)
+        if not source:
+            return
+
+        if not messagebox.askyesno(
+                "Merge Branch",
+                f"Merge '{source}' INTO '{current}'?\n\n"
+                f"This brings commits from '{source}' into '{current}'.\n"
+                "Your working tree must be clean.\n\n"
+                "If conflicts occur, resolve them in your editor, then\n"
+                "Commit the result.",
+                parent=self):
+            return
+
+        self._git_begin_op()
+
+        def worker():
+            try:
+                out, rc = self._shell_capture(
+                    [GIT_EXE,"-C", path, "merge", "--no-edit", source], path)
+                col = C["green"] if rc == 0 else C["red"]
+                if rc == 0:
+                    self._log(f"  [{proj}] Merged '{source}' into '{current}'", col)
+                    for line in out.strip().splitlines()[-4:]:
+                        self._log(f"    {line}", col)
+                else:
+                    out_l = out.lower()
+                    if "conflict" in out_l:
+                        self.after(0, lambda: messagebox.showwarning(
+                            "Merge Conflicts",
+                            f"Merging '{source}' into '{current}' produced conflicts.\n\n"
+                            "Open the project in your editor and look for files\n"
+                            "marked with conflict markers (<<<<<< / >>>>>>).\n"
+                            "Resolve them, then use 📝 Commit… to commit the result.\n\n"
+                            "Or open a terminal in the project folder and run\n"
+                            "    git merge --abort\n"
+                            "to undo the merge attempt entirely.",
+                            parent=self))
+                    elif "unmerged" in out_l or "your local changes" in out_l:
+                        self.after(0, lambda: messagebox.showwarning(
+                            "Working Tree Not Clean",
+                            f"Cannot merge — '{current}' has uncommitted changes.\n\n"
+                            "Commit or stash them first, then try again.",
+                            parent=self))
+                    self._log(f"  [{proj}] Merge failed", col)
+                    for line in out.strip().splitlines()[-4:]:
+                        self._log(f"    {line}", col)
+            finally:
+                self.after(0, self._git_end_op)
+
+        threading.Thread(target=worker, daemon=True).start()
+
     def cmd_git_delete_branch(self):
         """Delete a non-current branch with safe/force-delete distinction."""
         path = self._git_path
@@ -2202,7 +2297,7 @@ class App(tk.Tk):
                     [GIT_EXE,"-C", path, "branch", "-d", branch], path)
                 if rc == 0:
                     self._log(f"  [{os.path.basename(path)}] Deleted branch '{branch}'", C["green"])
-                    self.after(0, self._git_end_op)
+                    self.after(0, lambda: offer_remote_delete(branch))
                     return
                 out_l = out.lower()
                 if "not fully merged" in out_l or "unmerged" in out_l:
@@ -2237,9 +2332,68 @@ class App(tk.Tk):
                     col = C["green"] if r2 == 0 else C["red"]
                     msg = f"Force-deleted '{branch}'" if r2 == 0 else o2.strip()
                     self._log(f"  [{os.path.basename(path)}] {msg}", col)
+                    if r2 == 0:
+                        self.after(0, lambda: offer_remote_delete(branch))
+                        return
                 finally:
                     self.after(0, self._git_end_op)
             threading.Thread(target=force_worker, daemon=True).start()
+
+        def offer_remote_delete(deleted_branch: str):
+            """After a successful local delete, offer to also delete origin/<branch>.
+
+            Only prompts if origin/<branch> actually exists. Avoids confusing
+            the user with a yes/no on a branch they never pushed.
+            """
+            # Check if origin/<branch> exists in the remote-tracking branch list.
+            rbo, rbrc = self._shell_capture(
+                [GIT_EXE, "-C", path, "branch", "-r"], path)
+            has_remote = False
+            if rbrc == 0:
+                target = f"origin/{deleted_branch}"
+                for line in rbo.strip().splitlines():
+                    if line.strip().split(" ", 1)[0] == target:
+                        has_remote = True
+                        break
+            if not has_remote:
+                self._git_end_op()
+                return
+
+            if not messagebox.askyesno(
+                    "Delete from GitHub too?",
+                    f"'{deleted_branch}' is deleted locally, but a copy still\n"
+                    f"exists on GitHub (origin/{deleted_branch}).\n\n"
+                    "Also delete it from GitHub?\n"
+                    "(This is the same as running\n"
+                    f"  git push origin --delete {deleted_branch})",
+                    parent=self):
+                self._git_end_op()
+                return
+
+            def remote_worker():
+                try:
+                    ro, rrc = self._shell_capture(
+                        [GIT_EXE, "-C", path, "push", "origin", "--delete", deleted_branch],
+                        path, env=_GIT_ENV_NO_PROMPT)
+                    col = C["green"] if rrc == 0 else C["red"]
+                    if rrc == 0:
+                        self._log(f"  [{os.path.basename(path)}] Deleted 'origin/{deleted_branch}' from GitHub", col)
+                    else:
+                        self._log(f"  [{os.path.basename(path)}] Remote delete failed", col)
+                        for line in ro.strip().splitlines()[-4:]:
+                            self._log(f"    {line}", col)
+                        if _is_auth_error(ro):
+                            self.after(0, lambda: messagebox.showinfo(
+                                "GitHub Authentication Required",
+                                "GitHub needs to verify your identity.\n\n"
+                                "Open a terminal in the project folder and run:\n"
+                                f"    git push origin --delete {deleted_branch}\n\n"
+                                "A browser window will open asking you to log in.",
+                                parent=self))
+                finally:
+                    self.after(0, self._git_end_op)
+
+            threading.Thread(target=remote_worker, daemon=True).start()
 
         threading.Thread(target=worker, daemon=True).start()
 
