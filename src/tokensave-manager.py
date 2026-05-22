@@ -2205,7 +2205,7 @@ class App(tk.Tk):
         proj = os.path.basename(path)
         source = SwitchBranchDialog.pick(self,
             f"Merge into {current} — {proj}",
-            non_current, parent=self)
+            non_current, parent_widget=self)
         if not source:
             return
 
@@ -2279,7 +2279,7 @@ class App(tk.Tk):
         # Let user pick
         branch = SwitchBranchDialog.pick(self,
                                           f"Delete Branch — {os.path.basename(path)}",
-                                          non_current, parent=self)
+                                          non_current, parent_widget=self)
         if not branch:
             return
         if not messagebox.askyesno(
