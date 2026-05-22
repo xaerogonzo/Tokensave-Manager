@@ -133,7 +133,9 @@ The manager's design philosophy: **never force a choice you don't want to make**
 - **Push / Pull** — one-click with `git push -u origin HEAD` / `git pull`; graceful auth-error message if GitHub credentials aren't cached yet
 - **Commit with per-file staging** — every changed file is shown as a checkbox with a colour-coded status badge (M modified / A added / D deleted / R renamed / ? untracked). Tick exactly the files you want, write a message (or use **💡 Suggest** for an auto-generated conventional-commit message), commit only those files
 - **Undo Last Commit** — `git reset --soft HEAD~1`; keeps all changes, removes only the commit marker
-- **Branch management** — New Branch, Switch Branch, Delete Branch dialogs; no typing required
+- **Branch management** — New Branch, Switch Branch, Merge, Delete Branch dialogs; no typing required
+- **Merge a branch INTO the current one** — `⇄ Merge…` picks a source branch (the destination is wherever you are right now). Uses `git merge --no-edit` so no editor pops up. Conflicts surface as a dialog with the resolve-and-commit or `git merge --abort` instructions; dirty-tree errors get their own dialog
+- **Remote-aware Delete Branch** — after a successful local delete, the manager checks `git branch -r` for `origin/<branch>`. If it exists, you get a prompt to also `git push origin --delete <branch>` so GitHub stays in sync. Works for both safe and force deletes
 - **Open PR on GitHub** — on a feature branch, opens the GitHub compare page directly in your browser. On master/main, walks you through the branch workflow step by step
 - **Set Remote** — step-by-step dialog for connecting a project to a GitHub repository
 - **GitHub Setup wizard** — full onboarding: set git identity, sign in / create account, create repo on GitHub, set remote, first push, create a release
@@ -291,8 +293,8 @@ A full git control panel for whichever project is selected in the Projects tab.
 │  +new line                                                        │
 ├───────────────────────────────────────────────────────────────────┤
 │  [⬆ Push]  [⬇ Pull]  [📝 Commit…]  [↩ Undo Last Commit]          │
-│  [🌿 New Branch]  [🔀 Switch Branch…]  [🗑 Delete Branch…]         │
-│  [🔗 Open PR]                                                      │
+│  [🌿 New Branch]  [🔀 Switch Branch…]  [⇄ Merge…]                  │
+│  [🗑 Delete Branch…]  [🔗 Open PR]                                 │
 └────────────────────────────────────────────────────────────────────┘
 ```
 
@@ -323,7 +325,8 @@ A full git control panel for whichever project is selected in the Projects tab.
 | ↩ Undo Last Commit | `git reset --soft HEAD~1` — remove last commit, keep changes |
 | 🌿 New Branch | Create a branch with optional immediate switch |
 | 🔀 Switch Branch… | Switch to a different local branch |
-| 🗑 Delete Branch… | Delete a non-current branch (safe by default; offers force if unmerged) |
+| ⇄ Merge… | Merge another branch INTO the current one (use after switching to master to pull a finished feature back in). Handles conflict + dirty-tree errors with inline instructions |
+| 🗑 Delete Branch… | Delete a non-current branch (safe by default; offers force if unmerged). After local delete, prompts to also delete `origin/<branch>` if it exists on GitHub |
 | 🔗 Open PR | Open GitHub's compare page for the current branch; or explains branch workflow if on main |
 
 Every button has a hover tooltip with a plain-English explanation.
@@ -416,11 +419,15 @@ If you're new to git, here's the pattern the manager is designed around:
 2. Make your edits in your editor
 3. **📝 Commit…** — tick the files you changed, write a message, commit
    - Repeat steps 2–3 as many times as needed
-4. **⬆ Push** — send your branch to GitHub
-5. **🔗 Open PR** — GitHub opens with a "Compare & pull request" button
-6. Review your changes on GitHub, add a description, click **Create pull request**
-7. When ready, **Merge** on GitHub (or just push directly to master for solo projects)
-8. Back in the manager: **🔀 Switch Branch…** → `master`, then **⬇ Pull** to bring the merged changes down
+4. **⬆ Push** — send your branch to GitHub (optional — only if you want a backup or to share)
+5. **🔀 Switch Branch…** → `master`
+6. **⬇ Pull** — pick up any new master commits before merging
+7. **⇄ Merge…** → pick your feature branch — confirmation reads "Merge X INTO master?"
+8. **⬆ Push** — master with the merged commits goes to GitHub
+9. **🗑 Delete Branch…** → pick your feature branch
+   - Yes to local delete → Yes to "Also delete from GitHub?"
+
+Steps 5–9 are the full **finish-a-branch** flow. If you prefer GitHub's PR review UI for collaborators, do steps 1–4 then use **🔗 Open PR** at step 5 instead, and merge from GitHub's web interface — then come back and run the delete step.
 
 ### Quick solo workflow (no PR needed)
 
@@ -550,6 +557,9 @@ Token Save Manager Source/
 See [CHANGELOG.md](CHANGELOG.md) for the full history.
 
 **Recent highlights (Unreleased):**
+- **⇄ Merge button on the Git tab** — merge a branch INTO the current one without dropping to the CLI. Handles conflicts and dirty-tree errors with inline guidance
+- **Remote-aware Delete Branch** — after a successful local delete, prompts to also delete `origin/<branch>` from GitHub when a remote copy exists
+- **[project-name] prefix on all git log lines** — every Push, Pull, Commit, Merge, branch op, etc. logs as `[Project] …` so it's unambiguous which repo an action ran on. Dialog titles too: `New Branch — MyProject` etc.
 - Git tab with full push/pull/commit/branch/diff UI
 - Per-file staging in the commit dialog with colour-coded badges
 - Conventional-commit message auto-suggestion

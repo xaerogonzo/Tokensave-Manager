@@ -3086,10 +3086,23 @@ class App(tk.Tk):
             ins("  1. Click  🌿 New Branch  and give it a name (e.g. 'try-new-ui')\n", "body")
             ins("  2. Check 'Switch to this branch immediately'\n", "body")
             ins("  3. Make your changes and commit as normal\n", "body")
-            ins("  4. If you like it: use 🔀 Switch Branch to go back to master,\n"
-                "     then merge (currently via terminal: git merge try-new-ui)\n", "body")
-            ins("  5. If you don't like it: just switch back to master — the\n"
+            ins("  4. If you don't like it: 🔀 Switch Branch back to master — the\n"
                 "     experiment branch stays there but your main code is untouched\n", "body")
+            br()
+            h2("Finishing a feature branch (merge & cleanup)")
+            p("Once your branch is tested and ready to bring back into master:")
+            ins("  1.  🔀 Switch Branch  → master\n", "body")
+            ins("  2.  ⬇ Pull            — pick up any new master commits first\n", "body")
+            ins("  3.  ⇄ Merge…          → pick your feature branch\n", "body")
+            ins("                          Confirmation says 'Merge X INTO master?' — yes\n", "body")
+            ins("  4.  ⬆ Push            — master with the merged commits goes to GitHub\n", "body")
+            ins("  5.  🗑 Delete Branch  → pick your feature branch → Yes (local)\n", "body")
+            ins("                          Then: 'Also delete from GitHub?' → Yes\n", "body")
+            br()
+            p("If the merge produces conflicts, the manager pops a dialog telling "
+              "you what to do (resolve in editor + commit, or run "
+              "'git merge --abort' to undo). Conflicts only happen when both "
+              "branches changed the same lines.")
             br()
             h2("Undoing mistakes")
             p("Made a bad commit? Click  ↩ Undo Last Commit. Your changes come back "
@@ -3132,10 +3145,16 @@ class App(tk.Tk):
             h2("Branches")
             ins("  🌿 New Branch    — create a branch and optionally switch to it\n", "body")
             ins("  🔀 Switch Branch — pick a branch from the list to check out\n", "body")
-            ins("  🗑 Delete Branch — safe-delete (warns if branch has unmerged changes)\n", "body")
+            ins("  ⇄ Merge…         — merge another branch INTO the current one\n", "body")
+            ins("                     (use after switching to master to pull a finished feature back in)\n", "body")
+            ins("  🗑 Delete Branch — safe-delete locally; then offers to also delete from GitHub\n", "body")
+            ins("                     (only prompts about GitHub if a remote copy actually exists)\n", "body")
             br()
             warn("⚠  Switching branches with uncommitted changes will fail. "
                  "Commit or undo first.")
+            br()
+            warn("⚠  Merging with uncommitted changes also fails. Same fix — commit, "
+                 "stash, or undo first.")
             br()
             h2("Push & Pull")
             p("Push and Pull are only enabled once a remote (GitHub URL) is set. "

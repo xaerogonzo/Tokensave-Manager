@@ -94,7 +94,8 @@ App (tk.Tk)
 │   ├── cmd_git_set_remote        — open SetRemoteDialog; runs git remote add/set-url
 │   ├── cmd_git_new_branch        — open NewBranchDialog; git checkout -b or git branch
 │   ├── cmd_git_switch_branch     — open SwitchBranchDialog; git checkout with dirty-tree guard
-│   ├── cmd_git_delete_branch     — safe/force delete with unmerged-vs-other-error distinction
+│   ├── cmd_git_merge             — open branch picker; git merge --no-edit; conflict + dirty-tree handling
+│   ├── cmd_git_delete_branch     — safe/force delete; post-delete prompt to push remote deletion if origin/<branch> exists
 │   ├── cmd_github_setup          — open GitHubSetupDialog for current/selected project
 │   └── _add_snippet / _edit_snippet / _delete_snippet / _on_snippet_saved
 └── Worker helpers
@@ -110,6 +111,8 @@ App (tk.Tk)
     ├── _do_git_set_remote()     — git remote add/set-url in background thread
     ├── _do_git_new_branch()     — git checkout -b / git branch in background thread
     ├── _do_git_switch_branch()  — git checkout <branch> with rc != 0 error dialog
+    ├── (cmd_git_merge inlines its worker)  — git merge --no-edit <source>; on rc != 0, distinguishes "conflict" vs "unmerged/your local changes" and pops the matching dialog
+    ├── (cmd_git_delete_branch offer_remote_delete nested fn) — after local delete, scans git branch -r for origin/<branch> and runs git push origin --delete on user confirm
     ├── _git_refresh()           — background fetch of branch/remote/status/log; calls _git_update_ui
     ├── _git_update_ui()         — main-thread update of all Git tab widgets + button states
     ├── _git_show_diff()         — render diff into Text widget with colour tags (capped at 2000 lines)
@@ -130,7 +133,7 @@ ShadowLinksDialog (tk.Toplevel)  — modal: editable extension/name map + sync t
 AssignCategoryDialog (tk.Toplevel)  — modal: category + sub-category comboboxes with existing values; right-click 📁 Assign Category…
 SetRemoteDialog (tk.Toplevel)     — modal: GitHub URL entry with beginner-friendly step-by-step instructions
 NewBranchDialog (tk.Toplevel)     — modal: branch name entry + "switch immediately" checkbox
-SwitchBranchDialog (tk.Toplevel)  — modal: listbox of local branches; double-click to switch; static pick() helper for delete flow
+SwitchBranchDialog (tk.Toplevel)  — modal: listbox of local branches; double-click to switch; static pick() helper reused for delete + merge picker flows. Important calling convention: pick()'s signature is `(parent, title, branches, parent_widget=None)` — pass `parent_widget=self` for the centering anchor, NOT `parent=self` (the latter collides with the positional first arg and raises TypeError, which Tk silently swallows on button callbacks → dead button)
 GitCommitDialog (tk.Toplevel)     — modal: per-file checklist of working-tree changes with colour-coded status badges (M/A/D/R/?/!) + Select All / None / Modified Only quick-pick buttons + commit message entry with auto-suggest (💡 Suggest button that updates based on which files are ticked); callback signature `(path, message, selected_files: list[str])`. Right-click → 📝 Git Commit… or Git tab → Commit…
 GitHubSetupDialog (tk.Toplevel)  — modal: step-by-step GitHub onboarding wizard. Step 1 saves git identity; Step 2 offers Sign in (primary) + Create account (secondary); Step 3 opens github.com/new; Step 4 sets remote URL; Step 5 first push. Separate Releases section shells out to `gh release create` when `shutil.which("gh")` returns a path. Scrollable canvas wraps the body Frame so it fits small windows. Opened by 🐙 GitHub… button in Git tab header.
 ```
@@ -146,7 +149,7 @@ GitHubSetupDialog (tk.Toplevel)  — modal: step-by-step GitHub onboarding wizar
 │  │   ├─ Header: project name, branch, remote, Set Remote, Refresh
 │  │   ├─ Working tree Listbox + Recent commits Text (side by side)
 │  │   ├─ Diff Text widget (colour-coded +/- lines, capped at 2000 lines)
-│  │   └─ Action bar: Push, Pull, Commit, Undo Last Commit, New Branch, Switch Branch, Delete Branch
+│  │   └─ Action bar: Push, Pull, Commit, Undo Last Commit, New Branch, Switch Branch, Merge, Delete Branch, Open PR
 │  │   │   Columns: Project (#0, tree col), active ★, path, last synced, scaffold ✔/—
 │  │   │   └─ Right-click on project row → context menu (per-project actions)
 │  │   │      Right-click on category/sub-category header → no menu

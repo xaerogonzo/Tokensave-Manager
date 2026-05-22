@@ -175,18 +175,34 @@ Click **🔀 Switch Branch…**, select `master`, click Switch.
 > **Important:** commit your changes before switching. If you have uncommitted
 > changes that conflict with the target branch, the switch will fail.
 
-### Merge a branch (terminal step — not yet in the manager)
+### Merge a branch back into master
 
-Once your experiment is done and you're on `master`:
+Once your experiment is tested and you want its commits in `master`:
 
-```
-git merge feature/dark-mode
-```
+1. **🔀 Switch Branch…** → `master`
+2. **⬇ Pull** (in case the remote master moved while you were working)
+3. **⇄ Merge…** → pick your feature branch
+   - Confirmation will read: *"Merge 'feature/dark-mode' INTO 'master'?"*
+4. **⬆ Push** — master now has the merged commits on GitHub too
+
+> **Conflicts?** If both branches changed the same lines, git can't auto-merge
+> and the manager pops a dialog telling you exactly what to do — open the
+> affected files in your editor, fix the `<<<<<<` markers, then **📝 Commit**.
+> Prefer to back out instead? Open a terminal in the project folder and run
+> `git merge --abort`.
+
+> **Dirty working tree?** Merge fails if you have uncommitted changes on the
+> destination branch. Commit or stash them first, then re-run Merge.
 
 ### Delete a finished branch
 
 Click **🗑 Delete Branch…**, select the branch, click Delete. If it has unmerged
 changes you'll be warned and given the option to force-delete.
+
+After the local delete succeeds, the manager checks whether `origin/<branch>`
+exists on GitHub. If it does, you'll get a second prompt: **"Also delete from
+GitHub?"** Say yes and the manager runs `git push origin --delete <branch>`
+for you — no terminal needed, and no orphaned remote branch left behind.
 
 ---
 

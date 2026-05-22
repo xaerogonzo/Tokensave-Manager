@@ -3,6 +3,15 @@
 
 ## [Unreleased]
 
+### Added
+- **⇄ Merge button on the Git tab** — merge another branch INTO the current one without dropping to the CLI. New `cmd_git_merge` opens a branch picker (reuses `SwitchBranchDialog.pick`), then runs `git merge --no-edit <source>` in a background worker. Two failure modes get dedicated dialogs: merge conflicts ("resolve in editor + Commit, or run `git merge --abort`") and dirty working tree ("commit or stash first"). Confirmation reads `"Merge 'X' INTO 'Y'?"` — direction is always explicit
+- **Remote-aware Delete Branch** — after a successful local delete (both safe `-d` and force `-D` paths), the worker scans `git branch -r` for `origin/<branch>`. If present, a follow-up dialog offers to also run `git push origin --delete <branch>`. Same `_is_auth_error` detection as Push/Pull surfaces a helpful re-auth message on credential failures. Only prompts when the remote actually exists — never-pushed branches just delete silently
+- **Project name in every git operation log line** — Push, Pull, Commit, Undo, Set Remote, New Branch, Switch Branch, Merge, Delete Branch (regular + force + remote), Open PR all prefix their log lines with `[<project-basename>] …`. Solves a real footgun: previously operations from the Git tab and operations from the Projects-tab right-click could target different projects depending on selection state, with no way to tell from the log which repo actually got the change. The active project also gets its own prominent "OPERATING ON" header label on the Git tab
+- **Project name suffixed onto branch dialog titles** — `New Branch — MyProject`, `Switch Branch — MyProject`, `Set Remote — MyProject`, `Delete Branch — MyProject`, `Merge into master — MyProject`. The OS window title also identifies the target, so window managers / Alt-Tab disambiguate too. SwitchBranchDialog body now shows the project basename under its heading to match the existing NewBranchDialog pattern
+
+### Fixed
+- **`SwitchBranchDialog.pick()` calls were duplicating the `parent` argument** — both `cmd_git_delete_branch` (after the project-name-suffix UX change) and the brand-new `cmd_git_merge` called `pick(self, ..., parent=self)`. The signature is `pick(parent, title, branches, parent_widget=None)`, so the kwarg `parent=self` collided with the positional first arg → `TypeError: pick() got multiple values for argument 'parent'`. Tk's default behaviour for callback exceptions is to print to stderr only, so both buttons appeared inert ("nothing happens when clicked"). Fixed by switching to `parent_widget=self` in both call sites. The Delete Branch button had been silently broken since the UX-suffix commit earlier in the unreleased cycle; Merge was broken from its first commit. Architecture doc updated with a note about the calling convention to prevent recurrence
+
 ## [1.0.3] — 2026-05-22
 
 Patch release. Fixes a UX dead-end in the Git tab and replaces the noisy auto-commit Stop hook with a smarter version that collapses consecutive auto-commits and writes useful messages.
