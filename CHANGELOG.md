@@ -3,6 +3,24 @@
 
 ## [Unreleased]
 
+## [1.0.4] — 2026-05-22
+
+Edit this summary, then click Publish.
+
+### Changed
+- update tokensave-manager.py
+- update tokensave-manager.py
+- update BASIC_INSTRUCTIONS.md, CHANGELOG.md + 2 more
+
+### Docs
+- update documentation
+
+### Other
+- Document the Merge button + remote-aware Delete Branch
+- Fix SwitchBranchDialog.pick() calls — was duplicating 'parent' arg
+- Add Merge button + remote-aware Delete Branch
+- Make git operations project-aware in logs and dialog titles
+
 ### Added
 - **📦 Release… button on the Git tab — one-button GitHub release wizard.** Right-click an existing release flow used to round-trip through Claude: read CHANGELOG, classify commits, write notes prose, build, zip, `gh release create`. The new wizard does it all locally — zero LLM tokens per release. Six stacked sections in a scrollable canvas:
   - **Version** — auto-detects the last tag via `git describe --tags --abbrev=0`, then offers Patch / Minor / Major radio buttons biased by commit content (any `feat:` → preselect Minor; any `BREAKING` / `!:` → preselect Major). Free-text override field for prerelease tags. First-release default is `v0.1.0`
