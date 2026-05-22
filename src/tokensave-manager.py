@@ -1476,9 +1476,13 @@ class App(tk.Tk):
         left = tk.Frame(hdr, bg=C["mantle"])
         left.pack(side=tk.LEFT, fill=tk.X, expand=True)
 
+        tk.Label(left,
+            text="OPERATING ON",
+            font=("Segoe UI", 7, "bold"), bg=C["mantle"], fg=C["overlay0"]
+            ).pack(anchor=tk.W)
         self._git_project_lbl = tk.Label(left,
             text="Select a project in the Projects tab",
-            font=("Segoe UI", 10, "bold"), bg=C["mantle"], fg=C["blue"])
+            font=("Segoe UI", 13, "bold"), bg=C["mantle"], fg=C["blue"])
         self._git_project_lbl.pack(anchor=tk.W)
 
         info_row = tk.Frame(left, bg=C["mantle"])
@@ -1899,7 +1903,7 @@ class App(tk.Tk):
         if self._git_op_in_flight:
             return   # belt-and-suspenders — button is also disabled
         name = os.path.basename(path)
-        self._log(f"Pushing {name}…", C["peach"])
+        self._log(f"[{name}] Pushing…", C["peach"])
         self._git_begin_op()
 
         def worker():
@@ -1931,7 +1935,7 @@ class App(tk.Tk):
         if self._git_op_in_flight:
             return
         name = os.path.basename(path)
-        self._log(f"Pulling {name}…", C["peach"])
+        self._log(f"[{name}] Pulling…", C["peach"])
         self._git_begin_op()
 
         def worker():
@@ -2017,7 +2021,7 @@ class App(tk.Tk):
         else:
             # Feature branch — open the compare URL directly
             pr_url = f"{base}/compare/{branch}"
-            self._log(f"  Opening PR page for branch '{branch}'…", C["peach"])
+            self._log(f"  [{os.path.basename(path)}] Opening PR page for branch '{branch}'…", C["peach"])
             os.startfile(pr_url)
 
     def cmd_git_undo_commit(self):
@@ -2042,7 +2046,7 @@ class App(tk.Tk):
                     [GIT_EXE,"-C", path, "reset", "--soft", "HEAD~1"], path)
                 col = C["green"] if rc == 0 else C["red"]
                 msg = "Last commit undone — changes are now staged." if rc == 0 else out.strip()
-                self._log(f"  {msg}", col)
+                self._log(f"  [{os.path.basename(path)}] {msg}", col)
             finally:
                 self.after(0, self._git_end_op)
 
@@ -2075,7 +2079,7 @@ class App(tk.Tk):
                 col = C["green"] if rc == 0 else C["red"]
                 action = "updated" if rc_check == 0 else "added"
                 msg = f"Remote {action}: {url}" if rc == 0 else out.strip()
-                self._log(f"  {msg}", col)
+                self._log(f"  [{os.path.basename(path)}] {msg}", col)
             finally:
                 self.after(0, self._git_end_op)
 
@@ -2112,7 +2116,7 @@ class App(tk.Tk):
                 col = C["green"] if rc == 0 else C["red"]
                 action = f"Created and switched to '{name}'" if (switch and rc == 0) \
                          else (f"Created '{name}'" if rc == 0 else out.strip())
-                self._log(f"  {action}", col)
+                self._log(f"  [{os.path.basename(path)}] {action}", col)
             finally:
                 self.after(0, self._git_end_op)
 
@@ -2152,7 +2156,7 @@ class App(tk.Tk):
                         "Please commit or undo your changes before switching.",
                         parent=self))
                 else:
-                    self._log(f"  Switched to branch '{name}'", C["green"])
+                    self._log(f"  [{os.path.basename(path)}] Switched to branch '{name}'", C["green"])
             finally:
                 self.after(0, self._git_end_op)
 
@@ -2178,8 +2182,9 @@ class App(tk.Tk):
                 "There are no other branches to delete.", parent=self)
             return
         # Let user pick
-        branch = SwitchBranchDialog.pick(self, "Delete Branch", non_current,
-                                          parent=self)
+        branch = SwitchBranchDialog.pick(self,
+                                          f"Delete Branch — {os.path.basename(path)}",
+                                          non_current, parent=self)
         if not branch:
             return
         if not messagebox.askyesno(
@@ -2196,7 +2201,7 @@ class App(tk.Tk):
                 out, rc = self._shell_capture(
                     [GIT_EXE,"-C", path, "branch", "-d", branch], path)
                 if rc == 0:
-                    self._log(f"  Deleted branch '{branch}'", C["green"])
+                    self._log(f"  [{os.path.basename(path)}] Deleted branch '{branch}'", C["green"])
                     self.after(0, self._git_end_op)
                     return
                 out_l = out.lower()
@@ -2231,7 +2236,7 @@ class App(tk.Tk):
                         [GIT_EXE,"-C", path, "branch", "-D", branch], path)
                     col = C["green"] if r2 == 0 else C["red"]
                     msg = f"Force-deleted '{branch}'" if r2 == 0 else o2.strip()
-                    self._log(f"  {msg}", col)
+                    self._log(f"  [{os.path.basename(path)}] {msg}", col)
                 finally:
                     self.after(0, self._git_end_op)
             threading.Thread(target=force_worker, daemon=True).start()
@@ -4253,7 +4258,7 @@ class App(tk.Tk):
                 # 2. Commit ONLY the selected paths (includes any
                 # already-staged ones that we didn't re-add — like
                 # untracking-deletions queued via `git rm --cached`).
-                self._log(f"Committing {name} ({len(all_paths)} file"
+                self._log(f"[{name}] Committing ({len(all_paths)} file"
                           f"{'s' if len(all_paths) != 1 else ''})…",
                           C["peach"])
                 commit_cmd = [GIT_EXE,"-C", path, "commit", "-m", message,
@@ -5707,7 +5712,7 @@ class SetRemoteDialog(tk.Toplevel):
 
     def __init__(self, parent, path: str, current_url: str, callback):
         super().__init__(parent)
-        self.title("Set Remote")
+        self.title(f"Set Remote — {os.path.basename(path)}")
         self.configure(bg=C["base"])
         self.resizable(False, False)
         self.grab_set()
@@ -5781,7 +5786,7 @@ class NewBranchDialog(tk.Toplevel):
 
     def __init__(self, parent, path: str, callback):
         super().__init__(parent)
-        self.title("New Branch")
+        self.title(f"New Branch — {os.path.basename(path)}")
         self.configure(bg=C["base"])
         self.resizable(False, False)
         self.grab_set()
@@ -5854,7 +5859,7 @@ class SwitchBranchDialog(tk.Toplevel):
     def __init__(self, parent, path: str, branches: list, current: str,
                  callback):
         super().__init__(parent)
-        self.title("Switch Branch")
+        self.title(f"Switch Branch — {os.path.basename(path)}")
         self.configure(bg=C["base"])
         self.resizable(False, False)
         self.grab_set()
@@ -5866,6 +5871,9 @@ class SwitchBranchDialog(tk.Toplevel):
         tk.Label(self, text="🔀  Switch Branch",
                  font=("Segoe UI", 13, "bold"),
                  bg=C["base"], fg=C["lavender"]).pack(anchor=tk.W, padx=20, pady=(16, 0))
+        tk.Label(self, text=os.path.basename(path),
+                 font=("Segoe UI", 9), bg=C["base"],
+                 fg=C["overlay0"]).pack(anchor=tk.W, padx=20, pady=(0, 2))
         if current:
             tk.Label(self, text=f"Current: {current}",
                      font=("Segoe UI", 9), bg=C["base"],
