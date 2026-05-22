@@ -3,6 +3,20 @@
 
 ## [Unreleased]
 
+## [1.0.3] — 2026-05-22
+
+Patch release. Fixes a UX dead-end in the Git tab and replaces the noisy auto-commit Stop hook with a smarter version that collapses consecutive auto-commits and writes useful messages.
+
+### Fixed
+- **Git-tab Commit button no longer requires a Projects-tab row selection.** The Commit button on the Git tab called `_selected_path()` (Projects-tab Treeview), so clicking it while the Git tab already had a project loaded produced "Click a project row first." Every other Git-tab button (Push, Pull, Undo, New Branch…) already used `self._git_path` — the project loaded on the tab — and Commit now does the same. Falls back to `_selected_path()` only when `_git_path` is unset (right-click from Projects tab before ever visiting the Git tab).
+
+### Changed
+- **Smart auto-commit Stop hook** — `_scaffold_git_hook` now writes a Python helper to `.claude/auto-commit-helper.py` alongside `settings.json`, and the Stop hook command becomes `python ".claude/auto-commit-helper.py"`. The helper:
+  - **Amends** the previous commit if it was also an `auto:` commit, collapsing a long Claude Code session into a single commit instead of stacking identical entries
+  - Builds a **useful message**: `auto: 3 files (14:22) - src/foo.py, docs/bar.md, +1 more`
+  - Exits 0 silently when the working tree is already clean
+- **Automatic upgrade of legacy Stop hooks on Retrofit** — `_scaffold_git_hook` detects the old `git add -A && … git commit -m "auto: Claude session"` oneliner and rewrites it to the new helper command in place, without adding a duplicate entry.
+
 ## [1.0.2] — 2026-05-21
 
 Patch release. Fixes the **three-headed commit bug** that made the v1.0 / v1.0.1 Untrack-Ignored-Files workflow unusable in practice. Each fix peels off one layer of the onion:
