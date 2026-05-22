@@ -257,6 +257,28 @@ without retyping anything.
 uncommitted changes in anything other than `CHANGELOG.md` (the wizard owns
 that file). This keeps your release-prep commit laser-focused.
 
+### What the zip contains and where it lands
+
+The release zip is named `<repo>-<tag>-windows.zip` (e.g. `MyApp-v1.0.0-windows.zip`)
+and lands **next to your repo root** — NOT inside `dist/`. Example: a project at
+`D:\projects\MyApp` releasing `v1.0.0` produces `D:\projects\MyApp\MyApp-v1.0.0-windows.zip`.
+
+**Contents are flat.** When a user downloads the zip and extracts it, files sit
+at the root — `tokensave-manager.exe`, `manager-config.json`, etc. — NOT nested
+inside a `dist/` folder. (This matters: users expect to double-click the .exe
+right after extracting, not hunt one folder deeper.)
+
+**What goes in is whatever your build script puts in `dist/`.** The wizard
+doesn't pick and choose — it zips everything `build.ps1` (or `build.bat`)
+staged into `dist/`. If you want to exclude something from the release,
+exclude it from the build's staging step.
+
+**The zip stays on disk after publishing** — it isn't auto-deleted. Add
+`*-windows.zip` to your `.gitignore` so the auto-commit Stop hook doesn't
+package release artefacts into the next commit. (The Manager's own repo
+does this; new projects you scaffold do not — add the line manually if
+you'll be cutting releases.)
+
 ### Quick-fire releases via the GitHub Setup wizard (legacy)
 
 The older `🐙 GitHub…` → 📦 Releases section is still there for first-time

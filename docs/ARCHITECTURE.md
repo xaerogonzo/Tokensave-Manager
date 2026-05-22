@@ -136,7 +136,47 @@ NewBranchDialog (tk.Toplevel)     — modal: branch name entry + "switch immedia
 SwitchBranchDialog (tk.Toplevel)  — modal: listbox of local branches; double-click to switch; static pick() helper reused for delete + merge picker flows. Important calling convention: pick()'s signature is `(parent, title, branches, parent_widget=None)` — pass `parent_widget=self` for the centering anchor, NOT `parent=self` (the latter collides with the positional first arg and raises TypeError, which Tk silently swallows on button callbacks → dead button)
 GitCommitDialog (tk.Toplevel)     — modal: per-file checklist of working-tree changes with colour-coded status badges (M/A/D/R/?/!) + Select All / None / Modified Only quick-pick buttons + commit message entry with auto-suggest (💡 Suggest button that updates based on which files are ticked); callback signature `(path, message, selected_files: list[str])`. Right-click → 📝 Git Commit… or Git tab → Commit…
 GitHubSetupDialog (tk.Toplevel)  — modal: step-by-step GitHub onboarding wizard. Step 1 saves git identity; Step 2 offers Sign in (primary) + Create account (secondary); Step 3 opens github.com/new; Step 4 sets remote URL; Step 5 first push. Separate Releases section shells out to `gh release create` when `shutil.which("gh")` returns a path. Scrollable canvas wraps the body Frame so it fits small windows. Opened by 🐙 GitHub… button in Git tab header.
+ReleaseWizardDialog (tk.Toplevel) — modal: full-featured release wizard. Six sections in a scrollable canvas: (1) version with last-tag detection + Patch/Minor/Major radios biased by commit content + free-text override; (2) auto-filled title; (3) auto-drafted release notes textarea grouped by conventional-commit prefix; (4) build step with `build.ps1` / `build.bat` auto-detect; (5) artefact preview showing dist contents + resolved zip name; (6) CHANGELOG.md sync checkbox. Publish runs a single threaded `_publish_worker` that sequences: build → zip → patch CHANGELOG → stage CHANGELOG only → commit → local `git tag -a` → `git push --follow-tags` → `gh release create --notes-file <tmp>`. Each step short-circuits with a copy-pasteable recovery command. The notes-file temp path is preserved on the final-step failure so the user can retry `gh release create` by hand without retyping notes. Opened by 📦 Release… button on the Git tab. Pre-flight in `cmd_git_release` refuses to open the wizard if the working tree is dirty in anything other than `CHANGELOG.md` (with a one-click handoff to the existing Git Commit dialog).
 ```
+
+### Release-wizard helpers (module-level, pure)
+
+All ten helpers live in the module-scope section between `_GITIGNORE_TEMPLATES` and `_STOP_HOOK_CMD`. They are unit-testable without instantiating any Tk widget — the wizard dialog is purely a UI shell around these:
+
+| Helper | Purpose |
+|---|---|
+| `_last_release_tag(path) -> str \| None` | Wraps `git describe --tags --abbrev=0`; None on no tags |
+| `_commits_since(path, ref) -> list[dict]` | `git log <ref>..HEAD --pretty=format:%H%x09%s%x09%b%x1f` parsed into `[{hash, subject, body}]`. Records separated by `\x1f`, fields by `\x09` — subject and body are never confused |
+| `_classify_commits_for_changelog(commits) -> dict` | Subject-only regex (`_CONVENTIONAL_RE`) + body substring check for `BREAKING CHANGE:`. Skips `auto:` commits. Unknown prefixes fall into `Other`. Returns ordered dict of section → list[str] |
+| `_bump_version(tag, kind)` | Semver-aware patch / minor / major bump; date-stamped fallback for non-semver inputs |
+| `_suggest_bump_kind(commits)` | Picks bump radio default: any `!` or body BREAKING → major; any `feat` → minor; else patch |
+| `_render_release_notes(version, date, sections, summary)` | Pure markdown rendering with the canonical `## [version] — date` header, optional summary paragraph, and `### Section` blocks. Single source of truth used by both the wizard textarea AND `_patch_changelog`'s replacement body |
+| `_patch_changelog(path, version, date, notes_md)` | **Idempotent**: replaces existing `## [<version>]` block in place if found, else inserts below `## [Unreleased]`. Atomic write via `.tmp` + `os.replace`. Returns `(ok, status_msg)`; refuses to write if neither anchor nor existing section is present |
+| `_zip_dist(dist_path, zip_path)` | Flat zip via `shutil.make_archive(root_dir=dist_path, base_dir=".")` — extracted files land at the archive root, not nested under `dist/`. Strips trailing `.zip` from the passed-in path before calling `make_archive` (which re-appends the format extension), so `foo.zip` stays `foo.zip`, never `foo.zip.zip`. Returns absolute path of created zip |
+| `_git_tag(path, tag, message)` | Wraps `git tag -a <tag> -m <message>` — annotated tags so `git describe` works and so `git show <tag>` displays the release title |
+| `_git_push_with_tags(path)` | `git push origin HEAD --follow-tags` — commits + the new annotated tag travel together in one network round-trip |
+
+`_CONVENTIONAL_RE` and `_TYPE_TO_SECTION` are the canonical commit-prefix → section mapping. To add a new conventional-commit type (e.g. `revert:`), update both in lockstep — never duplicate the mapping inside the dialog.
+
+### How the dist zip is produced and shipped
+
+When the user clicks 🚀 Publish:
+
+1. After the optional build step finishes, `_publish_worker` computes the zip path:
+   ```python
+   dist_dir = os.path.join(path, "dist")
+   zip_name = f"{self._repo_name}-{tag}-windows.zip"
+   zip_path = os.path.join(path, zip_name)
+   ```
+   For a project at `D:\foo\MyApp` releasing `v1.2.0`, that produces `D:\foo\MyApp\MyApp-v1.2.0-windows.zip` — **next to the repo root, NOT inside `dist/`**. This is intentional: the zip itself is a release artefact, not a build output, so it sits outside the build tree (and the repo's `.gitignore` patterns for `*-windows.zip` keep it out of commits).
+2. `_zip_dist(dist_dir, zip_path)` is called. The helper:
+   - Bails (returns None) if `dist/` is missing or empty — the wizard then surfaces "Zip step failed" and aborts before any tagging happens.
+   - Otherwise calls `shutil.make_archive(base_name=base, format="zip", root_dir=dist_dir, base_dir=".")` where `base` is `zip_path` with any trailing `.zip` stripped.
+   - The `root_dir` + `base_dir="."` combo flattens the archive: files inside `dist/` end up at the zip's root. Without these args the archive would contain `dist/tokensave-manager.exe` instead of `tokensave-manager.exe`, forcing users to extract through an extra folder.
+3. The returned absolute path is passed as the last positional argument to `gh release create` so it gets uploaded as a release asset.
+4. The zip stays on disk after publishing — it isn't deleted. The repo's `.gitignore` should include the matching pattern (`*-windows.zip` or similar) so it doesn't accidentally get committed by the next auto-commit Stop hook.
+
+Contents of the zip are 1:1 whatever `dist/` holds after the build, which is controlled by the project's own `build.ps1` staging block. The wizard doesn't pick and choose — exclude things from the zip by excluding them from the build's output staging.
 
 ### UI structure
 
