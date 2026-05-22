@@ -894,9 +894,16 @@ def _bump_version(tag: str, kind: str) -> str:
 
     Accepts tags with or without a leading ``v``. Output preserves the ``v``
     prefix if present. Non-semver inputs fall back to a date-stamped tag.
+
+    Prerelease tail (``-alpha.1``, ``-rc.2``) and build metadata (``+abc``)
+    are stripped before parsing per semver — we only bump the MAJOR.MINOR.PATCH
+    core. Without this, a tag like ``v1.0.0-alpha.1`` would fail the
+    ``int()`` parse on ``"0-alpha"`` and fall back to a date-stamped tag,
+    producing three identical radio values in the wizard.
     """
-    raw = tag.lstrip("v") if tag else ""
-    parts = raw.split(".")
+    raw  = tag.lstrip("v") if tag else ""
+    core = raw.split("-", 1)[0].split("+", 1)[0]
+    parts = core.split(".")
     try:
         major, minor, patch = (int(parts[0]), int(parts[1]), int(parts[2]))
     except (ValueError, IndexError):
@@ -1064,6 +1071,31 @@ def _zip_dist(dist_path: str, zip_path: str) -> str | None:
     except (OSError, shutil.Error):
         return None
     return os.path.abspath(produced)
+
+
+def _fetch_tags(path: str) -> None:
+    """Pull tags from origin so ``_last_release_tag`` reflects releases that
+    were created remotely without a local ``git tag`` step.
+
+    Why this exists: pre-v1.0.4 releases of this manager (and any release
+    created by ``gh release create`` directly) only tag remotely. The local
+    tree has no record of those tags until ``git fetch --tags`` runs. If
+    the wizard relies purely on ``git describe --tags --abbrev=0``, it'll
+    pick up an old prerelease like ``v1.0.0-alpha.1`` and suggest bumps
+    from THAT, not the real current version.
+
+    Silent on failure — wizard still works with whatever local tags exist.
+    Short timeout (5 s) so a flaky network doesn't block dialog open for
+    long.
+    """
+    try:
+        subprocess.run(
+            [GIT_EXE, "-C", path, "fetch", "--tags", "--quiet", "origin"],
+            capture_output=True, text=True, timeout=5,
+            creationflags=CREATE_NO_WINDOW,
+        )
+    except (FileNotFoundError, subprocess.TimeoutExpired, OSError):
+        pass
 
 
 def _git_tag(path: str, tag: str, message: str) -> tuple:
@@ -7062,6 +7094,11 @@ class ReleaseWizardDialog(tk.Toplevel):
         self.transient(parent)
 
         # ── Discover state up front ─────────────────────────────────────────
+        # Sync tags from origin first so the detected "last tag" reflects any
+        # releases created remotely (e.g. legacy `gh release create` calls
+        # that never tagged locally). Silent + 5s timeout — never blocks
+        # dialog open on flaky networks.
+        _fetch_tags(path)
         self._last_tag       = _last_release_tag(path)
         self._commits        = _commits_since(path, self._last_tag)
         self._suggested_kind = _suggest_bump_kind(self._commits)
