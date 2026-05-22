@@ -217,20 +217,53 @@ installed. This is how you distribute your application to other people.
   Free, installs in under a minute. The TokenSave Manager uses it to create releases.
 - **A built .exe** — run `build.bat` first to compile `dist\tokensave-manager.exe`.
 
-### Creating a release
+### Creating a release — the Release Wizard (recommended)
 
-1. Open the Git tab → click **🐙 GitHub…**
-2. Scroll to the **📦 Releases** section
-3. Enter a version tag: `v1.0.0` (convention: `v` + major.minor.patch)
-4. Enter a title: `Release 1.0.0` or `First public release`
-5. Click **📦 Create Release**
+Since v1.0.4, the **📦 Release…** button on the Git tab opens a full release wizard:
 
-The manager will:
-- Create a git tag with your version number
-- Create a GitHub Release with auto-generated release notes
-- Upload all `.exe` files from `dist\` as downloadable attachments
+1. Open the Git tab on the project you want to release
+2. Click **📦 Release…**
+3. The wizard auto-detects your last tag and pre-fills:
+   - **Version**: Patch / Minor / Major radio (biased by what your commits did
+     — any `feat:` defaults to Minor, anything breaking defaults to Major)
+   - **Title**: derived from the highest-priority commit subject
+   - **Release notes**: grouped Added / Fixed / Changed / Docs / Breaking
+     sections, auto-drafted from your conventional-commit messages
+     (`feat:`, `fix:`, `chore:`, etc.) since the last tag
+4. Edit the notes textarea as needed (or click 🔄 Regenerate to rebuild from commits)
+5. Pick whether to **run the build first** (auto-detects `build.ps1` / `build.bat`)
+6. Pick whether to **update CHANGELOG.md** (auto-disabled if no `## [Unreleased]`
+   anchor exists)
+7. Click **🚀 Publish**
 
-Your release will appear at `https://github.com/you/your-repo/releases`.
+The wizard then runs locally (zero token cost, no LLM round-trip):
+
+1. **Build** via `powershell -File build.ps1` or `cmd.exe /c build.bat`
+2. **Zip** `dist/` flat as `<repo>-<tag>-windows.zip`
+3. **Patch CHANGELOG.md** — insert the new section directly below `[Unreleased]`
+   (idempotent — retrying replaces the section, never duplicates)
+4. **Stage only CHANGELOG.md** and `git commit -m "chore: release prep for <tag>"`
+   (never blanket-commits — unrelated WIP can't sneak into the release commit)
+5. **Tag locally** with `git tag -a <tag> -m <title>` so your local tree records
+   the release (vital — `gh release create` only tags remotely)
+6. **Push** commits + tag via `git push origin HEAD --follow-tags`
+7. **Create the GitHub Release** via `gh release create <tag> --notes-file <tmp> <zip>`
+
+If any step fails, the wizard shows a copy-pasteable recovery command. The
+notes-file is preserved on the final-step failure so you can retry by hand
+without retyping anything.
+
+**Pre-flight check**: the wizard refuses to open if the working tree has
+uncommitted changes in anything other than `CHANGELOG.md` (the wizard owns
+that file). This keeps your release-prep commit laser-focused.
+
+### Quick-fire releases via the GitHub Setup wizard (legacy)
+
+The older `🐙 GitHub…` → 📦 Releases section is still there for first-time
+setup. It uses `gh release create --generate-notes` (GitHub's auto-PR-title
+list, not the curated `Added / Fixed / Changed` style the wizard produces).
+Use the new Release Wizard for any project that already uses conventional
+commit prefixes.
 
 ### Version numbering convention
 

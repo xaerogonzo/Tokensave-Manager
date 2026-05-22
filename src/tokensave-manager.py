@@ -746,6 +746,359 @@ _GITIGNORE_TEMPLATES = {
 }
 
 
+# ─── Release-wizard helpers ─────────────────────────────────────────────────
+# Pure functions used by ReleaseWizardDialog. Pull them out at module scope
+# so they're unit-testable without instantiating any Tk widget.
+
+# Conventional-commit subject parser. Matches the prefix (type), optional
+# (scope), optional ! breaking-marker, then ': ' and the rest of the subject.
+# Subject-only — never applied to body text (the body can contain unrelated
+# matching strings that would cause false positives).
+_CONVENTIONAL_RE = re.compile(
+    r"^(feat|fix|chore|docs|refactor|perf|style|test|build|ci)"
+    r"(?:\(([^)]+)\))?(!)?:\s*(.+)$"
+)
+
+# Map conventional prefix → section header in the changelog.
+_TYPE_TO_SECTION = {
+    "feat":     "Added",
+    "fix":      "Fixed",
+    "chore":    "Changed",
+    "docs":     "Docs",
+    "refactor": "Changed",
+    "perf":     "Changed",
+    "style":    "Changed",
+    "test":     "Changed",
+    "build":    "Changed",
+    "ci":       "Changed",
+}
+
+# Order sections appear in the rendered notes. Breaking always wins.
+_SECTION_ORDER = ["Breaking", "Added", "Fixed", "Changed", "Docs", "Other"]
+
+
+def _last_release_tag(path: str) -> str | None:
+    """Return the most recent annotated/lightweight tag, or None if no tags."""
+    try:
+        proc = subprocess.run(
+            [GIT_EXE, "-C", path, "describe", "--tags", "--abbrev=0"],
+            capture_output=True, text=True, timeout=10,
+            encoding="utf-8", errors="replace",
+            creationflags=CREATE_NO_WINDOW,
+        )
+    except (FileNotFoundError, subprocess.TimeoutExpired):
+        return None
+    if proc.returncode != 0:
+        return None
+    tag = proc.stdout.strip()
+    return tag or None
+
+
+def _commits_since(path: str, ref: str | None) -> list:
+    """Return commits between ``ref`` (exclusive) and HEAD (inclusive).
+
+    Uses a custom git-log format with three fields per commit separated by
+    \\x09 (tab), and records separated by \\x1f (unit separator). This lets
+    multi-line bodies coexist with the field separator without ambiguity.
+
+    Returns list of dicts: ``{"hash": str, "subject": str, "body": str}``.
+    If ``ref`` is None (no prior tag), returns ALL commits.
+    """
+    range_spec = f"{ref}..HEAD" if ref else "HEAD"
+    try:
+        proc = subprocess.run(
+            [GIT_EXE, "-C", path, "log", range_spec,
+             "--pretty=format:%H%x09%s%x09%b%x1f"],
+            capture_output=True, text=True, timeout=15,
+            encoding="utf-8", errors="replace",
+            creationflags=CREATE_NO_WINDOW,
+        )
+    except (FileNotFoundError, subprocess.TimeoutExpired):
+        return []
+    if proc.returncode != 0:
+        return []
+    commits = []
+    # Each record ends with \x1f. Split, drop empty trailing, parse fields.
+    for record in proc.stdout.split("\x1f"):
+        if not record.strip():
+            continue
+        # Strip leading newline that git inserts between records
+        record = record.lstrip("\n")
+        parts = record.split("\x09", 2)
+        if len(parts) < 2:
+            continue
+        h = parts[0]
+        s = parts[1] if len(parts) >= 2 else ""
+        b = parts[2] if len(parts) >= 3 else ""
+        commits.append({"hash": h, "subject": s, "body": b})
+    return commits
+
+
+def _classify_commits_for_changelog(commits: list) -> dict:
+    """Group commits into changelog sections by conventional-commit prefix.
+
+    Rules:
+      * Subject parsed via ``_CONVENTIONAL_RE`` (subject-only — body is
+        excluded from the regex match so unrelated body text never causes
+        false positives).
+      * Substring check on body for ``BREAKING CHANGE:`` / ``BREAKING-CHANGE:``
+        escalates to ``Breaking`` regardless of subject prefix.
+      * The ``!`` marker in the subject also forces ``Breaking``.
+      * ``auto:`` commits (from the smart auto-commit Stop hook) are skipped
+        entirely — internal noise, not changelog material.
+      * Unmatched subjects fall into ``Other`` so nothing silently disappears.
+      * Scope (the parenthetical) is preserved in the rendered line:
+        ``feat(ui): button`` → ``- (ui) button``.
+
+    Returns dict of section → list[str], in the order of ``_SECTION_ORDER``.
+    Empty sections are omitted from the returned dict.
+    """
+    buckets = {name: [] for name in _SECTION_ORDER}
+    for c in commits:
+        subject = (c.get("subject") or "").strip()
+        body    = c.get("body") or ""
+
+        if not subject:
+            continue
+
+        # Skip auto-commit noise from the Stop hook helper.
+        if subject.startswith("auto:"):
+            continue
+
+        m = _CONVENTIONAL_RE.match(subject)
+        breaking_body = ("BREAKING CHANGE:" in body
+                         or "BREAKING-CHANGE:" in body)
+
+        if m:
+            ctype, scope, bang, desc = m.group(1), m.group(2), m.group(3), m.group(4)
+            line = f"({scope}) {desc}" if scope else desc
+            if bang or breaking_body:
+                buckets["Breaking"].append(line)
+            else:
+                section = _TYPE_TO_SECTION.get(ctype, "Other")
+                buckets[section].append(line)
+        else:
+            # Non-conventional subject. If the body still mentions a BREAKING
+            # CHANGE, surface it; else dump in Other.
+            if breaking_body:
+                buckets["Breaking"].append(subject)
+            else:
+                buckets["Other"].append(subject)
+
+    # Drop empty sections from the returned dict, preserving order.
+    return {name: buckets[name] for name in _SECTION_ORDER if buckets[name]}
+
+
+def _bump_version(tag: str, kind: str) -> str:
+    """Return the next semver tag for ``kind`` ∈ {patch, minor, major}.
+
+    Accepts tags with or without a leading ``v``. Output preserves the ``v``
+    prefix if present. Non-semver inputs fall back to a date-stamped tag.
+    """
+    raw = tag.lstrip("v") if tag else ""
+    parts = raw.split(".")
+    try:
+        major, minor, patch = (int(parts[0]), int(parts[1]), int(parts[2]))
+    except (ValueError, IndexError):
+        # Fallback for non-semver — date-stamped tag.
+        from datetime import datetime as _dt
+        return _dt.now().strftime("v%Y.%m.%d")
+
+    if kind == "major":
+        major, minor, patch = major + 1, 0, 0
+    elif kind == "minor":
+        minor, patch = minor + 1, 0
+    else:   # default: patch
+        patch += 1
+
+    prefix = "v" if (tag or "").startswith("v") else ""
+    return f"{prefix}{major}.{minor}.{patch}"
+
+
+def _suggest_bump_kind(commits: list) -> str:
+    """Pick the appropriate bump kind based on commit content.
+
+    Returns ``"major"`` if any commit is breaking, ``"minor"`` if any new
+    feature, else ``"patch"``. Mirrors conventional-commits semantics.
+    """
+    any_feat = False
+    for c in commits:
+        subject = (c.get("subject") or "").strip()
+        body    = c.get("body") or ""
+        if not subject:
+            continue
+        m = _CONVENTIONAL_RE.match(subject)
+        if m and m.group(3):    # ! marker
+            return "major"
+        if "BREAKING CHANGE:" in body or "BREAKING-CHANGE:" in body:
+            return "major"
+        if m and m.group(1) == "feat":
+            any_feat = True
+    return "minor" if any_feat else "patch"
+
+
+def _render_release_notes(version: str, date: str, sections: dict,
+                          summary: str = "") -> str:
+    """Render the canonical release-notes markdown.
+
+    Single source of truth used by BOTH the wizard textarea pre-fill AND
+    the CHANGELOG.md section body. The leading ``## [version] — date``
+    header is included so the same text can be inserted into the changelog
+    verbatim.
+
+    ``version`` should be passed WITHOUT the leading ``v`` (we add the
+    bracket notation here). ``sections`` is the dict returned by
+    ``_classify_commits_for_changelog``.
+    """
+    clean_version = version.lstrip("v")
+    lines = [f"## [{clean_version}] — {date}", ""]
+    if summary:
+        lines.append(summary.strip())
+        lines.append("")
+    for section in _SECTION_ORDER:
+        items = sections.get(section)
+        if not items:
+            continue
+        lines.append(f"### {section}")
+        for item in items:
+            lines.append(f"- {item}")
+        lines.append("")
+    # Trim trailing blank line
+    while lines and not lines[-1]:
+        lines.pop()
+    return "\n".join(lines) + "\n"
+
+
+def _patch_changelog(changelog_path: str, version: str, date: str,
+                     notes_md: str) -> tuple:
+    """Insert or replace a version section in CHANGELOG.md.
+
+    Idempotent: if a section with the same version header already exists,
+    its block (header line through the next ``## [`` line or EOF) is
+    REPLACED with ``notes_md``. Otherwise the new section is inserted
+    directly below the ``## [Unreleased]`` anchor.
+
+    If neither the version section nor the ``## [Unreleased]`` anchor is
+    present, returns ``(False, "missing anchor")`` and writes nothing —
+    the caller surfaces this rather than producing a malformed file.
+
+    Atomic write: writes to ``.tmp`` then ``os.replace``.
+
+    Returns ``(ok: bool, message: str)``.
+    """
+    clean_version = version.lstrip("v")
+    try:
+        with open(changelog_path, encoding="utf-8") as f:
+            text = f.read()
+    except OSError as exc:
+        return (False, f"Could not read {changelog_path}: {exc}")
+
+    new_block = notes_md if notes_md.endswith("\n") else notes_md + "\n"
+    new_block = new_block.rstrip("\n") + "\n\n"   # ensure one blank line after
+
+    # Try to find an existing section for this version.
+    section_re = re.compile(
+        rf"(?ms)^## \[{re.escape(clean_version)}\][^\n]*\n.*?(?=^## \[|\Z)"
+    )
+    m = section_re.search(text)
+    if m:
+        # Replace existing section.
+        updated = text[:m.start()] + new_block + text[m.end():]
+    else:
+        # Insert below ## [Unreleased].
+        anchor_re = re.compile(r"(?m)^## \[Unreleased\][^\n]*\n")
+        am = anchor_re.search(text)
+        if not am:
+            return (False, "CHANGELOG.md is missing the `## [Unreleased]` anchor")
+        insert_at = am.end()
+        # Skip any blank lines directly after the anchor so the new section
+        # ends up flush against (Unreleased) but with one blank line padding.
+        tail = text[insert_at:]
+        leading_blanks = len(tail) - len(tail.lstrip("\n"))
+        # Keep exactly one blank line between [Unreleased] and the new section.
+        updated = (text[:insert_at]
+                   + "\n"
+                   + new_block
+                   + tail[leading_blanks:])
+
+    # Atomic write
+    tmp_path = changelog_path + ".tmp"
+    try:
+        with open(tmp_path, "w", encoding="utf-8", newline="\n") as f:
+            f.write(updated)
+        os.replace(tmp_path, changelog_path)
+    except OSError as exc:
+        return (False, f"Could not write {changelog_path}: {exc}")
+
+    return (True, "replaced" if m else "inserted")
+
+
+def _zip_dist(dist_path: str, zip_path: str) -> str | None:
+    """Zip the contents of ``dist_path`` into ``zip_path`` (flat).
+
+    Uses ``shutil.make_archive`` with ``root_dir=dist_path, base_dir="."``
+    so the archive contains files at the root, NOT nested under ``dist/``.
+    Strips a trailing ``.zip`` from ``zip_path`` before passing it to
+    ``make_archive`` (which re-appends the format extension automatically).
+
+    Returns the absolute path of the created zip, or None on failure.
+    """
+    if not os.path.isdir(dist_path):
+        return None
+    try:
+        any_files = any(True for _ in os.scandir(dist_path))
+    except OSError:
+        return None
+    if not any_files:
+        return None
+
+    # Strip trailing .zip so make_archive doesn't double it.
+    base = zip_path[:-4] if zip_path.lower().endswith(".zip") else zip_path
+    try:
+        produced = shutil.make_archive(
+            base_name=base,
+            format="zip",
+            root_dir=dist_path,
+            base_dir=".",
+        )
+    except (OSError, shutil.Error):
+        return None
+    return os.path.abspath(produced)
+
+
+def _git_tag(path: str, tag: str, message: str) -> tuple:
+    """Create an annotated local tag. Returns (stdout+stderr, rc)."""
+    try:
+        proc = subprocess.run(
+            [GIT_EXE, "-C", path, "tag", "-a", tag, "-m", message],
+            capture_output=True, text=True, timeout=10,
+            encoding="utf-8", errors="replace",
+            creationflags=CREATE_NO_WINDOW,
+        )
+    except (FileNotFoundError, subprocess.TimeoutExpired) as exc:
+        return (f"Error invoking git: {exc}", 1)
+    out = (proc.stdout or "") + (proc.stderr or "")
+    return (out, proc.returncode)
+
+
+def _git_push_with_tags(path: str) -> tuple:
+    """Push HEAD plus the new annotated tag in one network round-trip."""
+    try:
+        proc = subprocess.run(
+            [GIT_EXE, "-C", path, "push", "origin", "HEAD", "--follow-tags"],
+            capture_output=True, text=True, timeout=120,
+            encoding="utf-8", errors="replace",
+            creationflags=CREATE_NO_WINDOW,
+        )
+    except (FileNotFoundError, subprocess.TimeoutExpired) as exc:
+        return (f"Error invoking git: {exc}", 1)
+    out = (proc.stdout or "") + (proc.stderr or "")
+    return (out, proc.returncode)
+
+
+# ─── End release-wizard helpers ─────────────────────────────────────────────
+
+
 # Stop hook injected into .claude/settings.json by _scaffold_git_hook.
 # Runs the smart helper at .claude/auto-commit-helper.py — see _AUTO_COMMIT_HELPER.
 # The helper amends consecutive auto-commits (so a long session is one commit,
@@ -1598,9 +1951,12 @@ class App(tk.Tk):
                                 command=self.cmd_git_delete_branch)
         btn_openpr = ttk.Button(row2, text="🔗  Open PR",
                                 command=self.cmd_git_open_pr)
+        btn_release = ttk.Button(row2, text="📦  Release…",
+                                 command=self.cmd_git_release)
 
         for btn in (btn_push, btn_pull, btn_commit, btn_undo,
-                    btn_new, btn_switch, btn_merge, btn_del, btn_openpr):
+                    btn_new, btn_switch, btn_merge, btn_del, btn_openpr,
+                    btn_release):
             btn.pack(side=tk.LEFT, padx=(0, 6))
 
         _Tooltip(btn_push,
@@ -1650,11 +2006,24 @@ class App(tk.Tk):
             "On master/main: shows you how to create a branch first.\n"
             "On any other branch: opens GitHub's compare page directly.\n\n"
             "Requires a GitHub remote and the branch to be pushed first.")
+        _Tooltip(btn_release,
+            "One-button GitHub release.\n\n"
+            "Opens a wizard that auto-drafts release notes from your\n"
+            "commits, builds the project, zips dist/, tags locally,\n"
+            "pushes, and publishes via `gh release create` — all in one\n"
+            "threaded worker. Editable textarea so you can polish the\n"
+            "notes before publishing.\n\n"
+            "Requires: GitHub CLI (`gh`) installed AND a remote set.")
 
         self._git_all_btns       = [btn_set_remote, btn_push, btn_pull,
                                      btn_commit, btn_undo, btn_new,
-                                     btn_switch, btn_merge, btn_del, btn_openpr]
+                                     btn_switch, btn_merge, btn_del, btn_openpr,
+                                     btn_release]
         self._git_push_pull_btns = [btn_push, btn_pull, btn_openpr]
+        # Release button has an extra requirement: gh on PATH. Tracked
+        # separately so _git_update_ui can gate it without affecting the
+        # other Push/Pull/PR buttons.
+        self._git_release_btns   = [btn_release]
 
         # Start all buttons disabled — enabled by _git_update_ui once state is known
         for btn in self._git_all_btns:
@@ -1808,6 +2177,12 @@ class App(tk.Tk):
             push_pull_state = tk.NORMAL if (is_repo and remote) else tk.DISABLED
             for btn in self._git_push_pull_btns:
                 btn.configure(state=push_pull_state)
+            # Release button is the strictest of the lot: needs repo + remote
+            # + `gh` CLI on PATH. Disabling here (after the all-buttons NORMAL
+            # sweep above) is intentional — keeps the logic linear.
+            release_ok = bool(is_repo and remote and shutil.which("gh"))
+            for btn in getattr(self, "_git_release_btns", []):
+                btn.configure(state=tk.NORMAL if release_ok else tk.DISABLED)
 
         # Populate status listbox
         self._git_status_lb.configure(state=tk.NORMAL)
@@ -2032,6 +2407,87 @@ class App(tk.Tk):
             pr_url = f"{base}/compare/{branch}"
             self._log(f"  [{os.path.basename(path)}] Opening PR page for branch '{branch}'…", C["peach"])
             os.startfile(pr_url)
+
+    def cmd_git_release(self):
+        """Open the Release Wizard for the currently loaded Git-tab project.
+
+        Pre-flight (in addition to the button-gating done by _git_update_ui):
+          • gh on PATH       — should already be true (button is gated)
+          • is a git repo    — should already be true (button is gated)
+          • has a remote     — should already be true (button is gated)
+          • working tree is clean apart from CHANGELOG.md (which the wizard
+            owns and will edit as part of the release-prep commit)
+
+        Each pre-flight failure surfaces a specific dialog rather than
+        silently bailing. The dirty-tree check offers a one-click handoff
+        to the existing Git Commit dialog so the user can deal with
+        unrelated changes before retrying the release.
+        """
+        path = self._git_path
+        if not path:
+            return
+
+        if not shutil.which("gh"):
+            messagebox.showwarning("GitHub CLI required",
+                "The Release Wizard runs `gh release create` under the hood.\n\n"
+                "Install GitHub CLI from https://cli.github.com and re-open\n"
+                "this dialog.",
+                parent=self)
+            return
+
+        if not _is_local_git_repo(path):
+            messagebox.showwarning("Not a git repo",
+                f"{os.path.basename(path)} is not a git repository.\n\n"
+                "Right-click the project → 🔧 Git Init first.",
+                parent=self)
+            return
+
+        # Remote check (defensive — button gating should make this unreachable)
+        remote_out, rrc = self._shell_capture(
+            [GIT_EXE, "-C", path, "remote", "get-url", "origin"], path)
+        if rrc != 0 or not remote_out.strip():
+            messagebox.showwarning("No remote",
+                "This project has no GitHub remote set.\n\n"
+                "Click 'Set Remote' in the Git tab header first.",
+                parent=self)
+            return
+
+        # Working-tree cleanliness check. CHANGELOG.md is allowed to be dirty
+        # (the wizard will rewrite + commit it as part of the release-prep
+        # commit) — anything else means the user has unrelated WIP that
+        # shouldn't get bundled into the release commit.
+        status_out, src = self._shell_capture(
+            [GIT_EXE, "-C", path, "status", "--porcelain"], path)
+        if src == 0 and status_out.strip():
+            dirty_files = []
+            for line in status_out.splitlines():
+                if len(line) < 4:
+                    continue
+                fname = line[3:].strip()
+                if fname and fname != "CHANGELOG.md":
+                    dirty_files.append(fname)
+            if dirty_files:
+                preview = "\n".join(f"  • {f}" for f in dirty_files[:6])
+                if len(dirty_files) > 6:
+                    preview += f"\n  • …and {len(dirty_files) - 6} more"
+                choice = messagebox.askyesnocancel(
+                    "Working tree has unrelated changes",
+                    f"The Release Wizard needs a clean working tree so the\n"
+                    f"release-prep commit only contains the version bump.\n\n"
+                    f"Uncommitted files:\n{preview}\n\n"
+                    f"Yes  → open the Git Commit dialog now\n"
+                    f"No   → cancel, deal with it later\n"
+                    f"(Stash flow is on the roadmap.)",
+                    parent=self)
+                if choice is None or choice is False:
+                    return
+                # User chose Yes — open commit dialog and bail. After they
+                # commit (or close the dialog), they can re-trigger Release.
+                self._open_commit_dialog(path)
+                return
+
+        # All pre-flight passed — open the wizard.
+        ReleaseWizardDialog(self, path)
 
     def cmd_git_undo_commit(self):
         """Undo the last commit, keeping all changes staged (git reset --soft HEAD~1)."""
@@ -6564,6 +7020,586 @@ class GitHubSetupDialog(tk.Toplevel):
             if rc == 0:
                 self._app._log(f"  ✓ Release {tag} created — check GitHub!", C["green"])
         threading.Thread(target=worker, daemon=True).start()
+
+
+class ReleaseWizardDialog(tk.Toplevel):
+    """One-button release wizard for tagged GitHub releases.
+
+    Six stages stacked top-to-bottom in a scrollable canvas:
+
+      1. Version          — auto-detected last tag + Patch/Minor/Major radio
+                            with intelligent default + free-text override
+      2. Title            — auto-filled from highest-priority commit
+      3. Release notes    — auto-drafted from `<last_tag>..HEAD` via the
+                            classifier; editable textarea
+      4. Build step       — checkbox + auto-detect build.ps1 or build.bat
+      5. Artefact         — read-only preview of dist/ contents + zip name
+      6. CHANGELOG sync   — checkbox (only if CHANGELOG.md exists with the
+                            `## [Unreleased]` anchor)
+
+    Publish runs everything locally in one threaded worker — zero LLM calls.
+    Errors short-circuit with copy-pasteable recovery commands so any
+    partial state can be cleaned up by hand.
+
+    Pre-flight (in `cmd_git_release`, before constructing this dialog):
+      • gh on PATH
+      • _is_local_git_repo(path)
+      • has remote
+      • working tree clean (CHANGELOG.md is fine to be dirty — we own it)
+    """
+
+    def __init__(self, parent, path: str):
+        super().__init__(parent)
+        self._app  = parent
+        self._path = path
+        self._repo_name = os.path.basename(path)
+
+        self.title(f"Release Wizard — {self._repo_name}")
+        self.configure(bg=C["base"])
+        self.resizable(True, True)
+        self.minsize(640, 600)
+        self.grab_set()
+        self.transient(parent)
+
+        # ── Discover state up front ─────────────────────────────────────────
+        self._last_tag       = _last_release_tag(path)
+        self._commits        = _commits_since(path, self._last_tag)
+        self._suggested_kind = _suggest_bump_kind(self._commits)
+        self._build_script   = self._detect_build_script()
+        self._changelog_path = os.path.join(path, "CHANGELOG.md")
+        self._has_changelog  = (os.path.isfile(self._changelog_path)
+                                and self._changelog_has_unreleased())
+
+        # ── State vars ──────────────────────────────────────────────────────
+        self._bump_var       = tk.StringVar(value=self._suggested_kind)
+        self._override_var   = tk.StringVar(value="")
+        self._title_var      = tk.StringVar(value="")
+        self._run_build_var  = tk.BooleanVar(value=bool(self._build_script))
+        self._sync_cl_var    = tk.BooleanVar(value=self._has_changelog)
+        self._publishing     = False    # guard against double-clicks
+
+        # ── Scrollable canvas (mirrors GitHubSetupDialog pattern) ───────────
+        self._canvas = tk.Canvas(self, bg=C["base"], highlightthickness=0)
+        _vsb = ttk.Scrollbar(self, orient="vertical", command=self._canvas.yview)
+        self._canvas.configure(yscrollcommand=_vsb.set)
+        _vsb.pack(side=tk.RIGHT, fill=tk.Y)
+        self._canvas.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
+        self._body = tk.Frame(self, bg=C["base"])
+        self._body_id = self._canvas.create_window(
+            (0, 0), window=self._body, anchor="nw")
+        self._canvas.bind("<Configure>",
+            lambda e: self._canvas.itemconfigure(self._body_id, width=e.width))
+        self._body.bind("<Configure>",
+            lambda e: self._canvas.configure(scrollregion=self._canvas.bbox("all")))
+
+        def _mw(e):
+            self._canvas.yview_scroll(int(-1 * (e.delta / 120)), "units")
+        self._canvas.bind_all("<MouseWheel>", _mw)
+        self.bind("<Destroy>",
+            lambda e: self._canvas.unbind_all("<MouseWheel>"))
+
+        try:
+            self._build_ui()
+            self._regenerate_notes()
+        except Exception as ex:
+            import traceback
+            messagebox.showerror(
+                "Release Wizard — build error",
+                f"The wizard failed to render:\n\n{ex}\n\n"
+                f"{traceback.format_exc()[-800:]}",
+                parent=self)
+
+        self.update_idletasks()
+        # Open at content height, but never taller than parent.
+        content_h = self._body.winfo_reqheight() + 30
+        max_h = max(500, parent.winfo_height() - 40)
+        w, h = 680, min(content_h, max_h)
+        px = parent.winfo_x() + (parent.winfo_width()  - w) // 2
+        py = parent.winfo_y() + (parent.winfo_height() - h) // 2
+        self.geometry(f"{w}x{h}+{max(0, px)}+{max(0, py)}")
+
+    # ── Discovery helpers ──────────────────────────────────────────────────
+
+    def _detect_build_script(self) -> str | None:
+        """Return ``build.ps1`` or ``build.bat`` if either exists in the repo
+        root, preferring .ps1. Returns None if no script is found."""
+        for name in ("build.ps1", "build.bat"):
+            if os.path.isfile(os.path.join(self._path, name)):
+                return name
+        return None
+
+    def _changelog_has_unreleased(self) -> bool:
+        try:
+            with open(self._changelog_path, encoding="utf-8") as f:
+                text = f.read()
+        except OSError:
+            return False
+        return re.search(r"(?m)^## \[Unreleased\]", text) is not None
+
+    def _next_tag(self) -> str:
+        """Compute the version tag from the override box or the bump radio."""
+        override = self._override_var.get().strip()
+        if override:
+            # Ensure leading 'v' for consistency with existing tags.
+            return override if override.startswith("v") else f"v{override}"
+        prior = self._last_tag or "v0.0.0"
+        bumped = _bump_version(prior, self._bump_var.get())
+        # On a fresh repo with no tags, the first release should default to
+        # v0.1.0 rather than v0.0.1 (which a patch-bump of v0.0.0 would give).
+        if self._last_tag is None:
+            return "v0.1.0"
+        return bumped
+
+    # ── UI ─────────────────────────────────────────────────────────────────
+
+    def _build_ui(self):
+        body = self._body
+        P = dict(padx=20)
+
+        # Header ─────────────────────────────────────────────────────────────
+        tk.Label(body, text="📦  Release Wizard",
+                 font=("Segoe UI", 13, "bold"),
+                 bg=C["base"], fg=C["blue"]).pack(anchor=tk.W, pady=(16, 0), **P)
+        tk.Label(body, text=self._repo_name,
+                 font=("Segoe UI", 9), bg=C["base"],
+                 fg=C["overlay0"]).pack(anchor=tk.W, pady=(0, 4), **P)
+        n = len(self._commits)
+        prior = self._last_tag or "(none — first release)"
+        tk.Label(body,
+                 text=f"{n} commit{'s' if n != 1 else ''} since {prior}",
+                 font=("Segoe UI", 9), bg=C["base"],
+                 fg=C["overlay0"]).pack(anchor=tk.W, pady=(0, 10), **P)
+
+        ttk.Separator(body, orient="horizontal").pack(fill=tk.X, padx=20, pady=(0, 12))
+
+        # ── 1. Version ──────────────────────────────────────────────────────
+        self._section_header(body, "1", "Version")
+        ver_frame = tk.Frame(body, bg=C["base"])
+        ver_frame.pack(fill=tk.X, padx=(44, 20), pady=(0, 4))
+
+        suggestions = [
+            ("patch", _bump_version(self._last_tag or "v0.0.0", "patch")),
+            ("minor", _bump_version(self._last_tag or "v0.0.0", "minor")),
+            ("major", _bump_version(self._last_tag or "v0.0.0", "major")),
+        ]
+        for kind, candidate in suggestions:
+            label = f"{kind.title()}  ({candidate})"
+            ttk.Radiobutton(ver_frame, text=label,
+                            variable=self._bump_var, value=kind,
+                            command=self._refresh_title).pack(anchor=tk.W)
+
+        ov_row = tk.Frame(body, bg=C["base"])
+        ov_row.pack(fill=tk.X, padx=(44, 20), pady=(6, 12))
+        tk.Label(ov_row, text="Custom tag:", bg=C["base"], fg=C["subtext"],
+                 font=("Segoe UI", 9)).pack(side=tk.LEFT, padx=(0, 6))
+        ttk.Entry(ov_row, textvariable=self._override_var,
+                  width=18).pack(side=tk.LEFT)
+        tk.Label(ov_row, text="(overrides the radio above when set)",
+                 font=("Segoe UI", 8), bg=C["base"],
+                 fg=C["overlay0"]).pack(side=tk.LEFT, padx=(8, 0))
+
+        # ── 2. Title ────────────────────────────────────────────────────────
+        self._section_header(body, "2", "Title")
+        ttk.Entry(body, textvariable=self._title_var, font=("Segoe UI", 10)
+                  ).pack(fill=tk.X, padx=(44, 20), pady=(0, 12))
+
+        # ── 3. Release notes ────────────────────────────────────────────────
+        self._section_header(body, "3", "Release notes  (editable)")
+
+        notes_row = tk.Frame(body, bg=C["base"])
+        notes_row.pack(fill=tk.X, padx=(44, 20), pady=(0, 4))
+        ttk.Button(notes_row, text="🔄  Regenerate from commits",
+                   command=self._regenerate_notes).pack(side=tk.LEFT)
+        ttk.Button(notes_row, text="📋  Copy to clipboard",
+                   command=self._copy_notes).pack(side=tk.LEFT, padx=(6, 0))
+
+        nt_wrap = tk.Frame(body, bg=C["mantle"])
+        nt_wrap.pack(fill=tk.BOTH, expand=False, padx=(44, 20), pady=(4, 12))
+        self._notes_txt = tk.Text(nt_wrap, height=14, font=("Consolas", 9),
+                                  bg=C["mantle"], fg=C["text"],
+                                  insertbackground=C["text"],
+                                  relief=tk.FLAT, padx=8, pady=6, wrap=tk.WORD)
+        nt_vsb = ttk.Scrollbar(nt_wrap, orient="vertical",
+                               command=self._notes_txt.yview)
+        self._notes_txt.configure(yscrollcommand=nt_vsb.set)
+        self._notes_txt.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
+        nt_vsb.pack(side=tk.RIGHT, fill=tk.Y)
+
+        # ── 4. Build ────────────────────────────────────────────────────────
+        self._section_header(body, "4", "Build step")
+        build_frame = tk.Frame(body, bg=C["base"])
+        build_frame.pack(fill=tk.X, padx=(44, 20), pady=(0, 12))
+
+        if self._build_script:
+            cmd_preview = (
+                f"powershell -ExecutionPolicy Bypass -File {self._build_script}"
+                if self._build_script.endswith(".ps1")
+                else f"cmd.exe /c {self._build_script}"
+            )
+            ttk.Checkbutton(build_frame,
+                            text=f"Run build before release  ({self._build_script})",
+                            variable=self._run_build_var).pack(anchor=tk.W)
+            tk.Label(build_frame, text=f"Will invoke: {cmd_preview}",
+                     font=("Segoe UI", 8), bg=C["base"],
+                     fg=C["overlay0"]).pack(anchor=tk.W, pady=(2, 0))
+        else:
+            self._run_build_var.set(False)
+            tk.Label(build_frame,
+                     text="No build.ps1 / build.bat found in repo root.",
+                     font=("Segoe UI", 9), bg=C["base"],
+                     fg=C["overlay0"]).pack(anchor=tk.W)
+            tk.Label(build_frame,
+                     text="Release will package whatever is in dist/ as-is.",
+                     font=("Segoe UI", 8), bg=C["base"],
+                     fg=C["overlay0"]).pack(anchor=tk.W)
+
+        # ── 5. Artefact ─────────────────────────────────────────────────────
+        self._section_header(body, "5", "Artefact")
+        self._artefact_lbl = tk.Label(body, text="(will be computed at publish time)",
+                                       font=("Segoe UI", 9), bg=C["base"],
+                                       fg=C["subtext"], justify=tk.LEFT)
+        self._artefact_lbl.pack(anchor=tk.W, padx=(44, 20), pady=(0, 12))
+        self._refresh_artefact_preview()
+
+        # ── 6. CHANGELOG sync ───────────────────────────────────────────────
+        self._section_header(body, "6", "CHANGELOG.md sync")
+        cl_frame = tk.Frame(body, bg=C["base"])
+        cl_frame.pack(fill=tk.X, padx=(44, 20), pady=(0, 12))
+        if self._has_changelog:
+            ttk.Checkbutton(cl_frame,
+                            text="Update CHANGELOG.md with the new version section",
+                            variable=self._sync_cl_var).pack(anchor=tk.W)
+            tk.Label(cl_frame,
+                     text="Inserts (or replaces) the [<version>] section directly "
+                          "below [Unreleased], then commits as `chore: release "
+                          "prep for <tag>`.",
+                     font=("Segoe UI", 8), bg=C["base"], fg=C["overlay0"],
+                     justify=tk.LEFT, wraplength=520).pack(anchor=tk.W, pady=(2, 0))
+        else:
+            self._sync_cl_var.set(False)
+            tk.Label(cl_frame,
+                     text="CHANGELOG.md not found or missing the `## [Unreleased]` "
+                          "anchor — sync disabled.",
+                     font=("Segoe UI", 9), bg=C["base"], fg=C["overlay0"],
+                     justify=tk.LEFT, wraplength=520).pack(anchor=tk.W)
+
+        # ── Publish row ─────────────────────────────────────────────────────
+        ttk.Separator(body, orient="horizontal").pack(fill=tk.X, padx=20, pady=(8, 12))
+        btn_row = tk.Frame(body, bg=C["base"])
+        btn_row.pack(anchor=tk.W, padx=20, pady=(0, 18))
+        self._publish_btn = ttk.Button(btn_row, text="🚀  Publish",
+                                       style="Primary.TButton",
+                                       command=self._on_publish)
+        self._publish_btn.pack(side=tk.LEFT, padx=(0, 8))
+        ttk.Button(btn_row, text="Cancel",
+                   command=self.destroy).pack(side=tk.LEFT)
+
+        # Status label below buttons — updated as the worker progresses.
+        self._status_lbl = tk.Label(body, text="",
+                                     font=("Segoe UI", 9), bg=C["base"],
+                                     fg=C["overlay0"], justify=tk.LEFT,
+                                     wraplength=600)
+        self._status_lbl.pack(anchor=tk.W, padx=20, pady=(0, 18))
+
+    def _section_header(self, parent, num: str, text: str):
+        row = tk.Frame(parent, bg=C["base"])
+        row.pack(fill=tk.X, padx=20, pady=(4, 4))
+        tk.Label(row, text=f"{num}.", bg=C["base"], fg=C["blue"],
+                 font=("Segoe UI", 11, "bold")).pack(side=tk.LEFT, padx=(0, 8))
+        tk.Label(row, text=text, bg=C["base"], fg=C["text"],
+                 font=("Segoe UI", 11, "bold")).pack(side=tk.LEFT)
+
+    # ── Auto-fill / regenerate ─────────────────────────────────────────────
+
+    def _regenerate_notes(self):
+        sections = _classify_commits_for_changelog(self._commits)
+        from datetime import datetime as _dt
+        date_str = _dt.now().strftime("%Y-%m-%d")
+        tag_clean = self._next_tag().lstrip("v")
+        notes = _render_release_notes(tag_clean, date_str, sections,
+                                       summary="Edit this summary, then click Publish.")
+        self._notes_txt.delete("1.0", tk.END)
+        self._notes_txt.insert("1.0", notes)
+        self._refresh_title()
+
+    def _refresh_title(self):
+        # Default title: "v1.0.4 — <first non-summary heading or top item>".
+        tag = self._next_tag()
+        first = ""
+        sections = _classify_commits_for_changelog(self._commits)
+        for sec in ("Breaking", "Added", "Fixed", "Changed", "Docs", "Other"):
+            if sections.get(sec):
+                first = sections[sec][0]
+                break
+        if first:
+            # Take the first 60 chars of the first commit subject as a hint.
+            self._title_var.set(f"{tag} — {first[:60]}")
+        else:
+            self._title_var.set(f"{tag} — release")
+
+    def _refresh_artefact_preview(self):
+        dist_dir = os.path.join(self._path, "dist")
+        tag = self._next_tag()
+        # Title-cased repo name for the zip; manager convention.
+        nice_name = self._repo_name
+        zip_name  = f"{nice_name}-{tag}-windows.zip"
+        if not os.path.isdir(dist_dir):
+            txt = f"dist/ not found yet — will be created by the build step.\nZip: {zip_name}"
+        else:
+            try:
+                entries = sorted(os.listdir(dist_dir))
+            except OSError:
+                entries = []
+            if not entries:
+                txt = f"dist/ is empty (will be populated by build).\nZip: {zip_name}"
+            else:
+                bits = []
+                for n in entries[:6]:
+                    full = os.path.join(dist_dir, n)
+                    if os.path.isfile(full):
+                        mb = os.path.getsize(full) / 1024 / 1024
+                        bits.append(f"{n} ({mb:.1f} MB)")
+                    else:
+                        bits.append(f"{n}/")
+                more = f" + {len(entries) - 6} more" if len(entries) > 6 else ""
+                txt = f"Files: {', '.join(bits)}{more}\nZip: {zip_name}"
+        self._artefact_lbl.config(text=txt)
+
+    def _copy_notes(self):
+        text = self._notes_txt.get("1.0", "end-1c")
+        try:
+            self.clipboard_clear()
+            self.clipboard_append(text)
+            self._status_lbl.config(text="✔ Release notes copied to clipboard.",
+                                     fg=C["green"])
+        except tk.TclError as exc:
+            self._status_lbl.config(text=f"Could not copy: {exc}", fg=C["red"])
+
+    # ── Publish pipeline ───────────────────────────────────────────────────
+
+    def _on_publish(self):
+        if self._publishing:
+            return
+        tag = self._next_tag()
+        title = self._title_var.get().strip() or tag
+        notes = self._notes_txt.get("1.0", "end-1c").strip()
+        if not tag.lstrip("v"):
+            messagebox.showwarning("Tag required",
+                "Pick a bump radio or enter a custom tag.", parent=self)
+            return
+        if not notes:
+            messagebox.showwarning("Notes required",
+                "Release notes cannot be empty. Click 🔄 Regenerate or edit "
+                "the textarea.", parent=self)
+            return
+
+        # Confirm
+        confirm = messagebox.askyesno(
+            "Publish release",
+            f"Publish {tag} to GitHub?\n\n"
+            f"This will:\n"
+            f"  • Run the build  ({'yes' if self._run_build_var.get() else 'no'})\n"
+            f"  • Zip dist/ as the release artefact\n"
+            f"  • {'Update CHANGELOG.md, commit, ' if self._sync_cl_var.get() else ''}"
+            f"create local tag {tag}, push, then call gh release create.",
+            parent=self)
+        if not confirm:
+            return
+
+        self._publishing = True
+        self._publish_btn.configure(state=tk.DISABLED)
+        self._app._git_begin_op()
+
+        threading.Thread(
+            target=self._publish_worker,
+            args=(tag, title, notes),
+            daemon=True,
+        ).start()
+
+    def _set_status(self, text: str, fg: str = None):
+        """Thread-safe status update."""
+        def _do():
+            self._status_lbl.config(text=text, fg=fg or C["subtext"])
+        try:
+            self.after(0, _do)
+        except tk.TclError:
+            pass  # dialog already destroyed
+
+    def _fail(self, message: str, *, keep_temp: bool = False,
+              temp_path: str | None = None):
+        """Surface a copy-pasteable recovery message and end the op."""
+        self._set_status(message, fg=C["red"])
+        self._app._log(f"  ✗ Release aborted", C["red"])
+        for line in message.splitlines():
+            if line.strip():
+                self._app._log(f"    {line}", C["red"])
+        if keep_temp and temp_path:
+            self._app._log(f"    Notes preserved at: {temp_path}", C["red"])
+        # Re-enable buttons
+        self._publishing = False
+        def _reenable():
+            try:
+                self._publish_btn.configure(state=tk.NORMAL)
+            except tk.TclError:
+                pass
+            self._app._git_end_op()
+        try:
+            self.after(0, _reenable)
+        except tk.TclError:
+            pass
+
+    def _publish_worker(self, tag: str, title: str, notes: str):
+        """Sequenced publish pipeline. Runs entirely on a background thread.
+        Each step short-circuits with a specific recovery message."""
+        log = self._app._log
+        sh  = self._app._shell_capture
+        path = self._path
+
+        # 1. Build (optional) ─────────────────────────────────────────────
+        if self._run_build_var.get() and self._build_script:
+            self._set_status(f"Building via {self._build_script}…  "
+                             "(this can take 3–8 minutes)", fg=C["peach"])
+            log(f"Release {tag}: running {self._build_script}…", C["peach"])
+            if self._build_script.endswith(".ps1"):
+                build_cmd = ["powershell", "-ExecutionPolicy", "Bypass",
+                             "-File", self._build_script]
+            else:
+                # .bat needs cmd.exe /c — running the .bat directly raises
+                # WinError 193 ("not a valid Win32 application") on Windows.
+                build_cmd = ["cmd.exe", "/c", self._build_script]
+            out, rc = sh(build_cmd, path)
+            for line in out.strip().splitlines()[-12:]:
+                log(f"  {line}", C["overlay0"])
+            if rc != 0:
+                return self._fail(
+                    "Build failed — release aborted, no state changed.\n"
+                    "See log panel for build tail.")
+
+        # 2. Zip ──────────────────────────────────────────────────────────
+        self._set_status("Zipping dist/…", fg=C["peach"])
+        dist_dir = os.path.join(path, "dist")
+        zip_name = f"{self._repo_name}-{tag}-windows.zip"
+        zip_path = os.path.join(path, zip_name)
+        zip_out  = _zip_dist(dist_dir, zip_path)
+        if not zip_out:
+            return self._fail(
+                f"Zip step failed — dist/ missing or empty.\n"
+                f"Re-run with 'Run build' enabled, or build manually first.")
+        try:
+            mb = os.path.getsize(zip_out) / 1024 / 1024
+        except OSError:
+            mb = 0.0
+        log(f"  zipped: {os.path.basename(zip_out)} ({mb:.1f} MB)", C["green"])
+
+        # 3. Write notes to a temp file (used by gh and preserved on failure) ──
+        import tempfile
+        notes_fd, notes_file = tempfile.mkstemp(
+            prefix=f"release-notes-{tag}-", suffix=".md", text=True)
+        try:
+            with os.fdopen(notes_fd, "w", encoding="utf-8") as f:
+                f.write(notes)
+        except OSError as exc:
+            return self._fail(f"Could not write temporary notes file: {exc}")
+
+        # 4. Patch CHANGELOG.md (optional) ────────────────────────────────
+        files_to_stage = []
+        if self._sync_cl_var.get() and self._has_changelog:
+            from datetime import datetime as _dt
+            self._set_status("Patching CHANGELOG.md…", fg=C["peach"])
+            ok, msg = _patch_changelog(
+                self._changelog_path,
+                tag.lstrip("v"),
+                _dt.now().strftime("%Y-%m-%d"),
+                notes,
+            )
+            if not ok:
+                return self._fail(f"CHANGELOG patch failed: {msg}",
+                                  keep_temp=True, temp_path=notes_file)
+            log(f"  CHANGELOG.md {msg}", C["green"])
+            files_to_stage.append("CHANGELOG.md")
+
+        # 5. Stage + commit ONLY the files we touched ─────────────────────
+        if files_to_stage:
+            self._set_status("Committing release-prep changes…", fg=C["peach"])
+            add_cmd = [GIT_EXE, "-C", path, "add", "--"] + files_to_stage
+            out, rc = sh(add_cmd, path)
+            if rc != 0:
+                return self._fail(
+                    f"git add CHANGELOG.md failed (rc={rc}).\n{out[-300:]}",
+                    keep_temp=True, temp_path=notes_file)
+            commit_cmd = [GIT_EXE, "-C", path, "commit",
+                          "-m", f"chore: release prep for {tag}",
+                          "--"] + files_to_stage
+            out, rc = sh(commit_cmd, path)
+            if rc != 0:
+                return self._fail(
+                    f"Commit failed (rc={rc}).\n{out[-300:]}\n\n"
+                    f"Recover: git restore --staged CHANGELOG.md",
+                    keep_temp=True, temp_path=notes_file)
+            log(f"  committed release-prep changes", C["green"])
+
+        # 6. Local annotated tag ──────────────────────────────────────────
+        self._set_status(f"Creating local tag {tag}…", fg=C["peach"])
+        out, rc = _git_tag(path, tag, title)
+        if rc != 0:
+            return self._fail(
+                f"git tag {tag} failed — possibly already exists locally.\n"
+                f"Recover: git tag -d {tag}\n\n"
+                f"git output:\n{out[-300:]}",
+                keep_temp=True, temp_path=notes_file)
+        log(f"  created annotated tag {tag}", C["green"])
+
+        # 7. Push commits + tag in one round-trip ─────────────────────────
+        self._set_status(f"Pushing {tag} to origin…", fg=C["peach"])
+        out, rc = _git_push_with_tags(path)
+        if rc != 0:
+            return self._fail(
+                f"Push failed (rc={rc}).\n{out[-300:]}\n\n"
+                f"Recover local state with:\n"
+                f"  git tag -d {tag}                # remove local tag\n"
+                f"  git reset --soft HEAD~1         # if release-prep commit was made",
+                keep_temp=True, temp_path=notes_file)
+        log(f"  pushed HEAD + {tag} to origin", C["green"])
+
+        # 8. gh release create ────────────────────────────────────────────
+        # After this point, tag + commit are already on the remote, so a
+        # failure here means manual recovery is needed.
+        self._set_status(f"Creating GitHub release {tag}…", fg=C["peach"])
+        gh_cmd = ["gh", "release", "create", tag,
+                  "--title", title,
+                  "--notes-file", notes_file,
+                  zip_out]
+        out, rc = sh(gh_cmd, path)
+        for line in out.strip().splitlines()[-8:]:
+            log(f"  {line}", C["overlay0"])
+        if rc != 0:
+            cmd_str = (f"gh release create {tag} --title \"{title}\" "
+                       f"--notes-file \"{notes_file}\" \"{zip_out}\"")
+            return self._fail(
+                f"GitHub release creation failed AFTER the tag was pushed.\n\n"
+                f"Local repo and remote ARE in sync — only the GitHub Release\n"
+                f"page wasn't created. Recover with:\n\n"
+                f"  {cmd_str}\n\n"
+                f"Notes file preserved at: {notes_file}",
+                keep_temp=True, temp_path=notes_file)
+
+        # 9. Cleanup notes temp ────────────────────────────────────────────
+        try:
+            os.unlink(notes_file)
+        except OSError:
+            pass
+
+        # 10. Done. Refresh git tab, close wizard.
+        log(f"  ✓ Release {tag} published — check GitHub!", C["green"])
+        self._set_status(f"✔ Release {tag} published.", fg=C["green"])
+        def _close():
+            self._publishing = False
+            self._app._git_end_op()
+            self.destroy()
+        try:
+            self.after(2000, _close)   # let the success message sit briefly
+        except tk.TclError:
+            pass
 
 
 class UntrackIgnoredDialog(tk.Toplevel):
