@@ -1073,6 +1073,55 @@ def _zip_dist(dist_path: str, zip_path: str) -> str | None:
     return os.path.abspath(produced)
 
 
+def _release_basename(path: str) -> str:
+    """Return a clean release-artefact prefix (no spaces) for ``path``.
+
+    Tries the git remote first — ``https://github.com/user/Repo.git`` →
+    ``Repo``, ``git@github.com:user/Repo.git`` → ``Repo``. This matches the
+    GitHub repo name, which is what users expect to see in
+    ``Repo-vX.Y.Z-windows.zip``. Falls back to the folder basename with
+    spaces replaced by dashes when the remote can't be read (no repo yet,
+    no remote set, git missing).
+
+    Pure-ish — does a single fast git call, no network.
+    """
+    try:
+        proc = subprocess.run(
+            [GIT_EXE, "-C", path, "remote", "get-url", "origin"],
+            capture_output=True, text=True, timeout=5,
+            creationflags=CREATE_NO_WINDOW,
+        )
+    except (FileNotFoundError, subprocess.TimeoutExpired, OSError):
+        proc = None
+
+    if proc and proc.returncode == 0:
+        url = proc.stdout.strip().rstrip("/")
+        if url.endswith(".git"):
+            url = url[:-4]
+        # Split on both '/' (https) and ':' (ssh), take the last segment.
+        tail = url.rsplit("/", 1)[-1].rsplit(":", 1)[-1]
+        if tail:
+            return tail
+
+    # Fallback: sanitize the folder basename.
+    base = os.path.basename(path.rstrip(os.sep))
+    return base.replace(" ", "-") or "release"
+
+
+def _fmt_size(byte_count: int) -> str:
+    """Format ``byte_count`` as a human-friendly size string.
+
+    - <1 KB → "<1 KB" (avoids "0.0 MB" / "0.0 KB" for tiny files)
+    - <1 MB → "N KB" with no decimal
+    - ≥1 MB → "N.N MB" with one decimal
+    """
+    if byte_count < 1024:
+        return "<1 KB"
+    if byte_count < 1024 * 1024:
+        return f"{byte_count // 1024} KB"
+    return f"{byte_count / 1024 / 1024:.1f} MB"
+
+
 def _fetch_tags(path: str) -> None:
     """Pull tags from origin so ``_last_release_tag`` reflects releases that
     were created remotely without a local ``git tag`` step.
@@ -7084,7 +7133,12 @@ class ReleaseWizardDialog(tk.Toplevel):
         super().__init__(parent)
         self._app  = parent
         self._path = path
-        self._repo_name = os.path.basename(path)
+        # _repo_name is shown in the dialog title / header — keep the
+        # human-readable folder name. _release_basename is used for the
+        # release zip filename and is derived from the git remote so it
+        # matches the GitHub repo name (no spaces).
+        self._repo_name        = os.path.basename(path)
+        self._release_basename = _release_basename(path)
 
         self.title(f"Release Wizard — {self._repo_name}")
         self.configure(bg=C["base"])
@@ -7375,32 +7429,79 @@ class ReleaseWizardDialog(tk.Toplevel):
             self._title_var.set(f"{tag} — release")
 
     def _refresh_artefact_preview(self):
+        """Refresh the artefact preview label.
+
+        Layout intent: surface the IMPORTANT files first — `.exe` artefacts
+        are what users actually download — then directories, then everything
+        else. Plain alphabetical sort buried the exes after `templates/` in
+        the manager's own dist/ which was misleading. Sizes use `_fmt_size`
+        so a 12 KB file shows as `12 KB`, not `0.0 MB`.
+        """
         dist_dir = os.path.join(self._path, "dist")
         tag = self._next_tag()
-        # Title-cased repo name for the zip; manager convention.
-        nice_name = self._repo_name
-        zip_name  = f"{nice_name}-{tag}-windows.zip"
+        zip_name  = f"{self._release_basename}-{tag}-windows.zip"
         if not os.path.isdir(dist_dir):
-            txt = f"dist/ not found yet — will be created by the build step.\nZip: {zip_name}"
-        else:
-            try:
-                entries = sorted(os.listdir(dist_dir))
-            except OSError:
-                entries = []
-            if not entries:
-                txt = f"dist/ is empty (will be populated by build).\nZip: {zip_name}"
+            self._artefact_lbl.config(
+                text=f"dist/ not found yet — will be created by the build step.\n"
+                     f"Zip: {zip_name}")
+            return
+        try:
+            all_entries = sorted(os.listdir(dist_dir))
+        except OSError:
+            all_entries = []
+        if not all_entries:
+            self._artefact_lbl.config(
+                text=f"dist/ is empty (will be populated by build).\n"
+                     f"Zip: {zip_name}")
+            return
+
+        # Priority bucket order: .exe → other files → directories.
+        # Within each bucket, alphabetical.
+        exes, files, dirs = [], [], []
+        for name in all_entries:
+            full = os.path.join(dist_dir, name)
+            if os.path.isdir(full):
+                dirs.append(name)
+            elif name.lower().endswith(".exe"):
+                exes.append(name)
             else:
-                bits = []
-                for n in entries[:6]:
-                    full = os.path.join(dist_dir, n)
-                    if os.path.isfile(full):
-                        mb = os.path.getsize(full) / 1024 / 1024
-                        bits.append(f"{n} ({mb:.1f} MB)")
-                    else:
-                        bits.append(f"{n}/")
-                more = f" + {len(entries) - 6} more" if len(entries) > 6 else ""
-                txt = f"Files: {', '.join(bits)}{more}\nZip: {zip_name}"
-        self._artefact_lbl.config(text=txt)
+                files.append(name)
+        ordered = exes + files + dirs
+
+        # Show first 8 entries; if more, append "+ N more".
+        SHOW = 8
+        bits = []
+        for name in ordered[:SHOW]:
+            full = os.path.join(dist_dir, name)
+            if os.path.isdir(full):
+                bits.append(f"{name}/")
+            else:
+                try:
+                    size = os.path.getsize(full)
+                except OSError:
+                    size = 0
+                bits.append(f"{name} ({_fmt_size(size)})")
+        more = f"  + {len(ordered) - SHOW} more" if len(ordered) > SHOW else ""
+
+        # Two lines for legibility — exes get their own line so they stand out.
+        if exes:
+            exe_bits  = [b for b in bits if any(b.startswith(e) for e in exes)]
+            rest_bits = [b for b in bits if b not in exe_bits]
+            lines = ["Files:"]
+            lines.append(f"  {', '.join(exe_bits)}")
+            if rest_bits:
+                lines.append(f"  {', '.join(rest_bits)}{more}")
+            elif more:
+                lines.append(f"  {more.strip()}")
+            lines.append(f"Zip: {zip_name}")
+            self._artefact_lbl.config(text="\n".join(lines))
+        else:
+            # No exes found in dist/ yet (probably pre-build) — keep the
+            # original single-line layout, but the build step will produce them.
+            self._artefact_lbl.config(
+                text=f"Files: {', '.join(bits)}{more}\n"
+                     f"(no .exe yet — will be produced by the build step)\n"
+                     f"Zip: {zip_name}")
 
     def _copy_notes(self):
         text = self._notes_txt.get("1.0", "end-1c")
@@ -7515,7 +7616,7 @@ class ReleaseWizardDialog(tk.Toplevel):
         # 2. Zip ──────────────────────────────────────────────────────────
         self._set_status("Zipping dist/…", fg=C["peach"])
         dist_dir = os.path.join(path, "dist")
-        zip_name = f"{self._repo_name}-{tag}-windows.zip"
+        zip_name = f"{self._release_basename}-{tag}-windows.zip"
         zip_path = os.path.join(path, zip_name)
         zip_out  = _zip_dist(dist_dir, zip_path)
         if not zip_out:
