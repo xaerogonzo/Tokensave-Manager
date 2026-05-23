@@ -493,172 +493,195 @@ def _slim_tokensave_context(ctx: dict) -> dict:
 
 
 # ───────────────────────────────────────────────────────────────────────
+# Per-tool spec factories
+# ───────────────────────────────────────────────────────────────────────
+
+def _tool_read_file(project_path: str) -> ToolSpec:
+    return ToolSpec(
+        name="read_file",
+        description=(
+            "Read a file's contents. Returns up to 50 KB; longer "
+            "files are truncated with a notice. THIS IS THE PRIMARY "
+            "TOOL FOR ANSWERING 'why does X behave like Y' or 'how "
+            "does X work' questions — when the user names a file, "
+            "read it directly instead of searching.\n\n"
+            "FOR LARGE FILES (e.g. src/tokensave-manager.py which is "
+            "over 50 KB): pass `start_line` and `end_line` to read a "
+            "specific section. tokensave_search returns the exact "
+            "line number where each symbol is DEFINED — pass that "
+            "as `start_line` and set `end_line` 150-200 lines later "
+            "so you read the full function body, not just the "
+            "signature + docstring.\n\n"
+            "If the path isn't found, the error message will "
+            "suggest the correct location."),
+        parameters={
+            "type": "object",
+            "properties": {
+                "path": {
+                    "type": "string",
+                    "description": ("Path relative to the project root, "
+                                    "e.g. 'src/main.py' or 'README.md'."),
+                },
+                "start_line": {
+                    "type": "integer",
+                    "minimum": 1,
+                    "description": ("Optional 1-based line number to "
+                                    "start reading from.  Use with "
+                                    "end_line to read just a section "
+                                    "of a large file."),
+                },
+                "end_line": {
+                    "type": "integer",
+                    "minimum": 1,
+                    "description": ("Optional 1-based last line to "
+                                    "read, inclusive.  Defaults to "
+                                    "end of file."),
+                },
+            },
+            "required": ["path"],
+            "additionalProperties": False,
+        },
+        handler=_make_read_file(project_path),
+    )
+
+
+def _tool_list_directory(project_path: str) -> ToolSpec:
+    return ToolSpec(
+        name="list_directory",
+        description=(
+            "List entries in a directory inside the project. Entries "
+            "ending with '/' are subdirectories. Use this to discover "
+            "what files exist before reading them."),
+        parameters={
+            "type": "object",
+            "properties": {
+                "path": {
+                    "type": "string",
+                    "description": ("Directory path relative to the "
+                                    "project root. Pass '' or '.' for "
+                                    "the project root."),
+                },
+            },
+            "required": [],
+            "additionalProperties": False,
+        },
+        handler=_make_list_directory(project_path),
+    )
+
+
+def _tool_git_log(project_path: str) -> ToolSpec:
+    return ToolSpec(
+        name="git_log",
+        description=(
+            "Show the last N commits as one line each (sha + subject). "
+            "Default 20. Useful for understanding recent history."),
+        parameters={
+            "type": "object",
+            "properties": {
+                "n": {
+                    "type": "integer",
+                    "minimum": 1,
+                    "maximum": 100,
+                    "description": "Number of commits to show (1-100).",
+                },
+            },
+            "required": [],
+            "additionalProperties": False,
+        },
+        handler=_make_git_log(project_path),
+    )
+
+
+def _tool_git_diff(project_path: str) -> ToolSpec:
+    return ToolSpec(
+        name="git_diff",
+        description=(
+            "Show the pending diff (git diff HEAD) for the project, "
+            "or for a specific path. Returns up to 24 KB; longer diffs "
+            "are truncated."),
+        parameters={
+            "type": "object",
+            "properties": {
+                "path": {
+                    "type": "string",
+                    "description": ("Optional path to limit the diff. "
+                                    "Pass '' for the whole project."),
+                },
+            },
+            "required": [],
+            "additionalProperties": False,
+        },
+        handler=_make_git_diff(project_path),
+    )
+
+
+def _tool_tokensave_search(project_path: str, tokensave_exe: str) -> ToolSpec:
+    return ToolSpec(
+        name="tokensave_search",
+        description=(
+            "Find DEFINED SYMBOLS (functions, classes, methods, "
+            "constants) in the project's tokensave code graph by "
+            "name. Returns matched node names with file:line "
+            "locations. NOT a full-text grep — searching for "
+            "keywords like 'Popen', 'import', or arbitrary "
+            "substrings will return nothing. Use this to answer "
+            "'where is the symbol X defined?'. For reading actual "
+            "file contents, use read_file."),
+        parameters={
+            "type": "object",
+            "properties": {
+                "query": {
+                    "type": "string",
+                    "description": ("What to search for, e.g. "
+                                    "'commit message generator' or "
+                                    "'_call_llm'."),
+                },
+            },
+            "required": ["query"],
+            "additionalProperties": False,
+        },
+        handler=_make_tokensave_runner(project_path, tokensave_exe, "search"),
+    )
+
+
+def _tool_tokensave_context(project_path: str, tokensave_exe: str) -> ToolSpec:
+    return ToolSpec(
+        name="tokensave_context",
+        description=(
+            "Build an AI-ready context bundle from the project's "
+            "tokensave code graph for a natural-language task. "
+            "Returns related symbols, relationships, and code snippets. "
+            "Prefer this over many read_file calls when answering "
+            "questions about code structure."),
+        parameters={
+            "type": "object",
+            "properties": {
+                "query": {
+                    "type": "string",
+                    "description": ("Natural-language description of "
+                                    "what you want context for."),
+                },
+            },
+            "required": ["query"],
+            "additionalProperties": False,
+        },
+        handler=_make_tokensave_runner(project_path, tokensave_exe, "context"),
+    )
+
+
+# ───────────────────────────────────────────────────────────────────────
 # Registry builder
 # ───────────────────────────────────────────────────────────────────────
 
 def build_tools(project_path: str, tokensave_exe: str = "") -> dict[str, ToolSpec]:
-    """Construct the tool registry for a given project.
-
-    Handlers are closures over `project_path` and `tokensave_exe` so they
-    don't need to be passed through every call. Return a new registry
-    per project (cheap — these are dataclass instances).
-    """
+    """Construct the tool registry for a given project."""
     return {
-        "read_file": ToolSpec(
-            name="read_file",
-            description=(
-                "Read a file's contents. Returns up to 50 KB; longer "
-                "files are truncated with a notice. THIS IS THE PRIMARY "
-                "TOOL FOR ANSWERING 'why does X behave like Y' or 'how "
-                "does X work' questions — when the user names a file, "
-                "read it directly instead of searching.\n\n"
-                "FOR LARGE FILES (e.g. src/tokensave-manager.py which is "
-                "over 50 KB): pass `start_line` and `end_line` to read a "
-                "specific section. tokensave_search returns the exact "
-                "line number where each symbol is DEFINED — pass that "
-                "as `start_line` and set `end_line` 150-200 lines later "
-                "so you read the full function body, not just the "
-                "signature + docstring.\n\n"
-                "If the path isn't found, the error message will "
-                "suggest the correct location."),
-            parameters={
-                "type": "object",
-                "properties": {
-                    "path": {
-                        "type": "string",
-                        "description": ("Path relative to the project root, "
-                                        "e.g. 'src/main.py' or 'README.md'."),
-                    },
-                    "start_line": {
-                        "type": "integer",
-                        "minimum": 1,
-                        "description": ("Optional 1-based line number to "
-                                        "start reading from.  Use with "
-                                        "end_line to read just a section "
-                                        "of a large file."),
-                    },
-                    "end_line": {
-                        "type": "integer",
-                        "minimum": 1,
-                        "description": ("Optional 1-based last line to "
-                                        "read, inclusive.  Defaults to "
-                                        "end of file."),
-                    },
-                },
-                "required": ["path"],
-                "additionalProperties": False,
-            },
-            handler=_make_read_file(project_path),
-        ),
-        "list_directory": ToolSpec(
-            name="list_directory",
-            description=(
-                "List entries in a directory inside the project. Entries "
-                "ending with '/' are subdirectories. Use this to discover "
-                "what files exist before reading them."),
-            parameters={
-                "type": "object",
-                "properties": {
-                    "path": {
-                        "type": "string",
-                        "description": ("Directory path relative to the "
-                                        "project root. Pass '' or '.' for "
-                                        "the project root."),
-                    },
-                },
-                "required": [],
-                "additionalProperties": False,
-            },
-            handler=_make_list_directory(project_path),
-        ),
-        "git_log": ToolSpec(
-            name="git_log",
-            description=(
-                "Show the last N commits as one line each (sha + subject). "
-                "Default 20. Useful for understanding recent history."),
-            parameters={
-                "type": "object",
-                "properties": {
-                    "n": {
-                        "type": "integer",
-                        "minimum": 1,
-                        "maximum": 100,
-                        "description": "Number of commits to show (1-100).",
-                    },
-                },
-                "required": [],
-                "additionalProperties": False,
-            },
-            handler=_make_git_log(project_path),
-        ),
-        "git_diff": ToolSpec(
-            name="git_diff",
-            description=(
-                "Show the pending diff (git diff HEAD) for the project, "
-                "or for a specific path. Returns up to 24 KB; longer diffs "
-                "are truncated."),
-            parameters={
-                "type": "object",
-                "properties": {
-                    "path": {
-                        "type": "string",
-                        "description": ("Optional path to limit the diff. "
-                                        "Pass '' for the whole project."),
-                    },
-                },
-                "required": [],
-                "additionalProperties": False,
-            },
-            handler=_make_git_diff(project_path),
-        ),
-        "tokensave_search": ToolSpec(
-            name="tokensave_search",
-            description=(
-                "Find DEFINED SYMBOLS (functions, classes, methods, "
-                "constants) in the project's tokensave code graph by "
-                "name. Returns matched node names with file:line "
-                "locations. NOT a full-text grep — searching for "
-                "keywords like 'Popen', 'import', or arbitrary "
-                "substrings will return nothing. Use this to answer "
-                "'where is the symbol X defined?'. For reading actual "
-                "file contents, use read_file."),
-            parameters={
-                "type": "object",
-                "properties": {
-                    "query": {
-                        "type": "string",
-                        "description": ("What to search for, e.g. "
-                                        "'commit message generator' or "
-                                        "'_call_llm'."),
-                    },
-                },
-                "required": ["query"],
-                "additionalProperties": False,
-            },
-            handler=_make_tokensave_runner(project_path, tokensave_exe, "search"),
-        ),
-        "tokensave_context": ToolSpec(
-            name="tokensave_context",
-            description=(
-                "Build an AI-ready context bundle from the project's "
-                "tokensave code graph for a natural-language task. "
-                "Returns related symbols, relationships, and code snippets. "
-                "Prefer this over many read_file calls when answering "
-                "questions about code structure."),
-            parameters={
-                "type": "object",
-                "properties": {
-                    "query": {
-                        "type": "string",
-                        "description": ("Natural-language description of "
-                                        "what you want context for."),
-                    },
-                },
-                "required": ["query"],
-                "additionalProperties": False,
-            },
-            handler=_make_tokensave_runner(project_path, tokensave_exe, "context"),
-        ),
+        "read_file":         _tool_read_file(project_path),
+        "list_directory":    _tool_list_directory(project_path),
+        "git_log":           _tool_git_log(project_path),
+        "git_diff":          _tool_git_diff(project_path),
+        "tokensave_search":  _tool_tokensave_search(project_path, tokensave_exe),
+        "tokensave_context": _tool_tokensave_context(project_path, tokensave_exe),
     }
 
 
