@@ -165,7 +165,12 @@ def _make_read_file(project_path: str):
         if full is None:
             return f"[tool error] path '{path}' is outside the project root"
         if not os.path.isfile(full):
-            return f"[tool error] file not found: {path}"
+            # File not found — look for likely matches by basename so
+            # the model gets an actionable hint instead of just "no".
+            # qwen2.5-coder and similar local models frequently give up
+            # after a single tool error; suggesting concrete retry
+            # paths keeps the agent loop productive.
+            return _suggest_paths_for_missing_file(project_path, path)
         try:
             with open(full, encoding="utf-8", errors="replace") as f:
                 # Read one byte over the cap so we can detect truncation.
@@ -179,6 +184,52 @@ def _make_read_file(project_path: str):
                          "ask for a specific section if you need more ...]")
         return content
     return _read_file
+
+
+def _suggest_paths_for_missing_file(project_path: str, requested: str) -> str:
+    """Build a `[tool error] file not found` message with concrete retry
+    suggestions.
+
+    When the model asks to read a file by bare basename or with a wrong
+    leading directory (very common — local models often guess "foo.py"
+    when the actual path is "src/foo.py"), we walk the project tree
+    looking for files whose basename matches the request and surface
+    up to 5 candidates. This converts a dead-end "file not found" into
+    an actionable hint the next iteration can act on.
+    """
+    basename = os.path.basename(requested.replace("\\", "/")).strip()
+    if not basename:
+        return f"[tool error] file not found: {requested}"
+
+    matches: list[str] = []
+    basename_lower = basename.lower()
+    try:
+        for root, dirs, files in os.walk(project_path):
+            # Skip hidden and noisy dirs to keep the search fast.
+            dirs[:] = [d for d in dirs
+                       if not d.startswith(".")
+                       and d not in ("__pycache__", "node_modules",
+                                     "venv", ".venv", "dist", "build")]
+            for f in files:
+                if f.lower() == basename_lower:
+                    rel = os.path.relpath(
+                        os.path.join(root, f), project_path)
+                    matches.append(rel.replace("\\", "/"))
+                    if len(matches) >= 5:
+                        break
+            if len(matches) >= 5:
+                break
+    except OSError:
+        # Walking failed mid-stream; deliver whatever we got.
+        pass
+
+    if not matches:
+        return (f"[tool error] file not found: {requested}.  "
+                "Use list_directory to see what's available in the "
+                "project root or its subdirectories.")
+    return (f"[tool error] file not found at '{requested}', but a file "
+            f"named '{basename}' exists at: {', '.join(matches)}.  "
+            f"Retry read_file with one of those paths.")
 
 
 def _make_list_directory(project_path: str):
@@ -247,6 +298,20 @@ def _make_git_diff(project_path: str):
 
 def _make_tokensave_runner(project_path: str, tokensave_exe: str,
                             subcommand: str):
+    """Build a handler for one of tokensave's CLI subcommands.
+
+    Note on naming mismatch: the MCP tools we expose to the model are
+    `tokensave_search` and `tokensave_context`, but the tokensave CLI
+    uses the subcommands `query` (not `search`) and `context`. The MCP-
+    style names are preferred at the agent-facing layer because that's
+    what users / the model already know from tokensave's own MCP server.
+    Internally, `subcommand="search"` maps to the `query` CLI command.
+
+    Also note: neither `query` nor `context` accept a `--json` flag.
+    The `context` subcommand has `--format json|markdown` instead. The
+    `query` subcommand has no structured output mode — we get plain
+    text and pass it through.
+    """
     def _runner(args: dict) -> str:
         if not tokensave_exe or not os.path.isfile(tokensave_exe):
             return ("[tool error] tokensave executable not configured. "
@@ -258,9 +323,33 @@ def _make_tokensave_runner(project_path: str, tokensave_exe: str,
         query = (args.get("query") or "").strip()
         if not query:
             return "[tool error] missing required arg: query"
+
+        # Map the agent-facing subcommand name to the actual CLI
+        # subcommand, and build the argv with the correct flags.
+        if subcommand == "search":
+            # tokensave's CLI calls this `query` (not `search` — that
+            # would clash with `search` in shell scripts maybe?).
+            cli_subcommand = "query"
+            cli_args = [tokensave_exe, "query", query]
+            display_name = "tokensave query"
+        elif subcommand == "context":
+            cli_subcommand = "context"
+            # Cap nodes lower than tokensave's default 20: subgraph JSON
+            # is dense with metadata (IDs, columns, attrs_start_line,
+            # etc.) and we slim it further in _slim_tokensave_context
+            # below, but a smaller node count keeps both the wire size
+            # and the model's reasoning load down.
+            cli_args = [tokensave_exe, "context",
+                        "--format", "json",
+                        "--max-nodes", "10",
+                        query]
+            display_name = "tokensave context"
+        else:
+            return f"[tool error] unknown tokensave subcommand: {subcommand}"
+
         try:
             r = subprocess.run(
-                [tokensave_exe, subcommand, "--json", query],
+                cli_args,
                 cwd=project_path,
                 capture_output=True, text=True, timeout=20,
                 creationflags=CREATE_NO_WINDOW,
@@ -268,24 +357,79 @@ def _make_tokensave_runner(project_path: str, tokensave_exe: str,
         except FileNotFoundError:
             return f"[tool error] tokensave executable not found at {tokensave_exe}"
         except subprocess.TimeoutExpired:
-            return f"[tool error] tokensave {subcommand} timed out after 20s"
+            return f"[tool error] {display_name} timed out after 20s"
         out = (r.stdout or "").strip()
         if r.returncode != 0:
             err = (r.stderr or "").strip()
-            return (f"[tool error] tokensave {subcommand} failed "
+            return (f"[tool error] {display_name} failed "
                     f"(rc={r.returncode}): {err[:500]}")
         if not out:
             return f"(no results for: {query})"
         if len(out) > _TOKENSAVE_MAX_CHARS:
             out = (out[:_TOKENSAVE_MAX_CHARS]
                    + f"\n[... output truncated at {_TOKENSAVE_MAX_CHARS} chars ...]")
-        # Try to pretty-print if it's valid JSON, otherwise pass through.
-        try:
-            parsed = json.loads(out)
-            return json.dumps(parsed, indent=2)[:_TOKENSAVE_MAX_CHARS]
-        except json.JSONDecodeError:
-            return out
+        # context returns valid JSON when --format json is used. Slim
+        # the node dicts down to just the fields the model actually
+        # needs (name, kind, file_path, start_line, signature, parent)
+        # — the raw tokensave output also includes IDs, column numbers,
+        # docstrings, attrs_start_line, branches/loops/returns counts,
+        # etc. that bloat the wire by ~3-5x without helping the model
+        # answer code questions. query output is plain text and passes
+        # through unchanged.
+        if cli_subcommand == "context":
+            try:
+                parsed = json.loads(out)
+                slimmed = _slim_tokensave_context(parsed)
+                return json.dumps(slimmed, indent=2)[:_TOKENSAVE_MAX_CHARS]
+            except json.JSONDecodeError:
+                # Fallback if --format json wasn't honored for some
+                # reason (older tokensave versions).
+                return out
+        return out
     return _runner
+
+
+def _slim_tokensave_context(ctx: dict) -> dict:
+    """Strip noise from `tokensave context --format json` output.
+
+    The raw response includes per-node metadata that's useful for IDE
+    integrations (column numbers, internal hash IDs, attrs vs start
+    line, complexity metrics) but is dead weight for an LLM trying to
+    answer a structural question. This function returns a slim version
+    keeping only the fields a code-Q&A agent needs: name, kind,
+    qualified_name, file_path, start_line, end_line, signature, parent_id.
+
+    Edges and the top-level summary/query fields pass through unchanged.
+    On any structural surprise (missing keys, wrong types) the function
+    falls back to returning the input untouched — better to deliver
+    something the model can use than to crash on a future schema change.
+    """
+    if not isinstance(ctx, dict):
+        return ctx
+    try:
+        sub = ctx.get("subgraph") or {}
+        nodes = sub.get("nodes")
+        if isinstance(nodes, list):
+            slim_nodes = []
+            for n in nodes:
+                if not isinstance(n, dict):
+                    slim_nodes.append(n)
+                    continue
+                slim_nodes.append({
+                    k: n[k] for k in
+                    ("name", "kind", "qualified_name", "file_path",
+                     "start_line", "end_line", "signature", "parent_id")
+                    if k in n and n[k] is not None
+                })
+            sub = {**sub, "nodes": slim_nodes}
+        return {
+            "query":   ctx.get("query"),
+            "summary": ctx.get("summary"),
+            "subgraph": sub,
+        }
+    except Exception:
+        # Schema drift defence: pass through if anything looks off.
+        return ctx
 
 
 # ───────────────────────────────────────────────────────────────────────
@@ -303,11 +447,13 @@ def build_tools(project_path: str, tokensave_exe: str = "") -> dict[str, ToolSpe
         "read_file": ToolSpec(
             name="read_file",
             description=(
-                "Read the contents of a file inside the current project. "
-                "Returns up to 50 KB; longer files are truncated with a "
-                "notice. Use this when you need the literal text of a file. "
-                "For finding WHERE something is defined, prefer "
-                "tokensave_search."),
+                "Read a file's contents. Returns up to 50 KB; longer "
+                "files are truncated with a notice. THIS IS THE PRIMARY "
+                "TOOL FOR ANSWERING 'why does X behave like Y' or 'how "
+                "does X work' questions — when the user names a file, "
+                "read it directly instead of searching. If the path "
+                "isn't found, the error message will suggest the "
+                "correct location."),
             parameters={
                 "type": "object",
                 "properties": {
@@ -386,12 +532,14 @@ def build_tools(project_path: str, tokensave_exe: str = "") -> dict[str, ToolSpe
         "tokensave_search": ToolSpec(
             name="tokensave_search",
             description=(
-                "Search the project's tokensave code graph for symbols / "
-                "files matching a natural-language or substring query. "
-                "Returns JSON with matched nodes (functions, classes, "
-                "methods) and their file:line locations. Far cheaper than "
-                "grepping. Skips with a notice if the project has no "
-                "tokensave index."),
+                "Find DEFINED SYMBOLS (functions, classes, methods, "
+                "constants) in the project's tokensave code graph by "
+                "name. Returns matched node names with file:line "
+                "locations. NOT a full-text grep — searching for "
+                "keywords like 'Popen', 'import', or arbitrary "
+                "substrings will return nothing. Use this to answer "
+                "'where is the symbol X defined?'. For reading actual "
+                "file contents, use read_file."),
             parameters={
                 "type": "object",
                 "properties": {

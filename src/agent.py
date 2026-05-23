@@ -56,8 +56,74 @@ DEFAULT_MAX_ITERATIONS = 8
 DEFAULT_TOOL_BUDGET_CHARS = 40_000
 
 # Per-request HTTP timeout. Tool-calling round trips include the model's
-# reasoning + JSON-encoded args, so allow ~120s on slow local hardware.
-DEFAULT_HTTP_TIMEOUT = 120
+# reasoning + JSON-encoded args, AND each iteration's context grows
+# (prior tool results accumulate). On slow local hardware running a 14B
+# model, the third or fourth iteration of a non-trivial task can take
+# 3-5 minutes per round trip — 300 seconds is a comfortable ceiling
+# that still surfaces "the server actually hung" within a reasonable
+# wait. Tunable via cfg["timeout_seconds"]; the agent floors anything
+# under 60 s back up to the default since shorter values reliably break
+# on tool-call sequences.
+DEFAULT_HTTP_TIMEOUT = 300
+
+
+# Cap on how many balanced-braces substrings we'll consider during
+# tool-call rescue. Most assistant messages have at most one tool-call
+# JSON object; this cap just prevents a pathological response with
+# hundreds of `{`s from causing quadratic scanning.
+_MAX_RESCUE_CANDIDATES = 16
+
+
+def _extract_balanced_json_substrings(text: str) -> list[str]:
+    """Return all syntactically valid JSON object substrings (top-level
+    `{...}` blocks) found anywhere in `text`, ordered by length descending.
+
+    Uses a simple brace-counter to find balanced regions, then tries
+    json.loads on each. Designed for rescuing tool calls out of mixed
+    prose-plus-JSON content emitted by local models. Naive single-pass
+    scanner — not aware of strings (so an unescaped `}` inside a JSON
+    string could confuse it), but json.loads validation downstream
+    catches any false-positives.
+
+    Bounded by `_MAX_RESCUE_CANDIDATES` to keep the worst case linear
+    in input size even when the text has many `{`s.
+    """
+    import json as _json
+    if not text:
+        return []
+    results: list[str] = []
+    n = len(text)
+    i = 0
+    while i < n and len(results) < _MAX_RESCUE_CANDIDATES:
+        if text[i] != "{":
+            i += 1
+            continue
+        # Walk forward maintaining a brace counter. When it returns to 0
+        # we've found a balanced region; try to parse it.
+        depth = 0
+        j = i
+        while j < n:
+            c = text[j]
+            if c == "{":
+                depth += 1
+            elif c == "}":
+                depth -= 1
+                if depth == 0:
+                    candidate = text[i:j + 1]
+                    try:
+                        _json.loads(candidate)
+                        results.append(candidate)
+                    except _json.JSONDecodeError:
+                        pass
+                    break
+            j += 1
+        # Advance past this `{` whether or not the region parsed.
+        i += 1
+    # Longest first — improves the odds that the first match is the
+    # actual tool call rather than a small `{"path": "x"}` substring
+    # nested inside it.
+    results.sort(key=len, reverse=True)
+    return results
 
 
 # ───────────────────────────────────────────────────────────────────────
@@ -90,6 +156,11 @@ class LocalAgent:
         self.tools = tools
         self.max_iterations = max_iterations
         self.tool_budget_chars = tool_budget_chars
+        # Populated by _chat_completion on the failure path so callers
+        # can surface the actual exception detail (HTTP code + body,
+        # network error, JSON parse failure) instead of a generic
+        # "LLM request failed" message.
+        self._last_error: str | None = None
 
     # ── Public entry point ──────────────────────────────────────────────
 
@@ -148,9 +219,10 @@ class LocalAgent:
                 response = self._chat_completion(messages)
                 if response is None:
                     if on_error:
-                        on_error("LLM request failed — check Settings → "
-                                 "AI commit messages (provider / model / "
-                                 "server running).")
+                        detail = self._last_error or (
+                            "no detail (check the manager's log file for "
+                            "tokensave-manager.agent warnings)")
+                        on_error(f"LLM request failed.  {detail}")
                     return
 
                 choice = (response.get("choices") or [{}])[0]
@@ -166,6 +238,33 @@ class LocalAgent:
                 if tool_calls:
                     assistant_msg["tool_calls"] = tool_calls
                 messages.append(assistant_msg)
+
+                # ── Tool-call rescue ───────────────────────────────────
+                # Some local models (notably qwen2.5-coder via Ollama) emit
+                # the tool call as JSON in the assistant content field
+                # instead of populating the proper tool_calls structure.
+                # When we see no tool_calls but the content looks like a
+                # tool-call JSON object, parse it and synthesise a
+                # tool_calls entry so the rest of the loop can proceed
+                # normally. Without this, the agent treats the JSON-as-
+                # text as the final answer and dies.
+                #
+                # Detected shapes (handled in order):
+                #   1. {"name": "tool", "arguments": {...}}
+                #   2. {"tool": "tool", "arguments": {...}}
+                #   3. Same as 1/2 but wrapped in markdown ```json fences
+                #   4. Same as 1/2 but with `parameters` instead of `arguments`
+                if not tool_calls and content:
+                    rescued = self._rescue_tool_call_from_content(content)
+                    if rescued is not None:
+                        log.info("rescued tool_call from assistant content: "
+                                 f"{rescued.get('function', {}).get('name')}")
+                        tool_calls = [rescued]
+                        # Re-write the assistant message we just appended
+                        # so it carries the synthesised tool_calls. The
+                        # text-content stays so on-screen rendering still
+                        # shows what the model emitted.
+                        messages[-1]["tool_calls"] = tool_calls
 
                 if content and on_assistant_message:
                     on_assistant_message(content)
@@ -224,6 +323,111 @@ class LocalAgent:
                 on_error(f"Agent crashed: {type(e).__name__}: {e}")
 
     # ── Tool dispatch ───────────────────────────────────────────────────
+
+    # ── Tool-call rescue helper ─────────────────────────────────────────
+
+    @staticmethod
+    def _rescue_tool_call_from_content(content: str) -> dict | None:
+        """Try to parse `content` as a JSON-encoded tool call and return
+        a synthesised tool_calls[] entry, or None if the content isn't a
+        tool call.
+
+        Local models — especially qwen2.5-coder, llama3.1, and several
+        Mistral variants — frequently emit tool calls as JSON in the
+        assistant `content` field instead of using the proper structured
+        `tool_calls` array. This is a known training-data quirk: the
+        models are fine-tuned on examples where tool calls are *visible*
+        JSON, and they emit them in that shape regardless of whether the
+        provider wraps them in tool_calls or not.
+
+        Worse, they often surround the JSON with explanatory prose
+        ("To understand the structure, I'll list the root directory…")
+        and wrap it in ```json``` fences. This extractor tries several
+        strategies to find the actual tool-call object:
+
+          1. Treat the whole content as JSON.
+          2. Find any ```json…``` or ```…``` fenced block, parse its body.
+          3. Find the longest valid balanced-braces JSON substring.
+
+        For each candidate it checks four object shapes:
+          • {"name": "tool_name", "arguments": {...}}
+          • {"tool": "tool_name", "arguments": {...}}
+          • {"name": "tool_name", "parameters": {...}}
+          • {"function": {"name": "tool_name", "arguments": {...}}}
+
+        Returns a dict shaped like a real tool_calls[] entry:
+          {"id": "rescued-<uuid>",
+           "type": "function",
+           "function": {"name": "X", "arguments": "<json-string>"}}
+
+        Note that `arguments` is a STRING (matching the OpenAI spec —
+        downstream code expects json.loads() on it). Returns None when
+        no candidate parses or none has a valid tool-call shape.
+        """
+        import json as _json
+        import uuid as _uuid
+        import re as _re
+        if not content or not isinstance(content, str):
+            return None
+
+        # ── Collect candidate JSON object strings ──────────────────────
+        candidates: list[str] = []
+
+        # 1. The whole content (after a quick strip).
+        whole = content.strip()
+        if whole.startswith("{") and whole.endswith("}"):
+            candidates.append(whole)
+
+        # 2. Anything inside a ```json ... ``` (or plain ``` ... ```) fence.
+        #    Multiple fences supported — try each in order.
+        for m in _re.finditer(
+                r"```(?:json|JSON)?\s*\n?(.*?)\n?```",
+                content, _re.DOTALL):
+            body = m.group(1).strip()
+            if body.startswith("{") and body.endswith("}"):
+                candidates.append(body)
+
+        # 3. The longest balanced-braces JSON substring anywhere in the
+        #    content. Scans for `{` starts, then for each tries to parse
+        #    progressively-longer substrings ending at each `}`. Picks
+        #    the longest that parses as JSON. Bounded — caps the number
+        #    of scan iterations to avoid pathological prose with many
+        #    braces.
+        candidates.extend(_extract_balanced_json_substrings(content))
+
+        # ── Try each candidate ─────────────────────────────────────────
+        for cand in candidates:
+            try:
+                obj = _json.loads(cand)
+            except _json.JSONDecodeError:
+                continue
+            if not isinstance(obj, dict):
+                continue
+            # Unwrap the {"function": {...}} variant.
+            if "function" in obj and isinstance(obj["function"], dict):
+                obj = obj["function"]
+            # Find the tool name.
+            name = obj.get("name") or obj.get("tool")
+            if not isinstance(name, str) or not name:
+                continue
+            # Find the args.
+            args = obj.get("arguments")
+            if args is None:
+                args = obj.get("parameters")
+            if args is None:
+                args = {}
+            if not isinstance(args, dict):
+                continue
+            return {
+                "id": f"rescued-{_uuid.uuid4().hex[:8]}",
+                "type": "function",
+                "function": {
+                    "name": name,
+                    # OpenAI spec requires arguments as a JSON STRING.
+                    "arguments": _json.dumps(args),
+                },
+            }
+        return None
 
     def _dispatch_tool(self, name: str, args: dict) -> str:
         """Run the named tool and return its result as a string.
@@ -289,7 +493,22 @@ class LocalAgent:
 
     def _chat_completion(self, messages: list[dict]) -> dict | None:
         """POST one /v1/chat/completions request with the tools array
-        and return the parsed response dict, or None on failure."""
+        and return the parsed response dict, or None on failure.
+
+        On failure, stores a detailed error message on `self._last_error`
+        (and logs it) so the calling `run()` can pass that detail to
+        `on_error` instead of a generic "LLM request failed" message.
+
+        For Ollama: passes `options.num_ctx` (default 32768) to bump the
+        per-request context window. Ollama's default `num_ctx` is 2048
+        tokens — drastically below what most modern models actually
+        support, and easily exceeded after 2-3 tool-call iterations
+        where each tool result can be hundreds of bytes. Symptom: 4xx
+        or 5xx response after a few successful round trips with no
+        obvious cause. Setting this explicitly via the OpenAI-compat
+        `options` extension fixes it. Non-Ollama providers ignore the
+        field. Tunable via `cfg["num_ctx"]`.
+        """
         provider = (self.cfg.get("provider") or "anthropic").lower()
         base_url = (self.cfg.get("base_url") or "").rstrip("/")
         model = self.cfg.get("model") or ""
@@ -298,20 +517,32 @@ class LocalAgent:
         timeout = int(self.cfg.get("timeout_seconds", DEFAULT_HTTP_TIMEOUT))
         if timeout < 60:
             timeout = DEFAULT_HTTP_TIMEOUT
+        is_ollama = (provider == "ollama")
 
         # ollama → openai_compatible alias (matches _call_llm).
         if provider == "ollama":
             provider = "openai_compatible"
             if not base_url:
                 base_url = "http://localhost:11434"
+        # Also flag a configured openai_compatible pointing at the default
+        # Ollama port — same context-window concern applies.
+        if not is_ollama and provider == "openai_compatible" \
+                and base_url and "11434" in base_url:
+            is_ollama = True
 
         if provider == "openai":
             url = "https://api.openai.com/v1/chat/completions"
         elif provider == "openai_compatible":
             if not base_url:
+                self._last_error = ("openai_compatible provider has no "
+                                    "base_url set — open Settings → AI "
+                                    "commit messages and configure it.")
                 return None
             url = base_url + "/v1/chat/completions"
         else:
+            self._last_error = (
+                f"provider '{provider}' is not supported for tool calling. "
+                "Use 'ollama', 'openai', or 'openai_compatible'.")
             return None
 
         payload = {
@@ -321,6 +552,12 @@ class LocalAgent:
             "tools": tools_as_openai_array(self.tools),
             "tool_choice": "auto",
         }
+        # Ollama-specific: bump num_ctx via the options field. Other
+        # OpenAI-compatible servers (LM Studio, vLLM) ignore this.
+        if is_ollama:
+            num_ctx = int(self.cfg.get("num_ctx", 32768))
+            payload["options"] = {"num_ctx": num_ctx}
+
         headers = {"Content-Type": "application/json"}
         if api_key:
             headers["Authorization"] = f"Bearer {api_key}"
@@ -333,9 +570,37 @@ class LocalAgent:
         try:
             with urllib.request.urlopen(req, timeout=timeout) as resp:
                 data = json.loads(resp.read().decode("utf-8"))
-        except (urllib.error.URLError, urllib.error.HTTPError,
-                TimeoutError, json.JSONDecodeError, OSError) as e:
-            log.warning("chat completion failed: %s: %s", type(e).__name__, e)
+        except urllib.error.HTTPError as e:
+            # Read the body — Ollama / OpenAI both put useful diagnostics
+            # there (e.g. "context length exceeded", "model not found",
+            # "invalid tool schema").
+            try:
+                body = e.read().decode("utf-8", errors="replace")[:600]
+            except OSError:
+                body = "(no body)"
+            self._last_error = (
+                f"HTTP {e.code} from {url}: {e.reason}. "
+                f"Response body: {body}")
+            log.warning("chat completion HTTP %d: %s", e.code, body[:200])
+            return None
+        except (urllib.error.URLError, TimeoutError) as e:
+            reason = getattr(e, "reason", str(e))
+            self._last_error = (
+                f"Network error talking to {url}: {type(e).__name__}: "
+                f"{reason}. Is the LLM server running and reachable?")
+            log.warning("chat completion network failure: %s: %s",
+                        type(e).__name__, reason)
+            return None
+        except json.JSONDecodeError as e:
+            self._last_error = (
+                f"Server at {url} returned non-JSON response: {e}. "
+                "Provider misconfiguration or wrong URL?")
+            log.warning("chat completion JSON decode failed: %s", e)
+            return None
+        except OSError as e:
+            self._last_error = (
+                f"OS error talking to {url}: {type(e).__name__}: {e}")
+            log.warning("chat completion OS error: %s", e)
             return None
         return data
 

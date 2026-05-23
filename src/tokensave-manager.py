@@ -3649,6 +3649,14 @@ class App(tk.Tk):
                 self._ask_path = self.active_path
             if hasattr(self, "_ask_refresh_header"):
                 self._ask_refresh_header()
+            # Pull focus into the question entry so the user can start
+            # typing immediately. Without this, focus tends to stay on
+            # the notebook tab itself and keystrokes go nowhere.
+            if hasattr(self, "_ask_entry"):
+                try:
+                    self._ask_entry.focus_set()
+                except tk.TclError:
+                    pass
             return
 
         if not self._git_tab_is_visible():
@@ -4430,17 +4438,48 @@ class App(tk.Tk):
         "You have access to READ-ONLY tools that let you read files, list "
         "directories, view git history, view the pending diff, and search "
         "the project's tokensave code graph when present.\n\n"
-        "Rules:\n"
-        "- Use the tools to find answers. Do NOT guess about file contents "
-        "or code that you have not read.\n"
-        "- Prefer tokensave_search / tokensave_context for finding WHERE "
-        "things live; prefer read_file for reading specific known files.\n"
-        "- Cite file:line locations when you reference code.\n"
+        "How to use tools:\n"
+        "- Use the API's tool_calls mechanism — emit calls via the "
+        "tool_calls field of your response, NOT as JSON text inside the "
+        "content field. After the tool result is returned to you as a "
+        "role:'tool' message, continue your reasoning and either call "
+        "another tool or give a final text answer.\n"
+        "- Do NOT guess about file contents or code that you have not read.\n"
+        "- Cite file:line locations when you reference code.\n\n"
+        "Tool-selection guide (CRITICAL — wrong tool choice wastes "
+        "iterations):\n"
+        "- **read_file** is your primary tool. When the user names a "
+        "specific file in their question, OR when you're asked about a "
+        "specific symbol or behaviour you can locate, just read the file "
+        "directly. Don't search first.\n"
+        "- **tokensave_search** finds DEFINED SYMBOLS by name — "
+        "functions, classes, methods, constants. It does NOT do "
+        "full-text grep across source. Searching for 'Popen', 'import', "
+        "or any keyword that isn't a symbol name returns nothing. Use "
+        "tokensave_search to answer 'where is X defined?' for an X that "
+        "is itself a function/class/constant name.\n"
+        "- **tokensave_context** builds a focused subgraph for a "
+        "natural-language task description (e.g. 'how does the commit "
+        "message generator work'). Returns related symbols + their "
+        "relationships. Use sparingly — it's expensive on a big project.\n"
+        "- **list_directory** for path discovery when you don't know "
+        "what's in a folder.\n"
+        "- **git_log / git_diff** for change history and pending work.\n\n"
+        "Error handling:\n"
+        "- If a tool returns an error message starting with '[tool error]', "
+        "DO NOT report the failure to the user. Instead, read the error "
+        "carefully — it usually contains a concrete suggestion (e.g. "
+        "'a file named X exists at src/X — retry with that path'). "
+        "Apply the suggestion and call the tool again. Only report failure "
+        "to the user as a last resort, after at least 2 retry attempts "
+        "with different approaches.\n"
+        "- If tokensave_search returns no results, that means the query "
+        "isn't a symbol name. Switch to read_file (if you have a target "
+        "file in mind) or list_directory (to discover one) — don't keep "
+        "searching with variations.\n\n"
+        "Style:\n"
         "- Keep answers concise. If a question is open-ended, ask a "
         "clarifying follow-up instead of writing a wall of text.\n"
-        "- If a tool returns an error message starting with '[tool error]', "
-        "treat it as a hint to try a different approach (e.g. a different "
-        "path, or a different tool) rather than reporting failure to the user.\n"
         "- You CANNOT modify files, run commits, or change config. This is "
         "by design. If the user asks you to make changes, suggest the "
         "specific edits in your answer and let them apply them manually."
@@ -4483,16 +4522,32 @@ class App(tk.Tk):
         self._ask_status.pack(fill=tk.X, padx=18, pady=(0, 4))
 
         # ── Input row (BOTTOM, packed before chat log so it stays put) ──
+        # NOTE: the entry MUST have a visible border + contrasting bg or
+        # it disappears against the parent frame.  Earlier version used
+        # bg=mantle (#181825) on a base (#1e1e2e) parent with
+        # relief=tk.FLAT — visually identical, so the field appeared
+        # missing entirely.  Now uses surface0 (#313244) which is two
+        # luminance steps lighter than base, plus a 1px SOLID border and
+        # a 2px highlight ring that turns blue on focus.
         in_row = tk.Frame(tab, bg=C["base"], padx=14, pady=8)
         in_row.pack(fill=tk.X, side=tk.BOTTOM)
 
         self._ask_entry = tk.Entry(
             in_row, font=("Segoe UI", 10),
-            bg=C["mantle"], fg=C["text"], insertbackground=C["text"],
-            relief=tk.FLAT)
+            bg=C["surface0"], fg=C["text"],
+            insertbackground=C["text"],
+            relief=tk.SOLID, bd=1,
+            highlightthickness=2,
+            highlightbackground=C["overlay0"],
+            highlightcolor=C["blue"],
+            width=40)
         self._ask_entry.pack(side=tk.LEFT, fill=tk.X, expand=True,
-                              ipady=4, padx=(0, 6))
+                              ipady=6, padx=(0, 6))
         self._ask_entry.bind("<Return>", lambda e: self._ask_send())
+        # Auto-focus on tab switch — see _on_tab_changed below.  Also focus
+        # at build time so the user can start typing immediately when the
+        # tab is first opened.
+        self._ask_entry.focus_set()
 
         self._ask_send_btn = ttk.Button(
             in_row, text="Send", style="Primary.TButton",
