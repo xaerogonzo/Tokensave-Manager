@@ -257,70 +257,106 @@ def _is_auth_error(text: str) -> bool:
         "invalid username or password",
     ))
 
-def _suggest_commit_message(status_text: str) -> str:
-    """Generate a conventional-commit-style message from `git status --short` output.
+def _suggest_commit_message(repo_path: str = "", status_text: str = "") -> str:
+    """Generate a conventional-commit-style message for the staged changes.
 
-    Tries to produce something meaningful based on which files changed and how.
-    The user can always edit or replace the suggestion.
+    Multi-strategy orchestrator — tries the highest-quality strategy first
+    and falls through to weaker ones on empty results. Returns "" only if
+    every strategy yields nothing AND there are no staged files at all.
+
+    Strategy chain (see helpers near `_render_release_notes`):
+      0. LLM mode (if enabled in config) — calls Anthropic / OpenAI / LM Studio /
+         Ollama. Silent fallback on any failure.
+      1. CHANGELOG.md additions — parses staged bullets, infers type+scope.
+      2. Diff content — added Python defs/classes, file-kind heuristics.
+      3. File-name patterns — legacy behaviour from v1.0.x.
+
+    `repo_path` is optional for backwards compatibility — if empty, only
+    the file-name strategy runs (it doesn't need shell access).
+
+    All non-empty results are sanitised: subject ≤ 72 chars, imperative
+    mood, no filename listings, `chore:` escalated to `refactor:` when
+    actual source files changed.
     """
-    # BUG FIX (see GitCommitDialog parsing): never strip() the full
-    # status_text before splitlines() — strip eats the leading space from
-    # the first line, shifting columns and silently dropping the first
-    # character of the filename when the first entry is a working-tree
-    # modification (which starts with a single leading space).
+    # Parse `git status --short` into (xy, filename) tuples for downstream use.
+    # (Kept inline because we need it on every code path.)
     lines = [l for l in status_text.splitlines() if len(l) >= 4]
-    if not lines:
-        return ""
-
     files = []
     for line in lines:
-        xy   = line[:2].strip()
+        xy    = line[:2].strip()
         fname = line[3:]
-        # Handle renames: "old -> new" format
         if " -> " in fname:
             fname = fname.split(" -> ")[-1]
         files.append((xy, fname))
 
-    if not files:
-        return ""
+    has_source = any(
+        os.path.splitext(os.path.basename(f))[1].lower() in
+        {".py", ".js", ".ts", ".cs", ".cpp", ".c", ".h", ".rs", ".go", ".java",
+         ".rb", ".php", ".swift", ".kt", ".scala"}
+        for _xy, f in files
+    )
 
-    basenames = [os.path.basename(f) for _, f in files]
-    exts      = {os.path.splitext(b)[1].lower() for b in basenames}
-    has_del   = any("D" in xy for xy, _ in files)
-    has_add   = any("A" in xy or "?" in xy for xy, _ in files)
+    # ── Strategy 0: LLM (opt-in) ────────────────────────────────────────────
+    if repo_path:
+        llm_cfg = (_cfg.get("commit_message_llm") or {}) if isinstance(_cfg, dict) else {}
+        if llm_cfg.get("enabled"):
+            raw = _call_llm_for_commit_message(llm_cfg, repo_path)
+            if raw:
+                # LLM may return subject + body; split on first blank line.
+                head, _, tail = raw.partition("\n\n")
+                subj, body = _sanitize_commit_message(
+                    head, tail, has_source_changes=has_source,
+                )
+                if subj:
+                    return subj + (("\n\n" + body) if body else "")
 
-    # ── Single file ──
-    if len(files) == 1:
-        xy, fname = files[0]
-        bname = os.path.basename(fname)
-        if "D" in xy:
-            return f"chore: remove {bname}"
-        if "A" in xy or "?" in xy:
-            ext = os.path.splitext(bname)[1].lower()
-            return f"docs: add {bname}" if ext in (".md", ".txt", ".rst") else f"feat: add {bname}"
-        if bname.lower().endswith((".md", ".txt", ".rst")):
-            return f"docs: update {bname}"
-        return f"chore: update {bname}"
+    # ── Strategy 1: CHANGELOG bullets ───────────────────────────────────────
+    if repo_path:
+        try:
+            additions = _extract_changelog_additions(repo_path)
+        except Exception:
+            additions = []
+        if additions:
+            subj, body = _message_from_changelog(additions, files)
+            subj, body = _sanitize_commit_message(
+                subj, body, has_source_changes=has_source,
+            )
+            if subj:
+                return subj + (("\n\n" + body) if body else "")
 
-    # ── Multiple files ──
-    doc_exts = {".md", ".txt", ".rst", ".adoc"}
-    code_exts = {".py", ".js", ".ts", ".cs", ".cpp", ".c", ".h", ".rs", ".go", ".java"}
+    # ── Strategy 2: Diff content (added defs/classes, file kinds) ──────────
+    if repo_path and files:
+        try:
+            subj, body = _suggest_from_diff_content(repo_path, files)
+        except Exception:
+            subj, body = "", ""
+        if subj:
+            subj, body = _sanitize_commit_message(
+                subj, body, has_source_changes=has_source,
+            )
+            if subj:
+                return subj + (("\n\n" + body) if body else "")
 
-    if exts <= doc_exts:
-        return "docs: update documentation"
+    # ── Strategy 3: File-name patterns (legacy fallback) ───────────────────
+    legacy = _suggest_from_filenames(status_text)
+    if legacy:
+        subj, body = _sanitize_commit_message(
+            legacy, "", has_source_changes=has_source,
+        )
+        if subj:
+            return subj  # body is always empty for the legacy strategy
 
-    if exts <= code_exts:
-        if len(basenames) <= 3:
-            return f"chore: update {', '.join(basenames)}"
-        return f"chore: update {len(files)} source files"
-
-    if has_del and not has_add:
-        return f"chore: remove {len(files)} files"
-
-    # Mixed — list up to two names then summarise the rest
-    if len(basenames) <= 2:
-        return f"chore: update {', '.join(basenames)}"
-    return f"chore: update {basenames[0]}, {basenames[1]} + {len(basenames) - 2} more"
+    # ── Strategy 4: Generic backstop ────────────────────────────────────────
+    # Reached only when the legacy output was an anti-pattern (filename
+    # listing) that sanitization rejected, AND no higher strategy produced
+    # anything. Better to give the user a clean generic stub than an empty
+    # field — they can edit it.
+    if files:
+        if has_source:
+            scope = _dominant_directory(files)
+            return f"refactor({scope}): update sources" if scope else "refactor: update sources"
+        return "chore: update files"
+    return ""
 
 
 # ── Shadow-link helpers ────────────────────────────────────────────────────────
@@ -890,7 +926,7 @@ def _classify_commits_for_changelog(commits: list) -> dict:
 
 
 def _bump_version(tag: str, kind: str) -> str:
-    """Return the next semver tag for ``kind`` ∈ {patch, minor, major}.
+    """Return the next tag for ``kind`` ∈ {patch, minor, major, hotfix}.
 
     Accepts tags with or without a leading ``v``. Output preserves the ``v``
     prefix if present. Non-semver inputs fall back to a date-stamped tag.
@@ -900,26 +936,40 @@ def _bump_version(tag: str, kind: str) -> str:
     core. Without this, a tag like ``v1.0.0-alpha.1`` would fail the
     ``int()`` parse on ``"0-alpha"`` and fall back to a date-stamped tag,
     producing three identical radio values in the wizard.
+
+    Hotfix bump produces a four-part version: ``v1.0.4`` → ``v1.0.4.1``,
+    ``v1.0.4.1`` → ``v1.0.4.2``. This is intentionally not strict semver —
+    it's the "small adjustment on top of an existing release without
+    starting a new patch series" idiom common in enterprise / Windows
+    versioning (assembly versions, NuGet 4-part). The patch / minor / major
+    bumps always normalise back to three parts, so a hotfix branch
+    eventually merges into a clean semver line on the next regular release.
     """
     raw  = tag.lstrip("v") if tag else ""
     core = raw.split("-", 1)[0].split("+", 1)[0]
     parts = core.split(".")
     try:
-        major, minor, patch = (int(parts[0]), int(parts[1]), int(parts[2]))
+        major  = int(parts[0])
+        minor  = int(parts[1])
+        patch  = int(parts[2])
+        # Optional 4th segment (hotfix counter). Default 0 if absent.
+        hotfix = int(parts[3]) if len(parts) >= 4 else 0
     except (ValueError, IndexError):
         # Fallback for non-semver — date-stamped tag.
         from datetime import datetime as _dt
         return _dt.now().strftime("v%Y.%m.%d")
 
-    if kind == "major":
-        major, minor, patch = major + 1, 0, 0
-    elif kind == "minor":
-        minor, patch = minor + 1, 0
-    else:   # default: patch
-        patch += 1
-
     prefix = "v" if (tag or "").startswith("v") else ""
-    return f"{prefix}{major}.{minor}.{patch}"
+
+    if kind == "major":
+        return f"{prefix}{major + 1}.0.0"
+    if kind == "minor":
+        return f"{prefix}{major}.{minor + 1}.0"
+    if kind == "hotfix":
+        # Bump or introduce the 4th segment, leaving MAJOR.MINOR.PATCH intact.
+        return f"{prefix}{major}.{minor}.{patch}.{hotfix + 1}"
+    # default: patch — drop any hotfix segment, bump patch
+    return f"{prefix}{major}.{minor}.{patch + 1}"
 
 
 def _suggest_bump_kind(commits: list) -> str:
@@ -942,6 +992,681 @@ def _suggest_bump_kind(commits: list) -> str:
         if m and m.group(1) == "feat":
             any_feat = True
     return "minor" if any_feat else "patch"
+
+
+# ─── GitCommitDialog helpers ────────────────────────────────────────────────
+# Smart commit-message generation. Pure functions co-located with the
+# release-wizard helpers above because they share `_CONVENTIONAL_RE`,
+# `_TYPE_TO_SECTION`, and `_SECTION_ORDER`. The public entry point
+# `_suggest_commit_message` is defined far above (near the top of the file)
+# for backwards-compatible discoverability — it forward-references the
+# strategy helpers below.
+
+# Inverse of `_TYPE_TO_SECTION`, used when reading a CHANGELOG bullet
+# under (e.g.) `### Added` and producing a `feat:` prefix in the commit.
+# Picks the SINGLE canonical type per section — `Changed` maps back to
+# `refactor` by default; `_message_from_changelog` escalates to `feat` when
+# the bullet text hints at user-visible UI changes.
+_SECTION_TO_TYPE = {
+    "Added":      "feat",
+    "Fixed":      "fix",
+    "Changed":    "refactor",
+    "Removed":    "refactor",
+    "Deprecated": "chore",
+    "Security":   "fix",
+    "Docs":       "docs",
+    "Breaking":   "feat",   # surfaced with ! marker in `_message_from_changelog`
+    "Other":      "chore",
+}
+
+# Vocabulary for inferring conventional-commit scope from CHANGELOG bullet
+# lead-ins or commit-subject text. Patterns are case-insensitive regex; the
+# first match wins. Order matters — put more-specific patterns first.
+# Maintain in lockstep with the project's actual subsystem names.
+_SCOPE_PATTERNS = [
+    (r"release\s*wizard",           "release-wizard"),
+    (r"git\s*commit\s*dialog",      "commit-dialog"),
+    (r"git\s*(status|column)",      "git-status"),
+    (r"auto[-\s]*commit",           "auto-commit"),
+    (r"settings?\s*dialog",         "settings"),
+    (r"project\s*tree",             "tree"),
+    (r"scaffold(?:ing)?",           "scaffold"),
+    (r"shadow[-\s]*link",           "shadow-link"),
+    (r"sync\b",                     "sync"),
+    (r"tokensave\b",                "tokensave"),
+    (r"changelog\b",                "changelog"),
+]
+
+# Words in a bullet description that signal "user-visible feature" rather
+# than internal refactor. Used to escalate `Changed` section bullets from
+# `refactor:` to `feat:` in commit subjects.
+_USER_VISIBLE_HINTS = re.compile(
+    r"\b(button|dialog|wizard|menu|toolbar|hotkey|shortcut|"
+    r"command|option|toggle|checkbox|tab|panel|label|tooltip|"
+    r"radio|dropdown|preview|banner|popup)\b",
+    re.IGNORECASE,
+)
+
+# Imperative-mood rewriter — applied to the FIRST word of the subject only.
+# Catches the most common past-tense / -ing slip-ups.
+_IMPERATIVE_REWRITES = {
+    "added":   "add",
+    "adds":    "add",
+    "adding":  "add",
+    "fixed":   "fix",
+    "fixes":   "fix",
+    "fixing":  "fix",
+    "updated": "update",
+    "updates": "update",
+    "updating":"update",
+    "removed": "remove",
+    "removes": "remove",
+    "removing":"remove",
+    "changed": "change",
+    "changes": "change",
+    "changing":"change",
+    "refactored": "refactor",
+    "improved":   "improve",
+    "improves":   "improve",
+}
+
+# Common locations for project changelog files. First hit wins.
+_CHANGELOG_CANDIDATES = [
+    "CHANGELOG.md", "CHANGELOG", "Changelog.md",
+    "docs/CHANGELOG.md", "HISTORY.md", "RELEASES.md",
+]
+
+# Anti-pattern: filename listings in the subject ("update X.md, Y.md").
+_FILENAME_LISTING_RE = re.compile(
+    r"\b(update|change|modify)\s+[\w.-]+\.\w+\s*,",
+    re.IGNORECASE,
+)
+
+
+def _sanitize_commit_message(subject: str, body: str = "",
+                              has_source_changes: bool = False) -> tuple[str, str]:
+    """Enforce subject/body invariants on any candidate message.
+
+    Returns (subject, body). Empty subject means "give up; caller should
+    fall through to a lower-priority strategy".
+
+    Rules:
+      * Strip markdown noise: ``**x**`` → ``x``, backticks → none,
+        ``[text](url)`` → ``text``
+      * Strip surrounding quotes / leading "Here's a commit message:" preambles
+      * Imperative mood — rewrite first word if it matches a known past tense
+      * Subject ≤ 72 chars (truncate at last word boundary that fits)
+      * Escalate ``chore:`` → ``refactor:`` when source files changed and the
+        subject is otherwise generic (no scope, generic verb)
+      * Reject filename-listing anti-pattern → empty subject (forces fallback)
+      * Body wrapped at 72 chars per line
+    """
+    import textwrap
+
+    def _strip_md(s: str) -> str:
+        s = re.sub(r"\*\*([^*]+)\*\*", r"\1", s)        # bold
+        s = re.sub(r"\*([^*]+)\*",      r"\1", s)        # italic
+        s = re.sub(r"`([^`]+)`",        r"\1", s)        # code
+        s = re.sub(r"\[([^\]]+)\]\([^)]+\)", r"\1", s)   # links
+        return s
+
+    subject = _strip_md((subject or "").strip())
+    body    = _strip_md((body or "").strip())
+
+    # Strip common LLM preambles / wrapping characters
+    for pre in ("Here's a commit message:", "Commit message:",
+                "Suggested commit message:"):
+        if subject.lower().startswith(pre.lower()):
+            subject = subject[len(pre):].lstrip(":").strip()
+    subject = subject.strip("`'\"")
+
+    # If the LLM gave us a multi-line subject, split into subject + body
+    if "\n" in subject:
+        head, _, tail = subject.partition("\n")
+        subject = head.strip()
+        if tail.strip():
+            body = (tail.strip() + ("\n\n" + body if body else "")).strip()
+
+    # Imperative mood rewrite on first word (preserve any prefix like "feat:")
+    m = re.match(r"^(?:(\w+(?:\([^)]+\))?!?:\s+))?(\w+)(.*)$", subject)
+    if m:
+        prefix, first, rest = m.group(1) or "", m.group(2), m.group(3)
+        canonical = _IMPERATIVE_REWRITES.get(first.lower())
+        if canonical:
+            subject = f"{prefix}{canonical}{rest}"
+
+    # Filename-listing anti-pattern → caller falls back
+    if _FILENAME_LISTING_RE.search(subject):
+        return "", ""
+
+    # Escalate `chore:` to `refactor:` when actual source files changed AND
+    # the subject is non-specific (no parenthetical scope, generic verb).
+    if has_source_changes and subject.lower().startswith("chore:"):
+        # Keep `chore(deps):`, `chore(ci):`, etc.
+        if not re.match(r"^chore\([^)]+\):", subject, re.IGNORECASE):
+            subject = "refactor:" + subject[len("chore:"):]
+
+    # Subject ≤ 72 chars, truncate at word boundary
+    if len(subject) > 72:
+        truncated = subject[:72]
+        sp = truncated.rfind(" ")
+        if sp > 40:
+            truncated = truncated[:sp]
+        subject = truncated.rstrip(",;:-")
+
+    # Body wrap at 72 chars per paragraph
+    if body:
+        paragraphs = [p.strip() for p in body.split("\n\n") if p.strip()]
+        wrapped = [textwrap.fill(p, width=72, break_long_words=False,
+                                  break_on_hyphens=False) for p in paragraphs]
+        body = "\n\n".join(wrapped)
+
+    return subject, body
+
+
+def _recent_commit_subjects(repo_path: str, n: int = 5) -> list:
+    """Return the last `n` commit subject lines (most-recent first)."""
+    try:
+        proc = subprocess.run(
+            [GIT_EXE, "-C", repo_path, "log", f"-n{n}", "--format=%s"],
+            capture_output=True, text=True, timeout=5,
+            encoding="utf-8", errors="replace",
+            creationflags=CREATE_NO_WINDOW,
+        )
+    except (FileNotFoundError, subprocess.TimeoutExpired):
+        return []
+    if proc.returncode != 0:
+        return []
+    return [line for line in proc.stdout.splitlines() if line.strip()]
+
+
+def _find_changelog_file(repo_path: str) -> str | None:
+    """Locate the first present CHANGELOG-style file in the repo."""
+    for candidate in _CHANGELOG_CANDIDATES:
+        full = os.path.join(repo_path, candidate)
+        if os.path.isfile(full):
+            return candidate
+    return None
+
+
+def _pending_diff(repo_path: str, *paths: str, lines_of_context: int = 0) -> str:
+    """Return the diff between HEAD and the working tree (staged + unstaged).
+
+    Used for commit-message suggestion BEFORE the GitCommitDialog actually
+    stages files. ``git diff HEAD`` captures everything that would land in
+    the commit if the user stages and commits all working-tree changes.
+    """
+    cmd = [GIT_EXE, "-C", repo_path, "diff", "HEAD", "--no-color",
+           f"-U{lines_of_context}"]
+    if paths:
+        cmd.append("--")
+        cmd.extend(paths)
+    try:
+        proc = subprocess.run(
+            cmd, capture_output=True, text=True, timeout=10,
+            encoding="utf-8", errors="replace",
+            creationflags=CREATE_NO_WINDOW,
+        )
+    except (FileNotFoundError, subprocess.TimeoutExpired):
+        return ""
+    return proc.stdout if proc.returncode == 0 else ""
+
+
+def _extract_changelog_additions(repo_path: str) -> list:
+    """Parse the staged CHANGELOG diff into structured bullet records.
+
+    Returns a list of dicts: ``{"section": "Added"|"Fixed"|..., "lead_in": str,
+    "description": str}``. Returns ``[]`` if no changelog or no additions.
+
+    Handles Keep-a-Changelog format with bolded lead-ins:
+        ### Added
+        - **Hotfix bump option in the Release Wizard** — fourth radio option…
+    Falls back gracefully to plain bullets without bold lead-ins.
+    """
+    cl_file = _find_changelog_file(repo_path)
+    if not cl_file:
+        return []
+    diff = _pending_diff(repo_path, cl_file, lines_of_context=0)
+    if not diff:
+        return []
+
+    section = None
+    bullets = []
+    current_bullet = None
+
+    for raw_line in diff.splitlines():
+        if not raw_line.startswith("+"):
+            continue
+        # Skip the +++ filename header
+        if raw_line.startswith("+++"):
+            continue
+        line = raw_line[1:]   # drop the leading "+"
+
+        # Section header: ### Added, ### Changed, etc.
+        m_section = re.match(r"^#{2,4}\s+(\w+)\s*$", line)
+        if m_section:
+            section = m_section.group(1)
+            current_bullet = None
+            continue
+
+        # New bullet starting with "- "
+        m_bullet = re.match(r"^\s*[-*]\s+(.*)$", line)
+        if m_bullet and section:
+            text = m_bullet.group(1)
+            # Bolded lead-in pattern: handles
+            #   **lead** — desc       (en-dash, em-dash, hyphen, colon)
+            #   **lead.** desc        (period INSIDE the bold; no separator after)
+            #   **lead** desc         (no separator at all)
+            m_bold = re.match(
+                r"^\*\*(?P<lead>[^*]+?)\*\*\s*(?:[—\-–:]\s*)?(?P<desc>.+)$",
+                text,
+            )
+            if m_bold:
+                lead = m_bold.group("lead").strip().rstrip(".").strip()
+                desc = m_bold.group("desc").strip()
+            else:
+                # Fall back to first 60 chars or first sentence as lead
+                first_sent = re.split(r"(?<=[.!?])\s", text, maxsplit=1)[0]
+                lead = (first_sent[:60].rstrip() if len(first_sent) > 60
+                        else first_sent).rstrip(".")
+                desc = text[len(first_sent):].strip() or text
+            current_bullet = {"section": section, "lead_in": lead,
+                              "description": desc}
+            bullets.append(current_bullet)
+            continue
+
+        # Continuation of a previous bullet (no leading dash)
+        if current_bullet and line.strip():
+            current_bullet["description"] = (
+                current_bullet["description"] + " " + line.strip()
+            ).strip()
+
+    return bullets
+
+
+def _extract_scope(text: str) -> str | None:
+    """Match `text` against the scope vocabulary; return scope or None."""
+    for pat, scope in _SCOPE_PATTERNS:
+        if re.search(pat, text, re.IGNORECASE):
+            return scope
+    return None
+
+
+def _dominant_directory(files: list) -> str | None:
+    """Find the most-common meaningful directory among staged files.
+
+    `files` is a list of (xy, fname) tuples (the format `_suggest_from_filenames`
+    uses). Returns the last component of the deepest common directory, or
+    None if all files are at repo root.
+    """
+    if not files:
+        return None
+    dirs = []
+    for _xy, fname in files:
+        parent = os.path.dirname(fname.replace("\\", "/"))
+        if parent:
+            dirs.append(parent)
+    if not dirs:
+        return None
+    # Most common directory
+    from collections import Counter
+    most_common, _ = Counter(dirs).most_common(1)[0]
+    # Return the LAST meaningful component (e.g. src/components/wizard → wizard)
+    parts = [p for p in most_common.split("/") if p and p not in
+             ("src", "lib", "app", "source")]
+    return parts[-1] if parts else None
+
+
+def _message_from_changelog(bullets: list, files: list) -> tuple:
+    """Build (subject, body) from CHANGELOG bullet additions. Returns ("","")
+    if `bullets` is empty.
+
+    Strategy:
+      * Pick the highest-impact section (Breaking > Added > Fixed > Changed > …)
+      * Map section → conventional-commit type (`feat` / `fix` / `refactor` / …)
+      * Escalate Changed → feat when bullet description hints at user-visible UI
+      * Infer scope from bullet lead-ins (vocabulary), then file paths
+      * Subject = `type(scope): lead-in` (or "+ N more" if multiple bullets)
+      * Body = stripped descriptions, one paragraph per bullet, wrapped at 72
+    """
+    if not bullets:
+        return "", ""
+
+    # Group bullets by section
+    by_section = {}
+    for b in bullets:
+        by_section.setdefault(b["section"], []).append(b)
+
+    # Impact order: prefer Added > Fixed > Changed > Removed > Deprecated > Docs > Security
+    impact_order = ["Breaking", "Added", "Fixed", "Changed", "Security",
+                    "Removed", "Deprecated", "Docs", "Other"]
+    dominant_section = next((s for s in impact_order if s in by_section), None)
+    if not dominant_section:
+        return "", ""
+
+    dom_bullets = by_section[dominant_section]
+    ctype = _SECTION_TO_TYPE.get(dominant_section, "chore")
+
+    # Escalate Changed → feat when bullet text describes user-visible UI changes
+    if dominant_section == "Changed":
+        for b in dom_bullets:
+            combined = b["lead_in"] + " " + b["description"]
+            if _USER_VISIBLE_HINTS.search(combined):
+                ctype = "feat"
+                break
+
+    # Breaking marker
+    bang = "!" if dominant_section == "Breaking" else ""
+
+    # Scope: try vocabulary on every lead-in, then fall back to directory
+    scope = None
+    for b in dom_bullets:
+        s = _extract_scope(b["lead_in"])
+        if s:
+            scope = s
+            break
+    if not scope:
+        scope = _dominant_directory(files)
+
+    # Subject
+    primary_lead = dom_bullets[0]["lead_in"]
+    # Lowercase first character so it reads naturally after "feat(x): "
+    if primary_lead:
+        primary_lead = primary_lead[0].lower() + primary_lead[1:]
+    # Count ALL other bullets across ALL sections (not just same-section)
+    total_bullets = sum(len(v) for v in by_section.values())
+    extras = total_bullets - 1
+    if extras > 0:
+        primary_lead += f" + {extras} more"
+
+    scope_str = f"({scope})" if scope else ""
+    subject = f"{ctype}{scope_str}{bang}: {primary_lead}"
+
+    # Body: one paragraph per bullet across ALL sections, lead-in + description
+    body_paragraphs = []
+    for section_name in impact_order:
+        section_bullets = by_section.get(section_name) or []
+        for b in section_bullets:
+            lead = b["lead_in"].strip()
+            desc = b["description"].strip()
+            # Take first ~2 sentences of description, capped at 240 chars
+            sentences = re.split(r"(?<=[.!?])\s+", desc, maxsplit=2)
+            short_desc = " ".join(sentences[:2])[:240].strip()
+            if short_desc and short_desc != lead:
+                body_paragraphs.append(f"{lead}: {short_desc}")
+            else:
+                body_paragraphs.append(lead)
+    body = "\n\n".join(body_paragraphs)
+
+    return subject, body
+
+
+def _diff_added_python_symbols(repo_path: str) -> dict:
+    """Parse `git diff --cached` for newly-added top-level def/class names."""
+    diff = _pending_diff(repo_path, lines_of_context=0)
+    if not diff:
+        return {"functions": [], "classes": []}
+
+    functions, classes = [], []
+    for line in diff.splitlines():
+        # Only consider added lines that start at column 0 (top-level definitions)
+        # The leading + is followed immediately by the keyword.
+        m_fn = re.match(r"^\+(?:async\s+)?def\s+(\w+)", line)
+        m_cl = re.match(r"^\+class\s+(\w+)", line)
+        if m_fn:
+            functions.append(m_fn.group(1))
+        elif m_cl:
+            classes.append(m_cl.group(1))
+    # Dedup, preserve order
+    return {
+        "functions": list(dict.fromkeys(functions)),
+        "classes":   list(dict.fromkeys(classes)),
+    }
+
+
+def _suggest_from_diff_content(repo_path: str, files: list) -> tuple:
+    """Strategy 2 — infer message from file kinds + added Python symbols.
+
+    `files` is a list of (xy, fname) tuples. Returns ("","") if no signal.
+    """
+    if not files:
+        return "", ""
+
+    basenames = [os.path.basename(f) for _xy, f in files]
+    exts = {os.path.splitext(b)[1].lower() for b in basenames}
+    paths = [f.replace("\\", "/") for _xy, f in files]
+
+    doc_exts    = {".md", ".rst", ".txt", ".adoc"}
+    test_paths  = [p for p in paths if re.search(r"(?:^|/)tests?/", p)
+                   or os.path.basename(p).startswith("test_")
+                   or os.path.basename(p).endswith("_test.py")]
+    config_files = {"requirements.txt", "pyproject.toml", "package.json",
+                    "package-lock.json", "Pipfile", "Pipfile.lock",
+                    "poetry.lock", "setup.py", "setup.cfg"}
+    config_paths = [p for p in paths if os.path.basename(p) in config_files]
+    ci_paths     = [p for p in paths if "/.github/workflows/" in "/" + p]
+    scope        = _dominant_directory(files)
+
+    # Docs only
+    if exts and exts <= doc_exts:
+        if len(files) == 1:
+            return f"docs: update {basenames[0]}", ""
+        return "docs: update documentation", ""
+
+    # CI workflows
+    if ci_paths and len(ci_paths) == len(files):
+        return f"ci: update {os.path.basename(ci_paths[0])}", ""
+
+    # Config / deps
+    if config_paths and len(config_paths) == len(files):
+        return "chore(deps): update dependencies", ""
+
+    # Tests only
+    if test_paths and len(test_paths) == len(files):
+        if scope:
+            return f"test({scope}): add tests", ""
+        return f"test: add {basenames[0]}", ""
+
+    # Source-code changes: look at added Python symbols
+    has_py = any(p.endswith(".py") for p in paths)
+    if has_py:
+        syms = _diff_added_python_symbols(repo_path)
+        scope_str = f"({scope})" if scope else ""
+        if syms["classes"]:
+            return f"feat{scope_str}: add {syms['classes'][0]}", ""
+        if syms["functions"]:
+            fn = syms["functions"][0]
+            return f"feat{scope_str}: add {fn}", ""
+        # No new top-level defs — likely a refactor
+        return f"refactor{scope_str}: update {scope or basenames[0]}", ""
+
+    return "", ""
+
+
+def _build_llm_prompt(diff: str, recent: list, max_diff_chars: int) -> tuple:
+    """Construct (system, user) prompt text for the LLM call."""
+    system = (
+        "You write conventional-commit messages. Output ONE commit message:\n"
+        "- Subject line MUST be 72 chars or less, imperative mood "
+        "(use add/fix/update, NOT added/fixed/updated).\n"
+        "- Start with a conventional-commit prefix: "
+        "feat / fix / chore / docs / refactor / perf / test / build / ci.\n"
+        "- Optionally include scope: feat(scope): subject.\n"
+        "- Blank line, then a body wrapped at 72 chars per line.\n"
+        "- Match the existing tone from the recent commit subjects.\n"
+        "- Output ONLY the commit message. NO preamble, NO markdown, "
+        "NO quotes, NO code fences, NO explanation."
+    )
+    recent_lines = "\n".join(f"- {s}" for s in recent[:5]) if recent else "(no prior commits)"
+    user = (
+        f"Recent commit subjects (tone reference):\n{recent_lines}\n\n"
+        f"Staged diff (truncated to {max_diff_chars} chars):\n"
+        f"```diff\n{diff[:max_diff_chars]}\n```"
+    )
+    return system, user
+
+
+def _call_llm_for_commit_message(cfg: dict, repo_path: str) -> str | None:
+    """Call the configured LLM provider for a commit-message suggestion.
+
+    Returns the raw LLM text on success, or None on ANY failure (no API key,
+    network error, timeout, provider error, empty response). The caller is
+    expected to pass the result through `_sanitize_commit_message`.
+
+    Supported providers:
+      * "anthropic" — native Messages API (api.anthropic.com)
+      * "openai" — OpenAI Chat Completions API (api.openai.com)
+      * "openai_compatible" — any OpenAI-compatible endpoint
+        (LM Studio defaults to http://localhost:1234,
+         Ollama defaults to http://localhost:11434)
+    """
+    import urllib.request, urllib.error, json
+
+    if not cfg.get("enabled"):
+        return None
+
+    # Diff size guard — skip LLM for trivial commits
+    diff = _pending_diff(repo_path)
+    if not diff:
+        return None
+    diff_lines = diff.count("\n")
+    if diff_lines < int(cfg.get("min_diff_lines", 30)):
+        return None
+
+    max_chars = int(cfg.get("max_diff_chars", 8000))
+    timeout   = int(cfg.get("timeout_seconds", 12))
+    recent    = _recent_commit_subjects(repo_path, n=5)
+    system, user = _build_llm_prompt(diff, recent, max_chars)
+
+    provider = (cfg.get("provider") or "anthropic").lower()
+    model    = cfg.get("model") or ""
+    base_url = (cfg.get("base_url") or "").rstrip("/")
+    api_key_env = cfg.get("api_key_env") or ""
+    api_key = os.environ.get(api_key_env, "") if api_key_env else ""
+
+    try:
+        if provider == "anthropic":
+            if not api_key:
+                return None
+            url = "https://api.anthropic.com/v1/messages"
+            payload = {
+                "model": model or "claude-haiku-4-5",
+                "max_tokens": 400,
+                "system": system,
+                "messages": [{"role": "user", "content": user}],
+            }
+            req = urllib.request.Request(
+                url, method="POST",
+                data=json.dumps(payload).encode("utf-8"),
+                headers={
+                    "Content-Type": "application/json",
+                    "x-api-key": api_key,
+                    "anthropic-version": "2023-06-01",
+                },
+            )
+            with urllib.request.urlopen(req, timeout=timeout) as resp:
+                data = json.loads(resp.read().decode("utf-8"))
+            blocks = data.get("content") or []
+            text = "".join(b.get("text", "") for b in blocks if b.get("type") == "text")
+            return text.strip() or None
+
+        elif provider in ("openai", "openai_compatible"):
+            if provider == "openai":
+                url = "https://api.openai.com/v1/chat/completions"
+            else:
+                if not base_url:
+                    return None
+                url = base_url + "/v1/chat/completions"
+            payload = {
+                "model": model or "gpt-4o-mini",
+                "messages": [
+                    {"role": "system", "content": system},
+                    {"role": "user", "content": user},
+                ],
+                "max_tokens": 400,
+                "temperature": 0.3,
+            }
+            headers = {"Content-Type": "application/json"}
+            if api_key:
+                headers["Authorization"] = f"Bearer {api_key}"
+            req = urllib.request.Request(
+                url, method="POST",
+                data=json.dumps(payload).encode("utf-8"),
+                headers=headers,
+            )
+            with urllib.request.urlopen(req, timeout=timeout) as resp:
+                data = json.loads(resp.read().decode("utf-8"))
+            choices = data.get("choices") or []
+            if not choices:
+                return None
+            msg = choices[0].get("message") or {}
+            text = msg.get("content") or ""
+            return text.strip() or None
+
+    except (urllib.error.URLError, urllib.error.HTTPError,
+            TimeoutError, json.JSONDecodeError, KeyError, OSError):
+        return None
+
+    return None
+
+
+def _suggest_from_filenames(status_text: str) -> str:
+    """Legacy file-pattern strategy. Last-resort fallback.
+
+    Generates a conventional-commit-style message from `git status --short`
+    output ONLY (no diff content, no CHANGELOG). The strategies above this
+    in the chain are preferred when they have signal.
+    """
+    # NOTE: never strip() the full status_text before splitlines() — strip
+    # eats the leading space from the first line, shifting columns and
+    # silently dropping the first character of the filename when the first
+    # entry is a working-tree modification (single leading space).
+    lines = [l for l in status_text.splitlines() if len(l) >= 4]
+    if not lines:
+        return ""
+
+    files = []
+    for line in lines:
+        xy   = line[:2].strip()
+        fname = line[3:]
+        if " -> " in fname:
+            fname = fname.split(" -> ")[-1]
+        files.append((xy, fname))
+
+    if not files:
+        return ""
+
+    basenames = [os.path.basename(f) for _, f in files]
+    exts      = {os.path.splitext(b)[1].lower() for b in basenames}
+    has_del   = any("D" in xy for xy, _ in files)
+    has_add   = any("A" in xy or "?" in xy for xy, _ in files)
+
+    if len(files) == 1:
+        xy, fname = files[0]
+        bname = os.path.basename(fname)
+        if "D" in xy:
+            return f"chore: remove {bname}"
+        if "A" in xy or "?" in xy:
+            ext = os.path.splitext(bname)[1].lower()
+            return f"docs: add {bname}" if ext in (".md", ".txt", ".rst") else f"feat: add {bname}"
+        if bname.lower().endswith((".md", ".txt", ".rst")):
+            return f"docs: update {bname}"
+        return f"chore: update {bname}"
+
+    doc_exts  = {".md", ".txt", ".rst", ".adoc"}
+    code_exts = {".py", ".js", ".ts", ".cs", ".cpp", ".c", ".h", ".rs", ".go", ".java"}
+
+    if exts <= doc_exts:
+        return "docs: update documentation"
+    if exts <= code_exts:
+        if len(basenames) <= 3:
+            return f"chore: update {', '.join(basenames)}"
+        return f"chore: update {len(files)} source files"
+    if has_del and not has_add:
+        return f"chore: remove {len(files)} files"
+    if len(basenames) <= 2:
+        return f"chore: update {', '.join(basenames)}"
+    return f"chore: update {basenames[0]}, {basenames[1]} + {len(basenames) - 2} more"
 
 
 def _render_release_notes(version: str, date: str, sections: dict,
@@ -3670,9 +4395,16 @@ class App(tk.Tk):
             ins("  2. Click  📝 Commit… — the dialog opens with a suggested message\n", "body")
             ins("  3. Edit the message if you like, then click Commit\n", "body")
             br()
-            p("The suggested message is generated from the list of changed files "
-              "(e.g. 'docs: update ARCHITECTURE.md' or 'chore: update 3 source files'). "
-              "Click 💡 Suggest at any time to regenerate it.")
+            p("The suggested message is generated from your staged changes, using "
+              "a chain of strategies — highest-quality first:")
+            ins("    1. CHANGELOG.md bullets (if you've added an entry)\n", "body")
+            ins("    2. Diff content — added Python defs/classes, file kinds\n", "body")
+            ins("    3. File-name patterns (legacy fallback)\n", "body")
+            p("Each result is sanitised (subject ≤ 72 chars, imperative mood, "
+              "no filename listings). When AI is enabled in Settings, an "
+              "Anthropic / OpenAI / LM Studio / Ollama call runs first — silent "
+              "fallback to heuristics on any failure. Click 💡 Suggest at any "
+              "time to regenerate.")
             br()
             h2("Undo Last Commit")
             p("Removes the most recent commit but keeps all your changes staged — "
@@ -4361,17 +5093,44 @@ class App(tk.Tk):
                         _, staged_rc = self._shell_capture(
                             [GIT_EXE,"-C", cwd, "diff", "--cached", "--quiet"], cwd)
                         if staged_rc != 0:   # non-zero = staged changes exist
-                            # Amend the previous commit if it was also a sync commit
-                            # so repeated syncs don't pile up in history
-                            last_out, _ = self._shell_capture(
-                                [GIT_EXE,"-C", cwd, "log", "-1", "--format=%s"], cwd)
-                            if last_out.strip() == "chore: tokensave sync":
+                            # Decide whether to use LLM-generated messages or
+                            # the default "chore: tokensave sync" amend-stacking.
+                            llm_cfg = _cfg.get("commit_message_llm") or {}
+                            use_llm_for_sync = bool(
+                                llm_cfg.get("enabled")
+                                and llm_cfg.get("use_for_sync_autocommit")
+                            )
+
+                            if use_llm_for_sync:
+                                # LLM mode: each sync gets a unique message,
+                                # so no amend-stacking. Compose via the new
+                                # generator (which only invokes the LLM if
+                                # the diff is non-trivial — small syncs
+                                # still fall through to heuristics).
+                                self._log("  Composing AI commit message…", C["peach"])
+                                status_out, _ = self._shell_capture(
+                                    [GIT_EXE,"-C", cwd, "status", "--short"], cwd)
+                                ai_msg = _suggest_commit_message(cwd, status_out) \
+                                         or "chore: tokensave sync"
                                 commit_cmd = [GIT_EXE,"-C", cwd, "commit",
-                                              "--amend", "--no-edit"]
-                                self._log("  Amending previous sync commit…", C["peach"])
+                                              "-m", ai_msg.split("\n", 1)[0]]
+                                # If body present, append via -m again
+                                if "\n\n" in ai_msg:
+                                    commit_cmd.extend(
+                                        ["-m", ai_msg.split("\n\n", 1)[1]]
+                                    )
                             else:
-                                commit_cmd = [GIT_EXE,"-C", cwd, "commit",
-                                              "-m", "chore: tokensave sync"]
+                                # Default amend-stacking: repeated syncs collapse
+                                # into a single "chore: tokensave sync" commit.
+                                last_out, _ = self._shell_capture(
+                                    [GIT_EXE,"-C", cwd, "log", "-1", "--format=%s"], cwd)
+                                if last_out.strip() == "chore: tokensave sync":
+                                    commit_cmd = [GIT_EXE,"-C", cwd, "commit",
+                                                  "--amend", "--no-edit"]
+                                    self._log("  Amending previous sync commit…", C["peach"])
+                                else:
+                                    commit_cmd = [GIT_EXE,"-C", cwd, "commit",
+                                                  "-m", "chore: tokensave sync"]
                             cout, crc = self._shell_capture(commit_cmd, cwd)
                             col = C["green"] if crc == 0 else C["red"]
                             for line in cout.strip().splitlines()[-3:]:
@@ -6064,7 +6823,118 @@ class SettingsDialog(tk.Toplevel):
             font=("Segoe UI", 10)).pack(anchor=tk.W, padx=20, pady=(0, 2))
         tk.Label(self,
             text="  Only fires when the project is a git repo and the working tree has changes.\n"
-                 "  Commit message: \"chore: tokensave sync\"",
+                 "  Commit message: \"chore: tokensave sync\"  (or AI-generated if enabled below)",
+            font=("Segoe UI", 8), bg=C["base"], fg=C["overlay0"],
+            justify=tk.LEFT).pack(anchor=tk.W, padx=36, pady=(0, 8))
+
+        # ── AI commit messages ──────────────────────────────────────────────
+        ttk.Separator(self, orient="horizontal").pack(fill=tk.X, padx=20, pady=(8, 8))
+
+        tk.Label(self, text="AI commit messages",
+                 font=("Segoe UI", 10, "bold"),
+                 bg=C["base"], fg=C["text"]).pack(anchor=tk.W, padx=20, pady=(0, 2))
+
+        llm_cfg = (cfg.get("commit_message_llm") or {})
+        self._var_llm_enabled = tk.BooleanVar(value=bool(llm_cfg.get("enabled", False)))
+        tk.Checkbutton(self,
+            text="Use AI to generate commit message suggestions",
+            variable=self._var_llm_enabled,
+            bg=C["base"], fg=C["text"], selectcolor=C["surface0"],
+            activebackground=C["base"], activeforeground=C["text"],
+            font=("Segoe UI", 10)).pack(anchor=tk.W, padx=20, pady=(0, 4))
+
+        # Provider + model + key + base URL grid
+        llm_grid = tk.Frame(self, bg=C["base"])
+        llm_grid.pack(fill=tk.X, padx=36, pady=(0, 6))
+
+        def _row(parent, label_txt, widget):
+            row = tk.Frame(parent, bg=C["base"])
+            row.pack(fill=tk.X, pady=2)
+            tk.Label(row, text=label_txt, width=18, anchor=tk.W,
+                     font=("Segoe UI", 9), bg=C["base"],
+                     fg=C["subtext"]).pack(side=tk.LEFT)
+            widget.pack(side=tk.LEFT, fill=tk.X, expand=True)
+            return row
+
+        self._var_llm_provider = tk.StringVar(
+            value=llm_cfg.get("provider", "anthropic"))
+        provider_box = ttk.Combobox(llm_grid,
+            textvariable=self._var_llm_provider,
+            values=["anthropic", "openai", "openai_compatible"],
+            state="readonly", width=22)
+        _row(llm_grid, "Provider:", provider_box)
+
+        self._var_llm_model = tk.StringVar(
+            value=llm_cfg.get("model", "claude-haiku-4-5"))
+        model_entry = ttk.Entry(llm_grid, textvariable=self._var_llm_model)
+        _row(llm_grid, "Model:", model_entry)
+
+        self._var_llm_keyenv = tk.StringVar(
+            value=llm_cfg.get("api_key_env", "ANTHROPIC_API_KEY"))
+        keyenv_entry = ttk.Entry(llm_grid, textvariable=self._var_llm_keyenv)
+        _row(llm_grid, "API key env var:", keyenv_entry)
+
+        self._var_llm_base_url = tk.StringVar(
+            value=llm_cfg.get("base_url", ""))
+        base_entry = ttk.Entry(llm_grid, textvariable=self._var_llm_base_url)
+        _row(llm_grid, "Base URL:", base_entry)
+
+        # Preset buttons for local OpenAI-compatible servers
+        preset_row = tk.Frame(self, bg=C["base"])
+        preset_row.pack(anchor=tk.W, padx=36, pady=(0, 4))
+        tk.Label(preset_row, text="Quick presets:",
+                 font=("Segoe UI", 9), bg=C["base"],
+                 fg=C["subtext"]).pack(side=tk.LEFT, padx=(0, 8))
+
+        def _apply_lm_studio():
+            self._var_llm_provider.set("openai_compatible")
+            self._var_llm_base_url.set("http://localhost:1234")
+            self._var_llm_keyenv.set("")
+            # leave model alone — user picks whatever's loaded in LM Studio
+        def _apply_ollama():
+            self._var_llm_provider.set("openai_compatible")
+            self._var_llm_base_url.set("http://localhost:11434")
+            self._var_llm_keyenv.set("")
+            if not self._var_llm_model.get() or "claude" in self._var_llm_model.get():
+                self._var_llm_model.set("llama3.2")
+        def _apply_anthropic():
+            self._var_llm_provider.set("anthropic")
+            self._var_llm_base_url.set("")
+            self._var_llm_keyenv.set("ANTHROPIC_API_KEY")
+            if not self._var_llm_model.get() or "/" in self._var_llm_model.get():
+                self._var_llm_model.set("claude-haiku-4-5")
+        ttk.Button(preset_row, text="Anthropic",
+                   command=_apply_anthropic).pack(side=tk.LEFT, padx=(0, 4))
+        ttk.Button(preset_row, text="LM Studio",
+                   command=_apply_lm_studio).pack(side=tk.LEFT, padx=(0, 4))
+        ttk.Button(preset_row, text="Ollama",
+                   command=_apply_ollama).pack(side=tk.LEFT)
+
+        # Min diff lines
+        min_row = tk.Frame(self, bg=C["base"])
+        min_row.pack(anchor=tk.W, padx=36, pady=(2, 0))
+        self._var_llm_min_diff = tk.StringVar(
+            value=str(llm_cfg.get("min_diff_lines", 30)))
+        tk.Label(min_row, text="Min diff lines (smaller commits skip AI):",
+                 font=("Segoe UI", 9), bg=C["base"],
+                 fg=C["subtext"]).pack(side=tk.LEFT, padx=(0, 6))
+        ttk.Entry(min_row, textvariable=self._var_llm_min_diff,
+                  width=6).pack(side=tk.LEFT)
+
+        self._var_llm_for_sync = tk.BooleanVar(
+            value=bool(llm_cfg.get("use_for_sync_autocommit", False)))
+        tk.Checkbutton(self,
+            text="Also use AI for sync auto-commit messages "
+                 "(disables amend-stacking)",
+            variable=self._var_llm_for_sync,
+            bg=C["base"], fg=C["text"], selectcolor=C["surface0"],
+            activebackground=C["base"], activeforeground=C["text"],
+            font=("Segoe UI", 9)).pack(anchor=tk.W, padx=20, pady=(6, 2))
+
+        tk.Label(self,
+            text="  AI runs only when toggled ON. Silent fallback on any error\n"
+                 "  (missing key, network failure, timeout). Anthropic Claude Haiku\n"
+                 "  costs ~$0.0005 per commit.",
             font=("Segoe UI", 8), bg=C["base"], fg=C["overlay0"],
             justify=tk.LEFT).pack(anchor=tk.W, padx=36, pady=(0, 8))
 
@@ -6178,6 +7048,26 @@ class SettingsDialog(tk.Toplevel):
             for iid in self._roots_tv.get_children()
         ]
         self._cfg["auto_commit_after_sync"] = self._var_autocommit.get()
+        # Persist AI commit-message settings (preserves any unknown keys
+        # the user may have added manually via JSON edit).
+        existing_llm = self._cfg.get("commit_message_llm") or {}
+        try:
+            min_diff_lines = int(self._var_llm_min_diff.get())
+        except ValueError:
+            min_diff_lines = 30
+        existing_llm.update({
+            "enabled":     self._var_llm_enabled.get(),
+            "provider":    self._var_llm_provider.get().strip() or "anthropic",
+            "model":       self._var_llm_model.get().strip(),
+            "api_key_env": self._var_llm_keyenv.get().strip(),
+            "base_url":    self._var_llm_base_url.get().strip(),
+            "min_diff_lines": max(0, min_diff_lines),
+            "use_for_sync_autocommit": self._var_llm_for_sync.get(),
+        })
+        # Fill in defaults that other helpers expect
+        existing_llm.setdefault("max_diff_chars", 8000)
+        existing_llm.setdefault("timeout_seconds", 12)
+        self._cfg["commit_message_llm"] = existing_llm
         self._cfg["git_exe"]       = self._git_exe_var.get().strip()
         self._cfg["codegraph_exe"] = self._cg_exe_var.get().strip()
         self._save_fn(self._cfg)
@@ -7268,26 +8158,53 @@ class ReleaseWizardDialog(tk.Toplevel):
         ver_frame = tk.Frame(body, bg=C["base"])
         ver_frame.pack(fill=tk.X, padx=(44, 20), pady=(0, 4))
 
+        base_for_bump = self._last_tag or "v0.0.0"
         suggestions = [
-            ("patch", _bump_version(self._last_tag or "v0.0.0", "patch")),
-            ("minor", _bump_version(self._last_tag or "v0.0.0", "minor")),
-            ("major", _bump_version(self._last_tag or "v0.0.0", "major")),
+            ("patch",  _bump_version(base_for_bump, "patch")),
+            ("minor",  _bump_version(base_for_bump, "minor")),
+            ("major",  _bump_version(base_for_bump, "major")),
+            ("hotfix", _bump_version(base_for_bump, "hotfix")),
         ]
+        hotfix_labels = {
+            "patch":  "Patch",
+            "minor":  "Minor",
+            "major":  "Major",
+            "hotfix": "Hotfix",
+        }
+        hotfix_blurb = {
+            "patch":  "(bug fixes — new patch series)",
+            "minor":  "(new feature, no breaking changes)",
+            "major":  "(breaking changes)",
+            "hotfix": "(small tweak on top of the current release — 4-part)",
+        }
         for kind, candidate in suggestions:
-            label = f"{kind.title()}  ({candidate})"
-            ttk.Radiobutton(ver_frame, text=label,
+            text = f"{hotfix_labels[kind]}  ({candidate})  {hotfix_blurb[kind]}"
+            ttk.Radiobutton(ver_frame, text=text,
                             variable=self._bump_var, value=kind,
-                            command=self._refresh_title).pack(anchor=tk.W)
+                            command=self._refresh_resolved_tag).pack(anchor=tk.W)
 
         ov_row = tk.Frame(body, bg=C["base"])
-        ov_row.pack(fill=tk.X, padx=(44, 20), pady=(6, 12))
+        ov_row.pack(fill=tk.X, padx=(44, 20), pady=(6, 2))
         tk.Label(ov_row, text="Custom tag:", bg=C["base"], fg=C["subtext"],
                  font=("Segoe UI", 9)).pack(side=tk.LEFT, padx=(0, 6))
-        ttk.Entry(ov_row, textvariable=self._override_var,
-                  width=18).pack(side=tk.LEFT)
-        tk.Label(ov_row, text="(overrides the radio above when set)",
+        custom_entry = ttk.Entry(ov_row, textvariable=self._override_var,
+                                 width=18, font=("Consolas", 9))
+        custom_entry.pack(side=tk.LEFT)
+        tk.Label(ov_row, text="e.g. v1.0.5 or 1.0.5 or v1.0.4.1",
                  font=("Segoe UI", 8), bg=C["base"],
                  fg=C["overlay0"]).pack(side=tk.LEFT, padx=(8, 0))
+
+        # Live "Will publish as" preview — updates as the user types in the
+        # custom field OR switches radios. Removes the "do I add the v?"
+        # ambiguity entirely because the resolved tag is right there.
+        self._resolved_lbl = tk.Label(body, text="",
+                                       font=("Segoe UI", 9, "bold"),
+                                       bg=C["base"], fg=C["green"])
+        self._resolved_lbl.pack(anchor=tk.W, padx=(44, 20), pady=(2, 12))
+
+        # Watch the override entry — every keystroke refreshes the preview.
+        self._override_var.trace_add("write",
+            lambda *_: self._refresh_resolved_tag())
 
         # ── 2. Title ────────────────────────────────────────────────────────
         self._section_header(body, "2", "Title")
@@ -7296,6 +8213,17 @@ class ReleaseWizardDialog(tk.Toplevel):
 
         # ── 3. Release notes ────────────────────────────────────────────────
         self._section_header(body, "3", "Release notes  (editable)")
+
+        # Helper text BELOW the section header but ABOVE the textarea, so
+        # the instruction never leaks INTO the textarea (and from there into
+        # the published release on GitHub).
+        tk.Label(body,
+                 text="The textarea is your release body verbatim. Edit before "
+                      "publishing — add a one-line summary at the top, tweak "
+                      "bullets, drop sections you don't want shipped.",
+                 font=("Segoe UI", 8), bg=C["base"], fg=C["overlay0"],
+                 wraplength=600, justify=tk.LEFT
+                 ).pack(anchor=tk.W, padx=(44, 20), pady=(0, 4))
 
         notes_row = tk.Frame(body, bg=C["base"])
         notes_row.pack(fill=tk.X, padx=(44, 20), pady=(0, 4))
@@ -7403,15 +8331,24 @@ class ReleaseWizardDialog(tk.Toplevel):
     # ── Auto-fill / regenerate ─────────────────────────────────────────────
 
     def _regenerate_notes(self):
+        """(Re)populate the notes textarea from the commit classifier.
+
+        Does NOT inject any placeholder summary text — the helper label
+        above the textarea is the user-facing instruction, and a published
+        release should contain only the user's content. (Earlier versions
+        injected an "Edit this summary…" line that some users shipped to
+        GitHub by accident.)
+        """
         sections = _classify_commits_for_changelog(self._commits)
         from datetime import datetime as _dt
         date_str = _dt.now().strftime("%Y-%m-%d")
         tag_clean = self._next_tag().lstrip("v")
-        notes = _render_release_notes(tag_clean, date_str, sections,
-                                       summary="Edit this summary, then click Publish.")
+        notes = _render_release_notes(tag_clean, date_str, sections)
         self._notes_txt.delete("1.0", tk.END)
         self._notes_txt.insert("1.0", notes)
-        self._refresh_title()
+        # Cascade — title, resolved-tag preview, and artefact label all
+        # depend on the resolved tag. _refresh_resolved_tag handles them all.
+        self._refresh_resolved_tag()
 
     def _refresh_title(self):
         # Default title: "v1.0.4 — <first non-summary heading or top item>".
@@ -7427,6 +8364,30 @@ class ReleaseWizardDialog(tk.Toplevel):
             self._title_var.set(f"{tag} — {first[:60]}")
         else:
             self._title_var.set(f"{tag} — release")
+
+    def _refresh_resolved_tag(self):
+        """Update the live "Will publish as" preview + title + artefact name.
+
+        Called whenever the user changes a version control (radio or custom
+        entry). Centralises the "what tag are we actually publishing?"
+        question — no matter how they pick the version, the resolved tag
+        is visible in one place and propagates downstream automatically.
+        """
+        tag = self._next_tag()
+        # Show the resolved tag prominently in green.
+        if self._override_var.get().strip():
+            self._resolved_lbl.config(
+                text=f"  → Will publish as:  {tag}   (custom)",
+                fg=C["green"])
+        else:
+            kind = self._bump_var.get()
+            self._resolved_lbl.config(
+                text=f"  → Will publish as:  {tag}   ({kind} bump)",
+                fg=C["green"])
+        # Cascade — title and artefact preview depend on the resolved tag.
+        self._refresh_title()
+        if hasattr(self, "_artefact_lbl"):   # guard during __init__ build order
+            self._refresh_artefact_preview()
 
     def _refresh_artefact_preview(self):
         """Refresh the artefact preview label.
@@ -8468,10 +9429,18 @@ class GitCommitDialog(tk.Toplevel):
         self._msg_txt.pack(fill=tk.X)
 
         # Auto-populate with a suggestion based on currently selected files
-        suggestion = _suggest_commit_message(status_text) if is_repo else ""
+        suggestion = (_suggest_commit_message(self._path, status_text)
+                      if is_repo else "")
         if suggestion:
             self._msg_txt.insert(tk.END, suggestion)
-            self._msg_txt.tag_add(tk.SEL, "1.0", tk.END)  # pre-select so typing replaces it
+            # Pre-select only the FIRST LINE so the user can replace just the
+            # subject while keeping the body intact. The body is typically
+            # AI/CHANGELOG-derived prose that's correct as-is.
+            first_line_end = self._msg_txt.search("\n", "1.0", tk.END)
+            if first_line_end:
+                self._msg_txt.tag_add(tk.SEL, "1.0", first_line_end)
+            else:
+                self._msg_txt.tag_add(tk.SEL, "1.0", tk.END)
         self._msg_txt.focus_set()
 
         # ── Action buttons ──
@@ -8516,12 +9485,17 @@ class GitCommitDialog(tk.Toplevel):
             if var.get():
                 selected_lines.append(f"{xy} {fname}")
         sub_status = "\n".join(selected_lines) if selected_lines else self._status_raw
-        suggestion = _suggest_commit_message(sub_status)
+        suggestion = _suggest_commit_message(self._path, sub_status)
         if not suggestion:
             suggestion = "chore: update files"
         self._msg_txt.delete("1.0", tk.END)
         self._msg_txt.insert(tk.END, suggestion)
-        self._msg_txt.tag_add(tk.SEL, "1.0", tk.END)
+        # Pre-select only the first line — see initial-fill comment for why.
+        first_line_end = self._msg_txt.search("\n", "1.0", tk.END)
+        if first_line_end:
+            self._msg_txt.tag_add(tk.SEL, "1.0", first_line_end)
+        else:
+            self._msg_txt.tag_add(tk.SEL, "1.0", tk.END)
         self._msg_txt.focus_set()
 
     def _apply(self):
