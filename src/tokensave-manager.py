@@ -67,21 +67,228 @@ def _migrate_config(cfg: dict) -> dict:
     Migration is idempotent: re-running on already-migrated configs is a no-op.
     Saves back to disk only if anything changed.
     """
-    llm = cfg.get("commit_message_llm")
-    if not isinstance(llm, dict):
-        return cfg
     changed = False
-    # timeout_seconds: old default was 12, current is 90; bump anything <30
-    if int(llm.get("timeout_seconds", 90)) < 30:
-        llm["timeout_seconds"] = 90
-        changed = True
-    # max_diff_chars: old default was 8000, current is 24000; bump anything <16000
-    if int(llm.get("max_diff_chars", 24000)) < 16000:
-        llm["max_diff_chars"] = 24000
+    llm = cfg.get("commit_message_llm")
+    if isinstance(llm, dict):
+        # timeout_seconds: old default was 12, current is 90; bump anything <30
+        if int(llm.get("timeout_seconds", 90)) < 30:
+            llm["timeout_seconds"] = 90
+            changed = True
+        # max_diff_chars: old default was 8000, current is 24000; bump anything <16000
+        if int(llm.get("max_diff_chars", 24000)) < 16000:
+            llm["max_diff_chars"] = 24000
+            changed = True
+    # MCP-config skip list — added [Unreleased]. Empty list means "warn me
+    # whenever any Claude MCP config drifts from the canonical wrapper-based
+    # shape". Each entry is an absolute path to a config file the user has
+    # told us to stop warning about.
+    if "mcp_skip_warnings" not in cfg:
+        cfg["mcp_skip_warnings"] = []
         changed = True
     if changed:
         _save_config(cfg)
     return cfg
+
+
+# ───────────────────────────────────────────────────────────────────────
+# MCP-config introspection + canonical-shape helpers
+# ───────────────────────────────────────────────────────────────────────
+#
+# Two Claude apps each have their own MCP config; both need to point at
+# tokensave-wrapper.py for the manager's ★ Set as Active pin to drive which
+# project gets served. Without the wrapper, an MCP entry that runs
+# `tokensave.exe serve -p <hardcoded>` bypasses the pin file entirely —
+# which is the exact failure mode that produced this whole subsystem.
+#
+# Pure helpers, no Tk. Easy to unit-test from the command line.
+
+_MCP_DESKTOP_CFG_PATH = os.path.join(
+    os.environ.get("APPDATA", ""), "Claude", "claude_desktop_config.json")
+_MCP_CODE_CFG_PATH    = os.path.join(
+    os.environ.get("USERPROFILE", ""), ".claude.json")
+
+# Friendly labels — kept short so they fit in the dialog headers.
+_MCP_CONFIGS = [
+    ("Claude Desktop", _MCP_DESKTOP_CFG_PATH),
+    ("Claude Code",    _MCP_CODE_CFG_PATH),
+]
+
+
+def _wrapper_path() -> str:
+    """Where tokensave-wrapper lives for this installation.
+
+    In a Nuitka onefile build the wrapper is a sibling .exe; in source mode
+    it's the .py next to tokensave-manager.py. Matches the same lookup the
+    Reference tab already does (~ line 5275).
+    """
+    if os.environ.get("NUITKA_ONEFILE_PARENT"):
+        return os.path.join(_BASE_DIR, "tokensave-wrapper.exe")
+    return os.path.join(_BASE_DIR, "src", "tokensave-wrapper.py")
+
+
+def _canonical_mcp_entry() -> dict:
+    """The MCP server entry the manager wants every Claude config to have.
+
+    Source-mode shape: pythonw.exe → tokensave-wrapper.py
+    Bundled-mode shape: tokensave-wrapper.exe directly (no python needed)
+
+    The python_exe field in manager-config.json supplies pythonw — same one
+    the .bat launcher uses, so users who already configured the launcher
+    don't have to pick a python a second time.
+    """
+    wrapper = _wrapper_path()
+    if wrapper.lower().endswith(".exe"):
+        return {"command": wrapper, "args": []}
+    # Source mode — need a python interpreter for the .py wrapper.
+    py = (_cfg.get("python_exe") if isinstance(_cfg, dict) else "") or ""
+    if not py:
+        # Best-effort default: the same pythonw that's running this script.
+        # User can override in Settings.
+        py_candidate = sys.executable.replace("python.exe", "pythonw.exe")
+        py = py_candidate if os.path.isfile(py_candidate) else sys.executable
+    return {"command": py, "args": [wrapper]}
+
+
+def _classify_mcp_entry(cfg_path: str) -> dict:
+    """Inspect a Claude MCP config file and report what shape its tokensave
+    entry is in.
+
+    Returns a dict with keys:
+      - "state":  one of "ok", "direct_serve", "wrong_wrapper", "missing",
+                  "no_file", "unparseable"
+      - "label":  short human-readable status (✓ / ⚠ / ✗ prefixed)
+      - "issue":  longer explanation suitable for a tooltip / dialog body
+      - "current": the current tokensave entry dict (if any) — for diff display
+      - "proposed": the canonical entry the manager wants to write
+      - "cfg_path": echoes the input, for callers that thread through many configs
+
+    Pure function — no side effects. Safe to call on every startup.
+    """
+    proposed = _canonical_mcp_entry()
+    base = {"cfg_path": cfg_path, "current": None, "proposed": proposed}
+
+    if not cfg_path or not os.path.isfile(cfg_path):
+        return {**base,
+                "state": "no_file",
+                "label": "✗ no config file",
+                "issue": (f"{cfg_path} doesn't exist yet. "
+                          "If you use this Claude app, the manager can create "
+                          "the file with just a tokensave entry.")}
+    try:
+        with open(cfg_path, encoding="utf-8") as f:
+            data = json.load(f)
+    except (OSError, json.JSONDecodeError) as e:
+        return {**base,
+                "state": "unparseable",
+                "label": "✗ unreadable",
+                "issue": (f"Could not parse {cfg_path}: "
+                          f"{type(e).__name__}: {e}. Fix the JSON by hand "
+                          "before re-running the configurator.")}
+
+    servers = data.get("mcpServers") or {}
+    entry = servers.get("tokensave")
+    if not isinstance(entry, dict):
+        return {**base,
+                "state": "missing",
+                "label": "✗ no tokensave entry",
+                "issue": ("No 'tokensave' MCP server is configured. "
+                          "Click Apply to add the canonical wrapper-based "
+                          "entry — other mcpServers entries (if any) stay "
+                          "untouched.")}
+
+    base["current"] = entry
+    cmd  = (entry.get("command") or "").strip()
+    args = entry.get("args") or []
+
+    # State 1: correct shape — pythonw/python + wrapper.py  OR  wrapper.exe.
+    cmd_lower = cmd.lower().replace("/", os.sep)
+    if cmd_lower.endswith("tokensave-wrapper.exe"):
+        return {**base, "state": "ok",
+                "label": "✓ correct (bundled wrapper)",
+                "issue": ""}
+    if (cmd_lower.endswith("pythonw.exe") or cmd_lower.endswith("python.exe")):
+        if args and isinstance(args[0], str) \
+                and args[0].lower().endswith("tokensave-wrapper.py"):
+            # Also check the wrapper file referenced actually exists.
+            if os.path.isfile(args[0]):
+                return {**base, "state": "ok",
+                        "label": "✓ correct",
+                        "issue": ""}
+            return {**base,
+                    "state": "wrong_wrapper",
+                    "label": "⚠ wrapper path missing",
+                    "issue": (f"Points at {args[0]} but that file doesn't "
+                              "exist. Click Apply to update to the current "
+                              "wrapper location.")}
+
+    # State 2: direct-serve — runs tokensave.exe itself with a hardcoded -p.
+    if cmd_lower.endswith("tokensave.exe"):
+        target = ""
+        if isinstance(args, list) and "-p" in args:
+            try:
+                target = args[args.index("-p") + 1]
+            except (IndexError, ValueError):
+                target = "(unknown)"
+        return {**base,
+                "state": "direct_serve",
+                "label": "⚠ bypasses wrapper",
+                "issue": (f"Runs tokensave.exe directly with -p "
+                          f"\"{target}\". This ignores the manager's ★ pin "
+                          "file — every project switch needs a Claude "
+                          "restart. Click Apply to route through the wrapper "
+                          "instead.")}
+
+    # State 3: something else entirely.
+    return {**base,
+            "state": "wrong_wrapper",
+            "label": "⚠ non-canonical",
+            "issue": (f"command is {cmd!r}, which isn't a shape the manager "
+                      "knows how to maintain. Click Apply to replace with "
+                      "the canonical wrapper-based entry.")}
+
+
+def _apply_mcp_fix(cfg_path: str, proposed_entry: dict) -> tuple[bool, str]:
+    """Write `proposed_entry` into `cfg_path` under mcpServers.tokensave.
+
+    Returns (success, message). Always writes a timestamped backup first
+    via shutil.copy2 (skipped if the source file doesn't exist — in that
+    case the function creates a fresh config with only tokensave in it).
+    Other mcpServers entries are preserved verbatim.
+
+    Idempotent: applying twice in a row is a no-op-equivalent (the second
+    write writes the same bytes the first one did).
+    """
+    backup_msg = ""
+    if os.path.isfile(cfg_path):
+        try:
+            backup = cfg_path + ".backup." + str(int(time.time() * 1000))
+            shutil.copy2(cfg_path, backup)
+            backup_msg = f" (backup: {os.path.basename(backup)})"
+        except OSError as e:
+            return False, f"Could not write backup: {e}"
+        try:
+            with open(cfg_path, encoding="utf-8") as f:
+                data = json.load(f)
+        except (OSError, json.JSONDecodeError) as e:
+            return False, f"Could not parse existing file: {e}"
+    else:
+        # Fresh file — make sure the parent dir exists.
+        try:
+            os.makedirs(os.path.dirname(cfg_path), exist_ok=True)
+        except OSError as e:
+            return False, f"Could not create parent dir: {e}"
+        data = {}
+
+    servers = data.setdefault("mcpServers", {})
+    servers["tokensave"] = proposed_entry
+
+    try:
+        with open(cfg_path, "w", encoding="utf-8") as f:
+            json.dump(data, f, indent=2)
+            f.write("\n")
+    except OSError as e:
+        return False, f"Could not write config: {e}"
+    return True, f"Wrote tokensave entry to {cfg_path}{backup_msg}"
 
 
 _cfg = _migrate_config(_load_config())
@@ -5532,12 +5739,52 @@ class App(tk.Tk):
             problems.append("tokensave.exe path is missing or invalid")
         if not TEMPLATE_DIR or not os.path.isdir(TEMPLATE_DIR):
             problems.append("Template directory is missing or invalid")
-        if not problems:
+
+        # MCP-config drift detection — opens the configurator instead of
+        # Settings when there are no other problems, since that's the most
+        # actionable thing the user can do.
+        skips = (_cfg.get("mcp_skip_warnings") or []) \
+                if isinstance(_cfg, dict) else []
+        mcp_drift = []
+        for label, path in _MCP_CONFIGS:
+            if path in skips:
+                continue
+            try:
+                info = _classify_mcp_entry(path)
+            except Exception:
+                # Defensive — never crash startup just because we can't read
+                # a Claude config file. The dialog can surface details.
+                continue
+            if info["state"] != "ok":
+                mcp_drift.append((label, info))
+
+        if not problems and not mcp_drift:
             return
-        note = "Please set the correct paths before using the manager."
-        self._log("Config problem: " + " | ".join(problems), C["red"])
-        SettingsDialog(self, _cfg, _save_config, self._on_settings_saved,
-                       startup_note=note + "\n\n" + "\n".join(f"• {p}" for p in problems))
+
+        if problems:
+            # Existing path: paths broken, open Settings as before.
+            note = "Please set the correct paths before using the manager."
+            self._log("Config problem: " + " | ".join(problems), C["red"])
+            SettingsDialog(
+                self, _cfg, _save_config, self._on_settings_saved,
+                startup_note=(note + "\n\n"
+                              + "\n".join(f"• {p}" for p in problems)))
+            return
+
+        # Pure MCP drift — log it, open the configurator dialog directly.
+        # Don't auto-pop in a modal way; the user just launched the manager
+        # and wants to see the project list. A log line + a non-modal dialog
+        # gives them the choice.
+        for label, info in mcp_drift:
+            self._log(
+                f"MCP: {label} {info['label']} ({info['cfg_path']}). "
+                f"Open Settings → MCP integration to fix.",
+                C["peach"] if info["state"] in
+                ("direct_serve", "wrong_wrapper") else C["red"])
+
+        # Open the configurator after a short delay so the main window has
+        # finished laying out — feels less like an interruption.
+        self.after(800, lambda: MCPConfigDialog(self))
 
     def _auto_refresh(self):
         if self._current_proc is None:
@@ -7662,6 +7909,49 @@ class SettingsDialog(tk.Toplevel):
         tk.Label(body,
             text="  Only fires when the project is a git repo and the working tree has changes.\n"
                  "  Commit message: \"chore: tokensave sync\"  (or AI-generated if enabled below)",
+            font=("Segoe UI", 8), bg=C["base"], fg=C["overlay0"],
+            justify=tk.LEFT).pack(anchor=tk.W, padx=36, pady=(0, 8))
+
+        # ── MCP integration ─────────────────────────────────────────────────
+        ttk.Separator(body, orient="horizontal").pack(fill=tk.X, padx=20, pady=(8, 8))
+
+        tk.Label(body, text="MCP integration",
+                 font=("Segoe UI", 10, "bold"),
+                 bg=C["base"], fg=C["text"]).pack(anchor=tk.W, padx=20, pady=(0, 2))
+
+        mcp_row = tk.Frame(body, bg=C["base"])
+        mcp_row.pack(anchor=tk.W, padx=20, pady=(0, 4))
+        ttk.Button(mcp_row, text="🔌  Manage MCP wiring…",
+                   command=lambda: MCPConfigDialog(self)).pack(side=tk.LEFT)
+
+        # Inline status summary — green if both ok, peach if any drift,
+        # red if any missing. Computed on dialog open; clicking Re-detect
+        # in the configurator dialog is the way to refresh.
+        try:
+            states = [_classify_mcp_entry(p)["state"] for _, p in _MCP_CONFIGS]
+        except Exception:
+            states = []
+        if states and all(s == "ok" for s in states):
+            summary = "✓  Both Claude Desktop and Claude Code route through the wrapper."
+            summary_fg = C["green"]
+        elif "no_file" in states or "missing" in states:
+            summary = "✗  One or more Claude configs need a tokensave entry."
+            summary_fg = C["red"]
+        elif any(s in ("direct_serve", "wrong_wrapper", "unparseable") for s in states):
+            summary = "⚠  One or more Claude configs bypass the wrapper (★ pin won't work for them)."
+            summary_fg = C["peach"]
+        else:
+            summary = ""
+            summary_fg = C["overlay0"]
+        if summary:
+            tk.Label(body, text="  " + summary,
+                     font=("Segoe UI", 9),
+                     bg=C["base"], fg=summary_fg,
+                     justify=tk.LEFT, anchor=tk.W,
+                     wraplength=620).pack(anchor=tk.W, padx=36, pady=(0, 2))
+        tk.Label(body,
+            text="  Routes tokensave through the manager's pin-aware wrapper so\n"
+                 "  ★ Set as Active swaps projects live, without restarting Claude.",
             font=("Segoe UI", 8), bg=C["base"], fg=C["overlay0"],
             justify=tk.LEFT).pack(anchor=tk.W, padx=36, pady=(0, 8))
 
@@ -10711,6 +11001,323 @@ class OllamaModelManagerDialog(tk.Toplevel):
             self.destroy()
         except tk.TclError:
             pass
+
+
+def _is_claude_running() -> dict:
+    """Detect running Claude Desktop / Claude Code processes.
+
+    Returns a dict: {"desktop": bool, "code": bool, "pids": [int, ...]}.
+
+    Why this matters: Claude Desktop periodically rewrites
+    `claude_desktop_config.json` with its in-memory state, including its
+    cached copy of `mcpServers`. Any edit we make while Desktop is running
+    is silently clobbered within ~1-2 minutes. The configurator dialog
+    refuses to apply a fix to a config whose owning app is currently
+    running — the user gets a clear "quit Claude Desktop, then retry"
+    message instead of a fix that mysteriously reverts itself.
+
+    Best-effort: uses tasklist on Windows. Empty/false results don't
+    block the apply — the warning is advisory, not enforced.
+    """
+    result = {"desktop": False, "code": False, "pids": []}
+    try:
+        r = subprocess.run(
+            ["tasklist", "/FO", "CSV", "/NH"],
+            capture_output=True, text=True, timeout=5,
+            creationflags=CREATE_NO_WINDOW,
+            encoding="utf-8", errors="replace")
+    except (OSError, subprocess.TimeoutExpired):
+        return result
+    for line in (r.stdout or "").splitlines():
+        # CSV: "claude.exe","12345","Console","1","123,456 K"
+        parts = [p.strip().strip('"') for p in line.split(",")]
+        if len(parts) < 2:
+            continue
+        name = parts[0].lower()
+        try:
+            pid = int(parts[1])
+        except ValueError:
+            continue
+        if name == "claude.exe":
+            result["desktop"] = True
+            result["pids"].append(pid)
+        elif name in ("claude-code.exe",):  # currently bundled inside claude.exe; future-proof
+            result["code"] = True
+            result["pids"].append(pid)
+    return result
+
+
+class MCPConfigDialog(tk.Toplevel):
+    """Manage tokensave entries in Claude Desktop's and Claude Code's MCP
+    config files.
+
+    Shows one block per config file with:
+      - Path of the file
+      - Current state badge (✓ correct / ⚠ drift / ✗ missing)
+      - Diff between current and proposed entries
+      - Apply / Skip / Open file actions
+      - Big warning if the owning Claude app is currently running
+
+    Per the show-diff-and-ask protocol in CLAUDE.md: each config gets its
+    own Apply button (no "Fix all"), each Apply writes a timestamped
+    backup before mutating, and the diff is rendered in plain text so the
+    user can read it without leaving the dialog.
+
+    The dialog is the one place in the manager that touches Claude's MCP
+    configs. Other callers (startup banner, Settings button) only LAUNCH
+    this dialog — they never edit the JSON themselves.
+    """
+
+    def __init__(self, parent):
+        super().__init__(parent)
+        self.title("MCP Integration")
+        self.configure(bg=C["base"])
+        self.resizable(True, True)
+        self.minsize(680, 520)
+        self.geometry("820x680")
+        self.grab_set()
+        self.transient(parent)
+
+        # Header
+        hdr = tk.Frame(self, bg=C["base"])
+        hdr.pack(fill=tk.X, padx=18, pady=(14, 4))
+        tk.Label(hdr, text="🔌  MCP Integration",
+                 font=("Segoe UI", 13, "bold"),
+                 bg=C["base"], fg=C["blue"]).pack(side=tk.LEFT)
+        tk.Label(hdr, text="Manage tokensave's wiring into Claude's MCP system.",
+                 font=("Segoe UI", 9, "italic"),
+                 bg=C["base"], fg=C["overlay0"]).pack(side=tk.LEFT, padx=(10, 0))
+
+        # Running-Claude warning banner (populated on detect)
+        self._warn_lbl = tk.Label(
+            self, text="", font=("Segoe UI", 9),
+            bg=C["base"], fg=C["red"],
+            justify=tk.LEFT, anchor=tk.W, wraplength=760)
+        self._warn_lbl.pack(fill=tk.X, padx=18, pady=(2, 4))
+
+        # Scrollable body — same Canvas+Frame pattern as SettingsDialog
+        wrap = tk.Frame(self, bg=C["base"])
+        wrap.pack(fill=tk.BOTH, expand=True, padx=14, pady=(2, 4))
+        self._canvas = tk.Canvas(wrap, bg=C["base"], highlightthickness=0)
+        vsb = ttk.Scrollbar(wrap, orient="vertical", command=self._canvas.yview)
+        self._canvas.configure(yscrollcommand=vsb.set)
+        self._canvas.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
+        vsb.pack(side=tk.RIGHT, fill=tk.Y)
+        self._body = tk.Frame(self._canvas, bg=C["base"])
+        self._body_win = self._canvas.create_window(
+            (0, 0), window=self._body, anchor="nw")
+        self._body.bind(
+            "<Configure>",
+            lambda e: self._canvas.configure(
+                scrollregion=self._canvas.bbox("all")))
+        self._canvas.bind(
+            "<Configure>",
+            lambda e: self._canvas.itemconfigure(
+                self._body_win, width=e.width))
+        for w in (self._canvas, self._body):
+            w.bind(
+                "<MouseWheel>",
+                lambda e: self._canvas.yview_scroll(
+                    int(-1 * (e.delta / 120)), "units"))
+
+        # Footer
+        btn_row = tk.Frame(self, bg=C["base"])
+        btn_row.pack(fill=tk.X, padx=18, pady=(0, 14))
+        ttk.Button(btn_row, text="↻ Re-detect",
+                   command=self._render).pack(side=tk.LEFT)
+        ttk.Button(btn_row, text="Close",
+                   command=self.destroy).pack(side=tk.RIGHT)
+
+        # Per-config-path state for the renderer
+        self._config_state: dict[str, dict] = {}
+        self._render()
+
+    # ── Rendering ───────────────────────────────────────────────────────
+
+    def _render(self):
+        """(Re-)build the per-config blocks. Called once at open and from
+        Re-detect / after each Apply so the state badges stay fresh."""
+        for child in self._body.winfo_children():
+            child.destroy()
+
+        # Warning banner — running Claude apps
+        running = _is_claude_running()
+        if running["desktop"] or running["code"]:
+            apps = []
+            if running["desktop"]:
+                apps.append("Claude Desktop")
+            if running["code"]:
+                apps.append("Claude Code")
+            self._warn_lbl.configure(
+                text=("⚠  " + " / ".join(apps) + " is currently running. "
+                      "It rewrites its own config file every 1–2 minutes, "
+                      "which will silently revert any fix you apply here. "
+                      "Fully quit the app before clicking Apply on its row."))
+        else:
+            self._warn_lbl.configure(text="")
+
+        for label, path in _MCP_CONFIGS:
+            self._render_block(label, path)
+
+    def _render_block(self, label: str, path: str):
+        info = _classify_mcp_entry(path)
+        self._config_state[path] = info
+
+        # Section frame
+        frame = tk.LabelFrame(
+            self._body, text=f"  {label}  ",
+            bg=C["base"], fg=C["text"],
+            font=("Segoe UI", 10, "bold"),
+            bd=1, relief=tk.GROOVE)
+        frame.pack(fill=tk.X, padx=4, pady=(8, 4), ipady=4)
+
+        # Path + status row
+        head = tk.Frame(frame, bg=C["base"])
+        head.pack(fill=tk.X, padx=8, pady=(4, 2))
+        tk.Label(head, text=path, font=("Consolas", 9),
+                 bg=C["base"], fg=C["subtext"]).pack(side=tk.LEFT)
+
+        state = info["state"]
+        if state == "ok":
+            badge_colour = C["green"]
+        elif state in ("direct_serve", "wrong_wrapper"):
+            badge_colour = C["peach"]
+        else:
+            badge_colour = C["red"]
+        tk.Label(head, text=info["label"],
+                 font=("Segoe UI", 9, "bold"),
+                 bg=C["base"], fg=badge_colour).pack(side=tk.RIGHT)
+
+        # Issue text (always shown for clarity, even on ok)
+        issue_text = info["issue"] or "No action needed — already routes through the wrapper."
+        tk.Label(frame, text=issue_text,
+                 font=("Segoe UI", 9),
+                 bg=C["base"], fg=C["overlay0"],
+                 justify=tk.LEFT, wraplength=720, anchor=tk.W).pack(
+            fill=tk.X, padx=8, pady=(0, 4))
+
+        # Diff (only if there's something to change)
+        if state != "ok":
+            diff_box = tk.Text(
+                frame, height=8, font=("Consolas", 9),
+                bg=C["mantle"], fg=C["text"],
+                relief=tk.FLAT, padx=8, pady=6, wrap=tk.NONE,
+                state=tk.NORMAL)
+            diff_box.tag_configure("old", foreground="#f38ba8")
+            diff_box.tag_configure("new", foreground="#a6e3a1")
+            diff_box.tag_configure("hdr", foreground=C["overlay0"],
+                                    font=("Consolas", 9, "italic"))
+
+            if info["current"] is None:
+                diff_box.insert(tk.END, "  (no current entry — will be added)\n", "hdr")
+            else:
+                diff_box.insert(tk.END, "  --- current ---\n", "hdr")
+                for line in json.dumps(info["current"], indent=2).splitlines():
+                    diff_box.insert(tk.END, "  - " + line + "\n", "old")
+            diff_box.insert(tk.END, "  +++ proposed +++\n", "hdr")
+            for line in json.dumps(info["proposed"], indent=2).splitlines():
+                diff_box.insert(tk.END, "  + " + line + "\n", "new")
+
+            # Auto-size height to content, capped
+            line_count = int(diff_box.index("end-1c").split(".")[0])
+            diff_box.configure(height=min(max(line_count + 1, 6), 18),
+                               state=tk.DISABLED)
+            diff_box.pack(fill=tk.X, padx=8, pady=(2, 4))
+
+        # Action row
+        actions = tk.Frame(frame, bg=C["base"])
+        actions.pack(fill=tk.X, padx=8, pady=(2, 4))
+
+        if state == "ok":
+            ttk.Button(actions, text="Open file",
+                       command=lambda p=path: self._open_file(p)).pack(side=tk.LEFT)
+        else:
+            apply_btn = ttk.Button(
+                actions, text="Apply this fix",
+                style="Primary.TButton",
+                command=lambda p=path, l=label: self._apply(p, l))
+            apply_btn.pack(side=tk.LEFT)
+
+            ttk.Button(actions, text="Skip (don't warn again)",
+                       command=lambda p=path: self._skip(p)).pack(
+                side=tk.LEFT, padx=(8, 0))
+            ttk.Button(actions, text="Open file",
+                       command=lambda p=path: self._open_file(p)).pack(
+                side=tk.LEFT, padx=(8, 0))
+
+        # Backup-notice strip
+        tk.Label(frame,
+            text=("  A timestamped backup is written before any change. "
+                  "Other mcpServers entries in this file are preserved verbatim."),
+            font=("Segoe UI", 8, "italic"),
+            bg=C["base"], fg=C["overlay0"],
+            justify=tk.LEFT, anchor=tk.W).pack(
+            fill=tk.X, padx=8, pady=(0, 4))
+
+    # ── Actions ─────────────────────────────────────────────────────────
+
+    def _apply(self, cfg_path: str, label: str):
+        # Pre-flight: don't apply over a running Claude.
+        running = _is_claude_running()
+        if (label == "Claude Desktop" and running["desktop"]) or \
+           (label == "Claude Code" and running["code"]):
+            messagebox.showwarning(
+                f"{label} is running",
+                f"{label} is currently running and will rewrite its config "
+                "file with its in-memory state within 1–2 minutes — that "
+                "would silently revert any fix applied now.\n\n"
+                f"Fully quit {label}, then click Apply again.",
+                parent=self)
+            return
+
+        proposed = self._config_state[cfg_path]["proposed"]
+        ok, msg = _apply_mcp_fix(cfg_path, proposed)
+        if ok:
+            messagebox.showinfo(
+                "Fix applied", f"{msg}\n\n"
+                "Re-detect will refresh the status below.",
+                parent=self)
+            # Take the path off the skip list if it was on it.
+            skips = (_cfg.get("mcp_skip_warnings") or []) \
+                    if isinstance(_cfg, dict) else []
+            if cfg_path in skips:
+                skips.remove(cfg_path)
+                _cfg["mcp_skip_warnings"] = skips
+                _save_config(_cfg)
+            self._render()
+        else:
+            messagebox.showerror("Fix failed", msg, parent=self)
+
+    def _skip(self, cfg_path: str):
+        skips = (_cfg.get("mcp_skip_warnings") or []) \
+                if isinstance(_cfg, dict) else []
+        if cfg_path not in skips:
+            skips.append(cfg_path)
+            _cfg["mcp_skip_warnings"] = skips
+            _save_config(_cfg)
+        messagebox.showinfo(
+            "Skipped",
+            f"Won't warn about {cfg_path} on startup anymore.\n\n"
+            "Open this dialog from Settings → MCP integration to revisit.",
+            parent=self)
+
+    def _open_file(self, cfg_path: str):
+        """Open the config file in the user's default editor, or its parent
+        folder if the file doesn't exist yet."""
+        try:
+            if os.path.isfile(cfg_path):
+                os.startfile(cfg_path)
+            else:
+                parent_dir = os.path.dirname(cfg_path)
+                if os.path.isdir(parent_dir):
+                    os.startfile(parent_dir)
+                else:
+                    messagebox.showwarning(
+                        "Not found",
+                        f"Neither {cfg_path} nor its parent directory exists.",
+                        parent=self)
+        except OSError as e:
+            messagebox.showerror("Could not open", str(e), parent=self)
 
 
 class AICodeReviewDialog(tk.Toplevel):
