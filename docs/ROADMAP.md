@@ -46,12 +46,12 @@ For agentic / custodial work, you want **non-reasoning instruction-tuned** model
 
 The 💡 Suggest button in the Git Commit dialog runs a multi-strategy orchestrator: AI call (if enabled) → CHANGELOG bullet parsing → diff content analysis → file-name fallback. All results pass a sanitiser that enforces conventional-commit format. Async with a spinner so the GUI never freezes. See `CHANGELOG.md` for the full feature list.
 
-### 🔮 Stage 1 — AI Code Review panel
-*Status: planned, next up*
+### ✅ Stage 1 — AI Code Review panel
+*Status: shipped*
 
-Right-click any project → **🔍 AI Code Review…** opens a dialog showing the pending diff alongside an AI-generated structured review (high/medium/low severity findings, observations). Pure read-only — the AI never modifies anything. Smallest viable feature that proves whether local models give useful reviews on your hardware.
+Right-click any project → **🔍 AI Code Review…** opens a split-pane dialog: top pane shows `git diff HEAD` with green/red colour-coding, bottom pane streams an AI-generated structured review (⚠ High / ⚡ Medium / 💡 Low / ℹ Observations) with severity-coloured section headers. Async with **token-by-token streaming** via byte-aligned SSE parsing — visible progress instead of a long opaque wait. Worker-side token batching (~50 ms / 8 tokens) prevents Tk event-loop saturation on fast local models. Stop / Regenerate / Copy buttons. Section-header colour tags applied in a final pass after streaming ends.
 
-**Why first:** ~1 day of work, maximum reuse of existing infrastructure, zero autonomy concerns.
+Pure read-only: one `_call_llm` call with a locked system prompt. No tools, no file writes, no autonomy concerns. `AICodeReviewDialog._SYSTEM_PROMPT` holds the prompt as a class-level constant — match this pattern for any future one-shot LLM dialog.
 
 ### ✅ Stage 2 — Project Q&A chat with tool calling
 *Status: shipped*
@@ -163,4 +163,18 @@ To be explicit about what we're NOT building:
 
 ## Status updates
 
-This file is updated whenever a stage ships or its design materially changes. Last updated: 2026-05-23 (Stage 2 shipped — agent chat tab + tool registry + LocalAgent loop. Ollama deep integration: streaming responses in AI Code Review, Model Manager dialog. Pin-watcher fix in `tokensave-wrapper.py`).
+This file is updated whenever a stage ships or its design materially changes.
+
+**Last updated: 2026-05-23** — Stages 0, 1, AND 2 all shipped this cycle. Highlights:
+
+- **Stage 0** (smart commit messages) shipped earlier; this cycle extended `_call_llm` with optional streaming via an `on_token` callback.
+- **Stage 1** (AI Code Review) shipped with streaming response display, byte-aligned SSE parsing, and worker-side token batching to avoid Tk event-loop saturation.
+- **Stage 2** (🤖 Ask tab) shipped end-to-end. `src/agent.py` (`LocalAgent`) + `src/agent_tools.py` (`ToolSpec` registry with 6 read-only tools). Includes: bounded iteration loop, cumulative context budget, per-tool error wrapping, path-containment validation, tool-call rescue for local models that emit calls as JSON-in-content, Ollama `num_ctx=32768` bump, detailed HTTP error reporting via `_last_error`, `read_file` line-range support, basename-match suggestions on not-found errors.
+- **🦙 Ollama Model Manager** shipped — Settings → "🦙 Manage Ollama Models…" using Ollama's native REST API.
+- **🔄 Upgrade tokensave from the manager** shipped — sync-output regex parser + hourly GitHub releases poller.
+- **🔌 MCP Integration configurator** shipped — UWP-aware path detection, label-aware classification, backup-first writes, refuses to write over running Claude.
+- **Doctor button** enhanced with stale-entry purge offer + cmd.exe spawn fallback for TTY-gated prompts.
+- **`tokensave-wrapper.py`** stdio bug fixed (explicit `sys.stdin/stdout/stderr` to Popen). Live in-session pin reloading via wrapper-side watcher deferred — see `docs/MCP_INTEGRATION_GOTCHAS.md` for the three viable paths forward.
+- **🐙 Merge PR button** added to Git tab — full GitHub PR merge flow without leaving the manager.
+
+Next up: Stage 3 (CHANGELOG drafter — first write tool, ProposalDialog gate) when there's lived-with experience with Stages 0–2 to inform the proposal-dialog design.

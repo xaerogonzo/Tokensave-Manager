@@ -177,6 +177,25 @@ Carbon · D · Lua · Julia · R · MATLAB · Groovy · Gradle · Maven · SQL
 | Item | Path |
 |------|------|
 | Binary | `D:\Claude Co worker\Token Save\tokensave.exe` |
-| Project DB | `D:\Claude Co worker\Token Save\.tokensave\tokensave.db` |
-| Desktop pin file | `%USERPROFILE%\.tokensave\desktop-project.txt` |
-| MCP config (Claude Desktop) | `%APPDATA%\Claude\claude_desktop_config.json` |
+| Project DB | `<project-root>\.tokensave\tokensave.db` (plus `.db-wal` and `.db-shm` siblings for WAL-mode SQLite) |
+| Desktop pin file | `%USERPROFILE%\.tokensave\desktop-project.txt` (still single-shot at wrapper startup — live in-session reload deferred) |
+| MCP config (Claude Desktop, traditional install) | `%APPDATA%\Claude\claude_desktop_config.json` |
+| MCP config (Claude Desktop, UWP / Microsoft Store install) | `%LOCALAPPDATA%\Packages\Claude_<id>\LocalCache\Roaming\Claude\claude_desktop_config.json` ⚠ |
+| MCP config (Claude Code) | `%USERPROFILE%\.claude.json` |
+| Tokensave global DB | `%USERPROFILE%\.tokensave\global.db` |
+| Tokensave user config | `%USERPROFILE%\.tokensave\config.toml` |
+
+⚠ **UWP gotcha:** Microsoft Store installs of Claude Desktop apply asymmetric file-path redirection — the same path string `%APPDATA%\Claude\claude_desktop_config.json` resolves to a DIFFERENT physical file depending on whether the caller is in UWP-context (Claude Desktop itself and its children) vs. non-UWP-context (the manager, Notepad++, plain cmd.exe). Both files exist; both have the same path string; they have unrelated content. Edit the package-internal file. The manager's `_resolve_desktop_cfg_path()` handles this automatically. See `docs/MCP_INTEGRATION_GOTCHAS.md` for the full diagnosis trail.
+
+## Notes on tokensave 5.1.x ([Unreleased] manager cycle)
+
+- **WAL-mode SQLite.** Incremental syncs only touch `.tokensave/tokensave.db-wal`, not the main `.db` file. The main file's mtime only advances on checkpoint (server shutdown or `sync --force`). The manager's "Last Synced" column reads `max(mtime)` across all three files (`db`, `db-wal`, `db-shm`) so it reflects actual sync activity, not just the last checkpoint.
+- **MCP server lifetime.** Claude Desktop respawns the tokensave child every ~60 seconds (its normal MCP heartbeat). Each respawn picks up whatever binary is currently at `tokensave_exe` — meaning `tokensave upgrade` lands in a Claude Desktop session within one heartbeat. The manager's tokensave 5.1.1 → 5.1.2 upgrade in this cycle was confirmed live by observing the post-upgrade MCP children all using the new binary at the next respawn.
+- **CLI subcommand names.** `tokensave query` (not `search` — `search` doesn't exist as a subcommand even though MCP exposes `tokensave_search`). `tokensave context` accepts `--format json|markdown` (not `--json`). `tokensave install --agent claude` configures Claude Code integration but writes hook commands without quoting paths-with-spaces — see `docs/upstream-issues/tokensave-hook-quoting.md` for the bug draft.
+- **`tokensave doctor` purge prompt is TTY-gated.** Piped stdin won't trigger the y/n prompt for purging stale global-DB entries. The manager's Doctor button detects this case and offers to spawn `cmd.exe /k "tokensave doctor"` in a NEW console window where the user can answer the prompt for real.
+
+## tokensave-wrapper.py (manager-side script)
+
+A thin script the manager registers as Claude Desktop's MCP server in `claude_desktop_config.json`. Spawns `tokensave.exe serve -p <pinned-project>` and proxies its stdio. **Critical:** the Popen call must pass `stdin=sys.stdin, stdout=sys.stdout, stderr=sys.stderr` explicitly — default-inheritance under pythonw.exe breaks console-child stdio in a way that times out MCP handshake at 30 s. **Also critical:** keep it single-threaded — `import threading` and daemon threads introduce additional subtle stdio issues. Both of these were learned the hard way and are documented in detail in `docs/MCP_INTEGRATION_GOTCHAS.md`.
+
+The wrapper currently reads the pin file ONCE at startup. Live in-session pin reloading (so `★ Set as Active` swaps the served project without a Claude restart) is deferred — must be implemented out-of-process (sibling watcher daemon that signals via `taskkill /F` to the tokensave PID, or DXT extension migration) rather than inside the wrapper.

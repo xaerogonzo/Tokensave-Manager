@@ -25,6 +25,7 @@ If you use Claude across several projects, this is the control panel: switch act
 - [The Interface](#the-interface)
   - [Projects Tab](#projects-tab)
   - [Git Tab](#git-tab)
+  - [🤖 Ask Tab](#-ask-tab)
   - [Reference Tab](#reference-tab)
   - [Help Tab](#help-tab)
 - [Right-Click Menu](#right-click-menu)
@@ -146,9 +147,17 @@ The manager's design philosophy: **never force a choice you don't want to make**
 - **Auto-commit after sync** — optional toggle (Settings) that runs `git add -A + git commit` automatically after every successful tokensave sync; amends the previous commit if it was also a sync commit, to avoid history pile-up. With the AI integration enabled, can produce a fresh AI-generated message per sync instead (no amend-stacking) — opt-in via the **"Also use AI for sync auto-commit messages"** sub-toggle
 - **Auto-commit Stop hook** — optional per-project Claude Code hook that commits whatever Claude changed at the end of each session
 
+### AI features (Stages 0–2 shipped)
+- **Stage 0 — Smart commit-message generation** (described under "Git Integration" above)
+- **Stage 1 — 🔍 AI Code Review** — right-click any project → "🔍 AI Code Review…" opens a split-pane dialog: top pane shows `git diff HEAD` with green/red colour-coding, bottom pane streams an AI-generated structured review (⚠ High / ⚡ Medium / 💡 Low / ℹ Observations sections). Async with token-by-token streaming via byte-aligned SSE parsing — visible progress instead of a long spinner. Stop / Regenerate / Copy buttons. Pure read-only: no tools, no file writes
+- **Stage 2 — 🤖 Ask tab** — notebook tab next to Git. Chat interface where a local LLM uses six READ-ONLY tools (`read_file`, `list_directory`, `git_log`, `git_diff`, `tokensave_search`, `tokensave_context`) to answer questions about the selected project. Bounded loop (8 iterations default), cumulative context budget (~40 000 chars across tool outputs), per-tool error wrapping, path-containment validation, stop-via-event-flag cancellation. Tool calls + results appear inline in the chat log (peach for call, dim grey for result, blue for user, default for assistant). See `docs/AGENT_ARCHITECTURE.md` for the locked architectural rules
+- **🦙 Ollama Model Manager** — Settings → "🦙 Manage Ollama Models…" launches a dedicated dialog that uses Ollama's native REST API (`GET /api/tags`, `POST /api/show`, streaming `POST /api/pull`, `DELETE /api/delete`) to browse installed models, pull new ones with live progress, see per-model context windows, and delete unwanted ones. Cancel during a pull explicitly closes the `HTTPResponse` to unblock the worker (setting a `threading.Event` alone doesn't break out of `read()`)
+- **🔄 Upgrade tokensave from the manager** — Settings has an always-visible "🔄 Upgrade tokensave" button that runs `tokensave upgrade`. Three signals keep the button label fresh: a local `tokensave --version` probe at startup, the sync-output parser catching `Update available: vA → vB` lines, and an hourly GitHub releases poller (`api.github.com/.../releases/latest`). When a newer version is available the button promotes to a green Primary "🔄 Upgrade tokensave to v5.1.2"
+
 ### Settings & Tools
 - **Settings dialog** — configure all paths (`tokensave_exe`, `template_dir`, `editor_cmd`, `git_exe`, `codegraph_exe`) and search roots through a GUI; changes apply immediately. Validates and auto-detects on save. Scrollable and resizable (760×700 default, 640×500 minimum) so growing sections never push controls off-screen
-- **AI commit messages** — Settings dialog has a dedicated **"AI commit messages"** section with a provider dropdown (Anthropic / OpenAI / OpenAI-compatible), model field, API-key env-var name, and base URL for local OpenAI-compatible servers. Quick-preset buttons for **Anthropic** (Claude Haiku/Sonnet/Opus), **LM Studio** (`http://localhost:1234`), and **Ollama** (`http://localhost:11434`). Min-diff-lines threshold so trivial commits skip the LLM. All LLM failures silent-fallback to the heuristic chain — never blocks the commit dialog
+- **🔌 MCP Integration configurator** — Settings → "🔌 Manage MCP wiring…" opens a dialog that classifies the `tokensave` MCP entries in BOTH Claude Desktop's `claude_desktop_config.json` AND Claude Code's `~/.claude.json`. UWP-aware: detects Microsoft Store / packaged Claude installs and targets the per-package config under `%LOCALAPPDATA%\Packages\Claude_*\LocalCache\Roaming\Claude\` (where the legacy `%APPDATA%\Claude\` path resolves to a DIFFERENT file from inside the package's process tree — see `docs/MCP_INTEGRATION_GOTCHAS.md` for the full story). Each config row shows ✓ correct / ⚠ bypasses wrapper / ✗ missing. Recognises `tokensave install --agent claude`'s canonical direct-serve shape (`{"command": "tokensave.exe", "args": ["serve"]}`) as valid for Claude Code so the banner doesn't fight an upstream tool. Apply writes via `shutil.copy2` backup-first; refuses to write while Claude is running (the config would be silently clobbered by Desktop's preferences-save). Skip list persists so dismissed warnings don't return
+- **AI commit messages** — Settings dialog has a dedicated **"AI commit messages"** section with a provider dropdown (Anthropic / OpenAI / OpenAI-compatible / Ollama), model field, API-key env-var name, and base URL for local OpenAI-compatible servers. Quick-preset buttons for **Anthropic** (Claude Haiku/Sonnet/Opus), **LM Studio** (`http://localhost:1234`), and **Ollama** (`http://localhost:11434`). Min-diff-lines threshold so trivial commits skip the LLM. All LLM failures silent-fallback to the heuristic chain — never blocks the commit dialog
 - **GitHub CLI installer** — Settings dialog includes a **"Install via winget"** button that installs the GitHub CLI (`gh`) in the background; shows a green checkmark when found on PATH
 - **CodeGraph installer** — Settings dialog includes a **"Install via npm"** button that installs `@colbymchenry/codegraph` globally. Runs on a background thread so the GUI never freezes; surfaces Windows EPERM/EACCES errors with actionable hints
 - **Git auto-detection** — finds `git.exe` via PATH or common Windows install locations automatically
@@ -331,6 +340,8 @@ A full git control panel for whichever project is selected in the Projects tab.
 | ⇄ Merge… | Merge another branch INTO the current one (use after switching to master to pull a finished feature back in). Handles conflict + dirty-tree errors with inline instructions |
 | 🗑 Delete Branch… | Delete a non-current branch (safe by default; offers force if unmerged). After local delete, prompts to also delete `origin/<branch>` if it exists on GitHub |
 | 🔗 Open PR | Open GitHub's compare page for the current branch; or explains branch workflow if on main |
+| 🐙 Merge PR… | Lists open PRs via `gh pr list --json`. Pick one + a merge strategy (Merge / Squash / Rebase) + optional delete-source-branch. Single confirmation modal shows title, source/base branches, diff stats. On confirm: `gh pr merge <N> --merge\|--squash\|--rebase`, then auto-switches local to the default branch and pulls so you end up sitting on the freshly-merged state |
+| 📦 Release… | One-button GitHub release (see Release Wizard above) |
 
 Every button has a hover tooltip with a plain-English explanation.
 
@@ -353,6 +364,54 @@ Commit message:
 - Tick exactly the files you want in this commit; unticked files stay as working-tree changes for a later commit
 - **💡 Suggest** generates a conventional-commit message based on *only the ticked files* (`feat:`, `fix:`, `docs:`, `chore:`, etc.)
 - Select All / Select None / Modified Only are quick-pick shortcuts
+
+### 🤖 Ask Tab
+
+Stage 2 of the agentic-AI roadmap (see `docs/AGENT_ARCHITECTURE.md` and `docs/ROADMAP.md`). A chat interface where a local LLM uses read-only tools to answer questions about the selected project.
+
+```
+🤖 Ask — MyProject               [provider: ollama / qwen2.5-coder:14b]
+─────────────────────────────────────────────────────────────────────
+│  🤖  Ready. Ask anything about the selected project…              │
+│                                                                   │
+│  👤  Where is the commit-message generator?                       │
+│  🔧  tokensave_search({"query": "commit message generator"})      │
+│      _suggest_commit_message (function) - src/...:2136            │
+│  🔧  read_file({"path": "src/tokensave-manager.py",               │
+│                  "start_line": 2136, "end_line": 2300})           │
+│      <body of _suggest_commit_message with line numbers>          │
+│  🤖  The commit-message generator lives in                        │
+│      _suggest_commit_message at src/tokensave-manager.py:2136.    │
+│      It runs a strategy chain: LLM → CHANGELOG bullets → diff…    │
+├───────────────────────────────────────────────────────────────────┤
+│ [type your question here…                          ] [Send] [Stop]│
+│ [Clear history]                                                   │
+```
+
+**Tools the agent has access to** (all read-only):
+
+| Tool | Purpose |
+|------|---------|
+| `read_file` | Read a file's contents. Supports `start_line` / `end_line` for files larger than 50 KB. When a path isn't found, the error suggests likely candidates by basename. |
+| `list_directory` | List entries with `/` suffix on subdirs. Skips noise (`__pycache__`, `node_modules`, hidden dirs). |
+| `git_log` | `git log --oneline -n N` (default 20). |
+| `git_diff` | `git diff HEAD [-- path]`. Capped at 24 KB. |
+| `tokensave_search` | Runs `tokensave query <q>` — finds DEFINED SYMBOLS by name (functions, classes, methods, constants). NOT a full-text grep. |
+| `tokensave_context` | Runs `tokensave context --format json --max-nodes 10 <task>`. Result is slimmed (per-node metadata trimmed to name/kind/qualified_name/file_path/start_line/end_line/signature/parent_id) so the model can reason about it without burning tokens. |
+
+**Provider support**:
+- **Ollama / OpenAI / OpenAI-compatible** (LM Studio, vLLM, llama.cpp) — full tool-calling. The agent passes `options.num_ctx=32768` to Ollama specifically (Ollama's default is 2048, easily blown after a few tool iterations).
+- **Anthropic** — falls back to a one-shot completion without tools and surfaces a hint. Adding native Anthropic tool-use is a follow-up.
+
+**Tool-call rescue**: local models (qwen2.5-coder especially) sometimes emit tool calls as JSON text in the assistant content field instead of using the structured `tool_calls` array. The agent detects this pattern (four shapes: `{"name": ..., "arguments": ...}`, `{"tool": ...}`, `{"name": ..., "parameters": ...}`, `{"function": {...}}`, with `\`\`\`json` fence stripping and balanced-brace substring scanning) and synthesises a proper tool call from the embedded JSON.
+
+**Error reporting**: any LLM HTTP failure surfaces the actual response body (HTTPError bodies, network reasons, JSON decode failures) — no more generic "LLM request failed" messages.
+
+Recommended starter prompts:
+- "How is this project structured? What are the major components?"
+- "Where is the commit-message generator? How does it decide what message to suggest?"
+- "What did I change in the last 10 commits?"
+- "Why might `_call_llm` fail silently? What are all the failure modes?"
 
 ### Reference Tab
 
@@ -536,8 +595,17 @@ Token Save Manager Source/
 ├── TOKENSAVE_GUIDE.md             Full tokensave CLI + MCP reference
 │
 ├── src/
-│   ├── tokensave-manager.py       Main GUI (~4,700 lines)
-│   └── tokensave-wrapper.py       Claude Desktop MCP wrapper
+│   ├── tokensave-manager.py       Main GUI (~12,500 lines as of [Unreleased])
+│   ├── tokensave-wrapper.py       Claude Desktop MCP wrapper (~120 lines —
+│   │                              MUST stay single-threaded and pass
+│   │                              sys.stdin/stdout/stderr explicitly to
+│   │                              Popen; see MCP_INTEGRATION_GOTCHAS.md)
+│   ├── agent.py                   LocalAgent loop for the 🤖 Ask tab
+│   │                              (~600 lines, Stage 2)
+│   └── agent_tools.py             ToolSpec registry: read_file,
+│                                  list_directory, git_log, git_diff,
+│                                  tokensave_search, tokensave_context
+│                                  (~500 lines, Stage 2)
 │
 ├── templates/
 │   ├── claude-md-template.md      BASIC_INSTRUCTIONS template for new projects
@@ -548,13 +616,17 @@ Token Save Manager Source/
 │   └── NUITKA_GOTCHAS.md          Nuitka pitfalls reference (14 known issues)
 │
 └── docs/
-    ├── ARCHITECTURE.md             Class structure, UI layout, threading model
-    ├── ARCHITECTURE_TOKENSAVE.md   tokensave internals reference
-    ├── AGENT_ARCHITECTURE.md       LocalAgent loop + tool registry + propose-only rules
-    ├── ROADMAP.md                  Staged plan for local AI features (Stages 0–8)
-    ├── MCP_INTEGRATION_GOTCHAS.md  Field manual: UWP path redirection, stdio bugs,
-    │                                Connectors UI vs legacy config, live-reload paths
-    └── GITHUB_GUIDE.md             Beginner GitHub guide
+    ├── ARCHITECTURE.md              Class structure, UI layout, threading model
+    ├── ARCHITECTURE_TOKENSAVE.md    tokensave internals reference
+    ├── AGENT_ARCHITECTURE.md        LocalAgent loop + tool registry + propose-only rules
+    ├── ROADMAP.md                   Staged plan for local AI features (Stages 0–8)
+    ├── MCP_INTEGRATION_GOTCHAS.md   Field manual: UWP path redirection, stdio bugs,
+    │                                Connectors UI vs legacy config, live-reload paths,
+    │                                tokensave install hook-quoting upstream bug
+    ├── GITHUB_GUIDE.md              Beginner GitHub guide
+    └── upstream-issues/             Drafts of bugs to file against upstream tools
+        └── tokensave-hook-quoting.md  Path-with-spaces hook-quoting bug in
+                                       tokensave install --agent claude
 ```
 
 ---
@@ -563,7 +635,9 @@ Token Save Manager Source/
 
 The manager is growing into a **propose-only local AI assistant** for project maintenance — code review, CHANGELOG drafting, dead-code scouting, whole-project Q&A. Every AI suggestion waits for explicit user approval; nothing auto-applies.
 
-See [docs/ROADMAP.md](docs/ROADMAP.md) for the staged plan, model recommendations (Ollama with `qwen2.5-coder:14b`, `qwen2.5:14b`, or Anthropic Claude Haiku), and architectural rules. The roadmap is updated as features ship.
+**Status:** Stages 0–2 shipped. Stage 0 = smart commit messages. Stage 1 = AI Code Review with streaming. Stage 2 = 🤖 Ask tab with tool-calling agent against your own code.
+
+See [docs/ROADMAP.md](docs/ROADMAP.md) for the full staged plan (Stages 0–8), model recommendations (Ollama with `qwen2.5-coder:14b`, `qwen2.5:14b`, or Anthropic Claude Haiku), and the locked architectural rules. [docs/AGENT_ARCHITECTURE.md](docs/AGENT_ARCHITECTURE.md) has the technical detail on the Stage 2 agent loop, tool registry, and the propose-only design. [docs/MCP_INTEGRATION_GOTCHAS.md](docs/MCP_INTEGRATION_GOTCHAS.md) is the field manual for everything we learned debugging the wrapper + MCP integration the hard way.
 
 ---
 
@@ -571,19 +645,39 @@ See [docs/ROADMAP.md](docs/ROADMAP.md) for the staged plan, model recommendation
 
 See [CHANGELOG.md](CHANGELOG.md) for the full history.
 
-**Recent highlights (Unreleased):**
-- **⇄ Merge button on the Git tab** — merge a branch INTO the current one without dropping to the CLI. Handles conflicts and dirty-tree errors with inline guidance
-- **Remote-aware Delete Branch** — after a successful local delete, prompts to also delete `origin/<branch>` from GitHub when a remote copy exists
-- **[project-name] prefix on all git log lines** — every Push, Pull, Commit, Merge, branch op, etc. logs as `[Project] …` so it's unambiguous which repo an action ran on. Dialog titles too: `New Branch — MyProject` etc.
-- Git tab with full push/pull/commit/branch/diff UI
-- Per-file staging in the commit dialog with colour-coded badges
-- Conventional-commit message auto-suggestion
-- GitHub Setup wizard (step-by-step onboarding)
-- Open PR button with beginner branch-workflow guide
-- GitHub CLI installer in Settings
-- Project categories + sub-categories in the project tree
-- Ensure .gitignore — one-click baseline gitignore for any project
-- Auto-commit after sync + Claude session Stop hook
+**Recent highlights (Unreleased)** — see CHANGELOG.md for the detailed bullets on each:
+
+**Major: local-AI integration (Stages 0–2 of the roadmap)**
+- 🤖 Ask tab — Stage 2 chat interface with bounded tool-calling agent (`src/agent.py` + `src/agent_tools.py`)
+- 🔍 AI Code Review with token-by-token streaming
+- 🦙 Ollama Model Manager dialog with native REST API integration
+- 🔄 Upgrade tokensave from the manager, with hourly GitHub releases polling
+- Tool-call rescue for local models that emit calls as JSON-in-content
+- read_file with `start_line`/`end_line` for large files + basename-match suggestions on not-found errors
+
+**MCP / wrapper hardening**
+- 🔌 MCP Integration configurator (UWP-aware, label-aware classification — recognises `tokensave install` canonical shape for Claude Code)
+- Wrapper stdio fix: explicit `stdin=sys.stdin, stdout=sys.stdout, stderr=sys.stderr` in Popen (the root cause of the 30-second MCP attach timeout)
+- 🔍 Doctor button with stale-entry purge offer + cmd.exe spawn fallback for TTY-gated prompts
+- Last Synced column now reads max mtime across `.db`/`.db-wal`/`.db-shm` (SQLite WAL-mode aware)
+
+**Git workflow**
+- 🐙 Merge PR button — full GitHub PR merge from the manager (lists PRs via `gh pr list`, three strategies, auto-syncs local after)
+- ⇄ Merge button — merge a branch INTO the current one
+- Remote-aware Delete Branch — prompts to also delete `origin/<branch>`
+- `[project-name]` prefix on all git log lines
+
+**Docs**
+- `docs/AGENT_ARCHITECTURE.md` — agent loop design
+- `docs/ROADMAP.md` — staged plan with status badges
+- `docs/MCP_INTEGRATION_GOTCHAS.md` — postmortem field manual
+- `docs/upstream-issues/tokensave-hook-quoting.md` — draft of an upstream bug we discovered
+
+**Earlier highlights** (these landed before the current cycle):
+- Git tab with full push/pull/commit/branch/diff UI, per-file staging, conventional-commit auto-suggest
+- GitHub Setup wizard, Open PR button, Release Wizard with `gh release create` pipeline
+- Project categories + sub-categories, gitignore editor with template inject + diff preview
+- Ensure .gitignore, Auto-commit after sync, Claude session Stop hook
 
 ---
 

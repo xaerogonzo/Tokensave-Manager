@@ -25,8 +25,10 @@ Token Save Manager Source/
 ├── build.bat                      Launcher for build.ps1 (bypasses execution policy)
 │
 ├── src/
-│   ├── tokensave-manager.py       Main GUI application (~9,500 lines)
-│   └── tokensave-wrapper.py       Claude Desktop auto-detection wrapper
+│   ├── tokensave-manager.py       Main GUI application (~12,500 lines as of [Unreleased])
+│   ├── tokensave-wrapper.py       Claude Desktop auto-detection wrapper (~120 lines)
+│   ├── agent.py                   LocalAgent loop for the 🤖 Ask tab (Stage 2)
+│   └── agent_tools.py             ToolSpec registry (6 read-only tools) (Stage 2)
 │
 ├── templates/                     Data files used by the manager + shipped in dist\
 │   ├── claude-md-template.md      BASIC_INSTRUCTIONS.md template for other projects
@@ -50,16 +52,22 @@ Token Save Manager Source/
 │   └── manager.log                Rotating log (500 KB x 5 backups)
 │
 └── docs/
-    ├── ARCHITECTURE.md            This file
-    ├── ARCHITECTURE_TOKENSAVE.md  tokensave tool internals reference
-    └── GITHUB_GUIDE.md            Beginner GitHub guide (concepts, setup, daily workflow, releases)
+    ├── ARCHITECTURE.md             This file
+    ├── ARCHITECTURE_TOKENSAVE.md   tokensave tool internals reference
+    ├── AGENT_ARCHITECTURE.md       LocalAgent loop + tool registry + propose-only rules
+    ├── ROADMAP.md                  Staged plan for local AI features (Stages 0–8)
+    ├── MCP_INTEGRATION_GOTCHAS.md  Field manual: UWP path redirection, wrapper stdio bug,
+    │                               Connectors UI vs legacy config, live-reload paths
+    ├── GITHUB_GUIDE.md             Beginner GitHub guide (concepts, setup, daily workflow)
+    └── upstream-issues/            Drafts of bugs to file against upstream tools
+        └── tokensave-hook-quoting.md   tokensave install --agent claude path-quoting bug
 ```
 
 ---
 
 ## `src/tokensave-manager.py` — Main Application
 
-Single-file tkinter application (~9,500 lines). Entry point is `if __name__ == "__main__": App().mainloop()`.
+Single-file tkinter application (~12,500 lines as of [Unreleased]). Entry point is `if __name__ == "__main__": App().mainloop()`. Size has grown substantially this cycle from the addition of Stages 1–2 AI features, the MCP configurator, the Ollama Model Manager, and various dialog classes — see the "Dialog classes added [Unreleased]" subsection below for the new ones.
 
 ### Class hierarchy
 
@@ -136,6 +144,10 @@ NewBranchDialog (tk.Toplevel)     — modal: branch name entry + "switch immedia
 SwitchBranchDialog (tk.Toplevel)  — modal: listbox of local branches; double-click to switch; static pick() helper reused for delete + merge picker flows. Important calling convention: pick()'s signature is `(parent, title, branches, parent_widget=None)` — pass `parent_widget=self` for the centering anchor, NOT `parent=self` (the latter collides with the positional first arg and raises TypeError, which Tk silently swallows on button callbacks → dead button)
 GitCommitDialog (tk.Toplevel)     — modal: per-file checklist of working-tree changes with colour-coded status badges (M/A/D/R/?/!) + Select All / None / Modified Only quick-pick buttons + commit message entry with multi-strategy auto-suggest (💡 Suggest button that re-runs the orchestrator scoped to the currently-ticked files); callback signature `(path, message, selected_files: list[str])`. Right-click → 📝 Git Commit… or Git tab → Commit…. Initial selection covers only the FIRST LINE of the suggestion so the AI/CHANGELOG-derived body survives the user typing a new subject
 GitHubSetupDialog (tk.Toplevel)  — modal: step-by-step GitHub onboarding wizard. Step 1 saves git identity; Step 2 offers Sign in (primary) + Create account (secondary); Step 3 opens github.com/new; Step 4 sets remote URL; Step 5 first push. Separate Releases section shells out to `gh release create` when `shutil.which("gh")` returns a path. Scrollable canvas wraps the body Frame so it fits small windows. Opened by 🐙 GitHub… button in Git tab header.
+AICodeReviewDialog (tk.Toplevel) — modal: Stage 1 AI Code Review. Split-pane with the project's `git diff HEAD` on top (green/red colour-coded) and a streaming AI review below. One `_call_llm` invocation with locked `_SYSTEM_PROMPT` class-constant. Tokens stream into the bottom pane via an `on_token` callback wrapped in worker-side batching (~50ms / 8 tokens) to avoid Tk event-loop saturation. Section-header colour tags (⚠/⚡/💡/ℹ) applied in a final pass when streaming ends. Stop button via `_review_token` mismatch (cancellation never orphans the worker — stale results just get discarded). Opened by right-click → 🔍 AI Code Review….
+OllamaModelManagerDialog (tk.Toplevel) — modal: browse / pull / delete Ollama models without leaving the manager. Uses Ollama's NATIVE REST API (not the OpenAI-compatible /v1 surface): `GET /api/version` health check, `GET /api/tags` for installed models, `POST /api/show` per-model context-length, streaming `POST /api/pull` with live progress bar, `DELETE /api/delete`. Pull progress streams newline-delimited JSON via `_iter_json_lines`. Critical pattern: Cancel during pull explicitly closes the `HTTPResponse` object (not just `threading.Event.set()` — the worker is syscall-blocked inside `read()` and only socket close unblocks it). "Use for AI features" button pre-fills the parent SettingsDialog's provider/model/base-URL fields. Opened by Settings → "🦙 Manage Ollama Models…".
+MCPConfigDialog (tk.Toplevel) — modal: classify + edit `tokensave` MCP entries in BOTH Claude Desktop's config AND Claude Code's `~/.claude.json`. Header banner warns if Claude is currently running (via `_is_claude_running`) — Desktop rewrites its config file every 1–2 minutes with cached in-memory state, silently clobbering any edit applied while it's alive. Per-row diff display, per-row Apply button (separate confirmations, one per config), Re-detect, Open file, Skip-and-don't-warn-again (writes path to `manager-config.json` → `mcp_skip_warnings` list which `_check_config` honours). Apply uses backup-first via `shutil.copy2`. The Apply-refused path uses `messagebox.showerror` (red icon, reads as rejection — earlier showwarning was easy to dismiss without realising no write happened), logs a red `MCP Apply REFUSED:` line to the main OUTPUT pane, AND calls `self._render()` to refresh the row state. UWP-aware: `_resolve_desktop_cfg_path` globs `%LOCALAPPDATA%\Packages\Claude_*\LocalCache\Roaming\Claude\` and targets that when found. Opened by Settings → "🔌 Manage MCP wiring…" OR auto-launched 800ms after manager startup if `_check_config` finds drift.
+MergePRDialog (tk.Toplevel) — modal: pick an open GitHub PR + a merge strategy, then confirm. Treeview lists every open PR via `gh pr list --json number,title,headRefName,baseRefName,additions,deletions,author,url --limit 50`. Three strategy buttons (Merge commit / Squash and merge / Rebase and merge) map 1:1 to `gh pr merge`'s flags. Delete-source-branch checkbox (default on, matches GitHub web UI default). Single confirmation modal per merge attempt. Callback signature: `(path, pr_number, strategy, delete_branch, title)`. Opened by Git tab → "🐙 Merge PR…". Strategy buttons are gated until a row is selected. Post-merge: App's `_post_merge_pr_sync` auto-discovers the default branch via `git symbolic-ref refs/remotes/origin/HEAD --short`, switches local to it if needed, runs `git pull --ff-only`.
 ReleaseWizardDialog (tk.Toplevel) — modal: full-featured release wizard. Six sections in a scrollable canvas: (1) version with last-tag detection + Patch/Minor/Major radios biased by commit content + free-text override; (2) auto-filled title; (3) auto-drafted release notes textarea grouped by conventional-commit prefix; (4) build step with `build.ps1` / `build.bat` auto-detect; (5) artefact preview showing dist contents + resolved zip name; (6) CHANGELOG.md sync checkbox. Publish runs a single threaded `_publish_worker` that sequences: build → zip → patch CHANGELOG → stage CHANGELOG only → commit → local `git tag -a` → `git push --follow-tags` → `gh release create --notes-file <tmp>`. Each step short-circuits with a copy-pasteable recovery command. The notes-file temp path is preserved on the final-step failure so the user can retry `gh release create` by hand without retyping notes. Opened by 📦 Release… button on the Git tab. Pre-flight in `cmd_git_release` refuses to open the wizard if the working tree is dirty in anything other than `CHANGELOG.md` (with a one-click handoff to the existing Git Commit dialog).
 ```
 
@@ -235,6 +247,40 @@ Contents of the zip are 1:1 whatever `dist/` holds after the build, which is con
 | `_require_codegraph_installed()` (App method) | Parallel to `_require_tokensave`. Returns True iff `CODEGRAPH_EXE` is non-empty AND the file exists. Otherwise shows an install-nudge dialog that opens Settings and focuses the CodeGraph path entry. |
 | `GitignoreDialog(tk.Toplevel)` | User-facing `.gitignore` editor. Opened via right-click → 📋 Manage .gitignore…. Canvas-backed scrollable Frame for per-row removal buttons; real-strikethrough font (`tkfont.Font(overstrike=1)`) for marked-removed rows; template inject buttons (push, not stateful); custom-entry field with sanity check; live Pending changes Text widget. Save → `_write_gitignore_lines` → `_offer_commit_after_change`. |
 
+### Helpers added in this cycle ([Unreleased])
+
+| Symbol | Purpose |
+|--------|---------|
+| `_call_llm(cfg, system_prompt, user_prompt, max_tokens=1500, timeout=None, on_token=None)` | Generalised from the commit-message-specific helper. Returns `str \| None`. New `on_token` parameter enables streaming: when provided, sends `"stream": true` to the provider and calls `on_token(delta)` for each text chunk. Anthropic + OpenAI-compatible streaming both supported via byte-aligned `_iter_sse_events` SSE parser. The streaming path still returns the accumulated full text at end-of-stream for callers that use the return value. Used by `AICodeReviewDialog._start_review` (streaming) and `_call_llm_for_commit_message` (non-streaming). |
+| `_iter_sse_events(response)` | Module-level generator. Accumulates raw bytes from an `HTTPResponse` in a `bytearray`, splits on `\n` (CRLF tolerant), yields each `data: ...` payload. Handles mid-line network fragmentation correctly — `readline()` doesn't work reliably here because the SSE stream isn't always newline-terminated at network-buffer boundaries. |
+| `_iter_json_lines(response)` | Same idea as `_iter_sse_events` but for Ollama's `/api/pull` newline-delimited JSON output (no `data:` prefix). |
+| `_TOKENSAVE_UPDATE_RE` | Regex matching `Update available: vX.Y.Z → vA.B.C` lines in tokensave sync output. Used by `_run`'s line-by-line parser to detect when a newer tokensave release is available and populate `App._tokensave_available_version`. Accepts Unicode `→` and ASCII `->`/`=>` arrows. |
+| `_version_lt(a, b) -> bool` | Module-level numeric-tuple version comparator. Splits on `.`, pads to equal length, compares tuple-wise. Falls back to string compare on parse failure. Used by `App._check_tokensave_updates` to decide if a GitHub-reported latest tag is newer than the installed version. |
+| `_MCP_DESKTOP_CFG_PATH` / `_MCP_CODE_CFG_PATH` | Module-level constants for the two Claude MCP config files. Desktop path is computed via `_resolve_desktop_cfg_path()`. |
+| `_resolve_desktop_cfg_path()` | UWP-aware: globs `%LOCALAPPDATA%\Packages\Claude_*\LocalCache\Roaming\Claude\claude_desktop_config.json` first and returns the most-recently-touched candidate. Falls back to the traditional `%APPDATA%\Claude\claude_desktop_config.json` if no UWP install detected. Critical for Microsoft Store / packaged Claude installs where the two paths resolve to DIFFERENT physical files depending on caller context — see `docs/MCP_INTEGRATION_GOTCHAS.md`. |
+| `_canonical_mcp_entry()` | Returns the dict shape the manager wants every Claude config to have — `pythonw.exe + tokensave-wrapper.py` in source mode, `tokensave-wrapper.exe` in bundled mode. Sources `python_exe` from `manager-config.json`. |
+| `_classify_mcp_entry(cfg_path)` | Pure inspector that returns `{state, label, issue, current, proposed, cfg_path}`. Label-aware: for Claude Code (`.claude.json` paths), treats `tokensave.exe serve` (no hardcoded `-p`) as `state="ok"` because that's the canonical shape `tokensave install --agent claude` writes and `tokensave doctor` blesses. For Claude Desktop, requires wrapper-routed (Desktop's long-lived MCP server can't re-auto-detect per spawn). Hardcoded `-p` flagged in both. |
+| `_apply_mcp_fix(cfg_path, entry)` | Writes a new `tokensave` entry into the given JSON config, backup-first via `shutil.copy2(..., f"{path}.backup.{int(time.time()*1000)}")`. Preserves all other `mcpServers` entries verbatim. Returns `(ok, msg)`. Creates parent dirs if needed; tolerates the case where the file doesn't exist yet (creates a fresh one with just the tokensave entry). |
+| `_is_claude_running()` | Uses `tasklist /FO CSV /NH` to detect running `claude.exe` and `claude-code.exe` processes. Returns `{"desktop": bool, "code": bool, "pids": [...]}`. Best-effort (silent failure on tasklist error). Used by `MCPConfigDialog._apply` to refuse writing over running Claude (whose preferences-save loop would silently clobber the edit). |
+| `App._probe_tokensave_version()` | At App startup: runs `tokensave --version` on a daemon thread, parses the version string, stores in `self._tokensave_current_version`. Also kicks off `_check_tokensave_updates` for the initial check. |
+| `App._tokensave_update_poll_loop()` | Daemon thread that calls `_check_tokensave_updates` once per `tokensave_update_poll_hours` (default 1.0, floor 0.25). Polls GitHub's releases API for the latest tag, compares with installed via `_version_lt`, populates `_tokensave_available_version` if newer. Logs a peach hint on fresh-discovery transitions (skips re-confirms). |
+| `App._check_tokensave_updates()` | Single-shot check: hits `api.github.com/repos/aovestdipaperino/tokensave/releases/latest`, extracts tag, compares with `_tokensave_current_version`. Silent on offline/rate-limited. |
+| `App._extract_doctor_stale_paths(output_lines)` | Pure parser for `tokensave doctor`'s `! N stale project(s) in global DB` warning. Returns the list of bulleted paths (accepts `•`, `*`, `-` bullets). Used by the Doctor button's purge-offer flow. |
+| `App._offer_doctor_purge(path, stale_paths)` | Pops a confirmation modal listing stale entries; on yes, calls `_run_doctor_purge` which re-invokes doctor with `y\ny\ny\ny\ny\n` piped to stdin. The piped-stdin approach often fails (tokensave's prompt uses `is_terminal()` — a real TTY check). Auto-detection: a third silent run checks whether stale entries are still present; if so, offers a follow-up `_offer_doctor_in_cmd` dialog that spawns `cmd.exe /k ""<tokensave>" doctor"` in a NEW console window (CREATE_NEW_CONSOLE flag) where the user can answer the TTY prompt for real. |
+
+### Dialog classes added in this cycle ([Unreleased])
+
+| Class | Purpose | Opened from |
+|---|---|---|
+| `AICodeReviewDialog` | Stage 1 AI Code Review — diff + streaming severity-coloured review | Right-click → 🔍 AI Code Review… |
+| `OllamaModelManagerDialog` | Browse / pull / delete Ollama models via native REST API | Settings → 🦙 Manage Ollama Models… |
+| `MCPConfigDialog` | Classify + edit tokensave MCP entries in both Claude configs | Settings → 🔌 Manage MCP wiring… (or auto-launched at startup if drift detected) |
+| `MergePRDialog` | Pick an open GitHub PR + merge strategy, then confirm | Git tab → 🐙 Merge PR… |
+
+### AskTab — Stage 2 agent chat (not a class)
+
+The 🤖 Ask tab is built as methods on the `App` class (`_build_ask_tab`, `_ask_send`, `_ask_stop`, `_ask_clear`, `_ask_append`, `_ask_refresh_header`, `_ask_set_intro`) rather than a separate dialog because the chat log + input row + status line all live inside the notebook tab directly. State: `self._ask_messages` (the running message history), `self._ask_stop_event` (current `threading.Event` for cancellation), `self._ask_thread` (worker thread reference), `self._ask_path` (currently-selected project — synced from the Projects tab selection in `_on_tab_changed`). The agent itself lives in `src/agent.py` (`LocalAgent`); the tools live in `src/agent_tools.py` (`build_tools(project_path, tokensave_exe)`). See `docs/AGENT_ARCHITECTURE.md` for the full design rationale.
+
 ### Configuration (`manager-config.json`)
 
 All machine-specific values live in `manager-config.json` at the project root.
@@ -253,6 +299,9 @@ Editable through the Settings dialog without touching JSON directly.
 | `project_categories` | Dict mapping project path → `{"category": str, "subcategory"?: str}` — per-project override of the root's category label. Edit via right-click → 📁 Assign Category…. |
 | `user_snippets` | List of `{"title": str, "text": str}` — user-defined prompt snippets |
 | `auto_commit_after_sync` | Boolean. If true, `_run()` runs `git add -A + git commit -m "chore: tokensave sync"` after every successful sync on a git-repo project. If the previous commit was the same message, it's amended (`commit --amend --no-edit`) to avoid history pile-up. |
+| `commit_message_llm` | Dict. AI-commit-message + general LLM settings. Keys: `enabled` (bool), `provider` (str — `anthropic`/`openai`/`openai_compatible`/`ollama`), `model` (str), `api_key_env` (str — env var name), `base_url` (str — for OpenAI-compatible local servers), `min_diff_lines` (int — default 30), `max_diff_chars` (int — default 24000), `timeout_seconds` (int — default 90), `use_for_sync_autocommit` (bool), `num_ctx` (int — Ollama context window, default 32768, only Ollama). The agent in `src/agent.py` reads this whole dict. |
+| `mcp_skip_warnings` | List of absolute file paths. Each path corresponds to an MCP config file (`claude_desktop_config.json` or `.claude.json`) the user has chosen NOT to be warned about further. `_check_config` honours this list to keep the startup banner silent for explicitly-dismissed configs. Managed via `MCPConfigDialog`'s Skip button. |
+| `tokensave_update_poll_hours` | Float, default 1.0 (min 0.25). How often the daemon background poller hits the GitHub releases API to check for tokensave updates. Tunable to balance freshness against GitHub API rate limits (60/hr unauthenticated). |
 
 ### Nuitka onefile path resolution
 
@@ -453,12 +502,24 @@ Logic:
 3. Otherwise: walk SEARCH_ROOTS, collect all .tokensave/tokensave.db paths
 4. Pick the one with the most recent mtime (= last synced project)
 5. Spawn: tokensave.exe serve -p <chosen-path>
-   with CREATE_NO_WINDOW flag and inherited stdio
+   with CREATE_NO_WINDOW flag and EXPLICIT stdio handle pass-through
 6. sys.exit(proc.wait()) — becomes the MCP server process
 ```
 
 **Critical:** the `.tokensave` dir check must happen **before** `dirnames[:] = [d for d in dirnames if not d.startswith(".")]`
 prunes it from the walk. This is a known footgun — the check is `has_ts = ".tokensave" in dirnames` before the prune line.
+
+**ALSO CRITICAL ([Unreleased] fix):** the `subprocess.Popen` call MUST pass `stdin=sys.stdin, stdout=sys.stdout, stderr=sys.stderr` explicitly:
+
+```python
+proc = subprocess.Popen(args,
+    stdin=sys.stdin,
+    stdout=sys.stdout,
+    stderr=sys.stderr,
+    creationflags=CREATE_NO_WINDOW)
+```
+
+Without those explicit args, Python's default "inherit standard handles" behaviour does NOT reliably propagate piped stdio handles to a console child process when the parent is `pythonw.exe`. The tokensave child gets unusable standard handles, never sees MCP messages from Claude Desktop, and Desktop times out at 30 s with `MCP server tokensave connection timed out after 30000ms`. Diagnosed in [Unreleased] by running the wrapper directly with `subprocess.PIPE` stdio and feeding a real MCP `initialize` request — default-inheritance Popen produced zero bytes from tokensave, explicit pass-through returned a valid response in <100 ms. **The wrapper script must stay single-threaded** — adding `import threading` and daemon threads introduces additional subtle stdio-handling issues under pythonw.exe. Live in-session pin reloading is deferred and must be implemented out-of-process. See `docs/MCP_INTEGRATION_GOTCHAS.md` for the full forensic write-up.
 
 ---
 

@@ -31,8 +31,13 @@ Token Save Manager Source/
 ├── .gitignore                     Excludes manager-config.json, .claude/, .tokensave/, dist/, etc.
 │
 ├── src/
-│   ├── tokensave-manager.py       Main GUI (~4,700 lines) — App class + dialog classes
-│   └── tokensave-wrapper.py       Claude Desktop auto-detection wrapper (MCP server launcher)
+│   ├── tokensave-manager.py       Main GUI (~12,500 lines) — App class + many dialog classes
+│   ├── tokensave-wrapper.py       Claude Desktop auto-detection wrapper (MUST stay single-threaded
+│   │                              AND pass sys.stdin/stdout/stderr to Popen explicitly — see
+│   │                              docs/MCP_INTEGRATION_GOTCHAS.md before touching)
+│   ├── agent.py                   LocalAgent loop for the 🤖 Ask tab (Stage 2 — read-only tool calling)
+│   └── agent_tools.py             ToolSpec registry: 6 read-only tools (read_file, list_directory,
+│                                  git_log, git_diff, tokensave_search, tokensave_context)
 │
 ├── templates/                     Data files used by the manager (all shipped in dist\templates\)
 │   ├── claude-md-template.md      BASIC_INSTRUCTIONS template written into scaffolded projects
@@ -53,9 +58,21 @@ Token Save Manager Source/
 │   └── docs\                      GITHUB_GUIDE.md, ARCHITECTURE.md, ARCHITECTURE_TOKENSAVE.md
 │
 └── docs/
-    ├── ARCHITECTURE.md            Manager architecture reference (UI, data flow, threading)
-    ├── ARCHITECTURE_TOKENSAVE.md  tokensave tool internals reference
-    └── GITHUB_GUIDE.md            Beginner GitHub guide — concepts, setup, daily workflow, releases
+    ├── ARCHITECTURE.md             Manager architecture reference (UI, data flow, threading,
+    │                               every dialog class, every helper)
+    ├── ARCHITECTURE_TOKENSAVE.md   tokensave tool internals reference (including the
+    │                               wrapper stdio fix + UWP path gotcha)
+    ├── AGENT_ARCHITECTURE.md       LocalAgent + tool registry + locked propose-only rules
+    │                               (Stage 2 design — read before adding new AI features)
+    ├── ROADMAP.md                  Staged plan for local AI features (Stages 0–8, 0–2 shipped)
+    ├── MCP_INTEGRATION_GOTCHAS.md  Postmortem field manual. READ THIS before changing the
+    │                               wrapper or MCP configurator: UWP path redirection,
+    │                               wrapper stdio bug, Connectors UI vs legacy config,
+    │                               tokensave install path-quoting upstream bug, deferred
+    │                               live-reload paths.
+    ├── GITHUB_GUIDE.md             Beginner GitHub guide
+    └── upstream-issues/            Drafts of bugs to file against upstream tools
+        └── tokensave-hook-quoting.md   tokensave install --agent claude path-quoting bug
 ```
 
 ---
@@ -76,6 +93,9 @@ Must be updated when the project moves to a new location or machine.
 | `project_categories` | Dict `{path: {"category": str, "subcategory"?: str}}` — per-project category override. Set via right-click → 📁 Assign Category…; persisted here automatically. |
 | `user_snippets` | List of `{"title": str, "text": str}` dicts — user-defined Claude prompt snippets |
 | `auto_commit_after_sync` | Boolean (default `false`) — if `true`, auto-runs `git add -A + git commit` after every successful `tokensave sync` on a git-repo project. If the previous commit was already `"chore: tokensave sync"`, the new auto-commit is amended onto it instead of stacking. |
+| `commit_message_llm` | Dict. AI-commit + general LLM settings. Keys include `enabled`, `provider`, `model`, `api_key_env`, `base_url`, `min_diff_lines`, `max_diff_chars`, `timeout_seconds`, `use_for_sync_autocommit`, `num_ctx` (Ollama context window, default 32768). Read by both `_call_llm` (Stage 0/1) and `LocalAgent` (Stage 2 — the 🤖 Ask tab). |
+| `mcp_skip_warnings` | List of absolute paths. MCP config files the user has dismissed warnings about. Honoured by `_check_config`'s startup banner. Managed via `MCPConfigDialog`'s Skip button. |
+| `tokensave_update_poll_hours` | Float, default 1.0 (min 0.25). Hourly GitHub releases poller cadence for tokensave update detection. |
 
 ---
 
