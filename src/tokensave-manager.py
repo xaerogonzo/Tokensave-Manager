@@ -7246,7 +7246,272 @@ class App(tk.Tk):
             return
         if not self._require_tokensave(path):
             return
-        self._run(["doctor"], cwd=path, label=os.path.basename(path))
+        # Stream output through the normal _log path AND accumulate so we
+        # can scan for the "N stale project(s) in global DB" warning
+        # tokensave emits when registered projects have their .tokensave/
+        # folders deleted. When detected, offer to re-invoke doctor with
+        # `y` piped to stdin (which tokensave reads to confirm the purge
+        # when its interactive prompt fires — the same prompt the user
+        # would see by running `tokensave doctor` from a terminal).
+        self._run_doctor_with_purge_offer(path)
+
+    def _run_doctor_with_purge_offer(self, path: str):
+        """Run `tokensave doctor`, stream output, and after completion
+        offer to purge any stale global-DB entries the warning surfaced.
+
+        Variant of self._run that also captures the output text for
+        post-completion parsing. Kept separate from _run rather than
+        adding an on_complete callback to avoid disturbing the
+        commit/sync paths that already depend on _run's exact shape.
+        """
+        label = os.path.basename(path)
+
+        def worker():
+            cmd_str = "tokensave doctor"
+            self._log(f"$ {cmd_str}  [{label}]", C["blue"])
+            self.after(0, self._set_running, True, label)
+            log.info(f"RUN  {cmd_str}")
+            output_lines: list[str] = []
+            t0 = time.monotonic()
+            try:
+                env = os.environ.copy()
+                env["NO_COLOR"] = "1"
+                env["TERM"] = "dumb"
+                proc = subprocess.Popen(
+                    [TOKENSAVE, "doctor"],
+                    cwd=path,
+                    stdout=subprocess.PIPE,
+                    stderr=subprocess.STDOUT,
+                    text=True, encoding="utf-8", errors="replace",
+                    env=env,
+                    creationflags=CREATE_NO_WINDOW,
+                )
+                self._current_proc = proc
+                for line in proc.stdout:
+                    stripped = _ANSI.sub("", line).rstrip()
+                    if not stripped:
+                        continue
+                    output_lines.append(stripped)
+                    self._log(stripped)
+                proc.wait()
+                elapsed = time.monotonic() - t0
+                if proc.returncode == 0:
+                    self._log("Done.", C["green"])
+                    log.info(f"DONE exit=0  [{elapsed:.1f}s]")
+                else:
+                    self._log(f"Exited with code {proc.returncode}", C["red"])
+                    log.warning(f"DONE exit={proc.returncode}  [{elapsed:.1f}s]")
+
+                # Parse for stale-entry warning.
+                stale_paths = self._extract_doctor_stale_paths(output_lines)
+                if stale_paths and proc.returncode == 0:
+                    self.after(0, self._offer_doctor_purge,
+                               path, stale_paths)
+            except Exception as e:
+                self._log(f"Error: {e}", C["red"])
+                log.exception(f"EXCEPTION in cmd_doctor")
+            finally:
+                self._current_proc = None
+                self.after(0, self._set_running, False)
+
+        threading.Thread(target=worker, daemon=True,
+                         name="doctor-worker").start()
+
+    @staticmethod
+    def _extract_doctor_stale_paths(output_lines: list[str]) -> list[str]:
+        """Parse tokensave doctor's stdout for the stale-entries section.
+
+        The relevant chunk looks like:
+
+            ! 2 stale project(s) in global DB (registered but `.tokensave/` is gone):
+                • D:\\Claude Co worker\\Token Save
+                • D:\\Games\\Doom wads\\My Projects\\Doom RPG MOD\\X
+                  Re-run `tokensave doctor` interactively to purge them.
+
+        Returns the list of paths after the bullets, or [] if no stale
+        warning was found. Bullet detection is permissive — accepts `•`,
+        `*`, or `-` prefixes after optional leading whitespace.
+        """
+        bullet_re = re.compile(r"^\s*[•\*\-]\s+(.+?)\s*$")
+        in_block = False
+        paths: list[str] = []
+        for line in output_lines:
+            if "stale project" in line and "global DB" in line:
+                in_block = True
+                continue
+            if not in_block:
+                continue
+            # End the block when we hit the "Re-run" suggestion line OR
+            # a section header (anything starting with bold-ANSI-stripped
+            # text in a known section).
+            if "Re-run" in line and "tokensave doctor" in line:
+                break
+            m = bullet_re.match(line)
+            if m:
+                paths.append(m.group(1).strip())
+            elif paths and not line.startswith(" ") and not line.startswith("\t"):
+                # Hit a new section after collecting some bullets.
+                break
+        return paths
+
+    def _offer_doctor_purge(self, path: str, stale_paths: list[str]):
+        """Prompt the user with the list of stale entries and re-run
+        doctor with stdin piped 'y' if they confirm."""
+        n = len(stale_paths)
+        bullets = "\n".join(f"  • {p}" for p in stale_paths)
+        msg = (f"tokensave doctor found {n} stale project entr"
+               f"{'y' if n == 1 else 'ies'} in the global DB.\n\n"
+               f"{bullets}\n\n"
+               "These projects were registered but their `.tokensave/` "
+               "folders are gone — most likely deleted folders.\n\n"
+               "Purge them now?  The manager will re-run `tokensave "
+               "doctor` with `y` piped to confirm the interactive "
+               "purge prompt.")
+        if not messagebox.askyesno(
+                "Purge stale tokensave projects?",
+                msg, parent=self):
+            self._log("  (purge skipped — stale entries left in place)",
+                     C["overlay0"])
+            return
+        self._run_doctor_purge(path)
+
+    def _run_doctor_purge(self, path: str):
+        """Run `tokensave doctor` with `y\\n` piped repeatedly to stdin
+        so tokensave's interactive purge prompt fires and is confirmed.
+
+        Caveat: tokensave's prompt may use `is_terminal()` to decide
+        whether to ask at all. If that's the case under our piped
+        stdin, the second doctor run will just print the same stale
+        warning again and exit without purging. We surface that
+        outcome to the user via the log so they know the manager-side
+        purge isn't possible — fall back to running `tokensave doctor`
+        from a real terminal."""
+        label = "doctor (purge)"
+
+        def worker():
+            self._log(f"$ tokensave doctor  [{label}]", C["blue"])
+            self.after(0, self._set_running, True, label)
+            captured: list[str] = []
+            try:
+                env = os.environ.copy()
+                env["NO_COLOR"] = "1"
+                env["TERM"] = "dumb"
+                proc = subprocess.Popen(
+                    [TOKENSAVE, "doctor"],
+                    cwd=path,
+                    stdin=subprocess.PIPE,
+                    stdout=subprocess.PIPE,
+                    stderr=subprocess.STDOUT,
+                    text=True, encoding="utf-8", errors="replace",
+                    env=env,
+                    creationflags=CREATE_NO_WINDOW,
+                )
+                self._current_proc = proc
+                # Send several yes-newlines in case doctor asks more than
+                # one yes/no question. Closing stdin after to signal EOF.
+                try:
+                    proc.stdin.write("y\ny\ny\ny\ny\n")
+                    proc.stdin.flush()
+                    proc.stdin.close()
+                except (OSError, BrokenPipeError):
+                    pass
+                for line in proc.stdout:
+                    stripped = _ANSI.sub("", line).rstrip()
+                    if not stripped:
+                        continue
+                    captured.append(stripped)
+                    self._log(stripped)
+                proc.wait()
+                self._log(
+                    "Done." if proc.returncode == 0
+                    else f"Exited with code {proc.returncode}",
+                    C["green"] if proc.returncode == 0 else C["red"])
+
+                # Did the purge actually work?  If the second run STILL
+                # reports stale entries, tokensave's prompt requires a
+                # real TTY and stdin-piping isn't enough — offer to
+                # open cmd.exe with the doctor command pre-typed so the
+                # user can answer 'y' themselves.
+                still_stale = self._extract_doctor_stale_paths(captured)
+                if still_stale:
+                    self._log(
+                        f"  ⚠ Purge didn't take — tokensave still "
+                        f"reports {len(still_stale)} stale entr"
+                        f"{'y' if len(still_stale) == 1 else 'ies'}. "
+                        f"tokensave doctor needs a real terminal "
+                        f"(piped stdin doesn't trigger the prompt).",
+                        C["peach"])
+                    self.after(0, self._offer_doctor_in_cmd, path,
+                               len(still_stale))
+                else:
+                    self._log("  ✓ Stale entries purged.", C["green"])
+            except Exception as e:
+                self._log(f"Error: {e}", C["red"])
+                log.exception(f"EXCEPTION in doctor purge")
+            finally:
+                self._current_proc = None
+                self.after(0, self._set_running, False)
+
+        threading.Thread(target=worker, daemon=True,
+                         name="doctor-purge").start()
+
+    def _offer_doctor_in_cmd(self, path: str, n_stale: int):
+        """Pop a follow-up dialog: when the piped-stdin purge fails,
+        offer to spawn cmd.exe with `tokensave doctor` already running
+        so the user has a real TTY to answer the interactive 'y' prompt.
+
+        This is the cleanest fallback for tokensave's TTY-gated purge
+        without us reaching into the global.db directly. The new cmd
+        window stays open (cmd /k) so the user can see the output and
+        type their answer.
+        """
+        plural = "entry" if n_stale == 1 else "entries"
+        if not messagebox.askyesno(
+                "Open Doctor in a new terminal?",
+                f"The piped-stdin purge didn't work — tokensave needs "
+                f"a real terminal for its interactive 'y/n' prompt.\n\n"
+                f"Open a new cmd.exe window with `tokensave doctor` "
+                f"running there?  You'll see the {n_stale} stale "
+                f"{plural} listed and tokensave will ask you to "
+                f"confirm — type 'y' and press Enter to purge.\n\n"
+                f"The window stays open after, so you can close it "
+                f"yourself when done.",
+                parent=self):
+            self._log(
+                "  (terminal-purge skipped — stale entries still in DB)",
+                C["overlay0"])
+            return
+
+        # Launch cmd.exe in a new console window with tokensave doctor
+        # already running. /k keeps the window open after the command
+        # finishes so the user has time to read + close manually.
+        #
+        # Critical Windows-quoting note: we pass the command as a SINGLE
+        # STRING (not a list) so Python's subprocess doesn't apply its
+        # own list2cmdline quoting on top of cmd.exe's. The earlier
+        # list-form `["cmd.exe", "/k", f'"{TOKENSAVE}" doctor']`
+        # produced `\"D:/path/tokensave.exe\" doctor` (backslash-escaped
+        # quotes) — cmd doesn't recognise those as quote pairs and
+        # errors with `'\"D:/...\" is not recognized as an internal or
+        # external command`.
+        #
+        # The pattern `cmd /k ""path with spaces" doctor"` is cmd.exe's
+        # idiom for running quoted paths via /k: the OUTER pair of `"`s
+        # marks the start/end of the /k command region, the INNER pair
+        # quotes the path. Cmd strips the outermost pair on /k entry,
+        # leaving `"path with spaces" doctor` to execute.
+        try:
+            cmd_line = f'cmd.exe /k ""{TOKENSAVE}" doctor"'
+            subprocess.Popen(
+                cmd_line,
+                cwd=path,
+                creationflags=subprocess.CREATE_NEW_CONSOLE)
+            self._log(
+                "  Opened cmd.exe — type 'y' at the prompt to purge, "
+                "then close the window.",
+                C["sky"])
+        except OSError as e:
+            self._log(f"  ✗ Could not launch cmd.exe: {e}", C["red"])
 
     # ── CodeGraph commands ─────────────────────────────────────────────────
 

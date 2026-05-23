@@ -314,6 +314,30 @@ reading `getmtime(tokensave.db)` exclusively, so "Last Synced" stayed
 stuck on the last checkpoint time. Fixed by taking `max()` across the
 three sibling files.
 
+### `tokensave install` writes broken Claude Code hooks on path-with-spaces installs
+
+Discovered while building the in-manager Doctor purge flow:
+`tokensave install --agent claude` writes hook commands as a single
+unquoted string like `"D:/Claude Co worker/Token Save/tokensave.exe hook-pre-tool-use"`.
+Claude Code splits by whitespace and ends up with subcommand =
+`Co` (or `With`, `Program`, etc., depending on the install path).
+`tokensave doctor` detects `wrong subcommand: "Co"` and auto-removes
+the hooks; the next install re-adds them broken. Infinite loop until
+either tokensave fixes the quoting or the install path stops having
+spaces.
+
+**This is an upstream bug, not a manager bug.** The draft issue body
+lives at `docs/upstream-issues/tokensave-hook-quoting.md`. When/if it
+gets filed, replace the placeholder below with the actual issue URL
+so future readers can follow the fix.
+
+> **Upstream issue:** (file at https://github.com/aovestdipaperino/tokensave/issues — https://github.com/aovestdipaperino/tokensave/issues/81)
+
+In the meantime, the hooks aren't critical (they're for tokensave's
+session-event tracking — token counters get less rich data without
+them) and the manager doesn't depend on them at all. Just dismiss
+the doctor warnings about hooks until the upstream fix lands.
+
 ---
 
 ## What we DID NOT solve: live pin reloading
