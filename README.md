@@ -548,9 +548,13 @@ Token Save Manager Source/
 │   └── NUITKA_GOTCHAS.md          Nuitka pitfalls reference (14 known issues)
 │
 └── docs/
-    ├── ARCHITECTURE.md            Class structure, UI layout, threading model
-    ├── ARCHITECTURE_TOKENSAVE.md  tokensave internals reference
-    └── GITHUB_GUIDE.md            Beginner GitHub guide
+    ├── ARCHITECTURE.md             Class structure, UI layout, threading model
+    ├── ARCHITECTURE_TOKENSAVE.md   tokensave internals reference
+    ├── AGENT_ARCHITECTURE.md       LocalAgent loop + tool registry + propose-only rules
+    ├── ROADMAP.md                  Staged plan for local AI features (Stages 0–8)
+    ├── MCP_INTEGRATION_GOTCHAS.md  Field manual: UWP path redirection, stdio bugs,
+    │                                Connectors UI vs legacy config, live-reload paths
+    └── GITHUB_GUIDE.md             Beginner GitHub guide
 ```
 
 ---

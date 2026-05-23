@@ -7,6 +7,7 @@ Claude Desktop uses via the wrapper script.
 import os
 import re
 import json
+import glob
 import shlex
 import shutil
 import subprocess
@@ -25,6 +26,38 @@ import pystray
 from PIL import Image, ImageDraw
 
 _ANSI = re.compile(r'\x1b(?:[@-Z\\-_]|\[[0-9;]*[ -/]*[@-~])')
+
+def _version_lt(a: str, b: str) -> bool:
+    """Return True if version string `a` is strictly less than `b`.
+
+    Compares dotted numeric versions tuple-wise after coercing missing
+    components to 0. Non-numeric tags (alpha/beta/rc) are not handled —
+    pure semver-style "1.2.3" comparisons only, which is what tokensave
+    uses. Falls back to string compare on parse failure.
+    """
+    def _parts(v: str) -> tuple:
+        try:
+            return tuple(int(x) for x in v.split("."))
+        except (ValueError, AttributeError):
+            return None
+    pa, pb = _parts(a), _parts(b)
+    if pa is None or pb is None:
+        return a < b
+    # Pad to equal length for fair tuple compare.
+    n = max(len(pa), len(pb))
+    pa = pa + (0,) * (n - len(pa))
+    pb = pb + (0,) * (n - len(pb))
+    return pa < pb
+
+
+# tokensave emits this line at the end of any sync when a newer release is
+# available on GitHub. Capture both versions so the manager can display
+# "Upgrade v5.1.1 → v5.1.2" in Settings and decide when the button should
+# show up. Accepts an arrow rendered as either Unicode → or ASCII -> /=>,
+# and tolerates either the bare "5.1.2" or "v5.1.2" form.
+_TOKENSAVE_UPDATE_RE = re.compile(
+    r'Update available:\s*v?(\d+\.\d+\.\d+(?:\.\d+)?)\s*'
+    r'(?:→|->|=>)\s*v?(\d+\.\d+\.\d+(?:\.\d+)?)')
 
 # ── Paths ─────────────────────────────────────────────────────────────────────
 # Under Nuitka --onefile, NUITKA_ONEFILE_PARENT is the actual .exe path.
@@ -102,8 +135,64 @@ def _migrate_config(cfg: dict) -> dict:
 #
 # Pure helpers, no Tk. Easy to unit-test from the command line.
 
-_MCP_DESKTOP_CFG_PATH = os.path.join(
-    os.environ.get("APPDATA", ""), "Claude", "claude_desktop_config.json")
+def _resolve_desktop_cfg_path() -> str:
+    """Locate Claude Desktop's MCP config file — UWP-aware.
+
+    Claude Desktop ships in two install flavours that store the same
+    `claude_desktop_config.json` at different physical paths:
+
+      1. Microsoft Store / UWP install (Claude_pzs8sxrjxfjjc package family):
+         %LOCALAPPDATA%\\Packages\\Claude_*\\LocalCache\\Roaming\\Claude\\
+             claude_desktop_config.json
+
+      2. Traditional installer:
+         %APPDATA%\\Claude\\claude_desktop_config.json
+
+    The UWP case has a brutal gotcha: Windows file-path redirection is
+    ASYMMETRIC across UWP-context and non-UWP-context processes. A UWP
+    process opening `%APPDATA%\\Claude\\<file>` gets redirected to the
+    package's LocalCache. A non-UWP process opening the same path string
+    sees a DIFFERENT physical file (the user's normal-view file) — both
+    files exist on disk simultaneously, with the same path, and Windows
+    silently picks one based on caller context.
+
+    The manager is a non-UWP process. If we point it at `%APPDATA%\\Claude\\`
+    on a UWP-installed Desktop, the manager will read/write the wrong
+    file — Desktop never sees those changes. Diagnosed when a user's
+    Apply through the configurator wrote 231 bytes of canonical content
+    to the external `%APPDATA%\\Claude\\` file while Desktop continued
+    serving `tokensave.exe -p <hardcoded>` from its 2,219-byte UWP-internal
+    file.
+
+    Detection: glob for any `Claude_*` package directory. When found,
+    target the UWP-internal path — that's the one Desktop actually reads.
+    Otherwise fall back to the traditional path.
+
+    Multiple Claude packages can in principle co-exist (Stable + Beta);
+    we pick the most-recently-modified config file as a heuristic for
+    "the one Desktop is currently running from".
+    """
+    local = os.environ.get("LOCALAPPDATA", "")
+    traditional = os.path.join(
+        os.environ.get("APPDATA", ""), "Claude", "claude_desktop_config.json")
+    if local:
+        try:
+            candidates = glob.glob(os.path.join(
+                local, "Packages", "Claude_*",
+                "LocalCache", "Roaming", "Claude",
+                "claude_desktop_config.json"))
+        except OSError:
+            candidates = []
+        # Most-recently-touched first.
+        candidates = sorted(
+            candidates,
+            key=lambda p: -os.path.getmtime(p) if os.path.exists(p) else 0)
+        if candidates:
+            return candidates[0]
+    return traditional
+
+
+_MCP_DESKTOP_CFG_PATH = _resolve_desktop_cfg_path()
 _MCP_CODE_CFG_PATH    = os.path.join(
     os.environ.get("USERPROFILE", ""), ".claude.json")
 
@@ -2829,10 +2918,31 @@ def find_projects():
             seen.add(dirpath)
 
             # mtime: tokensave db age if available, else last git commit,
-            # else codegraph db mtime (last full-build), else dirpath
+            # else codegraph db mtime (last full-build), else dirpath.
+            #
+            # tokensave uses SQLite in WAL mode. Incremental syncs write to
+            # tokensave.db-wal; the main tokensave.db file's mtime only
+            # advances when SQLite checkpoints (typically on close, or after
+            # `sync --force`). So `getmtime(tokensave.db)` shows stale "6h
+            # ago" even right after an incremental sync that's clearly
+            # touched the index. Take the MAX mtime across the .db + WAL +
+            # SHM sibling files so the "Last Synced" column tracks actual
+            # sync activity, not just the last full checkpoint.
             if has_ts:
-                db    = os.path.join(dirpath, ".tokensave", "tokensave.db")
-                mtime = os.path.getmtime(db) if os.path.isfile(db) else os.path.getmtime(dirpath)
+                db = os.path.join(dirpath, ".tokensave", "tokensave.db")
+                ts_dir = os.path.join(dirpath, ".tokensave")
+                mtime_candidates = []
+                for fname in ("tokensave.db", "tokensave.db-wal",
+                              "tokensave.db-shm"):
+                    full = os.path.join(ts_dir, fname)
+                    try:
+                        mtime_candidates.append(os.path.getmtime(full))
+                    except OSError:
+                        pass
+                if mtime_candidates:
+                    mtime = max(mtime_candidates)
+                else:
+                    mtime = os.path.getmtime(dirpath)
             elif has_git:
                 db    = None
                 git_dir    = os.path.join(dirpath, ".git")
@@ -2965,6 +3075,17 @@ class App(tk.Tk):
         self.configure(bg=C["base"])
         self._current_proc = None
         self._stop_requested = False
+        # Cached tokensave version info.  Current version is populated at
+        # App startup via `tokensave --version` (fast, no network).
+        # Available-update version is populated by the output parser in
+        # `_run` when tokensave emits "Update available: vA → vB" at the
+        # end of a sync — that line is opportunistic (tokensave appears
+        # to throttle update checks to once per day), so SettingsDialog
+        # ALWAYS shows the Upgrade button with the current version, and
+        # only labels it with the target version when one is known.
+        self._tokensave_current_version: str | None = None
+        self._tokensave_available_version: str | None = None
+        self._probe_tokensave_version()
         log.info("=" * 60)
         log.info("TokenSave Manager started")
         log.info(f"  exe      : {TOKENSAVE}")
@@ -6010,20 +6131,44 @@ class App(tk.Tk):
             return
         set_pinned(path)
         self._log(f"Pinned → {path}", C["green"])
-        self._log(
-            "Running MCP wrappers reload within ~2s — no Claude restart "
-            "required (wrapper v1.0.5+).  Older wrappers still need a "
-            "Claude Desktop / Claude Code restart.",
-            C["overlay0"])
+        # Live-reload of the pin via a wrapper-side file watcher was
+        # attempted earlier (2026-05-23) but broke MCP handshake with
+        # Claude Desktop on UWP installs — Desktop's MCP attach would
+        # time out at 30s with the wrapper running a daemon thread. The
+        # wrapper has been reverted to the literal original single-
+        # threaded shape, so pin changes once again require a Claude
+        # restart to take effect.
+        try:
+            states = [_classify_mcp_entry(p)["state"] for _, p in _MCP_CONFIGS]
+        except Exception:
+            states = []
+        if "ok" in states and not all(s == "ok" for s in states):
+            bad = [lbl for (lbl, p), s in zip(_MCP_CONFIGS, states) if s != "ok"]
+            self._log(
+                f"  Pin will take effect at next Claude restart.  "
+                f"Note: {', '.join(bad)} also still needs its MCP wiring "
+                f"fixed (Settings → 🔌 Manage MCP wiring).",
+                C["peach"])
+        elif "ok" not in states:
+            self._log(
+                "  No MCP config currently routes through the wrapper — "
+                "this pin won't take effect until you fix the MCP wiring "
+                "AND restart Claude.  Settings → 🔌 Manage MCP wiring.",
+                C["peach"])
+        else:
+            self._log(
+                "  Pin will take effect at next Claude Desktop / Claude Code "
+                "restart.  (Live in-session reload is deferred — see the "
+                "wrapper script's docstring for context.)",
+                C["overlay0"])
         self.refresh()
 
     def cmd_auto(self):
         clear_pinned()
-        self._log("Auto-detect enabled — wrapper picks the most-recently-synced project.", C["sky"])
+        self._log("Auto-detect enabled — wrapper picks the most-recently-synced project at next launch.", C["sky"])
         self._log(
-            "Running MCP wrappers will keep their current project until the "
-            "next swap (auto-detect runs at startup).  Restart Claude to "
-            "trigger a fresh auto-detect now.",
+            "  Restart Claude Desktop / Claude Code to trigger a fresh "
+            "auto-detect.",
             C["overlay0"])
         self.refresh()
 
@@ -6098,6 +6243,24 @@ class App(tk.Tk):
                                 C["overlay0"])
                             _suppressed_codegraph_warning = True
                         log.debug(f"  SUPPRESSED {stripped}")
+                        continue
+                    # Detect tokensave's "Update available: v→v" line and
+                    # remember the upgrade target. Settings shows an
+                    # "Upgrade tokensave" button when this is set; the
+                    # button just runs `tokensave upgrade` via _run.
+                    m = _TOKENSAVE_UPDATE_RE.search(stripped)
+                    if m:
+                        cur_v, new_v = m.group(1), m.group(2)
+                        self._tokensave_current_version = cur_v
+                        self._tokensave_available_version = new_v
+                        self._log(stripped, C["yellow"])
+                        self._log(
+                            f"  → tokensave {cur_v} → {new_v} ready to "
+                            f"install.  Settings → 'Upgrade tokensave to "
+                            f"v{new_v}' to apply, or run "
+                            f"'tokensave upgrade' from a shell.",
+                            C["peach"])
+                        log.info(f"UPDATE-AVAILABLE  {cur_v} -> {new_v}")
                         continue
                     self._log(stripped)
                     log.debug(f"  OUT {stripped}")
@@ -6240,6 +6403,170 @@ class App(tk.Tk):
         if not self._require_tokensave(path):
             return
         self._run(["sync"], cwd=path, label=os.path.basename(path))
+
+    def _probe_tokensave_version(self):
+        """Best-effort read of the installed tokensave version.
+
+        Runs `tokensave --version` once at App startup (in a background
+        thread to avoid blocking the GUI). Output looks like
+        "tokensave 5.1.1" — we extract the version string and cache it
+        on the instance. Failures (binary missing, weird output) leave
+        the cache as None, which the Settings UI handles gracefully.
+        """
+        def _worker():
+            if not TOKENSAVE or not os.path.isfile(TOKENSAVE):
+                return
+            try:
+                r = subprocess.run(
+                    [TOKENSAVE, "--version"],
+                    capture_output=True, text=True, timeout=5,
+                    creationflags=CREATE_NO_WINDOW,
+                    encoding="utf-8", errors="replace")
+            except (OSError, subprocess.TimeoutExpired):
+                return
+            out = (r.stdout or "").strip()
+            m = re.search(r'(\d+\.\d+\.\d+(?:\.\d+)?)', out)
+            if m:
+                self._tokensave_current_version = m.group(1)
+                log.debug(f"tokensave installed version: "
+                          f"{self._tokensave_current_version}")
+                # Kick off a single update check right after we know the
+                # local version. Subsequent checks fire from the hourly
+                # poller below.
+                self._check_tokensave_updates()
+        threading.Thread(target=_worker, daemon=True,
+                         name="tokensave-version-probe").start()
+        # Hourly background poller. Cheap (one GitHub API call, no auth);
+        # safe to run forever as a daemon thread.
+        threading.Thread(target=self._tokensave_update_poll_loop,
+                         daemon=True,
+                         name="tokensave-update-poll").start()
+
+    # GitHub releases API endpoint for tokensave. Hardcoded since the
+    # tokensave repo URL is referenced in README.md and is unlikely to
+    # change. If it does, this is a one-line update.
+    _TOKENSAVE_RELEASES_API = (
+        "https://api.github.com/repos/aovestdipaperino/tokensave/releases/latest")
+
+    # Hourly poll cadence — GitHub allows 60 unauthenticated requests/hour
+    # per IP, so once an hour is comfortably within the limit and keeps
+    # the update notification fresh enough that users won't miss a release
+    # for long. Tunable via _cfg["tokensave_update_poll_hours"] if a user
+    # wants to be more or less aggressive.
+    def _tokensave_update_poll_interval(self) -> float:
+        hours = float(_cfg.get("tokensave_update_poll_hours", 1.0))
+        return max(0.25, hours) * 3600.0  # never poll more than 4x/hour
+
+    def _tokensave_update_poll_loop(self):
+        """Daemon: re-check GitHub for new tokensave releases periodically.
+
+        Doesn't trigger any UI prompts — just refreshes the cached
+        `_tokensave_available_version` so the Settings dialog reflects
+        the current state next time it's opened. The OUTPUT-pane hint
+        line is only logged on FRESH discovery (transition from "no
+        update known" → "update available"), not on every poll, to avoid
+        spamming the log.
+        """
+        while True:
+            time.sleep(self._tokensave_update_poll_interval())
+            self._check_tokensave_updates()
+
+    def _check_tokensave_updates(self):
+        """Single-shot check against the tokensave releases API.
+
+        Compares against `_tokensave_current_version` (set by the local
+        --version probe). When a strictly-newer version is found AND it
+        wasn't known before, logs a peach hint to the OUTPUT pane so
+        users see the update offer without opening Settings.
+        """
+        import urllib.request, urllib.error, json as _json
+        if not self._tokensave_current_version:
+            return  # nothing to compare against yet
+        try:
+            req = urllib.request.Request(
+                self._TOKENSAVE_RELEASES_API,
+                headers={"Accept": "application/vnd.github+json",
+                         "User-Agent": "tokensave-manager"})
+            with urllib.request.urlopen(req, timeout=8) as resp:
+                data = _json.loads(resp.read().decode("utf-8"))
+        except (urllib.error.URLError, urllib.error.HTTPError,
+                TimeoutError, _json.JSONDecodeError, OSError) as e:
+            # Common when offline or rate-limited. Silent — try again
+            # next interval.
+            log.debug(f"tokensave update check failed: {type(e).__name__}: {e}")
+            return
+        tag = (data.get("tag_name") or "").strip().lstrip("v")
+        m = re.match(r'(\d+\.\d+\.\d+(?:\.\d+)?)', tag)
+        if not m:
+            return
+        latest = m.group(1)
+        cur = self._tokensave_current_version
+        if not _version_lt(cur, latest):
+            return  # current is up-to-date or ahead (unlikely but possible)
+        prev_known = self._tokensave_available_version
+        self._tokensave_available_version = latest
+        if prev_known != latest:
+            # Fresh discovery — surface it. (Skip the log line if the
+            # poller is just re-confirming a version we already knew
+            # about.)
+            self._log(
+                f"  → tokensave {cur} → {latest} ready to install.  "
+                f"Settings → 'Upgrade tokensave to v{latest}' to apply, "
+                f"or run 'tokensave upgrade' from a shell.",
+                C["peach"])
+            log.info(f"UPDATE-AVAILABLE  {cur} -> {latest}  (via GitHub API)")
+
+    def cmd_upgrade_tokensave(self):
+        """Run `tokensave upgrade` from the manager.
+
+        Streams output to the OUTPUT pane via the existing _run path. cwd
+        doesn't matter for upgrade (it operates on the installed binary,
+        not any specific project) so we use the tokensave_exe's directory
+        as a stable choice. On success, the upgrade replaces the binary
+        on disk; future sync / MCP-server spawns pick up the new version
+        automatically, but the currently-running MCP wrappers continue
+        serving from the old binary until Claude is restarted.
+
+        Clears the cached `_tokensave_available_version` on success so
+        the Settings button auto-hides until the next sync re-reports an
+        update.
+        """
+        if not TOKENSAVE or not os.path.isfile(TOKENSAVE):
+            messagebox.showwarning(
+                "tokensave not found",
+                "Set the tokensave.exe path in Settings first.",
+                parent=self)
+            return
+        # Confirm — upgrades replace a binary and we want the user fully
+        # aware. Skip the prompt if no version metadata is known (still
+        # useful — runs the upgrade command which itself shows what'll
+        # happen).
+        target = self._tokensave_available_version
+        cur = self._tokensave_current_version
+        if target:
+            msg = (f"Upgrade tokensave from v{cur or '?'} to v{target}?\n\n")
+        elif cur:
+            msg = (f"Run `tokensave upgrade`?  (Currently installed: "
+                   f"v{cur}.)\n\n"
+                   "tokensave will check GitHub for a newer release and "
+                   "apply it.  No-op if you're already on the latest.\n\n")
+        else:
+            msg = ("Run `tokensave upgrade`?\n\n"
+                   "tokensave will check GitHub for a newer release and "
+                   "apply it.  No-op if you're already on the latest.\n\n")
+        msg += (
+            "This replaces the tokensave binary on disk.  Currently-running\n"
+            "MCP wrappers continue serving from the old binary until you\n"
+            "restart Claude Desktop / Claude Code.")
+        if not messagebox.askyesno("Upgrade tokensave", msg, parent=self):
+            return
+        # Clear cache so the Settings button hides until the next sync
+        # reports a fresh update.  If the upgrade fails, the next sync
+        # will re-populate it anyway.
+        self._tokensave_available_version = None
+        # cwd is the tokensave.exe folder — works for any upgrade flow.
+        self._run(["upgrade"], cwd=os.path.dirname(TOKENSAVE),
+                  label="upgrade")
 
     def cmd_sync_all(self):
         if not self.projects:
@@ -7590,6 +7917,41 @@ class SettingsDialog(tk.Toplevel):
 
         self._exe_var  = field_row("tokensave.exe  —  path to the tokensave binary",
                                    "tokensave_exe", is_file=True)
+
+        # Upgrade tokensave row — ALWAYS shown (the button is idempotent;
+        # `tokensave upgrade` reports "already on latest" when no update is
+        # available, so there's no downside to always offering it). When
+        # the app has cached a target version from an "Update available"
+        # sync line, we promote the button styling and pre-fill the
+        # target in the label so users know exactly what'll happen.
+        upgrade_row = tk.Frame(body, bg=C["base"])
+        upgrade_row.pack(fill=tk.X, padx=20, pady=(6, 0))
+
+        # The parent App is self.master for this Toplevel.
+        host = self.master
+        cur_ver = getattr(host, "_tokensave_current_version", None)
+        new_ver = getattr(host, "_tokensave_available_version", None)
+
+        cur_str = f"v{cur_ver}" if cur_ver else "version unknown"
+        if new_ver:
+            btn_label = f"🔄  Upgrade tokensave to v{new_ver}"
+            btn_style = "Primary.TButton"
+            hint = (f"  Current: {cur_str} → available: v{new_ver}.  "
+                    "Replaces the binary; restart Claude after upgrading.")
+            hint_fg = C["green"]
+        else:
+            btn_label = "🔄  Upgrade tokensave"
+            btn_style = "TButton"
+            hint = (f"  Current: {cur_str}.  Runs `tokensave upgrade` — "
+                    "no-op if you're already on the latest release. "
+                    "Restart Claude after a successful upgrade.")
+            hint_fg = C["overlay0"]
+
+        ttk.Button(upgrade_row, text=btn_label, style=btn_style,
+                   command=host.cmd_upgrade_tokensave).pack(side=tk.LEFT)
+        tk.Label(body, text=hint, bg=C["base"], fg=hint_fg,
+                 font=("Segoe UI", 8), justify=tk.LEFT,
+                 anchor=tk.W).pack(fill=tk.X, padx=20, pady=(0, 4))
         self._tmpl_var = field_row("Template directory  —  folder containing claude-md-template.md and project-baseline.md",
                                    "template_dir", is_dir=True,
                                    note="(leave blank to auto-detect)")
@@ -11177,6 +11539,21 @@ class MCPConfigDialog(tk.Toplevel):
         tk.Label(head, text=path, font=("Consolas", 9),
                  bg=C["base"], fg=C["subtext"]).pack(side=tk.LEFT)
 
+        # UWP / traditional install indicator — only meaningful for the
+        # Desktop row.  Users hitting the UWP path-redirection footgun
+        # need to SEE that the manager is targeting the package-internal
+        # config, not %APPDATA%\Claude\.  Knowing this prevents a whole
+        # category of "I edited the file but Desktop ignores my fix"
+        # confusion.
+        if label == "Claude Desktop":
+            is_uwp = "\\Packages\\Claude_" in path
+            install_tag = ("(UWP / Store install)" if is_uwp
+                           else "(Traditional install)")
+            tag_colour = C["blue"] if is_uwp else C["overlay0"]
+            tk.Label(head, text="  " + install_tag,
+                     font=("Segoe UI", 8, "italic"),
+                     bg=C["base"], fg=tag_colour).pack(side=tk.LEFT)
+
         state = info["state"]
         if state == "ok":
             badge_colour = C["green"]
@@ -11257,25 +11634,58 @@ class MCPConfigDialog(tk.Toplevel):
     # ── Actions ─────────────────────────────────────────────────────────
 
     def _apply(self, cfg_path: str, label: str):
-        # Pre-flight: don't apply over a running Claude.
+        # Pre-flight: don't apply over a running Claude.  The previous
+        # version of this method used a showwarning that was easy to
+        # dismiss without realising the Apply was a no-op — the row state
+        # didn't change visibly, no main-log entry appeared, and users
+        # walked away thinking the fix had landed.  Now: showerror (which
+        # uses the red-X icon and reads as a rejection, not a hint), a
+        # main-log line in red so the OUTPUT pane records it persistently,
+        # and a forced re-render so any state-change (or lack thereof)
+        # is visible immediately.
         running = _is_claude_running()
         if (label == "Claude Desktop" and running["desktop"]) or \
            (label == "Claude Code" and running["code"]):
-            messagebox.showwarning(
-                f"{label} is running",
-                f"{label} is currently running and will rewrite its config "
-                "file with its in-memory state within 1–2 minutes — that "
-                "would silently revert any fix applied now.\n\n"
-                f"Fully quit {label}, then click Apply again.",
+            try:
+                # The parent App is the manager window; reach back to log()
+                # so the message lands in the persistent OUTPUT pane.
+                self.master._log(
+                    f"MCP Apply REFUSED: {label} is still running. "
+                    f"No changes were written. Quit {label} (verify zero "
+                    f"rows in Task Manager) then click Apply again.",
+                    C["red"])
+            except (AttributeError, tk.TclError):
+                pass
+            messagebox.showerror(
+                f"Apply refused — {label} is running",
+                f"{label} is currently running and is reading the MCP "
+                "config from its in-memory cache.  Writing to the file now "
+                "would either be ignored (Desktop only reloads at startup) "
+                "or silently reverted (Desktop writes its cache back to "
+                "disk every 1–2 minutes).\n\n"
+                "★  NO CHANGES WERE WRITTEN  ★\n\n"
+                f"To fix:\n"
+                f"1. Fully quit {label} (tray icon → Quit).\n"
+                f"2. Verify ZERO rows for 'claude' in Task Manager.\n"
+                f"3. Wait ~5 seconds for stragglers (crashpad, renderer).\n"
+                "4. Click Re-detect, then Apply this fix.",
                 parent=self)
+            self._render()
             return
 
         proposed = self._config_state[cfg_path]["proposed"]
         ok, msg = _apply_mcp_fix(cfg_path, proposed)
         if ok:
+            try:
+                self.master._log(
+                    f"MCP Apply OK: wrote canonical tokensave entry to "
+                    f"{label} config.  {msg}",
+                    C["green"])
+            except (AttributeError, tk.TclError):
+                pass
             messagebox.showinfo(
                 "Fix applied", f"{msg}\n\n"
-                "Re-detect will refresh the status below.",
+                "Status row below has been refreshed.",
                 parent=self)
             # Take the path off the skip list if it was on it.
             skips = (_cfg.get("mcp_skip_warnings") or []) \
@@ -11286,7 +11696,13 @@ class MCPConfigDialog(tk.Toplevel):
                 _save_config(_cfg)
             self._render()
         else:
+            try:
+                self.master._log(
+                    f"MCP Apply FAILED: {label} — {msg}", C["red"])
+            except (AttributeError, tk.TclError):
+                pass
             messagebox.showerror("Fix failed", msg, parent=self)
+            self._render()
 
     def _skip(self, cfg_path: str):
         skips = (_cfg.get("mcp_skip_warnings") or []) \
