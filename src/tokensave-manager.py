@@ -2000,6 +2000,111 @@ def _iter_sse_events(response):
                 yield line[6:]
 
 
+def _call_anthropic(api_key: str, model: str, system_prompt: str, user_prompt: str,
+                    max_tokens: int, timeout: int, on_token) -> str | None:
+    """Anthropic Messages API — streaming and non-streaming. Pure execution layer;
+    validation and error handling live in the _call_llm dispatcher."""
+    import urllib.request
+    payload = {
+        "model": model or "claude-haiku-4-5",
+        "max_tokens": max_tokens,
+        "system": system_prompt,
+        "messages": [{"role": "user", "content": user_prompt}],
+    }
+    if on_token is not None:
+        payload["stream"] = True
+    req = urllib.request.Request(
+        "https://api.anthropic.com/v1/messages",
+        method="POST",
+        data=json.dumps(payload).encode("utf-8"),
+        headers={
+            "Content-Type": "application/json",
+            "x-api-key": api_key,
+            "anthropic-version": "2023-06-01",
+        },
+    )
+    if on_token is not None:
+        with urllib.request.urlopen(req, timeout=timeout) as resp:
+            pieces = []
+            for event in _iter_sse_events(resp):
+                try:
+                    data = json.loads(event)
+                except json.JSONDecodeError:
+                    continue
+                # Anthropic streams content_block_delta events with
+                # {"delta": {"type":"text_delta","text":"..."}}
+                if data.get("type") == "content_block_delta":
+                    delta = (data.get("delta") or {}).get("text", "")
+                    if delta:
+                        pieces.append(delta)
+                        try:
+                            on_token(delta)
+                        except Exception:
+                            log.exception("on_token callback raised")
+        return "".join(pieces).strip() or None
+    with urllib.request.urlopen(req, timeout=timeout) as resp:
+        data = json.loads(resp.read().decode("utf-8"))
+    blocks = data.get("content") or []
+    text = "".join(b.get("text", "") for b in blocks if b.get("type") == "text")
+    return text.strip() or None
+
+
+def _call_openai_compat(url: str, api_key: str, model: str,
+                        system_prompt: str, user_prompt: str,
+                        max_tokens: int, timeout: int, on_token) -> str | None:
+    """OpenAI Chat Completions — covers openai, openai_compatible, and ollama.
+    Caller resolves the endpoint URL before dispatching here."""
+    import urllib.request
+    payload = {
+        "model": model or "gpt-4o-mini",
+        "messages": [
+            {"role": "system", "content": system_prompt},
+            {"role": "user", "content": user_prompt},
+        ],
+        "max_tokens": max_tokens,
+        "temperature": 0.3,
+    }
+    if on_token is not None:
+        payload["stream"] = True
+    headers = {"Content-Type": "application/json"}
+    if api_key:
+        headers["Authorization"] = f"Bearer {api_key}"
+    req = urllib.request.Request(
+        url, method="POST",
+        data=json.dumps(payload).encode("utf-8"),
+        headers=headers,
+    )
+    if on_token is not None:
+        with urllib.request.urlopen(req, timeout=timeout) as resp:
+            pieces = []
+            for event in _iter_sse_events(resp):
+                if event == "[DONE]":
+                    break
+                try:
+                    data = json.loads(event)
+                except json.JSONDecodeError:
+                    continue
+                choices = data.get("choices") or []
+                if not choices:
+                    continue
+                delta_obj = choices[0].get("delta") or {}
+                delta = delta_obj.get("content") or ""
+                if delta:
+                    pieces.append(delta)
+                    try:
+                        on_token(delta)
+                    except Exception:
+                        log.exception("on_token callback raised")
+        return "".join(pieces).strip() or None
+    with urllib.request.urlopen(req, timeout=timeout) as resp:
+        data = json.loads(resp.read().decode("utf-8"))
+    choices = data.get("choices") or []
+    if not choices:
+        return None
+    msg = choices[0].get("message") or {}
+    return (msg.get("content") or "").strip() or None
+
+
 def _call_llm(cfg: dict, system_prompt: str, user_prompt: str,
               max_tokens: int = 1500, timeout: int | None = None,
               on_token=None) -> str | None:
@@ -2034,7 +2139,7 @@ def _call_llm(cfg: dict, system_prompt: str, user_prompt: str,
     Callers that need to push deltas to a Tk UI must wrap it in a
     `self.after(0, ...)` schedule (see AICodeReviewDialog._start_review).
     """
-    import urllib.request, urllib.error, json
+    import urllib.error
 
     if not cfg.get("enabled"):
         return None
@@ -2050,11 +2155,9 @@ def _call_llm(cfg: dict, system_prompt: str, user_prompt: str,
     base_url    = (cfg.get("base_url") or "").rstrip("/")
     api_key_env = cfg.get("api_key_env") or ""
     api_key     = os.environ.get(api_key_env, "") if api_key_env else ""
-    streaming   = on_token is not None
 
     # "ollama" is a friendly alias — falls through to OpenAI-compatible with
-    # the default Ollama base URL if none was set. Saves the user from
-    # remembering the port.
+    # the default Ollama base URL if none was set.
     if provider == "ollama":
         provider = "openai_compatible"
         if not base_url:
@@ -2064,111 +2167,17 @@ def _call_llm(cfg: dict, system_prompt: str, user_prompt: str,
         if provider == "anthropic":
             if not api_key:
                 return None
-            payload = {
-                "model": model or "claude-haiku-4-5",
-                "max_tokens": max_tokens,
-                "system": system_prompt,
-                "messages": [{"role": "user", "content": user_prompt}],
-            }
-            if streaming:
-                payload["stream"] = True
-            req = urllib.request.Request(
-                "https://api.anthropic.com/v1/messages",
-                method="POST",
-                data=json.dumps(payload).encode("utf-8"),
-                headers={
-                    "Content-Type": "application/json",
-                    "x-api-key": api_key,
-                    "anthropic-version": "2023-06-01",
-                },
-            )
-            if streaming:
-                with urllib.request.urlopen(req, timeout=timeout) as resp:
-                    pieces = []
-                    for event in _iter_sse_events(resp):
-                        try:
-                            data = json.loads(event)
-                        except json.JSONDecodeError:
-                            continue
-                        # Anthropic streams content_block_delta events with
-                        # {"delta": {"type":"text_delta","text":"..."}}
-                        if data.get("type") == "content_block_delta":
-                            delta = (data.get("delta") or {}).get("text", "")
-                            if delta:
-                                pieces.append(delta)
-                                try:
-                                    on_token(delta)
-                                except Exception:
-                                    # Callback errors must not break the stream.
-                                    log.exception("on_token callback raised")
-                text = "".join(pieces).strip()
-                return text or None
-            else:
-                with urllib.request.urlopen(req, timeout=timeout) as resp:
-                    data = json.loads(resp.read().decode("utf-8"))
-                blocks = data.get("content") or []
-                text = "".join(b.get("text", "") for b in blocks if b.get("type") == "text")
-                return text.strip() or None
-
-        elif provider in ("openai", "openai_compatible"):
+            return _call_anthropic(api_key, model, system_prompt, user_prompt,
+                                   max_tokens, timeout, on_token)
+        if provider in ("openai", "openai_compatible"):
             if provider == "openai":
                 url = "https://api.openai.com/v1/chat/completions"
             else:
                 if not base_url:
                     return None
                 url = base_url + "/v1/chat/completions"
-            payload = {
-                "model": model or "gpt-4o-mini",
-                "messages": [
-                    {"role": "system", "content": system_prompt},
-                    {"role": "user", "content": user_prompt},
-                ],
-                "max_tokens": max_tokens,
-                "temperature": 0.3,
-            }
-            if streaming:
-                payload["stream"] = True
-            headers = {"Content-Type": "application/json"}
-            if api_key:
-                headers["Authorization"] = f"Bearer {api_key}"
-            req = urllib.request.Request(
-                url, method="POST",
-                data=json.dumps(payload).encode("utf-8"),
-                headers=headers,
-            )
-            if streaming:
-                with urllib.request.urlopen(req, timeout=timeout) as resp:
-                    pieces = []
-                    for event in _iter_sse_events(resp):
-                        if event == "[DONE]":
-                            break
-                        try:
-                            data = json.loads(event)
-                        except json.JSONDecodeError:
-                            continue
-                        choices = data.get("choices") or []
-                        if not choices:
-                            continue
-                        delta_obj = choices[0].get("delta") or {}
-                        delta = delta_obj.get("content") or ""
-                        if delta:
-                            pieces.append(delta)
-                            try:
-                                on_token(delta)
-                            except Exception:
-                                log.exception("on_token callback raised")
-                text = "".join(pieces).strip()
-                return text or None
-            else:
-                with urllib.request.urlopen(req, timeout=timeout) as resp:
-                    data = json.loads(resp.read().decode("utf-8"))
-                choices = data.get("choices") or []
-                if not choices:
-                    return None
-                msg = choices[0].get("message") or {}
-                text = msg.get("content") or ""
-                return text.strip() or None
-
+            return _call_openai_compat(url, api_key, model, system_prompt, user_prompt,
+                                       max_tokens, timeout, on_token)
     except (urllib.error.URLError, urllib.error.HTTPError,
             TimeoutError, json.JSONDecodeError, KeyError, OSError):
         return None
@@ -4548,33 +4557,40 @@ class App(tk.Tk):
         path = self._git_path
         if not path:
             return
-        out, rc = self._shell_capture(
-            [GIT_EXE,"-C", path, "branch"], path)
+        branch = self._confirm_branch_delete(path)
+        if branch is None:
+            return
+        self._do_delete_branch(path, branch)
+
+    def _confirm_branch_delete(self, path: str) -> str | None:
+        """List non-current branches, prompt for a selection, and confirm.
+        Returns the branch name to delete, or None if the user cancelled."""
+        out, rc = self._shell_capture([GIT_EXE, "-C", path, "branch"], path)
         if rc != 0:
             messagebox.showerror("Git Error", out.strip(), parent=self)
-            return
-        # Collect non-current branches
-        non_current = []
-        for line in out.strip().splitlines():
-            if not line.startswith("* "):
-                non_current.append(line.strip())
+            return None
+        non_current = [line.strip() for line in out.strip().splitlines()
+                       if not line.startswith("* ")]
         if not non_current:
             messagebox.showinfo("No Branches",
                 "There are no other branches to delete.", parent=self)
-            return
-        # Let user pick
-        branch = SwitchBranchDialog.pick(self,
-                                          f"Delete Branch — {os.path.basename(path)}",
-                                          non_current, parent_widget=self)
+            return None
+        branch = SwitchBranchDialog.pick(
+            self, f"Delete Branch — {os.path.basename(path)}",
+            non_current, parent_widget=self)
         if not branch:
-            return
+            return None
         if not messagebox.askyesno(
                 "Delete Branch",
                 f"Delete branch '{branch}'?\n\n"
                 "If this branch has been merged, it will be removed safely.",
                 parent=self):
-            return
+            return None
+        return branch
 
+    def _do_delete_branch(self, path: str, branch: str) -> None:
+        """Execute local (and optionally remote) branch deletion on background threads.
+        Uses self.after() to schedule dialogs and _git_end_op back on the main thread."""
         self._git_begin_op()
 
         def worker():
@@ -4608,7 +4624,6 @@ class App(tk.Tk):
                     "Force-delete anyway?\n"
                     "This permanently discards those commits.",
                     parent=self):
-                # User cancelled — release the lock
                 self._git_end_op()
                 return
             def force_worker():
@@ -4626,12 +4641,7 @@ class App(tk.Tk):
             threading.Thread(target=force_worker, daemon=True).start()
 
         def offer_remote_delete(deleted_branch: str):
-            """After a successful local delete, offer to also delete origin/<branch>.
-
-            Only prompts if origin/<branch> actually exists. Avoids confusing
-            the user with a yes/no on a branch they never pushed.
-            """
-            # Check if origin/<branch> exists in the remote-tracking branch list.
+            # Only prompts if origin/<branch> actually exists.
             rbo, rbrc = self._shell_capture(
                 [GIT_EXE, "-C", path, "branch", "-r"], path)
             has_remote = False
@@ -6587,57 +6597,10 @@ class App(tk.Tk):
                 if proc.returncode == 0:
                     self._log("Done.", C["green"])
                     log.info(f"DONE exit=0  [{elapsed:.1f}s]")
-                    # Auto-commit after sync if the toggle is on and this is a git repo
                     if (args and args[0] == "sync"
                             and _cfg.get("auto_commit_after_sync")
                             and _is_git_repo(cwd)):
-                        self._log("  Auto-committing sync changes…", C["peach"])
-                        self._shell_capture([GIT_EXE,"-C", cwd, "add", "-A"], cwd)
-                        _, staged_rc = self._shell_capture(
-                            [GIT_EXE,"-C", cwd, "diff", "--cached", "--quiet"], cwd)
-                        if staged_rc != 0:   # non-zero = staged changes exist
-                            # Decide whether to use LLM-generated messages or
-                            # the default "chore: tokensave sync" amend-stacking.
-                            llm_cfg = _cfg.get("commit_message_llm") or {}
-                            use_llm_for_sync = bool(
-                                llm_cfg.get("enabled")
-                                and llm_cfg.get("use_for_sync_autocommit")
-                            )
-
-                            if use_llm_for_sync:
-                                # LLM mode: each sync gets a unique message,
-                                # so no amend-stacking. Compose via the new
-                                # generator (which only invokes the LLM if
-                                # the diff is non-trivial — small syncs
-                                # still fall through to heuristics).
-                                self._log("  Composing AI commit message…", C["peach"])
-                                status_out, _ = self._shell_capture(
-                                    [GIT_EXE,"-C", cwd, "status", "--short"], cwd)
-                                ai_msg = _suggest_commit_message(cwd, status_out) \
-                                         or "chore: tokensave sync"
-                                commit_cmd = [GIT_EXE,"-C", cwd, "commit",
-                                              "-m", ai_msg.split("\n", 1)[0]]
-                                # If body present, append via -m again
-                                if "\n\n" in ai_msg:
-                                    commit_cmd.extend(
-                                        ["-m", ai_msg.split("\n\n", 1)[1]]
-                                    )
-                            else:
-                                # Default amend-stacking: repeated syncs collapse
-                                # into a single "chore: tokensave sync" commit.
-                                last_out, _ = self._shell_capture(
-                                    [GIT_EXE,"-C", cwd, "log", "-1", "--format=%s"], cwd)
-                                if last_out.strip() == "chore: tokensave sync":
-                                    commit_cmd = [GIT_EXE,"-C", cwd, "commit",
-                                                  "--amend", "--no-edit"]
-                                    self._log("  Amending previous sync commit…", C["peach"])
-                                else:
-                                    commit_cmd = [GIT_EXE,"-C", cwd, "commit",
-                                                  "-m", "chore: tokensave sync"]
-                            cout, crc = self._shell_capture(commit_cmd, cwd)
-                            col = C["green"] if crc == 0 else C["red"]
-                            for line in cout.strip().splitlines()[-3:]:
-                                self._log(f"  {line}", col)
+                        self._auto_commit_after_sync(cwd)
                 else:
                     self._log(f"Exited with code {proc.returncode}", C["red"])
                     log.warning(f"DONE exit={proc.returncode}  [{elapsed:.1f}s]")
@@ -6649,6 +6612,42 @@ class App(tk.Tk):
                 self._current_proc = None
                 self.after(0, self._set_running, False)
         threading.Thread(target=worker, daemon=True).start()
+
+    def _auto_commit_after_sync(self, cwd: str) -> None:
+        """Commit staged changes after a successful sync, using LLM or amend-stacking."""
+        self._log("  Auto-committing sync changes…", C["peach"])
+        self._shell_capture([GIT_EXE, "-C", cwd, "add", "-A"], cwd)
+        _, staged_rc = self._shell_capture(
+            [GIT_EXE, "-C", cwd, "diff", "--cached", "--quiet"], cwd)
+        if staged_rc == 0:
+            return  # nothing staged
+
+        llm_cfg = _cfg.get("commit_message_llm") or {}
+        use_llm = bool(llm_cfg.get("enabled") and llm_cfg.get("use_for_sync_autocommit"))
+
+        if use_llm:
+            # LLM mode: each sync gets a unique message; no amend-stacking.
+            self._log("  Composing AI commit message…", C["peach"])
+            status_out, _ = self._shell_capture(
+                [GIT_EXE, "-C", cwd, "status", "--short"], cwd)
+            ai_msg = _suggest_commit_message(cwd, status_out) or "chore: tokensave sync"
+            commit_cmd = [GIT_EXE, "-C", cwd, "commit", "-m", ai_msg.split("\n", 1)[0]]
+            if "\n\n" in ai_msg:
+                commit_cmd.extend(["-m", ai_msg.split("\n\n", 1)[1]])
+        else:
+            # Default amend-stacking: repeated syncs collapse into one commit.
+            last_out, _ = self._shell_capture(
+                [GIT_EXE, "-C", cwd, "log", "-1", "--format=%s"], cwd)
+            if last_out.strip() == "chore: tokensave sync":
+                commit_cmd = [GIT_EXE, "-C", cwd, "commit", "--amend", "--no-edit"]
+                self._log("  Amending previous sync commit…", C["peach"])
+            else:
+                commit_cmd = [GIT_EXE, "-C", cwd, "commit", "-m", "chore: tokensave sync"]
+
+        cout, crc = self._shell_capture(commit_cmd, cwd)
+        col = C["green"] if crc == 0 else C["red"]
+        for line in cout.strip().splitlines()[-3:]:
+            self._log(f"  {line}", col)
 
     def _run_capture(self, args, cwd, label) -> tuple:
         """Run a tokensave command and return (raw_output, returncode, elapsed_s).

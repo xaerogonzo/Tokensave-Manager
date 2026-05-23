@@ -225,90 +225,18 @@ class LocalAgent:
                         on_error(f"LLM request failed.  {detail}")
                     return
 
-                choice = (response.get("choices") or [{}])[0]
-                msg = choice.get("message") or {}
-                content = msg.get("content") or ""
-                tool_calls = msg.get("tool_calls") or []
-                finish_reason = choice.get("finish_reason") or ""
-
-                # Always append the assistant message to history (even if
-                # only tool_calls — the API requires the assistant message
-                # with tool_calls to precede the role:tool replies).
-                assistant_msg = {"role": "assistant", "content": content}
-                if tool_calls:
-                    assistant_msg["tool_calls"] = tool_calls
-                messages.append(assistant_msg)
-
-                # ── Tool-call rescue ───────────────────────────────────
-                # Some local models (notably qwen2.5-coder via Ollama) emit
-                # the tool call as JSON in the assistant content field
-                # instead of populating the proper tool_calls structure.
-                # When we see no tool_calls but the content looks like a
-                # tool-call JSON object, parse it and synthesise a
-                # tool_calls entry so the rest of the loop can proceed
-                # normally. Without this, the agent treats the JSON-as-
-                # text as the final answer and dies.
-                #
-                # Detected shapes (handled in order):
-                #   1. {"name": "tool", "arguments": {...}}
-                #   2. {"tool": "tool", "arguments": {...}}
-                #   3. Same as 1/2 but wrapped in markdown ```json fences
-                #   4. Same as 1/2 but with `parameters` instead of `arguments`
-                if not tool_calls and content:
-                    rescued = self._rescue_tool_call_from_content(content)
-                    if rescued is not None:
-                        log.info("rescued tool_call from assistant content: "
-                                 f"{rescued.get('function', {}).get('name')}")
-                        tool_calls = [rescued]
-                        # Re-write the assistant message we just appended
-                        # so it carries the synthesised tool_calls. The
-                        # text-content stays so on-screen rendering still
-                        # shows what the model emitted.
-                        messages[-1]["tool_calls"] = tool_calls
+                content, tool_calls = self._parse_response(response, messages)
 
                 if content and on_assistant_message:
                     on_assistant_message(content)
                     last_assistant_text = content
 
                 if not tool_calls:
-                    # Final answer.
                     if on_done:
                         on_done(content or last_assistant_text)
                     return
 
-                # Execute each tool call and append the role:tool reply.
-                for call in tool_calls:
-                    call_id = call.get("id") or ""
-                    fn = call.get("function") or {}
-                    name = fn.get("name") or ""
-                    raw_args = fn.get("arguments") or "{}"
-                    try:
-                        args = json.loads(raw_args) if isinstance(raw_args, str) else raw_args
-                        if not isinstance(args, dict):
-                            args = {}
-                    except json.JSONDecodeError:
-                        args = {}
-
-                    if on_tool_call:
-                        try:
-                            on_tool_call(name, args)
-                        except Exception:
-                            log.exception("on_tool_call callback raised")
-
-                    result = self._dispatch_tool(name, args)
-
-                    if on_tool_result:
-                        try:
-                            on_tool_result(name, result)
-                        except Exception:
-                            log.exception("on_tool_result callback raised")
-
-                    messages.append({
-                        "role": "tool",
-                        "tool_call_id": call_id,
-                        "name": name,
-                        "content": result,
-                    })
+                self._execute_tool_calls(tool_calls, messages, on_tool_call, on_tool_result)
 
                 # Loop again — model gets to see the tool outputs.
             # Iteration cap exhausted.
@@ -321,6 +249,82 @@ class LocalAgent:
             log.exception("LocalAgent.run failed")
             if on_error:
                 on_error(f"Agent crashed: {type(e).__name__}: {e}")
+
+    # ── Response parsing ────────────────────────────────────────────────
+
+    def _parse_response(self, response: dict,
+                        messages: list[dict]) -> tuple[str, list]:
+        """Extract content and tool_calls from a chat completion response.
+
+        Appends the assistant message to `messages` (required by the API
+        before any role:tool replies). Runs the tool-call rescue heuristic
+        for local models that emit tool calls as JSON in the content field.
+        Returns (content, tool_calls) — both empty/[] on an empty response.
+        """
+        choice = (response.get("choices") or [{}])[0]
+        msg = choice.get("message") or {}
+        content = msg.get("content") or ""
+        tool_calls = msg.get("tool_calls") or []
+
+        # Always append the assistant message (even when only tool_calls —
+        # the API requires the assistant message with tool_calls to precede
+        # the role:tool replies).
+        assistant_msg: dict = {"role": "assistant", "content": content}
+        if tool_calls:
+            assistant_msg["tool_calls"] = tool_calls
+        messages.append(assistant_msg)
+
+        # ── Tool-call rescue ──────────────────────────────────────────────
+        # Some local models (notably qwen2.5-coder via Ollama) emit the tool
+        # call as JSON in the assistant content field instead of using the
+        # proper tool_calls structure. Parse and synthesise a tool_calls
+        # entry so the rest of the loop can proceed normally.
+        if not tool_calls and content:
+            rescued = self._rescue_tool_call_from_content(content)
+            if rescued is not None:
+                log.info("rescued tool_call from assistant content: "
+                         f"{rescued.get('function', {}).get('name')}")
+                tool_calls = [rescued]
+                messages[-1]["tool_calls"] = tool_calls
+
+        return content, tool_calls
+
+    def _execute_tool_calls(self, tool_calls: list[dict], messages: list[dict],
+                            on_tool_call, on_tool_result) -> None:
+        """Execute each tool call in `tool_calls`, fire callbacks, and
+        append role:tool reply messages to `messages`."""
+        for call in tool_calls:
+            call_id = call.get("id") or ""
+            fn = call.get("function") or {}
+            name = fn.get("name") or ""
+            raw_args = fn.get("arguments") or "{}"
+            try:
+                args = json.loads(raw_args) if isinstance(raw_args, str) else raw_args
+                if not isinstance(args, dict):
+                    args = {}
+            except json.JSONDecodeError:
+                args = {}
+
+            if on_tool_call:
+                try:
+                    on_tool_call(name, args)
+                except Exception:
+                    log.exception("on_tool_call callback raised")
+
+            result = self._dispatch_tool(name, args)
+
+            if on_tool_result:
+                try:
+                    on_tool_result(name, result)
+                except Exception:
+                    log.exception("on_tool_result callback raised")
+
+            messages.append({
+                "role": "tool",
+                "tool_call_id": call_id,
+                "name": name,
+                "content": result,
+            })
 
     # ── Tool dispatch ───────────────────────────────────────────────────
 
