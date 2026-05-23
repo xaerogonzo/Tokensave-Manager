@@ -24,6 +24,7 @@ import tkinter as tk
 from tkinter import ttk, filedialog, messagebox, simpledialog
 from tkinter import font as tkfont
 import math
+import tempfile
 import textwrap
 import pystray
 from PIL import Image, ImageDraw
@@ -10169,12 +10170,12 @@ class GitHubSetupDialog(tk.Toplevel):
             self._sh([GIT_EXE,"-C", self._path, "remote", "add", "origin", url])
             self._app._log(f"  Remote added: {url}", C["green"])
         self._refresh()
-        self._app.after(0, self._app._git_refresh)
+        self._app.after(0, self._app._git.refresh)
 
     def _do_push(self):
         self.destroy()
-        self._app._git_path = self._path
-        self._app.cmd_git_push()
+        self._app._git.set_active_path(self._path)
+        self._app._git.cmd_git_push()
 
     def _create_release(self):
         tag   = self._tag_var.get().strip()
@@ -10209,6 +10210,17 @@ class GitHubSetupDialog(tk.Toplevel):
             if rc == 0:
                 self._app._log(f"  ✓ Release {tag} created — check GitHub!", C["green"])
         threading.Thread(target=worker, daemon=True).start()
+
+
+@dataclasses.dataclass
+class _ReleaseCtx:
+    """Shared state bus passed between _pub_* step methods in ReleaseWizardDialog."""
+    tag: str
+    title: str
+    notes: str
+    zip_path: str | None = None
+    notes_file: str | None = None
+    staged_files: list = dataclasses.field(default_factory=list)
 
 
 class ReleaseWizardDialog(tk.Toplevel):
@@ -10725,7 +10737,7 @@ class ReleaseWizardDialog(tk.Toplevel):
 
         self._publishing = True
         self._publish_btn.configure(state=tk.DISABLED)
-        self._app._git_begin_op()
+        self._app._git._git_begin_op()
 
         threading.Thread(
             target=self._publish_worker,
@@ -10759,162 +10771,202 @@ class ReleaseWizardDialog(tk.Toplevel):
                 self._publish_btn.configure(state=tk.NORMAL)
             except tk.TclError:
                 pass
-            self._app._git_end_op()
+            self._app._git._git_end_op()
         try:
             self.after(0, _reenable)
         except tk.TclError:
             pass
 
-    def _publish_worker(self, tag: str, title: str, notes: str):
-        """Sequenced publish pipeline. Runs entirely on a background thread.
-        Each step short-circuits with a specific recovery message."""
+    # ── Publish pipeline step methods ─────────────────────────────────────────
+
+    def _pub_build(self, ctx: "_ReleaseCtx") -> bool:
+        """Step 1: run the optional build script. Returns False on failure."""
+        if not (self._run_build_var.get() and self._build_script):
+            return True
         log = self._app._log
         sh  = self._app._shell_capture
-        path = self._path
+        self._set_status(f"Building via {self._build_script}…  "
+                         "(this can take 3–8 minutes)", fg=C["peach"])
+        log(f"Release {ctx.tag}: running {self._build_script}…", C["peach"])
+        if self._build_script.endswith(".ps1"):
+            build_cmd = ["powershell", "-ExecutionPolicy", "Bypass",
+                         "-File", self._build_script]
+        else:
+            # .bat needs cmd.exe /c — running the .bat directly raises
+            # WinError 193 ("not a valid Win32 application") on Windows.
+            build_cmd = ["cmd.exe", "/c", self._build_script]
+        out, rc = sh(build_cmd, self._path)
+        for line in out.strip().splitlines()[-12:]:
+            log(f"  {line}", C["overlay0"])
+        if rc != 0:
+            self._fail("Build failed — release aborted, no state changed.\n"
+                       "See log panel for build tail.")
+            return False
+        return True
 
-        # 1. Build (optional) ─────────────────────────────────────────────
-        if self._run_build_var.get() and self._build_script:
-            self._set_status(f"Building via {self._build_script}…  "
-                             "(this can take 3–8 minutes)", fg=C["peach"])
-            log(f"Release {tag}: running {self._build_script}…", C["peach"])
-            if self._build_script.endswith(".ps1"):
-                build_cmd = ["powershell", "-ExecutionPolicy", "Bypass",
-                             "-File", self._build_script]
-            else:
-                # .bat needs cmd.exe /c — running the .bat directly raises
-                # WinError 193 ("not a valid Win32 application") on Windows.
-                build_cmd = ["cmd.exe", "/c", self._build_script]
-            out, rc = sh(build_cmd, path)
-            for line in out.strip().splitlines()[-12:]:
-                log(f"  {line}", C["overlay0"])
-            if rc != 0:
-                return self._fail(
-                    "Build failed — release aborted, no state changed.\n"
-                    "See log panel for build tail.")
-
-        # 2. Zip ──────────────────────────────────────────────────────────
+    def _pub_zip(self, ctx: "_ReleaseCtx") -> bool:
+        """Step 2: zip dist/. Populates ctx.zip_path on success."""
         self._set_status("Zipping dist/…", fg=C["peach"])
-        dist_dir = os.path.join(path, "dist")
-        zip_name = f"{self._release_basename}-{tag}-windows.zip"
-        zip_path = os.path.join(path, zip_name)
+        dist_dir = os.path.join(self._path, "dist")
+        zip_name = f"{self._release_basename}-{ctx.tag}-windows.zip"
+        zip_path = os.path.join(self._path, zip_name)
         zip_out  = _zip_dist(dist_dir, zip_path)
         if not zip_out:
-            return self._fail(
-                f"Zip step failed — dist/ missing or empty.\n"
-                f"Re-run with 'Run build' enabled, or build manually first.")
+            self._fail("Zip step failed — dist/ missing or empty.\n"
+                       "Re-run with 'Run build' enabled, or build manually first.")
+            return False
         try:
             mb = os.path.getsize(zip_out) / 1024 / 1024
         except OSError:
             mb = 0.0
-        log(f"  zipped: {os.path.basename(zip_out)} ({mb:.1f} MB)", C["green"])
+        self._app._log(f"  zipped: {os.path.basename(zip_out)} ({mb:.1f} MB)",
+                       C["green"])
+        ctx.zip_path = zip_out
+        return True
 
-        # 3. Write notes to a temp file (used by gh and preserved on failure) ──
-        import tempfile
+    def _pub_write_notes(self, ctx: "_ReleaseCtx") -> bool:
+        """Step 3: write release notes to a temp file. Populates ctx.notes_file."""
         notes_fd, notes_file = tempfile.mkstemp(
-            prefix=f"release-notes-{tag}-", suffix=".md", text=True)
+            prefix=f"release-notes-{ctx.tag}-", suffix=".md", text=True)
         try:
             with os.fdopen(notes_fd, "w", encoding="utf-8") as f:
-                f.write(notes)
+                f.write(ctx.notes)
         except OSError as exc:
-            return self._fail(f"Could not write temporary notes file: {exc}")
+            self._fail(f"Could not write temporary notes file: {exc}")
+            return False
+        ctx.notes_file = notes_file
+        return True
 
-        # 4. Patch CHANGELOG.md (optional) ────────────────────────────────
-        files_to_stage = []
-        if self._sync_cl_var.get() and self._has_changelog:
-            from datetime import datetime as _dt
-            self._set_status("Patching CHANGELOG.md…", fg=C["peach"])
-            ok, msg = _patch_changelog(
-                self._changelog_path,
-                tag.lstrip("v"),
-                _dt.now().strftime("%Y-%m-%d"),
-                notes,
-            )
-            if not ok:
-                return self._fail(f"CHANGELOG patch failed: {msg}",
-                                  keep_temp=True, temp_path=notes_file)
-            log(f"  CHANGELOG.md {msg}", C["green"])
-            files_to_stage.append("CHANGELOG.md")
+    def _pub_patch_changelog(self, ctx: "_ReleaseCtx") -> bool:
+        """Step 4: optionally stamp CHANGELOG.md with the release version."""
+        if not (self._sync_cl_var.get() and self._has_changelog):
+            return True
+        self._set_status("Patching CHANGELOG.md…", fg=C["peach"])
+        ok, msg = _patch_changelog(
+            self._changelog_path,
+            ctx.tag.lstrip("v"),
+            datetime.now().strftime("%Y-%m-%d"),
+            ctx.notes,
+        )
+        if not ok:
+            self._fail(f"CHANGELOG patch failed: {msg}",
+                       keep_temp=True, temp_path=ctx.notes_file)
+            return False
+        self._app._log(f"  CHANGELOG.md {msg}", C["green"])
+        ctx.staged_files.append("CHANGELOG.md")
+        return True
 
-        # 5. Stage + commit ONLY the files we touched ─────────────────────
-        if files_to_stage:
-            self._set_status("Committing release-prep changes…", fg=C["peach"])
-            add_cmd = [GIT_EXE, "-C", path, "add", "--"] + files_to_stage
-            out, rc = sh(add_cmd, path)
-            if rc != 0:
-                return self._fail(
-                    f"git add CHANGELOG.md failed (rc={rc}).\n{out[-300:]}",
-                    keep_temp=True, temp_path=notes_file)
-            commit_cmd = [GIT_EXE, "-C", path, "commit",
-                          "-m", f"chore: release prep for {tag}",
-                          "--"] + files_to_stage
-            out, rc = sh(commit_cmd, path)
-            if rc != 0:
-                return self._fail(
-                    f"Commit failed (rc={rc}).\n{out[-300:]}\n\n"
-                    f"Recover: git restore --staged CHANGELOG.md",
-                    keep_temp=True, temp_path=notes_file)
-            log(f"  committed release-prep changes", C["green"])
-
-        # 6. Local annotated tag ──────────────────────────────────────────
-        self._set_status(f"Creating local tag {tag}…", fg=C["peach"])
-        out, rc = _git_tag(path, tag, title)
+    def _pub_stage_commit(self, ctx: "_ReleaseCtx") -> bool:
+        """Step 5: stage and commit only the files we touched (e.g. CHANGELOG)."""
+        if not ctx.staged_files:
+            return True
+        sh   = self._app._shell_capture
+        path = self._path
+        self._set_status("Committing release-prep changes…", fg=C["peach"])
+        out, rc = sh([GIT_EXE, "-C", path, "add", "--"] + ctx.staged_files, path)
         if rc != 0:
-            return self._fail(
-                f"git tag {tag} failed — possibly already exists locally.\n"
-                f"Recover: git tag -d {tag}\n\n"
+            self._fail(f"git add CHANGELOG.md failed (rc={rc}).\n{out[-300:]}",
+                       keep_temp=True, temp_path=ctx.notes_file)
+            return False
+        commit_cmd = ([GIT_EXE, "-C", path, "commit",
+                       "-m", f"chore: release prep for {ctx.tag}", "--"]
+                      + ctx.staged_files)
+        out, rc = sh(commit_cmd, path)
+        if rc != 0:
+            self._fail(f"Commit failed (rc={rc}).\n{out[-300:]}\n\n"
+                       "Recover: git restore --staged CHANGELOG.md",
+                       keep_temp=True, temp_path=ctx.notes_file)
+            return False
+        self._app._log("  committed release-prep changes", C["green"])
+        return True
+
+    def _pub_tag(self, ctx: "_ReleaseCtx") -> bool:
+        """Step 6: create a local annotated tag."""
+        self._set_status(f"Creating local tag {ctx.tag}…", fg=C["peach"])
+        out, rc = _git_tag(self._path, ctx.tag, ctx.title)
+        if rc != 0:
+            self._fail(
+                f"git tag {ctx.tag} failed — possibly already exists locally.\n"
+                f"Recover: git tag -d {ctx.tag}\n\n"
                 f"git output:\n{out[-300:]}",
-                keep_temp=True, temp_path=notes_file)
-        log(f"  created annotated tag {tag}", C["green"])
+                keep_temp=True, temp_path=ctx.notes_file)
+            return False
+        self._app._log(f"  created annotated tag {ctx.tag}", C["green"])
+        return True
 
-        # 7. Push commits + tag in one round-trip ─────────────────────────
-        self._set_status(f"Pushing {tag} to origin…", fg=C["peach"])
-        out, rc = _git_push_with_tags(path)
+    def _pub_push(self, ctx: "_ReleaseCtx") -> bool:
+        """Step 7: push commits + tag to origin in one round-trip."""
+        self._set_status(f"Pushing {ctx.tag} to origin…", fg=C["peach"])
+        out, rc = _git_push_with_tags(self._path)
         if rc != 0:
-            return self._fail(
+            self._fail(
                 f"Push failed (rc={rc}).\n{out[-300:]}\n\n"
                 f"Recover local state with:\n"
-                f"  git tag -d {tag}                # remove local tag\n"
+                f"  git tag -d {ctx.tag}                # remove local tag\n"
                 f"  git reset --soft HEAD~1         # if release-prep commit was made",
-                keep_temp=True, temp_path=notes_file)
-        log(f"  pushed HEAD + {tag} to origin", C["green"])
+                keep_temp=True, temp_path=ctx.notes_file)
+            return False
+        self._app._log(f"  pushed HEAD + {ctx.tag} to origin", C["green"])
+        return True
 
-        # 8. gh release create ────────────────────────────────────────────
+    def _pub_gh_release(self, ctx: "_ReleaseCtx") -> bool:
+        """Step 8: create the GitHub Release via `gh release create`."""
         # After this point, tag + commit are already on the remote, so a
         # failure here means manual recovery is needed.
-        self._set_status(f"Creating GitHub release {tag}…", fg=C["peach"])
-        gh_cmd = ["gh", "release", "create", tag,
-                  "--title", title,
-                  "--notes-file", notes_file,
-                  zip_out]
-        out, rc = sh(gh_cmd, path)
+        self._set_status(f"Creating GitHub release {ctx.tag}…", fg=C["peach"])
+        gh_cmd = ["gh", "release", "create", ctx.tag,
+                  "--title", ctx.title,
+                  "--notes-file", ctx.notes_file,
+                  ctx.zip_path]
+        out, rc = self._app._shell_capture(gh_cmd, self._path)
         for line in out.strip().splitlines()[-8:]:
-            log(f"  {line}", C["overlay0"])
+            self._app._log(f"  {line}", C["overlay0"])
         if rc != 0:
-            cmd_str = (f"gh release create {tag} --title \"{title}\" "
-                       f"--notes-file \"{notes_file}\" \"{zip_out}\"")
-            return self._fail(
+            cmd_str = (f"gh release create {ctx.tag} --title \"{ctx.title}\" "
+                       f"--notes-file \"{ctx.notes_file}\" \"{ctx.zip_path}\"")
+            self._fail(
                 f"GitHub release creation failed AFTER the tag was pushed.\n\n"
                 f"Local repo and remote ARE in sync — only the GitHub Release\n"
                 f"page wasn't created. Recover with:\n\n"
                 f"  {cmd_str}\n\n"
-                f"Notes file preserved at: {notes_file}",
-                keep_temp=True, temp_path=notes_file)
+                f"Notes file preserved at: {ctx.notes_file}",
+                keep_temp=True, temp_path=ctx.notes_file)
+            return False
+        return True
 
-        # 9. Cleanup notes temp ────────────────────────────────────────────
-        try:
-            os.unlink(notes_file)
-        except OSError:
-            pass
+    def _publish_worker(self, tag: str, title: str, notes: str):
+        """Sequenced publish pipeline. Runs entirely on a background thread."""
+        ctx = _ReleaseCtx(tag=tag, title=title, notes=notes)
+        steps = [
+            self._pub_build,
+            self._pub_zip,
+            self._pub_write_notes,
+            self._pub_patch_changelog,
+            self._pub_stage_commit,
+            self._pub_tag,
+            self._pub_push,
+            self._pub_gh_release,
+        ]
+        for step in steps:
+            if not step(ctx):
+                return
 
-        # 10. Done. Refresh git tab, close wizard.
-        log(f"  ✓ Release {tag} published — check GitHub!", C["green"])
-        self._set_status(f"✔ Release {tag} published.", fg=C["green"])
+        # Step 9: cleanup notes temp file
+        if ctx.notes_file:
+            try:
+                os.unlink(ctx.notes_file)
+            except OSError:
+                pass
+
+        # Step 10: done — refresh git tab and close wizard
+        self._app._log(f"  ✓ Release {ctx.tag} published — check GitHub!", C["green"])
+        self._set_status(f"✔ Release {ctx.tag} published.", fg=C["green"])
         def _close():
             self._publishing = False
-            self._app._git_end_op()
+            self._app._git._git_end_op()
             self.destroy()
         try:
-            self.after(2000, _close)   # let the success message sit briefly
+            self.after(2000, _close)
         except tk.TclError:
             pass
 
