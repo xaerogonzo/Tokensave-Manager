@@ -51,40 +51,7 @@ def _save_config(cfg: dict):
     with open(_CONFIG_PATH, "w", encoding="utf-8") as f:
         json.dump(cfg, f, indent=2)
 
-
-def _migrate_config(cfg: dict) -> dict:
-    """Bump old config defaults to current ones, on first load after upgrade.
-
-    Why this exists: tk Settings dialog uses ``setdefault`` which only fills
-    MISSING keys. Users upgrading from v1.0.x have ``timeout_seconds: 12``
-    AND ``max_diff_chars: 8000`` already present in their saved config —
-    those keys exist, so setdefault no-ops, and the user keeps the old slow
-    defaults until they edit the JSON by hand. This migration treats values
-    AT-OR-BELOW the previous default as 'never explicitly chosen by the user'
-    and bumps them to the current default. Users who deliberately set
-    intermediate values (e.g. timeout=60, max_diff_chars=16000) keep those.
-
-    Migration is idempotent: re-running on already-migrated configs is a no-op.
-    Saves back to disk only if anything changed.
-    """
-    llm = cfg.get("commit_message_llm")
-    if not isinstance(llm, dict):
-        return cfg
-    changed = False
-    # timeout_seconds: old default was 12, current is 90; bump anything <30
-    if int(llm.get("timeout_seconds", 90)) < 30:
-        llm["timeout_seconds"] = 90
-        changed = True
-    # max_diff_chars: old default was 8000, current is 24000; bump anything <16000
-    if int(llm.get("max_diff_chars", 24000)) < 16000:
-        llm["max_diff_chars"] = 24000
-        changed = True
-    if changed:
-        _save_config(cfg)
-    return cfg
-
-
-_cfg = _migrate_config(_load_config())
+_cfg = _load_config()
 
 TOKENSAVE    = _cfg.get("tokensave_exe", "")
 TEMPLATE_DIR = _cfg.get("template_dir", "") or os.path.join(_BASE_DIR, "templates")
@@ -1752,7 +1719,7 @@ def _call_llm_for_commit_message(cfg: dict, repo_path: str) -> str | None:
     if diff_lines < int(cfg.get("min_diff_lines", 30)):
         return None
 
-    max_chars = int(cfg.get("max_diff_chars", 24000))
+    max_chars = int(cfg.get("max_diff_chars", 8000))
     recent    = _recent_commit_subjects(repo_path, n=5)
     system, user = _build_llm_prompt(diff, recent, max_chars)
     return _call_llm(cfg, system, user, max_tokens=1500)
@@ -7542,7 +7509,7 @@ class SettingsDialog(tk.Toplevel):
             "use_for_sync_autocommit": self._var_llm_for_sync.get(),
         })
         # Fill in defaults that other helpers expect
-        existing_llm.setdefault("max_diff_chars", 24000)
+        existing_llm.setdefault("max_diff_chars", 8000)
         existing_llm.setdefault("timeout_seconds", 90)
         self._cfg["commit_message_llm"] = existing_llm
         self._cfg["git_exe"]       = self._git_exe_var.get().strip()
@@ -9932,7 +9899,7 @@ class AICodeReviewDialog(tk.Toplevel):
         self._regen_btn.configure(state=tk.DISABLED)
         self._stop_btn.configure(state=tk.NORMAL)
 
-        max_chars = int(self._llm_cfg.get("max_diff_chars", 24000))
+        max_chars = int(self._llm_cfg.get("max_diff_chars", 8000))
         # Construct the user prompt — just the diff with context.
         user_prompt = (
             f"Review the following git diff. Project: "

@@ -51,40 +51,7 @@ def _save_config(cfg: dict):
     with open(_CONFIG_PATH, "w", encoding="utf-8") as f:
         json.dump(cfg, f, indent=2)
 
-
-def _migrate_config(cfg: dict) -> dict:
-    """Bump old config defaults to current ones, on first load after upgrade.
-
-    Why this exists: tk Settings dialog uses ``setdefault`` which only fills
-    MISSING keys. Users upgrading from v1.0.x have ``timeout_seconds: 12``
-    AND ``max_diff_chars: 8000`` already present in their saved config —
-    those keys exist, so setdefault no-ops, and the user keeps the old slow
-    defaults until they edit the JSON by hand. This migration treats values
-    AT-OR-BELOW the previous default as 'never explicitly chosen by the user'
-    and bumps them to the current default. Users who deliberately set
-    intermediate values (e.g. timeout=60, max_diff_chars=16000) keep those.
-
-    Migration is idempotent: re-running on already-migrated configs is a no-op.
-    Saves back to disk only if anything changed.
-    """
-    llm = cfg.get("commit_message_llm")
-    if not isinstance(llm, dict):
-        return cfg
-    changed = False
-    # timeout_seconds: old default was 12, current is 90; bump anything <30
-    if int(llm.get("timeout_seconds", 90)) < 30:
-        llm["timeout_seconds"] = 90
-        changed = True
-    # max_diff_chars: old default was 8000, current is 24000; bump anything <16000
-    if int(llm.get("max_diff_chars", 24000)) < 16000:
-        llm["max_diff_chars"] = 24000
-        changed = True
-    if changed:
-        _save_config(cfg)
-    return cfg
-
-
-_cfg = _migrate_config(_load_config())
+_cfg = _load_config()
 
 TOKENSAVE    = _cfg.get("tokensave_exe", "")
 TEMPLATE_DIR = _cfg.get("template_dir", "") or os.path.join(_BASE_DIR, "templates")
@@ -1109,19 +1076,9 @@ _CHANGELOG_CANDIDATES = [
     "docs/CHANGELOG.md", "HISTORY.md", "RELEASES.md",
 ]
 
-# Anti-pattern: filename listings in the subject. Catches three variants
-# the LLM commonly produces despite the system prompt telling it not to:
-#   "update X.md, Y.md"           — comma-separated (the original case)
-#   "update X.md and Y.md"        — natural-language "and" connector
-#   "update X.md, Y.md, and Z.md" — Oxford-comma variant
-#   "update X.md; Y.md"           — semicolon-separated
-# All match the same anti-pattern: a verb followed by a filename followed by
-# any separator and another filename-shaped token.
+# Anti-pattern: filename listings in the subject ("update X.md, Y.md").
 _FILENAME_LISTING_RE = re.compile(
-    r"\b(update|change|modify|edit|refactor|fix)\s+"
-    r"[\w.-]+\.\w+\s+"                       # first filename + any whitespace
-    r"(?:,\s*(?:and\s+)?|and\s+|;\s*|or\s+)" # connector: ',', ', and', 'and', ';', 'or'
-    r"[\w.-]+\.\w+",                         # second filename
+    r"\b(update|change|modify)\s+[\w.-]+\.\w+\s*,",
     re.IGNORECASE,
 )
 
@@ -1189,16 +1146,6 @@ def _sanitize_commit_message(subject: str, body: str = "",
         if not re.match(r"^chore\([^)]+\):", subject, re.IGNORECASE):
             subject = "refactor:" + subject[len("chore:"):]
 
-    # Escalate `docs:` to `refactor:` when source files (.py/.js/.ts/.go/etc.)
-    # are also changed. A `docs:` commit that touches code is misclassified —
-    # the LLM saw the README diff first and missed the code change. We default
-    # to `refactor:` because the LLM didn't add new top-level symbols (if it
-    # had, the diff-content strategy would have produced `feat: add X` earlier
-    # in the chain). Preserve scoped `docs(foo):` since the scope IS specific.
-    if has_source_changes and subject.lower().startswith("docs:"):
-        if not re.match(r"^docs\([^)]+\):", subject, re.IGNORECASE):
-            subject = "refactor:" + subject[len("docs:"):]
-
     # Subject ≤ 72 chars, truncate at word boundary
     if len(subject) > 72:
         truncated = subject[:72]
@@ -1207,44 +1154,12 @@ def _sanitize_commit_message(subject: str, body: str = "",
             truncated = truncated[:sp]
         subject = truncated.rstrip(",;:-")
 
-    # Body wrap at 72 chars per paragraph. Also split runs of bullets that
-    # the LLM jammed onto one line — e.g. `. - Foo` mid-paragraph means a
-    # new bullet that should be on its own line. Common pattern from small
-    # local models (Qwen 2.5 14B Q4 etc.) that don't always respect newlines.
+    # Body wrap at 72 chars per paragraph
     if body:
         paragraphs = [p.strip() for p in body.split("\n\n") if p.strip()]
-        normalised = []
-        for p in paragraphs:
-            # Split jammed bullets: `. - text` → `.\n- text` (also `: - text`).
-            # Only acts BETWEEN a sentence boundary and a literal `- ` — won't
-            # split things like `"low-key" - foo` or "M-1 - test rev" because
-            # those don't follow a period/colon.
-            p = re.sub(r"([.:])\s+-\s+", r"\1\n- ", p)
-            # If the paragraph is now multi-line bullets, wrap each line
-            # independently so bullet structure survives.
-            if "\n- " in p:
-                lines = p.split("\n")
-                wrapped_lines = []
-                for line in lines:
-                    if line.startswith("- "):
-                        # Wrap with hanging indent for the continuation
-                        wrapped_lines.append(textwrap.fill(
-                            line, width=72,
-                            initial_indent="", subsequent_indent="  ",
-                            break_long_words=False, break_on_hyphens=False,
-                        ))
-                    else:
-                        wrapped_lines.append(textwrap.fill(
-                            line, width=72,
-                            break_long_words=False, break_on_hyphens=False,
-                        ))
-                normalised.append("\n".join(wrapped_lines))
-            else:
-                normalised.append(textwrap.fill(
-                    p, width=72,
-                    break_long_words=False, break_on_hyphens=False,
-                ))
-        body = "\n\n".join(normalised)
+        wrapped = [textwrap.fill(p, width=72, break_long_words=False,
+                                  break_on_hyphens=False) for p in paragraphs]
+        body = "\n\n".join(wrapped)
 
     return subject, body
 
@@ -1311,11 +1226,7 @@ def _extract_changelog_additions(repo_path: str) -> list:
     cl_file = _find_changelog_file(repo_path)
     if not cl_file:
         return []
-    # NOTE: use generous context (-U20) so the section header (### Added /
-    # ### Changed) appears as a CONTEXT line above any newly-added bullets.
-    # Without this, bullets added to EXISTING sections become invisible to
-    # the parser because the section header isn't itself a `+` line.
-    diff = _pending_diff(repo_path, cl_file, lines_of_context=20)
+    diff = _pending_diff(repo_path, cl_file, lines_of_context=0)
     if not diff:
         return []
 
@@ -1324,40 +1235,18 @@ def _extract_changelog_additions(repo_path: str) -> list:
     current_bullet = None
 
     for raw_line in diff.splitlines():
-        # Skip diff metadata
-        if raw_line.startswith("---") or raw_line.startswith("+++"):
+        if not raw_line.startswith("+"):
             continue
-        if raw_line.startswith("@@"):
-            # Hunk boundary — section context from a different hunk is no
-            # longer reliable. Reset so we don't misattribute the next bullet.
-            section = None
-            current_bullet = None
+        # Skip the +++ filename header
+        if raw_line.startswith("+++"):
             continue
-
-        # Classify the line: + (added), - (removed), space (context)
-        if raw_line.startswith("+"):
-            line = raw_line[1:]
-            is_added = True
-        elif raw_line.startswith(" "):
-            line = raw_line[1:]
-            is_added = False
-        elif raw_line.startswith("-"):
-            continue   # ignore removed lines for section/bullet tracking
-        else:
-            # Should not happen for unified diff output
-            continue
+        line = raw_line[1:]   # drop the leading "+"
 
         # Section header: ### Added, ### Changed, etc.
-        # Track from BOTH context and added lines so a bullet added under an
-        # existing section header still gets the right section attribution.
         m_section = re.match(r"^#{2,4}\s+(\w+)\s*$", line)
         if m_section:
             section = m_section.group(1)
             current_bullet = None
-            continue
-
-        # Only PROCESS added lines for bullets — context lines just inform section.
-        if not is_added:
             continue
 
         # New bullet starting with "- "
@@ -1588,15 +1477,8 @@ def _suggest_from_diff_content(repo_path: str, files: list) -> tuple:
         if syms["functions"]:
             fn = syms["functions"][0]
             return f"feat{scope_str}: add {fn}", ""
-        # No new top-level defs AND no inferable scope — there's nothing useful
-        # left to say at this level of analysis. Return empty so the
-        # orchestrator falls through to the generic backstop strategy. (Using
-        # `basenames[0]` here produces misleading messages like
-        # "refactor: update BASIC_INSTRUCTIONS.md" for multi-file commits that
-        # touched many things — the first alphabetical filename is not a scope.)
-        if scope:
-            return f"refactor({scope}): update {scope}", ""
-        return "", ""
+        # No new top-level defs — likely a refactor
+        return f"refactor{scope_str}: update {scope or basenames[0]}", ""
 
     return "", ""
 
@@ -1624,65 +1506,57 @@ def _build_llm_prompt(diff: str, recent: list, max_diff_chars: int) -> tuple:
     return system, user
 
 
-def _call_llm(cfg: dict, system_prompt: str, user_prompt: str,
-              max_tokens: int = 1500, timeout: int | None = None) -> str | None:
-    """General-purpose LLM call. Returns raw text or None on ANY failure.
+def _call_llm_for_commit_message(cfg: dict, repo_path: str) -> str | None:
+    """Call the configured LLM provider for a commit-message suggestion.
 
-    Used by the commit-message orchestrator AND the AI Code Review feature
-    AND any future agentic stages. Stays propose-only by design — this
-    function returns text; what the caller does with that text is their
-    concern (e.g. displaying in a dialog, parsing tool calls, etc.).
+    Returns the raw LLM text on success, or None on ANY failure (no API key,
+    network error, timeout, provider error, empty response). The caller is
+    expected to pass the result through `_sanitize_commit_message`.
 
-    Supported providers (`cfg["provider"]`):
-      * "anthropic"        — native Messages API at api.anthropic.com
-      * "openai"           — OpenAI Chat Completions at api.openai.com
+    Supported providers:
+      * "anthropic" — native Messages API (api.anthropic.com)
+      * "openai" — OpenAI Chat Completions API (api.openai.com)
       * "openai_compatible" — any OpenAI-compatible endpoint
-            (Ollama at http://localhost:11434, LM Studio at :1234,
-             vLLM, llama-server, LocalAI, etc.)
-      * "ollama"           — Ollama's native API at /api/chat (alias for
-            openai_compatible with base_url defaulting to localhost:11434)
-
-    Returns None on any error: no key, missing model, network failure,
-    timeout, provider error, empty response. Caller falls back appropriately.
+        (LM Studio defaults to http://localhost:1234,
+         Ollama defaults to http://localhost:11434)
     """
     import urllib.request, urllib.error, json
 
     if not cfg.get("enabled"):
         return None
 
-    # Reasoning models on consumer GPUs can take 30-60+ seconds. Auto-promote
-    # any timeout below 30 to 90 (users who explicitly picked 30/60 keep their value).
-    if timeout is None:
-        raw_timeout = int(cfg.get("timeout_seconds", 90))
-        timeout = 90 if raw_timeout < 30 else raw_timeout
+    # Diff size guard — skip LLM for trivial commits
+    diff = _pending_diff(repo_path)
+    if not diff:
+        return None
+    diff_lines = diff.count("\n")
+    if diff_lines < int(cfg.get("min_diff_lines", 30)):
+        return None
 
-    provider    = (cfg.get("provider") or "anthropic").lower()
-    model       = cfg.get("model") or ""
-    base_url    = (cfg.get("base_url") or "").rstrip("/")
+    max_chars = int(cfg.get("max_diff_chars", 8000))
+    timeout   = int(cfg.get("timeout_seconds", 12))
+    recent    = _recent_commit_subjects(repo_path, n=5)
+    system, user = _build_llm_prompt(diff, recent, max_chars)
+
+    provider = (cfg.get("provider") or "anthropic").lower()
+    model    = cfg.get("model") or ""
+    base_url = (cfg.get("base_url") or "").rstrip("/")
     api_key_env = cfg.get("api_key_env") or ""
-    api_key     = os.environ.get(api_key_env, "") if api_key_env else ""
-
-    # "ollama" is a friendly alias — falls through to OpenAI-compatible with
-    # the default Ollama base URL if none was set. Saves the user from
-    # remembering the port.
-    if provider == "ollama":
-        provider = "openai_compatible"
-        if not base_url:
-            base_url = "http://localhost:11434"
+    api_key = os.environ.get(api_key_env, "") if api_key_env else ""
 
     try:
         if provider == "anthropic":
             if not api_key:
                 return None
+            url = "https://api.anthropic.com/v1/messages"
             payload = {
                 "model": model or "claude-haiku-4-5",
-                "max_tokens": max_tokens,
-                "system": system_prompt,
-                "messages": [{"role": "user", "content": user_prompt}],
+                "max_tokens": 400,
+                "system": system,
+                "messages": [{"role": "user", "content": user}],
             }
             req = urllib.request.Request(
-                "https://api.anthropic.com/v1/messages",
-                method="POST",
+                url, method="POST",
                 data=json.dumps(payload).encode("utf-8"),
                 headers={
                     "Content-Type": "application/json",
@@ -1706,10 +1580,10 @@ def _call_llm(cfg: dict, system_prompt: str, user_prompt: str,
             payload = {
                 "model": model or "gpt-4o-mini",
                 "messages": [
-                    {"role": "system", "content": system_prompt},
-                    {"role": "user", "content": user_prompt},
+                    {"role": "system", "content": system},
+                    {"role": "user", "content": user},
                 ],
-                "max_tokens": max_tokens,
+                "max_tokens": 400,
                 "temperature": 0.3,
             }
             headers = {"Content-Type": "application/json"}
@@ -1734,28 +1608,6 @@ def _call_llm(cfg: dict, system_prompt: str, user_prompt: str,
         return None
 
     return None
-
-
-def _call_llm_for_commit_message(cfg: dict, repo_path: str) -> str | None:
-    """Commit-message-specific LLM wrapper. Composes the prompt and calls _call_llm.
-
-    Skipped when the diff is shorter than `min_diff_lines` — trivial commits
-    don't justify an LLM call when the heuristic chain handles them fine.
-    """
-    if not cfg.get("enabled"):
-        return None
-
-    diff = _pending_diff(repo_path)
-    if not diff:
-        return None
-    diff_lines = diff.count("\n")
-    if diff_lines < int(cfg.get("min_diff_lines", 30)):
-        return None
-
-    max_chars = int(cfg.get("max_diff_chars", 24000))
-    recent    = _recent_commit_subjects(repo_path, n=5)
-    system, user = _build_llm_prompt(diff, recent, max_chars)
-    return _call_llm(cfg, system, user, max_tokens=1500)
 
 
 def _suggest_from_filenames(status_text: str) -> str:
@@ -2226,233 +2078,65 @@ log = _setup_logger()
 # ── Prompt snippets ────────────────────────────────────────────────────────────
 
 PROMPT_SNIPPETS = [
-    # ─────────────────────────── 🧭 EXPLORATION ───────────────────────────
     (
-        "🧭  Codebase overview",
-        "Give me a structural overview of this project using tokensave_context "
-        "with the question 'overall architecture'. Then list the top-level "
-        "modules with tokensave_files and run tokensave_outline on the entry "
-        "point file. Summarise: what the project does, the main components, "
-        "and the entry point flow."
+        "Codebase overview",
+        "Give me a high-level overview of this project using tokensave_context. "
+        "What are the main components, how do they relate, and what is the entry point?"
     ),
     (
-        "🧭  Find a symbol",
+        "Find a symbol",
         "Use tokensave_search to find [symbol name]. Then use tokensave_context "
-        "to explain what it does. Show its callers (tokensave_callers), what "
-        "it calls (tokensave_callees), and where its fields are accessed if "
-        "it's a class (tokensave_field_sites)."
+        "to explain what it does, what it calls, and what calls it."
     ),
     (
-        "🧭  Understand a feature",
-        "I want to understand how [feature/concept] works. Use tokensave_context "
-        "to identify the relevant symbols, then read each one with tokensave_node "
-        "and trace the data flow. Cite file:line for every claim. End with a "
-        "one-paragraph summary of the feature's lifecycle."
+        "What calls this function?",
+        "Use tokensave_callers to find everything that calls [function name]. "
+        "Show me the full call chain."
     ),
     (
-        "🧭  Onboarding tour",
-        "Pretend I just joined this project and have 15 minutes. Use "
-        "tokensave_outline on the main entry file, tokensave_module_api on the "
-        "top 3 modules from tokensave_largest, and tokensave_files to list the "
-        "directory layout. Produce a guided 5-step tour with file:line jumps."
+        "Impact of changing X",
+        "Use tokensave_impact to analyze what would be affected if I modify "
+        "[function or class name]. Show me the full impact chain."
     ),
     (
-        "🧭  Module public API",
-        "Use tokensave_module_api on [module or file name]. List its exports, "
-        "their signatures (tokensave_signature for each), and how they're meant "
-        "to be used (search for example call sites with tokensave_callers)."
-    ),
-
-    # ─────────────────────────── 🔬 ANALYSIS / TRACING ────────────────────
-    (
-        "🔬  Who calls this? Who does it call?",
-        "Bidirectional call chain for [function name]: tokensave_callers shows "
-        "what depends on it, tokensave_callees shows what it depends on. "
-        "Render as a two-column tree with file:line on each node."
+        "Code health check",
+        "Run tokensave_health, tokensave_complexity, and tokensave_god_class. "
+        "Give me a health report — flag god classes, high complexity, and circular dependencies."
     ),
     (
-        "🔬  Impact of changing X",
-        "Run tokensave_impact on [function or class name]. Show me the full "
-        "downstream impact chain. Then run tokensave_affected on the same "
-        "symbol to see which tests would need re-running. Flag any high-risk "
-        "ripples (cross-module, public API, etc.)."
+        "Find dead code",
+        "Use tokensave_dead_code and tokensave_unused_imports to find any "
+        "unused code or imports in this project. List them with file locations."
     ),
     (
-        "🔬  Trace a bug",
-        "Bug symptom: [describe]. Workflow: (1) tokensave_search for the "
-        "symbol you suspect, (2) tokensave_callers to see entry points, "
-        "(3) tokensave_callees to see what it depends on, (4) tokensave_node "
-        "to read the actual source, (5) tokensave_diagnose if you find "
-        "anything anomalous. Walk me through your reasoning."
+        "List all TODOs",
+        "Use tokensave_todos to list all TODO and FIXME comments in this project. "
+        "Group them by file."
     ),
     (
-        "🔬  Find similar code",
-        "Use tokensave_similar on [function/class name] OR tokensave_signature_search "
-        "for the signature pattern to find duplicates or near-duplicates. Group "
-        "results by likely-extract-into-helper candidates."
-    ),
-
-    # ─────────────────────────── 📊 AUDITS ────────────────────────────────
-    (
-        "📊  Full health audit",
-        "Run a comprehensive code health audit using ALL of these tokensave "
-        "tools and produce one structured report:\n"
-        "  • tokensave_health          (overall metrics)\n"
-        "  • tokensave_complexity      (high-complexity functions)\n"
-        "  • tokensave_god_class       (god classes / large files)\n"
-        "  • tokensave_circular        (circular dependencies)\n"
-        "  • tokensave_coupling        (high-coupling modules)\n"
-        "  • tokensave_dead_code       (unused code)\n"
-        "  • tokensave_unused_imports  (unused imports)\n"
-        "  • tokensave_hotspots        (high-churn files)\n"
-        "  • tokensave_recursion       (recursive call sites)\n"
-        "  • tokensave_unsafe_patterns (risky patterns)\n"
-        "Format: 🔴 Critical / 🟡 Warning / 🔵 Info, each with file:line and "
-        "a one-sentence suggested fix. End with a top-5 priority list."
+        "Generate changelog",
+        "Use tokensave_changelog to generate a changelog based on recent commits. "
+        "Format it as a proper CHANGELOG.md entry."
     ),
     (
-        "📊  Architecture report",
-        "Produce an architecture report for this project:\n"
-        "  • tokensave_dsm              (dependency structure matrix)\n"
-        "  • tokensave_dependency_depth (per-module)\n"
-        "  • tokensave_inheritance_depth (per-class)\n"
-        "  • tokensave_coupling          (high-coupling pairs)\n"
-        "  • tokensave_module_api        (each top-level module)\n"
-        "Format as a markdown ARCHITECTURE.md draft with sections: Module "
-        "Map, Dependency Layers, Public APIs, Hot Spots. Cite file:line."
+        "Module public API",
+        "Use tokensave_module_api to show me the public API of [module or file name]. "
+        "What does it export and how is it meant to be used?"
     ),
     (
-        "📊  Test coverage audit",
-        "Use tokensave_test_map to map tests to the code they cover. Use "
-        "tokensave_test_risk to rank tests by risk. Use tokensave_doc_coverage "
-        "for inline documentation gaps. Produce a 'Test & Docs Gap Report': "
-        "which public symbols have no tests, which have low-risk tests, "
-        "which lack docstrings. Cite file:line for each gap."
+        "Circular dependencies",
+        "Use tokensave_circular to find any circular dependencies in this project. "
+        "Explain how each one could be resolved."
     ),
     (
-        "📊  Security / unsafe-patterns scan",
-        "Run tokensave_unsafe_patterns and tokensave_recursion across the "
-        "whole project. Also run tokensave_diagnostics for general issues. "
-        "Categorise findings: input validation, error handling, resource "
-        "leaks, recursion depth, unsafe stdlib calls. Cite file:line and "
-        "rate severity 🔴/🟡/🔵 each."
+        "Largest / most complex files",
+        "Use tokensave_largest and tokensave_complexity to find the biggest and most "
+        "complex files. Which ones are the best candidates for refactoring?"
     ),
     (
-        "📊  Hotspot risk scan",
-        "Cross-reference tokensave_hotspots (high-churn files) with "
-        "tokensave_complexity (high-complexity functions) and "
-        "tokensave_coupling (high-coupling modules). Files high on multiple "
-        "axes are most bug-prone. Output a ranked 'Risk Heatmap' table with "
-        "the top 10 entries, churn / complexity / coupling scores, and a "
-        "one-line refactor suggestion each."
-    ),
-    (
-        "📊  Pre-release readiness check",
-        "Check whether this project is ready to release:\n"
-        "  • tokensave_diff_context     (recent changes summary)\n"
-        "  • tokensave_changelog        (CHANGELOG draft from commits)\n"
-        "  • tokensave_health           (overall metrics)\n"
-        "  • tokensave_dead_code        (cruft that shouldn't ship)\n"
-        "  • tokensave_unused_imports   (cruft that shouldn't ship)\n"
-        "  • tokensave_circular         (architectural debt)\n"
-        "  • tokensave_doc_coverage     (undocumented public API)\n"
-        "Output a 'Release Readiness Checklist' with ✅/⚠/❌ per item. "
-        "End with: 'Safe to release: yes/no, blockers:'."
-    ),
-    (
-        "📊  Documentation coverage report",
-        "Use tokensave_doc_coverage to find every public symbol without "
-        "a docstring. Use tokensave_module_api to identify which of those "
-        "are PART of a public module API (vs. internal helpers — those can "
-        "be skipped). Output a prioritised 'Docstrings to add' list grouped "
-        "by module, with the symbol's signature for context."
-    ),
-
-    # ─────────────────────────── 🪦 FINDINGS / CLEANUP ────────────────────
-    (
-        "🪦  Find dead code",
-        "Use tokensave_dead_code and tokensave_unused_imports. List findings "
-        "with file:line. For each, run tokensave_callers to double-check "
-        "(some 'dead' code is actually called via reflection / dynamic "
-        "dispatch and the index can miss it). Output: 'Safe to delete' vs "
-        "'Verify before deleting' groups."
-    ),
-    (
-        "🪦  List all TODOs / FIXMEs",
-        "Use tokensave_todos to list every TODO/FIXME/HACK/XXX comment. "
-        "Group by file, then by age (use git_log on the file to estimate "
-        "when each was added). Flag any older than 6 months as stale."
-    ),
-    (
-        "🪦  Circular dependencies",
-        "Use tokensave_circular to find cycles. For each cycle, use "
-        "tokensave_coupling on the involved modules to understand the "
-        "binding strength. Propose a fix for each — typically: extract "
-        "a third module, invert a dependency, or move a function."
-    ),
-    (
-        "🪦  Largest / most complex files",
-        "Cross-reference tokensave_largest (by LOC) with tokensave_complexity "
-        "(by cyclomatic complexity) with tokensave_god_class (by method "
-        "count). The intersection of all three is your top refactor "
-        "priority. Output a ranked table with all three scores."
-    ),
-
-    # ─────────────────────────── 🛠 WORKFLOWS ─────────────────────────────
-    (
-        "🛠  Pre-commit checklist",
-        "I'm about to commit. Run:\n"
-        "  • tokensave_diff_context     (what's actually changed)\n"
-        "  • tokensave_affected         (which tests would be affected)\n"
-        "  • tokensave_impact           (downstream impact of changed symbols)\n"
-        "  • tokensave_run_affected_tests (run only relevant tests)\n"
-        "Then review the diff for: missing tests, missing docstrings, "
-        "TODOs that should be resolved, secrets/keys. Output: 'Ready to "
-        "commit: yes/no, issues:'."
-    ),
-    (
-        "🛠  PR review prep",
-        "I want to open a PR. Run tokensave_pr_context for context, "
-        "tokensave_diff_context for the per-file diffs, tokensave_impact "
-        "on the most-changed symbols, and tokensave_affected for test "
-        "coverage. Draft a PR description with: Summary (2-3 sentences), "
-        "Changes (bulleted by file), Testing (what was run), and Review "
-        "Questions (what should a reviewer pay attention to)."
-    ),
-    (
-        "🛠  Plan a refactor",
-        "I want to refactor [target]. Workflow:\n"
-        "  1. tokensave_coupling on the target to see what it's bound to\n"
-        "  2. tokensave_dependency_depth to understand its position in the layer cake\n"
-        "  3. tokensave_callers + tokensave_callees to map the blast radius\n"
-        "  4. tokensave_rename_preview if any renames are involved\n"
-        "  5. tokensave_test_map to see what tests cover it\n"
-        "Output a step-by-step refactor plan with file:line for each step "
-        "and the order to do them in (least-coupled first)."
-    ),
-    (
-        "🛠  Refactor rename preview",
-        "Use tokensave_rename_preview for [old name] → [new name]. List "
-        "every affected file and line. Then use tokensave_callers to "
-        "double-check that all callers are in the rename set (vs. e.g. "
-        "string-based dynamic calls that the rename would miss)."
-    ),
-    (
-        "🛠  Generate CHANGELOG entry",
-        "Use tokensave_changelog to draft a CHANGELOG entry from recent "
-        "commits. Group by ### Added / ### Changed / ### Fixed / ### Removed "
-        "per Keep-a-Changelog format. Use the manager's existing CHANGELOG "
-        "style as a tone reference (bolded lead-in followed by em-dash and "
-        "prose description)."
-    ),
-    (
-        "🛠  Generate ARCHITECTURE.md draft",
-        "Produce a docs/ARCHITECTURE.md draft for this project. Use "
-        "tokensave_outline on the main module(s), tokensave_module_api on "
-        "each top-level module, tokensave_dependency_depth to identify "
-        "layering, and tokensave_dsm to render module-pair dependencies. "
-        "Format: Overview → Layer Diagram → Module Reference Table → "
-        "Module Detail Sections. Cite file:line throughout."
+        "Refactor rename preview",
+        "Use tokensave_rename_preview to show what would change if I rename "
+        "[old name] to [new name]. List every affected file and line."
     ),
 ]
 
@@ -5062,7 +4746,6 @@ class App(tk.Tk):
         m.add_separator()
         m.add_command(label="📜  Git Log",        command=self.cmd_git_log)
         m.add_command(label="📝  Git Commit…",        command=self.cmd_git_commit)
-        m.add_command(label="🔍  AI Code Review…",    command=self.cmd_ai_code_review)
         m.add_command(label="🔧  Git Init",           command=self.cmd_git_init)
         m.add_command(label="📋  Manage .gitignore…",      command=self.cmd_manage_gitignore)
         m.add_command(label="🧹  Untrack Ignored Files…",  command=self.cmd_untrack_ignored)
@@ -5390,32 +5073,9 @@ class App(tk.Tk):
                 )
                 self._current_proc = proc
                 log.debug(f"     pid={proc.pid}")
-                # Suppress tokensave's misleading "legacy .codegraph/" warning
-                # when CodeGraph is actually an active alternate index in this
-                # project — manager treats tokensave and CodeGraph as equal
-                # citizens; following tokensave's "safely deleted" advice would
-                # wipe the user's CodeGraph index. The warning is only correct
-                # for genuinely orphaned .codegraph/ folders (no codegraph.db).
-                codegraph_active = os.path.isfile(
-                    os.path.join(cwd, ".codegraph", "codegraph.db"))
-                _suppressed_codegraph_warning = False
                 for line in proc.stdout:
                     stripped = _ANSI.sub("", line).rstrip()
                     if not stripped:
-                        continue
-                    if (codegraph_active
-                            and "legacy .codegraph" in stripped
-                            and "safely deleted" in stripped):
-                        # Drop silently, but log once that we did so. The
-                        # info-bar message lets the user know we filtered
-                        # — never silent fakery without trace.
-                        if not _suppressed_codegraph_warning:
-                            self._log(
-                                "  (suppressed tokensave's '.codegraph/ legacy' "
-                                "warning — CodeGraph is active in this project)",
-                                C["overlay0"])
-                            _suppressed_codegraph_warning = True
-                        log.debug(f"  SUPPRESSED {stripped}")
                         continue
                     self._log(stripped)
                     log.debug(f"  OUT {stripped}")
@@ -5903,34 +5563,6 @@ class App(tk.Tk):
         if not path:
             return
         self._open_commit_dialog(path)
-
-    def cmd_ai_code_review(self):
-        """Open the AI Code Review dialog for the selected project.
-
-        Stage 1 of the agentic-AI roadmap (see docs/ROADMAP.md). Shows the
-        pending diff alongside an AI-generated structured review. Pure
-        read-only — no tools, no autonomy, just a one-shot LLM call.
-        Requires the LLM to be enabled in Settings → "AI commit messages".
-        """
-        path = self._git_path or self._selected_path()
-        if not path:
-            return
-        if not _is_local_git_repo(path):
-            messagebox.showinfo(
-                "Not a git repo",
-                f"{os.path.basename(path)} doesn't have a .git folder, "
-                "so there's no pending diff to review.",
-                parent=self)
-            return
-        llm_cfg = _cfg.get("commit_message_llm") or {}
-        if not llm_cfg.get("enabled"):
-            messagebox.showinfo(
-                "AI is not enabled",
-                "Open Settings → 'AI commit messages' and enable AI to use "
-                "this feature.",
-                parent=self)
-            return
-        AICodeReviewDialog(self, path, llm_cfg)
 
     def _open_commit_dialog(self, path: str):
         """Open GitCommitDialog for a given project path. Reused by
@@ -6830,61 +6462,26 @@ class SettingsDialog(tk.Toplevel):
         super().__init__(parent)
         self.title("Settings")
         self.configure(bg=C["base"])
-        self.resizable(True, True)
-        self.minsize(640, 500)
-        # Initial geometry — leave room for taskbar on 1080p displays
-        self.geometry("760x700")
+        self.resizable(False, False)
         self.grab_set()
         self.transient(parent)
         self._cfg = cfg
         self._save_fn = save_fn
         self._callback = callback
 
-        # ── Scrollable content area ───────────────────────────────────
-        # The dialog has many sections; on smaller displays the AI
-        # commit-messages section was getting pushed below the visible
-        # area with no way to reach it. Wrap content in a Canvas+Frame
-        # so the dialog scrolls when its natural height exceeds the
-        # window height. Save/Cancel buttons stay anchored at the
-        # bottom (packed on `self`, NOT on the scrollable body).
-        _scroll_wrap = tk.Frame(self, bg=C["base"])
-        _scroll_wrap.pack(side=tk.TOP, fill=tk.BOTH, expand=True)
-        _canvas = tk.Canvas(_scroll_wrap, bg=C["base"],
-                            highlightthickness=0, bd=0)
-        _vsb = ttk.Scrollbar(_scroll_wrap, orient="vertical",
-                             command=_canvas.yview)
-        _canvas.configure(yscrollcommand=_vsb.set)
-        _vsb.pack(side=tk.RIGHT, fill=tk.Y)
-        _canvas.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
-        body = tk.Frame(_canvas, bg=C["base"])
-        _body_window = _canvas.create_window((0, 0), window=body, anchor="nw")
-        def _on_body_configure(event):
-            _canvas.configure(scrollregion=_canvas.bbox("all"))
-        def _on_canvas_configure(event):
-            # Resize the embedded frame to match the canvas viewport width
-            _canvas.itemconfigure(_body_window, width=event.width)
-        body.bind("<Configure>", _on_body_configure)
-        _canvas.bind("<Configure>", _on_canvas_configure)
-        # Mousewheel scrolling — bind on the canvas, also forward from body
-        def _on_mousewheel(event):
-            _canvas.yview_scroll(int(-1 * (event.delta / 120)), "units")
-        _canvas.bind("<MouseWheel>", _on_mousewheel)
-        body.bind("<MouseWheel>", _on_mousewheel)
-
-
         pad = dict(padx=20, pady=4)
 
         if startup_note:
-            tk.Label(body, text=startup_note,
+            tk.Label(self, text=startup_note,
                      bg=C["red"], fg=C["mantle"],
                      font=("Segoe UI", 9, "bold"),
                      justify=tk.LEFT, padx=14, pady=8,
                      wraplength=440).pack(fill=tk.X, pady=(0, 4))
 
         def field_row(label, key, is_file=False, is_dir=False, note=""):
-            tk.Label(body, text=label, bg=C["base"], fg=C["subtext"],
+            tk.Label(self, text=label, bg=C["base"], fg=C["subtext"],
                      font=("Segoe UI", 9)).pack(anchor=tk.W, padx=20, pady=(10, 0))
-            row = tk.Frame(body, bg=C["base"])
+            row = tk.Frame(self, bg=C["base"])
             row.pack(fill=tk.X, padx=20, pady=(2, 0))
             var = tk.StringVar(value=cfg.get(key, ""))
             entry = ttk.Entry(row, textvariable=var, width=52)
@@ -6916,11 +6513,11 @@ class SettingsDialog(tk.Toplevel):
             "editor_cmd", note="(flags supported)")
 
         # ── Git executable ──
-        ttk.Separator(body, orient="horizontal").pack(fill=tk.X, padx=20, pady=(12, 8))
-        tk.Label(body, text="Git executable  —  path to git.exe",
+        ttk.Separator(self, orient="horizontal").pack(fill=tk.X, padx=20, pady=(12, 8))
+        tk.Label(self, text="Git executable  —  path to git.exe",
                  bg=C["base"], fg=C["subtext"],
                  font=("Segoe UI", 9)).pack(anchor=tk.W, padx=20, pady=(0, 0))
-        git_row = tk.Frame(body, bg=C["base"])
+        git_row = tk.Frame(self, bg=C["base"])
         git_row.pack(fill=tk.X, padx=20, pady=(4, 0))
         self._git_exe_var = tk.StringVar(value=cfg.get("git_exe", ""))
         git_entry = ttk.Entry(git_row, textvariable=self._git_exe_var, width=44)
@@ -6943,7 +6540,7 @@ class SettingsDialog(tk.Toplevel):
         self._git_status_lbl = tk.Label(git_row, text="", bg=C["base"],
                                         font=("Segoe UI", 8), fg=C["overlay0"])
         self._git_status_lbl.pack(side=tk.LEFT, padx=(6, 0))
-        tk.Label(body,
+        tk.Label(self,
                  text="  Leave blank to auto-detect from PATH or common install locations.",
                  font=("Segoe UI", 8), bg=C["base"], fg=C["overlay0"]).pack(
                  anchor=tk.W, padx=20, pady=(2, 0))
@@ -6951,11 +6548,11 @@ class SettingsDialog(tk.Toplevel):
         self.after(100, lambda: self._verify_git(cfg.get("git_exe") or GIT_EXE))
 
         # ── GitHub CLI (gh) ──
-        ttk.Separator(body, orient="horizontal").pack(fill=tk.X, padx=20, pady=(12, 8))
-        tk.Label(body, text="GitHub CLI (gh)  —  enables 'Open PR on GitHub' and release creation",
+        ttk.Separator(self, orient="horizontal").pack(fill=tk.X, padx=20, pady=(12, 8))
+        tk.Label(self, text="GitHub CLI (gh)  —  enables 'Open PR on GitHub' and release creation",
                  bg=C["base"], fg=C["subtext"],
                  font=("Segoe UI", 9)).pack(anchor=tk.W, padx=20)
-        gh_row = tk.Frame(body, bg=C["base"])
+        gh_row = tk.Frame(self, bg=C["base"])
         gh_row.pack(fill=tk.X, padx=20, pady=(4, 0))
         self._gh_status_lbl = tk.Label(gh_row, text="Checking…",
                                        bg=C["base"], fg=C["overlay0"],
@@ -7005,15 +6602,15 @@ class SettingsDialog(tk.Toplevel):
         self._gh_install_btn.pack(side=tk.LEFT, padx=(0, 6))
         ttk.Button(gh_row, text="Check again",
                    command=_check_gh_status).pack(side=tk.LEFT)
-        tk.Label(body,
+        tk.Label(self,
                  text="  Once installed, use the Git tab's '🔗 Open PR' button to create pull requests on GitHub.",
                  font=("Segoe UI", 8), bg=C["base"], fg=C["overlay0"]).pack(
                  anchor=tk.W, padx=20, pady=(2, 0))
         self.after(150, _check_gh_status)
 
         # ── CodeGraph (alternative code-graph tool) ──
-        ttk.Separator(body, orient="horizontal").pack(fill=tk.X, padx=20, pady=(12, 8))
-        self._cg_section = tk.Frame(body, bg=C["base"])
+        ttk.Separator(self, orient="horizontal").pack(fill=tk.X, padx=20, pady=(12, 8))
+        self._cg_section = tk.Frame(self, bg=C["base"])
         self._cg_section.pack(fill=tk.X)
         tk.Label(self._cg_section,
                  text="CodeGraph (codegraph)  —  optional alternative code-graph tool",
@@ -7171,12 +6768,12 @@ class SettingsDialog(tk.Toplevel):
         self.after(200, _check_cg_status)
 
         # ── Search roots — two-column Treeview (label + path) ──
-        tk.Label(body,
+        tk.Label(self,
                  text="Search roots  —  each root's label becomes a category in the project list",
                  bg=C["base"], fg=C["subtext"],
                  font=("Segoe UI", 9)).pack(anchor=tk.W, padx=20, pady=(12, 0))
 
-        roots_frame = tk.Frame(body, bg=C["base"])
+        roots_frame = tk.Frame(self, bg=C["base"])
         roots_frame.pack(fill=tk.X, padx=20, pady=(4, 0))
 
         tv_wrap = tk.Frame(roots_frame, bg=C["mantle"])
@@ -7215,31 +6812,31 @@ class SettingsDialog(tk.Toplevel):
                    command=self._remove_root).pack(fill=tk.X)
 
         # ── Auto-commit toggle ──
-        ttk.Separator(body, orient="horizontal").pack(fill=tk.X, padx=20, pady=(12, 8))
+        ttk.Separator(self, orient="horizontal").pack(fill=tk.X, padx=20, pady=(12, 8))
 
         self._var_autocommit = tk.BooleanVar(value=bool(cfg.get("auto_commit_after_sync", False)))
-        tk.Checkbutton(body,
+        tk.Checkbutton(self,
             text="Auto-commit after sync  (git add -A + git commit)",
             variable=self._var_autocommit,
             bg=C["base"], fg=C["text"], selectcolor=C["surface0"],
             activebackground=C["base"], activeforeground=C["text"],
             font=("Segoe UI", 10)).pack(anchor=tk.W, padx=20, pady=(0, 2))
-        tk.Label(body,
+        tk.Label(self,
             text="  Only fires when the project is a git repo and the working tree has changes.\n"
                  "  Commit message: \"chore: tokensave sync\"  (or AI-generated if enabled below)",
             font=("Segoe UI", 8), bg=C["base"], fg=C["overlay0"],
             justify=tk.LEFT).pack(anchor=tk.W, padx=36, pady=(0, 8))
 
         # ── AI commit messages ──────────────────────────────────────────────
-        ttk.Separator(body, orient="horizontal").pack(fill=tk.X, padx=20, pady=(8, 8))
+        ttk.Separator(self, orient="horizontal").pack(fill=tk.X, padx=20, pady=(8, 8))
 
-        tk.Label(body, text="AI commit messages",
+        tk.Label(self, text="AI commit messages",
                  font=("Segoe UI", 10, "bold"),
                  bg=C["base"], fg=C["text"]).pack(anchor=tk.W, padx=20, pady=(0, 2))
 
         llm_cfg = (cfg.get("commit_message_llm") or {})
         self._var_llm_enabled = tk.BooleanVar(value=bool(llm_cfg.get("enabled", False)))
-        tk.Checkbutton(body,
+        tk.Checkbutton(self,
             text="Use AI to generate commit message suggestions",
             variable=self._var_llm_enabled,
             bg=C["base"], fg=C["text"], selectcolor=C["surface0"],
@@ -7247,7 +6844,7 @@ class SettingsDialog(tk.Toplevel):
             font=("Segoe UI", 10)).pack(anchor=tk.W, padx=20, pady=(0, 4))
 
         # Provider + model + key + base URL grid
-        llm_grid = tk.Frame(body, bg=C["base"])
+        llm_grid = tk.Frame(self, bg=C["base"])
         llm_grid.pack(fill=tk.X, padx=36, pady=(0, 6))
 
         def _row(parent, label_txt, widget):
@@ -7263,7 +6860,7 @@ class SettingsDialog(tk.Toplevel):
             value=llm_cfg.get("provider", "anthropic"))
         provider_box = ttk.Combobox(llm_grid,
             textvariable=self._var_llm_provider,
-            values=["ollama", "anthropic", "openai", "openai_compatible"],
+            values=["anthropic", "openai", "openai_compatible"],
             state="readonly", width=22)
         _row(llm_grid, "Provider:", provider_box)
 
@@ -7283,94 +6880,29 @@ class SettingsDialog(tk.Toplevel):
         _row(llm_grid, "Base URL:", base_entry)
 
         # Preset buttons for local OpenAI-compatible servers
-        preset_row = tk.Frame(body, bg=C["base"])
+        preset_row = tk.Frame(self, bg=C["base"])
         preset_row.pack(anchor=tk.W, padx=36, pady=(0, 4))
         tk.Label(preset_row, text="Quick presets:",
                  font=("Segoe UI", 9), bg=C["base"],
                  fg=C["subtext"]).pack(side=tk.LEFT, padx=(0, 8))
 
-        def _probe_loaded_model(base_url: str) -> str:
-            """Hit /v1/models on an OpenAI-compatible server and return the first
-            chat-tuned model id. Returns "" on any failure (server down, no models
-            loaded, network error). Skips embedding models which can't generate text.
-            """
-            import urllib.request, urllib.error, json as _json
-            try:
-                req = urllib.request.Request(base_url.rstrip("/") + "/v1/models")
-                with urllib.request.urlopen(req, timeout=2) as resp:
-                    data = _json.loads(resp.read().decode("utf-8"))
-            except (urllib.error.URLError, urllib.error.HTTPError,
-                    TimeoutError, OSError, _json.JSONDecodeError):
-                return ""
-            models = data.get("data", []) or []
-            # Filter out embedding-only models (they can't do chat completion)
-            for m in models:
-                mid = m.get("id", "")
-                if not mid:
-                    continue
-                lid = mid.lower()
-                if "embed" in lid or "rerank" in lid or "whisper" in lid:
-                    continue
-                return mid
-            return ""
-
         def _apply_lm_studio():
             self._var_llm_provider.set("openai_compatible")
-            base = "http://localhost:1234"
-            self._var_llm_base_url.set(base)
+            self._var_llm_base_url.set("http://localhost:1234")
             self._var_llm_keyenv.set("")
-            # Auto-detect the first loaded chat model from LM Studio's /v1/models.
-            # If the server isn't running OR no models are loaded, leave the
-            # field alone and surface a hint to the user.
-            detected = _probe_loaded_model(base)
-            if detected:
-                self._var_llm_model.set(detected)
-                self._llm_preset_hint.configure(
-                    text=f"✓  Using loaded model: {detected}",
-                    fg=C["green"])
-            else:
-                self._llm_preset_hint.configure(
-                    text="⚠  LM Studio server not reachable at "
-                         "http://localhost:1234 — start the Local Server in "
-                         "LM Studio's '</>' panel and load a model, then click "
-                         "this preset again.",
-                    fg=C["peach"])
-
+            # leave model alone — user picks whatever's loaded in LM Studio
         def _apply_ollama():
-            # Use "ollama" as a first-class provider name; the _call_llm
-            # function falls through to OpenAI-compatible dispatch with the
-            # default Ollama base URL.
-            self._var_llm_provider.set("ollama")
-            base = "http://localhost:11434"
-            self._var_llm_base_url.set(base)
+            self._var_llm_provider.set("openai_compatible")
+            self._var_llm_base_url.set("http://localhost:11434")
             self._var_llm_keyenv.set("")
-            detected = _probe_loaded_model(base)
-            if detected:
-                self._var_llm_model.set(detected)
-                self._llm_preset_hint.configure(
-                    text=f"✓  Using Ollama model: {detected}", fg=C["green"])
-            else:
-                if (not self._var_llm_model.get()
-                        or "claude" in self._var_llm_model.get()):
-                    self._var_llm_model.set("qwen2.5-coder:14b")
-                self._llm_preset_hint.configure(
-                    text="⚠  Ollama not reachable at http://localhost:11434 — "
-                         "make sure the Ollama service is running and run "
-                         "`ollama pull qwen2.5-coder:14b` (or any chat model), "
-                         "then click this preset again.",
-                    fg=C["peach"])
-
+            if not self._var_llm_model.get() or "claude" in self._var_llm_model.get():
+                self._var_llm_model.set("llama3.2")
         def _apply_anthropic():
             self._var_llm_provider.set("anthropic")
             self._var_llm_base_url.set("")
             self._var_llm_keyenv.set("ANTHROPIC_API_KEY")
             if not self._var_llm_model.get() or "/" in self._var_llm_model.get():
                 self._var_llm_model.set("claude-haiku-4-5")
-            self._llm_preset_hint.configure(
-                text="ℹ  Set the ANTHROPIC_API_KEY environment variable (get a "
-                     "key at console.anthropic.com).  Haiku is cheapest "
-                     "(~$0.0005/commit); Sonnet/Opus are higher-fidelity.",
-                fg=C["blue"])
         ttk.Button(preset_row, text="Anthropic",
                    command=_apply_anthropic).pack(side=tk.LEFT, padx=(0, 4))
         ttk.Button(preset_row, text="LM Studio",
@@ -7378,17 +6910,8 @@ class SettingsDialog(tk.Toplevel):
         ttk.Button(preset_row, text="Ollama",
                    command=_apply_ollama).pack(side=tk.LEFT)
 
-        # Preset feedback line — shows what the preset did (auto-detected model,
-        # server-not-reachable warning, API-key hint, etc.). Stays blank until
-        # the user clicks a preset.
-        self._llm_preset_hint = tk.Label(
-            body, text="", font=("Segoe UI", 8),
-            bg=C["base"], fg=C["overlay0"],
-            justify=tk.LEFT, wraplength=620, anchor=tk.W)
-        self._llm_preset_hint.pack(anchor=tk.W, padx=36, pady=(2, 0), fill=tk.X)
-
         # Min diff lines
-        min_row = tk.Frame(body, bg=C["base"])
+        min_row = tk.Frame(self, bg=C["base"])
         min_row.pack(anchor=tk.W, padx=36, pady=(2, 0))
         self._var_llm_min_diff = tk.StringVar(
             value=str(llm_cfg.get("min_diff_lines", 30)))
@@ -7400,7 +6923,7 @@ class SettingsDialog(tk.Toplevel):
 
         self._var_llm_for_sync = tk.BooleanVar(
             value=bool(llm_cfg.get("use_for_sync_autocommit", False)))
-        tk.Checkbutton(body,
+        tk.Checkbutton(self,
             text="Also use AI for sync auto-commit messages "
                  "(disables amend-stacking)",
             variable=self._var_llm_for_sync,
@@ -7408,7 +6931,7 @@ class SettingsDialog(tk.Toplevel):
             activebackground=C["base"], activeforeground=C["text"],
             font=("Segoe UI", 9)).pack(anchor=tk.W, padx=20, pady=(6, 2))
 
-        tk.Label(body,
+        tk.Label(self,
             text="  AI runs only when toggled ON. Silent fallback on any error\n"
                  "  (missing key, network failure, timeout). Anthropic Claude Haiku\n"
                  "  costs ~$0.0005 per commit.",
@@ -7542,8 +7065,8 @@ class SettingsDialog(tk.Toplevel):
             "use_for_sync_autocommit": self._var_llm_for_sync.get(),
         })
         # Fill in defaults that other helpers expect
-        existing_llm.setdefault("max_diff_chars", 24000)
-        existing_llm.setdefault("timeout_seconds", 90)
+        existing_llm.setdefault("max_diff_chars", 8000)
+        existing_llm.setdefault("timeout_seconds", 12)
         self._cfg["commit_message_llm"] = existing_llm
         self._cfg["git_exe"]       = self._git_exe_var.get().strip()
         self._cfg["codegraph_exe"] = self._cg_exe_var.get().strip()
@@ -9728,322 +9251,6 @@ class GitignoreDialog(tk.Toplevel):
         self._app._offer_commit_after_change(path, ".gitignore")
 
 
-class AICodeReviewDialog(tk.Toplevel):
-    """Stage 1 of the agentic-AI roadmap: AI Code Review on the pending diff.
-
-    Pure read-only. Calls _call_llm once with a "you are a code reviewer"
-    system prompt and the project's `git diff HEAD` output. Result is
-    displayed as Markdown-style structured text. No tool calls, no file
-    writes, no autonomy concerns — just a one-shot review.
-
-    Async pattern matches GitCommitDialog: daemon thread runs the LLM call,
-    spinner shows progress, self.after(0, ...) pushes the result back to
-    the main thread. Stop button aborts the in-flight request.
-    """
-
-    _SYSTEM_PROMPT = (
-        "You are a senior code reviewer reviewing a pending git diff. "
-        "Produce a structured Markdown report.\n\n"
-        "Output format:\n\n"
-        "## ⚠ High severity\n"
-        "- <finding> (file:line)\n\n"
-        "## ⚡ Medium severity\n"
-        "- <finding> (file:line)\n\n"
-        "## 💡 Low severity / nits\n"
-        "- <finding> (file:line)\n\n"
-        "## ℹ Observations\n"
-        "- <design note>\n\n"
-        "Rules:\n"
-        "- One bullet per finding. Cite file:line when possible.\n"
-        "- Omit a section entirely if it has nothing — don't write empty sections.\n"
-        "- Do NOT repeat the diff back at me.\n"
-        "- Focus on correctness, security, and maintainability — not formatting.\n"
-        "- Match the project's existing style (judge by surrounding context).\n"
-        "- Output ONLY the report. No preamble, no closing remarks."
-    )
-
-    def __init__(self, parent, path: str, llm_cfg: dict):
-        super().__init__(parent)
-        self.title(f"AI Code Review — {os.path.basename(path)}")
-        self.configure(bg=C["base"])
-        self.resizable(True, True)
-        self.minsize(700, 500)
-        self.geometry("900x720")
-        self.grab_set()
-        self.transient(parent)
-
-        self._path = path
-        self._llm_cfg = llm_cfg
-        self._review_token = 0
-        self._cancelled = False
-
-        # ── Header ───────────────────────────────────────────────────────
-        hdr = tk.Frame(self, bg=C["base"])
-        hdr.pack(fill=tk.X, padx=20, pady=(14, 6))
-        tk.Label(hdr, text="🔍  AI Code Review",
-                 font=("Segoe UI", 13, "bold"),
-                 bg=C["base"], fg=C["blue"]).pack(side=tk.LEFT)
-        tk.Label(hdr, text=os.path.basename(path),
-                 font=("Segoe UI", 10),
-                 bg=C["base"], fg=C["overlay0"]).pack(side=tk.LEFT, padx=(10, 0))
-
-        # Live status (spinner + provider/model info)
-        self._status_lbl = tk.Label(
-            self, text="", font=("Segoe UI", 9, "italic"),
-            bg=C["base"], fg=C["peach"],
-            justify=tk.LEFT, anchor=tk.W)
-        self._status_lbl.pack(fill=tk.X, padx=20, pady=(0, 6))
-
-        # ── Split: diff (top) + review output (bottom) ───────────────────
-        paned = tk.PanedWindow(self, orient=tk.VERTICAL, bg=C["base"],
-                                sashwidth=6, sashrelief=tk.FLAT)
-        paned.pack(fill=tk.BOTH, expand=True, padx=20, pady=(0, 8))
-
-        # Diff view
-        diff_frame = tk.LabelFrame(
-            paned, text=" Pending diff (git diff HEAD) ",
-            bg=C["base"], fg=C["subtext"],
-            font=("Segoe UI", 9), bd=1, relief=tk.FLAT)
-        diff_inner = tk.Frame(diff_frame, bg=C["mantle"])
-        diff_inner.pack(fill=tk.BOTH, expand=True, padx=2, pady=2)
-        self._diff_txt = tk.Text(
-            diff_inner, bg=C["mantle"], fg=C["text"],
-            relief=tk.FLAT, font=("Consolas", 9),
-            padx=8, pady=6, wrap=tk.NONE, height=14)
-        diff_vsb = ttk.Scrollbar(diff_inner, orient="vertical",
-                                  command=self._diff_txt.yview)
-        diff_hsb = ttk.Scrollbar(diff_inner, orient="horizontal",
-                                  command=self._diff_txt.xview)
-        self._diff_txt.configure(
-            yscrollcommand=diff_vsb.set, xscrollcommand=diff_hsb.set)
-        self._diff_txt.grid(row=0, column=0, sticky="nsew")
-        diff_vsb.grid(row=0, column=1, sticky="ns")
-        diff_hsb.grid(row=1, column=0, sticky="ew")
-        diff_inner.grid_rowconfigure(0, weight=1)
-        diff_inner.grid_columnconfigure(0, weight=1)
-        # Catppuccin Mocha-ish diff colours
-        self._diff_txt.tag_configure("add",      foreground="#a6e3a1")
-        self._diff_txt.tag_configure("del",      foreground="#f38ba8")
-        self._diff_txt.tag_configure("hunk",     foreground="#89b4fa")
-        self._diff_txt.tag_configure("filename", foreground="#cba6f7",
-                                      font=("Consolas", 9, "bold"))
-        paned.add(diff_frame, minsize=120, stretch="always")
-
-        # Review output
-        rev_frame = tk.LabelFrame(
-            paned, text=" AI review ",
-            bg=C["base"], fg=C["subtext"],
-            font=("Segoe UI", 9), bd=1, relief=tk.FLAT)
-        rev_inner = tk.Frame(rev_frame, bg=C["mantle"])
-        rev_inner.pack(fill=tk.BOTH, expand=True, padx=2, pady=2)
-        self._rev_txt = tk.Text(
-            rev_inner, bg=C["mantle"], fg=C["text"],
-            relief=tk.FLAT, font=("Segoe UI", 10),
-            padx=10, pady=8, wrap=tk.WORD, height=14)
-        rev_vsb = ttk.Scrollbar(rev_inner, orient="vertical",
-                                 command=self._rev_txt.yview)
-        self._rev_txt.configure(yscrollcommand=rev_vsb.set)
-        self._rev_txt.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
-        rev_vsb.pack(side=tk.RIGHT, fill=tk.Y)
-        # Section header colours for the markdown-ish review text
-        self._rev_txt.tag_configure(
-            "h_high",   foreground="#f38ba8",
-            font=("Segoe UI", 11, "bold"), spacing1=8, spacing3=2)
-        self._rev_txt.tag_configure(
-            "h_medium", foreground="#fab387",
-            font=("Segoe UI", 11, "bold"), spacing1=8, spacing3=2)
-        self._rev_txt.tag_configure(
-            "h_low",    foreground="#f9e2af",
-            font=("Segoe UI", 11, "bold"), spacing1=8, spacing3=2)
-        self._rev_txt.tag_configure(
-            "h_info",   foreground="#89b4fa",
-            font=("Segoe UI", 11, "bold"), spacing1=8, spacing3=2)
-        paned.add(rev_frame, minsize=150, stretch="always")
-
-        # ── Action buttons ──────────────────────────────────────────────
-        btn_row = tk.Frame(self, bg=C["base"])
-        btn_row.pack(fill=tk.X, padx=20, pady=(0, 14))
-        self._copy_btn = ttk.Button(
-            btn_row, text="Copy review to clipboard",
-            command=self._copy_review, state=tk.DISABLED)
-        self._copy_btn.pack(side=tk.LEFT, padx=(0, 6))
-        self._regen_btn = ttk.Button(
-            btn_row, text="Regenerate",
-            command=self._start_review, state=tk.DISABLED)
-        self._regen_btn.pack(side=tk.LEFT, padx=(0, 6))
-        self._stop_btn = ttk.Button(
-            btn_row, text="Stop", command=self._cancel)
-        self._stop_btn.pack(side=tk.LEFT, padx=(0, 6))
-        ttk.Button(btn_row, text="Close",
-                   command=self.destroy).pack(side=tk.RIGHT)
-
-        # ── Load diff & kick off review ─────────────────────────────────
-        self._load_diff()
-        self._start_review()
-
-    # ─────────────────────────────────────────────────────────────────────
-
-    def _load_diff(self):
-        """Read the pending diff and render it into the diff pane."""
-        diff = _pending_diff(self._path, lines_of_context=3)
-        self._diff_txt.configure(state=tk.NORMAL)
-        self._diff_txt.delete("1.0", tk.END)
-        if not diff:
-            self._diff_txt.insert(tk.END, "(no pending changes)")
-            self._diff_txt.configure(state=tk.DISABLED)
-            self._show_status("No pending diff to review.", colour=C["overlay0"])
-            self._stop_btn.configure(state=tk.DISABLED)
-            self._regen_btn.configure(state=tk.DISABLED)
-            return
-        for line in diff.splitlines():
-            tag = ""
-            if line.startswith("+++") or line.startswith("---"):
-                tag = "filename"
-            elif line.startswith("+"):
-                tag = "add"
-            elif line.startswith("-"):
-                tag = "del"
-            elif line.startswith("@@"):
-                tag = "hunk"
-            self._diff_txt.insert(tk.END, line + "\n", tag)
-        self._diff_txt.configure(state=tk.DISABLED)
-
-    def _start_review(self):
-        """Kick off (or restart) the LLM review on a background thread."""
-        diff = _pending_diff(self._path, lines_of_context=3)
-        if not diff:
-            return
-        self._review_token += 1
-        token = self._review_token
-        self._cancelled = False
-
-        provider = self._llm_cfg.get("provider", "?")
-        model    = self._llm_cfg.get("model", "?")
-        self._show_status(
-            f"⟳  Reviewing diff with {provider} / {model}…  "
-            f"(can take 30–60s on local models)",
-            colour=C["peach"])
-        self._rev_txt.configure(state=tk.NORMAL)
-        self._rev_txt.delete("1.0", tk.END)
-        self._rev_txt.insert(tk.END, "(generating review…)")
-        self._rev_txt.configure(state=tk.DISABLED)
-
-        self._copy_btn.configure(state=tk.DISABLED)
-        self._regen_btn.configure(state=tk.DISABLED)
-        self._stop_btn.configure(state=tk.NORMAL)
-
-        max_chars = int(self._llm_cfg.get("max_diff_chars", 24000))
-        # Construct the user prompt — just the diff with context.
-        user_prompt = (
-            f"Review the following git diff. Project: "
-            f"{os.path.basename(self._path)}.\n\n"
-            f"```diff\n{diff[:max_chars]}\n```"
-            + ("\n\n[diff truncated for length]" if len(diff) > max_chars else "")
-        )
-
-        def _worker(tok=token):
-            try:
-                result = _call_llm(
-                    self._llm_cfg,
-                    self._SYSTEM_PROMPT,
-                    user_prompt,
-                    max_tokens=2000,
-                )
-            except Exception:
-                log.exception("AI code review worker failed")
-                result = None
-            try:
-                self.after(0, self._on_review_ready, tok, result)
-            except RuntimeError:
-                # Dialog destroyed before result arrived — silent drop.
-                pass
-
-        threading.Thread(target=_worker, daemon=True,
-                         name="ai-code-review-worker").start()
-
-    def _on_review_ready(self, token: int, result):
-        """Main-thread callback: receive the LLM result."""
-        if token != self._review_token or self._cancelled:
-            return  # stale or cancelled
-        self._stop_btn.configure(state=tk.DISABLED)
-        self._regen_btn.configure(state=tk.NORMAL)
-        if not result:
-            self._show_status(
-                "⚠  LLM call failed or returned empty. Check Settings → "
-                "AI commit messages (provider / model / server running).",
-                colour=C["red"])
-            self._rev_txt.configure(state=tk.NORMAL)
-            self._rev_txt.delete("1.0", tk.END)
-            self._rev_txt.insert(
-                tk.END,
-                "No review produced. Common causes:\n\n"
-                "• Ollama / LM Studio server isn't running\n"
-                "• Model name in Settings doesn't match a loaded model\n"
-                "• Timeout exceeded (try a smaller / non-reasoning model)\n"
-                "• Diff exceeds context window — try a model with more context")
-            self._rev_txt.configure(state=tk.DISABLED)
-            return
-        self._render_review(result)
-        self._show_status(
-            f"✓  Review complete. {self._llm_cfg.get('provider')} / "
-            f"{self._llm_cfg.get('model')}",
-            colour=C["green"])
-        self._copy_btn.configure(state=tk.NORMAL)
-        self._last_review = result
-
-    def _render_review(self, text: str):
-        """Insert the review text with section-header colour tags."""
-        self._rev_txt.configure(state=tk.NORMAL)
-        self._rev_txt.delete("1.0", tk.END)
-        for line in text.splitlines():
-            stripped = line.lstrip()
-            tag = ""
-            if stripped.startswith("## ⚠") or stripped.lower().startswith("## high"):
-                tag = "h_high"
-            elif stripped.startswith("## ⚡") or stripped.lower().startswith("## medium"):
-                tag = "h_medium"
-            elif stripped.startswith("## 💡") or stripped.lower().startswith("## low"):
-                tag = "h_low"
-            elif stripped.startswith("## ℹ") or stripped.lower().startswith("## observ"):
-                tag = "h_info"
-            if tag:
-                self._rev_txt.insert(tk.END, line + "\n", tag)
-            else:
-                self._rev_txt.insert(tk.END, line + "\n")
-        self._rev_txt.configure(state=tk.DISABLED)
-
-    def _show_status(self, text: str, colour: str):
-        self._status_lbl.configure(text=text, fg=colour)
-
-    def _cancel(self):
-        """User clicked Stop. The worker thread is daemon and will exit when
-        the LLM responds (we can't actually kill urllib mid-call from another
-        thread), but the result will be discarded by token mismatch."""
-        self._cancelled = True
-        self._review_token += 1   # invalidate the in-flight token
-        self._show_status(
-            "Cancelled. The background request may still finish but its "
-            "result will be discarded.",
-            colour=C["overlay0"])
-        self._stop_btn.configure(state=tk.DISABLED)
-        self._regen_btn.configure(state=tk.NORMAL)
-        self._rev_txt.configure(state=tk.NORMAL)
-        self._rev_txt.delete("1.0", tk.END)
-        self._rev_txt.insert(tk.END, "(cancelled)")
-        self._rev_txt.configure(state=tk.DISABLED)
-
-    def _copy_review(self):
-        text = getattr(self, "_last_review", "")
-        if not text:
-            return
-        try:
-            self.clipboard_clear()
-            self.clipboard_append(text)
-            self._show_status("✓  Review copied to clipboard.", colour=C["green"])
-        except tk.TclError:
-            pass
-
-
 class GitCommitDialog(tk.Toplevel):
     """
     Stage and commit changes in a project's git repository.
@@ -10203,29 +9410,12 @@ class GitCommitDialog(tk.Toplevel):
         ttk.Separator(self, orient="horizontal").pack(fill=tk.X, padx=20, pady=(2, 8))
 
         # ── Commit message ──
-        # Async-suggestion infrastructure:
-        # `_suggestion_token` is bumped every time a new request is issued
-        # (initial fill or 💡 Suggest click). The background worker stamps its
-        # result with the token it captured at launch — if a newer request has
-        # since started, the stale result is discarded.
-        # `_user_has_edited` flips to True the moment the user touches the
-        # field, after which background results are silently dropped so we
-        # never overwrite their typing.
-        self._suggestion_token = 0
-        self._user_has_edited = False
-
         msg_hdr = tk.Frame(self, bg=C["base"])
         msg_hdr.pack(fill=tk.X, padx=20, pady=(0, 4))
         tk.Label(msg_hdr,
                  text="Commit message:",
                  font=("Segoe UI", 9, "bold"),
                  bg=C["base"], fg=C["text"]).pack(side=tk.LEFT)
-        # Spinner / status label between header and Suggest button — empty
-        # when idle, "⟳ Generating with AI…" while the worker runs.
-        self._suggest_status_lbl = tk.Label(
-            msg_hdr, text="", font=("Segoe UI", 8, "italic"),
-            bg=C["base"], fg=C["peach"])
-        self._suggest_status_lbl.pack(side=tk.LEFT, padx=(12, 0))
         ttk.Button(msg_hdr, text="💡 Suggest",
                    command=self._fill_suggestion).pack(side=tk.RIGHT)
 
@@ -10238,23 +9428,19 @@ class GitCommitDialog(tk.Toplevel):
                                 padx=8, pady=6, wrap=tk.WORD)
         self._msg_txt.pack(fill=tk.X)
 
-        # Mark the field as user-edited on any keypress (other than navigation).
-        # This is how the async result knows to NOT overwrite the user's input.
-        def _on_key(event):
-            # Skip pure navigation / modifier keys so clicking around doesn't
-            # falsely lock the field.
-            if event.keysym in ("Left", "Right", "Up", "Down", "Home", "End",
-                                 "Prior", "Next", "Shift_L", "Shift_R",
-                                 "Control_L", "Control_R", "Alt_L", "Alt_R",
-                                 "Tab", "Escape", "Caps_Lock"):
-                return
-            self._user_has_edited = True
-        self._msg_txt.bind("<KeyPress>", _on_key, add="+")
-
-        # Kick off the initial suggestion (sync if heuristic-only, async if LLM
-        # might be involved — see `_populate_suggestion`).
-        if is_repo:
-            self._populate_suggestion(status_text, source="initial")
+        # Auto-populate with a suggestion based on currently selected files
+        suggestion = (_suggest_commit_message(self._path, status_text)
+                      if is_repo else "")
+        if suggestion:
+            self._msg_txt.insert(tk.END, suggestion)
+            # Pre-select only the FIRST LINE so the user can replace just the
+            # subject while keeping the body intact. The body is typically
+            # AI/CHANGELOG-derived prose that's correct as-is.
+            first_line_end = self._msg_txt.search("\n", "1.0", tk.END)
+            if first_line_end:
+                self._msg_txt.tag_add(tk.SEL, "1.0", first_line_end)
+            else:
+                self._msg_txt.tag_add(tk.SEL, "1.0", tk.END)
         self._msg_txt.focus_set()
 
         # ── Action buttons ──
@@ -10293,98 +9479,23 @@ class GitCommitDialog(tk.Toplevel):
 
     def _fill_suggestion(self):
         """Replace the commit message field with a fresh suggestion based on
-        currently *selected* files only. Resets the user-edited flag so the
-        async result is allowed to land — clicking 💡 Suggest is an explicit
-        opt-in to overwrite whatever is in the field."""
+        currently *selected* files only."""
         selected_lines = []
         for var, fname, xy in self._file_vars:
             if var.get():
                 selected_lines.append(f"{xy} {fname}")
         sub_status = "\n".join(selected_lines) if selected_lines else self._status_raw
-        # User pressed Suggest — they want to overwrite. Re-arm.
-        self._user_has_edited = False
-        self._populate_suggestion(sub_status, source="suggest_button")
-
-    def _populate_suggestion(self, status_text: str, source: str = "initial"):
-        """Run the commit-message orchestrator and populate the message field.
-
-        Synchronous when LLM is disabled (heuristics are fast).
-        Asynchronous when LLM is enabled — a daemon thread calls the
-        orchestrator while the dialog stays responsive; the spinner label
-        shows progress; the result lands via `self.after(0, …)`.
-
-        `source` is informational ("initial" / "suggest_button") for logging.
-        """
-        llm_cfg = (_cfg.get("commit_message_llm") or {}) if isinstance(_cfg, dict) else {}
-        llm_active = bool(llm_cfg.get("enabled"))
-
-        if not llm_active:
-            # Heuristics only — instant, no spinner needed.
-            result = _suggest_commit_message(self._path, status_text) or "chore: update files"
-            self._apply_suggestion(result)
-            return
-
-        # Async path. Bump token so an in-flight earlier request loses the race.
-        self._suggestion_token += 1
-        my_token = self._suggestion_token
-
-        # Visible spinner
-        self._suggest_status_lbl.configure(
-            text="⟳  Generating with AI…  (can take 30–60s on local models)",
-            fg=C["peach"])
-        # Optional: drop a placeholder in the field if it's currently empty,
-        # so the user sees "something is happening" without confusing focus.
-        if not self._msg_txt.get("1.0", tk.END).strip() and not self._user_has_edited:
-            self._msg_txt.delete("1.0", tk.END)
-            self._msg_txt.insert(tk.END, "(generating commit message…)")
-            self._msg_txt.tag_add(tk.SEL, "1.0", tk.END)
-            # The placeholder counts as "not user-edited"; rebind so any
-            # actual keystroke flips the flag.
-            self._user_has_edited = False
-
-        def _worker(path=self._path, st=status_text, tok=my_token):
-            try:
-                result = _suggest_commit_message(path, st)
-            except Exception as exc:
-                log.exception("Suggestion worker failed")
-                result = ""
-            # Always come back to the main thread to touch widgets.
-            try:
-                self.after(0, self._on_suggestion_ready, tok, result)
-            except RuntimeError:
-                # Dialog was destroyed before result arrived — silent drop.
-                pass
-
-        threading.Thread(target=_worker, daemon=True,
-                         name="commit-suggestion-worker").start()
-
-    def _on_suggestion_ready(self, token: int, result: str):
-        """Main-thread callback: receive the orchestrator's result."""
-        # Clear spinner regardless of outcome.
-        self._suggest_status_lbl.configure(text="")
-        # Stale request (a newer Suggest click already ran) — discard.
-        if token != self._suggestion_token:
-            return
-        # User started editing after we kicked off — respect their input.
-        if self._user_has_edited:
-            return
-        # Empty result → keep placeholder cleared and offer a generic fallback
-        if not result:
-            result = "chore: update files"
-        self._apply_suggestion(result)
-
-    def _apply_suggestion(self, suggestion: str):
-        """Insert `suggestion` into the message field, select first line."""
+        suggestion = _suggest_commit_message(self._path, sub_status)
+        if not suggestion:
+            suggestion = "chore: update files"
         self._msg_txt.delete("1.0", tk.END)
         self._msg_txt.insert(tk.END, suggestion)
+        # Pre-select only the first line — see initial-fill comment for why.
         first_line_end = self._msg_txt.search("\n", "1.0", tk.END)
         if first_line_end:
             self._msg_txt.tag_add(tk.SEL, "1.0", first_line_end)
         else:
             self._msg_txt.tag_add(tk.SEL, "1.0", tk.END)
-        # Inserting from code shouldn't count as user editing — keep the flag
-        # consistent (it's already False; explicit reset for clarity).
-        self._user_has_edited = False
         self._msg_txt.focus_set()
 
     def _apply(self):
