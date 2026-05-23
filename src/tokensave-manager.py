@@ -3115,6 +3115,630 @@ def _make_tray_icon():
     d.polygon(points, fill=(137, 180, 250, 255))  # Catppuccin blue
     return img
 
+# ── Ask tab controller ─────────────────────────────────────────────────────────
+
+class AskTabController:
+    """Owns the Ask tab UI and the agent conversation loop.
+
+    Decoupled from App: receives a get_project_path callback instead of
+    holding a reference to the App instance.
+    """
+
+    _ASK_SYSTEM_PROMPT = (
+        "You are a code-aware assistant for the user's current project. "
+        "You have access to READ-ONLY tools that let you read files, list "
+        "directories, view git history, view the pending diff, and search "
+        "the project's tokensave code graph when present.\n\n"
+        "How to use tools:\n"
+        "- Use the API's tool_calls mechanism — emit calls via the "
+        "tool_calls field of your response, NOT as JSON text inside the "
+        "content field. After the tool result is returned to you as a "
+        "role:'tool' message, continue your reasoning and either call "
+        "another tool or give a final text answer.\n"
+        "- Do NOT guess about file contents or code that you have not read.\n"
+        "- Cite file:line locations when you reference code.\n\n"
+        "Tool-selection guide (CRITICAL — wrong tool choice wastes "
+        "iterations):\n"
+        "- **read_file** is your primary tool. When the user names a "
+        "specific file in their question, OR when you're asked about a "
+        "specific symbol or behaviour you can locate, just read the file "
+        "directly. Don't search first.\n"
+        "- **tokensave_search** finds DEFINED SYMBOLS by name — "
+        "functions, classes, methods, constants. It does NOT do "
+        "full-text grep across source. Searching for 'Popen', 'import', "
+        "or any keyword that isn't a symbol name returns nothing. Use "
+        "tokensave_search to answer 'where is X defined?' for an X that "
+        "is itself a function/class/constant name.  The result includes "
+        "the exact line number where the symbol is *defined* — "
+        "**chain it into a read_file call with start_line set to that "
+        "line and end_line set ~150-200 lines later** so you read the "
+        "FULL body, not just the signature.  Most Python functions / "
+        "class methods are 20-200 lines; reading too narrow a window "
+        "shows only the docstring and you'll miss the actual logic.  "
+        "Never read a >50 KB file without a line range; you'll just "
+        "get the first 50 KB which is almost certainly not what you "
+        "want.\n"
+        "- **tokensave_context** builds a focused subgraph for a "
+        "natural-language task description (e.g. 'how does the commit "
+        "message generator work'). Returns related symbols + their "
+        "relationships. Use sparingly — it's expensive on a big project.\n"
+        "- **list_directory** for path discovery when you don't know "
+        "what's in a folder.\n"
+        "- **git_log / git_diff** for change history and pending work.\n\n"
+        "Error handling:\n"
+        "- If a tool returns an error message starting with '[tool error]', "
+        "DO NOT report the failure to the user. Instead, read the error "
+        "carefully — it usually contains a concrete suggestion (e.g. "
+        "'a file named X exists at src/X — retry with that path'). "
+        "Apply the suggestion and call the tool again. Only report failure "
+        "to the user as a last resort, after at least 2 retry attempts "
+        "with different approaches.\n"
+        "- If tokensave_search returns no results, that means the query "
+        "isn't a symbol name. Switch to read_file (if you have a target "
+        "file in mind) or list_directory (to discover one) — don't keep "
+        "searching with variations.\n\n"
+        "Style:\n"
+        "- Keep answers concise. If a question is open-ended, ask a "
+        "clarifying follow-up instead of writing a wall of text.\n"
+        "- You CANNOT modify files, run commits, or change config. This is "
+        "by design. If the user asks you to make changes, suggest the "
+        "specific edits in your answer and let them apply them manually."
+    )
+
+    def __init__(self, notebook: ttk.Notebook, get_project_path):
+        self._get_project_path = get_project_path
+        self._ask_path: str | None = None
+        self._ask_messages: list = []
+        self._ask_stop_event: threading.Event | None = None
+        self._ask_thread: threading.Thread | None = None
+        self._tab = tk.Frame(notebook, bg=C["base"])
+        notebook.add(self._tab, text="  🤖 Ask  ")
+        self._build()
+
+    def _build(self):
+        tab = self._tab
+
+        # ── Header: project + model + clear ─────────────────────────────
+        hdr = tk.Frame(tab, bg=C["base"], padx=14, pady=8)
+        hdr.pack(fill=tk.X, side=tk.TOP)
+
+        tk.Label(hdr, text="🤖  Ask",
+                 font=("Segoe UI", 13, "bold"),
+                 bg=C["base"], fg=C["blue"]).pack(side=tk.LEFT)
+        self._ask_project_lbl = tk.Label(
+            hdr, text="(no project selected)",
+            font=("Segoe UI", 10), bg=C["base"], fg=C["text"])
+        self._ask_project_lbl.pack(side=tk.LEFT, padx=(10, 0))
+        self._ask_model_lbl = tk.Label(
+            hdr, text="", font=("Segoe UI", 9, "italic"),
+            bg=C["base"], fg=C["overlay0"])
+        self._ask_model_lbl.pack(side=tk.LEFT, padx=(10, 0))
+
+        ttk.Button(hdr, text="Clear history",
+                   command=self._ask_clear).pack(side=tk.RIGHT)
+
+        # ── Status line (under header) ──────────────────────────────────
+        self._ask_status = tk.Label(
+            tab, text="", font=("Segoe UI", 8, "italic"),
+            bg=C["base"], fg=C["overlay0"],
+            justify=tk.LEFT, anchor=tk.W)
+        self._ask_status.pack(fill=tk.X, padx=18, pady=(0, 4))
+
+        # ── Input row (BOTTOM, packed before chat log so it stays put) ──
+        # NOTE: the entry MUST have a visible border + contrasting bg or
+        # it disappears against the parent frame.  Earlier version used
+        # bg=mantle (#181825) on a base (#1e1e2e) parent with
+        # relief=tk.FLAT — visually identical, so the field appeared
+        # missing entirely.  Now uses surface0 (#313244) which is two
+        # luminance steps lighter than base, plus a 1px SOLID border and
+        # a 2px highlight ring that turns blue on focus.
+        in_row = tk.Frame(tab, bg=C["base"], padx=14, pady=8)
+        in_row.pack(fill=tk.X, side=tk.BOTTOM)
+
+        self._ask_entry = tk.Entry(
+            in_row, font=("Segoe UI", 10),
+            bg=C["surface0"], fg=C["text"],
+            insertbackground=C["text"],
+            relief=tk.SOLID, bd=1,
+            highlightthickness=2,
+            highlightbackground=C["overlay0"],
+            highlightcolor=C["blue"],
+            width=40)
+        self._ask_entry.pack(side=tk.LEFT, fill=tk.X, expand=True,
+                              ipady=6, padx=(0, 6))
+        self._ask_entry.bind("<Return>", lambda e: self._ask_send())
+        self._ask_entry.focus_set()
+
+        self._ask_send_btn = ttk.Button(
+            in_row, text="Send", style="Primary.TButton",
+            command=self._ask_send)
+        self._ask_send_btn.pack(side=tk.LEFT, padx=(0, 4))
+        self._ask_stop_btn = ttk.Button(
+            in_row, text="■ Stop", style="Danger.TButton",
+            command=self._ask_stop, state=tk.DISABLED)
+        self._ask_stop_btn.pack(side=tk.LEFT)
+
+        # ── Chat log (fills remaining space) ────────────────────────────
+        log_outer = tk.Frame(tab, bg=C["base"])
+        log_outer.pack(fill=tk.BOTH, expand=True, padx=14, pady=(0, 4))
+        log_inner = tk.Frame(log_outer, bg=C["mantle"])
+        log_inner.pack(fill=tk.BOTH, expand=True)
+
+        self._ask_log = tk.Text(
+            log_inner, bg=C["mantle"], fg=C["text"],
+            relief=tk.FLAT, font=("Segoe UI", 10),
+            padx=10, pady=8, wrap=tk.WORD, state=tk.DISABLED)
+        ask_vsb = ttk.Scrollbar(log_inner, orient="vertical",
+                                 command=self._ask_log.yview)
+        self._ask_log.configure(yscrollcommand=ask_vsb.set)
+        self._ask_log.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
+        ask_vsb.pack(side=tk.RIGHT, fill=tk.Y)
+
+        self._ask_log.tag_configure(
+            "user",        foreground=C["blue"],
+            font=("Segoe UI", 10, "bold"), spacing1=8, spacing3=2)
+        self._ask_log.tag_configure(
+            "assistant",   foreground=C["text"],
+            spacing1=4, spacing3=4)
+        self._ask_log.tag_configure(
+            "tool_call",   foreground=C["peach"],
+            font=("Consolas", 9), spacing1=4)
+        self._ask_log.tag_configure(
+            "tool_result", foreground=C["overlay0"],
+            font=("Consolas", 9), lmargin1=20, lmargin2=20)
+        self._ask_log.tag_configure(
+            "error",       foreground=C["red"],
+            font=("Segoe UI", 9, "italic"), spacing1=4)
+        self._ask_log.tag_configure(
+            "info",        foreground=C["overlay0"],
+            font=("Segoe UI", 9, "italic"))
+
+        self._ask_set_intro()
+
+    def on_tab_selected(self):
+        """Called by App._on_tab_changed when the Ask tab is focused."""
+        path = self._get_project_path()
+        if path:
+            self._ask_path = path
+        self._ask_refresh_header()
+        try:
+            self._ask_entry.focus_set()
+        except tk.TclError:
+            pass
+
+    def _ask_set_intro(self):
+        self._ask_log.configure(state=tk.NORMAL)
+        self._ask_log.delete("1.0", tk.END)
+        self._ask_log.insert(tk.END,
+            "Ready. Ask anything about the selected project — I'll use "
+            "read_file, list_directory, git_log, git_diff, and (when "
+            "available) tokensave_search / tokensave_context to find "
+            "answers. I cannot modify files.\n\n",
+            "info")
+        self._ask_log.configure(state=tk.DISABLED)
+
+    def _ask_append(self, text: str, tag: str = "assistant"):
+        if not text:
+            return
+        self._ask_log.configure(state=tk.NORMAL)
+        self._ask_log.insert(tk.END, text, tag)
+        self._ask_log.see(tk.END)
+        self._ask_log.configure(state=tk.DISABLED)
+
+    def _ask_refresh_header(self):
+        if self._ask_path:
+            self._ask_project_lbl.configure(
+                text=os.path.basename(self._ask_path))
+        else:
+            self._ask_project_lbl.configure(text="(no project selected)")
+        cfg = (_cfg.get("commit_message_llm") or {}) if isinstance(_cfg, dict) else {}
+        provider = cfg.get("provider") or "?"
+        model = cfg.get("model") or "?"
+        enabled = bool(cfg.get("enabled"))
+        if enabled:
+            self._ask_model_lbl.configure(
+                text=f"[provider: {provider} / {model}]",
+                fg=C["overlay0"])
+        else:
+            self._ask_model_lbl.configure(
+                text="[AI is disabled — Settings → AI commit messages]",
+                fg=C["red"])
+
+    def _ask_clear(self):
+        if self._ask_thread and self._ask_thread.is_alive():
+            self._ask_stop()
+        self._ask_messages = []
+        self._ask_set_intro()
+        self._ask_status.configure(text="")
+
+    def _ask_stop(self):
+        """Signal the agent thread to abort; in-flight HTTP request finishes
+        but its result is discarded."""
+        if self._ask_stop_event is not None:
+            self._ask_stop_event.set()
+        self._ask_status.configure(
+            text="Cancelling — in-flight request will finish then stop.",
+            fg=C["overlay0"])
+        self._ask_stop_btn.configure(state=tk.DISABLED)
+
+    def _ask_send(self):
+        text = self._ask_entry.get().strip()
+        if not text:
+            return
+        if self._ask_thread and self._ask_thread.is_alive():
+            self._ask_status.configure(
+                text="A request is already running — click Stop first.",
+                fg=C["yellow"])
+            return
+
+        path = self._get_project_path()
+        if path:
+            self._ask_path = path
+        if not self._ask_path:
+            self._ask_append(
+                "Select a project in the Projects tab first.\n\n", "error")
+            return
+
+        llm_cfg = (_cfg.get("commit_message_llm") or {}) if isinstance(_cfg, dict) else {}
+        if not llm_cfg.get("enabled"):
+            self._ask_append(
+                "AI is disabled. Open Settings → AI commit messages and "
+                "tick the enable box, then try again.\n\n", "error")
+            return
+
+        try:
+            import agent as _agent_mod
+            import agent_tools as _agent_tools_mod
+        except ImportError as e:
+            self._ask_append(
+                f"Could not import agent module: {e}\n", "error")
+            return
+
+        self._ask_refresh_header()
+        self._ask_append(f"\n👤  {text}\n\n", "user")
+        self._ask_entry.delete(0, tk.END)
+        self._ask_status.configure(
+            text="⟳  Thinking…  (the model may call tools before answering)",
+            fg=C["peach"])
+        self._ask_send_btn.configure(state=tk.DISABLED)
+        self._ask_stop_btn.configure(state=tk.NORMAL)
+
+        if not self._ask_messages:
+            self._ask_messages.append({
+                "role": "system",
+                "content": self._ASK_SYSTEM_PROMPT,
+            })
+        self._ask_messages.append({"role": "user", "content": text})
+
+        stop_event = threading.Event()
+        self._ask_stop_event = stop_event
+
+        tokensave_exe = (_cfg.get("tokensave_exe") or "") if isinstance(_cfg, dict) else ""
+        tools = _agent_tools_mod.build_tools(self._ask_path, tokensave_exe)
+        agent_instance = _agent_mod.LocalAgent(llm_cfg, self._ask_path, tools)
+
+        def _on_tool_call(name, args):
+            short_args = json.dumps(args, ensure_ascii=False)
+            if len(short_args) > 120:
+                short_args = short_args[:120] + "…"
+            self._tab.after(0, self._ask_append,
+                            f"🔧  {name}({short_args})\n", "tool_call")
+
+        def _on_tool_result(name, result):
+            preview = result if len(result) <= 600 else (
+                result[:600] + f"\n[... {len(result)-600} more chars ...]")
+            self._tab.after(0, self._ask_append, preview + "\n\n", "tool_result")
+
+        def _on_assistant_message(text):
+            self._tab.after(0, self._ask_append, f"🤖  {text}\n\n", "assistant")
+
+        def _on_done(final_text):
+            def _ui():
+                if final_text is None:
+                    self._ask_status.configure(
+                        text="✓  Done (no final answer text — model only "
+                             "issued tool calls).",
+                        fg=C["green"])
+                else:
+                    self._ask_status.configure(text="✓  Done.", fg=C["green"])
+                self._ask_send_btn.configure(state=tk.NORMAL)
+                self._ask_stop_btn.configure(state=tk.DISABLED)
+                self._ask_stop_event = None
+            self._tab.after(0, _ui)
+
+        def _on_error(msg):
+            def _ui():
+                self._ask_append(f"⚠  {msg}\n\n", "error")
+                self._ask_status.configure(text="✗  Error.", fg=C["red"])
+                self._ask_send_btn.configure(state=tk.NORMAL)
+                self._ask_stop_btn.configure(state=tk.DISABLED)
+                self._ask_stop_event = None
+            self._tab.after(0, _ui)
+
+        def _worker():
+            try:
+                agent_instance.run(
+                    self._ask_messages,
+                    on_tool_call=_on_tool_call,
+                    on_tool_result=_on_tool_result,
+                    on_assistant_message=_on_assistant_message,
+                    on_done=_on_done,
+                    on_error=_on_error,
+                    stop_event=stop_event,
+                )
+            except Exception as e:
+                log.exception("Ask worker crashed")
+                try:
+                    self._tab.after(0, _on_error, f"{type(e).__name__}: {e}")
+                except RuntimeError:
+                    pass
+
+        self._ask_thread = threading.Thread(
+            target=_worker, daemon=True, name="ask-agent-worker")
+        self._ask_thread.start()
+
+
+# ── Reference / Snippets tab controller ────────────────────────────────────────
+
+class SnippetsController:
+    """Owns the Reference/Snippets tab UI."""
+
+    def __init__(self, notebook: ttk.Notebook):
+        self._tab = tk.Frame(notebook, bg=C["base"])
+        notebook.add(self._tab, text="  Reference  ")
+        self._build()
+
+    def _build(self):
+        tab = self._tab
+
+        # ── Top: CLI cheatsheet ───────────────────────────────────────────────
+        tk.Label(tab, text="CLI COMMANDS",
+                 font=("Segoe UI", 8, "bold"),
+                 bg=C["base"], fg=C["overlay0"]).pack(anchor=tk.W, padx=14, pady=(10, 4))
+
+        cli_wrap = tk.Frame(tab, bg=C["mantle"])
+        cli_wrap.pack(fill=tk.X, padx=14)
+
+        cli_sb = ttk.Scrollbar(cli_wrap, orient="vertical")
+        cli_txt = tk.Text(cli_wrap, height=9, font=("Consolas", 9),
+                          bg=C["mantle"], fg=C["text"], relief=tk.FLAT,
+                          padx=12, pady=8, wrap=tk.NONE,
+                          cursor="arrow", state=tk.NORMAL,
+                          yscrollcommand=cli_sb.set)
+        cli_sb.configure(command=cli_txt.yview)
+        cli_txt.pack(side=tk.LEFT, fill=tk.X, expand=True)
+        cli_sb.pack(side=tk.RIGHT, fill=tk.Y)
+
+        cli_txt.tag_configure("hd",  font=("Segoe UI", 9, "bold"), foreground=C["blue"],   spacing1=8, spacing3=2)
+        cli_txt.tag_configure("cmd", font=("Consolas", 9),          foreground=C["peach"],  spacing3=1)
+        cli_txt.tag_configure("dim", font=("Consolas", 9),          foreground=C["overlay0"])
+
+        def cli_row(cmd, desc):
+            cli_txt.insert(tk.END, f"  {cmd:<38}", "cmd")
+            cli_txt.insert(tk.END, f"{desc}\n", "dim")
+
+        def cli_h(t):
+            cli_txt.insert(tk.END, f"\n  {t}\n", "hd")
+
+        cli_h("Daily use")
+        cli_row("tokensave sync",               "Incremental re-index (fast)")
+        cli_row("tokensave sync --force",        "Full re-index from scratch")
+        cli_row("tokensave sync --doctor",       "Sync and list what changed")
+        cli_row("tokensave status",              "Stats + estimated token savings")
+        cli_row("tokensave status --details",    "Stats with node-kind breakdown")
+        cli_row("tokensave files",               "List all indexed files")
+        cli_row("tokensave monitor",             "Live TUI of MCP tool calls")
+        cli_h("Setup")
+        cli_row("tokensave init",                "First-time index of a project")
+        cli_row("tokensave install --agent claude", "Wire up Claude Code integration")
+        cli_row("tokensave daemon",              "Auto-sync daemon (foreground)")
+        cli_row("tokensave daemon --enable-autostart", "Install daemon as a service")
+        cli_h("Troubleshooting")
+        cli_row("tokensave doctor",              "Health check — diagnose issues")
+        cli_row("tokensave upgrade",             "Self-update to latest version")
+        cli_h("Cost & token tracking")
+        cli_row("tokensave cost",                "7-day cost summary")
+        cli_row("tokensave cost today",          "Today's spend only")
+        cli_row("tokensave cost --by-model",     "Breakdown by Claude model")
+        cli_h("Branches")
+        cli_row("tokensave branch add",          "Track current git branch")
+        cli_row("tokensave branch list",         "View tracked branches + DB sizes")
+        cli_row("tokensave branch gc",           "Clean up deleted branches")
+
+        cli_txt.configure(state=tk.DISABLED)
+
+        # ── Bottom: Claude prompt snippets ────────────────────────────────────
+        snippets_header = tk.Frame(tab, bg=C["base"])
+        snippets_header.pack(fill=tk.X, padx=14, pady=(12, 4))
+
+        tk.Label(snippets_header, text="CLAUDE PROMPT SNIPPETS",
+                 font=("Segoe UI", 8, "bold"),
+                 bg=C["base"], fg=C["overlay0"]).pack(side=tk.LEFT)
+
+        ttk.Button(snippets_header, text="📖  Open Full Guide",
+                   command=self._open_guide).pack(side=tk.RIGHT)
+
+        snippets_frame = tk.Frame(tab, bg=C["base"])
+        snippets_frame.pack(fill=tk.BOTH, expand=True, padx=14, pady=(0, 10))
+
+        list_wrap = tk.Frame(snippets_frame, bg=C["mantle"])
+        list_wrap.pack(side=tk.LEFT, fill=tk.Y)
+
+        self.snippet_lb = tk.Listbox(
+            list_wrap, width=26, font=("Segoe UI", 9),
+            bg=C["mantle"], fg=C["text"], selectbackground=C["surface1"],
+            selectforeground=C["text"], activestyle="none",
+            relief=tk.FLAT, borderwidth=0, highlightthickness=0,
+        )
+        list_sb = ttk.Scrollbar(list_wrap, orient="vertical",
+                                command=self.snippet_lb.yview)
+        self.snippet_lb.configure(yscrollcommand=list_sb.set)
+        self.snippet_lb.pack(side=tk.LEFT, fill=tk.Y)
+        list_sb.pack(side=tk.RIGHT, fill=tk.Y)
+
+        right = tk.Frame(snippets_frame, bg=C["base"])
+        right.pack(side=tk.LEFT, fill=tk.BOTH, expand=True, padx=(8, 0))
+
+        prev_wrap = tk.Frame(right, bg=C["mantle"])
+        prev_wrap.pack(fill=tk.BOTH, expand=True)
+
+        self._snippet_preview = tk.Text(
+            prev_wrap, font=("Segoe UI", 9), bg=C["mantle"], fg=C["text"],
+            relief=tk.FLAT, padx=10, pady=8, wrap=tk.WORD,
+            cursor="arrow", state=tk.DISABLED,
+        )
+        self._snippet_preview.pack(fill=tk.BOTH, expand=True)
+
+        copy_row = tk.Frame(right, bg=C["base"])
+        copy_row.pack(fill=tk.X, pady=(6, 0))
+
+        self._copy_btn = ttk.Button(copy_row, text="Copy Prompt  ▸",
+                                    style="Primary.TButton",
+                                    command=self._copy_snippet,
+                                    state=tk.DISABLED)
+        self._copy_btn.pack(side=tk.LEFT)
+
+        self._copy_status = tk.Label(copy_row, text="",
+                                     font=("Segoe UI", 8),
+                                     bg=C["base"], fg=C["green"])
+        self._copy_status.pack(side=tk.LEFT, padx=(10, 0))
+
+        user_btn_row = tk.Frame(right, bg=C["base"])
+        user_btn_row.pack(fill=tk.X, pady=(4, 0))
+
+        ttk.Button(user_btn_row, text="+ Add Snippet",
+                   command=self._add_snippet).pack(side=tk.LEFT, padx=(0, 4))
+        self._edit_btn = ttk.Button(user_btn_row, text="Edit",
+                                    command=self._edit_snippet, state=tk.DISABLED)
+        self._edit_btn.pack(side=tk.LEFT, padx=(0, 4))
+        self._delete_btn = ttk.Button(user_btn_row, text="Delete",
+                                      style="Danger.TButton",
+                                      command=self._delete_snippet, state=tk.DISABLED)
+        self._delete_btn.pack(side=tk.LEFT)
+
+        self._refresh_snippet_list()
+        self.snippet_lb.bind("<<ListboxSelect>>", self._on_snippet_select)
+
+    def _refresh_snippet_list(self, reselect_index=None):
+        self._active_snippets_map = []
+        self.snippet_lb.delete(0, tk.END)
+
+        for title, text in PROMPT_SNIPPETS:
+            self.snippet_lb.insert(tk.END, f"  {title}")
+            self._active_snippets_map.append({"type": "builtin", "data": {"title": title, "text": text}})
+
+        self.snippet_lb.insert(tk.END, "  ──── My Snippets ────")
+        self._active_snippets_map.append({"type": "separator"})
+
+        for idx, u in enumerate(_cfg.get("user_snippets", [])):
+            self.snippet_lb.insert(tk.END, f"  ✎ {u['title']}")
+            self._active_snippets_map.append({"type": "user", "index": idx, "data": u})
+
+        if reselect_index is not None and reselect_index < self.snippet_lb.size():
+            self.snippet_lb.selection_set(reselect_index)
+            self.snippet_lb.event_generate("<<ListboxSelect>>")
+        else:
+            self._snippet_preview.configure(state=tk.NORMAL)
+            self._snippet_preview.delete("1.0", tk.END)
+            self._snippet_preview.configure(state=tk.DISABLED)
+            self._copy_btn.configure(state=tk.DISABLED)
+            self._edit_btn.configure(state=tk.DISABLED)
+            self._delete_btn.configure(state=tk.DISABLED)
+            self._copy_status.configure(text="")
+
+    def _on_snippet_select(self, _event=None):
+        sel = self.snippet_lb.curselection()
+        if not sel:
+            return
+        meta = self._active_snippets_map[sel[0]]
+        if meta["type"] == "separator":
+            self.snippet_lb.selection_clear(0, tk.END)
+            self._copy_btn.configure(state=tk.DISABLED)
+            self._edit_btn.configure(state=tk.DISABLED)
+            self._delete_btn.configure(state=tk.DISABLED)
+            self._copy_status.configure(text="")
+            return
+
+        text = meta["data"]["text"]
+        self._snippet_preview.configure(state=tk.NORMAL)
+        self._snippet_preview.delete("1.0", tk.END)
+        self._snippet_preview.insert(tk.END, text)
+        self._snippet_preview.configure(state=tk.DISABLED)
+        self._copy_btn.configure(state=tk.NORMAL)
+        self._copy_status.configure(text="")
+
+        is_user = (meta["type"] == "user")
+        self._edit_btn.configure(state=tk.NORMAL if is_user else tk.DISABLED)
+        self._delete_btn.configure(state=tk.NORMAL if is_user else tk.DISABLED)
+
+    def _copy_snippet(self):
+        sel = self.snippet_lb.curselection()
+        if not sel:
+            return
+        meta = self._active_snippets_map[sel[0]]
+        if meta["type"] == "separator":
+            return
+        self._tab.clipboard_clear()
+        self._tab.clipboard_append(meta["data"]["text"])
+        self._copy_status.configure(text="✔ Copied!")
+        self._tab.after(2000, lambda: self._copy_status.configure(text=""))
+
+    def _add_snippet(self):
+        SnippetEditDialog(self._tab, None, self._on_snippet_saved)
+
+    def _edit_snippet(self):
+        sel = self.snippet_lb.curselection()
+        if not sel:
+            return
+        meta = self._active_snippets_map[sel[0]]
+        if meta["type"] != "user":
+            return
+        SnippetEditDialog(self._tab, meta, self._on_snippet_saved)
+
+    def _delete_snippet(self):
+        sel = self.snippet_lb.curselection()
+        if not sel:
+            return
+        meta = self._active_snippets_map[sel[0]]
+        if meta["type"] != "user":
+            return
+        title = meta["data"]["title"]
+        if not messagebox.askyesno(
+            "Delete snippet",
+            f"Delete '{title}'?\n\nThis cannot be undone.",
+            parent=self._tab,
+        ):
+            return
+        user_snippets = _cfg.get("user_snippets", [])
+        idx = meta["index"]
+        del user_snippets[idx]
+        _cfg["user_snippets"] = user_snippets
+        _save_config(_cfg)
+        self._refresh_snippet_list()
+
+    def _on_snippet_saved(self, title, text, edit_meta):
+        """Callback from SnippetEditDialog — save and refresh."""
+        user_snippets = _cfg.get("user_snippets", [])
+        if edit_meta is None:
+            user_snippets.append({"title": title, "text": text})
+            new_idx = len(PROMPT_SNIPPETS) + 1 + len(user_snippets) - 1
+        else:
+            idx = edit_meta["index"]
+            user_snippets[idx] = {"title": title, "text": text}
+            new_idx = len(PROMPT_SNIPPETS) + 1 + idx
+        _cfg["user_snippets"] = user_snippets
+        _save_config(_cfg)
+        self._refresh_snippet_list(reselect_index=new_idx)
+
+    def _open_guide(self):
+        guide = os.path.join(_BASE_DIR, "TOKENSAVE_GUIDE.md")
+        if os.path.isfile(guide):
+            os.startfile(guide)
+        else:
+            messagebox.showerror("Not found",
+                f"Guide not found at:\n{guide}", parent=self._tab)
+
+
 # ── App ────────────────────────────────────────────────────────────────────────
 
 class App(tk.Tk):
@@ -3288,8 +3912,8 @@ class App(tk.Tk):
 
         self._build_projects_tab()
         self._build_git_tab()
-        self._build_ask_tab()
-        self._build_reference_tab()
+        self._ask_ctrl = AskTabController(self.nb, self._get_ask_project_path)
+        self._snippets_ctrl = SnippetsController(self.nb)
         self._build_help_tab()
 
         self.nb.bind("<<NotebookTabChanged>>", self._on_tab_changed)
@@ -3708,21 +4332,7 @@ class App(tk.Tk):
         except tk.TclError:
             current_tab_text = ""
         if "Ask" in current_tab_text:
-            sel = self.tree.selection() if hasattr(self, "tree") else ()
-            if sel and sel[0].startswith("proj:"):
-                self._ask_path = sel[0][5:]
-            elif not getattr(self, "_ask_path", None) and getattr(self, "active_path", None):
-                self._ask_path = self.active_path
-            if hasattr(self, "_ask_refresh_header"):
-                self._ask_refresh_header()
-            # Pull focus into the question entry so the user can start
-            # typing immediately. Without this, focus tends to stay on
-            # the notebook tab itself and keystrokes go nowhere.
-            if hasattr(self, "_ask_entry"):
-                try:
-                    self._ask_entry.focus_set()
-                except tk.TclError:
-                    pass
+            self._ask_ctrl.on_tab_selected()
             return
 
         if not self._git_tab_is_visible():
@@ -3735,6 +4345,13 @@ class App(tk.Tk):
             self._git_path = self.active_path
         if self._git_path:
             self._git_refresh()
+
+    def _get_ask_project_path(self) -> str | None:
+        """Return the currently focused project path for AskTabController."""
+        sel = self.tree.selection() if hasattr(self, "tree") else ()
+        if sel and sel[0].startswith("proj:"):
+            return sel[0][5:]
+        return getattr(self, "active_path", None)
 
     def _git_refresh(self):
         """Kick off a background thread that re-reads all git state."""
@@ -4694,632 +5311,9 @@ class App(tk.Tk):
         threading.Thread(target=worker, daemon=True).start()
 
     # ═══════════════════════════════════════════════════════════════════
-    # 🤖 Ask tab — Stage 2 of the agentic-AI roadmap
+    # 🤖 Ask tab — handled by AskTabController (see above App class)
+    # 📚 Reference tab — handled by SnippetsController (see above App class)
     # ═══════════════════════════════════════════════════════════════════
-
-    _ASK_SYSTEM_PROMPT = (
-        "You are a code-aware assistant for the user's current project. "
-        "You have access to READ-ONLY tools that let you read files, list "
-        "directories, view git history, view the pending diff, and search "
-        "the project's tokensave code graph when present.\n\n"
-        "How to use tools:\n"
-        "- Use the API's tool_calls mechanism — emit calls via the "
-        "tool_calls field of your response, NOT as JSON text inside the "
-        "content field. After the tool result is returned to you as a "
-        "role:'tool' message, continue your reasoning and either call "
-        "another tool or give a final text answer.\n"
-        "- Do NOT guess about file contents or code that you have not read.\n"
-        "- Cite file:line locations when you reference code.\n\n"
-        "Tool-selection guide (CRITICAL — wrong tool choice wastes "
-        "iterations):\n"
-        "- **read_file** is your primary tool. When the user names a "
-        "specific file in their question, OR when you're asked about a "
-        "specific symbol or behaviour you can locate, just read the file "
-        "directly. Don't search first.\n"
-        "- **tokensave_search** finds DEFINED SYMBOLS by name — "
-        "functions, classes, methods, constants. It does NOT do "
-        "full-text grep across source. Searching for 'Popen', 'import', "
-        "or any keyword that isn't a symbol name returns nothing. Use "
-        "tokensave_search to answer 'where is X defined?' for an X that "
-        "is itself a function/class/constant name.  The result includes "
-        "the exact line number where the symbol is *defined* — "
-        "**chain it into a read_file call with start_line set to that "
-        "line and end_line set ~150-200 lines later** so you read the "
-        "FULL body, not just the signature.  Most Python functions / "
-        "class methods are 20-200 lines; reading too narrow a window "
-        "shows only the docstring and you'll miss the actual logic.  "
-        "Never read a >50 KB file without a line range; you'll just "
-        "get the first 50 KB which is almost certainly not what you "
-        "want.\n"
-        "- **tokensave_context** builds a focused subgraph for a "
-        "natural-language task description (e.g. 'how does the commit "
-        "message generator work'). Returns related symbols + their "
-        "relationships. Use sparingly — it's expensive on a big project.\n"
-        "- **list_directory** for path discovery when you don't know "
-        "what's in a folder.\n"
-        "- **git_log / git_diff** for change history and pending work.\n\n"
-        "Error handling:\n"
-        "- If a tool returns an error message starting with '[tool error]', "
-        "DO NOT report the failure to the user. Instead, read the error "
-        "carefully — it usually contains a concrete suggestion (e.g. "
-        "'a file named X exists at src/X — retry with that path'). "
-        "Apply the suggestion and call the tool again. Only report failure "
-        "to the user as a last resort, after at least 2 retry attempts "
-        "with different approaches.\n"
-        "- If tokensave_search returns no results, that means the query "
-        "isn't a symbol name. Switch to read_file (if you have a target "
-        "file in mind) or list_directory (to discover one) — don't keep "
-        "searching with variations.\n\n"
-        "Style:\n"
-        "- Keep answers concise. If a question is open-ended, ask a "
-        "clarifying follow-up instead of writing a wall of text.\n"
-        "- You CANNOT modify files, run commits, or change config. This is "
-        "by design. If the user asks you to make changes, suggest the "
-        "specific edits in your answer and let them apply them manually."
-    )
-
-    def _build_ask_tab(self):
-        tab = tk.Frame(self.nb, bg=C["base"])
-        self.nb.add(tab, text="  🤖 Ask  ")
-
-        # Conversation state
-        self._ask_path: str | None = None
-        self._ask_messages: list[dict] = []
-        self._ask_stop_event: threading.Event | None = None
-        self._ask_thread: threading.Thread | None = None
-
-        # ── Header: project + model + clear ─────────────────────────────
-        hdr = tk.Frame(tab, bg=C["base"], padx=14, pady=8)
-        hdr.pack(fill=tk.X, side=tk.TOP)
-
-        tk.Label(hdr, text="🤖  Ask",
-                 font=("Segoe UI", 13, "bold"),
-                 bg=C["base"], fg=C["blue"]).pack(side=tk.LEFT)
-        self._ask_project_lbl = tk.Label(
-            hdr, text="(no project selected)",
-            font=("Segoe UI", 10), bg=C["base"], fg=C["text"])
-        self._ask_project_lbl.pack(side=tk.LEFT, padx=(10, 0))
-        self._ask_model_lbl = tk.Label(
-            hdr, text="", font=("Segoe UI", 9, "italic"),
-            bg=C["base"], fg=C["overlay0"])
-        self._ask_model_lbl.pack(side=tk.LEFT, padx=(10, 0))
-
-        ttk.Button(hdr, text="Clear history",
-                   command=self._ask_clear).pack(side=tk.RIGHT)
-
-        # ── Status line (under header) ──────────────────────────────────
-        self._ask_status = tk.Label(
-            tab, text="", font=("Segoe UI", 8, "italic"),
-            bg=C["base"], fg=C["overlay0"],
-            justify=tk.LEFT, anchor=tk.W)
-        self._ask_status.pack(fill=tk.X, padx=18, pady=(0, 4))
-
-        # ── Input row (BOTTOM, packed before chat log so it stays put) ──
-        # NOTE: the entry MUST have a visible border + contrasting bg or
-        # it disappears against the parent frame.  Earlier version used
-        # bg=mantle (#181825) on a base (#1e1e2e) parent with
-        # relief=tk.FLAT — visually identical, so the field appeared
-        # missing entirely.  Now uses surface0 (#313244) which is two
-        # luminance steps lighter than base, plus a 1px SOLID border and
-        # a 2px highlight ring that turns blue on focus.
-        in_row = tk.Frame(tab, bg=C["base"], padx=14, pady=8)
-        in_row.pack(fill=tk.X, side=tk.BOTTOM)
-
-        self._ask_entry = tk.Entry(
-            in_row, font=("Segoe UI", 10),
-            bg=C["surface0"], fg=C["text"],
-            insertbackground=C["text"],
-            relief=tk.SOLID, bd=1,
-            highlightthickness=2,
-            highlightbackground=C["overlay0"],
-            highlightcolor=C["blue"],
-            width=40)
-        self._ask_entry.pack(side=tk.LEFT, fill=tk.X, expand=True,
-                              ipady=6, padx=(0, 6))
-        self._ask_entry.bind("<Return>", lambda e: self._ask_send())
-        # Auto-focus on tab switch — see _on_tab_changed below.  Also focus
-        # at build time so the user can start typing immediately when the
-        # tab is first opened.
-        self._ask_entry.focus_set()
-
-        self._ask_send_btn = ttk.Button(
-            in_row, text="Send", style="Primary.TButton",
-            command=self._ask_send)
-        self._ask_send_btn.pack(side=tk.LEFT, padx=(0, 4))
-        self._ask_stop_btn = ttk.Button(
-            in_row, text="■ Stop", style="Danger.TButton",
-            command=self._ask_stop, state=tk.DISABLED)
-        self._ask_stop_btn.pack(side=tk.LEFT)
-
-        # ── Chat log (fills remaining space) ────────────────────────────
-        log_outer = tk.Frame(tab, bg=C["base"])
-        log_outer.pack(fill=tk.BOTH, expand=True, padx=14, pady=(0, 4))
-        log_inner = tk.Frame(log_outer, bg=C["mantle"])
-        log_inner.pack(fill=tk.BOTH, expand=True)
-
-        self._ask_log = tk.Text(
-            log_inner, bg=C["mantle"], fg=C["text"],
-            relief=tk.FLAT, font=("Segoe UI", 10),
-            padx=10, pady=8, wrap=tk.WORD, state=tk.DISABLED)
-        ask_vsb = ttk.Scrollbar(log_inner, orient="vertical",
-                                 command=self._ask_log.yview)
-        self._ask_log.configure(yscrollcommand=ask_vsb.set)
-        self._ask_log.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
-        ask_vsb.pack(side=tk.RIGHT, fill=tk.Y)
-
-        # Catppuccin Mocha role tags
-        self._ask_log.tag_configure(
-            "user",        foreground=C["blue"],
-            font=("Segoe UI", 10, "bold"), spacing1=8, spacing3=2)
-        self._ask_log.tag_configure(
-            "assistant",   foreground=C["text"],
-            spacing1=4, spacing3=4)
-        self._ask_log.tag_configure(
-            "tool_call",   foreground=C["peach"],
-            font=("Consolas", 9), spacing1=4)
-        self._ask_log.tag_configure(
-            "tool_result", foreground=C["overlay0"],
-            font=("Consolas", 9), lmargin1=20, lmargin2=20)
-        self._ask_log.tag_configure(
-            "error",       foreground=C["red"],
-            font=("Segoe UI", 9, "italic"), spacing1=4)
-        self._ask_log.tag_configure(
-            "info",        foreground=C["overlay0"],
-            font=("Segoe UI", 9, "italic"))
-
-        self._ask_set_intro()
-
-    # ── Helpers ────────────────────────────────────────────────────────
-
-    def _ask_set_intro(self):
-        """Render the initial 'how to use this' greeting in the chat log."""
-        self._ask_log.configure(state=tk.NORMAL)
-        self._ask_log.delete("1.0", tk.END)
-        self._ask_log.insert(tk.END,
-            "Ready. Ask anything about the selected project — I'll use "
-            "read_file, list_directory, git_log, git_diff, and (when "
-            "available) tokensave_search / tokensave_context to find "
-            "answers. I cannot modify files.\n\n",
-            "info")
-        self._ask_log.configure(state=tk.DISABLED)
-
-    def _ask_append(self, text: str, tag: str = "assistant"):
-        """Append a chunk of text to the chat log with the given role tag."""
-        if not text:
-            return
-        self._ask_log.configure(state=tk.NORMAL)
-        self._ask_log.insert(tk.END, text, tag)
-        self._ask_log.see(tk.END)
-        self._ask_log.configure(state=tk.DISABLED)
-
-    def _ask_refresh_header(self):
-        """Update the project name and model display in the Ask tab header."""
-        if self._ask_path:
-            self._ask_project_lbl.configure(
-                text=os.path.basename(self._ask_path))
-        else:
-            self._ask_project_lbl.configure(text="(no project selected)")
-        cfg = (_cfg.get("commit_message_llm") or {}) if isinstance(_cfg, dict) else {}
-        provider = cfg.get("provider") or "?"
-        model = cfg.get("model") or "?"
-        enabled = bool(cfg.get("enabled"))
-        if enabled:
-            self._ask_model_lbl.configure(
-                text=f"[provider: {provider} / {model}]",
-                fg=C["overlay0"])
-        else:
-            self._ask_model_lbl.configure(
-                text="[AI is disabled — Settings → AI commit messages]",
-                fg=C["red"])
-
-    def _ask_clear(self):
-        """Reset conversation history and the log pane."""
-        if self._ask_thread and self._ask_thread.is_alive():
-            self._ask_stop()
-        self._ask_messages = []
-        self._ask_set_intro()
-        self._ask_status.configure(text="")
-
-    def _ask_stop(self):
-        """User clicked Stop. Signal the agent thread to abort at the next
-        iteration boundary; the in-flight HTTP request will finish (we
-        can't kill urlopen mid-call from another thread) but the result
-        will be ignored."""
-        if self._ask_stop_event is not None:
-            self._ask_stop_event.set()
-        self._ask_status.configure(
-            text="Cancelling — in-flight request will finish then stop.",
-            fg=C["overlay0"])
-        self._ask_stop_btn.configure(state=tk.DISABLED)
-
-    def _ask_send(self):
-        """Send the current question to the agent."""
-        text = self._ask_entry.get().strip()
-        if not text:
-            return
-        if self._ask_thread and self._ask_thread.is_alive():
-            self._ask_status.configure(
-                text="A request is already running — click Stop first.",
-                fg=C["yellow"])
-            return
-
-        # Sync project selection with current tab state
-        sel = self.tree.selection() if hasattr(self, "tree") else ()
-        if sel and sel[0].startswith("proj:"):
-            self._ask_path = sel[0][5:]
-        elif not self._ask_path and getattr(self, "active_path", None):
-            self._ask_path = self.active_path
-        if not self._ask_path:
-            self._ask_append(
-                "Select a project in the Projects tab first.\n\n", "error")
-            return
-
-        # Check AI is configured
-        llm_cfg = (_cfg.get("commit_message_llm") or {}) if isinstance(_cfg, dict) else {}
-        if not llm_cfg.get("enabled"):
-            self._ask_append(
-                "AI is disabled. Open Settings → AI commit messages and "
-                "tick the enable box, then try again.\n\n", "error")
-            return
-
-        # Defensive import so a corrupt agent.py doesn't break the rest of the UI
-        try:
-            import agent as _agent_mod
-            import agent_tools as _agent_tools_mod
-        except ImportError as e:
-            self._ask_append(
-                f"Could not import agent module: {e}\n", "error")
-            return
-
-        self._ask_refresh_header()
-        self._ask_append(f"\n👤  {text}\n\n", "user")
-        self._ask_entry.delete(0, tk.END)
-        self._ask_status.configure(
-            text="⟳  Thinking…  (the model may call tools before answering)",
-            fg=C["peach"])
-        self._ask_send_btn.configure(state=tk.DISABLED)
-        self._ask_stop_btn.configure(state=tk.NORMAL)
-
-        # First time in this conversation: seed with the system prompt.
-        if not self._ask_messages:
-            self._ask_messages.append({
-                "role": "system",
-                "content": self._ASK_SYSTEM_PROMPT,
-            })
-        self._ask_messages.append({"role": "user", "content": text})
-
-        stop_event = threading.Event()
-        self._ask_stop_event = stop_event
-
-        tokensave_exe = (_cfg.get("tokensave_exe") or "") if isinstance(_cfg, dict) else ""
-        tools = _agent_tools_mod.build_tools(self._ask_path, tokensave_exe)
-        agent_instance = _agent_mod.LocalAgent(
-            llm_cfg, self._ask_path, tools)
-
-        def _on_tool_call(name, args):
-            short_args = json.dumps(args, ensure_ascii=False)
-            if len(short_args) > 120:
-                short_args = short_args[:120] + "…"
-            self.after(0, self._ask_append,
-                       f"🔧  {name}({short_args})\n", "tool_call")
-
-        def _on_tool_result(name, result):
-            preview = result if len(result) <= 600 else (
-                result[:600] + f"\n[... {len(result)-600} more chars ...]")
-            self.after(0, self._ask_append, preview + "\n\n", "tool_result")
-
-        def _on_assistant_message(text):
-            self.after(0, self._ask_append, f"🤖  {text}\n\n", "assistant")
-
-        def _on_done(final_text):
-            def _ui():
-                if final_text is None:
-                    self._ask_status.configure(
-                        text="✓  Done (no final answer text — model only "
-                             "issued tool calls).",
-                        fg=C["green"])
-                else:
-                    self._ask_status.configure(
-                        text="✓  Done.",
-                        fg=C["green"])
-                self._ask_send_btn.configure(state=tk.NORMAL)
-                self._ask_stop_btn.configure(state=tk.DISABLED)
-                self._ask_stop_event = None
-            self.after(0, _ui)
-
-        def _on_error(msg):
-            def _ui():
-                self._ask_append(f"⚠  {msg}\n\n", "error")
-                self._ask_status.configure(text="✗  Error.", fg=C["red"])
-                self._ask_send_btn.configure(state=tk.NORMAL)
-                self._ask_stop_btn.configure(state=tk.DISABLED)
-                self._ask_stop_event = None
-            self.after(0, _ui)
-
-        def _worker():
-            try:
-                agent_instance.run(
-                    self._ask_messages,
-                    on_tool_call=_on_tool_call,
-                    on_tool_result=_on_tool_result,
-                    on_assistant_message=_on_assistant_message,
-                    on_done=_on_done,
-                    on_error=_on_error,
-                    stop_event=stop_event,
-                )
-            except Exception as e:
-                log.exception("Ask worker crashed")
-                try:
-                    self.after(0, _on_error, f"{type(e).__name__}: {e}")
-                except RuntimeError:
-                    pass
-
-        self._ask_thread = threading.Thread(
-            target=_worker, daemon=True, name="ask-agent-worker")
-        self._ask_thread.start()
-
-    def _build_reference_tab(self):
-        tab = tk.Frame(self.nb, bg=C["base"])
-        self.nb.add(tab, text="  Reference  ")
-
-        # ── Top: CLI cheatsheet ───────────────────────────────────────────────
-        tk.Label(tab, text="CLI COMMANDS",
-                 font=("Segoe UI", 8, "bold"),
-                 bg=C["base"], fg=C["overlay0"]).pack(anchor=tk.W, padx=14, pady=(10, 4))
-
-        cli_wrap = tk.Frame(tab, bg=C["mantle"])
-        cli_wrap.pack(fill=tk.X, padx=14)
-
-        cli_sb = ttk.Scrollbar(cli_wrap, orient="vertical")
-        cli_txt = tk.Text(cli_wrap, height=9, font=("Consolas", 9),
-                          bg=C["mantle"], fg=C["text"], relief=tk.FLAT,
-                          padx=12, pady=8, wrap=tk.NONE,
-                          cursor="arrow", state=tk.NORMAL,
-                          yscrollcommand=cli_sb.set)
-        cli_sb.configure(command=cli_txt.yview)
-        cli_txt.pack(side=tk.LEFT, fill=tk.X, expand=True)
-        cli_sb.pack(side=tk.RIGHT, fill=tk.Y)
-
-        cli_txt.tag_configure("hd",  font=("Segoe UI", 9, "bold"), foreground=C["blue"],   spacing1=8, spacing3=2)
-        cli_txt.tag_configure("cmd", font=("Consolas", 9),          foreground=C["peach"],  spacing3=1)
-        cli_txt.tag_configure("dim", font=("Consolas", 9),          foreground=C["overlay0"])
-
-        def cli_row(cmd, desc):
-            cli_txt.insert(tk.END, f"  {cmd:<38}", "cmd")
-            cli_txt.insert(tk.END, f"{desc}\n", "dim")
-
-        def cli_h(t):
-            cli_txt.insert(tk.END, f"\n  {t}\n", "hd")
-
-        cli_h("Daily use")
-        cli_row("tokensave sync",               "Incremental re-index (fast)")
-        cli_row("tokensave sync --force",        "Full re-index from scratch")
-        cli_row("tokensave sync --doctor",       "Sync and list what changed")
-        cli_row("tokensave status",              "Stats + estimated token savings")
-        cli_row("tokensave status --details",    "Stats with node-kind breakdown")
-        cli_row("tokensave files",               "List all indexed files")
-        cli_row("tokensave monitor",             "Live TUI of MCP tool calls")
-        cli_h("Setup")
-        cli_row("tokensave init",                "First-time index of a project")
-        cli_row("tokensave install --agent claude", "Wire up Claude Code integration")
-        cli_row("tokensave daemon",              "Auto-sync daemon (foreground)")
-        cli_row("tokensave daemon --enable-autostart", "Install daemon as a service")
-        cli_h("Troubleshooting")
-        cli_row("tokensave doctor",              "Health check — diagnose issues")
-        cli_row("tokensave upgrade",             "Self-update to latest version")
-        cli_h("Cost & token tracking")
-        cli_row("tokensave cost",                "7-day cost summary")
-        cli_row("tokensave cost today",          "Today's spend only")
-        cli_row("tokensave cost --by-model",     "Breakdown by Claude model")
-        cli_h("Branches")
-        cli_row("tokensave branch add",          "Track current git branch")
-        cli_row("tokensave branch list",         "View tracked branches + DB sizes")
-        cli_row("tokensave branch gc",           "Clean up deleted branches")
-
-        cli_txt.configure(state=tk.DISABLED)
-
-        # ── Bottom: Claude prompt snippets ────────────────────────────────────
-        snippets_header = tk.Frame(tab, bg=C["base"])
-        snippets_header.pack(fill=tk.X, padx=14, pady=(12, 4))
-
-        tk.Label(snippets_header, text="CLAUDE PROMPT SNIPPETS",
-                 font=("Segoe UI", 8, "bold"),
-                 bg=C["base"], fg=C["overlay0"]).pack(side=tk.LEFT)
-
-        ttk.Button(snippets_header, text="📖  Open Full Guide",
-                   command=self._open_guide).pack(side=tk.RIGHT)
-
-        snippets_frame = tk.Frame(tab, bg=C["base"])
-        snippets_frame.pack(fill=tk.BOTH, expand=True, padx=14, pady=(0, 10))
-
-        # Left: listbox of snippet titles
-        list_wrap = tk.Frame(snippets_frame, bg=C["mantle"])
-        list_wrap.pack(side=tk.LEFT, fill=tk.Y)
-
-        self.snippet_lb = tk.Listbox(
-            list_wrap, width=26, font=("Segoe UI", 9),
-            bg=C["mantle"], fg=C["text"], selectbackground=C["surface1"],
-            selectforeground=C["text"], activestyle="none",
-            relief=tk.FLAT, borderwidth=0, highlightthickness=0,
-        )
-        list_sb = ttk.Scrollbar(list_wrap, orient="vertical",
-                                command=self.snippet_lb.yview)
-        self.snippet_lb.configure(yscrollcommand=list_sb.set)
-        self.snippet_lb.pack(side=tk.LEFT, fill=tk.Y)
-        list_sb.pack(side=tk.RIGHT, fill=tk.Y)
-
-        # Right: preview + copy + add/edit/delete buttons
-        right = tk.Frame(snippets_frame, bg=C["base"])
-        right.pack(side=tk.LEFT, fill=tk.BOTH, expand=True, padx=(8, 0))
-
-        prev_wrap = tk.Frame(right, bg=C["mantle"])
-        prev_wrap.pack(fill=tk.BOTH, expand=True)
-
-        self._snippet_preview = tk.Text(
-            prev_wrap, font=("Segoe UI", 9), bg=C["mantle"], fg=C["text"],
-            relief=tk.FLAT, padx=10, pady=8, wrap=tk.WORD,
-            cursor="arrow", state=tk.DISABLED,
-        )
-        self._snippet_preview.pack(fill=tk.BOTH, expand=True)
-
-        copy_row = tk.Frame(right, bg=C["base"])
-        copy_row.pack(fill=tk.X, pady=(6, 0))
-
-        self._copy_btn = ttk.Button(copy_row, text="Copy Prompt  ▸",
-                                    style="Primary.TButton",
-                                    command=self._copy_snippet,
-                                    state=tk.DISABLED)
-        self._copy_btn.pack(side=tk.LEFT)
-
-        self._copy_status = tk.Label(copy_row, text="",
-                                     font=("Segoe UI", 8),
-                                     bg=C["base"], fg=C["green"])
-        self._copy_status.pack(side=tk.LEFT, padx=(10, 0))
-
-        user_btn_row = tk.Frame(right, bg=C["base"])
-        user_btn_row.pack(fill=tk.X, pady=(4, 0))
-
-        ttk.Button(user_btn_row, text="+ Add Snippet",
-                   command=self._add_snippet).pack(side=tk.LEFT, padx=(0, 4))
-        self._edit_btn = ttk.Button(user_btn_row, text="Edit",
-                                    command=self._edit_snippet, state=tk.DISABLED)
-        self._edit_btn.pack(side=tk.LEFT, padx=(0, 4))
-        self._delete_btn = ttk.Button(user_btn_row, text="Delete",
-                                      style="Danger.TButton",
-                                      command=self._delete_snippet, state=tk.DISABLED)
-        self._delete_btn.pack(side=tk.LEFT)
-
-        # Populate listbox and build the parallel metadata map
-        self._refresh_snippet_list()
-        self.snippet_lb.bind("<<ListboxSelect>>", self._on_snippet_select)
-
-    def _refresh_snippet_list(self, reselect_index=None):
-        """Rebuild the snippet listbox and _active_snippets_map from scratch."""
-        self._active_snippets_map = []
-        self.snippet_lb.delete(0, tk.END)
-
-        # Built-in snippets
-        for title, text in PROMPT_SNIPPETS:
-            self.snippet_lb.insert(tk.END, f"  {title}")
-            self._active_snippets_map.append({"type": "builtin", "data": {"title": title, "text": text}})
-
-        # Separator
-        self.snippet_lb.insert(tk.END, "  ──── My Snippets ────")
-        self._active_snippets_map.append({"type": "separator"})
-
-        # User snippets
-        for idx, u in enumerate(_cfg.get("user_snippets", [])):
-            self.snippet_lb.insert(tk.END, f"  ✎ {u['title']}")
-            self._active_snippets_map.append({"type": "user", "index": idx, "data": u})
-
-        # Restore selection
-        if reselect_index is not None and reselect_index < self.snippet_lb.size():
-            self.snippet_lb.selection_set(reselect_index)
-            self.snippet_lb.event_generate("<<ListboxSelect>>")
-        else:
-            # Clear preview and reset buttons if nothing to reselect
-            self._snippet_preview.configure(state=tk.NORMAL)
-            self._snippet_preview.delete("1.0", tk.END)
-            self._snippet_preview.configure(state=tk.DISABLED)
-            self._copy_btn.configure(state=tk.DISABLED)
-            self._edit_btn.configure(state=tk.DISABLED)
-            self._delete_btn.configure(state=tk.DISABLED)
-            self._copy_status.configure(text="")
-
-    def _on_snippet_select(self, _event=None):
-        sel = self.snippet_lb.curselection()
-        if not sel:
-            return
-        meta = self._active_snippets_map[sel[0]]
-        if meta["type"] == "separator":
-            # Deselect separator — don't show anything
-            self.snippet_lb.selection_clear(0, tk.END)
-            self._copy_btn.configure(state=tk.DISABLED)
-            self._edit_btn.configure(state=tk.DISABLED)
-            self._delete_btn.configure(state=tk.DISABLED)
-            self._copy_status.configure(text="")
-            return
-
-        text = meta["data"]["text"]
-        self._snippet_preview.configure(state=tk.NORMAL)
-        self._snippet_preview.delete("1.0", tk.END)
-        self._snippet_preview.insert(tk.END, text)
-        self._snippet_preview.configure(state=tk.DISABLED)
-        self._copy_btn.configure(state=tk.NORMAL)
-        self._copy_status.configure(text="")
-
-        is_user = (meta["type"] == "user")
-        self._edit_btn.configure(state=tk.NORMAL if is_user else tk.DISABLED)
-        self._delete_btn.configure(state=tk.NORMAL if is_user else tk.DISABLED)
-
-    def _copy_snippet(self):
-        sel = self.snippet_lb.curselection()
-        if not sel:
-            return
-        meta = self._active_snippets_map[sel[0]]
-        if meta["type"] == "separator":
-            return
-        self.clipboard_clear()
-        self.clipboard_append(meta["data"]["text"])
-        self._copy_status.configure(text="✔ Copied!")
-        self.after(2000, lambda: self._copy_status.configure(text=""))
-
-    def _add_snippet(self):
-        SnippetEditDialog(self, None, self._on_snippet_saved)
-
-    def _edit_snippet(self):
-        sel = self.snippet_lb.curselection()
-        if not sel:
-            return
-        meta = self._active_snippets_map[sel[0]]
-        if meta["type"] != "user":
-            return
-        SnippetEditDialog(self, meta, self._on_snippet_saved)
-
-    def _delete_snippet(self):
-        sel = self.snippet_lb.curselection()
-        if not sel:
-            return
-        meta = self._active_snippets_map[sel[0]]
-        if meta["type"] != "user":
-            return
-        title = meta["data"]["title"]
-        if not messagebox.askyesno(
-            "Delete snippet",
-            f"Delete '{title}'?\n\nThis cannot be undone.",
-            parent=self,
-        ):
-            return
-        user_snippets = _cfg.get("user_snippets", [])
-        idx = meta["index"]
-        del user_snippets[idx]
-        _cfg["user_snippets"] = user_snippets
-        _save_config(_cfg)
-        self._refresh_snippet_list()
-
-    def _on_snippet_saved(self, title, text, edit_meta):
-        """Callback from SnippetEditDialog — save and refresh."""
-        user_snippets = _cfg.get("user_snippets", [])
-        if edit_meta is None:
-            # Add new snippet
-            user_snippets.append({"title": title, "text": text})
-            new_idx = len(PROMPT_SNIPPETS) + 1 + len(user_snippets) - 1  # separator + 0-based
-        else:
-            # Update existing
-            idx = edit_meta["index"]
-            user_snippets[idx] = {"title": title, "text": text}
-            new_idx = len(PROMPT_SNIPPETS) + 1 + idx
-        _cfg["user_snippets"] = user_snippets
-        _save_config(_cfg)
-        self._refresh_snippet_list(reselect_index=new_idx)
-
-    def _open_guide(self):
-        guide = os.path.join(_BASE_DIR, "TOKENSAVE_GUIDE.md")
-        if os.path.isfile(guide):
-            os.startfile(guide)
-        else:
-            messagebox.showerror("Not found",
-                f"Guide not found at:\n{guide}", parent=self)
 
     def _build_help_tab(self):
         tab = tk.Frame(self.nb, bg=C["base"])
@@ -8423,7 +8417,6 @@ class SettingsDialog(tk.Toplevel):
         self.configure(bg=C["base"])
         self.resizable(True, True)
         self.minsize(640, 500)
-        # Initial geometry — leave room for taskbar on 1080p displays
         self.geometry("760x700")
         self.grab_set()
         self.transient(parent)
@@ -8431,19 +8424,13 @@ class SettingsDialog(tk.Toplevel):
         self._save_fn = save_fn
         self._callback = callback
 
-        # ── Scrollable content area ───────────────────────────────────
-        # The dialog has many sections; on smaller displays the AI
-        # commit-messages section was getting pushed below the visible
-        # area with no way to reach it. Wrap content in a Canvas+Frame
-        # so the dialog scrolls when its natural height exceeds the
-        # window height. Save/Cancel buttons stay anchored at the
-        # bottom (packed on `self`, NOT on the scrollable body).
+        # ── Scrollable content area ───────────────────────────────────────
+        # Save/Cancel buttons stay anchored at the bottom (packed on `self`,
+        # NOT on the scrollable body). All section content goes on `body`.
         _scroll_wrap = tk.Frame(self, bg=C["base"])
         _scroll_wrap.pack(side=tk.TOP, fill=tk.BOTH, expand=True)
-        _canvas = tk.Canvas(_scroll_wrap, bg=C["base"],
-                            highlightthickness=0, bd=0)
-        _vsb = ttk.Scrollbar(_scroll_wrap, orient="vertical",
-                             command=_canvas.yview)
+        _canvas = tk.Canvas(_scroll_wrap, bg=C["base"], highlightthickness=0, bd=0)
+        _vsb = ttk.Scrollbar(_scroll_wrap, orient="vertical", command=_canvas.yview)
         _canvas.configure(yscrollcommand=_vsb.set)
         _vsb.pack(side=tk.RIGHT, fill=tk.Y)
         _canvas.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
@@ -8452,18 +8439,13 @@ class SettingsDialog(tk.Toplevel):
         def _on_body_configure(event):
             _canvas.configure(scrollregion=_canvas.bbox("all"))
         def _on_canvas_configure(event):
-            # Resize the embedded frame to match the canvas viewport width
             _canvas.itemconfigure(_body_window, width=event.width)
         body.bind("<Configure>", _on_body_configure)
         _canvas.bind("<Configure>", _on_canvas_configure)
-        # Mousewheel scrolling — bind on the canvas, also forward from body
         def _on_mousewheel(event):
             _canvas.yview_scroll(int(-1 * (event.delta / 120)), "units")
         _canvas.bind("<MouseWheel>", _on_mousewheel)
         body.bind("<MouseWheel>", _on_mousewheel)
-
-
-        pad = dict(padx=20, pady=4)
 
         if startup_note:
             tk.Label(body, text=startup_note,
@@ -8472,6 +8454,22 @@ class SettingsDialog(tk.Toplevel):
                      justify=tk.LEFT, padx=14, pady=8,
                      wraplength=440).pack(fill=tk.X, pady=(0, 4))
 
+        self._build_paths_section(body, cfg)
+        self._build_git_tools_section(body, cfg)
+        self._build_codegraph_section(body, cfg)
+        self._build_roots_section(body, cfg)
+        self._build_behavior_section(body, cfg)
+        self._build_ai_section(body, cfg)
+
+        # ── Save/Cancel — anchored outside the scroll area ────────────────
+        btn_row = tk.Frame(self, bg=C["base"])
+        btn_row.pack(pady=(8, 16))
+        ttk.Button(btn_row, text="Save", style="Primary.TButton",
+                   command=self._save).pack(side=tk.LEFT, padx=(0, 8))
+        ttk.Button(btn_row, text="Cancel", command=self.destroy).pack(side=tk.LEFT)
+
+    def _build_paths_section(self, body, cfg):
+        """Tokensave exe, upgrade row, template dir, editor command."""
         def field_row(label, key, is_file=False, is_dir=False, note=""):
             tk.Label(body, text=label, bg=C["base"], fg=C["subtext"],
                      font=("Segoe UI", 9)).pack(anchor=tk.W, padx=20, pady=(10, 0))
@@ -8497,23 +8495,17 @@ class SettingsDialog(tk.Toplevel):
                          font=("Segoe UI", 8)).pack(side=tk.LEFT, padx=(8, 0))
             return var
 
-        self._exe_var  = field_row("tokensave.exe  —  path to the tokensave binary",
-                                   "tokensave_exe", is_file=True)
+        self._exe_var = field_row("tokensave.exe  —  path to the tokensave binary",
+                                  "tokensave_exe", is_file=True)
 
-        # Upgrade tokensave row — ALWAYS shown (the button is idempotent;
-        # `tokensave upgrade` reports "already on latest" when no update is
-        # available, so there's no downside to always offering it). When
-        # the app has cached a target version from an "Update available"
-        # sync line, we promote the button styling and pre-fill the
-        # target in the label so users know exactly what'll happen.
+        # Upgrade tokensave row — ALWAYS shown (idempotent; reports "already
+        # on latest" when no update is available). Promoted style when the app
+        # has cached an available version from an "Update available" sync line.
         upgrade_row = tk.Frame(body, bg=C["base"])
         upgrade_row.pack(fill=tk.X, padx=20, pady=(6, 0))
-
-        # The parent App is self.master for this Toplevel.
         host = self.master
         cur_ver = getattr(host, "_tokensave_current_version", None)
         new_ver = getattr(host, "_tokensave_available_version", None)
-
         cur_str = f"v{cur_ver}" if cur_ver else "version unknown"
         if new_ver:
             btn_label = f"🔄  Upgrade tokensave to v{new_ver}"
@@ -8528,35 +8520,35 @@ class SettingsDialog(tk.Toplevel):
                     "no-op if you're already on the latest release. "
                     "Restart Claude after a successful upgrade.")
             hint_fg = C["overlay0"]
-
         ttk.Button(upgrade_row, text=btn_label, style=btn_style,
                    command=host.cmd_upgrade_tokensave).pack(side=tk.LEFT)
         tk.Label(body, text=hint, bg=C["base"], fg=hint_fg,
                  font=("Segoe UI", 8), justify=tk.LEFT,
                  anchor=tk.W).pack(fill=tk.X, padx=20, pady=(0, 4))
-        self._tmpl_var = field_row("Template directory  —  folder containing claude-md-template.md and project-baseline.md",
-                                   "template_dir", is_dir=True,
-                                   note="(leave blank to auto-detect)")
+
+        self._tmpl_var = field_row(
+            "Template directory  —  folder containing claude-md-template.md and project-baseline.md",
+            "template_dir", is_dir=True, note="(leave blank to auto-detect)")
         self._editor_var = field_row(
             "Editor command  —  launched by 'Open in Editor' (e.g. code, code --new-window, notepad)",
             "editor_cmd", note="(flags supported)")
 
-        # ── Git executable ──
+    def _build_git_tools_section(self, body, cfg):
+        """Git executable path + GitHub CLI install/detect."""
+        # ── Git executable ────────────────────────────────────────────────
         ttk.Separator(body, orient="horizontal").pack(fill=tk.X, padx=20, pady=(12, 8))
         tk.Label(body, text="Git executable  —  path to git.exe",
                  bg=C["base"], fg=C["subtext"],
-                 font=("Segoe UI", 9)).pack(anchor=tk.W, padx=20, pady=(0, 0))
+                 font=("Segoe UI", 9)).pack(anchor=tk.W, padx=20)
         git_row = tk.Frame(body, bg=C["base"])
         git_row.pack(fill=tk.X, padx=20, pady=(4, 0))
         self._git_exe_var = tk.StringVar(value=cfg.get("git_exe", ""))
-        git_entry = ttk.Entry(git_row, textvariable=self._git_exe_var, width=44)
-        git_entry.pack(side=tk.LEFT, padx=(0, 6))
+        ttk.Entry(git_row, textvariable=self._git_exe_var, width=44).pack(side=tk.LEFT, padx=(0, 6))
         def _browse_git():
             p = filedialog.askopenfilename(
                 title="Select git.exe",
                 filetypes=[("Executable", "*.exe"), ("All", "*.*")],
-                initialdir=r"C:\Program Files\Git\cmd",
-                parent=self)
+                initialdir=r"C:\Program Files\Git\cmd", parent=self)
             if p:
                 self._git_exe_var.set(p)
                 self._verify_git(p)
@@ -8569,14 +8561,12 @@ class SettingsDialog(tk.Toplevel):
         self._git_status_lbl = tk.Label(git_row, text="", bg=C["base"],
                                         font=("Segoe UI", 8), fg=C["overlay0"])
         self._git_status_lbl.pack(side=tk.LEFT, padx=(6, 0))
-        tk.Label(body,
-                 text="  Leave blank to auto-detect from PATH or common install locations.",
+        tk.Label(body, text="  Leave blank to auto-detect from PATH or common install locations.",
                  font=("Segoe UI", 8), bg=C["base"], fg=C["overlay0"]).pack(
                  anchor=tk.W, padx=20, pady=(2, 0))
-        # Show current detected version on open
         self.after(100, lambda: self._verify_git(cfg.get("git_exe") or GIT_EXE))
 
-        # ── GitHub CLI (gh) ──
+        # ── GitHub CLI (gh) ───────────────────────────────────────────────
         ttk.Separator(body, orient="horizontal").pack(fill=tk.X, padx=20, pady=(12, 8))
         tk.Label(body, text="GitHub CLI (gh)  —  enables 'Open PR on GitHub' and release creation",
                  bg=C["base"], fg=C["subtext"],
@@ -8584,8 +8574,7 @@ class SettingsDialog(tk.Toplevel):
         gh_row = tk.Frame(body, bg=C["base"])
         gh_row.pack(fill=tk.X, padx=20, pady=(4, 0))
         self._gh_status_lbl = tk.Label(gh_row, text="Checking…",
-                                       bg=C["base"], fg=C["overlay0"],
-                                       font=("Segoe UI", 8))
+                                       bg=C["base"], fg=C["overlay0"], font=("Segoe UI", 8))
         self._gh_status_lbl.pack(side=tk.LEFT, padx=(0, 12))
 
         def _check_gh_status():
@@ -8626,18 +8615,17 @@ class SettingsDialog(tk.Toplevel):
                     self.after(0, lambda: self._gh_install_btn.configure(state=tk.NORMAL))
             threading.Thread(target=worker, daemon=True).start()
 
-        self._gh_install_btn = ttk.Button(gh_row, text="Install via winget",
-                                          command=_install_gh)
+        self._gh_install_btn = ttk.Button(gh_row, text="Install via winget", command=_install_gh)
         self._gh_install_btn.pack(side=tk.LEFT, padx=(0, 6))
-        ttk.Button(gh_row, text="Check again",
-                   command=_check_gh_status).pack(side=tk.LEFT)
+        ttk.Button(gh_row, text="Check again", command=_check_gh_status).pack(side=tk.LEFT)
         tk.Label(body,
                  text="  Once installed, use the Git tab's '🔗 Open PR' button to create pull requests on GitHub.",
                  font=("Segoe UI", 8), bg=C["base"], fg=C["overlay0"]).pack(
                  anchor=tk.W, padx=20, pady=(2, 0))
         self.after(150, _check_gh_status)
 
-        # ── CodeGraph (alternative code-graph tool) ──
+    def _build_codegraph_section(self, body, cfg):
+        """CodeGraph executable path, install via npm, status check."""
         ttk.Separator(body, orient="horizontal").pack(fill=tk.X, padx=20, pady=(12, 8))
         self._cg_section = tk.Frame(body, bg=C["base"])
         self._cg_section.pack(fill=tk.X)
@@ -8649,16 +8637,14 @@ class SettingsDialog(tk.Toplevel):
         cg_path_row = tk.Frame(self._cg_section, bg=C["base"])
         cg_path_row.pack(fill=tk.X, padx=20, pady=(4, 0))
         self._cg_exe_var = tk.StringVar(value=cfg.get("codegraph_exe", ""))
-        self._cg_exe_entry = ttk.Entry(cg_path_row, textvariable=self._cg_exe_var,
-                                        width=44)
+        self._cg_exe_entry = ttk.Entry(cg_path_row, textvariable=self._cg_exe_var, width=44)
         self._cg_exe_entry.pack(side=tk.LEFT, padx=(0, 6))
 
         def _browse_cg():
             p = filedialog.askopenfilename(
                 title="Select codegraph executable",
                 filetypes=[("Executable", "*.cmd;*.exe;*.bat"), ("All", "*.*")],
-                initialdir=os.path.expandvars(r"%APPDATA%\npm"),
-                parent=self)
+                initialdir=os.path.expandvars(r"%APPDATA%\npm"), parent=self)
             if p:
                 self._cg_exe_var.set(p)
                 self._verify_codegraph(p)
@@ -8669,25 +8655,21 @@ class SettingsDialog(tk.Toplevel):
                 self._cg_exe_var.set(found)
                 self._verify_codegraph(found)
             else:
-                self._cg_status_lbl.config(text="✗  not installed",
-                                            fg=C["red"])
+                self._cg_status_lbl.config(text="✗  not installed", fg=C["red"])
 
-        ttk.Button(cg_path_row, text="Browse…",
-                   command=_browse_cg).pack(side=tk.LEFT, padx=(0, 6))
-        ttk.Button(cg_path_row, text="Auto-detect",
-                   command=_autodetect_cg).pack(side=tk.LEFT, padx=(0, 6))
+        ttk.Button(cg_path_row, text="Browse…", command=_browse_cg).pack(side=tk.LEFT, padx=(0, 6))
+        ttk.Button(cg_path_row, text="Auto-detect", command=_autodetect_cg).pack(side=tk.LEFT, padx=(0, 6))
 
         cg_install_row = tk.Frame(self._cg_section, bg=C["base"])
         cg_install_row.pack(fill=tk.X, padx=20, pady=(6, 0))
         self._cg_status_lbl = tk.Label(cg_install_row, text="Checking…",
-                                        bg=C["base"], fg=C["overlay0"],
-                                        font=("Segoe UI", 8), justify=tk.LEFT,
-                                        wraplength=420, anchor=tk.W)
+                                       bg=C["base"], fg=C["overlay0"],
+                                       font=("Segoe UI", 8), justify=tk.LEFT,
+                                       wraplength=420, anchor=tk.W)
         self._cg_status_lbl.pack(side=tk.LEFT, padx=(0, 12), fill=tk.X, expand=True)
 
         cg_btn_row = tk.Frame(self._cg_section, bg=C["base"])
         cg_btn_row.pack(fill=tk.X, padx=20, pady=(4, 0))
-
         npm_path = _detect_npm()
 
         def _check_cg_status():
@@ -8698,73 +8680,53 @@ class SettingsDialog(tk.Toplevel):
                 if not self._cg_exe_var.get():
                     self._cg_exe_var.set(found)
             else:
-                self._cg_status_lbl.config(text="✗  not installed",
-                                            fg=C["red"])
-                # Only re-enable Install if npm is actually available
-                if _detect_npm():
-                    self._cg_install_btn.configure(state=tk.NORMAL)
-                else:
-                    self._cg_install_btn.configure(state=tk.DISABLED)
+                self._cg_status_lbl.config(text="✗  not installed", fg=C["red"])
+                state = tk.NORMAL if _detect_npm() else tk.DISABLED
+                self._cg_install_btn.configure(state=state)
 
         def _cg_finish_install(ok: bool, msg: str):
-            """Main-thread callback after the install worker finishes."""
             if ok:
-                # Re-detect so the resolved path shows up immediately
                 path = _detect_codegraph()
                 if path:
                     self._cg_exe_var.set(path)
-                    self._cg_status_lbl.config(
-                        text=f"✓  Installed — {path}", fg=C["green"])
+                    self._cg_status_lbl.config(text=f"✓  Installed — {path}", fg=C["green"])
                 else:
                     self._cg_status_lbl.config(
-                        text="✓  Installed.  Click 'Check again' to confirm.",
-                        fg=C["green"])
+                        text="✓  Installed.  Click 'Check again' to confirm.", fg=C["green"])
                 self._cg_install_btn.configure(state=tk.NORMAL)
             else:
                 self._cg_status_lbl.config(text=msg, fg=C["red"])
                 self._cg_install_btn.configure(state=tk.NORMAL)
-                # Multi-line failures also pop up in a messagebox so the
-                # error isn't lost when the user clicks elsewhere
                 if "\n" in msg:
-                    messagebox.showerror("CodeGraph install failed",
-                                          msg, parent=self)
+                    messagebox.showerror("CodeGraph install failed", msg, parent=self)
 
         def _install_cg():
             npm = _detect_npm()
             if not npm:
                 self._cg_status_lbl.config(
-                    text="✗  npm not found — install Node.js 18+ first "
-                         "(https://nodejs.org)",
+                    text="✗  npm not found — install Node.js 18+ first (https://nodejs.org)",
                     fg=C["red"])
                 return
             self._cg_install_btn.configure(state=tk.DISABLED)
             self._cg_status_lbl.config(
-                text="Installing…  (this may take a couple of minutes)",
-                fg=C["yellow"])
-
+                text="Installing…  (this may take a couple of minutes)", fg=C["yellow"])
             def worker():
                 try:
                     result = subprocess.run(
                         [npm, "install", "-g", "@colbymchenry/codegraph"],
                         capture_output=True, text=True, timeout=300,
-                        creationflags=CREATE_NO_WINDOW,
-                        encoding="utf-8", errors="replace")
+                        creationflags=CREATE_NO_WINDOW, encoding="utf-8", errors="replace")
                 except subprocess.TimeoutExpired:
                     self.after(0, lambda: _cg_finish_install(
                         ok=False, msg="Install timed out after 5 minutes."))
                     return
                 except FileNotFoundError as e:
-                    self.after(0, lambda: _cg_finish_install(
-                        ok=False, msg=f"npm not found: {e}"))
+                    self.after(0, lambda: _cg_finish_install(ok=False, msg=f"npm not found: {e}"))
                     return
-
                 if result.returncode == 0:
-                    self.after(0, lambda: _cg_finish_install(
-                        ok=True, msg="✓ Installed successfully."))
+                    self.after(0, lambda: _cg_finish_install(ok=True, msg="✓ Installed successfully."))
                 else:
                     err_text = (result.stderr or result.stdout or "").strip()
-                    # EPERM / EACCES is the common Windows failure when Node
-                    # was installed system-wide and the manager isn't elevated.
                     hint = ""
                     if "EPERM" in err_text or "EACCES" in err_text:
                         hint = ("\n\nThis usually happens when Node.js was "
@@ -8774,75 +8736,53 @@ class SettingsDialog(tk.Toplevel):
                                 "installer offers this option).")
                     tail = "\n".join(err_text.splitlines()[-8:]) or "(no output)"
                     self.after(0, lambda: _cg_finish_install(
-                        ok=False,
-                        msg=f"✗  Install failed (exit {result.returncode}):\n\n{tail}{hint}"))
-
+                        ok=False, msg=f"✗  Install failed (exit {result.returncode}):\n\n{tail}{hint}"))
             threading.Thread(target=worker, daemon=True).start()
 
-        self._cg_install_btn = ttk.Button(cg_btn_row, text="Install via npm",
-                                           command=_install_cg)
+        self._cg_install_btn = ttk.Button(cg_btn_row, text="Install via npm", command=_install_cg)
         self._cg_install_btn.pack(side=tk.LEFT, padx=(0, 6))
-        ttk.Button(cg_btn_row, text="Check again",
-                   command=_check_cg_status).pack(side=tk.LEFT, padx=(0, 6))
-
+        ttk.Button(cg_btn_row, text="Check again", command=_check_cg_status).pack(side=tk.LEFT, padx=(0, 6))
         if not npm_path:
             self._cg_install_btn.configure(state=tk.DISABLED)
-
         tk.Label(self._cg_section,
                  text="  npm install -g @colbymchenry/codegraph  —  requires Node.js 18+ on PATH.\n"
                       "  Per-project actions live in the right-click menu (🧠 CodeGraph …).",
                  font=("Segoe UI", 8), bg=C["base"], fg=C["overlay0"],
                  justify=tk.LEFT).pack(anchor=tk.W, padx=20, pady=(4, 0))
-
         self.after(200, _check_cg_status)
 
-        # ── Search roots — two-column Treeview (label + path) ──
+    def _build_roots_section(self, body, cfg):
+        """Search roots two-column Treeview (label + path)."""
         tk.Label(body,
                  text="Search roots  —  each root's label becomes a category in the project list",
                  bg=C["base"], fg=C["subtext"],
                  font=("Segoe UI", 9)).pack(anchor=tk.W, padx=20, pady=(12, 0))
-
         roots_frame = tk.Frame(body, bg=C["base"])
         roots_frame.pack(fill=tk.X, padx=20, pady=(4, 0))
-
         tv_wrap = tk.Frame(roots_frame, bg=C["mantle"])
         tv_wrap.pack(side=tk.LEFT, fill=tk.X, expand=True, padx=(0, 6))
-
-        self._roots_tv = ttk.Treeview(
-            tv_wrap,
-            columns=("label", "path"),
-            show="headings",
-            height=5,
-            selectmode="browse",
-        )
+        self._roots_tv = ttk.Treeview(tv_wrap, columns=("label", "path"),
+                                      show="headings", height=5, selectmode="browse")
         self._roots_tv.heading("label", text="Label")
         self._roots_tv.heading("path",  text="Path")
         self._roots_tv.column("label", width=130, stretch=False)
         self._roots_tv.column("path",  width=300)
-        roots_vsb = ttk.Scrollbar(tv_wrap, orient="vertical",
-                                   command=self._roots_tv.yview)
+        roots_vsb = ttk.Scrollbar(tv_wrap, orient="vertical", command=self._roots_tv.yview)
         self._roots_tv.configure(yscrollcommand=roots_vsb.set)
         self._roots_tv.pack(side=tk.LEFT, fill=tk.X, expand=True)
         roots_vsb.pack(side=tk.RIGHT, fill=tk.Y)
-
-        # Populate from config (support legacy bare strings)
         for r in cfg.get("search_roots", []):
-            lbl  = _root_label(r)
-            path_val = _root_path(r)
-            self._roots_tv.insert("", tk.END, values=(lbl, path_val))
-
+            self._roots_tv.insert("", tk.END, values=(_root_label(r), _root_path(r)))
         root_btns = tk.Frame(roots_frame, bg=C["base"])
         root_btns.pack(side=tk.LEFT, anchor=tk.N)
-        ttk.Button(root_btns, text="+ Add",
-                   command=self._add_root).pack(fill=tk.X, pady=(0, 4))
-        ttk.Button(root_btns, text="Edit Label",
-                   command=self._edit_root_label).pack(fill=tk.X, pady=(0, 4))
-        ttk.Button(root_btns, text="Remove",
-                   command=self._remove_root).pack(fill=tk.X)
+        ttk.Button(root_btns, text="+ Add",      command=self._add_root).pack(fill=tk.X, pady=(0, 4))
+        ttk.Button(root_btns, text="Edit Label", command=self._edit_root_label).pack(fill=tk.X, pady=(0, 4))
+        ttk.Button(root_btns, text="Remove",     command=self._remove_root).pack(fill=tk.X)
 
-        # ── Auto-commit toggle ──
+    def _build_behavior_section(self, body, cfg):
+        """Auto-commit toggle, MCP integration status, Ollama shortcut."""
+        # ── Auto-commit ───────────────────────────────────────────────────
         ttk.Separator(body, orient="horizontal").pack(fill=tk.X, padx=20, pady=(12, 8))
-
         self._var_autocommit = tk.BooleanVar(value=bool(cfg.get("auto_commit_after_sync", False)))
         tk.Checkbutton(body,
             text="Auto-commit after sync  (git add -A + git commit)",
@@ -8856,21 +8796,15 @@ class SettingsDialog(tk.Toplevel):
             font=("Segoe UI", 8), bg=C["base"], fg=C["overlay0"],
             justify=tk.LEFT).pack(anchor=tk.W, padx=36, pady=(0, 8))
 
-        # ── MCP integration ─────────────────────────────────────────────────
+        # ── MCP integration ───────────────────────────────────────────────
         ttk.Separator(body, orient="horizontal").pack(fill=tk.X, padx=20, pady=(8, 8))
-
         tk.Label(body, text="MCP integration",
                  font=("Segoe UI", 10, "bold"),
                  bg=C["base"], fg=C["text"]).pack(anchor=tk.W, padx=20, pady=(0, 2))
-
         mcp_row = tk.Frame(body, bg=C["base"])
         mcp_row.pack(anchor=tk.W, padx=20, pady=(0, 4))
         ttk.Button(mcp_row, text="🔌  Manage MCP wiring…",
                    command=lambda: MCPConfigDialog(self)).pack(side=tk.LEFT)
-
-        # Inline status summary — green if both ok, peach if any drift,
-        # red if any missing. Computed on dialog open; clicking Re-detect
-        # in the configurator dialog is the way to refresh.
         try:
             states = [_classify_mcp_entry(p)["state"] for _, p in _MCP_CONFIGS]
         except Exception:
@@ -8889,8 +8823,7 @@ class SettingsDialog(tk.Toplevel):
             summary_fg = C["overlay0"]
         if summary:
             tk.Label(body, text="  " + summary,
-                     font=("Segoe UI", 9),
-                     bg=C["base"], fg=summary_fg,
+                     font=("Segoe UI", 9), bg=C["base"], fg=summary_fg,
                      justify=tk.LEFT, anchor=tk.W,
                      wraplength=620).pack(anchor=tk.W, padx=36, pady=(0, 2))
         tk.Label(body,
@@ -8899,13 +8832,10 @@ class SettingsDialog(tk.Toplevel):
             font=("Segoe UI", 8), bg=C["base"], fg=C["overlay0"],
             justify=tk.LEFT).pack(anchor=tk.W, padx=36, pady=(0, 8))
 
-        # ── Ollama ──────────────────────────────────────────────────────────
+        # ── Ollama ────────────────────────────────────────────────────────
         ttk.Separator(body, orient="horizontal").pack(fill=tk.X, padx=20, pady=(8, 8))
-
-        tk.Label(body, text="Ollama",
-                 font=("Segoe UI", 10, "bold"),
+        tk.Label(body, text="Ollama", font=("Segoe UI", 10, "bold"),
                  bg=C["base"], fg=C["text"]).pack(anchor=tk.W, padx=20, pady=(0, 2))
-
         ollama_row = tk.Frame(body, bg=C["base"])
         ollama_row.pack(anchor=tk.W, padx=20, pady=(0, 4))
         ttk.Button(ollama_row, text="🦙  Manage Ollama Models…",
@@ -8916,14 +8846,14 @@ class SettingsDialog(tk.Toplevel):
             font=("Segoe UI", 8), bg=C["base"], fg=C["overlay0"],
             justify=tk.LEFT).pack(anchor=tk.W, padx=36, pady=(0, 8))
 
-        # ── AI commit messages ──────────────────────────────────────────────
+    def _build_ai_section(self, body, cfg):
+        """AI commit messages — provider, model, key env, presets, options."""
         ttk.Separator(body, orient="horizontal").pack(fill=tk.X, padx=20, pady=(8, 8))
-
         tk.Label(body, text="AI commit messages",
                  font=("Segoe UI", 10, "bold"),
                  bg=C["base"], fg=C["text"]).pack(anchor=tk.W, padx=20, pady=(0, 2))
 
-        llm_cfg = (cfg.get("commit_message_llm") or {})
+        llm_cfg = cfg.get("commit_message_llm") or {}
         self._var_llm_enabled = tk.BooleanVar(value=bool(llm_cfg.get("enabled", False)))
         tk.Checkbutton(body,
             text="Use AI to generate commit message suggestions",
@@ -8932,7 +8862,7 @@ class SettingsDialog(tk.Toplevel):
             activebackground=C["base"], activeforeground=C["text"],
             font=("Segoe UI", 10)).pack(anchor=tk.W, padx=20, pady=(0, 4))
 
-        # Provider + model + key + base URL grid
+        # Provider / model / key / base URL grid
         llm_grid = tk.Frame(body, bg=C["base"])
         llm_grid.pack(fill=tk.X, padx=36, pady=(0, 6))
 
@@ -8945,41 +8875,28 @@ class SettingsDialog(tk.Toplevel):
             widget.pack(side=tk.LEFT, fill=tk.X, expand=True)
             return row
 
-        self._var_llm_provider = tk.StringVar(
-            value=llm_cfg.get("provider", "anthropic"))
-        provider_box = ttk.Combobox(llm_grid,
-            textvariable=self._var_llm_provider,
+        self._var_llm_provider = tk.StringVar(value=llm_cfg.get("provider", "anthropic"))
+        provider_box = ttk.Combobox(llm_grid, textvariable=self._var_llm_provider,
             values=["ollama", "anthropic", "openai", "openai_compatible"],
             state="readonly", width=22)
         _row(llm_grid, "Provider:", provider_box)
 
-        self._var_llm_model = tk.StringVar(
-            value=llm_cfg.get("model", "claude-haiku-4-5"))
-        model_entry = ttk.Entry(llm_grid, textvariable=self._var_llm_model)
-        _row(llm_grid, "Model:", model_entry)
+        self._var_llm_model = tk.StringVar(value=llm_cfg.get("model", "claude-haiku-4-5"))
+        _row(llm_grid, "Model:", ttk.Entry(llm_grid, textvariable=self._var_llm_model))
 
-        self._var_llm_keyenv = tk.StringVar(
-            value=llm_cfg.get("api_key_env", "ANTHROPIC_API_KEY"))
-        keyenv_entry = ttk.Entry(llm_grid, textvariable=self._var_llm_keyenv)
-        _row(llm_grid, "API key env var:", keyenv_entry)
+        self._var_llm_keyenv = tk.StringVar(value=llm_cfg.get("api_key_env", "ANTHROPIC_API_KEY"))
+        _row(llm_grid, "API key env var:", ttk.Entry(llm_grid, textvariable=self._var_llm_keyenv))
 
-        self._var_llm_base_url = tk.StringVar(
-            value=llm_cfg.get("base_url", ""))
-        base_entry = ttk.Entry(llm_grid, textvariable=self._var_llm_base_url)
-        _row(llm_grid, "Base URL:", base_entry)
+        self._var_llm_base_url = tk.StringVar(value=llm_cfg.get("base_url", ""))
+        _row(llm_grid, "Base URL:", ttk.Entry(llm_grid, textvariable=self._var_llm_base_url))
 
-        # Preset buttons for local OpenAI-compatible servers
+        # Quick presets
         preset_row = tk.Frame(body, bg=C["base"])
         preset_row.pack(anchor=tk.W, padx=36, pady=(0, 4))
-        tk.Label(preset_row, text="Quick presets:",
-                 font=("Segoe UI", 9), bg=C["base"],
-                 fg=C["subtext"]).pack(side=tk.LEFT, padx=(0, 8))
+        tk.Label(preset_row, text="Quick presets:", font=("Segoe UI", 9),
+                 bg=C["base"], fg=C["subtext"]).pack(side=tk.LEFT, padx=(0, 8))
 
         def _probe_loaded_model(base_url: str) -> str:
-            """Hit /v1/models on an OpenAI-compatible server and return the first
-            chat-tuned model id. Returns "" on any failure (server down, no models
-            loaded, network error). Skips embedding models which can't generate text.
-            """
             import urllib.request, urllib.error, json as _json
             try:
                 req = urllib.request.Request(base_url.rstrip("/") + "/v1/models")
@@ -8988,16 +8905,11 @@ class SettingsDialog(tk.Toplevel):
             except (urllib.error.URLError, urllib.error.HTTPError,
                     TimeoutError, OSError, _json.JSONDecodeError):
                 return ""
-            models = data.get("data", []) or []
-            # Filter out embedding-only models (they can't do chat completion)
-            for m in models:
+            for m in (data.get("data") or []):
                 mid = m.get("id", "")
-                if not mid:
-                    continue
                 lid = mid.lower()
-                if "embed" in lid or "rerank" in lid or "whisper" in lid:
-                    continue
-                return mid
+                if mid and "embed" not in lid and "rerank" not in lid and "whisper" not in lid:
+                    return mid
             return ""
 
         def _apply_lm_studio():
@@ -9005,27 +8917,17 @@ class SettingsDialog(tk.Toplevel):
             base = "http://localhost:1234"
             self._var_llm_base_url.set(base)
             self._var_llm_keyenv.set("")
-            # Auto-detect the first loaded chat model from LM Studio's /v1/models.
-            # If the server isn't running OR no models are loaded, leave the
-            # field alone and surface a hint to the user.
             detected = _probe_loaded_model(base)
             if detected:
                 self._var_llm_model.set(detected)
-                self._llm_preset_hint.configure(
-                    text=f"✓  Using loaded model: {detected}",
-                    fg=C["green"])
+                self._llm_preset_hint.configure(text=f"✓  Using loaded model: {detected}", fg=C["green"])
             else:
                 self._llm_preset_hint.configure(
-                    text="⚠  LM Studio server not reachable at "
-                         "http://localhost:1234 — start the Local Server in "
-                         "LM Studio's '</>' panel and load a model, then click "
-                         "this preset again.",
-                    fg=C["peach"])
+                    text="⚠  LM Studio server not reachable at http://localhost:1234 — "
+                         "start the Local Server in LM Studio's '</>' panel and load a model, "
+                         "then click this preset again.", fg=C["peach"])
 
         def _apply_ollama():
-            # Use "ollama" as a first-class provider name; the _call_llm
-            # function falls through to OpenAI-compatible dispatch with the
-            # default Ollama base URL.
             self._var_llm_provider.set("ollama")
             base = "http://localhost:11434"
             self._var_llm_base_url.set(base)
@@ -9033,18 +8935,15 @@ class SettingsDialog(tk.Toplevel):
             detected = _probe_loaded_model(base)
             if detected:
                 self._var_llm_model.set(detected)
-                self._llm_preset_hint.configure(
-                    text=f"✓  Using Ollama model: {detected}", fg=C["green"])
+                self._llm_preset_hint.configure(text=f"✓  Using Ollama model: {detected}", fg=C["green"])
             else:
-                if (not self._var_llm_model.get()
-                        or "claude" in self._var_llm_model.get()):
+                if not self._var_llm_model.get() or "claude" in self._var_llm_model.get():
                     self._var_llm_model.set("qwen2.5-coder:14b")
                 self._llm_preset_hint.configure(
                     text="⚠  Ollama not reachable at http://localhost:11434 — "
                          "make sure the Ollama service is running and run "
                          "`ollama pull qwen2.5-coder:14b` (or any chat model), "
-                         "then click this preset again.",
-                    fg=C["peach"])
+                         "then click this preset again.", fg=C["peach"])
 
         def _apply_anthropic():
             self._var_llm_provider.set("anthropic")
@@ -9055,58 +8954,40 @@ class SettingsDialog(tk.Toplevel):
             self._llm_preset_hint.configure(
                 text="ℹ  Set the ANTHROPIC_API_KEY environment variable (get a "
                      "key at console.anthropic.com).  Haiku is cheapest "
-                     "(~$0.0005/commit); Sonnet/Opus are higher-fidelity.",
-                fg=C["blue"])
-        ttk.Button(preset_row, text="Anthropic",
-                   command=_apply_anthropic).pack(side=tk.LEFT, padx=(0, 4))
-        ttk.Button(preset_row, text="LM Studio",
-                   command=_apply_lm_studio).pack(side=tk.LEFT, padx=(0, 4))
-        ttk.Button(preset_row, text="Ollama",
-                   command=_apply_ollama).pack(side=tk.LEFT)
+                     "(~$0.0005/commit); Sonnet/Opus are higher-fidelity.", fg=C["blue"])
 
-        # Preset feedback line — shows what the preset did (auto-detected model,
-        # server-not-reachable warning, API-key hint, etc.). Stays blank until
-        # the user clicks a preset.
-        self._llm_preset_hint = tk.Label(
-            body, text="", font=("Segoe UI", 8),
-            bg=C["base"], fg=C["overlay0"],
-            justify=tk.LEFT, wraplength=620, anchor=tk.W)
+        ttk.Button(preset_row, text="Anthropic", command=_apply_anthropic).pack(side=tk.LEFT, padx=(0, 4))
+        ttk.Button(preset_row, text="LM Studio", command=_apply_lm_studio).pack(side=tk.LEFT, padx=(0, 4))
+        ttk.Button(preset_row, text="Ollama",    command=_apply_ollama).pack(side=tk.LEFT)
+
+        # Preset feedback line — stays blank until user clicks a preset
+        self._llm_preset_hint = tk.Label(body, text="", font=("Segoe UI", 8),
+                                         bg=C["base"], fg=C["overlay0"],
+                                         justify=tk.LEFT, wraplength=620, anchor=tk.W)
         self._llm_preset_hint.pack(anchor=tk.W, padx=36, pady=(2, 0), fill=tk.X)
 
         # Min diff lines
         min_row = tk.Frame(body, bg=C["base"])
         min_row.pack(anchor=tk.W, padx=36, pady=(2, 0))
-        self._var_llm_min_diff = tk.StringVar(
-            value=str(llm_cfg.get("min_diff_lines", 30)))
+        self._var_llm_min_diff = tk.StringVar(value=str(llm_cfg.get("min_diff_lines", 30)))
         tk.Label(min_row, text="Min diff lines (smaller commits skip AI):",
                  font=("Segoe UI", 9), bg=C["base"],
                  fg=C["subtext"]).pack(side=tk.LEFT, padx=(0, 6))
-        ttk.Entry(min_row, textvariable=self._var_llm_min_diff,
-                  width=6).pack(side=tk.LEFT)
+        ttk.Entry(min_row, textvariable=self._var_llm_min_diff, width=6).pack(side=tk.LEFT)
 
-        self._var_llm_for_sync = tk.BooleanVar(
-            value=bool(llm_cfg.get("use_for_sync_autocommit", False)))
+        self._var_llm_for_sync = tk.BooleanVar(value=bool(llm_cfg.get("use_for_sync_autocommit", False)))
         tk.Checkbutton(body,
-            text="Also use AI for sync auto-commit messages "
-                 "(disables amend-stacking)",
+            text="Also use AI for sync auto-commit messages (disables amend-stacking)",
             variable=self._var_llm_for_sync,
             bg=C["base"], fg=C["text"], selectcolor=C["surface0"],
             activebackground=C["base"], activeforeground=C["text"],
             font=("Segoe UI", 9)).pack(anchor=tk.W, padx=20, pady=(6, 2))
-
         tk.Label(body,
             text="  AI runs only when toggled ON. Silent fallback on any error\n"
                  "  (missing key, network failure, timeout). Anthropic Claude Haiku\n"
                  "  costs ~$0.0005 per commit.",
             font=("Segoe UI", 8), bg=C["base"], fg=C["overlay0"],
             justify=tk.LEFT).pack(anchor=tk.W, padx=36, pady=(0, 8))
-
-        # ── Buttons ──
-        btn_row = tk.Frame(self, bg=C["base"])
-        btn_row.pack(pady=(8, 16))
-        ttk.Button(btn_row, text="Save", style="Primary.TButton",
-                   command=self._save).pack(side=tk.LEFT, padx=(0, 8))
-        ttk.Button(btn_row, text="Cancel", command=self.destroy).pack(side=tk.LEFT)
 
     def _open_ollama_manager(self):
         """Launch the Ollama Model Manager dialog.
