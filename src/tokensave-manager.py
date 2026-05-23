@@ -251,10 +251,30 @@ def _classify_mcp_entry(cfg_path: str) -> dict:
       - "proposed": the canonical entry the manager wants to write
       - "cfg_path": echoes the input, for callers that thread through many configs
 
+    Two valid shapes are recognised as "ok":
+      (a) Wrapper-routed:  pythonw[w].exe + tokensave-wrapper.py  (or the
+          bundled tokensave-wrapper.exe).  Manager-blessed.  Required for
+          Claude Desktop because Desktop spawns the MCP server once at
+          startup and the wrapper is what reads ~/.tokensave/desktop-
+          project.txt to pick the right project.
+      (b) tokensave install canonical:  tokensave.exe serve  with NO
+          hardcoded "-p" flag.  This is what `tokensave install --agent
+          claude` writes to ~/.claude.json, and `tokensave doctor`
+          considers it the correct shape.  Standalone Claude Code
+          sessions then let tokensave auto-detect the project per
+          invocation.  We ONLY accept this shape for Claude Code
+          (cfg_path ending in .claude.json) — Desktop must use (a)
+          because its MCP server is long-lived and can't re-auto-detect.
+
+    Direct-serve WITH a hardcoded "-p" is always flagged — that's the
+    KicomAI-style footgun where every Claude restart needs to know the
+    project at install time.
+
     Pure function — no side effects. Safe to call on every startup.
     """
     proposed = _canonical_mcp_entry()
     base = {"cfg_path": cfg_path, "current": None, "proposed": proposed}
+    is_claude_code = cfg_path.lower().endswith(".claude.json")
 
     if not cfg_path or not os.path.isfile(cfg_path):
         return {**base,
@@ -310,22 +330,44 @@ def _classify_mcp_entry(cfg_path: str) -> dict:
                               "exist. Click Apply to update to the current "
                               "wrapper location.")}
 
-    # State 2: direct-serve — runs tokensave.exe itself with a hardcoded -p.
+    # State 2: tokensave.exe direct.  Two sub-cases:
+    #   - With hardcoded -p: always flagged (KicomAI footgun)
+    #   - Without -p: OK for Claude Code (matches `tokensave install`
+    #     canonical shape that `tokensave doctor` blesses) but NOT for
+    #     Desktop (Desktop's long-lived MCP server can't re-auto-detect
+    #     per invocation, so wrapper-routed is required there).
     if cmd_lower.endswith("tokensave.exe"):
-        target = ""
-        if isinstance(args, list) and "-p" in args:
+        has_p_flag = isinstance(args, list) and "-p" in args
+        if has_p_flag:
             try:
                 target = args[args.index("-p") + 1]
             except (IndexError, ValueError):
                 target = "(unknown)"
+            return {**base,
+                    "state": "direct_serve",
+                    "label": "⚠ hardcoded project",
+                    "issue": (f"Runs tokensave.exe directly with -p "
+                              f"\"{target}\". This locks the MCP server "
+                              "to one project — switching requires a "
+                              "config edit AND a Claude restart. Click "
+                              "Apply to route through the wrapper or run "
+                              "`tokensave install --agent claude` for the "
+                              "auto-detect default.")}
+        # No -p, just `tokensave.exe serve` (possibly with other flags).
+        # OK for Claude Code; warn for Desktop.
+        if is_claude_code:
+            return {**base, "state": "ok",
+                    "label": "✓ tokensave-install canonical",
+                    "issue": ""}
         return {**base,
                 "state": "direct_serve",
-                "label": "⚠ bypasses wrapper",
-                "issue": (f"Runs tokensave.exe directly with -p "
-                          f"\"{target}\". This ignores the manager's ★ pin "
-                          "file — every project switch needs a Claude "
-                          "restart. Click Apply to route through the wrapper "
-                          "instead.")}
+                "label": "⚠ bypasses wrapper (Desktop needs wrapper)",
+                "issue": ("Claude Desktop's MCP server is long-lived and "
+                          "must use the wrapper to honour ★ Set as Active. "
+                          "Tokensave's auto-detect runs only at process "
+                          "startup, so direct-serve here means project "
+                          "switches need a Claude Desktop restart. Click "
+                          "Apply to route through the wrapper.")}
 
     # State 3: something else entirely.
     return {**base,
