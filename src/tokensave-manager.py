@@ -24,6 +24,7 @@ import tkinter as tk
 from tkinter import ttk, filedialog, messagebox, simpledialog
 from tkinter import font as tkfont
 import math
+import textwrap
 import pystray
 from PIL import Image, ImageDraw
 
@@ -620,6 +621,67 @@ def _is_auth_error(text: str) -> bool:
         "invalid username or password",
     ))
 
+def _parse_commit_status(status_text: str) -> "tuple[list[tuple[str,str]], bool]":
+    """Parse `git status --short` output into (files, has_source) for the commit strategies."""
+    _SOURCE_EXTS = {".py", ".js", ".ts", ".cs", ".cpp", ".c", ".h", ".rs",
+                    ".go", ".java", ".rb", ".php", ".swift", ".kt", ".scala"}
+    files = []
+    for line in status_text.splitlines():
+        if len(line) < 4:
+            continue
+        xy    = line[:2].strip()
+        fname = line[3:]
+        if " -> " in fname:
+            fname = fname.split(" -> ")[-1]
+        files.append((xy, fname))
+    has_source = any(
+        os.path.splitext(os.path.basename(f))[1].lower() in _SOURCE_EXTS
+        for _xy, f in files
+    )
+    return files, has_source
+
+
+def _strat_llm(repo_path: str, has_source: bool) -> "tuple[str, str] | None":
+    """Strategy 0: LLM (opt-in). Returns (subject, body) or None."""
+    if not repo_path:
+        return None
+    llm_cfg = (_cfg.get("commit_message_llm") or {}) if isinstance(_cfg, dict) else {}
+    if not llm_cfg.get("enabled"):
+        return None
+    raw = _call_llm_for_commit_message(llm_cfg, repo_path)
+    if not raw:
+        return None
+    head, _, tail = raw.partition("\n\n")
+    return head, tail
+
+
+def _strat_changelog(repo_path: str, files: list) -> "tuple[str, str] | None":
+    """Strategy 1: CHANGELOG bullets. Returns (subject, body) or None."""
+    if not repo_path:
+        return None
+    try:
+        additions = _extract_changelog_additions(repo_path)
+    except Exception:
+        return None
+    if not additions:
+        return None
+    return _message_from_changelog(additions, files)
+
+
+def _strat_diff(repo_path: str, files: list) -> "tuple[str, str] | None":
+    """Strategy 2: Diff content (added defs/classes, file kinds). Returns (subject, body) or None."""
+    if not repo_path or not files:
+        return None
+    subj, body = _suggest_from_diff_content(repo_path, files)
+    return (subj, body) if subj else None
+
+
+def _strat_filenames(status_text: str) -> "tuple[str, str] | None":
+    """Strategy 3: File-name patterns (legacy fallback). Returns (subject, body) or None."""
+    result = _suggest_from_filenames(status_text)
+    return (result, "") if result else None
+
+
 def _suggest_commit_message(repo_path: str = "", status_text: str = "") -> str:
     """Generate a conventional-commit-style message for the staged changes.
 
@@ -627,93 +689,31 @@ def _suggest_commit_message(repo_path: str = "", status_text: str = "") -> str:
     and falls through to weaker ones on empty results. Returns "" only if
     every strategy yields nothing AND there are no staged files at all.
 
-    Strategy chain (see helpers near `_render_release_notes`):
-      0. LLM mode (if enabled in config) — calls Anthropic / OpenAI / LM Studio /
-         Ollama. Silent fallback on any failure.
-      1. CHANGELOG.md additions — parses staged bullets, infers type+scope.
-      2. Diff content — added Python defs/classes, file-kind heuristics.
-      3. File-name patterns — legacy behaviour from v1.0.x.
-
     `repo_path` is optional for backwards compatibility — if empty, only
     the file-name strategy runs (it doesn't need shell access).
-
-    All non-empty results are sanitised: subject ≤ 72 chars, imperative
-    mood, no filename listings, `chore:` escalated to `refactor:` when
-    actual source files changed.
     """
-    # Parse `git status --short` into (xy, filename) tuples for downstream use.
-    # (Kept inline because we need it on every code path.)
-    lines = [l for l in status_text.splitlines() if len(l) >= 4]
-    files = []
-    for line in lines:
-        xy    = line[:2].strip()
-        fname = line[3:]
-        if " -> " in fname:
-            fname = fname.split(" -> ")[-1]
-        files.append((xy, fname))
+    files, has_source = _parse_commit_status(status_text)
 
-    has_source = any(
-        os.path.splitext(os.path.basename(f))[1].lower() in
-        {".py", ".js", ".ts", ".cs", ".cpp", ".c", ".h", ".rs", ".go", ".java",
-         ".rb", ".php", ".swift", ".kt", ".scala"}
-        for _xy, f in files
-    )
-
-    # ── Strategy 0: LLM (opt-in) ────────────────────────────────────────────
-    if repo_path:
-        llm_cfg = (_cfg.get("commit_message_llm") or {}) if isinstance(_cfg, dict) else {}
-        if llm_cfg.get("enabled"):
-            raw = _call_llm_for_commit_message(llm_cfg, repo_path)
-            if raw:
-                # LLM may return subject + body; split on first blank line.
-                head, _, tail = raw.partition("\n\n")
-                subj, body = _sanitize_commit_message(
-                    head, tail, has_source_changes=has_source,
-                )
-                if subj:
-                    return subj + (("\n\n" + body) if body else "")
-
-    # ── Strategy 1: CHANGELOG bullets ───────────────────────────────────────
-    if repo_path:
+    strategies = [
+        lambda: _strat_llm(repo_path, has_source),
+        lambda: _strat_changelog(repo_path, files),
+        lambda: _strat_diff(repo_path, files),
+        lambda: _strat_filenames(status_text),
+    ]
+    for strategy in strategies:
         try:
-            additions = _extract_changelog_additions(repo_path)
+            result = strategy()
         except Exception:
-            additions = []
-        if additions:
-            subj, body = _message_from_changelog(additions, files)
-            subj, body = _sanitize_commit_message(
-                subj, body, has_source_changes=has_source,
-            )
-            if subj:
-                return subj + (("\n\n" + body) if body else "")
-
-    # ── Strategy 2: Diff content (added defs/classes, file kinds) ──────────
-    if repo_path and files:
-        try:
-            subj, body = _suggest_from_diff_content(repo_path, files)
-        except Exception:
-            subj, body = "", ""
-        if subj:
-            subj, body = _sanitize_commit_message(
-                subj, body, has_source_changes=has_source,
-            )
-            if subj:
-                return subj + (("\n\n" + body) if body else "")
-
-    # ── Strategy 3: File-name patterns (legacy fallback) ───────────────────
-    legacy = _suggest_from_filenames(status_text)
-    if legacy:
+            continue
+        if result is None:
+            continue
         subj, body = _sanitize_commit_message(
-            legacy, "", has_source_changes=has_source,
-        )
+            result[0], result[1], has_source_changes=has_source)
         if subj:
-            return subj  # body is always empty for the legacy strategy
+            return subj + (("\n\n" + body) if body else "")
 
-    # ── Strategy 4: Generic backstop ────────────────────────────────────────
-    # Reached only when the legacy output was an anti-pattern (filename
-    # listing) that sanitization rejected, AND no higher strategy produced
-    # anything. Better to give the user a clean generic stub than an empty
-    # field — they can edit it.
+    # Generic backstop — reached only when every strategy was empty or
+    # produced a filename-listing that sanitization rejected.
     if files:
         if has_source:
             scope = _dominant_directory(files)
@@ -1456,6 +1456,68 @@ _FILENAME_LISTING_RE = re.compile(
 )
 
 
+def _strip_md(s: str) -> str:
+    """Strip bold, italic, inline code, and markdown links from a string."""
+    s = re.sub(r"\*\*([^*]+)\*\*", r"\1", s)        # bold
+    s = re.sub(r"\*([^*]+)\*",      r"\1", s)        # italic
+    s = re.sub(r"`([^`]+)`",        r"\1", s)        # code
+    s = re.sub(r"\[([^\]]+)\]\([^)]+\)", r"\1", s)   # links
+    return s
+
+
+def _escalate_commit_type(subject: str, has_source_changes: bool) -> str:
+    """Escalate generic `chore:` and `docs:` prefixes to `refactor:` when
+    source files are among the changed files.
+
+    Scoped variants like `chore(deps):` or `docs(api):` are left alone —
+    they carry enough signal to be treated as intentional.
+    """
+    if not has_source_changes:
+        return subject
+    for prefix in ("chore", "docs"):
+        if subject.lower().startswith(f"{prefix}:"):
+            if not re.match(rf"^{prefix}\([^)]+\):", subject, re.IGNORECASE):
+                subject = "refactor:" + subject[len(f"{prefix}:"):]
+            break
+    return subject
+
+
+def _normalize_commit_body(body: str) -> str:
+    """Wrap body text at 72 chars per paragraph.
+
+    Also splits jammed bullets (`. - Foo` on one line) that small local
+    LLMs (e.g. Qwen 2.5 14B Q4) produce when they don't respect newlines.
+    """
+    if not body:
+        return body
+    paragraphs = [p.strip() for p in body.split("\n\n") if p.strip()]
+    normalised = []
+    for p in paragraphs:
+        # Split `. - text` → `.\n- text` (also `: - text`)
+        p = re.sub(r"([.:])\s+-\s+", r"\1\n- ", p)
+        if "\n- " in p:
+            wrapped_lines = []
+            for line in p.split("\n"):
+                if line.startswith("- "):
+                    wrapped_lines.append(textwrap.fill(
+                        line, width=72,
+                        initial_indent="", subsequent_indent="  ",
+                        break_long_words=False, break_on_hyphens=False,
+                    ))
+                else:
+                    wrapped_lines.append(textwrap.fill(
+                        line, width=72,
+                        break_long_words=False, break_on_hyphens=False,
+                    ))
+            normalised.append("\n".join(wrapped_lines))
+        else:
+            normalised.append(textwrap.fill(
+                p, width=72,
+                break_long_words=False, break_on_hyphens=False,
+            ))
+    return "\n\n".join(normalised)
+
+
 def _sanitize_commit_message(subject: str, body: str = "",
                               has_source_changes: bool = False) -> tuple[str, str]:
     """Enforce subject/body invariants on any candidate message.
@@ -1469,38 +1531,25 @@ def _sanitize_commit_message(subject: str, body: str = "",
       * Strip surrounding quotes / leading "Here's a commit message:" preambles
       * Imperative mood — rewrite first word if it matches a known past tense
       * Subject ≤ 72 chars (truncate at last word boundary that fits)
-      * Escalate ``chore:`` → ``refactor:`` when source files changed and the
-        subject is otherwise generic (no scope, generic verb)
+      * Escalate ``chore:`` / ``docs:`` → ``refactor:`` when source files changed
       * Reject filename-listing anti-pattern → empty subject (forces fallback)
       * Body wrapped at 72 chars per line
     """
-    import textwrap
-
-    def _strip_md(s: str) -> str:
-        s = re.sub(r"\*\*([^*]+)\*\*", r"\1", s)        # bold
-        s = re.sub(r"\*([^*]+)\*",      r"\1", s)        # italic
-        s = re.sub(r"`([^`]+)`",        r"\1", s)        # code
-        s = re.sub(r"\[([^\]]+)\]\([^)]+\)", r"\1", s)   # links
-        return s
-
     subject = _strip_md((subject or "").strip())
     body    = _strip_md((body or "").strip())
 
-    # Strip common LLM preambles / wrapping characters
     for pre in ("Here's a commit message:", "Commit message:",
                 "Suggested commit message:"):
         if subject.lower().startswith(pre.lower()):
             subject = subject[len(pre):].lstrip(":").strip()
     subject = subject.strip("`'\"")
 
-    # If the LLM gave us a multi-line subject, split into subject + body
     if "\n" in subject:
         head, _, tail = subject.partition("\n")
         subject = head.strip()
         if tail.strip():
             body = (tail.strip() + ("\n\n" + body if body else "")).strip()
 
-    # Imperative mood rewrite on first word (preserve any prefix like "feat:")
     m = re.match(r"^(?:(\w+(?:\([^)]+\))?!?:\s+))?(\w+)(.*)$", subject)
     if m:
         prefix, first, rest = m.group(1) or "", m.group(2), m.group(3)
@@ -1508,28 +1557,11 @@ def _sanitize_commit_message(subject: str, body: str = "",
         if canonical:
             subject = f"{prefix}{canonical}{rest}"
 
-    # Filename-listing anti-pattern → caller falls back
     if _FILENAME_LISTING_RE.search(subject):
         return "", ""
 
-    # Escalate `chore:` to `refactor:` when actual source files changed AND
-    # the subject is non-specific (no parenthetical scope, generic verb).
-    if has_source_changes and subject.lower().startswith("chore:"):
-        # Keep `chore(deps):`, `chore(ci):`, etc.
-        if not re.match(r"^chore\([^)]+\):", subject, re.IGNORECASE):
-            subject = "refactor:" + subject[len("chore:"):]
+    subject = _escalate_commit_type(subject, has_source_changes)
 
-    # Escalate `docs:` to `refactor:` when source files (.py/.js/.ts/.go/etc.)
-    # are also changed. A `docs:` commit that touches code is misclassified —
-    # the LLM saw the README diff first and missed the code change. We default
-    # to `refactor:` because the LLM didn't add new top-level symbols (if it
-    # had, the diff-content strategy would have produced `feat: add X` earlier
-    # in the chain). Preserve scoped `docs(foo):` since the scope IS specific.
-    if has_source_changes and subject.lower().startswith("docs:"):
-        if not re.match(r"^docs\([^)]+\):", subject, re.IGNORECASE):
-            subject = "refactor:" + subject[len("docs:"):]
-
-    # Subject ≤ 72 chars, truncate at word boundary
     if len(subject) > 72:
         truncated = subject[:72]
         sp = truncated.rfind(" ")
@@ -1537,45 +1569,7 @@ def _sanitize_commit_message(subject: str, body: str = "",
             truncated = truncated[:sp]
         subject = truncated.rstrip(",;:-")
 
-    # Body wrap at 72 chars per paragraph. Also split runs of bullets that
-    # the LLM jammed onto one line — e.g. `. - Foo` mid-paragraph means a
-    # new bullet that should be on its own line. Common pattern from small
-    # local models (Qwen 2.5 14B Q4 etc.) that don't always respect newlines.
-    if body:
-        paragraphs = [p.strip() for p in body.split("\n\n") if p.strip()]
-        normalised = []
-        for p in paragraphs:
-            # Split jammed bullets: `. - text` → `.\n- text` (also `: - text`).
-            # Only acts BETWEEN a sentence boundary and a literal `- ` — won't
-            # split things like `"low-key" - foo` or "M-1 - test rev" because
-            # those don't follow a period/colon.
-            p = re.sub(r"([.:])\s+-\s+", r"\1\n- ", p)
-            # If the paragraph is now multi-line bullets, wrap each line
-            # independently so bullet structure survives.
-            if "\n- " in p:
-                lines = p.split("\n")
-                wrapped_lines = []
-                for line in lines:
-                    if line.startswith("- "):
-                        # Wrap with hanging indent for the continuation
-                        wrapped_lines.append(textwrap.fill(
-                            line, width=72,
-                            initial_indent="", subsequent_indent="  ",
-                            break_long_words=False, break_on_hyphens=False,
-                        ))
-                    else:
-                        wrapped_lines.append(textwrap.fill(
-                            line, width=72,
-                            break_long_words=False, break_on_hyphens=False,
-                        ))
-                normalised.append("\n".join(wrapped_lines))
-            else:
-                normalised.append(textwrap.fill(
-                    p, width=72,
-                    break_long_words=False, break_on_hyphens=False,
-                ))
-        body = "\n\n".join(normalised)
-
+    body = _normalize_commit_body(body)
     return subject, body
 
 
