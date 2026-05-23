@@ -97,17 +97,11 @@ App (tk.Tk)
 │   ├── cmd_remove / cmd_scaffold / cmd_retrofit / cmd_settings
 │   ├── cmd_shadow_links         — right-click: open ShadowLinksDialog for selected project
 │   ├── cmd_assign_category      — right-click: open AssignCategoryDialog for selected project
-│   ├── cmd_git_push / cmd_git_pull — push/pull with GIT_TERMINAL_PROMPT=0 + auth error handling
-│   ├── cmd_git_undo_commit       — git reset --soft HEAD~1 with confirmation
-│   ├── cmd_git_set_remote        — open SetRemoteDialog; runs git remote add/set-url
-│   ├── cmd_git_new_branch        — open NewBranchDialog; git checkout -b or git branch
-│   ├── cmd_git_switch_branch     — open SwitchBranchDialog; git checkout with dirty-tree guard
-│   ├── cmd_git_merge             — open branch picker; git merge --no-edit; conflict + dirty-tree handling
-│   ├── cmd_git_delete_branch     — safe/force delete; post-delete prompt to push remote deletion if origin/<branch> exists
-│   ├── cmd_github_setup          — open GitHubSetupDialog for current/selected project
-│   └── _add_snippet / _edit_snippet / _delete_snippet / _on_snippet_saved
-└── Worker helpers
-    ├── _run()                   — generic tokensave CLI call (threaded, streaming); auto-commits after sync if toggle on; amends previous sync commit if last message was "chore: tokensave sync"
+│   ├── ► Git tab commands (cmd_git_push/pull/undo/set-remote/new-branch/switch/merge/delete/release/open-pr/merge-pr + cmd_github_setup) → GitTabController (see below)
+│   ├── ► Snippet commands (_add_snippet / _edit_snippet / _delete_snippet / _on_snippet_saved) → SnippetsController (see below)
+│   └── ► Ask tab UI → AskTabController (see below)
+└── Worker helpers (App-owned)
+    ├── _run()                   — generic tokensave CLI call (threaded, streaming); delegates _auto_commit_after_sync() for the post-sync commit; amends previous commit if last message was "chore: tokensave sync"
     ├── _run_capture()           — tokensave call returning (output, rc, elapsed); synchronous from thread
     ├── _shell_capture()         — generic shell call returning (output, rc); catches FileNotFoundError
     ├── _scaffold_project()      — write BASIC_INSTRUCTIONS + optional tokensave init + Nuitka + git hook
@@ -115,23 +109,40 @@ App (tk.Tk)
     ├── _do_retrofit()           — prepend @include to CLAUDE.md + optional BASIC_INSTRUCTIONS + Nuitka + shadow links + git hook
     ├── _do_shadow_links()       — generate hardlinks in background thread, optionally run sync after
     ├── _do_assign_category()    — write project_categories override to config, refresh tree
-    ├── _do_git_commit()         — git reset → git add -- <selected_files> → git commit -m, in a background thread; commits only the files the user ticked in GitCommitDialog, leaving the rest as working-tree changes
-    ├── _do_git_set_remote()     — git remote add/set-url in background thread
-    ├── _do_git_new_branch()     — git checkout -b / git branch in background thread
-    ├── _do_git_switch_branch()  — git checkout <branch> with rc != 0 error dialog
-    ├── (cmd_git_merge inlines its worker)  — git merge --no-edit <source>; on rc != 0, distinguishes "conflict" vs "unmerged/your local changes" and pops the matching dialog
-    ├── (cmd_git_delete_branch offer_remote_delete nested fn) — after local delete, scans git branch -r for origin/<branch> and runs git push origin --delete on user confirm
+    ├── _do_git_commit()         — git reset → git add -- <selected_files> → git commit -m, background thread; commits only ticked files from GitCommitDialog
+    ├── _on_project_select()     — <<TreeviewSelect>>: calls self._git.set_active_path() + self._git.refresh() if Git tab visible
+    ├── _on_tab_changed()        — <<NotebookTabChanged>>: routes to self._ask_ctrl.on_tab_selected() or self._git.refresh()
+    ├── _show_status_popup() / _format_status_msg()
+    ├── _show_git_popup()        — Toplevel with scrollable monospace git output
+    └── _log()                   — thread-safe coloured log append
+
+GitTabController (standalone class, App._git)
+    ├── __init__(notebook, cfg, get_path, on_log, on_shell, on_commit) — 4 explicit callbacks; no App back-ref; queue.Queue for worker→main-thread log drain
+    ├── Public API: is_visible() / refresh() / set_active_path(path) / has_path()
+    ├── _poll_log_queue()        — drains entire (msg, color) queue every 100 ms via self._tab.after(); inner try/except prevents loop death on bad log lines
+    ├── _build_git_tab() → _build_git_header() / _build_git_status_pane(mid) / _build_git_action_bar() / _build_git_diff_pane()
+    ├── cmd_git_push / cmd_git_pull — push/pull with GIT_TERMINAL_PROMPT=0 + auth error handling
+    ├── cmd_git_undo_commit       — git reset --soft HEAD~1 with confirmation
+    ├── cmd_git_set_remote / _do_git_set_remote — SetRemoteDialog; git remote add/set-url
+    ├── cmd_git_new_branch / _do_git_new_branch — NewBranchDialog; git checkout -b or git branch
+    ├── cmd_git_switch_branch / _do_git_switch_branch — SwitchBranchDialog; git checkout with dirty-tree guard
+    ├── cmd_git_merge             — branch picker; git merge --no-edit; conflict + dirty-tree handling
+    ├── cmd_git_delete_branch / _confirm_branch_delete / _do_delete_branch — safe/force delete with extracted confirm + remote-delete prompt helpers
+    ├── cmd_github_setup          — GitHubSetupDialog for current/selected project
+    ├── cmd_git_open_pr / cmd_git_merge_pr / _show_merge_pr_dialog / _do_merge_pr / _post_merge_pr_sync
+    ├── cmd_git_release           — pre-flight dirty-tree check then opens ReleaseWizardDialog
     ├── _git_refresh()           — background fetch of branch/remote/status/log; calls _git_update_ui
     ├── _git_update_ui()         — main-thread update of all Git tab widgets + button states
     ├── _git_show_diff()         — render diff into Text widget with colour tags (capped at 2000 lines)
     ├── _on_git_status_select()  — click file in status listbox → fetch + show diff
-    ├── _on_project_select()     — <<TreeviewSelect>> binding: update _git_path, refresh Git tab if visible
-    ├── _on_tab_changed()        — <<NotebookTabChanged>> binding: sync project + refresh Git tab
-    ├── _git_tab_is_visible()    — returns True when the Git tab is the active notebook tab
-    ├── _refresh_snippet_list()  — rebuilds snippet_lb + _active_snippets_map from PROMPT_SNIPPETS + user_snippets
-    ├── _show_status_popup() / _format_status_msg()
-    ├── _show_git_popup()        — Toplevel with scrollable monospace git output
-    └── _log()                   — thread-safe coloured log append
+    └── _git_begin_op() / _git_end_op() — disable/enable all Git tab buttons during in-flight operations
+
+SnippetsController (standalone class, App._snippets_ctrl)
+    └── Reference tab snippet list: _refresh_snippet_list() + _add_snippet / _edit_snippet / _delete_snippet / _on_snippet_saved
+
+AskTabController (standalone class, App._ask_ctrl)
+    ├── 🤖 Ask tab: chat log Text, Send/Stop/Clear controls, _ask_messages conversation history
+    └── on_tab_selected() — called by App._on_tab_changed when Ask tab gains focus
 
 RetrofitDialog (tk.Toplevel)     — modal: 5 checkboxes: tokensave rules / BASIC_INSTRUCTIONS / Nuitka build / shadow links / auto-commit hook
 ScaffoldDialog (tk.Toplevel)     — modal: 4 checkboxes: BASIC_INSTRUCTIONS / tokensave init / Nuitka build / auto-commit hook
@@ -148,7 +159,7 @@ AICodeReviewDialog (tk.Toplevel) — modal: Stage 1 AI Code Review. Split-pane w
 OllamaModelManagerDialog (tk.Toplevel) — modal: browse / pull / delete Ollama models without leaving the manager. Uses Ollama's NATIVE REST API (not the OpenAI-compatible /v1 surface): `GET /api/version` health check, `GET /api/tags` for installed models, `POST /api/show` per-model context-length, streaming `POST /api/pull` with live progress bar, `DELETE /api/delete`. Pull progress streams newline-delimited JSON via `_iter_json_lines`. Critical pattern: Cancel during pull explicitly closes the `HTTPResponse` object (not just `threading.Event.set()` — the worker is syscall-blocked inside `read()` and only socket close unblocks it). "Use for AI features" button pre-fills the parent SettingsDialog's provider/model/base-URL fields. Opened by Settings → "🦙 Manage Ollama Models…".
 MCPConfigDialog (tk.Toplevel) — modal: classify + edit `tokensave` MCP entries in BOTH Claude Desktop's config AND Claude Code's `~/.claude.json`. Header banner warns if Claude is currently running (via `_is_claude_running`) — Desktop rewrites its config file every 1–2 minutes with cached in-memory state, silently clobbering any edit applied while it's alive. Per-row diff display, per-row Apply button (separate confirmations, one per config), Re-detect, Open file, Skip-and-don't-warn-again (writes path to `manager-config.json` → `mcp_skip_warnings` list which `_check_config` honours). Apply uses backup-first via `shutil.copy2`. The Apply-refused path uses `messagebox.showerror` (red icon, reads as rejection — earlier showwarning was easy to dismiss without realising no write happened), logs a red `MCP Apply REFUSED:` line to the main OUTPUT pane, AND calls `self._render()` to refresh the row state. UWP-aware: `_resolve_desktop_cfg_path` globs `%LOCALAPPDATA%\Packages\Claude_*\LocalCache\Roaming\Claude\` and targets that when found. Opened by Settings → "🔌 Manage MCP wiring…" OR auto-launched 800ms after manager startup if `_check_config` finds drift.
 MergePRDialog (tk.Toplevel) — modal: pick an open GitHub PR + a merge strategy, then confirm. Treeview lists every open PR via `gh pr list --json number,title,headRefName,baseRefName,additions,deletions,author,url --limit 50`. Three strategy buttons (Merge commit / Squash and merge / Rebase and merge) map 1:1 to `gh pr merge`'s flags. Delete-source-branch checkbox (default on, matches GitHub web UI default). Single confirmation modal per merge attempt. Callback signature: `(path, pr_number, strategy, delete_branch, title)`. Opened by Git tab → "🐙 Merge PR…". Strategy buttons are gated until a row is selected. Post-merge: App's `_post_merge_pr_sync` auto-discovers the default branch via `git symbolic-ref refs/remotes/origin/HEAD --short`, switches local to it if needed, runs `git pull --ff-only`.
-ReleaseWizardDialog (tk.Toplevel) — modal: full-featured release wizard. Six sections in a scrollable canvas: (1) version with last-tag detection + Patch/Minor/Major radios biased by commit content + free-text override; (2) auto-filled title; (3) auto-drafted release notes textarea grouped by conventional-commit prefix; (4) build step with `build.ps1` / `build.bat` auto-detect; (5) artefact preview showing dist contents + resolved zip name; (6) CHANGELOG.md sync checkbox. Publish runs a single threaded `_publish_worker` that sequences: build → zip → patch CHANGELOG → stage CHANGELOG only → commit → local `git tag -a` → `git push --follow-tags` → `gh release create --notes-file <tmp>`. Each step short-circuits with a copy-pasteable recovery command. The notes-file temp path is preserved on the final-step failure so the user can retry `gh release create` by hand without retyping notes. Opened by 📦 Release… button on the Git tab. Pre-flight in `cmd_git_release` refuses to open the wizard if the working tree is dirty in anything other than `CHANGELOG.md` (with a one-click handoff to the existing Git Commit dialog).
+ReleaseWizardDialog (tk.Toplevel) — modal: full-featured release wizard. Six sections in a scrollable canvas: (1) version with last-tag detection + Patch/Minor/Major radios biased by commit content + free-text override; (2) auto-filled title; (3) auto-drafted release notes textarea grouped by conventional-commit prefix; (4) build step with `build.ps1` / `build.bat` auto-detect; (5) artefact preview showing dist contents + resolved zip name; (6) CHANGELOG.md sync checkbox. Publish runs `_publish_worker` (background thread) which passes a `_ReleaseCtx` dataclass (`tag`, `title`, `notes`, `zip_path`, `notes_file`, `staged_files`) through 8 `_pub_*` step methods in sequence: `_pub_build` → `_pub_zip` → `_pub_write_notes` → `_pub_patch_changelog` → `_pub_stage_commit` → `_pub_tag` → `_pub_push` → `_pub_gh_release`; cleanup and done are inlined at the end. Each step returns `bool` and calls `self._fail(msg)` on error with a copy-pasteable recovery command; `staged_files` uses `dataclasses.field(default_factory=list)` to prevent mutable-default cross-run contamination. The notes temp file is preserved on final-step failure so the user can retry `gh release create` without retyping notes. Opened by 📦 Release… on the Git tab. Pre-flight in `cmd_git_release` refuses if working tree is dirty beyond `CHANGELOG.md` (hands off to Git Commit dialog).
 ```
 
 ### Release-wizard helpers (module-level, pure)
@@ -224,7 +235,7 @@ Contents of the zip are 1:1 whatever `dist/` holds after the build, which is con
 | `_detect_git()` | Returns `shutil.which("git")` if found; falls back to common Windows install paths (`C:\Program Files\Git\cmd\git.exe`, `…\bin\git.exe`, x86 variants); final fallback is the bare string `"git"`. |
 | `_GIT_ENV_NO_PROMPT` | `dict(os.environ, GIT_TERMINAL_PROMPT="0")`. Passed as `env=` for network git commands (push/pull) to prevent infinite hangs when GCM hasn't cached credentials yet. |
 | `_is_auth_error(text)` | Pattern-match on push/pull output to decide whether to show the GCM-setup message vs a generic error. |
-| `_suggest_commit_message(repo_path, status_text)` | **Multi-strategy orchestrator.** Chain order (highest-quality first): LLM (if `commit_message_llm.enabled` in config) → CHANGELOG.md staged bullets (`_extract_changelog_additions` + `_message_from_changelog`) → diff content (`_suggest_from_diff_content` + `_diff_added_python_symbols`) → file-name fallback (`_suggest_from_filenames`, the original v1.0.x function). Every result passes through `_sanitize_commit_message` (72-char subject, imperative mood, blocks filename listings, `chore:` → `refactor:` escalation when source files changed). Used by `GitCommitDialog` for initial fill and the 💡 Suggest button. |
+| `_suggest_commit_message(repo_path, status_text)` | **Multi-strategy orchestrator.** Chain order (highest-quality first): LLM → CHANGELOG.md staged bullets → diff content → file-name fallback. Implemented as a lambda table over four `_strat_*` module-level functions (`_strat_llm`, `_strat_changelog`, `_strat_diff`, `_strat_filenames`); the loop calls each in order, skips `None` returns, and passes the first hit to `_sanitize_commit_message`. Sanitize pipeline: `_strip_md` (promoted from inner fn) strips markdown formatting → `_escalate_commit_type` rewrites `chore:`/`docs:` subjects to `refactor:` when source files changed → subject truncated to 72 chars → `_normalize_commit_body` wraps paragraphs + bullet lists via `textwrap.fill`. Used by `GitCommitDialog` for initial fill and the 💡 Suggest button. |
 | `_call_llm_for_commit_message(cfg, repo_path)` | Provider abstraction over Anthropic Messages API / OpenAI Chat Completions / OpenAI-compatible local servers (LM Studio, Ollama). Uses `urllib.request` (no extra dependency). MUST silent-fallback on every failure path — any exception, timeout, missing API key, sub-`min_diff_lines` diff, or empty response returns `None` and the orchestrator falls through to heuristics. Diff truncated to `max_diff_chars` (default 8000) for cost control. |
 | `_pending_diff(repo_path, *paths)` | `git diff HEAD` (NOT `--cached`). Used by the orchestrator's CHANGELOG and diff-content strategies because the commit dialog generates suggestions BEFORE the user stages files — `--cached` would always return empty. Captures both staged and unstaged changes. |
 | `_BASELINE_GITIGNORE` | Multi-line string written by `cmd_git_init` when no `.gitignore` exists. Covers Python cache, Nuitka build output, `.tokensave/`, virtual environments, `.claude/`, and `logs/`. |
@@ -236,7 +247,7 @@ Contents of the zip are 1:1 whatever `dist/` holds after the build, which is con
 | `_kick_off_git_status_refresh()` (App method) | Background-thread walk over `self.projects` that runs `git status --porcelain=v2 --branch` for each git project and updates the Treeview Git column via `_update_git_status_cell(piid, status)`. Mtime-cached per project on `.git/index` so unchanged projects are skipped. Only one refresh in flight at a time. |
 | `_offer_commit_after_change(path, summary_label)` (App method) | After destructive manager ops (Ensure .gitignore, Shadow Links, Scaffold, Retrofit), checks `_is_git_repo` + `git status --porcelain` and offers a `messagebox.askyesno` → `_open_commit_dialog(path)` flow. Silent no-op when not a repo or working tree is clean. |
 | `_open_commit_dialog(path)` (App method) | Path-explicit version of `cmd_git_commit`. Both `cmd_git_commit` (from Projects tab right-click) and `_offer_commit_after_change` delegate here. |
-| `_git_op_in_flight` + `_git_begin_op()` / `_git_end_op()` (App method) | Locking pattern that disables every Git tab button during an in-flight operation. Honoured by `_git_update_ui()` so incidental refreshes don't bypass the lock. All 8 git command methods wrap their workers with begin/end in a `try`/`finally`. |
+| `_git_op_in_flight` + `_git_begin_op()` / `_git_end_op()` (GitTabController method) | Locking pattern that disables every Git tab button during an in-flight operation. Honoured by `_git_update_ui()` so incidental refreshes don't bypass the lock. All git command methods wrap their workers with begin/end in a `try`/`finally`. |
 | `_GITIGNORE_TEMPLATES` | Module-level dict mapping category name → list of patterns. The Baseline category is built from `_BASELINE_GITIGNORE` via `_baseline_patterns()` at module load (single source of truth). Used by `GitignoreDialog`'s template-inject buttons. |
 | `_read_gitignore_lines(path)` / `_write_gitignore_lines(path, lines)` | Pure file-IO for the gitignore editor. Read returns `[]` if missing, uses `utf-8-sig` to tolerate PowerShell-written BOMs. Write is atomic (`.tmp` + rename) and always ends with a trailing newline. |
 | `CODEGRAPH_EXE` | Path to the codegraph CLI (npm-installed). Resolved from `_cfg["codegraph_exe"] or _detect_codegraph()` at startup; rebuilt in `_on_settings_saved`. Empty string when not installed. |
