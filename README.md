@@ -32,6 +32,7 @@ If you use Claude across several projects, this is the control panel: switch act
 - [Configuration Reference](#configuration-reference)
 - [Building from Source](#building-from-source)
 - [Project Structure](#project-structure)
+- [Roadmap](#roadmap)
 - [Changelog](#changelog)
 
 ---
@@ -131,7 +132,8 @@ The manager's design philosophy: **never force a choice you don't want to make**
 ### Git Integration (no command line needed)
 - **Git tab** — live view of any project's git state: current branch, remote URL, working tree changes, recent commits, colour-coded diff viewer
 - **Push / Pull** — one-click with `git push -u origin HEAD` / `git pull`; graceful auth-error message if GitHub credentials aren't cached yet
-- **Commit with per-file staging** — every changed file is shown as a checkbox with a colour-coded status badge (M modified / A added / D deleted / R renamed / ? untracked). Tick exactly the files you want, write a message (or use **💡 Suggest** for an auto-generated conventional-commit message), commit only those files
+- **Commit with per-file staging** — every changed file is shown as a checkbox with a colour-coded status badge (M modified / A added / D deleted / R renamed / ? untracked). Tick exactly the files you want, write a message (or use **💡 Suggest** for a multi-strategy auto-generated conventional-commit message), commit only those files
+- **Smart commit-message suggestions** — the **💡 Suggest** button runs a strategy chain: optional AI call (Anthropic / OpenAI / LM Studio / Ollama) → staged CHANGELOG.md bullets parsed into `feat(scope): subject + body` → diff content (added Python `def`/`class` names, file-kind heuristics) → file-name fallback. Output is sanitised: subjects ≤ 72 chars, imperative mood, generic `chore:` escalated to `refactor:` when source files changed, filename-listing anti-patterns blocked
 - **Undo Last Commit** — `git reset --soft HEAD~1`; keeps all changes, removes only the commit marker
 - **Branch management** — New Branch, Switch Branch, Merge, Delete Branch dialogs; no typing required
 - **Merge a branch INTO the current one** — `⇄ Merge…` picks a source branch (the destination is wherever you are right now). Uses `git merge --no-edit` so no editor pops up. Conflicts surface as a dialog with the resolve-and-commit or `git merge --abort` instructions; dirty-tree errors get their own dialog
@@ -141,11 +143,12 @@ The manager's design philosophy: **never force a choice you don't want to make**
 - **GitHub Setup wizard** — full onboarding: set git identity, sign in / create account, create repo on GitHub, set remote, first push, create a release
 - **Commit prompts after manager actions** — when Ensure .gitignore / Shadow Links / Scaffold / Retrofit / 🧠 CodeGraph Init modifies files in a git project, a "Commit this change now?" dialog appears so the working tree never sits silently dirty. Uses a strict local-repo check (`os.path.exists(.git)` — supports git worktrees) so projects nested inside an unrelated parent repo don't get ghost prompts
 - **Button locking during git operations** — every Git tab button greys out while a push / pull / commit / branch operation is in flight, then re-enables when the worker finishes. Prevents the classic double-push race
-- **Auto-commit after sync** — optional toggle (Settings) that runs `git add -A + git commit` automatically after every successful tokensave sync; amends the previous commit if it was also a sync commit, to avoid history pile-up
+- **Auto-commit after sync** — optional toggle (Settings) that runs `git add -A + git commit` automatically after every successful tokensave sync; amends the previous commit if it was also a sync commit, to avoid history pile-up. With the AI integration enabled, can produce a fresh AI-generated message per sync instead (no amend-stacking) — opt-in via the **"Also use AI for sync auto-commit messages"** sub-toggle
 - **Auto-commit Stop hook** — optional per-project Claude Code hook that commits whatever Claude changed at the end of each session
 
 ### Settings & Tools
-- **Settings dialog** — configure all paths (`tokensave_exe`, `template_dir`, `editor_cmd`, `git_exe`, `codegraph_exe`) and search roots through a GUI; changes apply immediately. Validates and auto-detects on save
+- **Settings dialog** — configure all paths (`tokensave_exe`, `template_dir`, `editor_cmd`, `git_exe`, `codegraph_exe`) and search roots through a GUI; changes apply immediately. Validates and auto-detects on save. Scrollable and resizable (760×700 default, 640×500 minimum) so growing sections never push controls off-screen
+- **AI commit messages** — Settings dialog has a dedicated **"AI commit messages"** section with a provider dropdown (Anthropic / OpenAI / OpenAI-compatible), model field, API-key env-var name, and base URL for local OpenAI-compatible servers. Quick-preset buttons for **Anthropic** (Claude Haiku/Sonnet/Opus), **LM Studio** (`http://localhost:1234`), and **Ollama** (`http://localhost:11434`). Min-diff-lines threshold so trivial commits skip the LLM. All LLM failures silent-fallback to the heuristic chain — never blocks the commit dialog
 - **GitHub CLI installer** — Settings dialog includes a **"Install via winget"** button that installs the GitHub CLI (`gh`) in the background; shows a green checkmark when found on PATH
 - **CodeGraph installer** — Settings dialog includes a **"Install via npm"** button that installs `@colbymchenry/codegraph` globally. Runs on a background thread so the GUI never freezes; surfaces Windows EPERM/EACCES errors with actionable hints
 - **Git auto-detection** — finds `git.exe` via PATH or common Windows install locations automatically
@@ -545,10 +548,22 @@ Token Save Manager Source/
 │   └── NUITKA_GOTCHAS.md          Nuitka pitfalls reference (14 known issues)
 │
 └── docs/
-    ├── ARCHITECTURE.md            Class structure, UI layout, threading model
-    ├── ARCHITECTURE_TOKENSAVE.md  tokensave internals reference
-    └── GITHUB_GUIDE.md            Beginner GitHub guide
+    ├── ARCHITECTURE.md             Class structure, UI layout, threading model
+    ├── ARCHITECTURE_TOKENSAVE.md   tokensave internals reference
+    ├── AGENT_ARCHITECTURE.md       LocalAgent loop + tool registry + propose-only rules
+    ├── ROADMAP.md                  Staged plan for local AI features (Stages 0–8)
+    ├── MCP_INTEGRATION_GOTCHAS.md  Field manual: UWP path redirection, stdio bugs,
+    │                                Connectors UI vs legacy config, live-reload paths
+    └── GITHUB_GUIDE.md             Beginner GitHub guide
 ```
+
+---
+
+## Roadmap
+
+The manager is growing into a **propose-only local AI assistant** for project maintenance — code review, CHANGELOG drafting, dead-code scouting, whole-project Q&A. Every AI suggestion waits for explicit user approval; nothing auto-applies.
+
+See [docs/ROADMAP.md](docs/ROADMAP.md) for the staged plan, model recommendations (Ollama with `qwen2.5-coder:14b`, `qwen2.5:14b`, or Anthropic Claude Haiku), and architectural rules. The roadmap is updated as features ship.
 
 ---
 

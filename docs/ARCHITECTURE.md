@@ -25,7 +25,7 @@ Token Save Manager Source/
 ├── build.bat                      Launcher for build.ps1 (bypasses execution policy)
 │
 ├── src/
-│   ├── tokensave-manager.py       Main GUI application (~4,700 lines)
+│   ├── tokensave-manager.py       Main GUI application (~9,500 lines)
 │   └── tokensave-wrapper.py       Claude Desktop auto-detection wrapper
 │
 ├── templates/                     Data files used by the manager + shipped in dist\
@@ -59,7 +59,7 @@ Token Save Manager Source/
 
 ## `src/tokensave-manager.py` — Main Application
 
-Single-file tkinter application (~4,700 lines). Entry point is `if __name__ == "__main__": App().mainloop()`.
+Single-file tkinter application (~9,500 lines). Entry point is `if __name__ == "__main__": App().mainloop()`.
 
 ### Class hierarchy
 
@@ -127,14 +127,14 @@ App (tk.Tk)
 
 RetrofitDialog (tk.Toplevel)     — modal: 5 checkboxes: tokensave rules / BASIC_INSTRUCTIONS / Nuitka build / shadow links / auto-commit hook
 ScaffoldDialog (tk.Toplevel)     — modal: 4 checkboxes: BASIC_INSTRUCTIONS / tokensave init / Nuitka build / auto-commit hook
-SettingsDialog (tk.Toplevel)      — modal: edit manager-config.json; search roots as labeled two-column Treeview; auto-commit toggle
+SettingsDialog (tk.Toplevel)      — modal: edit manager-config.json; search roots as labeled two-column Treeview; auto-commit toggle; "AI commit messages" section with provider/model/api-key/base-URL fields + Anthropic/LM Studio/Ollama preset buttons. Content wrapped in a `Canvas + body Frame` with vertical scrollbar (mousewheel-bound on canvas AND body) so the growing dialog scrolls when its natural height exceeds the window. Save/Cancel buttons packed on `self` (NOT body) so they stay anchored at the bottom outside the scroll area. Resizable, 760×700 default, 640×500 minsize
 SnippetEditDialog (tk.Toplevel)  — modal: title + body for adding or editing a user-defined prompt snippet
 ShadowLinksDialog (tk.Toplevel)  — modal: editable extension/name map + sync toggle; right-click 🔗 Shadow Links…
 AssignCategoryDialog (tk.Toplevel)  — modal: category + sub-category comboboxes with existing values; right-click 📁 Assign Category…
 SetRemoteDialog (tk.Toplevel)     — modal: GitHub URL entry with beginner-friendly step-by-step instructions
 NewBranchDialog (tk.Toplevel)     — modal: branch name entry + "switch immediately" checkbox
 SwitchBranchDialog (tk.Toplevel)  — modal: listbox of local branches; double-click to switch; static pick() helper reused for delete + merge picker flows. Important calling convention: pick()'s signature is `(parent, title, branches, parent_widget=None)` — pass `parent_widget=self` for the centering anchor, NOT `parent=self` (the latter collides with the positional first arg and raises TypeError, which Tk silently swallows on button callbacks → dead button)
-GitCommitDialog (tk.Toplevel)     — modal: per-file checklist of working-tree changes with colour-coded status badges (M/A/D/R/?/!) + Select All / None / Modified Only quick-pick buttons + commit message entry with auto-suggest (💡 Suggest button that updates based on which files are ticked); callback signature `(path, message, selected_files: list[str])`. Right-click → 📝 Git Commit… or Git tab → Commit…
+GitCommitDialog (tk.Toplevel)     — modal: per-file checklist of working-tree changes with colour-coded status badges (M/A/D/R/?/!) + Select All / None / Modified Only quick-pick buttons + commit message entry with multi-strategy auto-suggest (💡 Suggest button that re-runs the orchestrator scoped to the currently-ticked files); callback signature `(path, message, selected_files: list[str])`. Right-click → 📝 Git Commit… or Git tab → Commit…. Initial selection covers only the FIRST LINE of the suggestion so the AI/CHANGELOG-derived body survives the user typing a new subject
 GitHubSetupDialog (tk.Toplevel)  — modal: step-by-step GitHub onboarding wizard. Step 1 saves git identity; Step 2 offers Sign in (primary) + Create account (secondary); Step 3 opens github.com/new; Step 4 sets remote URL; Step 5 first push. Separate Releases section shells out to `gh release create` when `shutil.which("gh")` returns a path. Scrollable canvas wraps the body Frame so it fits small windows. Opened by 🐙 GitHub… button in Git tab header.
 ReleaseWizardDialog (tk.Toplevel) — modal: full-featured release wizard. Six sections in a scrollable canvas: (1) version with last-tag detection + Patch/Minor/Major radios biased by commit content + free-text override; (2) auto-filled title; (3) auto-drafted release notes textarea grouped by conventional-commit prefix; (4) build step with `build.ps1` / `build.bat` auto-detect; (5) artefact preview showing dist contents + resolved zip name; (6) CHANGELOG.md sync checkbox. Publish runs a single threaded `_publish_worker` that sequences: build → zip → patch CHANGELOG → stage CHANGELOG only → commit → local `git tag -a` → `git push --follow-tags` → `gh release create --notes-file <tmp>`. Each step short-circuits with a copy-pasteable recovery command. The notes-file temp path is preserved on the final-step failure so the user can retry `gh release create` by hand without retyping notes. Opened by 📦 Release… button on the Git tab. Pre-flight in `cmd_git_release` refuses to open the wizard if the working tree is dirty in anything other than `CHANGELOG.md` (with a one-click handoff to the existing Git Commit dialog).
 ```
@@ -212,7 +212,9 @@ Contents of the zip are 1:1 whatever `dist/` holds after the build, which is con
 | `_detect_git()` | Returns `shutil.which("git")` if found; falls back to common Windows install paths (`C:\Program Files\Git\cmd\git.exe`, `…\bin\git.exe`, x86 variants); final fallback is the bare string `"git"`. |
 | `_GIT_ENV_NO_PROMPT` | `dict(os.environ, GIT_TERMINAL_PROMPT="0")`. Passed as `env=` for network git commands (push/pull) to prevent infinite hangs when GCM hasn't cached credentials yet. |
 | `_is_auth_error(text)` | Pattern-match on push/pull output to decide whether to show the GCM-setup message vs a generic error. |
-| `_suggest_commit_message(status_text)` | Pure function. Parses `git status --short` lines into `(xy, fname)` tuples and produces a conventional-commit-style message (`docs:` / `feat:` / `fix:` / `chore:`). Used by `GitCommitDialog` to auto-populate the message field and by the 💡 Suggest button. |
+| `_suggest_commit_message(repo_path, status_text)` | **Multi-strategy orchestrator.** Chain order (highest-quality first): LLM (if `commit_message_llm.enabled` in config) → CHANGELOG.md staged bullets (`_extract_changelog_additions` + `_message_from_changelog`) → diff content (`_suggest_from_diff_content` + `_diff_added_python_symbols`) → file-name fallback (`_suggest_from_filenames`, the original v1.0.x function). Every result passes through `_sanitize_commit_message` (72-char subject, imperative mood, blocks filename listings, `chore:` → `refactor:` escalation when source files changed). Used by `GitCommitDialog` for initial fill and the 💡 Suggest button. |
+| `_call_llm_for_commit_message(cfg, repo_path)` | Provider abstraction over Anthropic Messages API / OpenAI Chat Completions / OpenAI-compatible local servers (LM Studio, Ollama). Uses `urllib.request` (no extra dependency). MUST silent-fallback on every failure path — any exception, timeout, missing API key, sub-`min_diff_lines` diff, or empty response returns `None` and the orchestrator falls through to heuristics. Diff truncated to `max_diff_chars` (default 8000) for cost control. |
+| `_pending_diff(repo_path, *paths)` | `git diff HEAD` (NOT `--cached`). Used by the orchestrator's CHANGELOG and diff-content strategies because the commit dialog generates suggestions BEFORE the user stages files — `--cached` would always return empty. Captures both staged and unstaged changes. |
 | `_BASELINE_GITIGNORE` | Multi-line string written by `cmd_git_init` when no `.gitignore` exists. Covers Python cache, Nuitka build output, `.tokensave/`, virtual environments, `.claude/`, and `logs/`. |
 | `_STOP_HOOK_CMD` + `_scaffold_git_hook(path)` | Merges a Claude Code Stop hook (`.claude/settings.json`) that auto-commits at the end of every Claude session. Idempotent — detects an existing `git add -A`-prefixed hook before appending. |
 | `_Tooltip(widget, text)` | Hover-tooltip helper. 650 ms delay, auto-destroys on Leave/ButtonPress. Used on every Git tab button to give plain-English explanations to beginner users. |

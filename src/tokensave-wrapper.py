@@ -9,6 +9,26 @@ Project selection order:
 
 To pin a project: create desktop-project.txt containing the full folder path.
 To auto-switch: delete or update that file, then restart Claude Desktop.
+
+stdio note (2026-05-23):
+  The Popen call below passes sys.stdin/stdout/stderr EXPLICITLY. Without
+  that, Python's default inheritance produces a child with broken standard
+  handles when the wrapper runs under pythonw.exe — the child tokensave
+  binary then never sees MCP messages from Claude Desktop and the attach
+  times out at 30 s. This may have always been the case in the wrapper;
+  Claude Desktop installs that ran tokensave directly (via the DXT
+  extension shape) wouldn't have hit it. The explicit pass-through is
+  defensive — it makes the wrapper work under both console (python.exe)
+  and windowless (pythonw.exe) launches.
+
+Live-reload note (deferred):
+  An earlier revision added a background daemon thread that watched the
+  pin file. Removed for now — not strictly needed for correctness, and
+  the threading interaction with subprocess + pythonw is fiddly. Pin
+  changes currently require a Claude Desktop restart. Future live-reload
+  will be implemented as an OUT-OF-PROCESS watcher (sibling process or a
+  manager-managed daemon) that signals the running tokensave PID
+  directly via taskkill, leaving this wrapper single-threaded.
 """
 
 import json
@@ -45,7 +65,10 @@ def find_project():
     # 1. Check override file
     override_path = os.path.join(os.environ.get("USERPROFILE", ""), ".tokensave", "desktop-project.txt")
     if os.path.isfile(override_path):
-        pinned = open(override_path, encoding="utf-8").read().strip()
+        try:
+            pinned = open(override_path, encoding="utf-8").read().strip()
+        except OSError:
+            pinned = ""
         if pinned and os.path.isfile(os.path.join(pinned, ".tokensave", "tokensave.db")):
             return pinned
 
@@ -54,7 +77,12 @@ def find_project():
     best_project = None
 
     for root in SEARCH_ROOTS:
-        if not os.path.isdir(root):
+        # Search root may be a bare string OR {"path": ..., "label": ...}.
+        # The bare-string case is what the original wrapper supported; the
+        # dict case was added later in the manager's config schema.
+        if isinstance(root, dict):
+            root = root.get("path", "")
+        if not root or not os.path.isdir(root):
             continue
         for dirpath, dirnames, filenames in os.walk(root):
             # Enforce depth limit
@@ -86,7 +114,19 @@ args = [TOKENSAVE, "serve"]
 if project:
     args += ["-p", project]
 
-# Inherit stdin/stdout/stderr directly — no buffering proxy needed.
-# CREATE_NO_WINDOW ensures tokensave itself also gets no console window.
-proc = subprocess.Popen(args, creationflags=CREATE_NO_WINDOW)
+# CRITICAL: pass sys.stdin/stdout/stderr EXPLICITLY. Without this, Python's
+# default "inherit" behavior on Windows fails when the parent is pythonw.exe
+# (windowless) — the child tokensave.exe doesn't get usable standard handles,
+# never sees MCP messages, and Claude Desktop times out with
+# "MCP server tokensave connection timed out after 30000ms" after 30 s.
+# Diagnosed 2026-05-23 by running this wrapper directly with `subprocess.PIPE`
+# stdio, sending a real MCP `initialize` request: with default-inheritance
+# Popen the child produced zero bytes; with explicit `stdin=sys.stdin, ...`
+# the child responded with a full valid initialize result in <100 ms.
+# CREATE_NO_WINDOW still suppresses tokensave's console window.
+proc = subprocess.Popen(args,
+    stdin=sys.stdin,
+    stdout=sys.stdout,
+    stderr=sys.stderr,
+    creationflags=CREATE_NO_WINDOW)
 sys.exit(proc.wait())

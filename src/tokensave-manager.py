@@ -7,6 +7,7 @@ Claude Desktop uses via the wrapper script.
 import os
 import re
 import json
+import glob
 import shlex
 import shutil
 import subprocess
@@ -25,6 +26,38 @@ import pystray
 from PIL import Image, ImageDraw
 
 _ANSI = re.compile(r'\x1b(?:[@-Z\\-_]|\[[0-9;]*[ -/]*[@-~])')
+
+def _version_lt(a: str, b: str) -> bool:
+    """Return True if version string `a` is strictly less than `b`.
+
+    Compares dotted numeric versions tuple-wise after coercing missing
+    components to 0. Non-numeric tags (alpha/beta/rc) are not handled —
+    pure semver-style "1.2.3" comparisons only, which is what tokensave
+    uses. Falls back to string compare on parse failure.
+    """
+    def _parts(v: str) -> tuple:
+        try:
+            return tuple(int(x) for x in v.split("."))
+        except (ValueError, AttributeError):
+            return None
+    pa, pb = _parts(a), _parts(b)
+    if pa is None or pb is None:
+        return a < b
+    # Pad to equal length for fair tuple compare.
+    n = max(len(pa), len(pb))
+    pa = pa + (0,) * (n - len(pa))
+    pb = pb + (0,) * (n - len(pb))
+    return pa < pb
+
+
+# tokensave emits this line at the end of any sync when a newer release is
+# available on GitHub. Capture both versions so the manager can display
+# "Upgrade v5.1.1 → v5.1.2" in Settings and decide when the button should
+# show up. Accepts an arrow rendered as either Unicode → or ASCII -> /=>,
+# and tolerates either the bare "5.1.2" or "v5.1.2" form.
+_TOKENSAVE_UPDATE_RE = re.compile(
+    r'Update available:\s*v?(\d+\.\d+\.\d+(?:\.\d+)?)\s*'
+    r'(?:→|->|=>)\s*v?(\d+\.\d+\.\d+(?:\.\d+)?)')
 
 # ── Paths ─────────────────────────────────────────────────────────────────────
 # Under Nuitka --onefile, NUITKA_ONEFILE_PARENT is the actual .exe path.
@@ -51,7 +84,345 @@ def _save_config(cfg: dict):
     with open(_CONFIG_PATH, "w", encoding="utf-8") as f:
         json.dump(cfg, f, indent=2)
 
-_cfg = _load_config()
+
+def _migrate_config(cfg: dict) -> dict:
+    """Bump old config defaults to current ones, on first load after upgrade.
+
+    Why this exists: tk Settings dialog uses ``setdefault`` which only fills
+    MISSING keys. Users upgrading from v1.0.x have ``timeout_seconds: 12``
+    AND ``max_diff_chars: 8000`` already present in their saved config —
+    those keys exist, so setdefault no-ops, and the user keeps the old slow
+    defaults until they edit the JSON by hand. This migration treats values
+    AT-OR-BELOW the previous default as 'never explicitly chosen by the user'
+    and bumps them to the current default. Users who deliberately set
+    intermediate values (e.g. timeout=60, max_diff_chars=16000) keep those.
+
+    Migration is idempotent: re-running on already-migrated configs is a no-op.
+    Saves back to disk only if anything changed.
+    """
+    changed = False
+    llm = cfg.get("commit_message_llm")
+    if isinstance(llm, dict):
+        # timeout_seconds: old default was 12, current is 90; bump anything <30
+        if int(llm.get("timeout_seconds", 90)) < 30:
+            llm["timeout_seconds"] = 90
+            changed = True
+        # max_diff_chars: old default was 8000, current is 24000; bump anything <16000
+        if int(llm.get("max_diff_chars", 24000)) < 16000:
+            llm["max_diff_chars"] = 24000
+            changed = True
+    # MCP-config skip list — added [Unreleased]. Empty list means "warn me
+    # whenever any Claude MCP config drifts from the canonical wrapper-based
+    # shape". Each entry is an absolute path to a config file the user has
+    # told us to stop warning about.
+    if "mcp_skip_warnings" not in cfg:
+        cfg["mcp_skip_warnings"] = []
+        changed = True
+    if changed:
+        _save_config(cfg)
+    return cfg
+
+
+# ───────────────────────────────────────────────────────────────────────
+# MCP-config introspection + canonical-shape helpers
+# ───────────────────────────────────────────────────────────────────────
+#
+# Two Claude apps each have their own MCP config; both need to point at
+# tokensave-wrapper.py for the manager's ★ Set as Active pin to drive which
+# project gets served. Without the wrapper, an MCP entry that runs
+# `tokensave.exe serve -p <hardcoded>` bypasses the pin file entirely —
+# which is the exact failure mode that produced this whole subsystem.
+#
+# Pure helpers, no Tk. Easy to unit-test from the command line.
+
+def _resolve_desktop_cfg_path() -> str:
+    """Locate Claude Desktop's MCP config file — UWP-aware.
+
+    Claude Desktop ships in two install flavours that store the same
+    `claude_desktop_config.json` at different physical paths:
+
+      1. Microsoft Store / UWP install (Claude_pzs8sxrjxfjjc package family):
+         %LOCALAPPDATA%\\Packages\\Claude_*\\LocalCache\\Roaming\\Claude\\
+             claude_desktop_config.json
+
+      2. Traditional installer:
+         %APPDATA%\\Claude\\claude_desktop_config.json
+
+    The UWP case has a brutal gotcha: Windows file-path redirection is
+    ASYMMETRIC across UWP-context and non-UWP-context processes. A UWP
+    process opening `%APPDATA%\\Claude\\<file>` gets redirected to the
+    package's LocalCache. A non-UWP process opening the same path string
+    sees a DIFFERENT physical file (the user's normal-view file) — both
+    files exist on disk simultaneously, with the same path, and Windows
+    silently picks one based on caller context.
+
+    The manager is a non-UWP process. If we point it at `%APPDATA%\\Claude\\`
+    on a UWP-installed Desktop, the manager will read/write the wrong
+    file — Desktop never sees those changes. Diagnosed when a user's
+    Apply through the configurator wrote 231 bytes of canonical content
+    to the external `%APPDATA%\\Claude\\` file while Desktop continued
+    serving `tokensave.exe -p <hardcoded>` from its 2,219-byte UWP-internal
+    file.
+
+    Detection: glob for any `Claude_*` package directory. When found,
+    target the UWP-internal path — that's the one Desktop actually reads.
+    Otherwise fall back to the traditional path.
+
+    Multiple Claude packages can in principle co-exist (Stable + Beta);
+    we pick the most-recently-modified config file as a heuristic for
+    "the one Desktop is currently running from".
+    """
+    local = os.environ.get("LOCALAPPDATA", "")
+    traditional = os.path.join(
+        os.environ.get("APPDATA", ""), "Claude", "claude_desktop_config.json")
+    if local:
+        try:
+            candidates = glob.glob(os.path.join(
+                local, "Packages", "Claude_*",
+                "LocalCache", "Roaming", "Claude",
+                "claude_desktop_config.json"))
+        except OSError:
+            candidates = []
+        # Most-recently-touched first.
+        candidates = sorted(
+            candidates,
+            key=lambda p: -os.path.getmtime(p) if os.path.exists(p) else 0)
+        if candidates:
+            return candidates[0]
+    return traditional
+
+
+_MCP_DESKTOP_CFG_PATH = _resolve_desktop_cfg_path()
+_MCP_CODE_CFG_PATH    = os.path.join(
+    os.environ.get("USERPROFILE", ""), ".claude.json")
+
+# Friendly labels — kept short so they fit in the dialog headers.
+_MCP_CONFIGS = [
+    ("Claude Desktop", _MCP_DESKTOP_CFG_PATH),
+    ("Claude Code",    _MCP_CODE_CFG_PATH),
+]
+
+
+def _wrapper_path() -> str:
+    """Where tokensave-wrapper lives for this installation.
+
+    In a Nuitka onefile build the wrapper is a sibling .exe; in source mode
+    it's the .py next to tokensave-manager.py. Matches the same lookup the
+    Reference tab already does (~ line 5275).
+    """
+    if os.environ.get("NUITKA_ONEFILE_PARENT"):
+        return os.path.join(_BASE_DIR, "tokensave-wrapper.exe")
+    return os.path.join(_BASE_DIR, "src", "tokensave-wrapper.py")
+
+
+def _canonical_mcp_entry() -> dict:
+    """The MCP server entry the manager wants every Claude config to have.
+
+    Source-mode shape: pythonw.exe → tokensave-wrapper.py
+    Bundled-mode shape: tokensave-wrapper.exe directly (no python needed)
+
+    The python_exe field in manager-config.json supplies pythonw — same one
+    the .bat launcher uses, so users who already configured the launcher
+    don't have to pick a python a second time.
+    """
+    wrapper = _wrapper_path()
+    if wrapper.lower().endswith(".exe"):
+        return {"command": wrapper, "args": []}
+    # Source mode — need a python interpreter for the .py wrapper.
+    py = (_cfg.get("python_exe") if isinstance(_cfg, dict) else "") or ""
+    if not py:
+        # Best-effort default: the same pythonw that's running this script.
+        # User can override in Settings.
+        py_candidate = sys.executable.replace("python.exe", "pythonw.exe")
+        py = py_candidate if os.path.isfile(py_candidate) else sys.executable
+    return {"command": py, "args": [wrapper]}
+
+
+def _classify_mcp_entry(cfg_path: str) -> dict:
+    """Inspect a Claude MCP config file and report what shape its tokensave
+    entry is in.
+
+    Returns a dict with keys:
+      - "state":  one of "ok", "direct_serve", "wrong_wrapper", "missing",
+                  "no_file", "unparseable"
+      - "label":  short human-readable status (✓ / ⚠ / ✗ prefixed)
+      - "issue":  longer explanation suitable for a tooltip / dialog body
+      - "current": the current tokensave entry dict (if any) — for diff display
+      - "proposed": the canonical entry the manager wants to write
+      - "cfg_path": echoes the input, for callers that thread through many configs
+
+    Two valid shapes are recognised as "ok":
+      (a) Wrapper-routed:  pythonw[w].exe + tokensave-wrapper.py  (or the
+          bundled tokensave-wrapper.exe).  Manager-blessed.  Required for
+          Claude Desktop because Desktop spawns the MCP server once at
+          startup and the wrapper is what reads ~/.tokensave/desktop-
+          project.txt to pick the right project.
+      (b) tokensave install canonical:  tokensave.exe serve  with NO
+          hardcoded "-p" flag.  This is what `tokensave install --agent
+          claude` writes to ~/.claude.json, and `tokensave doctor`
+          considers it the correct shape.  Standalone Claude Code
+          sessions then let tokensave auto-detect the project per
+          invocation.  We ONLY accept this shape for Claude Code
+          (cfg_path ending in .claude.json) — Desktop must use (a)
+          because its MCP server is long-lived and can't re-auto-detect.
+
+    Direct-serve WITH a hardcoded "-p" is always flagged — that's the
+    KicomAI-style footgun where every Claude restart needs to know the
+    project at install time.
+
+    Pure function — no side effects. Safe to call on every startup.
+    """
+    proposed = _canonical_mcp_entry()
+    base = {"cfg_path": cfg_path, "current": None, "proposed": proposed}
+    is_claude_code = cfg_path.lower().endswith(".claude.json")
+
+    if not cfg_path or not os.path.isfile(cfg_path):
+        return {**base,
+                "state": "no_file",
+                "label": "✗ no config file",
+                "issue": (f"{cfg_path} doesn't exist yet. "
+                          "If you use this Claude app, the manager can create "
+                          "the file with just a tokensave entry.")}
+    try:
+        with open(cfg_path, encoding="utf-8") as f:
+            data = json.load(f)
+    except (OSError, json.JSONDecodeError) as e:
+        return {**base,
+                "state": "unparseable",
+                "label": "✗ unreadable",
+                "issue": (f"Could not parse {cfg_path}: "
+                          f"{type(e).__name__}: {e}. Fix the JSON by hand "
+                          "before re-running the configurator.")}
+
+    servers = data.get("mcpServers") or {}
+    entry = servers.get("tokensave")
+    if not isinstance(entry, dict):
+        return {**base,
+                "state": "missing",
+                "label": "✗ no tokensave entry",
+                "issue": ("No 'tokensave' MCP server is configured. "
+                          "Click Apply to add the canonical wrapper-based "
+                          "entry — other mcpServers entries (if any) stay "
+                          "untouched.")}
+
+    base["current"] = entry
+    cmd  = (entry.get("command") or "").strip()
+    args = entry.get("args") or []
+
+    # State 1: correct shape — pythonw/python + wrapper.py  OR  wrapper.exe.
+    cmd_lower = cmd.lower().replace("/", os.sep)
+    if cmd_lower.endswith("tokensave-wrapper.exe"):
+        return {**base, "state": "ok",
+                "label": "✓ correct (bundled wrapper)",
+                "issue": ""}
+    if (cmd_lower.endswith("pythonw.exe") or cmd_lower.endswith("python.exe")):
+        if args and isinstance(args[0], str) \
+                and args[0].lower().endswith("tokensave-wrapper.py"):
+            # Also check the wrapper file referenced actually exists.
+            if os.path.isfile(args[0]):
+                return {**base, "state": "ok",
+                        "label": "✓ correct",
+                        "issue": ""}
+            return {**base,
+                    "state": "wrong_wrapper",
+                    "label": "⚠ wrapper path missing",
+                    "issue": (f"Points at {args[0]} but that file doesn't "
+                              "exist. Click Apply to update to the current "
+                              "wrapper location.")}
+
+    # State 2: tokensave.exe direct.  Two sub-cases:
+    #   - With hardcoded -p: always flagged (KicomAI footgun)
+    #   - Without -p: OK for Claude Code (matches `tokensave install`
+    #     canonical shape that `tokensave doctor` blesses) but NOT for
+    #     Desktop (Desktop's long-lived MCP server can't re-auto-detect
+    #     per invocation, so wrapper-routed is required there).
+    if cmd_lower.endswith("tokensave.exe"):
+        has_p_flag = isinstance(args, list) and "-p" in args
+        if has_p_flag:
+            try:
+                target = args[args.index("-p") + 1]
+            except (IndexError, ValueError):
+                target = "(unknown)"
+            return {**base,
+                    "state": "direct_serve",
+                    "label": "⚠ hardcoded project",
+                    "issue": (f"Runs tokensave.exe directly with -p "
+                              f"\"{target}\". This locks the MCP server "
+                              "to one project — switching requires a "
+                              "config edit AND a Claude restart. Click "
+                              "Apply to route through the wrapper or run "
+                              "`tokensave install --agent claude` for the "
+                              "auto-detect default.")}
+        # No -p, just `tokensave.exe serve` (possibly with other flags).
+        # OK for Claude Code; warn for Desktop.
+        if is_claude_code:
+            return {**base, "state": "ok",
+                    "label": "✓ tokensave-install canonical",
+                    "issue": ""}
+        return {**base,
+                "state": "direct_serve",
+                "label": "⚠ bypasses wrapper (Desktop needs wrapper)",
+                "issue": ("Claude Desktop's MCP server is long-lived and "
+                          "must use the wrapper to honour ★ Set as Active. "
+                          "Tokensave's auto-detect runs only at process "
+                          "startup, so direct-serve here means project "
+                          "switches need a Claude Desktop restart. Click "
+                          "Apply to route through the wrapper.")}
+
+    # State 3: something else entirely.
+    return {**base,
+            "state": "wrong_wrapper",
+            "label": "⚠ non-canonical",
+            "issue": (f"command is {cmd!r}, which isn't a shape the manager "
+                      "knows how to maintain. Click Apply to replace with "
+                      "the canonical wrapper-based entry.")}
+
+
+def _apply_mcp_fix(cfg_path: str, proposed_entry: dict) -> tuple[bool, str]:
+    """Write `proposed_entry` into `cfg_path` under mcpServers.tokensave.
+
+    Returns (success, message). Always writes a timestamped backup first
+    via shutil.copy2 (skipped if the source file doesn't exist — in that
+    case the function creates a fresh config with only tokensave in it).
+    Other mcpServers entries are preserved verbatim.
+
+    Idempotent: applying twice in a row is a no-op-equivalent (the second
+    write writes the same bytes the first one did).
+    """
+    backup_msg = ""
+    if os.path.isfile(cfg_path):
+        try:
+            backup = cfg_path + ".backup." + str(int(time.time() * 1000))
+            shutil.copy2(cfg_path, backup)
+            backup_msg = f" (backup: {os.path.basename(backup)})"
+        except OSError as e:
+            return False, f"Could not write backup: {e}"
+        try:
+            with open(cfg_path, encoding="utf-8") as f:
+                data = json.load(f)
+        except (OSError, json.JSONDecodeError) as e:
+            return False, f"Could not parse existing file: {e}"
+    else:
+        # Fresh file — make sure the parent dir exists.
+        try:
+            os.makedirs(os.path.dirname(cfg_path), exist_ok=True)
+        except OSError as e:
+            return False, f"Could not create parent dir: {e}"
+        data = {}
+
+    servers = data.setdefault("mcpServers", {})
+    servers["tokensave"] = proposed_entry
+
+    try:
+        with open(cfg_path, "w", encoding="utf-8") as f:
+            json.dump(data, f, indent=2)
+            f.write("\n")
+    except OSError as e:
+        return False, f"Could not write config: {e}"
+    return True, f"Wrote tokensave entry to {cfg_path}{backup_msg}"
+
+
+_cfg = _migrate_config(_load_config())
 
 TOKENSAVE    = _cfg.get("tokensave_exe", "")
 TEMPLATE_DIR = _cfg.get("template_dir", "") or os.path.join(_BASE_DIR, "templates")
@@ -257,70 +628,106 @@ def _is_auth_error(text: str) -> bool:
         "invalid username or password",
     ))
 
-def _suggest_commit_message(status_text: str) -> str:
-    """Generate a conventional-commit-style message from `git status --short` output.
+def _suggest_commit_message(repo_path: str = "", status_text: str = "") -> str:
+    """Generate a conventional-commit-style message for the staged changes.
 
-    Tries to produce something meaningful based on which files changed and how.
-    The user can always edit or replace the suggestion.
+    Multi-strategy orchestrator — tries the highest-quality strategy first
+    and falls through to weaker ones on empty results. Returns "" only if
+    every strategy yields nothing AND there are no staged files at all.
+
+    Strategy chain (see helpers near `_render_release_notes`):
+      0. LLM mode (if enabled in config) — calls Anthropic / OpenAI / LM Studio /
+         Ollama. Silent fallback on any failure.
+      1. CHANGELOG.md additions — parses staged bullets, infers type+scope.
+      2. Diff content — added Python defs/classes, file-kind heuristics.
+      3. File-name patterns — legacy behaviour from v1.0.x.
+
+    `repo_path` is optional for backwards compatibility — if empty, only
+    the file-name strategy runs (it doesn't need shell access).
+
+    All non-empty results are sanitised: subject ≤ 72 chars, imperative
+    mood, no filename listings, `chore:` escalated to `refactor:` when
+    actual source files changed.
     """
-    # BUG FIX (see GitCommitDialog parsing): never strip() the full
-    # status_text before splitlines() — strip eats the leading space from
-    # the first line, shifting columns and silently dropping the first
-    # character of the filename when the first entry is a working-tree
-    # modification (which starts with a single leading space).
+    # Parse `git status --short` into (xy, filename) tuples for downstream use.
+    # (Kept inline because we need it on every code path.)
     lines = [l for l in status_text.splitlines() if len(l) >= 4]
-    if not lines:
-        return ""
-
     files = []
     for line in lines:
-        xy   = line[:2].strip()
+        xy    = line[:2].strip()
         fname = line[3:]
-        # Handle renames: "old -> new" format
         if " -> " in fname:
             fname = fname.split(" -> ")[-1]
         files.append((xy, fname))
 
-    if not files:
-        return ""
+    has_source = any(
+        os.path.splitext(os.path.basename(f))[1].lower() in
+        {".py", ".js", ".ts", ".cs", ".cpp", ".c", ".h", ".rs", ".go", ".java",
+         ".rb", ".php", ".swift", ".kt", ".scala"}
+        for _xy, f in files
+    )
 
-    basenames = [os.path.basename(f) for _, f in files]
-    exts      = {os.path.splitext(b)[1].lower() for b in basenames}
-    has_del   = any("D" in xy for xy, _ in files)
-    has_add   = any("A" in xy or "?" in xy for xy, _ in files)
+    # ── Strategy 0: LLM (opt-in) ────────────────────────────────────────────
+    if repo_path:
+        llm_cfg = (_cfg.get("commit_message_llm") or {}) if isinstance(_cfg, dict) else {}
+        if llm_cfg.get("enabled"):
+            raw = _call_llm_for_commit_message(llm_cfg, repo_path)
+            if raw:
+                # LLM may return subject + body; split on first blank line.
+                head, _, tail = raw.partition("\n\n")
+                subj, body = _sanitize_commit_message(
+                    head, tail, has_source_changes=has_source,
+                )
+                if subj:
+                    return subj + (("\n\n" + body) if body else "")
 
-    # ── Single file ──
-    if len(files) == 1:
-        xy, fname = files[0]
-        bname = os.path.basename(fname)
-        if "D" in xy:
-            return f"chore: remove {bname}"
-        if "A" in xy or "?" in xy:
-            ext = os.path.splitext(bname)[1].lower()
-            return f"docs: add {bname}" if ext in (".md", ".txt", ".rst") else f"feat: add {bname}"
-        if bname.lower().endswith((".md", ".txt", ".rst")):
-            return f"docs: update {bname}"
-        return f"chore: update {bname}"
+    # ── Strategy 1: CHANGELOG bullets ───────────────────────────────────────
+    if repo_path:
+        try:
+            additions = _extract_changelog_additions(repo_path)
+        except Exception:
+            additions = []
+        if additions:
+            subj, body = _message_from_changelog(additions, files)
+            subj, body = _sanitize_commit_message(
+                subj, body, has_source_changes=has_source,
+            )
+            if subj:
+                return subj + (("\n\n" + body) if body else "")
 
-    # ── Multiple files ──
-    doc_exts = {".md", ".txt", ".rst", ".adoc"}
-    code_exts = {".py", ".js", ".ts", ".cs", ".cpp", ".c", ".h", ".rs", ".go", ".java"}
+    # ── Strategy 2: Diff content (added defs/classes, file kinds) ──────────
+    if repo_path and files:
+        try:
+            subj, body = _suggest_from_diff_content(repo_path, files)
+        except Exception:
+            subj, body = "", ""
+        if subj:
+            subj, body = _sanitize_commit_message(
+                subj, body, has_source_changes=has_source,
+            )
+            if subj:
+                return subj + (("\n\n" + body) if body else "")
 
-    if exts <= doc_exts:
-        return "docs: update documentation"
+    # ── Strategy 3: File-name patterns (legacy fallback) ───────────────────
+    legacy = _suggest_from_filenames(status_text)
+    if legacy:
+        subj, body = _sanitize_commit_message(
+            legacy, "", has_source_changes=has_source,
+        )
+        if subj:
+            return subj  # body is always empty for the legacy strategy
 
-    if exts <= code_exts:
-        if len(basenames) <= 3:
-            return f"chore: update {', '.join(basenames)}"
-        return f"chore: update {len(files)} source files"
-
-    if has_del and not has_add:
-        return f"chore: remove {len(files)} files"
-
-    # Mixed — list up to two names then summarise the rest
-    if len(basenames) <= 2:
-        return f"chore: update {', '.join(basenames)}"
-    return f"chore: update {basenames[0]}, {basenames[1]} + {len(basenames) - 2} more"
+    # ── Strategy 4: Generic backstop ────────────────────────────────────────
+    # Reached only when the legacy output was an anti-pattern (filename
+    # listing) that sanitization rejected, AND no higher strategy produced
+    # anything. Better to give the user a clean generic stub than an empty
+    # field — they can edit it.
+    if files:
+        if has_source:
+            scope = _dominant_directory(files)
+            return f"refactor({scope}): update sources" if scope else "refactor: update sources"
+        return "chore: update files"
+    return ""
 
 
 # ── Shadow-link helpers ────────────────────────────────────────────────────────
@@ -890,7 +1297,7 @@ def _classify_commits_for_changelog(commits: list) -> dict:
 
 
 def _bump_version(tag: str, kind: str) -> str:
-    """Return the next semver tag for ``kind`` ∈ {patch, minor, major}.
+    """Return the next tag for ``kind`` ∈ {patch, minor, major, hotfix}.
 
     Accepts tags with or without a leading ``v``. Output preserves the ``v``
     prefix if present. Non-semver inputs fall back to a date-stamped tag.
@@ -900,26 +1307,40 @@ def _bump_version(tag: str, kind: str) -> str:
     core. Without this, a tag like ``v1.0.0-alpha.1`` would fail the
     ``int()`` parse on ``"0-alpha"`` and fall back to a date-stamped tag,
     producing three identical radio values in the wizard.
+
+    Hotfix bump produces a four-part version: ``v1.0.4`` → ``v1.0.4.1``,
+    ``v1.0.4.1`` → ``v1.0.4.2``. This is intentionally not strict semver —
+    it's the "small adjustment on top of an existing release without
+    starting a new patch series" idiom common in enterprise / Windows
+    versioning (assembly versions, NuGet 4-part). The patch / minor / major
+    bumps always normalise back to three parts, so a hotfix branch
+    eventually merges into a clean semver line on the next regular release.
     """
     raw  = tag.lstrip("v") if tag else ""
     core = raw.split("-", 1)[0].split("+", 1)[0]
     parts = core.split(".")
     try:
-        major, minor, patch = (int(parts[0]), int(parts[1]), int(parts[2]))
+        major  = int(parts[0])
+        minor  = int(parts[1])
+        patch  = int(parts[2])
+        # Optional 4th segment (hotfix counter). Default 0 if absent.
+        hotfix = int(parts[3]) if len(parts) >= 4 else 0
     except (ValueError, IndexError):
         # Fallback for non-semver — date-stamped tag.
         from datetime import datetime as _dt
         return _dt.now().strftime("v%Y.%m.%d")
 
-    if kind == "major":
-        major, minor, patch = major + 1, 0, 0
-    elif kind == "minor":
-        minor, patch = minor + 1, 0
-    else:   # default: patch
-        patch += 1
-
     prefix = "v" if (tag or "").startswith("v") else ""
-    return f"{prefix}{major}.{minor}.{patch}"
+
+    if kind == "major":
+        return f"{prefix}{major + 1}.0.0"
+    if kind == "minor":
+        return f"{prefix}{major}.{minor + 1}.0"
+    if kind == "hotfix":
+        # Bump or introduce the 4th segment, leaving MAJOR.MINOR.PATCH intact.
+        return f"{prefix}{major}.{minor}.{patch}.{hotfix + 1}"
+    # default: patch — drop any hotfix segment, bump patch
+    return f"{prefix}{major}.{minor}.{patch + 1}"
 
 
 def _suggest_bump_kind(commits: list) -> str:
@@ -942,6 +1363,898 @@ def _suggest_bump_kind(commits: list) -> str:
         if m and m.group(1) == "feat":
             any_feat = True
     return "minor" if any_feat else "patch"
+
+
+# ─── GitCommitDialog helpers ────────────────────────────────────────────────
+# Smart commit-message generation. Pure functions co-located with the
+# release-wizard helpers above because they share `_CONVENTIONAL_RE`,
+# `_TYPE_TO_SECTION`, and `_SECTION_ORDER`. The public entry point
+# `_suggest_commit_message` is defined far above (near the top of the file)
+# for backwards-compatible discoverability — it forward-references the
+# strategy helpers below.
+
+# Inverse of `_TYPE_TO_SECTION`, used when reading a CHANGELOG bullet
+# under (e.g.) `### Added` and producing a `feat:` prefix in the commit.
+# Picks the SINGLE canonical type per section — `Changed` maps back to
+# `refactor` by default; `_message_from_changelog` escalates to `feat` when
+# the bullet text hints at user-visible UI changes.
+_SECTION_TO_TYPE = {
+    "Added":      "feat",
+    "Fixed":      "fix",
+    "Changed":    "refactor",
+    "Removed":    "refactor",
+    "Deprecated": "chore",
+    "Security":   "fix",
+    "Docs":       "docs",
+    "Breaking":   "feat",   # surfaced with ! marker in `_message_from_changelog`
+    "Other":      "chore",
+}
+
+# Vocabulary for inferring conventional-commit scope from CHANGELOG bullet
+# lead-ins or commit-subject text. Patterns are case-insensitive regex; the
+# first match wins. Order matters — put more-specific patterns first.
+# Maintain in lockstep with the project's actual subsystem names.
+_SCOPE_PATTERNS = [
+    (r"release\s*wizard",           "release-wizard"),
+    (r"git\s*commit\s*dialog",      "commit-dialog"),
+    (r"git\s*(status|column)",      "git-status"),
+    (r"auto[-\s]*commit",           "auto-commit"),
+    (r"settings?\s*dialog",         "settings"),
+    (r"project\s*tree",             "tree"),
+    (r"scaffold(?:ing)?",           "scaffold"),
+    (r"shadow[-\s]*link",           "shadow-link"),
+    (r"sync\b",                     "sync"),
+    (r"tokensave\b",                "tokensave"),
+    (r"changelog\b",                "changelog"),
+]
+
+# Words in a bullet description that signal "user-visible feature" rather
+# than internal refactor. Used to escalate `Changed` section bullets from
+# `refactor:` to `feat:` in commit subjects.
+_USER_VISIBLE_HINTS = re.compile(
+    r"\b(button|dialog|wizard|menu|toolbar|hotkey|shortcut|"
+    r"command|option|toggle|checkbox|tab|panel|label|tooltip|"
+    r"radio|dropdown|preview|banner|popup)\b",
+    re.IGNORECASE,
+)
+
+# Imperative-mood rewriter — applied to the FIRST word of the subject only.
+# Catches the most common past-tense / -ing slip-ups.
+_IMPERATIVE_REWRITES = {
+    "added":   "add",
+    "adds":    "add",
+    "adding":  "add",
+    "fixed":   "fix",
+    "fixes":   "fix",
+    "fixing":  "fix",
+    "updated": "update",
+    "updates": "update",
+    "updating":"update",
+    "removed": "remove",
+    "removes": "remove",
+    "removing":"remove",
+    "changed": "change",
+    "changes": "change",
+    "changing":"change",
+    "refactored": "refactor",
+    "improved":   "improve",
+    "improves":   "improve",
+}
+
+# Common locations for project changelog files. First hit wins.
+_CHANGELOG_CANDIDATES = [
+    "CHANGELOG.md", "CHANGELOG", "Changelog.md",
+    "docs/CHANGELOG.md", "HISTORY.md", "RELEASES.md",
+]
+
+# Anti-pattern: filename listings in the subject. Catches three variants
+# the LLM commonly produces despite the system prompt telling it not to:
+#   "update X.md, Y.md"           — comma-separated (the original case)
+#   "update X.md and Y.md"        — natural-language "and" connector
+#   "update X.md, Y.md, and Z.md" — Oxford-comma variant
+#   "update X.md; Y.md"           — semicolon-separated
+# All match the same anti-pattern: a verb followed by a filename followed by
+# any separator and another filename-shaped token.
+_FILENAME_LISTING_RE = re.compile(
+    r"\b(update|change|modify|edit|refactor|fix)\s+"
+    r"[\w.-]+\.\w+\s+"                       # first filename + any whitespace
+    r"(?:,\s*(?:and\s+)?|and\s+|;\s*|or\s+)" # connector: ',', ', and', 'and', ';', 'or'
+    r"[\w.-]+\.\w+",                         # second filename
+    re.IGNORECASE,
+)
+
+
+def _sanitize_commit_message(subject: str, body: str = "",
+                              has_source_changes: bool = False) -> tuple[str, str]:
+    """Enforce subject/body invariants on any candidate message.
+
+    Returns (subject, body). Empty subject means "give up; caller should
+    fall through to a lower-priority strategy".
+
+    Rules:
+      * Strip markdown noise: ``**x**`` → ``x``, backticks → none,
+        ``[text](url)`` → ``text``
+      * Strip surrounding quotes / leading "Here's a commit message:" preambles
+      * Imperative mood — rewrite first word if it matches a known past tense
+      * Subject ≤ 72 chars (truncate at last word boundary that fits)
+      * Escalate ``chore:`` → ``refactor:`` when source files changed and the
+        subject is otherwise generic (no scope, generic verb)
+      * Reject filename-listing anti-pattern → empty subject (forces fallback)
+      * Body wrapped at 72 chars per line
+    """
+    import textwrap
+
+    def _strip_md(s: str) -> str:
+        s = re.sub(r"\*\*([^*]+)\*\*", r"\1", s)        # bold
+        s = re.sub(r"\*([^*]+)\*",      r"\1", s)        # italic
+        s = re.sub(r"`([^`]+)`",        r"\1", s)        # code
+        s = re.sub(r"\[([^\]]+)\]\([^)]+\)", r"\1", s)   # links
+        return s
+
+    subject = _strip_md((subject or "").strip())
+    body    = _strip_md((body or "").strip())
+
+    # Strip common LLM preambles / wrapping characters
+    for pre in ("Here's a commit message:", "Commit message:",
+                "Suggested commit message:"):
+        if subject.lower().startswith(pre.lower()):
+            subject = subject[len(pre):].lstrip(":").strip()
+    subject = subject.strip("`'\"")
+
+    # If the LLM gave us a multi-line subject, split into subject + body
+    if "\n" in subject:
+        head, _, tail = subject.partition("\n")
+        subject = head.strip()
+        if tail.strip():
+            body = (tail.strip() + ("\n\n" + body if body else "")).strip()
+
+    # Imperative mood rewrite on first word (preserve any prefix like "feat:")
+    m = re.match(r"^(?:(\w+(?:\([^)]+\))?!?:\s+))?(\w+)(.*)$", subject)
+    if m:
+        prefix, first, rest = m.group(1) or "", m.group(2), m.group(3)
+        canonical = _IMPERATIVE_REWRITES.get(first.lower())
+        if canonical:
+            subject = f"{prefix}{canonical}{rest}"
+
+    # Filename-listing anti-pattern → caller falls back
+    if _FILENAME_LISTING_RE.search(subject):
+        return "", ""
+
+    # Escalate `chore:` to `refactor:` when actual source files changed AND
+    # the subject is non-specific (no parenthetical scope, generic verb).
+    if has_source_changes and subject.lower().startswith("chore:"):
+        # Keep `chore(deps):`, `chore(ci):`, etc.
+        if not re.match(r"^chore\([^)]+\):", subject, re.IGNORECASE):
+            subject = "refactor:" + subject[len("chore:"):]
+
+    # Escalate `docs:` to `refactor:` when source files (.py/.js/.ts/.go/etc.)
+    # are also changed. A `docs:` commit that touches code is misclassified —
+    # the LLM saw the README diff first and missed the code change. We default
+    # to `refactor:` because the LLM didn't add new top-level symbols (if it
+    # had, the diff-content strategy would have produced `feat: add X` earlier
+    # in the chain). Preserve scoped `docs(foo):` since the scope IS specific.
+    if has_source_changes and subject.lower().startswith("docs:"):
+        if not re.match(r"^docs\([^)]+\):", subject, re.IGNORECASE):
+            subject = "refactor:" + subject[len("docs:"):]
+
+    # Subject ≤ 72 chars, truncate at word boundary
+    if len(subject) > 72:
+        truncated = subject[:72]
+        sp = truncated.rfind(" ")
+        if sp > 40:
+            truncated = truncated[:sp]
+        subject = truncated.rstrip(",;:-")
+
+    # Body wrap at 72 chars per paragraph. Also split runs of bullets that
+    # the LLM jammed onto one line — e.g. `. - Foo` mid-paragraph means a
+    # new bullet that should be on its own line. Common pattern from small
+    # local models (Qwen 2.5 14B Q4 etc.) that don't always respect newlines.
+    if body:
+        paragraphs = [p.strip() for p in body.split("\n\n") if p.strip()]
+        normalised = []
+        for p in paragraphs:
+            # Split jammed bullets: `. - text` → `.\n- text` (also `: - text`).
+            # Only acts BETWEEN a sentence boundary and a literal `- ` — won't
+            # split things like `"low-key" - foo` or "M-1 - test rev" because
+            # those don't follow a period/colon.
+            p = re.sub(r"([.:])\s+-\s+", r"\1\n- ", p)
+            # If the paragraph is now multi-line bullets, wrap each line
+            # independently so bullet structure survives.
+            if "\n- " in p:
+                lines = p.split("\n")
+                wrapped_lines = []
+                for line in lines:
+                    if line.startswith("- "):
+                        # Wrap with hanging indent for the continuation
+                        wrapped_lines.append(textwrap.fill(
+                            line, width=72,
+                            initial_indent="", subsequent_indent="  ",
+                            break_long_words=False, break_on_hyphens=False,
+                        ))
+                    else:
+                        wrapped_lines.append(textwrap.fill(
+                            line, width=72,
+                            break_long_words=False, break_on_hyphens=False,
+                        ))
+                normalised.append("\n".join(wrapped_lines))
+            else:
+                normalised.append(textwrap.fill(
+                    p, width=72,
+                    break_long_words=False, break_on_hyphens=False,
+                ))
+        body = "\n\n".join(normalised)
+
+    return subject, body
+
+
+def _recent_commit_subjects(repo_path: str, n: int = 5) -> list:
+    """Return the last `n` commit subject lines (most-recent first)."""
+    try:
+        proc = subprocess.run(
+            [GIT_EXE, "-C", repo_path, "log", f"-n{n}", "--format=%s"],
+            capture_output=True, text=True, timeout=5,
+            encoding="utf-8", errors="replace",
+            creationflags=CREATE_NO_WINDOW,
+        )
+    except (FileNotFoundError, subprocess.TimeoutExpired):
+        return []
+    if proc.returncode != 0:
+        return []
+    return [line for line in proc.stdout.splitlines() if line.strip()]
+
+
+def _find_changelog_file(repo_path: str) -> str | None:
+    """Locate the first present CHANGELOG-style file in the repo."""
+    for candidate in _CHANGELOG_CANDIDATES:
+        full = os.path.join(repo_path, candidate)
+        if os.path.isfile(full):
+            return candidate
+    return None
+
+
+def _pending_diff(repo_path: str, *paths: str, lines_of_context: int = 0) -> str:
+    """Return the diff between HEAD and the working tree (staged + unstaged).
+
+    Used for commit-message suggestion BEFORE the GitCommitDialog actually
+    stages files. ``git diff HEAD`` captures everything that would land in
+    the commit if the user stages and commits all working-tree changes.
+    """
+    cmd = [GIT_EXE, "-C", repo_path, "diff", "HEAD", "--no-color",
+           f"-U{lines_of_context}"]
+    if paths:
+        cmd.append("--")
+        cmd.extend(paths)
+    try:
+        proc = subprocess.run(
+            cmd, capture_output=True, text=True, timeout=10,
+            encoding="utf-8", errors="replace",
+            creationflags=CREATE_NO_WINDOW,
+        )
+    except (FileNotFoundError, subprocess.TimeoutExpired):
+        return ""
+    return proc.stdout if proc.returncode == 0 else ""
+
+
+def _extract_changelog_additions(repo_path: str) -> list:
+    """Parse the staged CHANGELOG diff into structured bullet records.
+
+    Returns a list of dicts: ``{"section": "Added"|"Fixed"|..., "lead_in": str,
+    "description": str}``. Returns ``[]`` if no changelog or no additions.
+
+    Handles Keep-a-Changelog format with bolded lead-ins:
+        ### Added
+        - **Hotfix bump option in the Release Wizard** — fourth radio option…
+    Falls back gracefully to plain bullets without bold lead-ins.
+    """
+    cl_file = _find_changelog_file(repo_path)
+    if not cl_file:
+        return []
+    # NOTE: use generous context (-U20) so the section header (### Added /
+    # ### Changed) appears as a CONTEXT line above any newly-added bullets.
+    # Without this, bullets added to EXISTING sections become invisible to
+    # the parser because the section header isn't itself a `+` line.
+    diff = _pending_diff(repo_path, cl_file, lines_of_context=20)
+    if not diff:
+        return []
+
+    section = None
+    bullets = []
+    current_bullet = None
+
+    for raw_line in diff.splitlines():
+        # Skip diff metadata
+        if raw_line.startswith("---") or raw_line.startswith("+++"):
+            continue
+        if raw_line.startswith("@@"):
+            # Hunk boundary — section context from a different hunk is no
+            # longer reliable. Reset so we don't misattribute the next bullet.
+            section = None
+            current_bullet = None
+            continue
+
+        # Classify the line: + (added), - (removed), space (context)
+        if raw_line.startswith("+"):
+            line = raw_line[1:]
+            is_added = True
+        elif raw_line.startswith(" "):
+            line = raw_line[1:]
+            is_added = False
+        elif raw_line.startswith("-"):
+            continue   # ignore removed lines for section/bullet tracking
+        else:
+            # Should not happen for unified diff output
+            continue
+
+        # Section header: ### Added, ### Changed, etc.
+        # Track from BOTH context and added lines so a bullet added under an
+        # existing section header still gets the right section attribution.
+        m_section = re.match(r"^#{2,4}\s+(\w+)\s*$", line)
+        if m_section:
+            section = m_section.group(1)
+            current_bullet = None
+            continue
+
+        # Only PROCESS added lines for bullets — context lines just inform section.
+        if not is_added:
+            continue
+
+        # New bullet starting with "- "
+        m_bullet = re.match(r"^\s*[-*]\s+(.*)$", line)
+        if m_bullet and section:
+            text = m_bullet.group(1)
+            # Bolded lead-in pattern: handles
+            #   **lead** — desc       (en-dash, em-dash, hyphen, colon)
+            #   **lead.** desc        (period INSIDE the bold; no separator after)
+            #   **lead** desc         (no separator at all)
+            m_bold = re.match(
+                r"^\*\*(?P<lead>[^*]+?)\*\*\s*(?:[—\-–:]\s*)?(?P<desc>.+)$",
+                text,
+            )
+            if m_bold:
+                lead = m_bold.group("lead").strip().rstrip(".").strip()
+                desc = m_bold.group("desc").strip()
+            else:
+                # Fall back to first 60 chars or first sentence as lead
+                first_sent = re.split(r"(?<=[.!?])\s", text, maxsplit=1)[0]
+                lead = (first_sent[:60].rstrip() if len(first_sent) > 60
+                        else first_sent).rstrip(".")
+                desc = text[len(first_sent):].strip() or text
+            current_bullet = {"section": section, "lead_in": lead,
+                              "description": desc}
+            bullets.append(current_bullet)
+            continue
+
+        # Continuation of a previous bullet (no leading dash)
+        if current_bullet and line.strip():
+            current_bullet["description"] = (
+                current_bullet["description"] + " " + line.strip()
+            ).strip()
+
+    return bullets
+
+
+def _extract_scope(text: str) -> str | None:
+    """Match `text` against the scope vocabulary; return scope or None."""
+    for pat, scope in _SCOPE_PATTERNS:
+        if re.search(pat, text, re.IGNORECASE):
+            return scope
+    return None
+
+
+def _dominant_directory(files: list) -> str | None:
+    """Find the most-common meaningful directory among staged files.
+
+    `files` is a list of (xy, fname) tuples (the format `_suggest_from_filenames`
+    uses). Returns the last component of the deepest common directory, or
+    None if all files are at repo root.
+    """
+    if not files:
+        return None
+    dirs = []
+    for _xy, fname in files:
+        parent = os.path.dirname(fname.replace("\\", "/"))
+        if parent:
+            dirs.append(parent)
+    if not dirs:
+        return None
+    # Most common directory
+    from collections import Counter
+    most_common, _ = Counter(dirs).most_common(1)[0]
+    # Return the LAST meaningful component (e.g. src/components/wizard → wizard)
+    parts = [p for p in most_common.split("/") if p and p not in
+             ("src", "lib", "app", "source")]
+    return parts[-1] if parts else None
+
+
+def _message_from_changelog(bullets: list, files: list) -> tuple:
+    """Build (subject, body) from CHANGELOG bullet additions. Returns ("","")
+    if `bullets` is empty.
+
+    Strategy:
+      * Pick the highest-impact section (Breaking > Added > Fixed > Changed > …)
+      * Map section → conventional-commit type (`feat` / `fix` / `refactor` / …)
+      * Escalate Changed → feat when bullet description hints at user-visible UI
+      * Infer scope from bullet lead-ins (vocabulary), then file paths
+      * Subject = `type(scope): lead-in` (or "+ N more" if multiple bullets)
+      * Body = stripped descriptions, one paragraph per bullet, wrapped at 72
+    """
+    if not bullets:
+        return "", ""
+
+    # Group bullets by section
+    by_section = {}
+    for b in bullets:
+        by_section.setdefault(b["section"], []).append(b)
+
+    # Impact order: prefer Added > Fixed > Changed > Removed > Deprecated > Docs > Security
+    impact_order = ["Breaking", "Added", "Fixed", "Changed", "Security",
+                    "Removed", "Deprecated", "Docs", "Other"]
+    dominant_section = next((s for s in impact_order if s in by_section), None)
+    if not dominant_section:
+        return "", ""
+
+    dom_bullets = by_section[dominant_section]
+    ctype = _SECTION_TO_TYPE.get(dominant_section, "chore")
+
+    # Escalate Changed → feat when bullet text describes user-visible UI changes
+    if dominant_section == "Changed":
+        for b in dom_bullets:
+            combined = b["lead_in"] + " " + b["description"]
+            if _USER_VISIBLE_HINTS.search(combined):
+                ctype = "feat"
+                break
+
+    # Breaking marker
+    bang = "!" if dominant_section == "Breaking" else ""
+
+    # Scope: try vocabulary on every lead-in, then fall back to directory
+    scope = None
+    for b in dom_bullets:
+        s = _extract_scope(b["lead_in"])
+        if s:
+            scope = s
+            break
+    if not scope:
+        scope = _dominant_directory(files)
+
+    # Subject
+    primary_lead = dom_bullets[0]["lead_in"]
+    # Lowercase first character so it reads naturally after "feat(x): "
+    if primary_lead:
+        primary_lead = primary_lead[0].lower() + primary_lead[1:]
+    # Count ALL other bullets across ALL sections (not just same-section)
+    total_bullets = sum(len(v) for v in by_section.values())
+    extras = total_bullets - 1
+    if extras > 0:
+        primary_lead += f" + {extras} more"
+
+    scope_str = f"({scope})" if scope else ""
+    subject = f"{ctype}{scope_str}{bang}: {primary_lead}"
+
+    # Body: one paragraph per bullet across ALL sections, lead-in + description
+    body_paragraphs = []
+    for section_name in impact_order:
+        section_bullets = by_section.get(section_name) or []
+        for b in section_bullets:
+            lead = b["lead_in"].strip()
+            desc = b["description"].strip()
+            # Take first ~2 sentences of description, capped at 240 chars
+            sentences = re.split(r"(?<=[.!?])\s+", desc, maxsplit=2)
+            short_desc = " ".join(sentences[:2])[:240].strip()
+            if short_desc and short_desc != lead:
+                body_paragraphs.append(f"{lead}: {short_desc}")
+            else:
+                body_paragraphs.append(lead)
+    body = "\n\n".join(body_paragraphs)
+
+    return subject, body
+
+
+def _diff_added_python_symbols(repo_path: str) -> dict:
+    """Parse `git diff --cached` for newly-added top-level def/class names."""
+    diff = _pending_diff(repo_path, lines_of_context=0)
+    if not diff:
+        return {"functions": [], "classes": []}
+
+    functions, classes = [], []
+    for line in diff.splitlines():
+        # Only consider added lines that start at column 0 (top-level definitions)
+        # The leading + is followed immediately by the keyword.
+        m_fn = re.match(r"^\+(?:async\s+)?def\s+(\w+)", line)
+        m_cl = re.match(r"^\+class\s+(\w+)", line)
+        if m_fn:
+            functions.append(m_fn.group(1))
+        elif m_cl:
+            classes.append(m_cl.group(1))
+    # Dedup, preserve order
+    return {
+        "functions": list(dict.fromkeys(functions)),
+        "classes":   list(dict.fromkeys(classes)),
+    }
+
+
+def _suggest_from_diff_content(repo_path: str, files: list) -> tuple:
+    """Strategy 2 — infer message from file kinds + added Python symbols.
+
+    `files` is a list of (xy, fname) tuples. Returns ("","") if no signal.
+    """
+    if not files:
+        return "", ""
+
+    basenames = [os.path.basename(f) for _xy, f in files]
+    exts = {os.path.splitext(b)[1].lower() for b in basenames}
+    paths = [f.replace("\\", "/") for _xy, f in files]
+
+    doc_exts    = {".md", ".rst", ".txt", ".adoc"}
+    test_paths  = [p for p in paths if re.search(r"(?:^|/)tests?/", p)
+                   or os.path.basename(p).startswith("test_")
+                   or os.path.basename(p).endswith("_test.py")]
+    config_files = {"requirements.txt", "pyproject.toml", "package.json",
+                    "package-lock.json", "Pipfile", "Pipfile.lock",
+                    "poetry.lock", "setup.py", "setup.cfg"}
+    config_paths = [p for p in paths if os.path.basename(p) in config_files]
+    ci_paths     = [p for p in paths if "/.github/workflows/" in "/" + p]
+    scope        = _dominant_directory(files)
+
+    # Docs only
+    if exts and exts <= doc_exts:
+        if len(files) == 1:
+            return f"docs: update {basenames[0]}", ""
+        return "docs: update documentation", ""
+
+    # CI workflows
+    if ci_paths and len(ci_paths) == len(files):
+        return f"ci: update {os.path.basename(ci_paths[0])}", ""
+
+    # Config / deps
+    if config_paths and len(config_paths) == len(files):
+        return "chore(deps): update dependencies", ""
+
+    # Tests only
+    if test_paths and len(test_paths) == len(files):
+        if scope:
+            return f"test({scope}): add tests", ""
+        return f"test: add {basenames[0]}", ""
+
+    # Source-code changes: look at added Python symbols
+    has_py = any(p.endswith(".py") for p in paths)
+    if has_py:
+        syms = _diff_added_python_symbols(repo_path)
+        scope_str = f"({scope})" if scope else ""
+        if syms["classes"]:
+            return f"feat{scope_str}: add {syms['classes'][0]}", ""
+        if syms["functions"]:
+            fn = syms["functions"][0]
+            return f"feat{scope_str}: add {fn}", ""
+        # No new top-level defs AND no inferable scope — there's nothing useful
+        # left to say at this level of analysis. Return empty so the
+        # orchestrator falls through to the generic backstop strategy. (Using
+        # `basenames[0]` here produces misleading messages like
+        # "refactor: update BASIC_INSTRUCTIONS.md" for multi-file commits that
+        # touched many things — the first alphabetical filename is not a scope.)
+        if scope:
+            return f"refactor({scope}): update {scope}", ""
+        return "", ""
+
+    return "", ""
+
+
+def _build_llm_prompt(diff: str, recent: list, max_diff_chars: int) -> tuple:
+    """Construct (system, user) prompt text for the LLM call."""
+    system = (
+        "You write conventional-commit messages. Output ONE commit message:\n"
+        "- Subject line MUST be 72 chars or less, imperative mood "
+        "(use add/fix/update, NOT added/fixed/updated).\n"
+        "- Start with a conventional-commit prefix: "
+        "feat / fix / chore / docs / refactor / perf / test / build / ci.\n"
+        "- Optionally include scope: feat(scope): subject.\n"
+        "- Blank line, then a body wrapped at 72 chars per line.\n"
+        "- Match the existing tone from the recent commit subjects.\n"
+        "- Output ONLY the commit message. NO preamble, NO markdown, "
+        "NO quotes, NO code fences, NO explanation."
+    )
+    recent_lines = "\n".join(f"- {s}" for s in recent[:5]) if recent else "(no prior commits)"
+    user = (
+        f"Recent commit subjects (tone reference):\n{recent_lines}\n\n"
+        f"Staged diff (truncated to {max_diff_chars} chars):\n"
+        f"```diff\n{diff[:max_diff_chars]}\n```"
+    )
+    return system, user
+
+
+def _iter_sse_events(response):
+    """Yield decoded `data:` payloads from an HTTPResponse byte stream.
+
+    Both Anthropic and OpenAI-compatible streaming use SSE (`data: <json>\\n`
+    lines, terminator `data: [DONE]` for OpenAI). Network buffering can split
+    a JSON payload mid-line, so we accumulate raw bytes in a bytearray and
+    only yield once we've seen a complete `\\n`-terminated line. CRLF is
+    handled via `rstrip("\\r")`. Non-data lines (event:, id:, retry:, blank
+    keep-alives, SSE comments starting with `:`) are skipped.
+
+    The generator stops when the underlying socket closes — the caller does
+    not need to handle StopIteration specially.
+    """
+    buf = bytearray()
+    while True:
+        try:
+            chunk = response.read(4096)
+        except (OSError, ConnectionError):
+            return
+        if not chunk:
+            # Final partial line (rare for well-behaved servers).
+            if buf:
+                line = buf.decode("utf-8", errors="replace").rstrip("\r")
+                if line.startswith("data: "):
+                    yield line[6:]
+            return
+        buf.extend(chunk)
+        while True:
+            i = buf.find(b"\n")
+            if i < 0:
+                break
+            raw = bytes(buf[:i])
+            del buf[:i + 1]
+            line = raw.decode("utf-8", errors="replace").rstrip("\r")
+            if line.startswith("data: "):
+                yield line[6:]
+
+
+def _call_llm(cfg: dict, system_prompt: str, user_prompt: str,
+              max_tokens: int = 1500, timeout: int | None = None,
+              on_token=None) -> str | None:
+    """General-purpose LLM call. Returns raw text or None on ANY failure.
+
+    Used by the commit-message orchestrator AND the AI Code Review feature
+    AND any future agentic stages. Stays propose-only by design — this
+    function returns text; what the caller does with that text is their
+    concern (e.g. displaying in a dialog, parsing tool calls, etc.).
+
+    Supported providers (`cfg["provider"]`):
+      * "anthropic"        — native Messages API at api.anthropic.com
+      * "openai"           — OpenAI Chat Completions at api.openai.com
+      * "openai_compatible" — any OpenAI-compatible endpoint
+            (Ollama at http://localhost:11434, LM Studio at :1234,
+             vLLM, llama-server, LocalAI, etc.)
+      * "ollama"           — friendly alias for openai_compatible with the
+            default Ollama base URL filled in if none was set.
+
+    Returns None on any error: no key, missing model, network failure,
+    timeout, provider error, empty response. Caller falls back appropriately.
+
+    Streaming (when `on_token` is provided): the function sends
+    `"stream": true` to the provider and calls `on_token(delta_text)` for
+    each text chunk as it arrives. The full accumulated text is still
+    returned at the end (so existing callers can continue to use the return
+    value unchanged). If the provider doesn't support streaming for the
+    given configuration, the function silently falls back to the blocking
+    path — `on_token` simply doesn't get called.
+
+    The `on_token` callback runs on whichever thread called `_call_llm`.
+    Callers that need to push deltas to a Tk UI must wrap it in a
+    `self.after(0, ...)` schedule (see AICodeReviewDialog._start_review).
+    """
+    import urllib.request, urllib.error, json
+
+    if not cfg.get("enabled"):
+        return None
+
+    # Reasoning models on consumer GPUs can take 30-60+ seconds. Auto-promote
+    # any timeout below 30 to 90 (users who explicitly picked 30/60 keep their value).
+    if timeout is None:
+        raw_timeout = int(cfg.get("timeout_seconds", 90))
+        timeout = 90 if raw_timeout < 30 else raw_timeout
+
+    provider    = (cfg.get("provider") or "anthropic").lower()
+    model       = cfg.get("model") or ""
+    base_url    = (cfg.get("base_url") or "").rstrip("/")
+    api_key_env = cfg.get("api_key_env") or ""
+    api_key     = os.environ.get(api_key_env, "") if api_key_env else ""
+    streaming   = on_token is not None
+
+    # "ollama" is a friendly alias — falls through to OpenAI-compatible with
+    # the default Ollama base URL if none was set. Saves the user from
+    # remembering the port.
+    if provider == "ollama":
+        provider = "openai_compatible"
+        if not base_url:
+            base_url = "http://localhost:11434"
+
+    try:
+        if provider == "anthropic":
+            if not api_key:
+                return None
+            payload = {
+                "model": model or "claude-haiku-4-5",
+                "max_tokens": max_tokens,
+                "system": system_prompt,
+                "messages": [{"role": "user", "content": user_prompt}],
+            }
+            if streaming:
+                payload["stream"] = True
+            req = urllib.request.Request(
+                "https://api.anthropic.com/v1/messages",
+                method="POST",
+                data=json.dumps(payload).encode("utf-8"),
+                headers={
+                    "Content-Type": "application/json",
+                    "x-api-key": api_key,
+                    "anthropic-version": "2023-06-01",
+                },
+            )
+            if streaming:
+                with urllib.request.urlopen(req, timeout=timeout) as resp:
+                    pieces = []
+                    for event in _iter_sse_events(resp):
+                        try:
+                            data = json.loads(event)
+                        except json.JSONDecodeError:
+                            continue
+                        # Anthropic streams content_block_delta events with
+                        # {"delta": {"type":"text_delta","text":"..."}}
+                        if data.get("type") == "content_block_delta":
+                            delta = (data.get("delta") or {}).get("text", "")
+                            if delta:
+                                pieces.append(delta)
+                                try:
+                                    on_token(delta)
+                                except Exception:
+                                    # Callback errors must not break the stream.
+                                    log.exception("on_token callback raised")
+                text = "".join(pieces).strip()
+                return text or None
+            else:
+                with urllib.request.urlopen(req, timeout=timeout) as resp:
+                    data = json.loads(resp.read().decode("utf-8"))
+                blocks = data.get("content") or []
+                text = "".join(b.get("text", "") for b in blocks if b.get("type") == "text")
+                return text.strip() or None
+
+        elif provider in ("openai", "openai_compatible"):
+            if provider == "openai":
+                url = "https://api.openai.com/v1/chat/completions"
+            else:
+                if not base_url:
+                    return None
+                url = base_url + "/v1/chat/completions"
+            payload = {
+                "model": model or "gpt-4o-mini",
+                "messages": [
+                    {"role": "system", "content": system_prompt},
+                    {"role": "user", "content": user_prompt},
+                ],
+                "max_tokens": max_tokens,
+                "temperature": 0.3,
+            }
+            if streaming:
+                payload["stream"] = True
+            headers = {"Content-Type": "application/json"}
+            if api_key:
+                headers["Authorization"] = f"Bearer {api_key}"
+            req = urllib.request.Request(
+                url, method="POST",
+                data=json.dumps(payload).encode("utf-8"),
+                headers=headers,
+            )
+            if streaming:
+                with urllib.request.urlopen(req, timeout=timeout) as resp:
+                    pieces = []
+                    for event in _iter_sse_events(resp):
+                        if event == "[DONE]":
+                            break
+                        try:
+                            data = json.loads(event)
+                        except json.JSONDecodeError:
+                            continue
+                        choices = data.get("choices") or []
+                        if not choices:
+                            continue
+                        delta_obj = choices[0].get("delta") or {}
+                        delta = delta_obj.get("content") or ""
+                        if delta:
+                            pieces.append(delta)
+                            try:
+                                on_token(delta)
+                            except Exception:
+                                log.exception("on_token callback raised")
+                text = "".join(pieces).strip()
+                return text or None
+            else:
+                with urllib.request.urlopen(req, timeout=timeout) as resp:
+                    data = json.loads(resp.read().decode("utf-8"))
+                choices = data.get("choices") or []
+                if not choices:
+                    return None
+                msg = choices[0].get("message") or {}
+                text = msg.get("content") or ""
+                return text.strip() or None
+
+    except (urllib.error.URLError, urllib.error.HTTPError,
+            TimeoutError, json.JSONDecodeError, KeyError, OSError):
+        return None
+
+    return None
+
+
+def _call_llm_for_commit_message(cfg: dict, repo_path: str) -> str | None:
+    """Commit-message-specific LLM wrapper. Composes the prompt and calls _call_llm.
+
+    Skipped when the diff is shorter than `min_diff_lines` — trivial commits
+    don't justify an LLM call when the heuristic chain handles them fine.
+    """
+    if not cfg.get("enabled"):
+        return None
+
+    diff = _pending_diff(repo_path)
+    if not diff:
+        return None
+    diff_lines = diff.count("\n")
+    if diff_lines < int(cfg.get("min_diff_lines", 30)):
+        return None
+
+    max_chars = int(cfg.get("max_diff_chars", 24000))
+    recent    = _recent_commit_subjects(repo_path, n=5)
+    system, user = _build_llm_prompt(diff, recent, max_chars)
+    return _call_llm(cfg, system, user, max_tokens=1500)
+
+
+def _suggest_from_filenames(status_text: str) -> str:
+    """Legacy file-pattern strategy. Last-resort fallback.
+
+    Generates a conventional-commit-style message from `git status --short`
+    output ONLY (no diff content, no CHANGELOG). The strategies above this
+    in the chain are preferred when they have signal.
+    """
+    # NOTE: never strip() the full status_text before splitlines() — strip
+    # eats the leading space from the first line, shifting columns and
+    # silently dropping the first character of the filename when the first
+    # entry is a working-tree modification (single leading space).
+    lines = [l for l in status_text.splitlines() if len(l) >= 4]
+    if not lines:
+        return ""
+
+    files = []
+    for line in lines:
+        xy   = line[:2].strip()
+        fname = line[3:]
+        if " -> " in fname:
+            fname = fname.split(" -> ")[-1]
+        files.append((xy, fname))
+
+    if not files:
+        return ""
+
+    basenames = [os.path.basename(f) for _, f in files]
+    exts      = {os.path.splitext(b)[1].lower() for b in basenames}
+    has_del   = any("D" in xy for xy, _ in files)
+    has_add   = any("A" in xy or "?" in xy for xy, _ in files)
+
+    if len(files) == 1:
+        xy, fname = files[0]
+        bname = os.path.basename(fname)
+        if "D" in xy:
+            return f"chore: remove {bname}"
+        if "A" in xy or "?" in xy:
+            ext = os.path.splitext(bname)[1].lower()
+            return f"docs: add {bname}" if ext in (".md", ".txt", ".rst") else f"feat: add {bname}"
+        if bname.lower().endswith((".md", ".txt", ".rst")):
+            return f"docs: update {bname}"
+        return f"chore: update {bname}"
+
+    doc_exts  = {".md", ".txt", ".rst", ".adoc"}
+    code_exts = {".py", ".js", ".ts", ".cs", ".cpp", ".c", ".h", ".rs", ".go", ".java"}
+
+    if exts <= doc_exts:
+        return "docs: update documentation"
+    if exts <= code_exts:
+        if len(basenames) <= 3:
+            return f"chore: update {', '.join(basenames)}"
+        return f"chore: update {len(files)} source files"
+    if has_del and not has_add:
+        return f"chore: remove {len(files)} files"
+    if len(basenames) <= 2:
+        return f"chore: update {', '.join(basenames)}"
+    return f"chore: update {basenames[0]}, {basenames[1]} + {len(basenames) - 2} more"
 
 
 def _render_release_notes(version: str, date: str, sections: dict,
@@ -1353,65 +2666,233 @@ log = _setup_logger()
 # ── Prompt snippets ────────────────────────────────────────────────────────────
 
 PROMPT_SNIPPETS = [
+    # ─────────────────────────── 🧭 EXPLORATION ───────────────────────────
     (
-        "Codebase overview",
-        "Give me a high-level overview of this project using tokensave_context. "
-        "What are the main components, how do they relate, and what is the entry point?"
+        "🧭  Codebase overview",
+        "Give me a structural overview of this project using tokensave_context "
+        "with the question 'overall architecture'. Then list the top-level "
+        "modules with tokensave_files and run tokensave_outline on the entry "
+        "point file. Summarise: what the project does, the main components, "
+        "and the entry point flow."
     ),
     (
-        "Find a symbol",
+        "🧭  Find a symbol",
         "Use tokensave_search to find [symbol name]. Then use tokensave_context "
-        "to explain what it does, what it calls, and what calls it."
+        "to explain what it does. Show its callers (tokensave_callers), what "
+        "it calls (tokensave_callees), and where its fields are accessed if "
+        "it's a class (tokensave_field_sites)."
     ),
     (
-        "What calls this function?",
-        "Use tokensave_callers to find everything that calls [function name]. "
-        "Show me the full call chain."
+        "🧭  Understand a feature",
+        "I want to understand how [feature/concept] works. Use tokensave_context "
+        "to identify the relevant symbols, then read each one with tokensave_node "
+        "and trace the data flow. Cite file:line for every claim. End with a "
+        "one-paragraph summary of the feature's lifecycle."
     ),
     (
-        "Impact of changing X",
-        "Use tokensave_impact to analyze what would be affected if I modify "
-        "[function or class name]. Show me the full impact chain."
+        "🧭  Onboarding tour",
+        "Pretend I just joined this project and have 15 minutes. Use "
+        "tokensave_outline on the main entry file, tokensave_module_api on the "
+        "top 3 modules from tokensave_largest, and tokensave_files to list the "
+        "directory layout. Produce a guided 5-step tour with file:line jumps."
     ),
     (
-        "Code health check",
-        "Run tokensave_health, tokensave_complexity, and tokensave_god_class. "
-        "Give me a health report — flag god classes, high complexity, and circular dependencies."
+        "🧭  Module public API",
+        "Use tokensave_module_api on [module or file name]. List its exports, "
+        "their signatures (tokensave_signature for each), and how they're meant "
+        "to be used (search for example call sites with tokensave_callers)."
+    ),
+
+    # ─────────────────────────── 🔬 ANALYSIS / TRACING ────────────────────
+    (
+        "🔬  Who calls this? Who does it call?",
+        "Bidirectional call chain for [function name]: tokensave_callers shows "
+        "what depends on it, tokensave_callees shows what it depends on. "
+        "Render as a two-column tree with file:line on each node."
     ),
     (
-        "Find dead code",
-        "Use tokensave_dead_code and tokensave_unused_imports to find any "
-        "unused code or imports in this project. List them with file locations."
+        "🔬  Impact of changing X",
+        "Run tokensave_impact on [function or class name]. Show me the full "
+        "downstream impact chain. Then run tokensave_affected on the same "
+        "symbol to see which tests would need re-running. Flag any high-risk "
+        "ripples (cross-module, public API, etc.)."
     ),
     (
-        "List all TODOs",
-        "Use tokensave_todos to list all TODO and FIXME comments in this project. "
-        "Group them by file."
+        "🔬  Trace a bug",
+        "Bug symptom: [describe]. Workflow: (1) tokensave_search for the "
+        "symbol you suspect, (2) tokensave_callers to see entry points, "
+        "(3) tokensave_callees to see what it depends on, (4) tokensave_node "
+        "to read the actual source, (5) tokensave_diagnose if you find "
+        "anything anomalous. Walk me through your reasoning."
     ),
     (
-        "Generate changelog",
-        "Use tokensave_changelog to generate a changelog based on recent commits. "
-        "Format it as a proper CHANGELOG.md entry."
+        "🔬  Find similar code",
+        "Use tokensave_similar on [function/class name] OR tokensave_signature_search "
+        "for the signature pattern to find duplicates or near-duplicates. Group "
+        "results by likely-extract-into-helper candidates."
+    ),
+
+    # ─────────────────────────── 📊 AUDITS ────────────────────────────────
+    (
+        "📊  Full health audit",
+        "Run a comprehensive code health audit using ALL of these tokensave "
+        "tools and produce one structured report:\n"
+        "  • tokensave_health          (overall metrics)\n"
+        "  • tokensave_complexity      (high-complexity functions)\n"
+        "  • tokensave_god_class       (god classes / large files)\n"
+        "  • tokensave_circular        (circular dependencies)\n"
+        "  • tokensave_coupling        (high-coupling modules)\n"
+        "  • tokensave_dead_code       (unused code)\n"
+        "  • tokensave_unused_imports  (unused imports)\n"
+        "  • tokensave_hotspots        (high-churn files)\n"
+        "  • tokensave_recursion       (recursive call sites)\n"
+        "  • tokensave_unsafe_patterns (risky patterns)\n"
+        "Format: 🔴 Critical / 🟡 Warning / 🔵 Info, each with file:line and "
+        "a one-sentence suggested fix. End with a top-5 priority list."
     ),
     (
-        "Module public API",
-        "Use tokensave_module_api to show me the public API of [module or file name]. "
-        "What does it export and how is it meant to be used?"
+        "📊  Architecture report",
+        "Produce an architecture report for this project:\n"
+        "  • tokensave_dsm              (dependency structure matrix)\n"
+        "  • tokensave_dependency_depth (per-module)\n"
+        "  • tokensave_inheritance_depth (per-class)\n"
+        "  • tokensave_coupling          (high-coupling pairs)\n"
+        "  • tokensave_module_api        (each top-level module)\n"
+        "Format as a markdown ARCHITECTURE.md draft with sections: Module "
+        "Map, Dependency Layers, Public APIs, Hot Spots. Cite file:line."
     ),
     (
-        "Circular dependencies",
-        "Use tokensave_circular to find any circular dependencies in this project. "
-        "Explain how each one could be resolved."
+        "📊  Test coverage audit",
+        "Use tokensave_test_map to map tests to the code they cover. Use "
+        "tokensave_test_risk to rank tests by risk. Use tokensave_doc_coverage "
+        "for inline documentation gaps. Produce a 'Test & Docs Gap Report': "
+        "which public symbols have no tests, which have low-risk tests, "
+        "which lack docstrings. Cite file:line for each gap."
     ),
     (
-        "Largest / most complex files",
-        "Use tokensave_largest and tokensave_complexity to find the biggest and most "
-        "complex files. Which ones are the best candidates for refactoring?"
+        "📊  Security / unsafe-patterns scan",
+        "Run tokensave_unsafe_patterns and tokensave_recursion across the "
+        "whole project. Also run tokensave_diagnostics for general issues. "
+        "Categorise findings: input validation, error handling, resource "
+        "leaks, recursion depth, unsafe stdlib calls. Cite file:line and "
+        "rate severity 🔴/🟡/🔵 each."
     ),
     (
-        "Refactor rename preview",
-        "Use tokensave_rename_preview to show what would change if I rename "
-        "[old name] to [new name]. List every affected file and line."
+        "📊  Hotspot risk scan",
+        "Cross-reference tokensave_hotspots (high-churn files) with "
+        "tokensave_complexity (high-complexity functions) and "
+        "tokensave_coupling (high-coupling modules). Files high on multiple "
+        "axes are most bug-prone. Output a ranked 'Risk Heatmap' table with "
+        "the top 10 entries, churn / complexity / coupling scores, and a "
+        "one-line refactor suggestion each."
+    ),
+    (
+        "📊  Pre-release readiness check",
+        "Check whether this project is ready to release:\n"
+        "  • tokensave_diff_context     (recent changes summary)\n"
+        "  • tokensave_changelog        (CHANGELOG draft from commits)\n"
+        "  • tokensave_health           (overall metrics)\n"
+        "  • tokensave_dead_code        (cruft that shouldn't ship)\n"
+        "  • tokensave_unused_imports   (cruft that shouldn't ship)\n"
+        "  • tokensave_circular         (architectural debt)\n"
+        "  • tokensave_doc_coverage     (undocumented public API)\n"
+        "Output a 'Release Readiness Checklist' with ✅/⚠/❌ per item. "
+        "End with: 'Safe to release: yes/no, blockers:'."
+    ),
+    (
+        "📊  Documentation coverage report",
+        "Use tokensave_doc_coverage to find every public symbol without "
+        "a docstring. Use tokensave_module_api to identify which of those "
+        "are PART of a public module API (vs. internal helpers — those can "
+        "be skipped). Output a prioritised 'Docstrings to add' list grouped "
+        "by module, with the symbol's signature for context."
+    ),
+
+    # ─────────────────────────── 🪦 FINDINGS / CLEANUP ────────────────────
+    (
+        "🪦  Find dead code",
+        "Use tokensave_dead_code and tokensave_unused_imports. List findings "
+        "with file:line. For each, run tokensave_callers to double-check "
+        "(some 'dead' code is actually called via reflection / dynamic "
+        "dispatch and the index can miss it). Output: 'Safe to delete' vs "
+        "'Verify before deleting' groups."
+    ),
+    (
+        "🪦  List all TODOs / FIXMEs",
+        "Use tokensave_todos to list every TODO/FIXME/HACK/XXX comment. "
+        "Group by file, then by age (use git_log on the file to estimate "
+        "when each was added). Flag any older than 6 months as stale."
+    ),
+    (
+        "🪦  Circular dependencies",
+        "Use tokensave_circular to find cycles. For each cycle, use "
+        "tokensave_coupling on the involved modules to understand the "
+        "binding strength. Propose a fix for each — typically: extract "
+        "a third module, invert a dependency, or move a function."
+    ),
+    (
+        "🪦  Largest / most complex files",
+        "Cross-reference tokensave_largest (by LOC) with tokensave_complexity "
+        "(by cyclomatic complexity) with tokensave_god_class (by method "
+        "count). The intersection of all three is your top refactor "
+        "priority. Output a ranked table with all three scores."
+    ),
+
+    # ─────────────────────────── 🛠 WORKFLOWS ─────────────────────────────
+    (
+        "🛠  Pre-commit checklist",
+        "I'm about to commit. Run:\n"
+        "  • tokensave_diff_context     (what's actually changed)\n"
+        "  • tokensave_affected         (which tests would be affected)\n"
+        "  • tokensave_impact           (downstream impact of changed symbols)\n"
+        "  • tokensave_run_affected_tests (run only relevant tests)\n"
+        "Then review the diff for: missing tests, missing docstrings, "
+        "TODOs that should be resolved, secrets/keys. Output: 'Ready to "
+        "commit: yes/no, issues:'."
+    ),
+    (
+        "🛠  PR review prep",
+        "I want to open a PR. Run tokensave_pr_context for context, "
+        "tokensave_diff_context for the per-file diffs, tokensave_impact "
+        "on the most-changed symbols, and tokensave_affected for test "
+        "coverage. Draft a PR description with: Summary (2-3 sentences), "
+        "Changes (bulleted by file), Testing (what was run), and Review "
+        "Questions (what should a reviewer pay attention to)."
+    ),
+    (
+        "🛠  Plan a refactor",
+        "I want to refactor [target]. Workflow:\n"
+        "  1. tokensave_coupling on the target to see what it's bound to\n"
+        "  2. tokensave_dependency_depth to understand its position in the layer cake\n"
+        "  3. tokensave_callers + tokensave_callees to map the blast radius\n"
+        "  4. tokensave_rename_preview if any renames are involved\n"
+        "  5. tokensave_test_map to see what tests cover it\n"
+        "Output a step-by-step refactor plan with file:line for each step "
+        "and the order to do them in (least-coupled first)."
+    ),
+    (
+        "🛠  Refactor rename preview",
+        "Use tokensave_rename_preview for [old name] → [new name]. List "
+        "every affected file and line. Then use tokensave_callers to "
+        "double-check that all callers are in the rename set (vs. e.g. "
+        "string-based dynamic calls that the rename would miss)."
+    ),
+    (
+        "🛠  Generate CHANGELOG entry",
+        "Use tokensave_changelog to draft a CHANGELOG entry from recent "
+        "commits. Group by ### Added / ### Changed / ### Fixed / ### Removed "
+        "per Keep-a-Changelog format. Use the manager's existing CHANGELOG "
+        "style as a tone reference (bolded lead-in followed by em-dash and "
+        "prose description)."
+    ),
+    (
+        "🛠  Generate ARCHITECTURE.md draft",
+        "Produce a docs/ARCHITECTURE.md draft for this project. Use "
+        "tokensave_outline on the main module(s), tokensave_module_api on "
+        "each top-level module, tokensave_dependency_depth to identify "
+        "layering, and tokensave_dsm to render module-pair dependencies. "
+        "Format: Overview → Layer Diagram → Module Reference Table → "
+        "Module Detail Sections. Cite file:line throughout."
     ),
 ]
 
@@ -1479,10 +2960,31 @@ def find_projects():
             seen.add(dirpath)
 
             # mtime: tokensave db age if available, else last git commit,
-            # else codegraph db mtime (last full-build), else dirpath
+            # else codegraph db mtime (last full-build), else dirpath.
+            #
+            # tokensave uses SQLite in WAL mode. Incremental syncs write to
+            # tokensave.db-wal; the main tokensave.db file's mtime only
+            # advances when SQLite checkpoints (typically on close, or after
+            # `sync --force`). So `getmtime(tokensave.db)` shows stale "6h
+            # ago" even right after an incremental sync that's clearly
+            # touched the index. Take the MAX mtime across the .db + WAL +
+            # SHM sibling files so the "Last Synced" column tracks actual
+            # sync activity, not just the last full checkpoint.
             if has_ts:
-                db    = os.path.join(dirpath, ".tokensave", "tokensave.db")
-                mtime = os.path.getmtime(db) if os.path.isfile(db) else os.path.getmtime(dirpath)
+                db = os.path.join(dirpath, ".tokensave", "tokensave.db")
+                ts_dir = os.path.join(dirpath, ".tokensave")
+                mtime_candidates = []
+                for fname in ("tokensave.db", "tokensave.db-wal",
+                              "tokensave.db-shm"):
+                    full = os.path.join(ts_dir, fname)
+                    try:
+                        mtime_candidates.append(os.path.getmtime(full))
+                    except OSError:
+                        pass
+                if mtime_candidates:
+                    mtime = max(mtime_candidates)
+                else:
+                    mtime = os.path.getmtime(dirpath)
             elif has_git:
                 db    = None
                 git_dir    = os.path.join(dirpath, ".git")
@@ -1615,6 +3117,17 @@ class App(tk.Tk):
         self.configure(bg=C["base"])
         self._current_proc = None
         self._stop_requested = False
+        # Cached tokensave version info.  Current version is populated at
+        # App startup via `tokensave --version` (fast, no network).
+        # Available-update version is populated by the output parser in
+        # `_run` when tokensave emits "Update available: vA → vB" at the
+        # end of a sync — that line is opportunistic (tokensave appears
+        # to throttle update checks to once per day), so SettingsDialog
+        # ALWAYS shows the Upgrade button with the current version, and
+        # only labels it with the target version when one is known.
+        self._tokensave_current_version: str | None = None
+        self._tokensave_available_version: str | None = None
+        self._probe_tokensave_version()
         log.info("=" * 60)
         log.info("TokenSave Manager started")
         log.info(f"  exe      : {TOKENSAVE}")
@@ -1766,6 +3279,7 @@ class App(tk.Tk):
 
         self._build_projects_tab()
         self._build_git_tab()
+        self._build_ask_tab()
         self._build_reference_tab()
         self._build_help_tab()
 
@@ -2164,6 +3678,29 @@ class App(tk.Tk):
 
     def _on_tab_changed(self, event=None):
         """Fires when the user switches notebook tabs."""
+        # Ask tab — refresh project label + model display when it's selected.
+        try:
+            current_tab_text = self.nb.tab(self.nb.select(), "text").strip()
+        except tk.TclError:
+            current_tab_text = ""
+        if "Ask" in current_tab_text:
+            sel = self.tree.selection() if hasattr(self, "tree") else ()
+            if sel and sel[0].startswith("proj:"):
+                self._ask_path = sel[0][5:]
+            elif not getattr(self, "_ask_path", None) and getattr(self, "active_path", None):
+                self._ask_path = self.active_path
+            if hasattr(self, "_ask_refresh_header"):
+                self._ask_refresh_header()
+            # Pull focus into the question entry so the user can start
+            # typing immediately. Without this, focus tends to stay on
+            # the notebook tab itself and keystrokes go nowhere.
+            if hasattr(self, "_ask_entry"):
+                try:
+                    self._ask_entry.focus_set()
+                except tk.TclError:
+                    pass
+            return
+
         if not self._git_tab_is_visible():
             return
         # Sync to currently selected project (or active project)
@@ -2934,6 +4471,371 @@ class App(tk.Tk):
 
         threading.Thread(target=worker, daemon=True).start()
 
+    # ═══════════════════════════════════════════════════════════════════
+    # 🤖 Ask tab — Stage 2 of the agentic-AI roadmap
+    # ═══════════════════════════════════════════════════════════════════
+
+    _ASK_SYSTEM_PROMPT = (
+        "You are a code-aware assistant for the user's current project. "
+        "You have access to READ-ONLY tools that let you read files, list "
+        "directories, view git history, view the pending diff, and search "
+        "the project's tokensave code graph when present.\n\n"
+        "How to use tools:\n"
+        "- Use the API's tool_calls mechanism — emit calls via the "
+        "tool_calls field of your response, NOT as JSON text inside the "
+        "content field. After the tool result is returned to you as a "
+        "role:'tool' message, continue your reasoning and either call "
+        "another tool or give a final text answer.\n"
+        "- Do NOT guess about file contents or code that you have not read.\n"
+        "- Cite file:line locations when you reference code.\n\n"
+        "Tool-selection guide (CRITICAL — wrong tool choice wastes "
+        "iterations):\n"
+        "- **read_file** is your primary tool. When the user names a "
+        "specific file in their question, OR when you're asked about a "
+        "specific symbol or behaviour you can locate, just read the file "
+        "directly. Don't search first.\n"
+        "- **tokensave_search** finds DEFINED SYMBOLS by name — "
+        "functions, classes, methods, constants. It does NOT do "
+        "full-text grep across source. Searching for 'Popen', 'import', "
+        "or any keyword that isn't a symbol name returns nothing. Use "
+        "tokensave_search to answer 'where is X defined?' for an X that "
+        "is itself a function/class/constant name.  The result includes "
+        "the exact line number where the symbol is *defined* — "
+        "**chain it into a read_file call with start_line set to that "
+        "line and end_line set ~150-200 lines later** so you read the "
+        "FULL body, not just the signature.  Most Python functions / "
+        "class methods are 20-200 lines; reading too narrow a window "
+        "shows only the docstring and you'll miss the actual logic.  "
+        "Never read a >50 KB file without a line range; you'll just "
+        "get the first 50 KB which is almost certainly not what you "
+        "want.\n"
+        "- **tokensave_context** builds a focused subgraph for a "
+        "natural-language task description (e.g. 'how does the commit "
+        "message generator work'). Returns related symbols + their "
+        "relationships. Use sparingly — it's expensive on a big project.\n"
+        "- **list_directory** for path discovery when you don't know "
+        "what's in a folder.\n"
+        "- **git_log / git_diff** for change history and pending work.\n\n"
+        "Error handling:\n"
+        "- If a tool returns an error message starting with '[tool error]', "
+        "DO NOT report the failure to the user. Instead, read the error "
+        "carefully — it usually contains a concrete suggestion (e.g. "
+        "'a file named X exists at src/X — retry with that path'). "
+        "Apply the suggestion and call the tool again. Only report failure "
+        "to the user as a last resort, after at least 2 retry attempts "
+        "with different approaches.\n"
+        "- If tokensave_search returns no results, that means the query "
+        "isn't a symbol name. Switch to read_file (if you have a target "
+        "file in mind) or list_directory (to discover one) — don't keep "
+        "searching with variations.\n\n"
+        "Style:\n"
+        "- Keep answers concise. If a question is open-ended, ask a "
+        "clarifying follow-up instead of writing a wall of text.\n"
+        "- You CANNOT modify files, run commits, or change config. This is "
+        "by design. If the user asks you to make changes, suggest the "
+        "specific edits in your answer and let them apply them manually."
+    )
+
+    def _build_ask_tab(self):
+        tab = tk.Frame(self.nb, bg=C["base"])
+        self.nb.add(tab, text="  🤖 Ask  ")
+
+        # Conversation state
+        self._ask_path: str | None = None
+        self._ask_messages: list[dict] = []
+        self._ask_stop_event: threading.Event | None = None
+        self._ask_thread: threading.Thread | None = None
+
+        # ── Header: project + model + clear ─────────────────────────────
+        hdr = tk.Frame(tab, bg=C["base"], padx=14, pady=8)
+        hdr.pack(fill=tk.X, side=tk.TOP)
+
+        tk.Label(hdr, text="🤖  Ask",
+                 font=("Segoe UI", 13, "bold"),
+                 bg=C["base"], fg=C["blue"]).pack(side=tk.LEFT)
+        self._ask_project_lbl = tk.Label(
+            hdr, text="(no project selected)",
+            font=("Segoe UI", 10), bg=C["base"], fg=C["text"])
+        self._ask_project_lbl.pack(side=tk.LEFT, padx=(10, 0))
+        self._ask_model_lbl = tk.Label(
+            hdr, text="", font=("Segoe UI", 9, "italic"),
+            bg=C["base"], fg=C["overlay0"])
+        self._ask_model_lbl.pack(side=tk.LEFT, padx=(10, 0))
+
+        ttk.Button(hdr, text="Clear history",
+                   command=self._ask_clear).pack(side=tk.RIGHT)
+
+        # ── Status line (under header) ──────────────────────────────────
+        self._ask_status = tk.Label(
+            tab, text="", font=("Segoe UI", 8, "italic"),
+            bg=C["base"], fg=C["overlay0"],
+            justify=tk.LEFT, anchor=tk.W)
+        self._ask_status.pack(fill=tk.X, padx=18, pady=(0, 4))
+
+        # ── Input row (BOTTOM, packed before chat log so it stays put) ──
+        # NOTE: the entry MUST have a visible border + contrasting bg or
+        # it disappears against the parent frame.  Earlier version used
+        # bg=mantle (#181825) on a base (#1e1e2e) parent with
+        # relief=tk.FLAT — visually identical, so the field appeared
+        # missing entirely.  Now uses surface0 (#313244) which is two
+        # luminance steps lighter than base, plus a 1px SOLID border and
+        # a 2px highlight ring that turns blue on focus.
+        in_row = tk.Frame(tab, bg=C["base"], padx=14, pady=8)
+        in_row.pack(fill=tk.X, side=tk.BOTTOM)
+
+        self._ask_entry = tk.Entry(
+            in_row, font=("Segoe UI", 10),
+            bg=C["surface0"], fg=C["text"],
+            insertbackground=C["text"],
+            relief=tk.SOLID, bd=1,
+            highlightthickness=2,
+            highlightbackground=C["overlay0"],
+            highlightcolor=C["blue"],
+            width=40)
+        self._ask_entry.pack(side=tk.LEFT, fill=tk.X, expand=True,
+                              ipady=6, padx=(0, 6))
+        self._ask_entry.bind("<Return>", lambda e: self._ask_send())
+        # Auto-focus on tab switch — see _on_tab_changed below.  Also focus
+        # at build time so the user can start typing immediately when the
+        # tab is first opened.
+        self._ask_entry.focus_set()
+
+        self._ask_send_btn = ttk.Button(
+            in_row, text="Send", style="Primary.TButton",
+            command=self._ask_send)
+        self._ask_send_btn.pack(side=tk.LEFT, padx=(0, 4))
+        self._ask_stop_btn = ttk.Button(
+            in_row, text="■ Stop", style="Danger.TButton",
+            command=self._ask_stop, state=tk.DISABLED)
+        self._ask_stop_btn.pack(side=tk.LEFT)
+
+        # ── Chat log (fills remaining space) ────────────────────────────
+        log_outer = tk.Frame(tab, bg=C["base"])
+        log_outer.pack(fill=tk.BOTH, expand=True, padx=14, pady=(0, 4))
+        log_inner = tk.Frame(log_outer, bg=C["mantle"])
+        log_inner.pack(fill=tk.BOTH, expand=True)
+
+        self._ask_log = tk.Text(
+            log_inner, bg=C["mantle"], fg=C["text"],
+            relief=tk.FLAT, font=("Segoe UI", 10),
+            padx=10, pady=8, wrap=tk.WORD, state=tk.DISABLED)
+        ask_vsb = ttk.Scrollbar(log_inner, orient="vertical",
+                                 command=self._ask_log.yview)
+        self._ask_log.configure(yscrollcommand=ask_vsb.set)
+        self._ask_log.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
+        ask_vsb.pack(side=tk.RIGHT, fill=tk.Y)
+
+        # Catppuccin Mocha role tags
+        self._ask_log.tag_configure(
+            "user",        foreground=C["blue"],
+            font=("Segoe UI", 10, "bold"), spacing1=8, spacing3=2)
+        self._ask_log.tag_configure(
+            "assistant",   foreground=C["text"],
+            spacing1=4, spacing3=4)
+        self._ask_log.tag_configure(
+            "tool_call",   foreground=C["peach"],
+            font=("Consolas", 9), spacing1=4)
+        self._ask_log.tag_configure(
+            "tool_result", foreground=C["overlay0"],
+            font=("Consolas", 9), lmargin1=20, lmargin2=20)
+        self._ask_log.tag_configure(
+            "error",       foreground=C["red"],
+            font=("Segoe UI", 9, "italic"), spacing1=4)
+        self._ask_log.tag_configure(
+            "info",        foreground=C["overlay0"],
+            font=("Segoe UI", 9, "italic"))
+
+        self._ask_set_intro()
+
+    # ── Helpers ────────────────────────────────────────────────────────
+
+    def _ask_set_intro(self):
+        """Render the initial 'how to use this' greeting in the chat log."""
+        self._ask_log.configure(state=tk.NORMAL)
+        self._ask_log.delete("1.0", tk.END)
+        self._ask_log.insert(tk.END,
+            "Ready. Ask anything about the selected project — I'll use "
+            "read_file, list_directory, git_log, git_diff, and (when "
+            "available) tokensave_search / tokensave_context to find "
+            "answers. I cannot modify files.\n\n",
+            "info")
+        self._ask_log.configure(state=tk.DISABLED)
+
+    def _ask_append(self, text: str, tag: str = "assistant"):
+        """Append a chunk of text to the chat log with the given role tag."""
+        if not text:
+            return
+        self._ask_log.configure(state=tk.NORMAL)
+        self._ask_log.insert(tk.END, text, tag)
+        self._ask_log.see(tk.END)
+        self._ask_log.configure(state=tk.DISABLED)
+
+    def _ask_refresh_header(self):
+        """Update the project name and model display in the Ask tab header."""
+        if self._ask_path:
+            self._ask_project_lbl.configure(
+                text=os.path.basename(self._ask_path))
+        else:
+            self._ask_project_lbl.configure(text="(no project selected)")
+        cfg = (_cfg.get("commit_message_llm") or {}) if isinstance(_cfg, dict) else {}
+        provider = cfg.get("provider") or "?"
+        model = cfg.get("model") or "?"
+        enabled = bool(cfg.get("enabled"))
+        if enabled:
+            self._ask_model_lbl.configure(
+                text=f"[provider: {provider} / {model}]",
+                fg=C["overlay0"])
+        else:
+            self._ask_model_lbl.configure(
+                text="[AI is disabled — Settings → AI commit messages]",
+                fg=C["red"])
+
+    def _ask_clear(self):
+        """Reset conversation history and the log pane."""
+        if self._ask_thread and self._ask_thread.is_alive():
+            self._ask_stop()
+        self._ask_messages = []
+        self._ask_set_intro()
+        self._ask_status.configure(text="")
+
+    def _ask_stop(self):
+        """User clicked Stop. Signal the agent thread to abort at the next
+        iteration boundary; the in-flight HTTP request will finish (we
+        can't kill urlopen mid-call from another thread) but the result
+        will be ignored."""
+        if self._ask_stop_event is not None:
+            self._ask_stop_event.set()
+        self._ask_status.configure(
+            text="Cancelling — in-flight request will finish then stop.",
+            fg=C["overlay0"])
+        self._ask_stop_btn.configure(state=tk.DISABLED)
+
+    def _ask_send(self):
+        """Send the current question to the agent."""
+        text = self._ask_entry.get().strip()
+        if not text:
+            return
+        if self._ask_thread and self._ask_thread.is_alive():
+            self._ask_status.configure(
+                text="A request is already running — click Stop first.",
+                fg=C["yellow"])
+            return
+
+        # Sync project selection with current tab state
+        sel = self.tree.selection() if hasattr(self, "tree") else ()
+        if sel and sel[0].startswith("proj:"):
+            self._ask_path = sel[0][5:]
+        elif not self._ask_path and getattr(self, "active_path", None):
+            self._ask_path = self.active_path
+        if not self._ask_path:
+            self._ask_append(
+                "Select a project in the Projects tab first.\n\n", "error")
+            return
+
+        # Check AI is configured
+        llm_cfg = (_cfg.get("commit_message_llm") or {}) if isinstance(_cfg, dict) else {}
+        if not llm_cfg.get("enabled"):
+            self._ask_append(
+                "AI is disabled. Open Settings → AI commit messages and "
+                "tick the enable box, then try again.\n\n", "error")
+            return
+
+        # Defensive import so a corrupt agent.py doesn't break the rest of the UI
+        try:
+            import agent as _agent_mod
+            import agent_tools as _agent_tools_mod
+        except ImportError as e:
+            self._ask_append(
+                f"Could not import agent module: {e}\n", "error")
+            return
+
+        self._ask_refresh_header()
+        self._ask_append(f"\n👤  {text}\n\n", "user")
+        self._ask_entry.delete(0, tk.END)
+        self._ask_status.configure(
+            text="⟳  Thinking…  (the model may call tools before answering)",
+            fg=C["peach"])
+        self._ask_send_btn.configure(state=tk.DISABLED)
+        self._ask_stop_btn.configure(state=tk.NORMAL)
+
+        # First time in this conversation: seed with the system prompt.
+        if not self._ask_messages:
+            self._ask_messages.append({
+                "role": "system",
+                "content": self._ASK_SYSTEM_PROMPT,
+            })
+        self._ask_messages.append({"role": "user", "content": text})
+
+        stop_event = threading.Event()
+        self._ask_stop_event = stop_event
+
+        tokensave_exe = (_cfg.get("tokensave_exe") or "") if isinstance(_cfg, dict) else ""
+        tools = _agent_tools_mod.build_tools(self._ask_path, tokensave_exe)
+        agent_instance = _agent_mod.LocalAgent(
+            llm_cfg, self._ask_path, tools)
+
+        def _on_tool_call(name, args):
+            short_args = json.dumps(args, ensure_ascii=False)
+            if len(short_args) > 120:
+                short_args = short_args[:120] + "…"
+            self.after(0, self._ask_append,
+                       f"🔧  {name}({short_args})\n", "tool_call")
+
+        def _on_tool_result(name, result):
+            preview = result if len(result) <= 600 else (
+                result[:600] + f"\n[... {len(result)-600} more chars ...]")
+            self.after(0, self._ask_append, preview + "\n\n", "tool_result")
+
+        def _on_assistant_message(text):
+            self.after(0, self._ask_append, f"🤖  {text}\n\n", "assistant")
+
+        def _on_done(final_text):
+            def _ui():
+                if final_text is None:
+                    self._ask_status.configure(
+                        text="✓  Done (no final answer text — model only "
+                             "issued tool calls).",
+                        fg=C["green"])
+                else:
+                    self._ask_status.configure(
+                        text="✓  Done.",
+                        fg=C["green"])
+                self._ask_send_btn.configure(state=tk.NORMAL)
+                self._ask_stop_btn.configure(state=tk.DISABLED)
+                self._ask_stop_event = None
+            self.after(0, _ui)
+
+        def _on_error(msg):
+            def _ui():
+                self._ask_append(f"⚠  {msg}\n\n", "error")
+                self._ask_status.configure(text="✗  Error.", fg=C["red"])
+                self._ask_send_btn.configure(state=tk.NORMAL)
+                self._ask_stop_btn.configure(state=tk.DISABLED)
+                self._ask_stop_event = None
+            self.after(0, _ui)
+
+        def _worker():
+            try:
+                agent_instance.run(
+                    self._ask_messages,
+                    on_tool_call=_on_tool_call,
+                    on_tool_result=_on_tool_result,
+                    on_assistant_message=_on_assistant_message,
+                    on_done=_on_done,
+                    on_error=_on_error,
+                    stop_event=stop_event,
+                )
+            except Exception as e:
+                log.exception("Ask worker crashed")
+                try:
+                    self.after(0, _on_error, f"{type(e).__name__}: {e}")
+                except RuntimeError:
+                    pass
+
+        self._ask_thread = threading.Thread(
+            target=_worker, daemon=True, name="ask-agent-worker")
+        self._ask_thread.start()
+
     def _build_reference_tab(self):
         tab = tk.Frame(self.nb, bg=C["base"])
         self.nb.add(tab, text="  Reference  ")
@@ -3670,9 +5572,16 @@ class App(tk.Tk):
             ins("  2. Click  📝 Commit… — the dialog opens with a suggested message\n", "body")
             ins("  3. Edit the message if you like, then click Commit\n", "body")
             br()
-            p("The suggested message is generated from the list of changed files "
-              "(e.g. 'docs: update ARCHITECTURE.md' or 'chore: update 3 source files'). "
-              "Click 💡 Suggest at any time to regenerate it.")
+            p("The suggested message is generated from your staged changes, using "
+              "a chain of strategies — highest-quality first:")
+            ins("    1. CHANGELOG.md bullets (if you've added an entry)\n", "body")
+            ins("    2. Diff content — added Python defs/classes, file kinds\n", "body")
+            ins("    3. File-name patterns (legacy fallback)\n", "body")
+            p("Each result is sanitised (subject ≤ 72 chars, imperative mood, "
+              "no filename listings). When AI is enabled in Settings, an "
+              "Anthropic / OpenAI / LM Studio / Ollama call runs first — silent "
+              "fallback to heuristics on any failure. Click 💡 Suggest at any "
+              "time to regenerate.")
             br()
             h2("Undo Last Commit")
             p("Removes the most recent commit but keeps all your changes staged — "
@@ -4014,6 +5923,7 @@ class App(tk.Tk):
         m.add_separator()
         m.add_command(label="📜  Git Log",        command=self.cmd_git_log)
         m.add_command(label="📝  Git Commit…",        command=self.cmd_git_commit)
+        m.add_command(label="🔍  AI Code Review…",    command=self.cmd_ai_code_review)
         m.add_command(label="🔧  Git Init",           command=self.cmd_git_init)
         m.add_command(label="📋  Manage .gitignore…",      command=self.cmd_manage_gitignore)
         m.add_command(label="🧹  Untrack Ignored Files…",  command=self.cmd_untrack_ignored)
@@ -4056,12 +5966,52 @@ class App(tk.Tk):
             problems.append("tokensave.exe path is missing or invalid")
         if not TEMPLATE_DIR or not os.path.isdir(TEMPLATE_DIR):
             problems.append("Template directory is missing or invalid")
-        if not problems:
+
+        # MCP-config drift detection — opens the configurator instead of
+        # Settings when there are no other problems, since that's the most
+        # actionable thing the user can do.
+        skips = (_cfg.get("mcp_skip_warnings") or []) \
+                if isinstance(_cfg, dict) else []
+        mcp_drift = []
+        for label, path in _MCP_CONFIGS:
+            if path in skips:
+                continue
+            try:
+                info = _classify_mcp_entry(path)
+            except Exception:
+                # Defensive — never crash startup just because we can't read
+                # a Claude config file. The dialog can surface details.
+                continue
+            if info["state"] != "ok":
+                mcp_drift.append((label, info))
+
+        if not problems and not mcp_drift:
             return
-        note = "Please set the correct paths before using the manager."
-        self._log("Config problem: " + " | ".join(problems), C["red"])
-        SettingsDialog(self, _cfg, _save_config, self._on_settings_saved,
-                       startup_note=note + "\n\n" + "\n".join(f"• {p}" for p in problems))
+
+        if problems:
+            # Existing path: paths broken, open Settings as before.
+            note = "Please set the correct paths before using the manager."
+            self._log("Config problem: " + " | ".join(problems), C["red"])
+            SettingsDialog(
+                self, _cfg, _save_config, self._on_settings_saved,
+                startup_note=(note + "\n\n"
+                              + "\n".join(f"• {p}" for p in problems)))
+            return
+
+        # Pure MCP drift — log it, open the configurator dialog directly.
+        # Don't auto-pop in a modal way; the user just launched the manager
+        # and wants to see the project list. A log line + a non-modal dialog
+        # gives them the choice.
+        for label, info in mcp_drift:
+            self._log(
+                f"MCP: {label} {info['label']} ({info['cfg_path']}). "
+                f"Open Settings → MCP integration to fix.",
+                C["peach"] if info["state"] in
+                ("direct_serve", "wrong_wrapper") else C["red"])
+
+        # Open the configurator after a short delay so the main window has
+        # finished laying out — feels less like an interruption.
+        self.after(800, lambda: MCPConfigDialog(self))
 
     def _auto_refresh(self):
         if self._current_proc is None:
@@ -4287,13 +6237,45 @@ class App(tk.Tk):
             return
         set_pinned(path)
         self._log(f"Pinned → {path}", C["green"])
-        self._log("Restart Claude Desktop for the change to take effect.", C["yellow"])
+        # Live-reload of the pin via a wrapper-side file watcher was
+        # attempted earlier (2026-05-23) but broke MCP handshake with
+        # Claude Desktop on UWP installs — Desktop's MCP attach would
+        # time out at 30s with the wrapper running a daemon thread. The
+        # wrapper has been reverted to the literal original single-
+        # threaded shape, so pin changes once again require a Claude
+        # restart to take effect.
+        try:
+            states = [_classify_mcp_entry(p)["state"] for _, p in _MCP_CONFIGS]
+        except Exception:
+            states = []
+        if "ok" in states and not all(s == "ok" for s in states):
+            bad = [lbl for (lbl, p), s in zip(_MCP_CONFIGS, states) if s != "ok"]
+            self._log(
+                f"  Pin will take effect at next Claude restart.  "
+                f"Note: {', '.join(bad)} also still needs its MCP wiring "
+                f"fixed (Settings → 🔌 Manage MCP wiring).",
+                C["peach"])
+        elif "ok" not in states:
+            self._log(
+                "  No MCP config currently routes through the wrapper — "
+                "this pin won't take effect until you fix the MCP wiring "
+                "AND restart Claude.  Settings → 🔌 Manage MCP wiring.",
+                C["peach"])
+        else:
+            self._log(
+                "  Pin will take effect at next Claude Desktop / Claude Code "
+                "restart.  (Live in-session reload is deferred — see the "
+                "wrapper script's docstring for context.)",
+                C["overlay0"])
         self.refresh()
 
     def cmd_auto(self):
         clear_pinned()
-        self._log("Auto-detect enabled — wrapper picks the most-recently-synced project.", C["sky"])
-        self._log("Restart Claude Desktop for the change to take effect.", C["yellow"])
+        self._log("Auto-detect enabled — wrapper picks the most-recently-synced project at next launch.", C["sky"])
+        self._log(
+            "  Restart Claude Desktop / Claude Code to trigger a fresh "
+            "auto-detect.",
+            C["overlay0"])
         self.refresh()
 
     def _set_running(self, running, label=""):
@@ -4341,9 +6323,50 @@ class App(tk.Tk):
                 )
                 self._current_proc = proc
                 log.debug(f"     pid={proc.pid}")
+                # Suppress tokensave's misleading "legacy .codegraph/" warning
+                # when CodeGraph is actually an active alternate index in this
+                # project — manager treats tokensave and CodeGraph as equal
+                # citizens; following tokensave's "safely deleted" advice would
+                # wipe the user's CodeGraph index. The warning is only correct
+                # for genuinely orphaned .codegraph/ folders (no codegraph.db).
+                codegraph_active = os.path.isfile(
+                    os.path.join(cwd, ".codegraph", "codegraph.db"))
+                _suppressed_codegraph_warning = False
                 for line in proc.stdout:
                     stripped = _ANSI.sub("", line).rstrip()
                     if not stripped:
+                        continue
+                    if (codegraph_active
+                            and "legacy .codegraph" in stripped
+                            and "safely deleted" in stripped):
+                        # Drop silently, but log once that we did so. The
+                        # info-bar message lets the user know we filtered
+                        # — never silent fakery without trace.
+                        if not _suppressed_codegraph_warning:
+                            self._log(
+                                "  (suppressed tokensave's '.codegraph/ legacy' "
+                                "warning — CodeGraph is active in this project)",
+                                C["overlay0"])
+                            _suppressed_codegraph_warning = True
+                        log.debug(f"  SUPPRESSED {stripped}")
+                        continue
+                    # Detect tokensave's "Update available: v→v" line and
+                    # remember the upgrade target. Settings shows an
+                    # "Upgrade tokensave" button when this is set; the
+                    # button just runs `tokensave upgrade` via _run.
+                    m = _TOKENSAVE_UPDATE_RE.search(stripped)
+                    if m:
+                        cur_v, new_v = m.group(1), m.group(2)
+                        self._tokensave_current_version = cur_v
+                        self._tokensave_available_version = new_v
+                        self._log(stripped, C["yellow"])
+                        self._log(
+                            f"  → tokensave {cur_v} → {new_v} ready to "
+                            f"install.  Settings → 'Upgrade tokensave to "
+                            f"v{new_v}' to apply, or run "
+                            f"'tokensave upgrade' from a shell.",
+                            C["peach"])
+                        log.info(f"UPDATE-AVAILABLE  {cur_v} -> {new_v}")
                         continue
                     self._log(stripped)
                     log.debug(f"  OUT {stripped}")
@@ -4361,17 +6384,44 @@ class App(tk.Tk):
                         _, staged_rc = self._shell_capture(
                             [GIT_EXE,"-C", cwd, "diff", "--cached", "--quiet"], cwd)
                         if staged_rc != 0:   # non-zero = staged changes exist
-                            # Amend the previous commit if it was also a sync commit
-                            # so repeated syncs don't pile up in history
-                            last_out, _ = self._shell_capture(
-                                [GIT_EXE,"-C", cwd, "log", "-1", "--format=%s"], cwd)
-                            if last_out.strip() == "chore: tokensave sync":
+                            # Decide whether to use LLM-generated messages or
+                            # the default "chore: tokensave sync" amend-stacking.
+                            llm_cfg = _cfg.get("commit_message_llm") or {}
+                            use_llm_for_sync = bool(
+                                llm_cfg.get("enabled")
+                                and llm_cfg.get("use_for_sync_autocommit")
+                            )
+
+                            if use_llm_for_sync:
+                                # LLM mode: each sync gets a unique message,
+                                # so no amend-stacking. Compose via the new
+                                # generator (which only invokes the LLM if
+                                # the diff is non-trivial — small syncs
+                                # still fall through to heuristics).
+                                self._log("  Composing AI commit message…", C["peach"])
+                                status_out, _ = self._shell_capture(
+                                    [GIT_EXE,"-C", cwd, "status", "--short"], cwd)
+                                ai_msg = _suggest_commit_message(cwd, status_out) \
+                                         or "chore: tokensave sync"
                                 commit_cmd = [GIT_EXE,"-C", cwd, "commit",
-                                              "--amend", "--no-edit"]
-                                self._log("  Amending previous sync commit…", C["peach"])
+                                              "-m", ai_msg.split("\n", 1)[0]]
+                                # If body present, append via -m again
+                                if "\n\n" in ai_msg:
+                                    commit_cmd.extend(
+                                        ["-m", ai_msg.split("\n\n", 1)[1]]
+                                    )
                             else:
-                                commit_cmd = [GIT_EXE,"-C", cwd, "commit",
-                                              "-m", "chore: tokensave sync"]
+                                # Default amend-stacking: repeated syncs collapse
+                                # into a single "chore: tokensave sync" commit.
+                                last_out, _ = self._shell_capture(
+                                    [GIT_EXE,"-C", cwd, "log", "-1", "--format=%s"], cwd)
+                                if last_out.strip() == "chore: tokensave sync":
+                                    commit_cmd = [GIT_EXE,"-C", cwd, "commit",
+                                                  "--amend", "--no-edit"]
+                                    self._log("  Amending previous sync commit…", C["peach"])
+                                else:
+                                    commit_cmd = [GIT_EXE,"-C", cwd, "commit",
+                                                  "-m", "chore: tokensave sync"]
                             cout, crc = self._shell_capture(commit_cmd, cwd)
                             col = C["green"] if crc == 0 else C["red"]
                             for line in cout.strip().splitlines()[-3:]:
@@ -4459,6 +6509,170 @@ class App(tk.Tk):
         if not self._require_tokensave(path):
             return
         self._run(["sync"], cwd=path, label=os.path.basename(path))
+
+    def _probe_tokensave_version(self):
+        """Best-effort read of the installed tokensave version.
+
+        Runs `tokensave --version` once at App startup (in a background
+        thread to avoid blocking the GUI). Output looks like
+        "tokensave 5.1.1" — we extract the version string and cache it
+        on the instance. Failures (binary missing, weird output) leave
+        the cache as None, which the Settings UI handles gracefully.
+        """
+        def _worker():
+            if not TOKENSAVE or not os.path.isfile(TOKENSAVE):
+                return
+            try:
+                r = subprocess.run(
+                    [TOKENSAVE, "--version"],
+                    capture_output=True, text=True, timeout=5,
+                    creationflags=CREATE_NO_WINDOW,
+                    encoding="utf-8", errors="replace")
+            except (OSError, subprocess.TimeoutExpired):
+                return
+            out = (r.stdout or "").strip()
+            m = re.search(r'(\d+\.\d+\.\d+(?:\.\d+)?)', out)
+            if m:
+                self._tokensave_current_version = m.group(1)
+                log.debug(f"tokensave installed version: "
+                          f"{self._tokensave_current_version}")
+                # Kick off a single update check right after we know the
+                # local version. Subsequent checks fire from the hourly
+                # poller below.
+                self._check_tokensave_updates()
+        threading.Thread(target=_worker, daemon=True,
+                         name="tokensave-version-probe").start()
+        # Hourly background poller. Cheap (one GitHub API call, no auth);
+        # safe to run forever as a daemon thread.
+        threading.Thread(target=self._tokensave_update_poll_loop,
+                         daemon=True,
+                         name="tokensave-update-poll").start()
+
+    # GitHub releases API endpoint for tokensave. Hardcoded since the
+    # tokensave repo URL is referenced in README.md and is unlikely to
+    # change. If it does, this is a one-line update.
+    _TOKENSAVE_RELEASES_API = (
+        "https://api.github.com/repos/aovestdipaperino/tokensave/releases/latest")
+
+    # Hourly poll cadence — GitHub allows 60 unauthenticated requests/hour
+    # per IP, so once an hour is comfortably within the limit and keeps
+    # the update notification fresh enough that users won't miss a release
+    # for long. Tunable via _cfg["tokensave_update_poll_hours"] if a user
+    # wants to be more or less aggressive.
+    def _tokensave_update_poll_interval(self) -> float:
+        hours = float(_cfg.get("tokensave_update_poll_hours", 1.0))
+        return max(0.25, hours) * 3600.0  # never poll more than 4x/hour
+
+    def _tokensave_update_poll_loop(self):
+        """Daemon: re-check GitHub for new tokensave releases periodically.
+
+        Doesn't trigger any UI prompts — just refreshes the cached
+        `_tokensave_available_version` so the Settings dialog reflects
+        the current state next time it's opened. The OUTPUT-pane hint
+        line is only logged on FRESH discovery (transition from "no
+        update known" → "update available"), not on every poll, to avoid
+        spamming the log.
+        """
+        while True:
+            time.sleep(self._tokensave_update_poll_interval())
+            self._check_tokensave_updates()
+
+    def _check_tokensave_updates(self):
+        """Single-shot check against the tokensave releases API.
+
+        Compares against `_tokensave_current_version` (set by the local
+        --version probe). When a strictly-newer version is found AND it
+        wasn't known before, logs a peach hint to the OUTPUT pane so
+        users see the update offer without opening Settings.
+        """
+        import urllib.request, urllib.error, json as _json
+        if not self._tokensave_current_version:
+            return  # nothing to compare against yet
+        try:
+            req = urllib.request.Request(
+                self._TOKENSAVE_RELEASES_API,
+                headers={"Accept": "application/vnd.github+json",
+                         "User-Agent": "tokensave-manager"})
+            with urllib.request.urlopen(req, timeout=8) as resp:
+                data = _json.loads(resp.read().decode("utf-8"))
+        except (urllib.error.URLError, urllib.error.HTTPError,
+                TimeoutError, _json.JSONDecodeError, OSError) as e:
+            # Common when offline or rate-limited. Silent — try again
+            # next interval.
+            log.debug(f"tokensave update check failed: {type(e).__name__}: {e}")
+            return
+        tag = (data.get("tag_name") or "").strip().lstrip("v")
+        m = re.match(r'(\d+\.\d+\.\d+(?:\.\d+)?)', tag)
+        if not m:
+            return
+        latest = m.group(1)
+        cur = self._tokensave_current_version
+        if not _version_lt(cur, latest):
+            return  # current is up-to-date or ahead (unlikely but possible)
+        prev_known = self._tokensave_available_version
+        self._tokensave_available_version = latest
+        if prev_known != latest:
+            # Fresh discovery — surface it. (Skip the log line if the
+            # poller is just re-confirming a version we already knew
+            # about.)
+            self._log(
+                f"  → tokensave {cur} → {latest} ready to install.  "
+                f"Settings → 'Upgrade tokensave to v{latest}' to apply, "
+                f"or run 'tokensave upgrade' from a shell.",
+                C["peach"])
+            log.info(f"UPDATE-AVAILABLE  {cur} -> {latest}  (via GitHub API)")
+
+    def cmd_upgrade_tokensave(self):
+        """Run `tokensave upgrade` from the manager.
+
+        Streams output to the OUTPUT pane via the existing _run path. cwd
+        doesn't matter for upgrade (it operates on the installed binary,
+        not any specific project) so we use the tokensave_exe's directory
+        as a stable choice. On success, the upgrade replaces the binary
+        on disk; future sync / MCP-server spawns pick up the new version
+        automatically, but the currently-running MCP wrappers continue
+        serving from the old binary until Claude is restarted.
+
+        Clears the cached `_tokensave_available_version` on success so
+        the Settings button auto-hides until the next sync re-reports an
+        update.
+        """
+        if not TOKENSAVE or not os.path.isfile(TOKENSAVE):
+            messagebox.showwarning(
+                "tokensave not found",
+                "Set the tokensave.exe path in Settings first.",
+                parent=self)
+            return
+        # Confirm — upgrades replace a binary and we want the user fully
+        # aware. Skip the prompt if no version metadata is known (still
+        # useful — runs the upgrade command which itself shows what'll
+        # happen).
+        target = self._tokensave_available_version
+        cur = self._tokensave_current_version
+        if target:
+            msg = (f"Upgrade tokensave from v{cur or '?'} to v{target}?\n\n")
+        elif cur:
+            msg = (f"Run `tokensave upgrade`?  (Currently installed: "
+                   f"v{cur}.)\n\n"
+                   "tokensave will check GitHub for a newer release and "
+                   "apply it.  No-op if you're already on the latest.\n\n")
+        else:
+            msg = ("Run `tokensave upgrade`?\n\n"
+                   "tokensave will check GitHub for a newer release and "
+                   "apply it.  No-op if you're already on the latest.\n\n")
+        msg += (
+            "This replaces the tokensave binary on disk.  Currently-running\n"
+            "MCP wrappers continue serving from the old binary until you\n"
+            "restart Claude Desktop / Claude Code.")
+        if not messagebox.askyesno("Upgrade tokensave", msg, parent=self):
+            return
+        # Clear cache so the Settings button hides until the next sync
+        # reports a fresh update.  If the upgrade fails, the next sync
+        # will re-populate it anyway.
+        self._tokensave_available_version = None
+        # cwd is the tokensave.exe folder — works for any upgrade flow.
+        self._run(["upgrade"], cwd=os.path.dirname(TOKENSAVE),
+                  label="upgrade")
 
     def cmd_sync_all(self):
         if not self.projects:
@@ -4805,6 +7019,34 @@ class App(tk.Tk):
             return
         self._open_commit_dialog(path)
 
+    def cmd_ai_code_review(self):
+        """Open the AI Code Review dialog for the selected project.
+
+        Stage 1 of the agentic-AI roadmap (see docs/ROADMAP.md). Shows the
+        pending diff alongside an AI-generated structured review. Pure
+        read-only — no tools, no autonomy, just a one-shot LLM call.
+        Requires the LLM to be enabled in Settings → "AI commit messages".
+        """
+        path = self._git_path or self._selected_path()
+        if not path:
+            return
+        if not _is_local_git_repo(path):
+            messagebox.showinfo(
+                "Not a git repo",
+                f"{os.path.basename(path)} doesn't have a .git folder, "
+                "so there's no pending diff to review.",
+                parent=self)
+            return
+        llm_cfg = _cfg.get("commit_message_llm") or {}
+        if not llm_cfg.get("enabled"):
+            messagebox.showinfo(
+                "AI is not enabled",
+                "Open Settings → 'AI commit messages' and enable AI to use "
+                "this feature.",
+                parent=self)
+            return
+        AICodeReviewDialog(self, path, llm_cfg)
+
     def _open_commit_dialog(self, path: str):
         """Open GitCommitDialog for a given project path. Reused by
         `cmd_git_commit` (Projects-tab right-click) AND by the
@@ -5004,7 +7246,272 @@ class App(tk.Tk):
             return
         if not self._require_tokensave(path):
             return
-        self._run(["doctor"], cwd=path, label=os.path.basename(path))
+        # Stream output through the normal _log path AND accumulate so we
+        # can scan for the "N stale project(s) in global DB" warning
+        # tokensave emits when registered projects have their .tokensave/
+        # folders deleted. When detected, offer to re-invoke doctor with
+        # `y` piped to stdin (which tokensave reads to confirm the purge
+        # when its interactive prompt fires — the same prompt the user
+        # would see by running `tokensave doctor` from a terminal).
+        self._run_doctor_with_purge_offer(path)
+
+    def _run_doctor_with_purge_offer(self, path: str):
+        """Run `tokensave doctor`, stream output, and after completion
+        offer to purge any stale global-DB entries the warning surfaced.
+
+        Variant of self._run that also captures the output text for
+        post-completion parsing. Kept separate from _run rather than
+        adding an on_complete callback to avoid disturbing the
+        commit/sync paths that already depend on _run's exact shape.
+        """
+        label = os.path.basename(path)
+
+        def worker():
+            cmd_str = "tokensave doctor"
+            self._log(f"$ {cmd_str}  [{label}]", C["blue"])
+            self.after(0, self._set_running, True, label)
+            log.info(f"RUN  {cmd_str}")
+            output_lines: list[str] = []
+            t0 = time.monotonic()
+            try:
+                env = os.environ.copy()
+                env["NO_COLOR"] = "1"
+                env["TERM"] = "dumb"
+                proc = subprocess.Popen(
+                    [TOKENSAVE, "doctor"],
+                    cwd=path,
+                    stdout=subprocess.PIPE,
+                    stderr=subprocess.STDOUT,
+                    text=True, encoding="utf-8", errors="replace",
+                    env=env,
+                    creationflags=CREATE_NO_WINDOW,
+                )
+                self._current_proc = proc
+                for line in proc.stdout:
+                    stripped = _ANSI.sub("", line).rstrip()
+                    if not stripped:
+                        continue
+                    output_lines.append(stripped)
+                    self._log(stripped)
+                proc.wait()
+                elapsed = time.monotonic() - t0
+                if proc.returncode == 0:
+                    self._log("Done.", C["green"])
+                    log.info(f"DONE exit=0  [{elapsed:.1f}s]")
+                else:
+                    self._log(f"Exited with code {proc.returncode}", C["red"])
+                    log.warning(f"DONE exit={proc.returncode}  [{elapsed:.1f}s]")
+
+                # Parse for stale-entry warning.
+                stale_paths = self._extract_doctor_stale_paths(output_lines)
+                if stale_paths and proc.returncode == 0:
+                    self.after(0, self._offer_doctor_purge,
+                               path, stale_paths)
+            except Exception as e:
+                self._log(f"Error: {e}", C["red"])
+                log.exception(f"EXCEPTION in cmd_doctor")
+            finally:
+                self._current_proc = None
+                self.after(0, self._set_running, False)
+
+        threading.Thread(target=worker, daemon=True,
+                         name="doctor-worker").start()
+
+    @staticmethod
+    def _extract_doctor_stale_paths(output_lines: list[str]) -> list[str]:
+        """Parse tokensave doctor's stdout for the stale-entries section.
+
+        The relevant chunk looks like:
+
+            ! 2 stale project(s) in global DB (registered but `.tokensave/` is gone):
+                • D:\\Claude Co worker\\Token Save
+                • D:\\Games\\Doom wads\\My Projects\\Doom RPG MOD\\X
+                  Re-run `tokensave doctor` interactively to purge them.
+
+        Returns the list of paths after the bullets, or [] if no stale
+        warning was found. Bullet detection is permissive — accepts `•`,
+        `*`, or `-` prefixes after optional leading whitespace.
+        """
+        bullet_re = re.compile(r"^\s*[•\*\-]\s+(.+?)\s*$")
+        in_block = False
+        paths: list[str] = []
+        for line in output_lines:
+            if "stale project" in line and "global DB" in line:
+                in_block = True
+                continue
+            if not in_block:
+                continue
+            # End the block when we hit the "Re-run" suggestion line OR
+            # a section header (anything starting with bold-ANSI-stripped
+            # text in a known section).
+            if "Re-run" in line and "tokensave doctor" in line:
+                break
+            m = bullet_re.match(line)
+            if m:
+                paths.append(m.group(1).strip())
+            elif paths and not line.startswith(" ") and not line.startswith("\t"):
+                # Hit a new section after collecting some bullets.
+                break
+        return paths
+
+    def _offer_doctor_purge(self, path: str, stale_paths: list[str]):
+        """Prompt the user with the list of stale entries and re-run
+        doctor with stdin piped 'y' if they confirm."""
+        n = len(stale_paths)
+        bullets = "\n".join(f"  • {p}" for p in stale_paths)
+        msg = (f"tokensave doctor found {n} stale project entr"
+               f"{'y' if n == 1 else 'ies'} in the global DB.\n\n"
+               f"{bullets}\n\n"
+               "These projects were registered but their `.tokensave/` "
+               "folders are gone — most likely deleted folders.\n\n"
+               "Purge them now?  The manager will re-run `tokensave "
+               "doctor` with `y` piped to confirm the interactive "
+               "purge prompt.")
+        if not messagebox.askyesno(
+                "Purge stale tokensave projects?",
+                msg, parent=self):
+            self._log("  (purge skipped — stale entries left in place)",
+                     C["overlay0"])
+            return
+        self._run_doctor_purge(path)
+
+    def _run_doctor_purge(self, path: str):
+        """Run `tokensave doctor` with `y\\n` piped repeatedly to stdin
+        so tokensave's interactive purge prompt fires and is confirmed.
+
+        Caveat: tokensave's prompt may use `is_terminal()` to decide
+        whether to ask at all. If that's the case under our piped
+        stdin, the second doctor run will just print the same stale
+        warning again and exit without purging. We surface that
+        outcome to the user via the log so they know the manager-side
+        purge isn't possible — fall back to running `tokensave doctor`
+        from a real terminal."""
+        label = "doctor (purge)"
+
+        def worker():
+            self._log(f"$ tokensave doctor  [{label}]", C["blue"])
+            self.after(0, self._set_running, True, label)
+            captured: list[str] = []
+            try:
+                env = os.environ.copy()
+                env["NO_COLOR"] = "1"
+                env["TERM"] = "dumb"
+                proc = subprocess.Popen(
+                    [TOKENSAVE, "doctor"],
+                    cwd=path,
+                    stdin=subprocess.PIPE,
+                    stdout=subprocess.PIPE,
+                    stderr=subprocess.STDOUT,
+                    text=True, encoding="utf-8", errors="replace",
+                    env=env,
+                    creationflags=CREATE_NO_WINDOW,
+                )
+                self._current_proc = proc
+                # Send several yes-newlines in case doctor asks more than
+                # one yes/no question. Closing stdin after to signal EOF.
+                try:
+                    proc.stdin.write("y\ny\ny\ny\ny\n")
+                    proc.stdin.flush()
+                    proc.stdin.close()
+                except (OSError, BrokenPipeError):
+                    pass
+                for line in proc.stdout:
+                    stripped = _ANSI.sub("", line).rstrip()
+                    if not stripped:
+                        continue
+                    captured.append(stripped)
+                    self._log(stripped)
+                proc.wait()
+                self._log(
+                    "Done." if proc.returncode == 0
+                    else f"Exited with code {proc.returncode}",
+                    C["green"] if proc.returncode == 0 else C["red"])
+
+                # Did the purge actually work?  If the second run STILL
+                # reports stale entries, tokensave's prompt requires a
+                # real TTY and stdin-piping isn't enough — offer to
+                # open cmd.exe with the doctor command pre-typed so the
+                # user can answer 'y' themselves.
+                still_stale = self._extract_doctor_stale_paths(captured)
+                if still_stale:
+                    self._log(
+                        f"  ⚠ Purge didn't take — tokensave still "
+                        f"reports {len(still_stale)} stale entr"
+                        f"{'y' if len(still_stale) == 1 else 'ies'}. "
+                        f"tokensave doctor needs a real terminal "
+                        f"(piped stdin doesn't trigger the prompt).",
+                        C["peach"])
+                    self.after(0, self._offer_doctor_in_cmd, path,
+                               len(still_stale))
+                else:
+                    self._log("  ✓ Stale entries purged.", C["green"])
+            except Exception as e:
+                self._log(f"Error: {e}", C["red"])
+                log.exception(f"EXCEPTION in doctor purge")
+            finally:
+                self._current_proc = None
+                self.after(0, self._set_running, False)
+
+        threading.Thread(target=worker, daemon=True,
+                         name="doctor-purge").start()
+
+    def _offer_doctor_in_cmd(self, path: str, n_stale: int):
+        """Pop a follow-up dialog: when the piped-stdin purge fails,
+        offer to spawn cmd.exe with `tokensave doctor` already running
+        so the user has a real TTY to answer the interactive 'y' prompt.
+
+        This is the cleanest fallback for tokensave's TTY-gated purge
+        without us reaching into the global.db directly. The new cmd
+        window stays open (cmd /k) so the user can see the output and
+        type their answer.
+        """
+        plural = "entry" if n_stale == 1 else "entries"
+        if not messagebox.askyesno(
+                "Open Doctor in a new terminal?",
+                f"The piped-stdin purge didn't work — tokensave needs "
+                f"a real terminal for its interactive 'y/n' prompt.\n\n"
+                f"Open a new cmd.exe window with `tokensave doctor` "
+                f"running there?  You'll see the {n_stale} stale "
+                f"{plural} listed and tokensave will ask you to "
+                f"confirm — type 'y' and press Enter to purge.\n\n"
+                f"The window stays open after, so you can close it "
+                f"yourself when done.",
+                parent=self):
+            self._log(
+                "  (terminal-purge skipped — stale entries still in DB)",
+                C["overlay0"])
+            return
+
+        # Launch cmd.exe in a new console window with tokensave doctor
+        # already running. /k keeps the window open after the command
+        # finishes so the user has time to read + close manually.
+        #
+        # Critical Windows-quoting note: we pass the command as a SINGLE
+        # STRING (not a list) so Python's subprocess doesn't apply its
+        # own list2cmdline quoting on top of cmd.exe's. The earlier
+        # list-form `["cmd.exe", "/k", f'"{TOKENSAVE}" doctor']`
+        # produced `\"D:/path/tokensave.exe\" doctor` (backslash-escaped
+        # quotes) — cmd doesn't recognise those as quote pairs and
+        # errors with `'\"D:/...\" is not recognized as an internal or
+        # external command`.
+        #
+        # The pattern `cmd /k ""path with spaces" doctor"` is cmd.exe's
+        # idiom for running quoted paths via /k: the OUTER pair of `"`s
+        # marks the start/end of the /k command region, the INNER pair
+        # quotes the path. Cmd strips the outermost pair on /k entry,
+        # leaving `"path with spaces" doctor` to execute.
+        try:
+            cmd_line = f'cmd.exe /k ""{TOKENSAVE}" doctor"'
+            subprocess.Popen(
+                cmd_line,
+                cwd=path,
+                creationflags=subprocess.CREATE_NEW_CONSOLE)
+            self._log(
+                "  Opened cmd.exe — type 'y' at the prompt to purge, "
+                "then close the window.",
+                C["sky"])
+        except OSError as e:
+            self._log(f"  ✗ Could not launch cmd.exe: {e}", C["red"])
 
     # ── CodeGraph commands ─────────────────────────────────────────────────
 
@@ -5703,26 +8210,61 @@ class SettingsDialog(tk.Toplevel):
         super().__init__(parent)
         self.title("Settings")
         self.configure(bg=C["base"])
-        self.resizable(False, False)
+        self.resizable(True, True)
+        self.minsize(640, 500)
+        # Initial geometry — leave room for taskbar on 1080p displays
+        self.geometry("760x700")
         self.grab_set()
         self.transient(parent)
         self._cfg = cfg
         self._save_fn = save_fn
         self._callback = callback
 
+        # ── Scrollable content area ───────────────────────────────────
+        # The dialog has many sections; on smaller displays the AI
+        # commit-messages section was getting pushed below the visible
+        # area with no way to reach it. Wrap content in a Canvas+Frame
+        # so the dialog scrolls when its natural height exceeds the
+        # window height. Save/Cancel buttons stay anchored at the
+        # bottom (packed on `self`, NOT on the scrollable body).
+        _scroll_wrap = tk.Frame(self, bg=C["base"])
+        _scroll_wrap.pack(side=tk.TOP, fill=tk.BOTH, expand=True)
+        _canvas = tk.Canvas(_scroll_wrap, bg=C["base"],
+                            highlightthickness=0, bd=0)
+        _vsb = ttk.Scrollbar(_scroll_wrap, orient="vertical",
+                             command=_canvas.yview)
+        _canvas.configure(yscrollcommand=_vsb.set)
+        _vsb.pack(side=tk.RIGHT, fill=tk.Y)
+        _canvas.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
+        body = tk.Frame(_canvas, bg=C["base"])
+        _body_window = _canvas.create_window((0, 0), window=body, anchor="nw")
+        def _on_body_configure(event):
+            _canvas.configure(scrollregion=_canvas.bbox("all"))
+        def _on_canvas_configure(event):
+            # Resize the embedded frame to match the canvas viewport width
+            _canvas.itemconfigure(_body_window, width=event.width)
+        body.bind("<Configure>", _on_body_configure)
+        _canvas.bind("<Configure>", _on_canvas_configure)
+        # Mousewheel scrolling — bind on the canvas, also forward from body
+        def _on_mousewheel(event):
+            _canvas.yview_scroll(int(-1 * (event.delta / 120)), "units")
+        _canvas.bind("<MouseWheel>", _on_mousewheel)
+        body.bind("<MouseWheel>", _on_mousewheel)
+
+
         pad = dict(padx=20, pady=4)
 
         if startup_note:
-            tk.Label(self, text=startup_note,
+            tk.Label(body, text=startup_note,
                      bg=C["red"], fg=C["mantle"],
                      font=("Segoe UI", 9, "bold"),
                      justify=tk.LEFT, padx=14, pady=8,
                      wraplength=440).pack(fill=tk.X, pady=(0, 4))
 
         def field_row(label, key, is_file=False, is_dir=False, note=""):
-            tk.Label(self, text=label, bg=C["base"], fg=C["subtext"],
+            tk.Label(body, text=label, bg=C["base"], fg=C["subtext"],
                      font=("Segoe UI", 9)).pack(anchor=tk.W, padx=20, pady=(10, 0))
-            row = tk.Frame(self, bg=C["base"])
+            row = tk.Frame(body, bg=C["base"])
             row.pack(fill=tk.X, padx=20, pady=(2, 0))
             var = tk.StringVar(value=cfg.get(key, ""))
             entry = ttk.Entry(row, textvariable=var, width=52)
@@ -5746,6 +8288,41 @@ class SettingsDialog(tk.Toplevel):
 
         self._exe_var  = field_row("tokensave.exe  —  path to the tokensave binary",
                                    "tokensave_exe", is_file=True)
+
+        # Upgrade tokensave row — ALWAYS shown (the button is idempotent;
+        # `tokensave upgrade` reports "already on latest" when no update is
+        # available, so there's no downside to always offering it). When
+        # the app has cached a target version from an "Update available"
+        # sync line, we promote the button styling and pre-fill the
+        # target in the label so users know exactly what'll happen.
+        upgrade_row = tk.Frame(body, bg=C["base"])
+        upgrade_row.pack(fill=tk.X, padx=20, pady=(6, 0))
+
+        # The parent App is self.master for this Toplevel.
+        host = self.master
+        cur_ver = getattr(host, "_tokensave_current_version", None)
+        new_ver = getattr(host, "_tokensave_available_version", None)
+
+        cur_str = f"v{cur_ver}" if cur_ver else "version unknown"
+        if new_ver:
+            btn_label = f"🔄  Upgrade tokensave to v{new_ver}"
+            btn_style = "Primary.TButton"
+            hint = (f"  Current: {cur_str} → available: v{new_ver}.  "
+                    "Replaces the binary; restart Claude after upgrading.")
+            hint_fg = C["green"]
+        else:
+            btn_label = "🔄  Upgrade tokensave"
+            btn_style = "TButton"
+            hint = (f"  Current: {cur_str}.  Runs `tokensave upgrade` — "
+                    "no-op if you're already on the latest release. "
+                    "Restart Claude after a successful upgrade.")
+            hint_fg = C["overlay0"]
+
+        ttk.Button(upgrade_row, text=btn_label, style=btn_style,
+                   command=host.cmd_upgrade_tokensave).pack(side=tk.LEFT)
+        tk.Label(body, text=hint, bg=C["base"], fg=hint_fg,
+                 font=("Segoe UI", 8), justify=tk.LEFT,
+                 anchor=tk.W).pack(fill=tk.X, padx=20, pady=(0, 4))
         self._tmpl_var = field_row("Template directory  —  folder containing claude-md-template.md and project-baseline.md",
                                    "template_dir", is_dir=True,
                                    note="(leave blank to auto-detect)")
@@ -5754,11 +8331,11 @@ class SettingsDialog(tk.Toplevel):
             "editor_cmd", note="(flags supported)")
 
         # ── Git executable ──
-        ttk.Separator(self, orient="horizontal").pack(fill=tk.X, padx=20, pady=(12, 8))
-        tk.Label(self, text="Git executable  —  path to git.exe",
+        ttk.Separator(body, orient="horizontal").pack(fill=tk.X, padx=20, pady=(12, 8))
+        tk.Label(body, text="Git executable  —  path to git.exe",
                  bg=C["base"], fg=C["subtext"],
                  font=("Segoe UI", 9)).pack(anchor=tk.W, padx=20, pady=(0, 0))
-        git_row = tk.Frame(self, bg=C["base"])
+        git_row = tk.Frame(body, bg=C["base"])
         git_row.pack(fill=tk.X, padx=20, pady=(4, 0))
         self._git_exe_var = tk.StringVar(value=cfg.get("git_exe", ""))
         git_entry = ttk.Entry(git_row, textvariable=self._git_exe_var, width=44)
@@ -5781,7 +8358,7 @@ class SettingsDialog(tk.Toplevel):
         self._git_status_lbl = tk.Label(git_row, text="", bg=C["base"],
                                         font=("Segoe UI", 8), fg=C["overlay0"])
         self._git_status_lbl.pack(side=tk.LEFT, padx=(6, 0))
-        tk.Label(self,
+        tk.Label(body,
                  text="  Leave blank to auto-detect from PATH or common install locations.",
                  font=("Segoe UI", 8), bg=C["base"], fg=C["overlay0"]).pack(
                  anchor=tk.W, padx=20, pady=(2, 0))
@@ -5789,11 +8366,11 @@ class SettingsDialog(tk.Toplevel):
         self.after(100, lambda: self._verify_git(cfg.get("git_exe") or GIT_EXE))
 
         # ── GitHub CLI (gh) ──
-        ttk.Separator(self, orient="horizontal").pack(fill=tk.X, padx=20, pady=(12, 8))
-        tk.Label(self, text="GitHub CLI (gh)  —  enables 'Open PR on GitHub' and release creation",
+        ttk.Separator(body, orient="horizontal").pack(fill=tk.X, padx=20, pady=(12, 8))
+        tk.Label(body, text="GitHub CLI (gh)  —  enables 'Open PR on GitHub' and release creation",
                  bg=C["base"], fg=C["subtext"],
                  font=("Segoe UI", 9)).pack(anchor=tk.W, padx=20)
-        gh_row = tk.Frame(self, bg=C["base"])
+        gh_row = tk.Frame(body, bg=C["base"])
         gh_row.pack(fill=tk.X, padx=20, pady=(4, 0))
         self._gh_status_lbl = tk.Label(gh_row, text="Checking…",
                                        bg=C["base"], fg=C["overlay0"],
@@ -5843,15 +8420,15 @@ class SettingsDialog(tk.Toplevel):
         self._gh_install_btn.pack(side=tk.LEFT, padx=(0, 6))
         ttk.Button(gh_row, text="Check again",
                    command=_check_gh_status).pack(side=tk.LEFT)
-        tk.Label(self,
+        tk.Label(body,
                  text="  Once installed, use the Git tab's '🔗 Open PR' button to create pull requests on GitHub.",
                  font=("Segoe UI", 8), bg=C["base"], fg=C["overlay0"]).pack(
                  anchor=tk.W, padx=20, pady=(2, 0))
         self.after(150, _check_gh_status)
 
         # ── CodeGraph (alternative code-graph tool) ──
-        ttk.Separator(self, orient="horizontal").pack(fill=tk.X, padx=20, pady=(12, 8))
-        self._cg_section = tk.Frame(self, bg=C["base"])
+        ttk.Separator(body, orient="horizontal").pack(fill=tk.X, padx=20, pady=(12, 8))
+        self._cg_section = tk.Frame(body, bg=C["base"])
         self._cg_section.pack(fill=tk.X)
         tk.Label(self._cg_section,
                  text="CodeGraph (codegraph)  —  optional alternative code-graph tool",
@@ -6009,12 +8586,12 @@ class SettingsDialog(tk.Toplevel):
         self.after(200, _check_cg_status)
 
         # ── Search roots — two-column Treeview (label + path) ──
-        tk.Label(self,
+        tk.Label(body,
                  text="Search roots  —  each root's label becomes a category in the project list",
                  bg=C["base"], fg=C["subtext"],
                  font=("Segoe UI", 9)).pack(anchor=tk.W, padx=20, pady=(12, 0))
 
-        roots_frame = tk.Frame(self, bg=C["base"])
+        roots_frame = tk.Frame(body, bg=C["base"])
         roots_frame.pack(fill=tk.X, padx=20, pady=(4, 0))
 
         tv_wrap = tk.Frame(roots_frame, bg=C["mantle"])
@@ -6053,18 +8630,263 @@ class SettingsDialog(tk.Toplevel):
                    command=self._remove_root).pack(fill=tk.X)
 
         # ── Auto-commit toggle ──
-        ttk.Separator(self, orient="horizontal").pack(fill=tk.X, padx=20, pady=(12, 8))
+        ttk.Separator(body, orient="horizontal").pack(fill=tk.X, padx=20, pady=(12, 8))
 
         self._var_autocommit = tk.BooleanVar(value=bool(cfg.get("auto_commit_after_sync", False)))
-        tk.Checkbutton(self,
+        tk.Checkbutton(body,
             text="Auto-commit after sync  (git add -A + git commit)",
             variable=self._var_autocommit,
             bg=C["base"], fg=C["text"], selectcolor=C["surface0"],
             activebackground=C["base"], activeforeground=C["text"],
             font=("Segoe UI", 10)).pack(anchor=tk.W, padx=20, pady=(0, 2))
-        tk.Label(self,
+        tk.Label(body,
             text="  Only fires when the project is a git repo and the working tree has changes.\n"
-                 "  Commit message: \"chore: tokensave sync\"",
+                 "  Commit message: \"chore: tokensave sync\"  (or AI-generated if enabled below)",
+            font=("Segoe UI", 8), bg=C["base"], fg=C["overlay0"],
+            justify=tk.LEFT).pack(anchor=tk.W, padx=36, pady=(0, 8))
+
+        # ── MCP integration ─────────────────────────────────────────────────
+        ttk.Separator(body, orient="horizontal").pack(fill=tk.X, padx=20, pady=(8, 8))
+
+        tk.Label(body, text="MCP integration",
+                 font=("Segoe UI", 10, "bold"),
+                 bg=C["base"], fg=C["text"]).pack(anchor=tk.W, padx=20, pady=(0, 2))
+
+        mcp_row = tk.Frame(body, bg=C["base"])
+        mcp_row.pack(anchor=tk.W, padx=20, pady=(0, 4))
+        ttk.Button(mcp_row, text="🔌  Manage MCP wiring…",
+                   command=lambda: MCPConfigDialog(self)).pack(side=tk.LEFT)
+
+        # Inline status summary — green if both ok, peach if any drift,
+        # red if any missing. Computed on dialog open; clicking Re-detect
+        # in the configurator dialog is the way to refresh.
+        try:
+            states = [_classify_mcp_entry(p)["state"] for _, p in _MCP_CONFIGS]
+        except Exception:
+            states = []
+        if states and all(s == "ok" for s in states):
+            summary = "✓  Both Claude Desktop and Claude Code route through the wrapper."
+            summary_fg = C["green"]
+        elif "no_file" in states or "missing" in states:
+            summary = "✗  One or more Claude configs need a tokensave entry."
+            summary_fg = C["red"]
+        elif any(s in ("direct_serve", "wrong_wrapper", "unparseable") for s in states):
+            summary = "⚠  One or more Claude configs bypass the wrapper (★ pin won't work for them)."
+            summary_fg = C["peach"]
+        else:
+            summary = ""
+            summary_fg = C["overlay0"]
+        if summary:
+            tk.Label(body, text="  " + summary,
+                     font=("Segoe UI", 9),
+                     bg=C["base"], fg=summary_fg,
+                     justify=tk.LEFT, anchor=tk.W,
+                     wraplength=620).pack(anchor=tk.W, padx=36, pady=(0, 2))
+        tk.Label(body,
+            text="  Routes tokensave through the manager's pin-aware wrapper so\n"
+                 "  ★ Set as Active swaps projects live, without restarting Claude.",
+            font=("Segoe UI", 8), bg=C["base"], fg=C["overlay0"],
+            justify=tk.LEFT).pack(anchor=tk.W, padx=36, pady=(0, 8))
+
+        # ── Ollama ──────────────────────────────────────────────────────────
+        ttk.Separator(body, orient="horizontal").pack(fill=tk.X, padx=20, pady=(8, 8))
+
+        tk.Label(body, text="Ollama",
+                 font=("Segoe UI", 10, "bold"),
+                 bg=C["base"], fg=C["text"]).pack(anchor=tk.W, padx=20, pady=(0, 2))
+
+        ollama_row = tk.Frame(body, bg=C["base"])
+        ollama_row.pack(anchor=tk.W, padx=20, pady=(0, 4))
+        ttk.Button(ollama_row, text="🦙  Manage Ollama Models…",
+                   command=self._open_ollama_manager).pack(side=tk.LEFT)
+        tk.Label(body,
+            text="  Browse installed models, pull new ones, see context windows.\n"
+                 "  Uses Ollama's native REST API at the base URL configured below.",
+            font=("Segoe UI", 8), bg=C["base"], fg=C["overlay0"],
+            justify=tk.LEFT).pack(anchor=tk.W, padx=36, pady=(0, 8))
+
+        # ── AI commit messages ──────────────────────────────────────────────
+        ttk.Separator(body, orient="horizontal").pack(fill=tk.X, padx=20, pady=(8, 8))
+
+        tk.Label(body, text="AI commit messages",
+                 font=("Segoe UI", 10, "bold"),
+                 bg=C["base"], fg=C["text"]).pack(anchor=tk.W, padx=20, pady=(0, 2))
+
+        llm_cfg = (cfg.get("commit_message_llm") or {})
+        self._var_llm_enabled = tk.BooleanVar(value=bool(llm_cfg.get("enabled", False)))
+        tk.Checkbutton(body,
+            text="Use AI to generate commit message suggestions",
+            variable=self._var_llm_enabled,
+            bg=C["base"], fg=C["text"], selectcolor=C["surface0"],
+            activebackground=C["base"], activeforeground=C["text"],
+            font=("Segoe UI", 10)).pack(anchor=tk.W, padx=20, pady=(0, 4))
+
+        # Provider + model + key + base URL grid
+        llm_grid = tk.Frame(body, bg=C["base"])
+        llm_grid.pack(fill=tk.X, padx=36, pady=(0, 6))
+
+        def _row(parent, label_txt, widget):
+            row = tk.Frame(parent, bg=C["base"])
+            row.pack(fill=tk.X, pady=2)
+            tk.Label(row, text=label_txt, width=18, anchor=tk.W,
+                     font=("Segoe UI", 9), bg=C["base"],
+                     fg=C["subtext"]).pack(side=tk.LEFT)
+            widget.pack(side=tk.LEFT, fill=tk.X, expand=True)
+            return row
+
+        self._var_llm_provider = tk.StringVar(
+            value=llm_cfg.get("provider", "anthropic"))
+        provider_box = ttk.Combobox(llm_grid,
+            textvariable=self._var_llm_provider,
+            values=["ollama", "anthropic", "openai", "openai_compatible"],
+            state="readonly", width=22)
+        _row(llm_grid, "Provider:", provider_box)
+
+        self._var_llm_model = tk.StringVar(
+            value=llm_cfg.get("model", "claude-haiku-4-5"))
+        model_entry = ttk.Entry(llm_grid, textvariable=self._var_llm_model)
+        _row(llm_grid, "Model:", model_entry)
+
+        self._var_llm_keyenv = tk.StringVar(
+            value=llm_cfg.get("api_key_env", "ANTHROPIC_API_KEY"))
+        keyenv_entry = ttk.Entry(llm_grid, textvariable=self._var_llm_keyenv)
+        _row(llm_grid, "API key env var:", keyenv_entry)
+
+        self._var_llm_base_url = tk.StringVar(
+            value=llm_cfg.get("base_url", ""))
+        base_entry = ttk.Entry(llm_grid, textvariable=self._var_llm_base_url)
+        _row(llm_grid, "Base URL:", base_entry)
+
+        # Preset buttons for local OpenAI-compatible servers
+        preset_row = tk.Frame(body, bg=C["base"])
+        preset_row.pack(anchor=tk.W, padx=36, pady=(0, 4))
+        tk.Label(preset_row, text="Quick presets:",
+                 font=("Segoe UI", 9), bg=C["base"],
+                 fg=C["subtext"]).pack(side=tk.LEFT, padx=(0, 8))
+
+        def _probe_loaded_model(base_url: str) -> str:
+            """Hit /v1/models on an OpenAI-compatible server and return the first
+            chat-tuned model id. Returns "" on any failure (server down, no models
+            loaded, network error). Skips embedding models which can't generate text.
+            """
+            import urllib.request, urllib.error, json as _json
+            try:
+                req = urllib.request.Request(base_url.rstrip("/") + "/v1/models")
+                with urllib.request.urlopen(req, timeout=2) as resp:
+                    data = _json.loads(resp.read().decode("utf-8"))
+            except (urllib.error.URLError, urllib.error.HTTPError,
+                    TimeoutError, OSError, _json.JSONDecodeError):
+                return ""
+            models = data.get("data", []) or []
+            # Filter out embedding-only models (they can't do chat completion)
+            for m in models:
+                mid = m.get("id", "")
+                if not mid:
+                    continue
+                lid = mid.lower()
+                if "embed" in lid or "rerank" in lid or "whisper" in lid:
+                    continue
+                return mid
+            return ""
+
+        def _apply_lm_studio():
+            self._var_llm_provider.set("openai_compatible")
+            base = "http://localhost:1234"
+            self._var_llm_base_url.set(base)
+            self._var_llm_keyenv.set("")
+            # Auto-detect the first loaded chat model from LM Studio's /v1/models.
+            # If the server isn't running OR no models are loaded, leave the
+            # field alone and surface a hint to the user.
+            detected = _probe_loaded_model(base)
+            if detected:
+                self._var_llm_model.set(detected)
+                self._llm_preset_hint.configure(
+                    text=f"✓  Using loaded model: {detected}",
+                    fg=C["green"])
+            else:
+                self._llm_preset_hint.configure(
+                    text="⚠  LM Studio server not reachable at "
+                         "http://localhost:1234 — start the Local Server in "
+                         "LM Studio's '</>' panel and load a model, then click "
+                         "this preset again.",
+                    fg=C["peach"])
+
+        def _apply_ollama():
+            # Use "ollama" as a first-class provider name; the _call_llm
+            # function falls through to OpenAI-compatible dispatch with the
+            # default Ollama base URL.
+            self._var_llm_provider.set("ollama")
+            base = "http://localhost:11434"
+            self._var_llm_base_url.set(base)
+            self._var_llm_keyenv.set("")
+            detected = _probe_loaded_model(base)
+            if detected:
+                self._var_llm_model.set(detected)
+                self._llm_preset_hint.configure(
+                    text=f"✓  Using Ollama model: {detected}", fg=C["green"])
+            else:
+                if (not self._var_llm_model.get()
+                        or "claude" in self._var_llm_model.get()):
+                    self._var_llm_model.set("qwen2.5-coder:14b")
+                self._llm_preset_hint.configure(
+                    text="⚠  Ollama not reachable at http://localhost:11434 — "
+                         "make sure the Ollama service is running and run "
+                         "`ollama pull qwen2.5-coder:14b` (or any chat model), "
+                         "then click this preset again.",
+                    fg=C["peach"])
+
+        def _apply_anthropic():
+            self._var_llm_provider.set("anthropic")
+            self._var_llm_base_url.set("")
+            self._var_llm_keyenv.set("ANTHROPIC_API_KEY")
+            if not self._var_llm_model.get() or "/" in self._var_llm_model.get():
+                self._var_llm_model.set("claude-haiku-4-5")
+            self._llm_preset_hint.configure(
+                text="ℹ  Set the ANTHROPIC_API_KEY environment variable (get a "
+                     "key at console.anthropic.com).  Haiku is cheapest "
+                     "(~$0.0005/commit); Sonnet/Opus are higher-fidelity.",
+                fg=C["blue"])
+        ttk.Button(preset_row, text="Anthropic",
+                   command=_apply_anthropic).pack(side=tk.LEFT, padx=(0, 4))
+        ttk.Button(preset_row, text="LM Studio",
+                   command=_apply_lm_studio).pack(side=tk.LEFT, padx=(0, 4))
+        ttk.Button(preset_row, text="Ollama",
+                   command=_apply_ollama).pack(side=tk.LEFT)
+
+        # Preset feedback line — shows what the preset did (auto-detected model,
+        # server-not-reachable warning, API-key hint, etc.). Stays blank until
+        # the user clicks a preset.
+        self._llm_preset_hint = tk.Label(
+            body, text="", font=("Segoe UI", 8),
+            bg=C["base"], fg=C["overlay0"],
+            justify=tk.LEFT, wraplength=620, anchor=tk.W)
+        self._llm_preset_hint.pack(anchor=tk.W, padx=36, pady=(2, 0), fill=tk.X)
+
+        # Min diff lines
+        min_row = tk.Frame(body, bg=C["base"])
+        min_row.pack(anchor=tk.W, padx=36, pady=(2, 0))
+        self._var_llm_min_diff = tk.StringVar(
+            value=str(llm_cfg.get("min_diff_lines", 30)))
+        tk.Label(min_row, text="Min diff lines (smaller commits skip AI):",
+                 font=("Segoe UI", 9), bg=C["base"],
+                 fg=C["subtext"]).pack(side=tk.LEFT, padx=(0, 6))
+        ttk.Entry(min_row, textvariable=self._var_llm_min_diff,
+                  width=6).pack(side=tk.LEFT)
+
+        self._var_llm_for_sync = tk.BooleanVar(
+            value=bool(llm_cfg.get("use_for_sync_autocommit", False)))
+        tk.Checkbutton(body,
+            text="Also use AI for sync auto-commit messages "
+                 "(disables amend-stacking)",
+            variable=self._var_llm_for_sync,
+            bg=C["base"], fg=C["text"], selectcolor=C["surface0"],
+            activebackground=C["base"], activeforeground=C["text"],
+            font=("Segoe UI", 9)).pack(anchor=tk.W, padx=20, pady=(6, 2))
+
+        tk.Label(body,
+            text="  AI runs only when toggled ON. Silent fallback on any error\n"
+                 "  (missing key, network failure, timeout). Anthropic Claude Haiku\n"
+                 "  costs ~$0.0005 per commit.",
             font=("Segoe UI", 8), bg=C["base"], fg=C["overlay0"],
             justify=tk.LEFT).pack(anchor=tk.W, padx=36, pady=(0, 8))
 
@@ -6074,6 +8896,35 @@ class SettingsDialog(tk.Toplevel):
         ttk.Button(btn_row, text="Save", style="Primary.TButton",
                    command=self._save).pack(side=tk.LEFT, padx=(0, 8))
         ttk.Button(btn_row, text="Cancel", command=self.destroy).pack(side=tk.LEFT)
+
+    def _open_ollama_manager(self):
+        """Launch the Ollama Model Manager dialog.
+
+        Uses whatever base URL is currently typed in the AI commit messages
+        section (so editing the URL takes effect without saving Settings
+        first). Falls back to http://localhost:11434 if blank. When the
+        user clicks "Use for AI features" on a model in the dialog, the
+        callback updates the provider/model/base-url fields in this very
+        Settings dialog — they still have to click Save to persist.
+        """
+        base_url = self._var_llm_base_url.get().strip() \
+                   or "http://localhost:11434"
+
+        def _on_use(model_name: str, server_url: str):
+            self._var_llm_provider.set("ollama")
+            self._var_llm_model.set(model_name)
+            self._var_llm_base_url.set(server_url)
+            self._var_llm_keyenv.set("")
+            # Auto-enable AI features when the user explicitly picks a model.
+            self._var_llm_enabled.set(True)
+            if hasattr(self, "_llm_preset_hint"):
+                self._llm_preset_hint.configure(
+                    text=f"✓  Using Ollama model: {model_name}.  "
+                         f"Click Save to persist.",
+                    fg=C["green"])
+
+        OllamaModelManagerDialog(
+            self, base_url=base_url, on_use_for_ai=_on_use)
 
     def _add_root(self):
         p = filedialog.askdirectory(title="Add search root", parent=self)
@@ -6178,6 +9029,26 @@ class SettingsDialog(tk.Toplevel):
             for iid in self._roots_tv.get_children()
         ]
         self._cfg["auto_commit_after_sync"] = self._var_autocommit.get()
+        # Persist AI commit-message settings (preserves any unknown keys
+        # the user may have added manually via JSON edit).
+        existing_llm = self._cfg.get("commit_message_llm") or {}
+        try:
+            min_diff_lines = int(self._var_llm_min_diff.get())
+        except ValueError:
+            min_diff_lines = 30
+        existing_llm.update({
+            "enabled":     self._var_llm_enabled.get(),
+            "provider":    self._var_llm_provider.get().strip() or "anthropic",
+            "model":       self._var_llm_model.get().strip(),
+            "api_key_env": self._var_llm_keyenv.get().strip(),
+            "base_url":    self._var_llm_base_url.get().strip(),
+            "min_diff_lines": max(0, min_diff_lines),
+            "use_for_sync_autocommit": self._var_llm_for_sync.get(),
+        })
+        # Fill in defaults that other helpers expect
+        existing_llm.setdefault("max_diff_chars", 24000)
+        existing_llm.setdefault("timeout_seconds", 90)
+        self._cfg["commit_message_llm"] = existing_llm
         self._cfg["git_exe"]       = self._git_exe_var.get().strip()
         self._cfg["codegraph_exe"] = self._cg_exe_var.get().strip()
         self._save_fn(self._cfg)
@@ -7268,26 +10139,53 @@ class ReleaseWizardDialog(tk.Toplevel):
         ver_frame = tk.Frame(body, bg=C["base"])
         ver_frame.pack(fill=tk.X, padx=(44, 20), pady=(0, 4))
 
+        base_for_bump = self._last_tag or "v0.0.0"
         suggestions = [
-            ("patch", _bump_version(self._last_tag or "v0.0.0", "patch")),
-            ("minor", _bump_version(self._last_tag or "v0.0.0", "minor")),
-            ("major", _bump_version(self._last_tag or "v0.0.0", "major")),
+            ("patch",  _bump_version(base_for_bump, "patch")),
+            ("minor",  _bump_version(base_for_bump, "minor")),
+            ("major",  _bump_version(base_for_bump, "major")),
+            ("hotfix", _bump_version(base_for_bump, "hotfix")),
         ]
+        hotfix_labels = {
+            "patch":  "Patch",
+            "minor":  "Minor",
+            "major":  "Major",
+            "hotfix": "Hotfix",
+        }
+        hotfix_blurb = {
+            "patch":  "(bug fixes — new patch series)",
+            "minor":  "(new feature, no breaking changes)",
+            "major":  "(breaking changes)",
+            "hotfix": "(small tweak on top of the current release — 4-part)",
+        }
         for kind, candidate in suggestions:
-            label = f"{kind.title()}  ({candidate})"
-            ttk.Radiobutton(ver_frame, text=label,
+            text = f"{hotfix_labels[kind]}  ({candidate})  {hotfix_blurb[kind]}"
+            ttk.Radiobutton(ver_frame, text=text,
                             variable=self._bump_var, value=kind,
-                            command=self._refresh_title).pack(anchor=tk.W)
+                            command=self._refresh_resolved_tag).pack(anchor=tk.W)
 
         ov_row = tk.Frame(body, bg=C["base"])
-        ov_row.pack(fill=tk.X, padx=(44, 20), pady=(6, 12))
+        ov_row.pack(fill=tk.X, padx=(44, 20), pady=(6, 2))
         tk.Label(ov_row, text="Custom tag:", bg=C["base"], fg=C["subtext"],
                  font=("Segoe UI", 9)).pack(side=tk.LEFT, padx=(0, 6))
-        ttk.Entry(ov_row, textvariable=self._override_var,
-                  width=18).pack(side=tk.LEFT)
-        tk.Label(ov_row, text="(overrides the radio above when set)",
+        custom_entry = ttk.Entry(ov_row, textvariable=self._override_var,
+                                 width=18, font=("Consolas", 9))
+        custom_entry.pack(side=tk.LEFT)
+        tk.Label(ov_row, text="e.g. v1.0.5 or 1.0.5 or v1.0.4.1",
                  font=("Segoe UI", 8), bg=C["base"],
                  fg=C["overlay0"]).pack(side=tk.LEFT, padx=(8, 0))
+
+        # Live "Will publish as" preview — updates as the user types in the
+        # custom field OR switches radios. Removes the "do I add the v?"
+        # ambiguity entirely because the resolved tag is right there.
+        self._resolved_lbl = tk.Label(body, text="",
+                                       font=("Segoe UI", 9, "bold"),
+                                       bg=C["base"], fg=C["green"])
+        self._resolved_lbl.pack(anchor=tk.W, padx=(44, 20), pady=(2, 12))
+
+        # Watch the override entry — every keystroke refreshes the preview.
+        self._override_var.trace_add("write",
+            lambda *_: self._refresh_resolved_tag())
 
         # ── 2. Title ────────────────────────────────────────────────────────
         self._section_header(body, "2", "Title")
@@ -7296,6 +10194,17 @@ class ReleaseWizardDialog(tk.Toplevel):
 
         # ── 3. Release notes ────────────────────────────────────────────────
         self._section_header(body, "3", "Release notes  (editable)")
+
+        # Helper text BELOW the section header but ABOVE the textarea, so
+        # the instruction never leaks INTO the textarea (and from there into
+        # the published release on GitHub).
+        tk.Label(body,
+                 text="The textarea is your release body verbatim. Edit before "
+                      "publishing — add a one-line summary at the top, tweak "
+                      "bullets, drop sections you don't want shipped.",
+                 font=("Segoe UI", 8), bg=C["base"], fg=C["overlay0"],
+                 wraplength=600, justify=tk.LEFT
+                 ).pack(anchor=tk.W, padx=(44, 20), pady=(0, 4))
 
         notes_row = tk.Frame(body, bg=C["base"])
         notes_row.pack(fill=tk.X, padx=(44, 20), pady=(0, 4))
@@ -7403,15 +10312,24 @@ class ReleaseWizardDialog(tk.Toplevel):
     # ── Auto-fill / regenerate ─────────────────────────────────────────────
 
     def _regenerate_notes(self):
+        """(Re)populate the notes textarea from the commit classifier.
+
+        Does NOT inject any placeholder summary text — the helper label
+        above the textarea is the user-facing instruction, and a published
+        release should contain only the user's content. (Earlier versions
+        injected an "Edit this summary…" line that some users shipped to
+        GitHub by accident.)
+        """
         sections = _classify_commits_for_changelog(self._commits)
         from datetime import datetime as _dt
         date_str = _dt.now().strftime("%Y-%m-%d")
         tag_clean = self._next_tag().lstrip("v")
-        notes = _render_release_notes(tag_clean, date_str, sections,
-                                       summary="Edit this summary, then click Publish.")
+        notes = _render_release_notes(tag_clean, date_str, sections)
         self._notes_txt.delete("1.0", tk.END)
         self._notes_txt.insert("1.0", notes)
-        self._refresh_title()
+        # Cascade — title, resolved-tag preview, and artefact label all
+        # depend on the resolved tag. _refresh_resolved_tag handles them all.
+        self._refresh_resolved_tag()
 
     def _refresh_title(self):
         # Default title: "v1.0.4 — <first non-summary heading or top item>".
@@ -7427,6 +10345,30 @@ class ReleaseWizardDialog(tk.Toplevel):
             self._title_var.set(f"{tag} — {first[:60]}")
         else:
             self._title_var.set(f"{tag} — release")
+
+    def _refresh_resolved_tag(self):
+        """Update the live "Will publish as" preview + title + artefact name.
+
+        Called whenever the user changes a version control (radio or custom
+        entry). Centralises the "what tag are we actually publishing?"
+        question — no matter how they pick the version, the resolved tag
+        is visible in one place and propagates downstream automatically.
+        """
+        tag = self._next_tag()
+        # Show the resolved tag prominently in green.
+        if self._override_var.get().strip():
+            self._resolved_lbl.config(
+                text=f"  → Will publish as:  {tag}   (custom)",
+                fg=C["green"])
+        else:
+            kind = self._bump_var.get()
+            self._resolved_lbl.config(
+                text=f"  → Will publish as:  {tag}   ({kind} bump)",
+                fg=C["green"])
+        # Cascade — title and artefact preview depend on the resolved tag.
+        self._refresh_title()
+        if hasattr(self, "_artefact_lbl"):   # guard during __init__ build order
+            self._refresh_artefact_preview()
 
     def _refresh_artefact_preview(self):
         """Refresh the artefact preview label.
@@ -8290,6 +11232,1267 @@ class GitignoreDialog(tk.Toplevel):
         self._app._offer_commit_after_change(path, ".gitignore")
 
 
+def _iter_json_lines(response):
+    """Yield decoded JSON objects from a newline-delimited JSON byte stream.
+
+    Used for Ollama's /api/pull progress stream — each line is a complete
+    JSON object terminated by `\\n`. Same byte-aligned accumulator pattern
+    as `_iter_sse_events` (network buffering can split a line in half).
+    Decode errors on individual lines are silently skipped — the next valid
+    line usually has the same status info we missed.
+    """
+    import json as _json
+    buf = bytearray()
+    while True:
+        try:
+            chunk = response.read(4096)
+        except (OSError, ConnectionError):
+            return
+        if not chunk:
+            if buf:
+                line = buf.decode("utf-8", errors="replace").strip()
+                if line:
+                    try:
+                        yield _json.loads(line)
+                    except _json.JSONDecodeError:
+                        pass
+            return
+        buf.extend(chunk)
+        while True:
+            i = buf.find(b"\n")
+            if i < 0:
+                break
+            raw = bytes(buf[:i])
+            del buf[:i + 1]
+            line = raw.decode("utf-8", errors="replace").strip()
+            if not line:
+                continue
+            try:
+                yield _json.loads(line)
+            except _json.JSONDecodeError:
+                continue
+
+
+class OllamaModelManagerDialog(tk.Toplevel):
+    """Browse, pull, and delete Ollama models without leaving the manager.
+
+    Uses Ollama's native REST API (not the OpenAI-compatible /v1 surface):
+      - `GET  /api/version`  — connection check
+      - `GET  /api/tags`     — list installed models (name, size)
+      - `POST /api/show`     — per-model details (context length)
+      - `POST /api/pull`     — download a new model, with streaming progress
+      - `DELETE /api/delete` — remove a model
+
+    The Pull operation streams newline-delimited JSON. Cancellation works by
+    holding a reference to the open HTTPResponse and calling `.close()` on
+    it from the main thread — that unblocks the worker thread's `read()`
+    immediately. A `threading.Event` alone would not (the worker is
+    syscall-blocked inside the network stack).
+
+    Pure read-only with respect to the project — no project-level state is
+    touched. The user's saved `commit_message_llm.model` is only updated if
+    they explicitly click "Use for AI features".
+    """
+
+    PRESET_MODELS = [
+        # Coder-tuned (top of the roadmap recommendations)
+        "qwen2.5-coder:14b",
+        "qwen2.5-coder:7b",
+        "deepseek-coder-v2:16b",
+        # General instruction-tuned
+        "qwen2.5:14b",
+        "qwen2.5:7b",
+        "mistral-nemo:12b",
+        # Smaller / fast
+        "llama3.1:8b",
+        "llama3.2",
+        "llama3.2:3b",
+    ]
+
+    def __init__(self, parent, base_url: str = "http://localhost:11434",
+                 on_use_for_ai=None):
+        super().__init__(parent)
+        self.title("Ollama Model Manager")
+        self.configure(bg=C["base"])
+        self.resizable(True, True)
+        self.minsize(640, 500)
+        self.geometry("780x620")
+        self.grab_set()
+        self.transient(parent)
+
+        self._base_url = base_url.rstrip("/") if base_url else "http://localhost:11434"
+        self._on_use_for_ai = on_use_for_ai
+        self._current_response = None      # type: ignore[assignment]
+        self._pull_cancelled = False
+        self._pull_active = False
+
+        # ── Header: server URL + check ──────────────────────────────────
+        hdr = tk.Frame(self, bg=C["base"])
+        hdr.pack(fill=tk.X, padx=18, pady=(14, 4))
+        tk.Label(hdr, text="🦙  Ollama Model Manager",
+                 font=("Segoe UI", 13, "bold"),
+                 bg=C["base"], fg=C["blue"]).pack(side=tk.LEFT)
+
+        url_row = tk.Frame(self, bg=C["base"])
+        url_row.pack(fill=tk.X, padx=18, pady=(2, 2))
+        tk.Label(url_row, text="Server:", width=8, anchor=tk.W,
+                 bg=C["base"], fg=C["subtext"],
+                 font=("Segoe UI", 9)).pack(side=tk.LEFT)
+        self._var_base_url = tk.StringVar(value=self._base_url)
+        ttk.Entry(url_row, textvariable=self._var_base_url,
+                  width=42).pack(side=tk.LEFT, padx=(0, 6))
+        ttk.Button(url_row, text="Check connection",
+                   command=self._check_connection).pack(side=tk.LEFT)
+
+        self._conn_lbl = tk.Label(
+            self, text="(click 'Check connection' to verify)",
+            font=("Segoe UI", 9, "italic"),
+            bg=C["base"], fg=C["overlay0"],
+            justify=tk.LEFT, anchor=tk.W)
+        self._conn_lbl.pack(fill=tk.X, padx=18, pady=(0, 8))
+
+        # ── Installed models list ───────────────────────────────────────
+        list_frame = tk.LabelFrame(
+            self, text=" Installed models ",
+            bg=C["base"], fg=C["subtext"],
+            font=("Segoe UI", 9), bd=1, relief=tk.FLAT)
+        list_frame.pack(fill=tk.BOTH, expand=True, padx=18, pady=(0, 6))
+
+        tv_wrap = tk.Frame(list_frame, bg=C["mantle"])
+        tv_wrap.pack(fill=tk.BOTH, expand=True, padx=2, pady=2)
+        self._tv = ttk.Treeview(
+            tv_wrap, columns=("size", "context"),
+            show="tree headings", height=8)
+        self._tv.heading("#0",      text="Model")
+        self._tv.heading("size",    text="Size")
+        self._tv.heading("context", text="Context window")
+        self._tv.column("#0",      width=320, anchor=tk.W)
+        self._tv.column("size",    width=100, anchor=tk.E)
+        self._tv.column("context", width=140, anchor=tk.E)
+        tv_vsb = ttk.Scrollbar(tv_wrap, orient="vertical",
+                                command=self._tv.yview)
+        self._tv.configure(yscrollcommand=tv_vsb.set)
+        self._tv.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
+        tv_vsb.pack(side=tk.RIGHT, fill=tk.Y)
+        self._tv.bind("<<TreeviewSelect>>", self._on_select)
+
+        list_btns = tk.Frame(list_frame, bg=C["base"])
+        list_btns.pack(fill=tk.X, padx=4, pady=(4, 4))
+        ttk.Button(list_btns, text="↻ Refresh",
+                   command=self._refresh_models).pack(side=tk.LEFT)
+        self._use_btn = ttk.Button(
+            list_btns, text="Use for AI features",
+            command=self._use_for_ai, state=tk.DISABLED)
+        self._use_btn.pack(side=tk.LEFT, padx=(8, 0))
+        self._del_btn = ttk.Button(
+            list_btns, text="🗑 Delete",
+            command=self._delete_selected, state=tk.DISABLED)
+        self._del_btn.pack(side=tk.LEFT, padx=(8, 0))
+
+        # ── Pull section ────────────────────────────────────────────────
+        pull_frame = tk.LabelFrame(
+            self, text=" Pull a new model ",
+            bg=C["base"], fg=C["subtext"],
+            font=("Segoe UI", 9), bd=1, relief=tk.FLAT)
+        pull_frame.pack(fill=tk.X, padx=18, pady=(0, 6))
+
+        pull_row = tk.Frame(pull_frame, bg=C["base"])
+        pull_row.pack(fill=tk.X, padx=4, pady=(6, 4))
+        tk.Label(pull_row, text="Model:", width=8, anchor=tk.W,
+                 bg=C["base"], fg=C["subtext"],
+                 font=("Segoe UI", 9)).pack(side=tk.LEFT)
+        self._var_pull = tk.StringVar(value=self.PRESET_MODELS[0])
+        self._pull_combo = ttk.Combobox(
+            pull_row, textvariable=self._var_pull,
+            values=self.PRESET_MODELS, width=28)
+        self._pull_combo.pack(side=tk.LEFT, padx=(0, 6))
+        self._pull_btn = ttk.Button(
+            pull_row, text="Pull", command=self._start_pull)
+        self._pull_btn.pack(side=tk.LEFT)
+
+        self._progress = ttk.Progressbar(
+            pull_frame, orient="horizontal", mode="determinate",
+            maximum=100, value=0)
+        self._progress.pack(fill=tk.X, padx=6, pady=(4, 2))
+        self._pull_status = tk.Label(
+            pull_frame, text="(idle)", font=("Segoe UI", 8),
+            bg=C["base"], fg=C["overlay0"],
+            anchor=tk.W, justify=tk.LEFT)
+        self._pull_status.pack(fill=tk.X, padx=8, pady=(0, 6))
+
+        # ── Close ───────────────────────────────────────────────────────
+        btn_row = tk.Frame(self, bg=C["base"])
+        btn_row.pack(fill=tk.X, padx=18, pady=(0, 14))
+        ttk.Button(btn_row, text="Close",
+                   command=self._on_close).pack(side=tk.RIGHT)
+
+        self.protocol("WM_DELETE_WINDOW", self._on_close)
+
+        # Initial population.
+        self.after(80, self._check_connection)
+        self.after(160, self._refresh_models)
+
+    # ── Networking helpers ──────────────────────────────────────────────
+
+    def _server(self) -> str:
+        v = self._var_base_url.get().strip().rstrip("/")
+        return v or "http://localhost:11434"
+
+    def _check_connection(self):
+        url = self._server() + "/api/version"
+        self._conn_lbl.configure(
+            text="⟳  Checking connection…", fg=C["peach"])
+
+        def _worker():
+            import urllib.request, urllib.error, json as _json
+            try:
+                with urllib.request.urlopen(url, timeout=3) as resp:
+                    data = _json.loads(resp.read().decode("utf-8"))
+                ver = data.get("version", "?")
+                self.after(0, self._conn_lbl.configure,
+                    {"text": f"✓  Connected — Ollama {ver}", "fg": C["green"]})
+            except (urllib.error.URLError, urllib.error.HTTPError,
+                    TimeoutError, _json.JSONDecodeError, OSError) as e:
+                self.after(0, self._conn_lbl.configure,
+                    {"text": f"✗  Not reachable at {self._server()} — "
+                             f"is the Ollama service running? ({type(e).__name__})",
+                     "fg": C["red"]})
+
+        threading.Thread(target=_worker, daemon=True,
+                         name="ollama-version").start()
+
+    def _refresh_models(self):
+        url = self._server() + "/api/tags"
+
+        def _worker():
+            import urllib.request, urllib.error, json as _json
+            try:
+                with urllib.request.urlopen(url, timeout=5) as resp:
+                    data = _json.loads(resp.read().decode("utf-8"))
+            except (urllib.error.URLError, urllib.error.HTTPError,
+                    TimeoutError, _json.JSONDecodeError, OSError):
+                self.after(0, self._populate_models, [])
+                return
+            models = data.get("models") or []
+            # Enrich each with context length via /api/show. This is N HTTP
+            # calls — fine for typical (< 20) installed model counts, and
+            # we cap at 25 to avoid pathological cases.
+            enriched = []
+            for m in models[:25]:
+                name = m.get("name") or m.get("model") or ""
+                size = int(m.get("size") or 0)
+                ctx = self._fetch_context_length(name)
+                enriched.append({"name": name, "size": size, "context": ctx})
+            self.after(0, self._populate_models, enriched)
+
+        threading.Thread(target=_worker, daemon=True,
+                         name="ollama-tags").start()
+
+    def _fetch_context_length(self, name: str) -> int | None:
+        import urllib.request, urllib.error, json as _json
+        url = self._server() + "/api/show"
+        payload = _json.dumps({"name": name}).encode("utf-8")
+        req = urllib.request.Request(
+            url, method="POST", data=payload,
+            headers={"Content-Type": "application/json"})
+        try:
+            with urllib.request.urlopen(req, timeout=5) as resp:
+                data = _json.loads(resp.read().decode("utf-8"))
+        except (urllib.error.URLError, urllib.error.HTTPError,
+                TimeoutError, _json.JSONDecodeError, OSError):
+            return None
+        # Ollama 0.3+ exposes model_info.<arch>.context_length; older
+        # versions use parameters.num_ctx. Try both, fall back to None.
+        mi = data.get("model_info") or {}
+        for k, v in mi.items():
+            if k.endswith(".context_length") and isinstance(v, int):
+                return v
+        params = data.get("parameters") or ""
+        if isinstance(params, str):
+            for line in params.splitlines():
+                if line.lower().startswith("num_ctx"):
+                    parts = line.split()
+                    if len(parts) >= 2 and parts[-1].isdigit():
+                        return int(parts[-1])
+        return None
+
+    def _populate_models(self, rows: list[dict]):
+        self._tv.delete(*self._tv.get_children())
+        if not rows:
+            self._tv.insert("", tk.END, text="(no models found — pull one below)",
+                            values=("", ""))
+            return
+        for r in rows:
+            size_h = self._human_bytes(r["size"])
+            ctx_h = "—" if r["context"] is None else f"{r['context']:,}"
+            self._tv.insert("", tk.END, text=r["name"], values=(size_h, ctx_h))
+
+    @staticmethod
+    def _human_bytes(n: int) -> str:
+        if n <= 0:
+            return "—"
+        for unit in ("B", "KB", "MB", "GB", "TB"):
+            if n < 1024.0:
+                return f"{n:.1f} {unit}" if unit != "B" else f"{int(n)} B"
+            n /= 1024.0
+        return f"{n:.1f} PB"
+
+    # ── Selection-driven actions ────────────────────────────────────────
+
+    def _on_select(self, _evt=None):
+        sel = self._tv.selection()
+        state = tk.NORMAL if sel and self._tv.item(sel[0], "text") else tk.DISABLED
+        self._use_btn.configure(state=state)
+        self._del_btn.configure(state=state)
+
+    def _selected_model(self) -> str:
+        sel = self._tv.selection()
+        if not sel:
+            return ""
+        name = self._tv.item(sel[0], "text") or ""
+        return "" if name.startswith("(no models") else name
+
+    def _use_for_ai(self):
+        name = self._selected_model()
+        if not name:
+            return
+        if self._on_use_for_ai:
+            self._on_use_for_ai(name, self._server())
+            messagebox.showinfo(
+                "Set as AI model",
+                f"'{name}' will be used for AI features.\n\n"
+                "Provider set to 'ollama'.",
+                parent=self)
+        else:
+            # No callback wired — copy to clipboard as a fallback.
+            self.clipboard_clear()
+            self.clipboard_append(name)
+            messagebox.showinfo(
+                "Copied", f"'{name}' copied to clipboard.\n"
+                "Paste it into Settings → AI commit messages → Model.",
+                parent=self)
+
+    def _delete_selected(self):
+        name = self._selected_model()
+        if not name:
+            return
+        if not messagebox.askyesno(
+                "Delete model",
+                f"Delete '{name}' from Ollama?\n\n"
+                "This frees disk space. You can re-pull it later.",
+                parent=self):
+            return
+
+        def _worker(model=name):
+            import urllib.request, urllib.error, json as _json
+            url = self._server() + "/api/delete"
+            payload = _json.dumps({"name": model}).encode("utf-8")
+            req = urllib.request.Request(
+                url, method="DELETE", data=payload,
+                headers={"Content-Type": "application/json"})
+            try:
+                with urllib.request.urlopen(req, timeout=10) as resp:
+                    resp.read()
+                ok = True
+                err = ""
+            except (urllib.error.URLError, urllib.error.HTTPError,
+                    TimeoutError, OSError) as e:
+                ok = False
+                err = f"{type(e).__name__}: {e}"
+            self.after(0, self._after_delete, model, ok, err)
+
+        threading.Thread(target=_worker, daemon=True,
+                         name="ollama-delete").start()
+
+    def _after_delete(self, name: str, ok: bool, err: str):
+        if ok:
+            self._refresh_models()
+        else:
+            messagebox.showerror(
+                "Delete failed",
+                f"Could not delete '{name}'.\n\n{err}",
+                parent=self)
+
+    # ── Pull (streaming) ────────────────────────────────────────────────
+
+    def _start_pull(self):
+        if self._pull_active:
+            # Button is in Cancel mode — second click cancels.
+            self._cancel_pull()
+            return
+        name = self._var_pull.get().strip()
+        if not name:
+            return
+        self._pull_active = True
+        self._pull_cancelled = False
+        self._progress.configure(value=0, maximum=100)
+        self._pull_status.configure(
+            text=f"⟳  Pulling {name}…", fg=C["peach"])
+        self._pull_btn.configure(text="Cancel")
+        self._pull_combo.configure(state=tk.DISABLED)
+
+        def _worker(model=name):
+            import urllib.request, urllib.error, json as _json
+            url = self._server() + "/api/pull"
+            payload = _json.dumps({"name": model, "stream": True}).encode("utf-8")
+            req = urllib.request.Request(
+                url, method="POST", data=payload,
+                headers={"Content-Type": "application/json"})
+            try:
+                # NOTE: no `with` block — we need the response object to
+                # remain accessible from the main thread so a Cancel click
+                # can call .close() on it to break this worker out of read().
+                response = urllib.request.urlopen(req, timeout=30)
+                self._current_response = response
+            except (urllib.error.URLError, urllib.error.HTTPError,
+                    TimeoutError, OSError) as e:
+                self.after(0, self._after_pull, model, False,
+                           f"{type(e).__name__}: {e}")
+                return
+            try:
+                for event in _iter_json_lines(response):
+                    if self._pull_cancelled:
+                        break
+                    status = event.get("status") or ""
+                    total = event.get("total")
+                    completed = event.get("completed")
+                    if isinstance(total, int) and total > 0 and isinstance(completed, int):
+                        pct = max(0.0, min(100.0, 100.0 * completed / total))
+                        msg = (f"{status} — "
+                               f"{self._human_bytes(completed)} / "
+                               f"{self._human_bytes(total)}  ({pct:.0f}%)")
+                        self.after(0, self._update_pull_progress, pct, msg)
+                    elif status:
+                        self.after(0, self._update_pull_status, status)
+                    if status == "success":
+                        self.after(0, self._after_pull, model, True, "")
+                        return
+            finally:
+                try:
+                    response.close()
+                except OSError:
+                    pass
+                self._current_response = None
+            # Stream ended without an explicit "success" — could be cancel,
+            # network drop, or an error event. Cancelled path takes priority.
+            if self._pull_cancelled:
+                self.after(0, self._after_pull, model, False, "cancelled")
+            else:
+                self.after(0, self._after_pull, model, False,
+                           "Stream ended without success")
+
+        self._pull_thread = threading.Thread(
+            target=_worker, daemon=True, name="ollama-pull")
+        self._pull_thread.start()
+
+    def _cancel_pull(self):
+        self._pull_cancelled = True
+        self._pull_status.configure(text="⏹  Cancelling…", fg=C["overlay0"])
+        # Sever the socket immediately so the worker thread's read() unblocks.
+        resp = self._current_response
+        if resp is not None:
+            try:
+                resp.close()
+            except OSError:
+                pass
+
+    def _update_pull_progress(self, pct: float, msg: str):
+        self._progress.configure(value=pct)
+        self._pull_status.configure(text=msg, fg=C["peach"])
+
+    def _update_pull_status(self, status: str):
+        self._pull_status.configure(text=status, fg=C["overlay0"])
+
+    def _after_pull(self, name: str, ok: bool, err: str):
+        self._pull_active = False
+        self._pull_btn.configure(text="Pull")
+        self._pull_combo.configure(state=tk.NORMAL)
+        if ok:
+            self._progress.configure(value=100)
+            self._pull_status.configure(
+                text=f"✓  Pulled {name} successfully.", fg=C["green"])
+            self._refresh_models()
+        else:
+            self._progress.configure(value=0)
+            if err == "cancelled":
+                self._pull_status.configure(
+                    text=f"⏹  Cancelled. Partial download for {name} is kept "
+                         f"by Ollama — re-run Pull to resume (layers are "
+                         f"deduplicated).",
+                    fg=C["overlay0"])
+            else:
+                self._pull_status.configure(
+                    text=f"✗  Pull failed: {err}", fg=C["red"])
+
+    # ── Close ───────────────────────────────────────────────────────────
+
+    def _on_close(self):
+        if self._pull_active:
+            # Cancel any in-flight pull so we don't leave the thread blocked.
+            self._cancel_pull()
+        try:
+            self.destroy()
+        except tk.TclError:
+            pass
+
+
+def _is_claude_running() -> dict:
+    """Detect running Claude Desktop / Claude Code processes.
+
+    Returns a dict: {"desktop": bool, "code": bool, "pids": [int, ...]}.
+
+    Why this matters: Claude Desktop periodically rewrites
+    `claude_desktop_config.json` with its in-memory state, including its
+    cached copy of `mcpServers`. Any edit we make while Desktop is running
+    is silently clobbered within ~1-2 minutes. The configurator dialog
+    refuses to apply a fix to a config whose owning app is currently
+    running — the user gets a clear "quit Claude Desktop, then retry"
+    message instead of a fix that mysteriously reverts itself.
+
+    Best-effort: uses tasklist on Windows. Empty/false results don't
+    block the apply — the warning is advisory, not enforced.
+    """
+    result = {"desktop": False, "code": False, "pids": []}
+    try:
+        r = subprocess.run(
+            ["tasklist", "/FO", "CSV", "/NH"],
+            capture_output=True, text=True, timeout=5,
+            creationflags=CREATE_NO_WINDOW,
+            encoding="utf-8", errors="replace")
+    except (OSError, subprocess.TimeoutExpired):
+        return result
+    for line in (r.stdout or "").splitlines():
+        # CSV: "claude.exe","12345","Console","1","123,456 K"
+        parts = [p.strip().strip('"') for p in line.split(",")]
+        if len(parts) < 2:
+            continue
+        name = parts[0].lower()
+        try:
+            pid = int(parts[1])
+        except ValueError:
+            continue
+        if name == "claude.exe":
+            result["desktop"] = True
+            result["pids"].append(pid)
+        elif name in ("claude-code.exe",):  # currently bundled inside claude.exe; future-proof
+            result["code"] = True
+            result["pids"].append(pid)
+    return result
+
+
+class MCPConfigDialog(tk.Toplevel):
+    """Manage tokensave entries in Claude Desktop's and Claude Code's MCP
+    config files.
+
+    Shows one block per config file with:
+      - Path of the file
+      - Current state badge (✓ correct / ⚠ drift / ✗ missing)
+      - Diff between current and proposed entries
+      - Apply / Skip / Open file actions
+      - Big warning if the owning Claude app is currently running
+
+    Per the show-diff-and-ask protocol in CLAUDE.md: each config gets its
+    own Apply button (no "Fix all"), each Apply writes a timestamped
+    backup before mutating, and the diff is rendered in plain text so the
+    user can read it without leaving the dialog.
+
+    The dialog is the one place in the manager that touches Claude's MCP
+    configs. Other callers (startup banner, Settings button) only LAUNCH
+    this dialog — they never edit the JSON themselves.
+    """
+
+    def __init__(self, parent):
+        super().__init__(parent)
+        self.title("MCP Integration")
+        self.configure(bg=C["base"])
+        self.resizable(True, True)
+        self.minsize(680, 520)
+        self.geometry("820x680")
+        self.grab_set()
+        self.transient(parent)
+
+        # Header
+        hdr = tk.Frame(self, bg=C["base"])
+        hdr.pack(fill=tk.X, padx=18, pady=(14, 4))
+        tk.Label(hdr, text="🔌  MCP Integration",
+                 font=("Segoe UI", 13, "bold"),
+                 bg=C["base"], fg=C["blue"]).pack(side=tk.LEFT)
+        tk.Label(hdr, text="Manage tokensave's wiring into Claude's MCP system.",
+                 font=("Segoe UI", 9, "italic"),
+                 bg=C["base"], fg=C["overlay0"]).pack(side=tk.LEFT, padx=(10, 0))
+
+        # Running-Claude warning banner (populated on detect)
+        self._warn_lbl = tk.Label(
+            self, text="", font=("Segoe UI", 9),
+            bg=C["base"], fg=C["red"],
+            justify=tk.LEFT, anchor=tk.W, wraplength=760)
+        self._warn_lbl.pack(fill=tk.X, padx=18, pady=(2, 4))
+
+        # Scrollable body — same Canvas+Frame pattern as SettingsDialog
+        wrap = tk.Frame(self, bg=C["base"])
+        wrap.pack(fill=tk.BOTH, expand=True, padx=14, pady=(2, 4))
+        self._canvas = tk.Canvas(wrap, bg=C["base"], highlightthickness=0)
+        vsb = ttk.Scrollbar(wrap, orient="vertical", command=self._canvas.yview)
+        self._canvas.configure(yscrollcommand=vsb.set)
+        self._canvas.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
+        vsb.pack(side=tk.RIGHT, fill=tk.Y)
+        self._body = tk.Frame(self._canvas, bg=C["base"])
+        self._body_win = self._canvas.create_window(
+            (0, 0), window=self._body, anchor="nw")
+        self._body.bind(
+            "<Configure>",
+            lambda e: self._canvas.configure(
+                scrollregion=self._canvas.bbox("all")))
+        self._canvas.bind(
+            "<Configure>",
+            lambda e: self._canvas.itemconfigure(
+                self._body_win, width=e.width))
+        for w in (self._canvas, self._body):
+            w.bind(
+                "<MouseWheel>",
+                lambda e: self._canvas.yview_scroll(
+                    int(-1 * (e.delta / 120)), "units"))
+
+        # Footer
+        btn_row = tk.Frame(self, bg=C["base"])
+        btn_row.pack(fill=tk.X, padx=18, pady=(0, 14))
+        ttk.Button(btn_row, text="↻ Re-detect",
+                   command=self._render).pack(side=tk.LEFT)
+        ttk.Button(btn_row, text="Close",
+                   command=self.destroy).pack(side=tk.RIGHT)
+
+        # Per-config-path state for the renderer
+        self._config_state: dict[str, dict] = {}
+        self._render()
+
+    # ── Rendering ───────────────────────────────────────────────────────
+
+    def _render(self):
+        """(Re-)build the per-config blocks. Called once at open and from
+        Re-detect / after each Apply so the state badges stay fresh."""
+        for child in self._body.winfo_children():
+            child.destroy()
+
+        # Warning banner — running Claude apps
+        running = _is_claude_running()
+        if running["desktop"] or running["code"]:
+            apps = []
+            if running["desktop"]:
+                apps.append("Claude Desktop")
+            if running["code"]:
+                apps.append("Claude Code")
+            self._warn_lbl.configure(
+                text=("⚠  " + " / ".join(apps) + " is currently running. "
+                      "It rewrites its own config file every 1–2 minutes, "
+                      "which will silently revert any fix you apply here. "
+                      "Fully quit the app before clicking Apply on its row."))
+        else:
+            self._warn_lbl.configure(text="")
+
+        for label, path in _MCP_CONFIGS:
+            self._render_block(label, path)
+
+    def _render_block(self, label: str, path: str):
+        info = _classify_mcp_entry(path)
+        self._config_state[path] = info
+
+        # Section frame
+        frame = tk.LabelFrame(
+            self._body, text=f"  {label}  ",
+            bg=C["base"], fg=C["text"],
+            font=("Segoe UI", 10, "bold"),
+            bd=1, relief=tk.GROOVE)
+        frame.pack(fill=tk.X, padx=4, pady=(8, 4), ipady=4)
+
+        # Path + status row
+        head = tk.Frame(frame, bg=C["base"])
+        head.pack(fill=tk.X, padx=8, pady=(4, 2))
+        tk.Label(head, text=path, font=("Consolas", 9),
+                 bg=C["base"], fg=C["subtext"]).pack(side=tk.LEFT)
+
+        # UWP / traditional install indicator — only meaningful for the
+        # Desktop row.  Users hitting the UWP path-redirection footgun
+        # need to SEE that the manager is targeting the package-internal
+        # config, not %APPDATA%\Claude\.  Knowing this prevents a whole
+        # category of "I edited the file but Desktop ignores my fix"
+        # confusion.
+        if label == "Claude Desktop":
+            is_uwp = "\\Packages\\Claude_" in path
+            install_tag = ("(UWP / Store install)" if is_uwp
+                           else "(Traditional install)")
+            tag_colour = C["blue"] if is_uwp else C["overlay0"]
+            tk.Label(head, text="  " + install_tag,
+                     font=("Segoe UI", 8, "italic"),
+                     bg=C["base"], fg=tag_colour).pack(side=tk.LEFT)
+
+        state = info["state"]
+        if state == "ok":
+            badge_colour = C["green"]
+        elif state in ("direct_serve", "wrong_wrapper"):
+            badge_colour = C["peach"]
+        else:
+            badge_colour = C["red"]
+        tk.Label(head, text=info["label"],
+                 font=("Segoe UI", 9, "bold"),
+                 bg=C["base"], fg=badge_colour).pack(side=tk.RIGHT)
+
+        # Issue text (always shown for clarity, even on ok)
+        issue_text = info["issue"] or "No action needed — already routes through the wrapper."
+        tk.Label(frame, text=issue_text,
+                 font=("Segoe UI", 9),
+                 bg=C["base"], fg=C["overlay0"],
+                 justify=tk.LEFT, wraplength=720, anchor=tk.W).pack(
+            fill=tk.X, padx=8, pady=(0, 4))
+
+        # Diff (only if there's something to change)
+        if state != "ok":
+            diff_box = tk.Text(
+                frame, height=8, font=("Consolas", 9),
+                bg=C["mantle"], fg=C["text"],
+                relief=tk.FLAT, padx=8, pady=6, wrap=tk.NONE,
+                state=tk.NORMAL)
+            diff_box.tag_configure("old", foreground="#f38ba8")
+            diff_box.tag_configure("new", foreground="#a6e3a1")
+            diff_box.tag_configure("hdr", foreground=C["overlay0"],
+                                    font=("Consolas", 9, "italic"))
+
+            if info["current"] is None:
+                diff_box.insert(tk.END, "  (no current entry — will be added)\n", "hdr")
+            else:
+                diff_box.insert(tk.END, "  --- current ---\n", "hdr")
+                for line in json.dumps(info["current"], indent=2).splitlines():
+                    diff_box.insert(tk.END, "  - " + line + "\n", "old")
+            diff_box.insert(tk.END, "  +++ proposed +++\n", "hdr")
+            for line in json.dumps(info["proposed"], indent=2).splitlines():
+                diff_box.insert(tk.END, "  + " + line + "\n", "new")
+
+            # Auto-size height to content, capped
+            line_count = int(diff_box.index("end-1c").split(".")[0])
+            diff_box.configure(height=min(max(line_count + 1, 6), 18),
+                               state=tk.DISABLED)
+            diff_box.pack(fill=tk.X, padx=8, pady=(2, 4))
+
+        # Action row
+        actions = tk.Frame(frame, bg=C["base"])
+        actions.pack(fill=tk.X, padx=8, pady=(2, 4))
+
+        if state == "ok":
+            ttk.Button(actions, text="Open file",
+                       command=lambda p=path: self._open_file(p)).pack(side=tk.LEFT)
+        else:
+            apply_btn = ttk.Button(
+                actions, text="Apply this fix",
+                style="Primary.TButton",
+                command=lambda p=path, l=label: self._apply(p, l))
+            apply_btn.pack(side=tk.LEFT)
+
+            ttk.Button(actions, text="Skip (don't warn again)",
+                       command=lambda p=path: self._skip(p)).pack(
+                side=tk.LEFT, padx=(8, 0))
+            ttk.Button(actions, text="Open file",
+                       command=lambda p=path: self._open_file(p)).pack(
+                side=tk.LEFT, padx=(8, 0))
+
+        # Backup-notice strip
+        tk.Label(frame,
+            text=("  A timestamped backup is written before any change. "
+                  "Other mcpServers entries in this file are preserved verbatim."),
+            font=("Segoe UI", 8, "italic"),
+            bg=C["base"], fg=C["overlay0"],
+            justify=tk.LEFT, anchor=tk.W).pack(
+            fill=tk.X, padx=8, pady=(0, 4))
+
+    # ── Actions ─────────────────────────────────────────────────────────
+
+    def _apply(self, cfg_path: str, label: str):
+        # Pre-flight: don't apply over a running Claude.  The previous
+        # version of this method used a showwarning that was easy to
+        # dismiss without realising the Apply was a no-op — the row state
+        # didn't change visibly, no main-log entry appeared, and users
+        # walked away thinking the fix had landed.  Now: showerror (which
+        # uses the red-X icon and reads as a rejection, not a hint), a
+        # main-log line in red so the OUTPUT pane records it persistently,
+        # and a forced re-render so any state-change (or lack thereof)
+        # is visible immediately.
+        running = _is_claude_running()
+        if (label == "Claude Desktop" and running["desktop"]) or \
+           (label == "Claude Code" and running["code"]):
+            try:
+                # The parent App is the manager window; reach back to log()
+                # so the message lands in the persistent OUTPUT pane.
+                self.master._log(
+                    f"MCP Apply REFUSED: {label} is still running. "
+                    f"No changes were written. Quit {label} (verify zero "
+                    f"rows in Task Manager) then click Apply again.",
+                    C["red"])
+            except (AttributeError, tk.TclError):
+                pass
+            messagebox.showerror(
+                f"Apply refused — {label} is running",
+                f"{label} is currently running and is reading the MCP "
+                "config from its in-memory cache.  Writing to the file now "
+                "would either be ignored (Desktop only reloads at startup) "
+                "or silently reverted (Desktop writes its cache back to "
+                "disk every 1–2 minutes).\n\n"
+                "★  NO CHANGES WERE WRITTEN  ★\n\n"
+                f"To fix:\n"
+                f"1. Fully quit {label} (tray icon → Quit).\n"
+                f"2. Verify ZERO rows for 'claude' in Task Manager.\n"
+                f"3. Wait ~5 seconds for stragglers (crashpad, renderer).\n"
+                "4. Click Re-detect, then Apply this fix.",
+                parent=self)
+            self._render()
+            return
+
+        proposed = self._config_state[cfg_path]["proposed"]
+        ok, msg = _apply_mcp_fix(cfg_path, proposed)
+        if ok:
+            try:
+                self.master._log(
+                    f"MCP Apply OK: wrote canonical tokensave entry to "
+                    f"{label} config.  {msg}",
+                    C["green"])
+            except (AttributeError, tk.TclError):
+                pass
+            messagebox.showinfo(
+                "Fix applied", f"{msg}\n\n"
+                "Status row below has been refreshed.",
+                parent=self)
+            # Take the path off the skip list if it was on it.
+            skips = (_cfg.get("mcp_skip_warnings") or []) \
+                    if isinstance(_cfg, dict) else []
+            if cfg_path in skips:
+                skips.remove(cfg_path)
+                _cfg["mcp_skip_warnings"] = skips
+                _save_config(_cfg)
+            self._render()
+        else:
+            try:
+                self.master._log(
+                    f"MCP Apply FAILED: {label} — {msg}", C["red"])
+            except (AttributeError, tk.TclError):
+                pass
+            messagebox.showerror("Fix failed", msg, parent=self)
+            self._render()
+
+    def _skip(self, cfg_path: str):
+        skips = (_cfg.get("mcp_skip_warnings") or []) \
+                if isinstance(_cfg, dict) else []
+        if cfg_path not in skips:
+            skips.append(cfg_path)
+            _cfg["mcp_skip_warnings"] = skips
+            _save_config(_cfg)
+        messagebox.showinfo(
+            "Skipped",
+            f"Won't warn about {cfg_path} on startup anymore.\n\n"
+            "Open this dialog from Settings → MCP integration to revisit.",
+            parent=self)
+
+    def _open_file(self, cfg_path: str):
+        """Open the config file in the user's default editor, or its parent
+        folder if the file doesn't exist yet."""
+        try:
+            if os.path.isfile(cfg_path):
+                os.startfile(cfg_path)
+            else:
+                parent_dir = os.path.dirname(cfg_path)
+                if os.path.isdir(parent_dir):
+                    os.startfile(parent_dir)
+                else:
+                    messagebox.showwarning(
+                        "Not found",
+                        f"Neither {cfg_path} nor its parent directory exists.",
+                        parent=self)
+        except OSError as e:
+            messagebox.showerror("Could not open", str(e), parent=self)
+
+
+class AICodeReviewDialog(tk.Toplevel):
+    """Stage 1 of the agentic-AI roadmap: AI Code Review on the pending diff.
+
+    Pure read-only. Calls _call_llm once with a "you are a code reviewer"
+    system prompt and the project's `git diff HEAD` output. Result is
+    displayed as Markdown-style structured text. No tool calls, no file
+    writes, no autonomy concerns — just a one-shot review.
+
+    Async pattern matches GitCommitDialog: daemon thread runs the LLM call,
+    spinner shows progress, self.after(0, ...) pushes the result back to
+    the main thread. Stop button aborts the in-flight request.
+    """
+
+    _SYSTEM_PROMPT = (
+        "You are a senior code reviewer reviewing a pending git diff. "
+        "Produce a structured Markdown report.\n\n"
+        "Output format:\n\n"
+        "## ⚠ High severity\n"
+        "- <finding> (file:line)\n\n"
+        "## ⚡ Medium severity\n"
+        "- <finding> (file:line)\n\n"
+        "## 💡 Low severity / nits\n"
+        "- <finding> (file:line)\n\n"
+        "## ℹ Observations\n"
+        "- <design note>\n\n"
+        "Rules:\n"
+        "- One bullet per finding. Cite file:line when possible.\n"
+        "- Omit a section entirely if it has nothing — don't write empty sections.\n"
+        "- Do NOT repeat the diff back at me.\n"
+        "- Focus on correctness, security, and maintainability — not formatting.\n"
+        "- Match the project's existing style (judge by surrounding context).\n"
+        "- Output ONLY the report. No preamble, no closing remarks."
+    )
+
+    def __init__(self, parent, path: str, llm_cfg: dict):
+        super().__init__(parent)
+        self.title(f"AI Code Review — {os.path.basename(path)}")
+        self.configure(bg=C["base"])
+        self.resizable(True, True)
+        self.minsize(700, 500)
+        self.geometry("900x720")
+        self.grab_set()
+        self.transient(parent)
+
+        self._path = path
+        self._llm_cfg = llm_cfg
+        self._review_token = 0
+        self._cancelled = False
+
+        # ── Header ───────────────────────────────────────────────────────
+        hdr = tk.Frame(self, bg=C["base"])
+        hdr.pack(fill=tk.X, padx=20, pady=(14, 6))
+        tk.Label(hdr, text="🔍  AI Code Review",
+                 font=("Segoe UI", 13, "bold"),
+                 bg=C["base"], fg=C["blue"]).pack(side=tk.LEFT)
+        tk.Label(hdr, text=os.path.basename(path),
+                 font=("Segoe UI", 10),
+                 bg=C["base"], fg=C["overlay0"]).pack(side=tk.LEFT, padx=(10, 0))
+
+        # Live status (spinner + provider/model info)
+        self._status_lbl = tk.Label(
+            self, text="", font=("Segoe UI", 9, "italic"),
+            bg=C["base"], fg=C["peach"],
+            justify=tk.LEFT, anchor=tk.W)
+        self._status_lbl.pack(fill=tk.X, padx=20, pady=(0, 6))
+
+        # ── Split: diff (top) + review output (bottom) ───────────────────
+        paned = tk.PanedWindow(self, orient=tk.VERTICAL, bg=C["base"],
+                                sashwidth=6, sashrelief=tk.FLAT)
+        paned.pack(fill=tk.BOTH, expand=True, padx=20, pady=(0, 8))
+
+        # Diff view
+        diff_frame = tk.LabelFrame(
+            paned, text=" Pending diff (git diff HEAD) ",
+            bg=C["base"], fg=C["subtext"],
+            font=("Segoe UI", 9), bd=1, relief=tk.FLAT)
+        diff_inner = tk.Frame(diff_frame, bg=C["mantle"])
+        diff_inner.pack(fill=tk.BOTH, expand=True, padx=2, pady=2)
+        self._diff_txt = tk.Text(
+            diff_inner, bg=C["mantle"], fg=C["text"],
+            relief=tk.FLAT, font=("Consolas", 9),
+            padx=8, pady=6, wrap=tk.NONE, height=14)
+        diff_vsb = ttk.Scrollbar(diff_inner, orient="vertical",
+                                  command=self._diff_txt.yview)
+        diff_hsb = ttk.Scrollbar(diff_inner, orient="horizontal",
+                                  command=self._diff_txt.xview)
+        self._diff_txt.configure(
+            yscrollcommand=diff_vsb.set, xscrollcommand=diff_hsb.set)
+        self._diff_txt.grid(row=0, column=0, sticky="nsew")
+        diff_vsb.grid(row=0, column=1, sticky="ns")
+        diff_hsb.grid(row=1, column=0, sticky="ew")
+        diff_inner.grid_rowconfigure(0, weight=1)
+        diff_inner.grid_columnconfigure(0, weight=1)
+        # Catppuccin Mocha-ish diff colours
+        self._diff_txt.tag_configure("add",      foreground="#a6e3a1")
+        self._diff_txt.tag_configure("del",      foreground="#f38ba8")
+        self._diff_txt.tag_configure("hunk",     foreground="#89b4fa")
+        self._diff_txt.tag_configure("filename", foreground="#cba6f7",
+                                      font=("Consolas", 9, "bold"))
+        paned.add(diff_frame, minsize=120, stretch="always")
+
+        # Review output
+        rev_frame = tk.LabelFrame(
+            paned, text=" AI review ",
+            bg=C["base"], fg=C["subtext"],
+            font=("Segoe UI", 9), bd=1, relief=tk.FLAT)
+        rev_inner = tk.Frame(rev_frame, bg=C["mantle"])
+        rev_inner.pack(fill=tk.BOTH, expand=True, padx=2, pady=2)
+        self._rev_txt = tk.Text(
+            rev_inner, bg=C["mantle"], fg=C["text"],
+            relief=tk.FLAT, font=("Segoe UI", 10),
+            padx=10, pady=8, wrap=tk.WORD, height=14)
+        rev_vsb = ttk.Scrollbar(rev_inner, orient="vertical",
+                                 command=self._rev_txt.yview)
+        self._rev_txt.configure(yscrollcommand=rev_vsb.set)
+        self._rev_txt.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
+        rev_vsb.pack(side=tk.RIGHT, fill=tk.Y)
+        # Section header colours for the markdown-ish review text
+        self._rev_txt.tag_configure(
+            "h_high",   foreground="#f38ba8",
+            font=("Segoe UI", 11, "bold"), spacing1=8, spacing3=2)
+        self._rev_txt.tag_configure(
+            "h_medium", foreground="#fab387",
+            font=("Segoe UI", 11, "bold"), spacing1=8, spacing3=2)
+        self._rev_txt.tag_configure(
+            "h_low",    foreground="#f9e2af",
+            font=("Segoe UI", 11, "bold"), spacing1=8, spacing3=2)
+        self._rev_txt.tag_configure(
+            "h_info",   foreground="#89b4fa",
+            font=("Segoe UI", 11, "bold"), spacing1=8, spacing3=2)
+        paned.add(rev_frame, minsize=150, stretch="always")
+
+        # ── Action buttons ──────────────────────────────────────────────
+        btn_row = tk.Frame(self, bg=C["base"])
+        btn_row.pack(fill=tk.X, padx=20, pady=(0, 14))
+        self._copy_btn = ttk.Button(
+            btn_row, text="Copy review to clipboard",
+            command=self._copy_review, state=tk.DISABLED)
+        self._copy_btn.pack(side=tk.LEFT, padx=(0, 6))
+        self._regen_btn = ttk.Button(
+            btn_row, text="Regenerate",
+            command=self._start_review, state=tk.DISABLED)
+        self._regen_btn.pack(side=tk.LEFT, padx=(0, 6))
+        self._stop_btn = ttk.Button(
+            btn_row, text="Stop", command=self._cancel)
+        self._stop_btn.pack(side=tk.LEFT, padx=(0, 6))
+        ttk.Button(btn_row, text="Close",
+                   command=self.destroy).pack(side=tk.RIGHT)
+
+        # ── Load diff & kick off review ─────────────────────────────────
+        self._load_diff()
+        self._start_review()
+
+    # ─────────────────────────────────────────────────────────────────────
+
+    def _load_diff(self):
+        """Read the pending diff and render it into the diff pane."""
+        diff = _pending_diff(self._path, lines_of_context=3)
+        self._diff_txt.configure(state=tk.NORMAL)
+        self._diff_txt.delete("1.0", tk.END)
+        if not diff:
+            self._diff_txt.insert(tk.END, "(no pending changes)")
+            self._diff_txt.configure(state=tk.DISABLED)
+            self._show_status("No pending diff to review.", colour=C["overlay0"])
+            self._stop_btn.configure(state=tk.DISABLED)
+            self._regen_btn.configure(state=tk.DISABLED)
+            return
+        for line in diff.splitlines():
+            tag = ""
+            if line.startswith("+++") or line.startswith("---"):
+                tag = "filename"
+            elif line.startswith("+"):
+                tag = "add"
+            elif line.startswith("-"):
+                tag = "del"
+            elif line.startswith("@@"):
+                tag = "hunk"
+            self._diff_txt.insert(tk.END, line + "\n", tag)
+        self._diff_txt.configure(state=tk.DISABLED)
+
+    def _start_review(self):
+        """Kick off (or restart) the LLM review on a background thread.
+
+        Streams tokens from the LLM into the review pane as they arrive, so
+        the user sees output building up in real time instead of staring at
+        a spinner for 30+ seconds. Tokens are batched on the worker side
+        (every ~8 deltas or 50 ms, whichever first) before being pushed to
+        the Tk main thread via `self.after` — a fast local model can emit
+        80+ tokens/s and 1:1 self.after calls would saturate Tk's event
+        loop. The accumulated full text is still returned at end-of-stream
+        so the existing `_render_review` (which applies severity-section
+        colour tags) can do its final pass.
+        """
+        diff = _pending_diff(self._path, lines_of_context=3)
+        if not diff:
+            return
+        self._review_token += 1
+        token = self._review_token
+        self._cancelled = False
+        self._streaming_started = False  # placeholder cleared on first token
+
+        provider = self._llm_cfg.get("provider", "?")
+        model    = self._llm_cfg.get("model", "?")
+        self._show_status(
+            f"⟳  Streaming review with {provider} / {model}…  "
+            f"(can take 30–60s on local models)",
+            colour=C["peach"])
+        self._rev_txt.configure(state=tk.NORMAL)
+        self._rev_txt.delete("1.0", tk.END)
+        self._rev_txt.insert(tk.END, "(waiting for first token…)")
+        self._rev_txt.configure(state=tk.DISABLED)
+
+        self._copy_btn.configure(state=tk.DISABLED)
+        self._regen_btn.configure(state=tk.DISABLED)
+        self._stop_btn.configure(state=tk.NORMAL)
+
+        max_chars = int(self._llm_cfg.get("max_diff_chars", 24000))
+        # Construct the user prompt — just the diff with context.
+        user_prompt = (
+            f"Review the following git diff. Project: "
+            f"{os.path.basename(self._path)}.\n\n"
+            f"```diff\n{diff[:max_chars]}\n```"
+            + ("\n\n[diff truncated for length]" if len(diff) > max_chars else "")
+        )
+
+        # Worker-thread-only batching buffer. No lock needed because both
+        # `_on_token` and the final-flush call run on the worker thread, and
+        # the captured snapshot is passed by value into `self.after`.
+        batch_text: list[str] = []
+        batch_chars = [0]
+        last_flush = [time.monotonic()]
+
+        def _flush(snapshot: str, tok=token):
+            # Runs on the Tk main thread.
+            if tok != self._review_token or self._cancelled:
+                return
+            self._stream_append(snapshot)
+
+        def _on_token(delta: str):
+            # Runs on the worker thread.
+            batch_text.append(delta)
+            batch_chars[0] += len(delta)
+            now = time.monotonic()
+            if batch_chars[0] >= 32 or (now - last_flush[0]) >= 0.05:
+                snapshot = "".join(batch_text)
+                batch_text.clear()
+                batch_chars[0] = 0
+                last_flush[0] = now
+                try:
+                    self.after(0, _flush, snapshot)
+                except RuntimeError:
+                    # Dialog destroyed mid-stream — stop trying to push.
+                    pass
+
+        def _worker(tok=token):
+            try:
+                result = _call_llm(
+                    self._llm_cfg,
+                    self._SYSTEM_PROMPT,
+                    user_prompt,
+                    max_tokens=2000,
+                    on_token=_on_token,
+                )
+            except Exception:
+                log.exception("AI code review worker failed")
+                result = None
+            # Final flush — any tokens still buffered when the stream ended.
+            if batch_text:
+                snapshot = "".join(batch_text)
+                batch_text.clear()
+                try:
+                    self.after(0, _flush, snapshot)
+                except RuntimeError:
+                    pass
+            try:
+                self.after(0, self._on_review_ready, tok, result)
+            except RuntimeError:
+                # Dialog destroyed before result arrived — silent drop.
+                pass
+
+        threading.Thread(target=_worker, daemon=True,
+                         name="ai-code-review-worker").start()
+
+    def _stream_append(self, text: str):
+        """Append a batch of streamed tokens to the review pane.
+
+        On the first call after `_start_review`, clears the placeholder
+        ('(waiting for first token…)'). Auto-scrolls so the latest content
+        stays visible. Section-header colour tags are NOT applied here —
+        they get a clean re-render in `_on_review_ready` once the full text
+        is available, which keeps the streaming path simple (no need to
+        re-tag partial lines as they grow).
+        """
+        if not text:
+            return
+        self._rev_txt.configure(state=tk.NORMAL)
+        if not getattr(self, "_streaming_started", False):
+            self._rev_txt.delete("1.0", tk.END)
+            self._streaming_started = True
+        self._rev_txt.insert(tk.END, text)
+        self._rev_txt.see(tk.END)
+        self._rev_txt.configure(state=tk.DISABLED)
+
+    def _on_review_ready(self, token: int, result):
+        """Main-thread callback: receive the LLM result."""
+        if token != self._review_token or self._cancelled:
+            return  # stale or cancelled
+        self._stop_btn.configure(state=tk.DISABLED)
+        self._regen_btn.configure(state=tk.NORMAL)
+        if not result:
+            self._show_status(
+                "⚠  LLM call failed or returned empty. Check Settings → "
+                "AI commit messages (provider / model / server running).",
+                colour=C["red"])
+            self._rev_txt.configure(state=tk.NORMAL)
+            self._rev_txt.delete("1.0", tk.END)
+            self._rev_txt.insert(
+                tk.END,
+                "No review produced. Common causes:\n\n"
+                "• Ollama / LM Studio server isn't running\n"
+                "• Model name in Settings doesn't match a loaded model\n"
+                "• Timeout exceeded (try a smaller / non-reasoning model)\n"
+                "• Diff exceeds context window — try a model with more context")
+            self._rev_txt.configure(state=tk.DISABLED)
+            return
+        self._render_review(result)
+        self._show_status(
+            f"✓  Review complete. {self._llm_cfg.get('provider')} / "
+            f"{self._llm_cfg.get('model')}",
+            colour=C["green"])
+        self._copy_btn.configure(state=tk.NORMAL)
+        self._last_review = result
+
+    def _render_review(self, text: str):
+        """Insert the review text with section-header colour tags."""
+        self._rev_txt.configure(state=tk.NORMAL)
+        self._rev_txt.delete("1.0", tk.END)
+        for line in text.splitlines():
+            stripped = line.lstrip()
+            tag = ""
+            if stripped.startswith("## ⚠") or stripped.lower().startswith("## high"):
+                tag = "h_high"
+            elif stripped.startswith("## ⚡") or stripped.lower().startswith("## medium"):
+                tag = "h_medium"
+            elif stripped.startswith("## 💡") or stripped.lower().startswith("## low"):
+                tag = "h_low"
+            elif stripped.startswith("## ℹ") or stripped.lower().startswith("## observ"):
+                tag = "h_info"
+            if tag:
+                self._rev_txt.insert(tk.END, line + "\n", tag)
+            else:
+                self._rev_txt.insert(tk.END, line + "\n")
+        self._rev_txt.configure(state=tk.DISABLED)
+
+    def _show_status(self, text: str, colour: str):
+        self._status_lbl.configure(text=text, fg=colour)
+
+    def _cancel(self):
+        """User clicked Stop. The worker thread is daemon and will exit when
+        the LLM responds (we can't actually kill urllib mid-call from another
+        thread), but the result will be discarded by token mismatch."""
+        self._cancelled = True
+        self._review_token += 1   # invalidate the in-flight token
+        self._show_status(
+            "Cancelled. The background request may still finish but its "
+            "result will be discarded.",
+            colour=C["overlay0"])
+        self._stop_btn.configure(state=tk.DISABLED)
+        self._regen_btn.configure(state=tk.NORMAL)
+        self._rev_txt.configure(state=tk.NORMAL)
+        self._rev_txt.delete("1.0", tk.END)
+        self._rev_txt.insert(tk.END, "(cancelled)")
+        self._rev_txt.configure(state=tk.DISABLED)
+
+    def _copy_review(self):
+        text = getattr(self, "_last_review", "")
+        if not text:
+            return
+        try:
+            self.clipboard_clear()
+            self.clipboard_append(text)
+            self._show_status("✓  Review copied to clipboard.", colour=C["green"])
+        except tk.TclError:
+            pass
+
+
 class GitCommitDialog(tk.Toplevel):
     """
     Stage and commit changes in a project's git repository.
@@ -8449,12 +12652,29 @@ class GitCommitDialog(tk.Toplevel):
         ttk.Separator(self, orient="horizontal").pack(fill=tk.X, padx=20, pady=(2, 8))
 
         # ── Commit message ──
+        # Async-suggestion infrastructure:
+        # `_suggestion_token` is bumped every time a new request is issued
+        # (initial fill or 💡 Suggest click). The background worker stamps its
+        # result with the token it captured at launch — if a newer request has
+        # since started, the stale result is discarded.
+        # `_user_has_edited` flips to True the moment the user touches the
+        # field, after which background results are silently dropped so we
+        # never overwrite their typing.
+        self._suggestion_token = 0
+        self._user_has_edited = False
+
         msg_hdr = tk.Frame(self, bg=C["base"])
         msg_hdr.pack(fill=tk.X, padx=20, pady=(0, 4))
         tk.Label(msg_hdr,
                  text="Commit message:",
                  font=("Segoe UI", 9, "bold"),
                  bg=C["base"], fg=C["text"]).pack(side=tk.LEFT)
+        # Spinner / status label between header and Suggest button — empty
+        # when idle, "⟳ Generating with AI…" while the worker runs.
+        self._suggest_status_lbl = tk.Label(
+            msg_hdr, text="", font=("Segoe UI", 8, "italic"),
+            bg=C["base"], fg=C["peach"])
+        self._suggest_status_lbl.pack(side=tk.LEFT, padx=(12, 0))
         ttk.Button(msg_hdr, text="💡 Suggest",
                    command=self._fill_suggestion).pack(side=tk.RIGHT)
 
@@ -8467,11 +12687,23 @@ class GitCommitDialog(tk.Toplevel):
                                 padx=8, pady=6, wrap=tk.WORD)
         self._msg_txt.pack(fill=tk.X)
 
-        # Auto-populate with a suggestion based on currently selected files
-        suggestion = _suggest_commit_message(status_text) if is_repo else ""
-        if suggestion:
-            self._msg_txt.insert(tk.END, suggestion)
-            self._msg_txt.tag_add(tk.SEL, "1.0", tk.END)  # pre-select so typing replaces it
+        # Mark the field as user-edited on any keypress (other than navigation).
+        # This is how the async result knows to NOT overwrite the user's input.
+        def _on_key(event):
+            # Skip pure navigation / modifier keys so clicking around doesn't
+            # falsely lock the field.
+            if event.keysym in ("Left", "Right", "Up", "Down", "Home", "End",
+                                 "Prior", "Next", "Shift_L", "Shift_R",
+                                 "Control_L", "Control_R", "Alt_L", "Alt_R",
+                                 "Tab", "Escape", "Caps_Lock"):
+                return
+            self._user_has_edited = True
+        self._msg_txt.bind("<KeyPress>", _on_key, add="+")
+
+        # Kick off the initial suggestion (sync if heuristic-only, async if LLM
+        # might be involved — see `_populate_suggestion`).
+        if is_repo:
+            self._populate_suggestion(status_text, source="initial")
         self._msg_txt.focus_set()
 
         # ── Action buttons ──
@@ -8510,18 +12742,98 @@ class GitCommitDialog(tk.Toplevel):
 
     def _fill_suggestion(self):
         """Replace the commit message field with a fresh suggestion based on
-        currently *selected* files only."""
+        currently *selected* files only. Resets the user-edited flag so the
+        async result is allowed to land — clicking 💡 Suggest is an explicit
+        opt-in to overwrite whatever is in the field."""
         selected_lines = []
         for var, fname, xy in self._file_vars:
             if var.get():
                 selected_lines.append(f"{xy} {fname}")
         sub_status = "\n".join(selected_lines) if selected_lines else self._status_raw
-        suggestion = _suggest_commit_message(sub_status)
-        if not suggestion:
-            suggestion = "chore: update files"
+        # User pressed Suggest — they want to overwrite. Re-arm.
+        self._user_has_edited = False
+        self._populate_suggestion(sub_status, source="suggest_button")
+
+    def _populate_suggestion(self, status_text: str, source: str = "initial"):
+        """Run the commit-message orchestrator and populate the message field.
+
+        Synchronous when LLM is disabled (heuristics are fast).
+        Asynchronous when LLM is enabled — a daemon thread calls the
+        orchestrator while the dialog stays responsive; the spinner label
+        shows progress; the result lands via `self.after(0, …)`.
+
+        `source` is informational ("initial" / "suggest_button") for logging.
+        """
+        llm_cfg = (_cfg.get("commit_message_llm") or {}) if isinstance(_cfg, dict) else {}
+        llm_active = bool(llm_cfg.get("enabled"))
+
+        if not llm_active:
+            # Heuristics only — instant, no spinner needed.
+            result = _suggest_commit_message(self._path, status_text) or "chore: update files"
+            self._apply_suggestion(result)
+            return
+
+        # Async path. Bump token so an in-flight earlier request loses the race.
+        self._suggestion_token += 1
+        my_token = self._suggestion_token
+
+        # Visible spinner
+        self._suggest_status_lbl.configure(
+            text="⟳  Generating with AI…  (can take 30–60s on local models)",
+            fg=C["peach"])
+        # Optional: drop a placeholder in the field if it's currently empty,
+        # so the user sees "something is happening" without confusing focus.
+        if not self._msg_txt.get("1.0", tk.END).strip() and not self._user_has_edited:
+            self._msg_txt.delete("1.0", tk.END)
+            self._msg_txt.insert(tk.END, "(generating commit message…)")
+            self._msg_txt.tag_add(tk.SEL, "1.0", tk.END)
+            # The placeholder counts as "not user-edited"; rebind so any
+            # actual keystroke flips the flag.
+            self._user_has_edited = False
+
+        def _worker(path=self._path, st=status_text, tok=my_token):
+            try:
+                result = _suggest_commit_message(path, st)
+            except Exception as exc:
+                log.exception("Suggestion worker failed")
+                result = ""
+            # Always come back to the main thread to touch widgets.
+            try:
+                self.after(0, self._on_suggestion_ready, tok, result)
+            except RuntimeError:
+                # Dialog was destroyed before result arrived — silent drop.
+                pass
+
+        threading.Thread(target=_worker, daemon=True,
+                         name="commit-suggestion-worker").start()
+
+    def _on_suggestion_ready(self, token: int, result: str):
+        """Main-thread callback: receive the orchestrator's result."""
+        # Clear spinner regardless of outcome.
+        self._suggest_status_lbl.configure(text="")
+        # Stale request (a newer Suggest click already ran) — discard.
+        if token != self._suggestion_token:
+            return
+        # User started editing after we kicked off — respect their input.
+        if self._user_has_edited:
+            return
+        # Empty result → keep placeholder cleared and offer a generic fallback
+        if not result:
+            result = "chore: update files"
+        self._apply_suggestion(result)
+
+    def _apply_suggestion(self, suggestion: str):
+        """Insert `suggestion` into the message field, select first line."""
         self._msg_txt.delete("1.0", tk.END)
         self._msg_txt.insert(tk.END, suggestion)
-        self._msg_txt.tag_add(tk.SEL, "1.0", tk.END)
+        first_line_end = self._msg_txt.search("\n", "1.0", tk.END)
+        if first_line_end:
+            self._msg_txt.tag_add(tk.SEL, "1.0", first_line_end)
+        else:
+            self._msg_txt.tag_add(tk.SEL, "1.0", tk.END)
+        # Inserting from code shouldn't count as user editing — keep the flag
+        # consistent (it's already False; explicit reset for clarity).
+        self._user_has_edited = False
         self._msg_txt.focus_set()
 
     def _apply(self):
