@@ -17,6 +17,7 @@ import logging
 import logging.handlers
 import ctypes
 import sys
+import dataclasses
 from datetime import datetime
 import tkinter as tk
 from tkinter import ttk, filedialog, messagebox, simpledialog
@@ -238,6 +239,60 @@ def _canonical_mcp_entry() -> dict:
     return {"command": py, "args": [wrapper]}
 
 
+@dataclasses.dataclass
+class _McpCtx:
+    cmd: str
+    cmd_lower: str
+    args: list
+    is_claude_code: bool
+
+
+def _chk_bundled_wrapper(ctx: "_McpCtx", base: dict) -> dict | None:
+    if ctx.cmd_lower.endswith("tokensave-wrapper.exe"):
+        return {**base, "state": "ok", "label": "✓ correct (bundled wrapper)", "issue": ""}
+    return None
+
+
+def _chk_python_wrapper(ctx: "_McpCtx", base: dict) -> dict | None:
+    if not (ctx.cmd_lower.endswith("pythonw.exe") or ctx.cmd_lower.endswith("python.exe")):
+        return None
+    if not (ctx.args and isinstance(ctx.args[0], str)
+            and ctx.args[0].lower().endswith("tokensave-wrapper.py")):
+        return None
+    if os.path.isfile(ctx.args[0]):
+        return {**base, "state": "ok", "label": "✓ correct", "issue": ""}
+    return {**base, "state": "wrong_wrapper", "label": "⚠ wrapper path missing",
+            "issue": (f"Points at {ctx.args[0]} but that file doesn't exist. "
+                      "Click Apply to update to the current wrapper location.")}
+
+
+def _chk_direct_serve(ctx: "_McpCtx", base: dict) -> dict | None:
+    if not ctx.cmd_lower.endswith("tokensave.exe"):
+        return None
+    has_p = isinstance(ctx.args, list) and "-p" in ctx.args
+    if has_p:
+        try:
+            target = ctx.args[ctx.args.index("-p") + 1]
+        except (IndexError, ValueError):
+            target = "(unknown)"
+        return {**base, "state": "direct_serve", "label": "⚠ hardcoded project",
+                "issue": (f"Runs tokensave.exe directly with -p \"{target}\". "
+                          "This locks the MCP server to one project — switching "
+                          "requires a config edit AND a Claude restart. Click Apply "
+                          "to route through the wrapper or run `tokensave install "
+                          "--agent claude` for the auto-detect default.")}
+    if ctx.is_claude_code:
+        return {**base, "state": "ok", "label": "✓ tokensave-install canonical", "issue": ""}
+    return {**base, "state": "direct_serve", "label": "⚠ bypasses wrapper (Desktop needs wrapper)",
+            "issue": ("Claude Desktop's MCP server is long-lived and must use the wrapper "
+                      "to honour ★ Set as Active. Tokensave's auto-detect runs only at process "
+                      "startup, so direct-serve here means project switches need a Claude "
+                      "Desktop restart. Click Apply to route through the wrapper.")}
+
+
+_MCP_CMD_CHECKERS = [_chk_bundled_wrapper, _chk_python_wrapper, _chk_direct_serve]
+
+
 def _classify_mcp_entry(cfg_path: str) -> dict:
     """Inspect a Claude MCP config file and report what shape its tokensave
     entry is in.
@@ -277,9 +332,7 @@ def _classify_mcp_entry(cfg_path: str) -> dict:
     is_claude_code = cfg_path.lower().endswith(".claude.json")
 
     if not cfg_path or not os.path.isfile(cfg_path):
-        return {**base,
-                "state": "no_file",
-                "label": "✗ no config file",
+        return {**base, "state": "no_file", "label": "✗ no config file",
                 "issue": (f"{cfg_path} doesn't exist yet. "
                           "If you use this Claude app, the manager can create "
                           "the file with just a tokensave entry.")}
@@ -287,92 +340,30 @@ def _classify_mcp_entry(cfg_path: str) -> dict:
         with open(cfg_path, encoding="utf-8") as f:
             data = json.load(f)
     except (OSError, json.JSONDecodeError) as e:
-        return {**base,
-                "state": "unparseable",
-                "label": "✗ unreadable",
-                "issue": (f"Could not parse {cfg_path}: "
-                          f"{type(e).__name__}: {e}. Fix the JSON by hand "
-                          "before re-running the configurator.")}
+        return {**base, "state": "unparseable", "label": "✗ unreadable",
+                "issue": (f"Could not parse {cfg_path}: {type(e).__name__}: {e}. "
+                          "Fix the JSON by hand before re-running the configurator.")}
 
     servers = data.get("mcpServers") or {}
     entry = servers.get("tokensave")
     if not isinstance(entry, dict):
-        return {**base,
-                "state": "missing",
-                "label": "✗ no tokensave entry",
+        return {**base, "state": "missing", "label": "✗ no tokensave entry",
                 "issue": ("No 'tokensave' MCP server is configured. "
                           "Click Apply to add the canonical wrapper-based "
-                          "entry — other mcpServers entries (if any) stay "
-                          "untouched.")}
+                          "entry — other mcpServers entries (if any) stay untouched.")}
 
     base["current"] = entry
-    cmd  = (entry.get("command") or "").strip()
+    cmd = (entry.get("command") or "").strip()
     args = entry.get("args") or []
+    ctx = _McpCtx(cmd=cmd, cmd_lower=cmd.lower().replace("/", os.sep),
+                  args=args, is_claude_code=is_claude_code)
 
-    # State 1: correct shape — pythonw/python + wrapper.py  OR  wrapper.exe.
-    cmd_lower = cmd.lower().replace("/", os.sep)
-    if cmd_lower.endswith("tokensave-wrapper.exe"):
-        return {**base, "state": "ok",
-                "label": "✓ correct (bundled wrapper)",
-                "issue": ""}
-    if (cmd_lower.endswith("pythonw.exe") or cmd_lower.endswith("python.exe")):
-        if args and isinstance(args[0], str) \
-                and args[0].lower().endswith("tokensave-wrapper.py"):
-            # Also check the wrapper file referenced actually exists.
-            if os.path.isfile(args[0]):
-                return {**base, "state": "ok",
-                        "label": "✓ correct",
-                        "issue": ""}
-            return {**base,
-                    "state": "wrong_wrapper",
-                    "label": "⚠ wrapper path missing",
-                    "issue": (f"Points at {args[0]} but that file doesn't "
-                              "exist. Click Apply to update to the current "
-                              "wrapper location.")}
+    for checker in _MCP_CMD_CHECKERS:
+        result = checker(ctx, base)
+        if result is not None:
+            return result
 
-    # State 2: tokensave.exe direct.  Two sub-cases:
-    #   - With hardcoded -p: always flagged (KicomAI footgun)
-    #   - Without -p: OK for Claude Code (matches `tokensave install`
-    #     canonical shape that `tokensave doctor` blesses) but NOT for
-    #     Desktop (Desktop's long-lived MCP server can't re-auto-detect
-    #     per invocation, so wrapper-routed is required there).
-    if cmd_lower.endswith("tokensave.exe"):
-        has_p_flag = isinstance(args, list) and "-p" in args
-        if has_p_flag:
-            try:
-                target = args[args.index("-p") + 1]
-            except (IndexError, ValueError):
-                target = "(unknown)"
-            return {**base,
-                    "state": "direct_serve",
-                    "label": "⚠ hardcoded project",
-                    "issue": (f"Runs tokensave.exe directly with -p "
-                              f"\"{target}\". This locks the MCP server "
-                              "to one project — switching requires a "
-                              "config edit AND a Claude restart. Click "
-                              "Apply to route through the wrapper or run "
-                              "`tokensave install --agent claude` for the "
-                              "auto-detect default.")}
-        # No -p, just `tokensave.exe serve` (possibly with other flags).
-        # OK for Claude Code; warn for Desktop.
-        if is_claude_code:
-            return {**base, "state": "ok",
-                    "label": "✓ tokensave-install canonical",
-                    "issue": ""}
-        return {**base,
-                "state": "direct_serve",
-                "label": "⚠ bypasses wrapper (Desktop needs wrapper)",
-                "issue": ("Claude Desktop's MCP server is long-lived and "
-                          "must use the wrapper to honour ★ Set as Active. "
-                          "Tokensave's auto-detect runs only at process "
-                          "startup, so direct-serve here means project "
-                          "switches need a Claude Desktop restart. Click "
-                          "Apply to route through the wrapper.")}
-
-    # State 3: something else entirely.
-    return {**base,
-            "state": "wrong_wrapper",
-            "label": "⚠ non-canonical",
+    return {**base, "state": "wrong_wrapper", "label": "⚠ non-canonical",
             "issue": (f"command is {cmd!r}, which isn't a shape the manager "
                       "knows how to maintain. Click Apply to replace with "
                       "the canonical wrapper-based entry.")}
