@@ -38,3 +38,11 @@ venv/
 # ── OS noise ──
 Thumbs.db
 .DS_Store
+
+# ── Per-edit backups (manager helpers + tool safety nets) ──
+# Pattern matches files like:
+#   src/tokensave-manager.py.backup.1779511978257
+#   claude_desktop_config.json.backup.1779521543172
+# Git history is the canonical safety net; these on-disk snapshots are
+# meant to be local-only and should never enter a commit.
+*.backup.*
