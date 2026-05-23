@@ -1624,8 +1624,47 @@ def _build_llm_prompt(diff: str, recent: list, max_diff_chars: int) -> tuple:
     return system, user
 
 
+def _iter_sse_events(response):
+    """Yield decoded `data:` payloads from an HTTPResponse byte stream.
+
+    Both Anthropic and OpenAI-compatible streaming use SSE (`data: <json>\\n`
+    lines, terminator `data: [DONE]` for OpenAI). Network buffering can split
+    a JSON payload mid-line, so we accumulate raw bytes in a bytearray and
+    only yield once we've seen a complete `\\n`-terminated line. CRLF is
+    handled via `rstrip("\\r")`. Non-data lines (event:, id:, retry:, blank
+    keep-alives, SSE comments starting with `:`) are skipped.
+
+    The generator stops when the underlying socket closes — the caller does
+    not need to handle StopIteration specially.
+    """
+    buf = bytearray()
+    while True:
+        try:
+            chunk = response.read(4096)
+        except (OSError, ConnectionError):
+            return
+        if not chunk:
+            # Final partial line (rare for well-behaved servers).
+            if buf:
+                line = buf.decode("utf-8", errors="replace").rstrip("\r")
+                if line.startswith("data: "):
+                    yield line[6:]
+            return
+        buf.extend(chunk)
+        while True:
+            i = buf.find(b"\n")
+            if i < 0:
+                break
+            raw = bytes(buf[:i])
+            del buf[:i + 1]
+            line = raw.decode("utf-8", errors="replace").rstrip("\r")
+            if line.startswith("data: "):
+                yield line[6:]
+
+
 def _call_llm(cfg: dict, system_prompt: str, user_prompt: str,
-              max_tokens: int = 1500, timeout: int | None = None) -> str | None:
+              max_tokens: int = 1500, timeout: int | None = None,
+              on_token=None) -> str | None:
     """General-purpose LLM call. Returns raw text or None on ANY failure.
 
     Used by the commit-message orchestrator AND the AI Code Review feature
@@ -1639,11 +1678,23 @@ def _call_llm(cfg: dict, system_prompt: str, user_prompt: str,
       * "openai_compatible" — any OpenAI-compatible endpoint
             (Ollama at http://localhost:11434, LM Studio at :1234,
              vLLM, llama-server, LocalAI, etc.)
-      * "ollama"           — Ollama's native API at /api/chat (alias for
-            openai_compatible with base_url defaulting to localhost:11434)
+      * "ollama"           — friendly alias for openai_compatible with the
+            default Ollama base URL filled in if none was set.
 
     Returns None on any error: no key, missing model, network failure,
     timeout, provider error, empty response. Caller falls back appropriately.
+
+    Streaming (when `on_token` is provided): the function sends
+    `"stream": true` to the provider and calls `on_token(delta_text)` for
+    each text chunk as it arrives. The full accumulated text is still
+    returned at the end (so existing callers can continue to use the return
+    value unchanged). If the provider doesn't support streaming for the
+    given configuration, the function silently falls back to the blocking
+    path — `on_token` simply doesn't get called.
+
+    The `on_token` callback runs on whichever thread called `_call_llm`.
+    Callers that need to push deltas to a Tk UI must wrap it in a
+    `self.after(0, ...)` schedule (see AICodeReviewDialog._start_review).
     """
     import urllib.request, urllib.error, json
 
@@ -1661,6 +1712,7 @@ def _call_llm(cfg: dict, system_prompt: str, user_prompt: str,
     base_url    = (cfg.get("base_url") or "").rstrip("/")
     api_key_env = cfg.get("api_key_env") or ""
     api_key     = os.environ.get(api_key_env, "") if api_key_env else ""
+    streaming   = on_token is not None
 
     # "ollama" is a friendly alias — falls through to OpenAI-compatible with
     # the default Ollama base URL if none was set. Saves the user from
@@ -1680,6 +1732,8 @@ def _call_llm(cfg: dict, system_prompt: str, user_prompt: str,
                 "system": system_prompt,
                 "messages": [{"role": "user", "content": user_prompt}],
             }
+            if streaming:
+                payload["stream"] = True
             req = urllib.request.Request(
                 "https://api.anthropic.com/v1/messages",
                 method="POST",
@@ -1690,11 +1744,33 @@ def _call_llm(cfg: dict, system_prompt: str, user_prompt: str,
                     "anthropic-version": "2023-06-01",
                 },
             )
-            with urllib.request.urlopen(req, timeout=timeout) as resp:
-                data = json.loads(resp.read().decode("utf-8"))
-            blocks = data.get("content") or []
-            text = "".join(b.get("text", "") for b in blocks if b.get("type") == "text")
-            return text.strip() or None
+            if streaming:
+                with urllib.request.urlopen(req, timeout=timeout) as resp:
+                    pieces = []
+                    for event in _iter_sse_events(resp):
+                        try:
+                            data = json.loads(event)
+                        except json.JSONDecodeError:
+                            continue
+                        # Anthropic streams content_block_delta events with
+                        # {"delta": {"type":"text_delta","text":"..."}}
+                        if data.get("type") == "content_block_delta":
+                            delta = (data.get("delta") or {}).get("text", "")
+                            if delta:
+                                pieces.append(delta)
+                                try:
+                                    on_token(delta)
+                                except Exception:
+                                    # Callback errors must not break the stream.
+                                    log.exception("on_token callback raised")
+                text = "".join(pieces).strip()
+                return text or None
+            else:
+                with urllib.request.urlopen(req, timeout=timeout) as resp:
+                    data = json.loads(resp.read().decode("utf-8"))
+                blocks = data.get("content") or []
+                text = "".join(b.get("text", "") for b in blocks if b.get("type") == "text")
+                return text.strip() or None
 
         elif provider in ("openai", "openai_compatible"):
             if provider == "openai":
@@ -1712,6 +1788,8 @@ def _call_llm(cfg: dict, system_prompt: str, user_prompt: str,
                 "max_tokens": max_tokens,
                 "temperature": 0.3,
             }
+            if streaming:
+                payload["stream"] = True
             headers = {"Content-Type": "application/json"}
             if api_key:
                 headers["Authorization"] = f"Bearer {api_key}"
@@ -1720,14 +1798,38 @@ def _call_llm(cfg: dict, system_prompt: str, user_prompt: str,
                 data=json.dumps(payload).encode("utf-8"),
                 headers=headers,
             )
-            with urllib.request.urlopen(req, timeout=timeout) as resp:
-                data = json.loads(resp.read().decode("utf-8"))
-            choices = data.get("choices") or []
-            if not choices:
-                return None
-            msg = choices[0].get("message") or {}
-            text = msg.get("content") or ""
-            return text.strip() or None
+            if streaming:
+                with urllib.request.urlopen(req, timeout=timeout) as resp:
+                    pieces = []
+                    for event in _iter_sse_events(resp):
+                        if event == "[DONE]":
+                            break
+                        try:
+                            data = json.loads(event)
+                        except json.JSONDecodeError:
+                            continue
+                        choices = data.get("choices") or []
+                        if not choices:
+                            continue
+                        delta_obj = choices[0].get("delta") or {}
+                        delta = delta_obj.get("content") or ""
+                        if delta:
+                            pieces.append(delta)
+                            try:
+                                on_token(delta)
+                            except Exception:
+                                log.exception("on_token callback raised")
+                text = "".join(pieces).strip()
+                return text or None
+            else:
+                with urllib.request.urlopen(req, timeout=timeout) as resp:
+                    data = json.loads(resp.read().decode("utf-8"))
+                choices = data.get("choices") or []
+                if not choices:
+                    return None
+                msg = choices[0].get("message") or {}
+                text = msg.get("content") or ""
+                return text.strip() or None
 
     except (urllib.error.URLError, urllib.error.HTTPError,
             TimeoutError, json.JSONDecodeError, KeyError, OSError):
@@ -2807,6 +2909,7 @@ class App(tk.Tk):
 
         self._build_projects_tab()
         self._build_git_tab()
+        self._build_ask_tab()
         self._build_reference_tab()
         self._build_help_tab()
 
@@ -3205,6 +3308,21 @@ class App(tk.Tk):
 
     def _on_tab_changed(self, event=None):
         """Fires when the user switches notebook tabs."""
+        # Ask tab — refresh project label + model display when it's selected.
+        try:
+            current_tab_text = self.nb.tab(self.nb.select(), "text").strip()
+        except tk.TclError:
+            current_tab_text = ""
+        if "Ask" in current_tab_text:
+            sel = self.tree.selection() if hasattr(self, "tree") else ()
+            if sel and sel[0].startswith("proj:"):
+                self._ask_path = sel[0][5:]
+            elif not getattr(self, "_ask_path", None) and getattr(self, "active_path", None):
+                self._ask_path = self.active_path
+            if hasattr(self, "_ask_refresh_header"):
+                self._ask_refresh_header()
+            return
+
         if not self._git_tab_is_visible():
             return
         # Sync to currently selected project (or active project)
@@ -3974,6 +4092,315 @@ class App(tk.Tk):
             threading.Thread(target=remote_worker, daemon=True).start()
 
         threading.Thread(target=worker, daemon=True).start()
+
+    # ═══════════════════════════════════════════════════════════════════
+    # 🤖 Ask tab — Stage 2 of the agentic-AI roadmap
+    # ═══════════════════════════════════════════════════════════════════
+
+    _ASK_SYSTEM_PROMPT = (
+        "You are a code-aware assistant for the user's current project. "
+        "You have access to READ-ONLY tools that let you read files, list "
+        "directories, view git history, view the pending diff, and search "
+        "the project's tokensave code graph when present.\n\n"
+        "Rules:\n"
+        "- Use the tools to find answers. Do NOT guess about file contents "
+        "or code that you have not read.\n"
+        "- Prefer tokensave_search / tokensave_context for finding WHERE "
+        "things live; prefer read_file for reading specific known files.\n"
+        "- Cite file:line locations when you reference code.\n"
+        "- Keep answers concise. If a question is open-ended, ask a "
+        "clarifying follow-up instead of writing a wall of text.\n"
+        "- If a tool returns an error message starting with '[tool error]', "
+        "treat it as a hint to try a different approach (e.g. a different "
+        "path, or a different tool) rather than reporting failure to the user.\n"
+        "- You CANNOT modify files, run commits, or change config. This is "
+        "by design. If the user asks you to make changes, suggest the "
+        "specific edits in your answer and let them apply them manually."
+    )
+
+    def _build_ask_tab(self):
+        tab = tk.Frame(self.nb, bg=C["base"])
+        self.nb.add(tab, text="  🤖 Ask  ")
+
+        # Conversation state
+        self._ask_path: str | None = None
+        self._ask_messages: list[dict] = []
+        self._ask_stop_event: threading.Event | None = None
+        self._ask_thread: threading.Thread | None = None
+
+        # ── Header: project + model + clear ─────────────────────────────
+        hdr = tk.Frame(tab, bg=C["base"], padx=14, pady=8)
+        hdr.pack(fill=tk.X, side=tk.TOP)
+
+        tk.Label(hdr, text="🤖  Ask",
+                 font=("Segoe UI", 13, "bold"),
+                 bg=C["base"], fg=C["blue"]).pack(side=tk.LEFT)
+        self._ask_project_lbl = tk.Label(
+            hdr, text="(no project selected)",
+            font=("Segoe UI", 10), bg=C["base"], fg=C["text"])
+        self._ask_project_lbl.pack(side=tk.LEFT, padx=(10, 0))
+        self._ask_model_lbl = tk.Label(
+            hdr, text="", font=("Segoe UI", 9, "italic"),
+            bg=C["base"], fg=C["overlay0"])
+        self._ask_model_lbl.pack(side=tk.LEFT, padx=(10, 0))
+
+        ttk.Button(hdr, text="Clear history",
+                   command=self._ask_clear).pack(side=tk.RIGHT)
+
+        # ── Status line (under header) ──────────────────────────────────
+        self._ask_status = tk.Label(
+            tab, text="", font=("Segoe UI", 8, "italic"),
+            bg=C["base"], fg=C["overlay0"],
+            justify=tk.LEFT, anchor=tk.W)
+        self._ask_status.pack(fill=tk.X, padx=18, pady=(0, 4))
+
+        # ── Input row (BOTTOM, packed before chat log so it stays put) ──
+        in_row = tk.Frame(tab, bg=C["base"], padx=14, pady=8)
+        in_row.pack(fill=tk.X, side=tk.BOTTOM)
+
+        self._ask_entry = tk.Entry(
+            in_row, font=("Segoe UI", 10),
+            bg=C["mantle"], fg=C["text"], insertbackground=C["text"],
+            relief=tk.FLAT)
+        self._ask_entry.pack(side=tk.LEFT, fill=tk.X, expand=True,
+                              ipady=4, padx=(0, 6))
+        self._ask_entry.bind("<Return>", lambda e: self._ask_send())
+
+        self._ask_send_btn = ttk.Button(
+            in_row, text="Send", style="Primary.TButton",
+            command=self._ask_send)
+        self._ask_send_btn.pack(side=tk.LEFT, padx=(0, 4))
+        self._ask_stop_btn = ttk.Button(
+            in_row, text="■ Stop", style="Danger.TButton",
+            command=self._ask_stop, state=tk.DISABLED)
+        self._ask_stop_btn.pack(side=tk.LEFT)
+
+        # ── Chat log (fills remaining space) ────────────────────────────
+        log_outer = tk.Frame(tab, bg=C["base"])
+        log_outer.pack(fill=tk.BOTH, expand=True, padx=14, pady=(0, 4))
+        log_inner = tk.Frame(log_outer, bg=C["mantle"])
+        log_inner.pack(fill=tk.BOTH, expand=True)
+
+        self._ask_log = tk.Text(
+            log_inner, bg=C["mantle"], fg=C["text"],
+            relief=tk.FLAT, font=("Segoe UI", 10),
+            padx=10, pady=8, wrap=tk.WORD, state=tk.DISABLED)
+        ask_vsb = ttk.Scrollbar(log_inner, orient="vertical",
+                                 command=self._ask_log.yview)
+        self._ask_log.configure(yscrollcommand=ask_vsb.set)
+        self._ask_log.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
+        ask_vsb.pack(side=tk.RIGHT, fill=tk.Y)
+
+        # Catppuccin Mocha role tags
+        self._ask_log.tag_configure(
+            "user",        foreground=C["blue"],
+            font=("Segoe UI", 10, "bold"), spacing1=8, spacing3=2)
+        self._ask_log.tag_configure(
+            "assistant",   foreground=C["text"],
+            spacing1=4, spacing3=4)
+        self._ask_log.tag_configure(
+            "tool_call",   foreground=C["peach"],
+            font=("Consolas", 9), spacing1=4)
+        self._ask_log.tag_configure(
+            "tool_result", foreground=C["overlay0"],
+            font=("Consolas", 9), lmargin1=20, lmargin2=20)
+        self._ask_log.tag_configure(
+            "error",       foreground=C["red"],
+            font=("Segoe UI", 9, "italic"), spacing1=4)
+        self._ask_log.tag_configure(
+            "info",        foreground=C["overlay0"],
+            font=("Segoe UI", 9, "italic"))
+
+        self._ask_set_intro()
+
+    # ── Helpers ────────────────────────────────────────────────────────
+
+    def _ask_set_intro(self):
+        """Render the initial 'how to use this' greeting in the chat log."""
+        self._ask_log.configure(state=tk.NORMAL)
+        self._ask_log.delete("1.0", tk.END)
+        self._ask_log.insert(tk.END,
+            "Ready. Ask anything about the selected project — I'll use "
+            "read_file, list_directory, git_log, git_diff, and (when "
+            "available) tokensave_search / tokensave_context to find "
+            "answers. I cannot modify files.\n\n",
+            "info")
+        self._ask_log.configure(state=tk.DISABLED)
+
+    def _ask_append(self, text: str, tag: str = "assistant"):
+        """Append a chunk of text to the chat log with the given role tag."""
+        if not text:
+            return
+        self._ask_log.configure(state=tk.NORMAL)
+        self._ask_log.insert(tk.END, text, tag)
+        self._ask_log.see(tk.END)
+        self._ask_log.configure(state=tk.DISABLED)
+
+    def _ask_refresh_header(self):
+        """Update the project name and model display in the Ask tab header."""
+        if self._ask_path:
+            self._ask_project_lbl.configure(
+                text=os.path.basename(self._ask_path))
+        else:
+            self._ask_project_lbl.configure(text="(no project selected)")
+        cfg = (_cfg.get("commit_message_llm") or {}) if isinstance(_cfg, dict) else {}
+        provider = cfg.get("provider") or "?"
+        model = cfg.get("model") or "?"
+        enabled = bool(cfg.get("enabled"))
+        if enabled:
+            self._ask_model_lbl.configure(
+                text=f"[provider: {provider} / {model}]",
+                fg=C["overlay0"])
+        else:
+            self._ask_model_lbl.configure(
+                text="[AI is disabled — Settings → AI commit messages]",
+                fg=C["red"])
+
+    def _ask_clear(self):
+        """Reset conversation history and the log pane."""
+        if self._ask_thread and self._ask_thread.is_alive():
+            self._ask_stop()
+        self._ask_messages = []
+        self._ask_set_intro()
+        self._ask_status.configure(text="")
+
+    def _ask_stop(self):
+        """User clicked Stop. Signal the agent thread to abort at the next
+        iteration boundary; the in-flight HTTP request will finish (we
+        can't kill urlopen mid-call from another thread) but the result
+        will be ignored."""
+        if self._ask_stop_event is not None:
+            self._ask_stop_event.set()
+        self._ask_status.configure(
+            text="Cancelling — in-flight request will finish then stop.",
+            fg=C["overlay0"])
+        self._ask_stop_btn.configure(state=tk.DISABLED)
+
+    def _ask_send(self):
+        """Send the current question to the agent."""
+        text = self._ask_entry.get().strip()
+        if not text:
+            return
+        if self._ask_thread and self._ask_thread.is_alive():
+            self._ask_status.configure(
+                text="A request is already running — click Stop first.",
+                fg=C["yellow"])
+            return
+
+        # Sync project selection with current tab state
+        sel = self.tree.selection() if hasattr(self, "tree") else ()
+        if sel and sel[0].startswith("proj:"):
+            self._ask_path = sel[0][5:]
+        elif not self._ask_path and getattr(self, "active_path", None):
+            self._ask_path = self.active_path
+        if not self._ask_path:
+            self._ask_append(
+                "Select a project in the Projects tab first.\n\n", "error")
+            return
+
+        # Check AI is configured
+        llm_cfg = (_cfg.get("commit_message_llm") or {}) if isinstance(_cfg, dict) else {}
+        if not llm_cfg.get("enabled"):
+            self._ask_append(
+                "AI is disabled. Open Settings → AI commit messages and "
+                "tick the enable box, then try again.\n\n", "error")
+            return
+
+        # Defensive import so a corrupt agent.py doesn't break the rest of the UI
+        try:
+            import agent as _agent_mod
+            import agent_tools as _agent_tools_mod
+        except ImportError as e:
+            self._ask_append(
+                f"Could not import agent module: {e}\n", "error")
+            return
+
+        self._ask_refresh_header()
+        self._ask_append(f"\n👤  {text}\n\n", "user")
+        self._ask_entry.delete(0, tk.END)
+        self._ask_status.configure(
+            text="⟳  Thinking…  (the model may call tools before answering)",
+            fg=C["peach"])
+        self._ask_send_btn.configure(state=tk.DISABLED)
+        self._ask_stop_btn.configure(state=tk.NORMAL)
+
+        # First time in this conversation: seed with the system prompt.
+        if not self._ask_messages:
+            self._ask_messages.append({
+                "role": "system",
+                "content": self._ASK_SYSTEM_PROMPT,
+            })
+        self._ask_messages.append({"role": "user", "content": text})
+
+        stop_event = threading.Event()
+        self._ask_stop_event = stop_event
+
+        tokensave_exe = (_cfg.get("tokensave_exe") or "") if isinstance(_cfg, dict) else ""
+        tools = _agent_tools_mod.build_tools(self._ask_path, tokensave_exe)
+        agent_instance = _agent_mod.LocalAgent(
+            llm_cfg, self._ask_path, tools)
+
+        def _on_tool_call(name, args):
+            short_args = json.dumps(args, ensure_ascii=False)
+            if len(short_args) > 120:
+                short_args = short_args[:120] + "…"
+            self.after(0, self._ask_append,
+                       f"🔧  {name}({short_args})\n", "tool_call")
+
+        def _on_tool_result(name, result):
+            preview = result if len(result) <= 600 else (
+                result[:600] + f"\n[... {len(result)-600} more chars ...]")
+            self.after(0, self._ask_append, preview + "\n\n", "tool_result")
+
+        def _on_assistant_message(text):
+            self.after(0, self._ask_append, f"🤖  {text}\n\n", "assistant")
+
+        def _on_done(final_text):
+            def _ui():
+                if final_text is None:
+                    self._ask_status.configure(
+                        text="✓  Done (no final answer text — model only "
+                             "issued tool calls).",
+                        fg=C["green"])
+                else:
+                    self._ask_status.configure(
+                        text="✓  Done.",
+                        fg=C["green"])
+                self._ask_send_btn.configure(state=tk.NORMAL)
+                self._ask_stop_btn.configure(state=tk.DISABLED)
+                self._ask_stop_event = None
+            self.after(0, _ui)
+
+        def _on_error(msg):
+            def _ui():
+                self._ask_append(f"⚠  {msg}\n\n", "error")
+                self._ask_status.configure(text="✗  Error.", fg=C["red"])
+                self._ask_send_btn.configure(state=tk.NORMAL)
+                self._ask_stop_btn.configure(state=tk.DISABLED)
+                self._ask_stop_event = None
+            self.after(0, _ui)
+
+        def _worker():
+            try:
+                agent_instance.run(
+                    self._ask_messages,
+                    on_tool_call=_on_tool_call,
+                    on_tool_result=_on_tool_result,
+                    on_assistant_message=_on_assistant_message,
+                    on_done=_on_done,
+                    on_error=_on_error,
+                    stop_event=stop_event,
+                )
+            except Exception as e:
+                log.exception("Ask worker crashed")
+                try:
+                    self.after(0, _on_error, f"{type(e).__name__}: {e}")
+                except RuntimeError:
+                    pass
+
+        self._ask_thread = threading.Thread(
+            target=_worker, daemon=True, name="ask-agent-worker")
+        self._ask_thread.start()
 
     def _build_reference_tab(self):
         tab = tk.Frame(self.nb, bg=C["base"])
@@ -5336,13 +5763,21 @@ class App(tk.Tk):
             return
         set_pinned(path)
         self._log(f"Pinned → {path}", C["green"])
-        self._log("Restart Claude Desktop for the change to take effect.", C["yellow"])
+        self._log(
+            "Running MCP wrappers reload within ~2s — no Claude restart "
+            "required (wrapper v1.0.5+).  Older wrappers still need a "
+            "Claude Desktop / Claude Code restart.",
+            C["overlay0"])
         self.refresh()
 
     def cmd_auto(self):
         clear_pinned()
         self._log("Auto-detect enabled — wrapper picks the most-recently-synced project.", C["sky"])
-        self._log("Restart Claude Desktop for the change to take effect.", C["yellow"])
+        self._log(
+            "Running MCP wrappers will keep their current project until the "
+            "next swap (auto-detect runs at startup).  Restart Claude to "
+            "trigger a fresh auto-detect now.",
+            C["overlay0"])
         self.refresh()
 
     def _set_running(self, running, label=""):
@@ -7230,6 +7665,23 @@ class SettingsDialog(tk.Toplevel):
             font=("Segoe UI", 8), bg=C["base"], fg=C["overlay0"],
             justify=tk.LEFT).pack(anchor=tk.W, padx=36, pady=(0, 8))
 
+        # ── Ollama ──────────────────────────────────────────────────────────
+        ttk.Separator(body, orient="horizontal").pack(fill=tk.X, padx=20, pady=(8, 8))
+
+        tk.Label(body, text="Ollama",
+                 font=("Segoe UI", 10, "bold"),
+                 bg=C["base"], fg=C["text"]).pack(anchor=tk.W, padx=20, pady=(0, 2))
+
+        ollama_row = tk.Frame(body, bg=C["base"])
+        ollama_row.pack(anchor=tk.W, padx=20, pady=(0, 4))
+        ttk.Button(ollama_row, text="🦙  Manage Ollama Models…",
+                   command=self._open_ollama_manager).pack(side=tk.LEFT)
+        tk.Label(body,
+            text="  Browse installed models, pull new ones, see context windows.\n"
+                 "  Uses Ollama's native REST API at the base URL configured below.",
+            font=("Segoe UI", 8), bg=C["base"], fg=C["overlay0"],
+            justify=tk.LEFT).pack(anchor=tk.W, padx=36, pady=(0, 8))
+
         # ── AI commit messages ──────────────────────────────────────────────
         ttk.Separator(body, orient="horizontal").pack(fill=tk.X, padx=20, pady=(8, 8))
 
@@ -7421,6 +7873,35 @@ class SettingsDialog(tk.Toplevel):
         ttk.Button(btn_row, text="Save", style="Primary.TButton",
                    command=self._save).pack(side=tk.LEFT, padx=(0, 8))
         ttk.Button(btn_row, text="Cancel", command=self.destroy).pack(side=tk.LEFT)
+
+    def _open_ollama_manager(self):
+        """Launch the Ollama Model Manager dialog.
+
+        Uses whatever base URL is currently typed in the AI commit messages
+        section (so editing the URL takes effect without saving Settings
+        first). Falls back to http://localhost:11434 if blank. When the
+        user clicks "Use for AI features" on a model in the dialog, the
+        callback updates the provider/model/base-url fields in this very
+        Settings dialog — they still have to click Save to persist.
+        """
+        base_url = self._var_llm_base_url.get().strip() \
+                   or "http://localhost:11434"
+
+        def _on_use(model_name: str, server_url: str):
+            self._var_llm_provider.set("ollama")
+            self._var_llm_model.set(model_name)
+            self._var_llm_base_url.set(server_url)
+            self._var_llm_keyenv.set("")
+            # Auto-enable AI features when the user explicitly picks a model.
+            self._var_llm_enabled.set(True)
+            if hasattr(self, "_llm_preset_hint"):
+                self._llm_preset_hint.configure(
+                    text=f"✓  Using Ollama model: {model_name}.  "
+                         f"Click Save to persist.",
+                    fg=C["green"])
+
+        OllamaModelManagerDialog(
+            self, base_url=base_url, on_use_for_ai=_on_use)
 
     def _add_root(self):
         p = filedialog.askdirectory(title="Add search root", parent=self)
@@ -9728,6 +10209,510 @@ class GitignoreDialog(tk.Toplevel):
         self._app._offer_commit_after_change(path, ".gitignore")
 
 
+def _iter_json_lines(response):
+    """Yield decoded JSON objects from a newline-delimited JSON byte stream.
+
+    Used for Ollama's /api/pull progress stream — each line is a complete
+    JSON object terminated by `\\n`. Same byte-aligned accumulator pattern
+    as `_iter_sse_events` (network buffering can split a line in half).
+    Decode errors on individual lines are silently skipped — the next valid
+    line usually has the same status info we missed.
+    """
+    import json as _json
+    buf = bytearray()
+    while True:
+        try:
+            chunk = response.read(4096)
+        except (OSError, ConnectionError):
+            return
+        if not chunk:
+            if buf:
+                line = buf.decode("utf-8", errors="replace").strip()
+                if line:
+                    try:
+                        yield _json.loads(line)
+                    except _json.JSONDecodeError:
+                        pass
+            return
+        buf.extend(chunk)
+        while True:
+            i = buf.find(b"\n")
+            if i < 0:
+                break
+            raw = bytes(buf[:i])
+            del buf[:i + 1]
+            line = raw.decode("utf-8", errors="replace").strip()
+            if not line:
+                continue
+            try:
+                yield _json.loads(line)
+            except _json.JSONDecodeError:
+                continue
+
+
+class OllamaModelManagerDialog(tk.Toplevel):
+    """Browse, pull, and delete Ollama models without leaving the manager.
+
+    Uses Ollama's native REST API (not the OpenAI-compatible /v1 surface):
+      - `GET  /api/version`  — connection check
+      - `GET  /api/tags`     — list installed models (name, size)
+      - `POST /api/show`     — per-model details (context length)
+      - `POST /api/pull`     — download a new model, with streaming progress
+      - `DELETE /api/delete` — remove a model
+
+    The Pull operation streams newline-delimited JSON. Cancellation works by
+    holding a reference to the open HTTPResponse and calling `.close()` on
+    it from the main thread — that unblocks the worker thread's `read()`
+    immediately. A `threading.Event` alone would not (the worker is
+    syscall-blocked inside the network stack).
+
+    Pure read-only with respect to the project — no project-level state is
+    touched. The user's saved `commit_message_llm.model` is only updated if
+    they explicitly click "Use for AI features".
+    """
+
+    PRESET_MODELS = [
+        # Coder-tuned (top of the roadmap recommendations)
+        "qwen2.5-coder:14b",
+        "qwen2.5-coder:7b",
+        "deepseek-coder-v2:16b",
+        # General instruction-tuned
+        "qwen2.5:14b",
+        "qwen2.5:7b",
+        "mistral-nemo:12b",
+        # Smaller / fast
+        "llama3.1:8b",
+        "llama3.2",
+        "llama3.2:3b",
+    ]
+
+    def __init__(self, parent, base_url: str = "http://localhost:11434",
+                 on_use_for_ai=None):
+        super().__init__(parent)
+        self.title("Ollama Model Manager")
+        self.configure(bg=C["base"])
+        self.resizable(True, True)
+        self.minsize(640, 500)
+        self.geometry("780x620")
+        self.grab_set()
+        self.transient(parent)
+
+        self._base_url = base_url.rstrip("/") if base_url else "http://localhost:11434"
+        self._on_use_for_ai = on_use_for_ai
+        self._current_response = None      # type: ignore[assignment]
+        self._pull_cancelled = False
+        self._pull_active = False
+
+        # ── Header: server URL + check ──────────────────────────────────
+        hdr = tk.Frame(self, bg=C["base"])
+        hdr.pack(fill=tk.X, padx=18, pady=(14, 4))
+        tk.Label(hdr, text="🦙  Ollama Model Manager",
+                 font=("Segoe UI", 13, "bold"),
+                 bg=C["base"], fg=C["blue"]).pack(side=tk.LEFT)
+
+        url_row = tk.Frame(self, bg=C["base"])
+        url_row.pack(fill=tk.X, padx=18, pady=(2, 2))
+        tk.Label(url_row, text="Server:", width=8, anchor=tk.W,
+                 bg=C["base"], fg=C["subtext"],
+                 font=("Segoe UI", 9)).pack(side=tk.LEFT)
+        self._var_base_url = tk.StringVar(value=self._base_url)
+        ttk.Entry(url_row, textvariable=self._var_base_url,
+                  width=42).pack(side=tk.LEFT, padx=(0, 6))
+        ttk.Button(url_row, text="Check connection",
+                   command=self._check_connection).pack(side=tk.LEFT)
+
+        self._conn_lbl = tk.Label(
+            self, text="(click 'Check connection' to verify)",
+            font=("Segoe UI", 9, "italic"),
+            bg=C["base"], fg=C["overlay0"],
+            justify=tk.LEFT, anchor=tk.W)
+        self._conn_lbl.pack(fill=tk.X, padx=18, pady=(0, 8))
+
+        # ── Installed models list ───────────────────────────────────────
+        list_frame = tk.LabelFrame(
+            self, text=" Installed models ",
+            bg=C["base"], fg=C["subtext"],
+            font=("Segoe UI", 9), bd=1, relief=tk.FLAT)
+        list_frame.pack(fill=tk.BOTH, expand=True, padx=18, pady=(0, 6))
+
+        tv_wrap = tk.Frame(list_frame, bg=C["mantle"])
+        tv_wrap.pack(fill=tk.BOTH, expand=True, padx=2, pady=2)
+        self._tv = ttk.Treeview(
+            tv_wrap, columns=("size", "context"),
+            show="tree headings", height=8)
+        self._tv.heading("#0",      text="Model")
+        self._tv.heading("size",    text="Size")
+        self._tv.heading("context", text="Context window")
+        self._tv.column("#0",      width=320, anchor=tk.W)
+        self._tv.column("size",    width=100, anchor=tk.E)
+        self._tv.column("context", width=140, anchor=tk.E)
+        tv_vsb = ttk.Scrollbar(tv_wrap, orient="vertical",
+                                command=self._tv.yview)
+        self._tv.configure(yscrollcommand=tv_vsb.set)
+        self._tv.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
+        tv_vsb.pack(side=tk.RIGHT, fill=tk.Y)
+        self._tv.bind("<<TreeviewSelect>>", self._on_select)
+
+        list_btns = tk.Frame(list_frame, bg=C["base"])
+        list_btns.pack(fill=tk.X, padx=4, pady=(4, 4))
+        ttk.Button(list_btns, text="↻ Refresh",
+                   command=self._refresh_models).pack(side=tk.LEFT)
+        self._use_btn = ttk.Button(
+            list_btns, text="Use for AI features",
+            command=self._use_for_ai, state=tk.DISABLED)
+        self._use_btn.pack(side=tk.LEFT, padx=(8, 0))
+        self._del_btn = ttk.Button(
+            list_btns, text="🗑 Delete",
+            command=self._delete_selected, state=tk.DISABLED)
+        self._del_btn.pack(side=tk.LEFT, padx=(8, 0))
+
+        # ── Pull section ────────────────────────────────────────────────
+        pull_frame = tk.LabelFrame(
+            self, text=" Pull a new model ",
+            bg=C["base"], fg=C["subtext"],
+            font=("Segoe UI", 9), bd=1, relief=tk.FLAT)
+        pull_frame.pack(fill=tk.X, padx=18, pady=(0, 6))
+
+        pull_row = tk.Frame(pull_frame, bg=C["base"])
+        pull_row.pack(fill=tk.X, padx=4, pady=(6, 4))
+        tk.Label(pull_row, text="Model:", width=8, anchor=tk.W,
+                 bg=C["base"], fg=C["subtext"],
+                 font=("Segoe UI", 9)).pack(side=tk.LEFT)
+        self._var_pull = tk.StringVar(value=self.PRESET_MODELS[0])
+        self._pull_combo = ttk.Combobox(
+            pull_row, textvariable=self._var_pull,
+            values=self.PRESET_MODELS, width=28)
+        self._pull_combo.pack(side=tk.LEFT, padx=(0, 6))
+        self._pull_btn = ttk.Button(
+            pull_row, text="Pull", command=self._start_pull)
+        self._pull_btn.pack(side=tk.LEFT)
+
+        self._progress = ttk.Progressbar(
+            pull_frame, orient="horizontal", mode="determinate",
+            maximum=100, value=0)
+        self._progress.pack(fill=tk.X, padx=6, pady=(4, 2))
+        self._pull_status = tk.Label(
+            pull_frame, text="(idle)", font=("Segoe UI", 8),
+            bg=C["base"], fg=C["overlay0"],
+            anchor=tk.W, justify=tk.LEFT)
+        self._pull_status.pack(fill=tk.X, padx=8, pady=(0, 6))
+
+        # ── Close ───────────────────────────────────────────────────────
+        btn_row = tk.Frame(self, bg=C["base"])
+        btn_row.pack(fill=tk.X, padx=18, pady=(0, 14))
+        ttk.Button(btn_row, text="Close",
+                   command=self._on_close).pack(side=tk.RIGHT)
+
+        self.protocol("WM_DELETE_WINDOW", self._on_close)
+
+        # Initial population.
+        self.after(80, self._check_connection)
+        self.after(160, self._refresh_models)
+
+    # ── Networking helpers ──────────────────────────────────────────────
+
+    def _server(self) -> str:
+        v = self._var_base_url.get().strip().rstrip("/")
+        return v or "http://localhost:11434"
+
+    def _check_connection(self):
+        url = self._server() + "/api/version"
+        self._conn_lbl.configure(
+            text="⟳  Checking connection…", fg=C["peach"])
+
+        def _worker():
+            import urllib.request, urllib.error, json as _json
+            try:
+                with urllib.request.urlopen(url, timeout=3) as resp:
+                    data = _json.loads(resp.read().decode("utf-8"))
+                ver = data.get("version", "?")
+                self.after(0, self._conn_lbl.configure,
+                    {"text": f"✓  Connected — Ollama {ver}", "fg": C["green"]})
+            except (urllib.error.URLError, urllib.error.HTTPError,
+                    TimeoutError, _json.JSONDecodeError, OSError) as e:
+                self.after(0, self._conn_lbl.configure,
+                    {"text": f"✗  Not reachable at {self._server()} — "
+                             f"is the Ollama service running? ({type(e).__name__})",
+                     "fg": C["red"]})
+
+        threading.Thread(target=_worker, daemon=True,
+                         name="ollama-version").start()
+
+    def _refresh_models(self):
+        url = self._server() + "/api/tags"
+
+        def _worker():
+            import urllib.request, urllib.error, json as _json
+            try:
+                with urllib.request.urlopen(url, timeout=5) as resp:
+                    data = _json.loads(resp.read().decode("utf-8"))
+            except (urllib.error.URLError, urllib.error.HTTPError,
+                    TimeoutError, _json.JSONDecodeError, OSError):
+                self.after(0, self._populate_models, [])
+                return
+            models = data.get("models") or []
+            # Enrich each with context length via /api/show. This is N HTTP
+            # calls — fine for typical (< 20) installed model counts, and
+            # we cap at 25 to avoid pathological cases.
+            enriched = []
+            for m in models[:25]:
+                name = m.get("name") or m.get("model") or ""
+                size = int(m.get("size") or 0)
+                ctx = self._fetch_context_length(name)
+                enriched.append({"name": name, "size": size, "context": ctx})
+            self.after(0, self._populate_models, enriched)
+
+        threading.Thread(target=_worker, daemon=True,
+                         name="ollama-tags").start()
+
+    def _fetch_context_length(self, name: str) -> int | None:
+        import urllib.request, urllib.error, json as _json
+        url = self._server() + "/api/show"
+        payload = _json.dumps({"name": name}).encode("utf-8")
+        req = urllib.request.Request(
+            url, method="POST", data=payload,
+            headers={"Content-Type": "application/json"})
+        try:
+            with urllib.request.urlopen(req, timeout=5) as resp:
+                data = _json.loads(resp.read().decode("utf-8"))
+        except (urllib.error.URLError, urllib.error.HTTPError,
+                TimeoutError, _json.JSONDecodeError, OSError):
+            return None
+        # Ollama 0.3+ exposes model_info.<arch>.context_length; older
+        # versions use parameters.num_ctx. Try both, fall back to None.
+        mi = data.get("model_info") or {}
+        for k, v in mi.items():
+            if k.endswith(".context_length") and isinstance(v, int):
+                return v
+        params = data.get("parameters") or ""
+        if isinstance(params, str):
+            for line in params.splitlines():
+                if line.lower().startswith("num_ctx"):
+                    parts = line.split()
+                    if len(parts) >= 2 and parts[-1].isdigit():
+                        return int(parts[-1])
+        return None
+
+    def _populate_models(self, rows: list[dict]):
+        self._tv.delete(*self._tv.get_children())
+        if not rows:
+            self._tv.insert("", tk.END, text="(no models found — pull one below)",
+                            values=("", ""))
+            return
+        for r in rows:
+            size_h = self._human_bytes(r["size"])
+            ctx_h = "—" if r["context"] is None else f"{r['context']:,}"
+            self._tv.insert("", tk.END, text=r["name"], values=(size_h, ctx_h))
+
+    @staticmethod
+    def _human_bytes(n: int) -> str:
+        if n <= 0:
+            return "—"
+        for unit in ("B", "KB", "MB", "GB", "TB"):
+            if n < 1024.0:
+                return f"{n:.1f} {unit}" if unit != "B" else f"{int(n)} B"
+            n /= 1024.0
+        return f"{n:.1f} PB"
+
+    # ── Selection-driven actions ────────────────────────────────────────
+
+    def _on_select(self, _evt=None):
+        sel = self._tv.selection()
+        state = tk.NORMAL if sel and self._tv.item(sel[0], "text") else tk.DISABLED
+        self._use_btn.configure(state=state)
+        self._del_btn.configure(state=state)
+
+    def _selected_model(self) -> str:
+        sel = self._tv.selection()
+        if not sel:
+            return ""
+        name = self._tv.item(sel[0], "text") or ""
+        return "" if name.startswith("(no models") else name
+
+    def _use_for_ai(self):
+        name = self._selected_model()
+        if not name:
+            return
+        if self._on_use_for_ai:
+            self._on_use_for_ai(name, self._server())
+            messagebox.showinfo(
+                "Set as AI model",
+                f"'{name}' will be used for AI features.\n\n"
+                "Provider set to 'ollama'.",
+                parent=self)
+        else:
+            # No callback wired — copy to clipboard as a fallback.
+            self.clipboard_clear()
+            self.clipboard_append(name)
+            messagebox.showinfo(
+                "Copied", f"'{name}' copied to clipboard.\n"
+                "Paste it into Settings → AI commit messages → Model.",
+                parent=self)
+
+    def _delete_selected(self):
+        name = self._selected_model()
+        if not name:
+            return
+        if not messagebox.askyesno(
+                "Delete model",
+                f"Delete '{name}' from Ollama?\n\n"
+                "This frees disk space. You can re-pull it later.",
+                parent=self):
+            return
+
+        def _worker(model=name):
+            import urllib.request, urllib.error, json as _json
+            url = self._server() + "/api/delete"
+            payload = _json.dumps({"name": model}).encode("utf-8")
+            req = urllib.request.Request(
+                url, method="DELETE", data=payload,
+                headers={"Content-Type": "application/json"})
+            try:
+                with urllib.request.urlopen(req, timeout=10) as resp:
+                    resp.read()
+                ok = True
+                err = ""
+            except (urllib.error.URLError, urllib.error.HTTPError,
+                    TimeoutError, OSError) as e:
+                ok = False
+                err = f"{type(e).__name__}: {e}"
+            self.after(0, self._after_delete, model, ok, err)
+
+        threading.Thread(target=_worker, daemon=True,
+                         name="ollama-delete").start()
+
+    def _after_delete(self, name: str, ok: bool, err: str):
+        if ok:
+            self._refresh_models()
+        else:
+            messagebox.showerror(
+                "Delete failed",
+                f"Could not delete '{name}'.\n\n{err}",
+                parent=self)
+
+    # ── Pull (streaming) ────────────────────────────────────────────────
+
+    def _start_pull(self):
+        if self._pull_active:
+            # Button is in Cancel mode — second click cancels.
+            self._cancel_pull()
+            return
+        name = self._var_pull.get().strip()
+        if not name:
+            return
+        self._pull_active = True
+        self._pull_cancelled = False
+        self._progress.configure(value=0, maximum=100)
+        self._pull_status.configure(
+            text=f"⟳  Pulling {name}…", fg=C["peach"])
+        self._pull_btn.configure(text="Cancel")
+        self._pull_combo.configure(state=tk.DISABLED)
+
+        def _worker(model=name):
+            import urllib.request, urllib.error, json as _json
+            url = self._server() + "/api/pull"
+            payload = _json.dumps({"name": model, "stream": True}).encode("utf-8")
+            req = urllib.request.Request(
+                url, method="POST", data=payload,
+                headers={"Content-Type": "application/json"})
+            try:
+                # NOTE: no `with` block — we need the response object to
+                # remain accessible from the main thread so a Cancel click
+                # can call .close() on it to break this worker out of read().
+                response = urllib.request.urlopen(req, timeout=30)
+                self._current_response = response
+            except (urllib.error.URLError, urllib.error.HTTPError,
+                    TimeoutError, OSError) as e:
+                self.after(0, self._after_pull, model, False,
+                           f"{type(e).__name__}: {e}")
+                return
+            try:
+                for event in _iter_json_lines(response):
+                    if self._pull_cancelled:
+                        break
+                    status = event.get("status") or ""
+                    total = event.get("total")
+                    completed = event.get("completed")
+                    if isinstance(total, int) and total > 0 and isinstance(completed, int):
+                        pct = max(0.0, min(100.0, 100.0 * completed / total))
+                        msg = (f"{status} — "
+                               f"{self._human_bytes(completed)} / "
+                               f"{self._human_bytes(total)}  ({pct:.0f}%)")
+                        self.after(0, self._update_pull_progress, pct, msg)
+                    elif status:
+                        self.after(0, self._update_pull_status, status)
+                    if status == "success":
+                        self.after(0, self._after_pull, model, True, "")
+                        return
+            finally:
+                try:
+                    response.close()
+                except OSError:
+                    pass
+                self._current_response = None
+            # Stream ended without an explicit "success" — could be cancel,
+            # network drop, or an error event. Cancelled path takes priority.
+            if self._pull_cancelled:
+                self.after(0, self._after_pull, model, False, "cancelled")
+            else:
+                self.after(0, self._after_pull, model, False,
+                           "Stream ended without success")
+
+        self._pull_thread = threading.Thread(
+            target=_worker, daemon=True, name="ollama-pull")
+        self._pull_thread.start()
+
+    def _cancel_pull(self):
+        self._pull_cancelled = True
+        self._pull_status.configure(text="⏹  Cancelling…", fg=C["overlay0"])
+        # Sever the socket immediately so the worker thread's read() unblocks.
+        resp = self._current_response
+        if resp is not None:
+            try:
+                resp.close()
+            except OSError:
+                pass
+
+    def _update_pull_progress(self, pct: float, msg: str):
+        self._progress.configure(value=pct)
+        self._pull_status.configure(text=msg, fg=C["peach"])
+
+    def _update_pull_status(self, status: str):
+        self._pull_status.configure(text=status, fg=C["overlay0"])
+
+    def _after_pull(self, name: str, ok: bool, err: str):
+        self._pull_active = False
+        self._pull_btn.configure(text="Pull")
+        self._pull_combo.configure(state=tk.NORMAL)
+        if ok:
+            self._progress.configure(value=100)
+            self._pull_status.configure(
+                text=f"✓  Pulled {name} successfully.", fg=C["green"])
+            self._refresh_models()
+        else:
+            self._progress.configure(value=0)
+            if err == "cancelled":
+                self._pull_status.configure(
+                    text=f"⏹  Cancelled. Partial download for {name} is kept "
+                         f"by Ollama — re-run Pull to resume (layers are "
+                         f"deduplicated).",
+                    fg=C["overlay0"])
+            else:
+                self._pull_status.configure(
+                    text=f"✗  Pull failed: {err}", fg=C["red"])
+
+    # ── Close ───────────────────────────────────────────────────────────
+
+    def _on_close(self):
+        if self._pull_active:
+            # Cancel any in-flight pull so we don't leave the thread blocked.
+            self._cancel_pull()
+        try:
+            self.destroy()
+        except tk.TclError:
+            pass
+
+
 class AICodeReviewDialog(tk.Toplevel):
     """Stage 1 of the agentic-AI roadmap: AI Code Review on the pending diff.
 
@@ -9909,23 +10894,35 @@ class AICodeReviewDialog(tk.Toplevel):
         self._diff_txt.configure(state=tk.DISABLED)
 
     def _start_review(self):
-        """Kick off (or restart) the LLM review on a background thread."""
+        """Kick off (or restart) the LLM review on a background thread.
+
+        Streams tokens from the LLM into the review pane as they arrive, so
+        the user sees output building up in real time instead of staring at
+        a spinner for 30+ seconds. Tokens are batched on the worker side
+        (every ~8 deltas or 50 ms, whichever first) before being pushed to
+        the Tk main thread via `self.after` — a fast local model can emit
+        80+ tokens/s and 1:1 self.after calls would saturate Tk's event
+        loop. The accumulated full text is still returned at end-of-stream
+        so the existing `_render_review` (which applies severity-section
+        colour tags) can do its final pass.
+        """
         diff = _pending_diff(self._path, lines_of_context=3)
         if not diff:
             return
         self._review_token += 1
         token = self._review_token
         self._cancelled = False
+        self._streaming_started = False  # placeholder cleared on first token
 
         provider = self._llm_cfg.get("provider", "?")
         model    = self._llm_cfg.get("model", "?")
         self._show_status(
-            f"⟳  Reviewing diff with {provider} / {model}…  "
+            f"⟳  Streaming review with {provider} / {model}…  "
             f"(can take 30–60s on local models)",
             colour=C["peach"])
         self._rev_txt.configure(state=tk.NORMAL)
         self._rev_txt.delete("1.0", tk.END)
-        self._rev_txt.insert(tk.END, "(generating review…)")
+        self._rev_txt.insert(tk.END, "(waiting for first token…)")
         self._rev_txt.configure(state=tk.DISABLED)
 
         self._copy_btn.configure(state=tk.DISABLED)
@@ -9941,6 +10938,35 @@ class AICodeReviewDialog(tk.Toplevel):
             + ("\n\n[diff truncated for length]" if len(diff) > max_chars else "")
         )
 
+        # Worker-thread-only batching buffer. No lock needed because both
+        # `_on_token` and the final-flush call run on the worker thread, and
+        # the captured snapshot is passed by value into `self.after`.
+        batch_text: list[str] = []
+        batch_chars = [0]
+        last_flush = [time.monotonic()]
+
+        def _flush(snapshot: str, tok=token):
+            # Runs on the Tk main thread.
+            if tok != self._review_token or self._cancelled:
+                return
+            self._stream_append(snapshot)
+
+        def _on_token(delta: str):
+            # Runs on the worker thread.
+            batch_text.append(delta)
+            batch_chars[0] += len(delta)
+            now = time.monotonic()
+            if batch_chars[0] >= 32 or (now - last_flush[0]) >= 0.05:
+                snapshot = "".join(batch_text)
+                batch_text.clear()
+                batch_chars[0] = 0
+                last_flush[0] = now
+                try:
+                    self.after(0, _flush, snapshot)
+                except RuntimeError:
+                    # Dialog destroyed mid-stream — stop trying to push.
+                    pass
+
         def _worker(tok=token):
             try:
                 result = _call_llm(
@@ -9948,10 +10974,19 @@ class AICodeReviewDialog(tk.Toplevel):
                     self._SYSTEM_PROMPT,
                     user_prompt,
                     max_tokens=2000,
+                    on_token=_on_token,
                 )
             except Exception:
                 log.exception("AI code review worker failed")
                 result = None
+            # Final flush — any tokens still buffered when the stream ended.
+            if batch_text:
+                snapshot = "".join(batch_text)
+                batch_text.clear()
+                try:
+                    self.after(0, _flush, snapshot)
+                except RuntimeError:
+                    pass
             try:
                 self.after(0, self._on_review_ready, tok, result)
             except RuntimeError:
@@ -9960,6 +10995,26 @@ class AICodeReviewDialog(tk.Toplevel):
 
         threading.Thread(target=_worker, daemon=True,
                          name="ai-code-review-worker").start()
+
+    def _stream_append(self, text: str):
+        """Append a batch of streamed tokens to the review pane.
+
+        On the first call after `_start_review`, clears the placeholder
+        ('(waiting for first token…)'). Auto-scrolls so the latest content
+        stays visible. Section-header colour tags are NOT applied here —
+        they get a clean re-render in `_on_review_ready` once the full text
+        is available, which keeps the streaming path simple (no need to
+        re-tag partial lines as they grow).
+        """
+        if not text:
+            return
+        self._rev_txt.configure(state=tk.NORMAL)
+        if not getattr(self, "_streaming_started", False):
+            self._rev_txt.delete("1.0", tk.END)
+            self._streaming_started = True
+        self._rev_txt.insert(tk.END, text)
+        self._rev_txt.see(tk.END)
+        self._rev_txt.configure(state=tk.DISABLED)
 
     def _on_review_ready(self, token: int, result):
         """Main-thread callback: receive the LLM result."""

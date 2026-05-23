@@ -21,13 +21,13 @@ Autonomous execution (Stage 5+) will be opt-in per tool with an explicit allowli
 | **Inference engine** | User's choice: Ollama (recommended), LM Studio, OpenAI, Anthropic. Configured in Settings → "AI commit messages". |
 | **HTTP transport** | `urllib.request` from the Python stdlib. No `httpx`, no `requests`, no `openai` SDK — keeping dependencies minimal. |
 | **LLM client** | `_call_llm(cfg, system_prompt, user_prompt, max_tokens, timeout) → str \| None` in `src/tokensave-manager.py`. Returns text on success, `None` on any failure. |
-| **Agent loop** | Future: `LocalAgent` class in `src/agent.py` (Stage 2+). Custom 150-line implementation. NO LangChain / LlamaIndex / OpenAI-Agents-SDK. |
-| **Tool registry** | Future: `ToolSpec` dataclass entries in `src/agent_tools.py` (Stage 2+). |
+| **Agent loop** | `LocalAgent` class in `src/agent.py`. Custom ~280-line stdlib implementation. NO LangChain / LlamaIndex / OpenAI-Agents-SDK. Bounded `max_iterations` (default 8), cumulative tool-output context budget (~40 000 chars), master try/except around every tool dispatch so handler errors feed back to the model rather than crashing the thread. |
+| **Tool registry** | `ToolSpec` dataclass entries in `src/agent_tools.py`. v1 ships six READ-ONLY tools: `read_file`, `list_directory`, `git_log`, `git_diff`, `tokensave_search`, `tokensave_context`. Path-bearing arguments validated by `_under_project` (real-path containment check) to prevent the model from reading outside the project root. |
 | **UI gate** | Future: `ProposalDialog(tk.Toplevel)` for any `is_write=True` tool call (Stage 3+). |
 
 ---
 
-## What's built today (Stage 0 + Stage 1)
+## What's built today (Stage 0 + Stage 1 + Stage 2)
 
 ### Stage 0 — Smart commit-message generation (shipped)
 
@@ -52,15 +52,31 @@ Right-click any project → 🔍 AI Code Review. New `AICodeReviewDialog(tk.Topl
 
 One `_call_llm` invocation with a locked system prompt. **No tools, no file writes, no autonomy concerns** — it's a pure read-only feature.
 
-The system prompt is in `AICodeReviewDialog._SYSTEM_PROMPT` and is intentionally rigid about output format so the section-header colour tags can render it consistently.
+The system prompt is in `AICodeReviewDialog._SYSTEM_PROMPT` and is intentionally rigid about output format so the section-header colour tags can render it consistently. As of the [Unreleased] cycle, the review streams tokens live into the bottom pane (batched ~50 ms / 8 tokens to avoid Tk event-loop saturation on fast local models) and applies section-header colour tags in a final pass when streaming ends.
+
+### Stage 2 — Project Q&A chat with tool calling (shipped)
+
+New notebook tab **🤖 Ask**. Built on three pieces:
+
+1. **`src/agent_tools.py`** — `ToolSpec` dataclass + `build_tools(project_path, tokensave_exe)` factory. Six READ-ONLY tools: `read_file`, `list_directory`, `git_log`, `git_diff`, `tokensave_search`, `tokensave_context`. Each handler is a pure function `(args: dict) -> str`. Errors are returned as `[tool error] ...` strings rather than raised — the model self-corrects instead of crashing the loop.
+
+2. **`src/agent.py`** — `LocalAgent.run(messages, on_tool_call, on_tool_result, on_assistant_message, on_done, on_error, stop_event)`. Iterates up to `max_iterations` (default 8) round trips against `/v1/chat/completions` with the `tools` array. Per round trip: send messages + tools → receive `assistant.tool_calls` → execute each tool via the registry → append `role:"tool"` reply → loop. When `finish_reason == "stop"` (no more tool calls), returns the final text via `on_done`.
+
+3. **`AskTab` inside the main App class** — chat log (read-only `tk.Text` with role-colour tags), Send/Stop/Clear controls, conversation history kept in `self._ask_messages` for the session. Stop button sets a `threading.Event` the agent checks at iteration boundaries.
+
+### Hardening notes (apply to all of the above)
+
+- **Tool-handler exceptions never crash the agent.** `LocalAgent._dispatch_tool` wraps every handler call in `try/except Exception` and returns a `[tool error] ...` string.
+- **Context-budget enforcement.** Before each LLM round trip, `LocalAgent._enforce_tool_budget` sums the byte size of `role:"tool"` messages; if over budget (40k chars default), oldest tool outputs are replaced with a placeholder.
+- **Path containment.** Every `path`-bearing tool argument is resolved via `os.path.realpath` and rejected if it ends up outside `project_path` (case-insensitive comparison on Windows).
+- **Streaming uses byte-aligned SSE parsing** to handle mid-line network fragmentation, with worker-side token batching (~50 ms / 8 tokens) to avoid Tk event-loop saturation.
 
 ---
 
-## What's not built yet (Stage 2-5)
+## What's not built yet (Stage 3-5)
 
 See `docs/ROADMAP.md` for the staged plan with status badges. Briefly:
 
-- **Stage 2** — Project Q&A chat with tool-calling agent loop. Adds `LocalAgent`, `ToolSpec`, the tool registry (`read_file`, `tokensave_search`, etc.). All tools read-only.
 - **Stage 3** — CHANGELOG drafter. First write tool (`patch_file`) gated by `ProposalDialog`.
 - **Stage 4** — Refactor scout. Agent calls multiple tokensave analytics tools, produces structured report.
 - **Stage 5** — Limited autonomy with per-tool allow/deny configuration. **Considering, not committed.**

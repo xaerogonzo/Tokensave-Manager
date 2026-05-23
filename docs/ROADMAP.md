@@ -53,17 +53,19 @@ Right-click any project → **🔍 AI Code Review…** opens a dialog showing th
 
 **Why first:** ~1 day of work, maximum reuse of existing infrastructure, zero autonomy concerns.
 
-### 🔮 Stage 2 — Project Q&A chat with tool calling
-*Status: planned, after Stage 1 is shipped + lived-with*
+### ✅ Stage 2 — Project Q&A chat with tool calling
+*Status: shipped*
 
-New manager tab: **🤖 Ask**. Chat interface where the AI can call read-only tools (`read_file`, `tokensave_search`, `tokensave_context`, `git_log`, etc.) to answer questions about the active project. Sample questions:
+New manager tab: **🤖 Ask**. Chat interface where the AI calls read-only tools (`read_file`, `list_directory`, `git_log`, `git_diff`, `tokensave_search`, `tokensave_context`) to answer questions about the active project. Sample questions:
 
 - "What does this project do?"
 - "Where is the commit-message generator?"
 - "Why is `_pending_diff` using `HEAD` instead of `--cached`?"
 - "Show me everything that calls `_classify_commits_for_changelog`."
 
-Tools are all read-only — the agent CANNOT write files, run commits, or modify config in this stage.
+All tools are read-only — the agent CANNOT write files, run commits, or modify config. The agent loop is bounded (default 8 iterations) and has a cumulative context budget (~40 000 chars across all tool outputs) so repeated 50 KB reads can't saturate small local-model context windows. Lives in `src/agent.py` (`LocalAgent`) and `src/agent_tools.py` (`ToolSpec` registry).
+
+Provider support: Ollama / OpenAI / OpenAI-compatible (LM Studio, vLLM, etc.) all do tool calling natively. Anthropic falls back to a one-shot completion without tools — adding native Anthropic tool-use is a known follow-up.
 
 ### 🔮 Stage 3 — CHANGELOG drafter
 *Status: planned*
@@ -161,4 +163,4 @@ To be explicit about what we're NOT building:
 
 ## Status updates
 
-This file is updated whenever a stage ships or its design materially changes. Last updated: 2026-05-23 (alongside the smart commit-message work).
+This file is updated whenever a stage ships or its design materially changes. Last updated: 2026-05-23 (Stage 2 shipped — agent chat tab + tool registry + LocalAgent loop. Ollama deep integration: streaming responses in AI Code Review, Model Manager dialog. Pin-watcher fix in `tokensave-wrapper.py`).
