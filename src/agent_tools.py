@@ -171,6 +171,31 @@ def _make_read_file(project_path: str):
             # after a single tool error; suggesting concrete retry
             # paths keeps the agent loop productive.
             return _suggest_paths_for_missing_file(project_path, path)
+
+        # Line-range mode: when start_line / end_line are provided, read
+        # only that window. Critical for files larger than 50 KB
+        # (tokensave-manager.py at ~370 KB is the obvious example) —
+        # without this, the model can't ever see anything past the
+        # first 50 KB of byte-truncated output. tokensave_search hands
+        # back precise line numbers for symbols; the model is expected
+        # to use them here.
+        start_line = args.get("start_line")
+        end_line = args.get("end_line")
+        if start_line is not None or end_line is not None:
+            try:
+                start = max(1, int(start_line)) if start_line is not None else 1
+            except (TypeError, ValueError):
+                return "[tool error] start_line must be a positive integer"
+            try:
+                end = int(end_line) if end_line is not None else None
+            except (TypeError, ValueError):
+                return "[tool error] end_line must be a positive integer"
+            if end is not None and end < start:
+                return (f"[tool error] end_line ({end}) is less than "
+                        f"start_line ({start}) — swap them or omit end_line")
+            return _read_file_range(full, start, end)
+
+        # Default: full-file read with byte cap.
         try:
             with open(full, encoding="utf-8", errors="replace") as f:
                 # Read one byte over the cap so we can detect truncation.
@@ -180,10 +205,45 @@ def _make_read_file(project_path: str):
         truncated = len(content) > _READ_FILE_MAX_BYTES
         if truncated:
             content = (content[:_READ_FILE_MAX_BYTES]
-                       + f"\n[... truncated at {_READ_FILE_MAX_BYTES} bytes — "
-                         "ask for a specific section if you need more ...]")
+                       + f"\n[... truncated at {_READ_FILE_MAX_BYTES} bytes. "
+                         f"This file is larger than the cap.  Re-call "
+                         f"read_file with start_line and end_line set "
+                         f"to read a specific section.  Use "
+                         f"tokensave_search to find the line number of "
+                         f"a symbol, then pass those line numbers here.]")
         return content
     return _read_file
+
+
+def _read_file_range(full_path: str, start: int, end: int | None) -> str:
+    """Read a specific line range from a file, returning the result with
+    line numbers prepended.
+
+    Line numbers in the output make it trivial for the model to cite
+    file:line in its final answer. Same byte cap applies — pass a
+    smaller range if the result is still too big.
+    """
+    try:
+        out_lines = []
+        with open(full_path, encoding="utf-8", errors="replace") as f:
+            for i, line in enumerate(f, 1):
+                if end is not None and i > end:
+                    break
+                if i >= start:
+                    out_lines.append(f"{i:>6}  {line.rstrip()}")
+    except OSError as e:
+        return f"[tool error] {type(e).__name__}: {e}"
+    if not out_lines:
+        end_str = str(end) if end is not None else "EOF"
+        return (f"(no lines in range {start}..{end_str} — file may be "
+                f"shorter than {start} lines)")
+    result = "\n".join(out_lines)
+    if len(result) > _READ_FILE_MAX_BYTES:
+        result = (result[:_READ_FILE_MAX_BYTES]
+                  + f"\n[... range still exceeds {_READ_FILE_MAX_BYTES} "
+                    "bytes.  Narrow the range with a closer "
+                    "start_line / end_line.]")
+    return result
 
 
 def _suggest_paths_for_missing_file(project_path: str, requested: str) -> str:
@@ -451,9 +511,16 @@ def build_tools(project_path: str, tokensave_exe: str = "") -> dict[str, ToolSpe
                 "files are truncated with a notice. THIS IS THE PRIMARY "
                 "TOOL FOR ANSWERING 'why does X behave like Y' or 'how "
                 "does X work' questions — when the user names a file, "
-                "read it directly instead of searching. If the path "
-                "isn't found, the error message will suggest the "
-                "correct location."),
+                "read it directly instead of searching.\n\n"
+                "FOR LARGE FILES (e.g. src/tokensave-manager.py which is "
+                "over 50 KB): pass `start_line` and `end_line` to read a "
+                "specific section. tokensave_search returns the exact "
+                "line number where each symbol is DEFINED — pass that "
+                "as `start_line` and set `end_line` 150-200 lines later "
+                "so you read the full function body, not just the "
+                "signature + docstring.\n\n"
+                "If the path isn't found, the error message will "
+                "suggest the correct location."),
             parameters={
                 "type": "object",
                 "properties": {
@@ -461,6 +528,21 @@ def build_tools(project_path: str, tokensave_exe: str = "") -> dict[str, ToolSpe
                         "type": "string",
                         "description": ("Path relative to the project root, "
                                         "e.g. 'src/main.py' or 'README.md'."),
+                    },
+                    "start_line": {
+                        "type": "integer",
+                        "minimum": 1,
+                        "description": ("Optional 1-based line number to "
+                                        "start reading from.  Use with "
+                                        "end_line to read just a section "
+                                        "of a large file."),
+                    },
+                    "end_line": {
+                        "type": "integer",
+                        "minimum": 1,
+                        "description": ("Optional 1-based last line to "
+                                        "read, inclusive.  Defaults to "
+                                        "end of file."),
                     },
                 },
                 "required": ["path"],
