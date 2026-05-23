@@ -3546,12 +3546,14 @@ class App(tk.Tk):
                                 command=self.cmd_git_delete_branch)
         btn_openpr = ttk.Button(row2, text="🔗  Open PR",
                                 command=self.cmd_git_open_pr)
+        btn_mergepr = ttk.Button(row2, text="🐙  Merge PR…",
+                                  command=self.cmd_git_merge_pr)
         btn_release = ttk.Button(row2, text="📦  Release…",
                                  command=self.cmd_git_release)
 
         for btn in (btn_push, btn_pull, btn_commit, btn_undo,
                     btn_new, btn_switch, btn_merge, btn_del, btn_openpr,
-                    btn_release):
+                    btn_mergepr, btn_release):
             btn.pack(side=tk.LEFT, padx=(0, 6))
 
         _Tooltip(btn_push,
@@ -3601,6 +3603,17 @@ class App(tk.Tk):
             "On master/main: shows you how to create a branch first.\n"
             "On any other branch: opens GitHub's compare page directly.\n\n"
             "Requires a GitHub remote and the branch to be pushed first.")
+        _Tooltip(btn_mergepr,
+            "Merge an open Pull Request from GitHub.\n\n"
+            "Lists every open PR on this repo with its +X/-Y diff size,\n"
+            "then lets you pick one and choose a merge strategy:\n"
+            "  • Merge commit  — preserves the PR's branch history\n"
+            "  • Squash and merge — collapses to a single commit\n"
+            "  • Rebase and merge — replays commits linearly\n\n"
+            "Shows a confirmation with the title and strategy before\n"
+            "doing anything. After a successful merge, the PR is closed\n"
+            "and (optionally) its branch is deleted on GitHub.\n\n"
+            "Requires: GitHub CLI (`gh`) installed AND a remote set.")
         _Tooltip(btn_release,
             "One-button GitHub release.\n\n"
             "Opens a wizard that auto-drafts release notes from your\n"
@@ -3613,12 +3626,14 @@ class App(tk.Tk):
         self._git_all_btns       = [btn_set_remote, btn_push, btn_pull,
                                      btn_commit, btn_undo, btn_new,
                                      btn_switch, btn_merge, btn_del, btn_openpr,
-                                     btn_release]
+                                     btn_mergepr, btn_release]
         self._git_push_pull_btns = [btn_push, btn_pull, btn_openpr]
-        # Release button has an extra requirement: gh on PATH. Tracked
-        # separately so _git_update_ui can gate it without affecting the
-        # other Push/Pull/PR buttons.
-        self._git_release_btns   = [btn_release]
+        # Release AND Merge PR have an extra requirement: gh on PATH.
+        # Tracked together so _git_update_ui can gate them without
+        # affecting the other Push/Pull/PR buttons. Same gating logic
+        # applies — `gh` is the binary that does the actual work for
+        # both commands.
+        self._git_release_btns   = [btn_release, btn_mergepr]
 
         # Start all buttons disabled — enabled by _git_update_ui once state is known
         for btn in self._git_all_btns:
@@ -4025,6 +4040,203 @@ class App(tk.Tk):
             pr_url = f"{base}/compare/{branch}"
             self._log(f"  [{os.path.basename(path)}] Opening PR page for branch '{branch}'…", C["peach"])
             os.startfile(pr_url)
+
+    def cmd_git_merge_pr(self):
+        """List open PRs on this repo's GitHub origin and let the user
+        pick one to merge, with a choice of merge strategy.
+
+        Wraps `gh pr list --json ...` to fetch and `gh pr merge <N>
+        --merge|--squash|--rebase` to perform. The dialog (MergePRDialog)
+        handles selection + strategy choice + confirmation; this method
+        just runs the chosen command and streams output to the OUTPUT
+        pane. The Git-tab buttons are gated for the duration via
+        `_git_begin_op` / `_git_end_op`.
+
+        Pre-flight (in addition to button gating):
+          • gh on PATH       — already true (button is in _git_release_btns)
+          • is a git repo    — already true (Git-tab is loaded)
+          • has a remote     — explicit check below for nice errors
+        """
+        path = self._git_path
+        if not path:
+            return
+        name = os.path.basename(path)
+
+        remote_out, rrc = self._shell_capture(
+            [GIT_EXE, "-C", path, "remote", "get-url", "origin"], path)
+        if rrc != 0 or not remote_out.strip():
+            messagebox.showwarning(
+                "No Remote",
+                "This project has no GitHub remote set.\n\n"
+                "Click 'Set Remote' in the Git tab header to add one first.",
+                parent=self)
+            return
+
+        self._log(f"$ gh pr list  [{name}]", C["blue"])
+        self._git_begin_op()
+
+        def worker():
+            try:
+                # Fetch open PRs as JSON for easy parsing.
+                r = subprocess.run(
+                    ["gh", "pr", "list", "--state", "open",
+                     "--json", "number,title,headRefName,baseRefName,"
+                               "additions,deletions,author,url",
+                     "--limit", "50"],
+                    cwd=path, capture_output=True, text=True,
+                    timeout=20, creationflags=CREATE_NO_WINDOW,
+                    encoding="utf-8", errors="replace")
+                if r.returncode != 0:
+                    err = (r.stderr or r.stdout or "").strip()
+                    self._log(f"  ✗ gh pr list failed: {err[:400]}",
+                              C["red"])
+                    return
+                try:
+                    prs = json.loads(r.stdout or "[]")
+                except json.JSONDecodeError as e:
+                    self._log(f"  ✗ Could not parse gh output: {e}",
+                              C["red"])
+                    return
+                if not prs:
+                    self._log("  No open PRs on this repo.",
+                              C["overlay0"])
+                    return
+                self._log(f"  Found {len(prs)} open PR(s).  Opening "
+                          f"selection dialog…", C["overlay0"])
+                self.after(0, self._show_merge_pr_dialog, path, prs)
+            except (OSError, subprocess.TimeoutExpired) as e:
+                self._log(f"  ✗ gh pr list error: {e}", C["red"])
+            finally:
+                # We always end the op here — the dialog itself doesn't
+                # need the Git-tab buttons disabled (the user might
+                # cancel out without merging).
+                self.after(0, self._git_end_op)
+
+        threading.Thread(target=worker, daemon=True,
+                         name="gh-pr-list").start()
+
+    def _show_merge_pr_dialog(self, path: str, prs: list[dict]):
+        """Open the MergePRDialog with the fetched PR list.  Called from
+        cmd_git_merge_pr's worker thread via self.after()."""
+        MergePRDialog(self, path, prs, self._do_merge_pr)
+
+    def _do_merge_pr(self, path: str, pr_number: int, strategy: str,
+                     delete_branch: bool, pr_title: str):
+        """Run `gh pr merge <N> --<strategy>` and stream output.
+
+        strategy ∈ {"merge", "squash", "rebase"} — matches gh's flag names.
+        delete_branch=True passes --delete-branch so the source branch is
+        also removed on GitHub after a successful merge (matches the
+        common workflow and the manager's local Delete Branch UX).
+        """
+        name = os.path.basename(path)
+        flag = f"--{strategy}"
+        cmd = ["gh", "pr", "merge", str(pr_number), flag]
+        if delete_branch:
+            cmd.append("--delete-branch")
+        self._log(f"$ gh pr merge {pr_number} {flag}"
+                  f"{' --delete-branch' if delete_branch else ''}  "
+                  f"[{name}]", C["blue"])
+        self._git_begin_op()
+
+        def worker():
+            try:
+                proc = subprocess.Popen(
+                    cmd, cwd=path,
+                    stdout=subprocess.PIPE,
+                    stderr=subprocess.STDOUT,
+                    text=True, encoding="utf-8", errors="replace",
+                    creationflags=CREATE_NO_WINDOW)
+                for line in proc.stdout:
+                    stripped = _ANSI.sub("", line).rstrip()
+                    if stripped:
+                        self._log(stripped)
+                proc.wait()
+                if proc.returncode == 0:
+                    self._log(
+                        f"  ✓ PR #{pr_number} merged ({strategy}).  "
+                        f"Pulling master to sync local…", C["green"])
+                    # Auto-sync: switch to base branch if not there,
+                    # then pull.  Lets the user end up on a clean,
+                    # up-to-date master without extra clicks.
+                    self.after(0, self._post_merge_pr_sync, path)
+                else:
+                    self._log(
+                        f"  ✗ gh pr merge exited with code "
+                        f"{proc.returncode}", C["red"])
+            except (OSError, FileNotFoundError) as e:
+                self._log(f"  ✗ Error running gh: {e}", C["red"])
+            finally:
+                self.after(0, self._git_end_op)
+
+        threading.Thread(target=worker, daemon=True,
+                         name="gh-pr-merge").start()
+
+    def _post_merge_pr_sync(self, path: str):
+        """After a successful PR merge, switch to master and pull so the
+        user is sitting on the merged state in their local clone.
+
+        Runs synchronously on the main thread because it's quick (one
+        switch + one pull) and the user is presumably waiting for the
+        local view to catch up. Wrapped in best-effort error handling —
+        a failure here just means the user has to `git pull` from the
+        manager themselves; the merge already succeeded on GitHub.
+        """
+        name = os.path.basename(path)
+        # Find the default branch (usually 'master' or 'main').
+        # `gh repo view --json defaultBranchRef` would do it via gh,
+        # but `git remote show origin` is faster + already cached
+        # locally.  Fall back to 'master' if neither path works.
+        base = "master"
+        try:
+            r = subprocess.run(
+                [GIT_EXE, "-C", path, "symbolic-ref",
+                 "refs/remotes/origin/HEAD", "--short"],
+                capture_output=True, text=True, timeout=5,
+                creationflags=CREATE_NO_WINDOW,
+                encoding="utf-8", errors="replace")
+            if r.returncode == 0 and r.stdout.strip():
+                # Output looks like "origin/master" — strip the prefix.
+                head = r.stdout.strip()
+                if head.startswith("origin/"):
+                    base = head[len("origin/"):]
+        except (OSError, subprocess.TimeoutExpired):
+            pass
+
+        # Check current branch — if already on base, skip the switch.
+        cur_out, cur_rc = self._shell_capture(
+            [GIT_EXE, "-C", path, "rev-parse",
+             "--abbrev-ref", "HEAD"], path)
+        cur = cur_out.strip() if cur_rc == 0 else ""
+
+        def worker():
+            self._git_begin_op()
+            try:
+                if cur and cur != base:
+                    self._log(f"  Switching to '{base}'…",
+                              C["overlay0"])
+                    out, rc = self._shell_capture(
+                        [GIT_EXE, "-C", path, "switch", base], path)
+                    if rc != 0:
+                        self._log(
+                            f"  ⚠ Could not switch to '{base}': "
+                            f"{out.strip()[:200]}.  Pull manually "
+                            f"after switching.", C["peach"])
+                        return
+                self._log(f"  Pulling latest '{base}'…", C["overlay0"])
+                out, rc = self._shell_capture(
+                    [GIT_EXE, "-C", path, "pull", "--ff-only"], path)
+                if rc == 0:
+                    self._log(f"  ✓ Local '{base}' synced.", C["green"])
+                else:
+                    self._log(
+                        f"  ⚠ Pull failed: {out.strip()[:200]}", C["peach"])
+            finally:
+                self.after(0, self._git_end_op)
+                self.after(0, self._git_refresh)
+
+        threading.Thread(target=worker, daemon=True,
+                         name="post-merge-sync").start()
 
     def cmd_git_release(self):
         """Open the Release Wizard for the currently loaded Git-tab project.
@@ -9357,6 +9569,185 @@ class SetRemoteDialog(tk.Toplevel):
             return
         self.destroy()
         self._callback(self._path, url)
+
+
+class MergePRDialog(tk.Toplevel):
+    """Pick an open Pull Request and a merge strategy, then confirm.
+
+    Callback: callback(path, pr_number, strategy, delete_branch, title)
+      • path           — project root (used to scope the gh invocation)
+      • pr_number      — int, the PR number to merge
+      • strategy       — 'merge' | 'squash' | 'rebase' (matches gh flags)
+      • delete_branch  — bool, whether to pass --delete-branch
+      • title          — the PR title (just for logging)
+
+    The list view shows: #N, title (truncated), source → base, +X/-Y.
+    Selecting a row enables the action buttons. Three confirm buttons
+    correspond to the three gh merge strategies; clicking one pops a
+    final "Merge PR #N — <title> — into <base> using <strategy>?"
+    confirmation before the callback fires.
+    """
+
+    def __init__(self, parent, path: str, prs: list[dict], callback):
+        super().__init__(parent)
+        self.title("Merge Pull Request")
+        self.configure(bg=C["base"])
+        self.resizable(True, True)
+        self.minsize(720, 380)
+        self.geometry("840x460")
+        self.grab_set()
+        self.transient(parent)
+
+        self._path = path
+        self._prs = prs
+        self._callback = callback
+        # Tracks whether to also delete the source branch on GitHub
+        # after a successful merge (the same toggle gh's web UI offers).
+        self._var_delete_branch = tk.BooleanVar(value=True)
+
+        # ── Header ──────────────────────────────────────────────────────
+        hdr = tk.Frame(self, bg=C["base"])
+        hdr.pack(fill=tk.X, padx=18, pady=(14, 4))
+        tk.Label(hdr, text="🐙  Merge Pull Request",
+                 font=("Segoe UI", 13, "bold"),
+                 bg=C["base"], fg=C["blue"]).pack(side=tk.LEFT)
+        tk.Label(hdr, text=os.path.basename(path),
+                 font=("Segoe UI", 10),
+                 bg=C["base"], fg=C["overlay0"]).pack(
+            side=tk.LEFT, padx=(10, 0))
+
+        tk.Label(self,
+            text=("Choose an open PR and a merge strategy.  After a "
+                  "successful merge, your local clone is auto-switched "
+                  "to the base branch and pulled."),
+            font=("Segoe UI", 9), bg=C["base"], fg=C["overlay0"],
+            justify=tk.LEFT, anchor=tk.W,
+            wraplength=780).pack(fill=tk.X, padx=18, pady=(0, 8))
+
+        # ── PR list (Treeview) ──────────────────────────────────────────
+        list_frame = tk.LabelFrame(
+            self, text=f" Open PRs ({len(prs)}) ",
+            bg=C["base"], fg=C["subtext"],
+            font=("Segoe UI", 9), bd=1, relief=tk.FLAT)
+        list_frame.pack(fill=tk.BOTH, expand=True, padx=18, pady=(0, 6))
+
+        tv_wrap = tk.Frame(list_frame, bg=C["mantle"])
+        tv_wrap.pack(fill=tk.BOTH, expand=True, padx=2, pady=2)
+        self._tv = ttk.Treeview(
+            tv_wrap,
+            columns=("title", "branch", "diff"),
+            show="tree headings", height=8)
+        self._tv.heading("#0",      text="#")
+        self._tv.heading("title",   text="Title")
+        self._tv.heading("branch",  text="Source → Base")
+        self._tv.heading("diff",    text="+/-")
+        self._tv.column("#0",       width=60,  anchor=tk.E)
+        self._tv.column("title",    width=380, anchor=tk.W)
+        self._tv.column("branch",   width=210, anchor=tk.W)
+        self._tv.column("diff",     width=110, anchor=tk.E)
+        tv_vsb = ttk.Scrollbar(tv_wrap, orient="vertical",
+                                command=self._tv.yview)
+        self._tv.configure(yscrollcommand=tv_vsb.set)
+        self._tv.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
+        tv_vsb.pack(side=tk.RIGHT, fill=tk.Y)
+        self._tv.bind("<<TreeviewSelect>>", self._on_select)
+
+        for pr in prs:
+            n      = pr.get("number", "?")
+            title  = pr.get("title", "(no title)")
+            if len(title) > 60:
+                title = title[:57] + "…"
+            head   = pr.get("headRefName", "?")
+            base   = pr.get("baseRefName", "?")
+            add    = pr.get("additions", 0)
+            rem    = pr.get("deletions", 0)
+            self._tv.insert("", tk.END, iid=str(n),
+                             text=f"#{n}",
+                             values=(title,
+                                     f"{head} → {base}",
+                                     f"+{add} -{rem}"))
+
+        # ── Delete-branch toggle ────────────────────────────────────────
+        opts_row = tk.Frame(self, bg=C["base"])
+        opts_row.pack(fill=tk.X, padx=18, pady=(4, 2))
+        tk.Checkbutton(opts_row,
+            text="Also delete the source branch on GitHub after merge",
+            variable=self._var_delete_branch,
+            bg=C["base"], fg=C["text"], selectcolor=C["surface0"],
+            activebackground=C["base"], activeforeground=C["text"],
+            font=("Segoe UI", 9)).pack(side=tk.LEFT)
+
+        # ── Strategy buttons + Close ────────────────────────────────────
+        btn_row = tk.Frame(self, bg=C["base"])
+        btn_row.pack(fill=tk.X, padx=18, pady=(2, 14))
+        self._btn_merge = ttk.Button(
+            btn_row, text="Merge commit",
+            style="Primary.TButton",
+            command=lambda: self._confirm("merge"),
+            state=tk.DISABLED)
+        self._btn_merge.pack(side=tk.LEFT, padx=(0, 4))
+        self._btn_squash = ttk.Button(
+            btn_row, text="Squash and merge",
+            command=lambda: self._confirm("squash"),
+            state=tk.DISABLED)
+        self._btn_squash.pack(side=tk.LEFT, padx=(0, 4))
+        self._btn_rebase = ttk.Button(
+            btn_row, text="Rebase and merge",
+            command=lambda: self._confirm("rebase"),
+            state=tk.DISABLED)
+        self._btn_rebase.pack(side=tk.LEFT, padx=(0, 4))
+        ttk.Button(btn_row, text="Close",
+                   command=self.destroy).pack(side=tk.RIGHT)
+
+    def _on_select(self, _evt=None):
+        sel = self._tv.selection()
+        state = tk.NORMAL if sel else tk.DISABLED
+        for b in (self._btn_merge, self._btn_squash, self._btn_rebase):
+            b.configure(state=state)
+
+    def _confirm(self, strategy: str):
+        sel = self._tv.selection()
+        if not sel:
+            return
+        try:
+            pr_number = int(sel[0])
+        except ValueError:
+            return
+        pr = next((p for p in self._prs if p.get("number") == pr_number),
+                  None)
+        if pr is None:
+            return
+        title = pr.get("title", "(no title)")
+        head  = pr.get("headRefName", "?")
+        base  = pr.get("baseRefName", "?")
+        add   = pr.get("additions", 0)
+        rem   = pr.get("deletions", 0)
+        delete_branch = bool(self._var_delete_branch.get())
+
+        strategy_name = {
+            "merge":  "Merge commit",
+            "squash": "Squash and merge",
+            "rebase": "Rebase and merge",
+        }.get(strategy, strategy)
+
+        msg = (f"Merge PR #{pr_number} into {base}?\n\n"
+               f"  Title:    {title}\n"
+               f"  Source:   {head}\n"
+               f"  Target:   {base}\n"
+               f"  Changes:  +{add} / -{rem}\n"
+               f"  Strategy: {strategy_name}\n"
+               f"  Delete source branch: "
+               f"{'yes' if delete_branch else 'no'}\n\n"
+               "This runs `gh pr merge` and pushes the result to "
+               "GitHub.  Your local master will then be switched-to "
+               "and pulled so it reflects the merged state.")
+        if not messagebox.askyesno(
+                "Merge Pull Request?",
+                msg, parent=self):
+            return
+        self.destroy()
+        self._callback(self._path, pr_number, strategy, delete_branch,
+                       title)
 
 
 class NewBranchDialog(tk.Toplevel):
