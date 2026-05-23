@@ -5095,7 +5095,7 @@ class App(tk.Tk):
 
         self._build_projects_tab()
         self._git = GitTabController(
-            self.nb, self._cfg,
+            self.nb, _cfg,
             get_path=self._get_git_path,
             on_log=self._log,
             on_shell=self._shell_capture,
@@ -5227,6 +5227,55 @@ class App(tk.Tk):
         self.tree.bind("<Button-3>", self._on_right_click)
         self.tree.bind("<<TreeviewSelect>>", self._on_project_select)
         self._build_context_menu()
+
+    # ── Tab / project navigation ────────────────────────────────────────────
+
+    def _on_project_select(self, event=None):
+        """Fires when the user clicks a row in the Projects Treeview."""
+        sel = self.tree.selection()
+        if not sel:
+            return
+        iid = sel[0]
+        if not iid.startswith("proj:"):
+            return
+        path = iid[5:]
+        self._git.set_active_path(path)
+        if self._git.is_visible():
+            self._git.refresh()
+
+    def _on_tab_changed(self, event=None):
+        """Fires when the user switches notebook tabs."""
+        try:
+            current_tab_text = self.nb.tab(self.nb.select(), "text").strip()
+        except tk.TclError:
+            current_tab_text = ""
+        if "Ask" in current_tab_text:
+            self._ask_ctrl.on_tab_selected()
+            return
+
+        if not self._git.is_visible():
+            return
+        sel = self.tree.selection()
+        if sel and sel[0].startswith("proj:"):
+            self._git.set_active_path(sel[0][5:])
+        elif not self._git.has_path() and self.active_path:
+            self._git.set_active_path(self.active_path)
+        if self._git.has_path():
+            self._git.refresh()
+
+    def _get_ask_project_path(self) -> str | None:
+        """Return the currently focused project path for AskTabController."""
+        sel = self.tree.selection() if hasattr(self, "tree") else ()
+        if sel and sel[0].startswith("proj:"):
+            return sel[0][5:]
+        return getattr(self, "active_path", None)
+
+    def _get_git_path(self) -> str | None:
+        """Return the currently focused project path for GitTabController."""
+        sel = self.tree.selection() if hasattr(self, "tree") else ()
+        if sel and sel[0].startswith("proj:"):
+            return sel[0][5:]
+        return getattr(self, "active_path", None)
 
     # ═══════════════════════════════════════════════════════════════════
     # 🤖 Ask tab — handled by AskTabController (see above App class)
