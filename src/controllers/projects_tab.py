@@ -456,6 +456,7 @@ class ProjectsTabController:
         m.add_command(label="🔧  Git Init",           command=self.cmd_git_init)
         m.add_command(label="📋  Manage .gitignore…",      command=self.cmd_manage_gitignore)
         m.add_command(label="🧹  Untrack Ignored Files…",  command=self.cmd_untrack_ignored)
+        m.add_command(label="🔍  Pre-commit AI Review hook…", command=self.cmd_precommit_hook)
         m.add_separator()
         m.add_command(label="📂  Open Folder",    command=self.cmd_open_folder)
         m.add_command(label="✏   Open in Editor", command=self.cmd_open_editor)
@@ -632,6 +633,10 @@ class ProjectsTabController:
     def cmd_manage_gitignore(self) -> None:
         if path := self._selected_path():
             self._gitops.cmd_manage_gitignore(path)
+
+    def cmd_precommit_hook(self) -> None:
+        if path := self._selected_path():
+            self._gitops.cmd_precommit_hook(path)
 
     def cmd_untrack_ignored(self) -> None:
         if path := self._selected_path():
