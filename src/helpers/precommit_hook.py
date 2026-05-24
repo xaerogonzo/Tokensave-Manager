@@ -153,6 +153,14 @@ def install_pre_commit_hook(
                 "by TokenSave Manager. Refusing to overwrite — back up or "
                 "remove it manually first, then retry.")
 
+    # `pythonw.exe` is the WINDOWLESS Python interpreter — used by the
+    # manager's bat launcher to suppress the console window. But for a
+    # git hook we NEED stdout/stderr to reach git's output, otherwise
+    # the user sees no review findings (silent fail-open). Swap to the
+    # adjacent python.exe when it exists. Failure path: keep pythonw
+    # and tell the user — better than silently swapping to a non-existent
+    # path that breaks the hook later.
+    python_exe = _prefer_console_python(python_exe)
     script = _render_hook_script(python_exe, reviewer_script)
     try:
         with open(p, "w", encoding="utf-8", newline="\n") as f:
@@ -193,6 +201,24 @@ def remove_pre_commit_hook(project_path: str) -> tuple[bool, str]:
     except OSError as e:
         return False, f"could not delete hook: {e}"
     return True, "removed"
+
+
+def _prefer_console_python(python_exe: str) -> str:
+    """If `python_exe` is `pythonw.exe`, prefer the adjacent `python.exe`.
+
+    `pythonw.exe` (Windows GUI-mode interpreter) silently discards stdout
+    and stderr — fatal for a git hook because the user would see no review
+    findings ever. The console interpreter (`python.exe`) lives in the
+    same directory in every standard install. Returns the original path
+    unchanged if no swap is possible.
+    """
+    base = os.path.basename(python_exe).lower()
+    if base != "pythonw.exe":
+        return python_exe
+    candidate = os.path.join(os.path.dirname(python_exe), "python.exe")
+    if os.path.isfile(candidate):
+        return candidate
+    return python_exe  # caller will see "pythonw.exe" hook output disappearing
 
 
 def _render_hook_script(python_exe: str, reviewer_script: str) -> str:
@@ -378,16 +404,23 @@ def _dispatch_review_backend(
 def _call_claude_cli(claude_exe: str, user_prompt: str) -> "str | None":
     """Invoke `claude --print` with the review system prompt + diff.
 
-    Uses --append-system-prompt to inject our reviewer persona. --print
+    Uses `--append-system-prompt` to inject our reviewer persona. --print
     is the non-interactive mode (vs. the TTY interactive mode the
-    Draft PR button uses via helpers/claude_cli.py). 30s timeout —
-    on timeout, return None and the caller fail-opens.
+    Draft PR button uses via helpers/claude_cli.py).
+
+    The user prompt is piped via stdin rather than passed as the trailing
+    positional arg. The argv path mangles multi-line / backtick-laden
+    prompts on Windows in ways that produce
+    "Input must be provided either through stdin or as a prompt argument"
+    even though the arg IS present. stdin sidesteps all argv quirks.
+
+    30s timeout — on timeout return None and the caller fail-opens.
     """
     try:
         proc = subprocess.run(
             [claude_exe, "--print",
-             "--append-system-prompt", _REVIEW_SYSTEM_PROMPT,
-             user_prompt],
+             "--append-system-prompt", _REVIEW_SYSTEM_PROMPT],
+            input=user_prompt,
             capture_output=True, text=True,
             encoding="utf-8", errors="replace",
             timeout=30,

@@ -36,14 +36,13 @@ import subprocess
 import sys
 
 
-# ── Recursion guard (must run BEFORE any other work) ─────────────────────
-
-if os.environ.get("TOKENSAVE_PRECOMMIT_RUNNING") == "1":
-    # Already inside a hook invocation — bail to prevent infinite recursion
-    # in the (currently theoretical) case where the reviewer itself triggers
-    # a git commit. Cheap insurance.
-    sys.exit(0)
-os.environ["TOKENSAVE_PRECOMMIT_RUNNING"] = "1"
+# Recursion guard lives ENTIRELY in the shell hook (helpers/precommit_hook.py:
+# _render_hook_script) — the shell sets TOKENSAVE_PRECOMMIT_RUNNING=1 before
+# invoking us, and any nested git subprocess inherits it via the OS env so
+# the NEXT hook firing's shell guard short-circuits before reaching python.
+# Duplicating the check here was wrong — we always see the var the shell
+# just set, so we'd exit immediately on FIRST run. (Fixed in Phase 5b post-
+# ship after end-to-end testing showed reviews silently no-op'ing.)
 
 
 # ── sys.path bootstrap so `helpers.*` resolves ───────────────────────────
