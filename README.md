@@ -132,11 +132,11 @@ The manager's design philosophy: **never force a choice you don't want to make**
 
 ### Git Integration (no command line needed)
 - **Git tab** — live view of any project's git state: current branch, remote URL, working tree changes, recent commits, colour-coded diff viewer
-- **Push / Pull** — one-click with `git push -u origin HEAD` / `git pull`; graceful auth-error message if GitHub credentials aren't cached yet
+- **Push / Pull / Fetch** — one-click with `git push -u origin HEAD` / `git pull` / `git fetch --prune`; graceful auth-error message if GitHub credentials aren't cached yet. **📡 Fetch** updates the remote-branch list without merging — use before Switch Branch… to see branches a collaborator pushed or that you created on another machine
 - **Commit with per-file staging** — every changed file is shown as a checkbox with a colour-coded status badge (M modified / A added / D deleted / R renamed / ? untracked). Tick exactly the files you want, write a message (or use **💡 Suggest** for a multi-strategy auto-generated conventional-commit message), commit only those files
 - **Smart commit-message suggestions** — the **💡 Suggest** button runs a strategy chain: optional AI call (Anthropic / OpenAI / LM Studio / Ollama) → staged CHANGELOG.md bullets parsed into `feat(scope): subject + body` → diff content (added Python `def`/`class` names, file-kind heuristics) → file-name fallback. Output is sanitised: subjects ≤ 72 chars, imperative mood, generic `chore:` escalated to `refactor:` when source files changed, filename-listing anti-patterns blocked
 - **Undo Last Commit** — `git reset --soft HEAD~1`; keeps all changes, removes only the commit marker
-- **Branch management** — New Branch, Switch Branch, Merge, Delete Branch dialogs; no typing required
+- **Branch management** — New Branch, Switch Branch, Merge, Delete Branch dialogs; no typing required. **Switch Branch and Merge dialogs show remote-tracking branches** below a `── remote ──` separator (each marked with `↓`); selecting one runs `git checkout <name>` and git's DWIM auto-creates a local tracking branch. Remote branches already checked out locally are deduplicated.
 - **Merge a branch INTO the current one** — `⇄ Merge…` picks a source branch (the destination is wherever you are right now). Uses `git merge --no-edit` so no editor pops up. Conflicts surface as a dialog with the resolve-and-commit or `git merge --abort` instructions; dirty-tree errors get their own dialog
 - **Remote-aware Delete Branch** — after a successful local delete, the manager checks `git branch -r` for `origin/<branch>`. If it exists, you get a prompt to also `git push origin --delete <branch>` so GitHub stays in sync. Works for both safe and force deletes
 - **Open PR on GitHub** — on a feature branch, opens the GitHub compare page directly in your browser. On master/main, walks you through the branch workflow step by step
@@ -304,7 +304,7 @@ A full git control panel for whichever project is selected in the Projects tab.
 │  -old line                                                        │
 │  +new line                                                        │
 ├───────────────────────────────────────────────────────────────────┤
-│  [⬆ Push]  [⬇ Pull]  [📝 Commit…]  [↩ Undo Last Commit]          │
+│  [⬆ Push]  [⬇ Pull]  [📡 Fetch]  [📝 Commit…]  [↩ Undo Last Commit]│
 │  [🌿 New Branch]  [🔀 Switch Branch…]  [⇄ Merge…]                  │
 │  [🗑 Delete Branch…]  [🔗 Open PR]                                 │
 └────────────────────────────────────────────────────────────────────┘
@@ -333,11 +333,12 @@ A full git control panel for whichever project is selected in the Projects tab.
 |--------|-------------|
 | ⬆ Push | `git push -u origin HEAD` — send commits to GitHub |
 | ⬇ Pull | `git pull` — download commits from GitHub |
+| 📡 Fetch | `git fetch --prune` — refresh remote-branch info without merging. Use before Switch Branch… to see branches created elsewhere |
 | 📝 Commit… | Per-file staging dialog (see below) |
 | ↩ Undo Last Commit | `git reset --soft HEAD~1` — remove last commit, keep changes |
 | 🌿 New Branch | Create a branch with optional immediate switch |
-| 🔀 Switch Branch… | Switch to a different local branch |
-| ⇄ Merge… | Merge another branch INTO the current one (use after switching to master to pull a finished feature back in). Handles conflict + dirty-tree errors with inline instructions |
+| 🔀 Switch Branch… | Switch to a local or remote-tracking branch. Remote-only branches appear below a `── remote ──` separator; picking one auto-creates a local tracking copy |
+| ⇄ Merge… | Merge another branch INTO the current one (use after switching to master to pull a finished feature back in). Lists both local and remote-tracking branches (remote picks merge via `origin/<name>`). Handles conflict + dirty-tree errors with inline instructions |
 | 🗑 Delete Branch… | Delete a non-current branch (safe by default; offers force if unmerged). After local delete, prompts to also delete `origin/<branch>` if it exists on GitHub |
 | 🔗 Open PR | Open GitHub's compare page for the current branch; or explains branch workflow if on main |
 | 🐙 Merge PR… | Lists open PRs via `gh pr list --json`. Pick one + a merge strategy (Merge / Squash / Rebase) + optional delete-source-branch. Single confirmation modal shows title, source/base branches, diff stats. On confirm: `gh pr merge <N> --merge\|--squash\|--rebase`, then auto-switches local to the default branch and pulls so you end up sitting on the freshly-merged state |

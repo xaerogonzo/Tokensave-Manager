@@ -51,6 +51,7 @@ destination you push to.
 | **origin** | The standard nickname for your GitHub remote |
 | **Push** | Send your local commits to GitHub |
 | **Pull** | Download commits from GitHub to your machine |
+| **Fetch** | Download the list of remote branches without merging anything |
 | **Working tree** | The current state of your files — changes not yet committed |
 | **Staging** | Choosing which changes to include in the next commit |
 | **Merge** | Combining changes from one branch into another |
@@ -174,6 +175,22 @@ Click **🔀 Switch Branch…**, select `master`, click Switch.
 
 > **Important:** commit your changes before switching. If you have uncommitted
 > changes that conflict with the target branch, the switch will fail.
+
+### Switch to a remote branch (created on another machine or by a collaborator)
+
+If a colleague pushed a new branch, or you created one on another computer, it
+won't appear in your **🔀 Switch Branch…** list until you've told git to look.
+
+1. Click **📡 Fetch** — this downloads the list of remote branches without
+   merging anything. Safe to run at any time.
+2. Click **🔀 Switch Branch…** — remote-only branches now appear below the
+   `── remote ──` separator, marked with `↓`.
+3. Pick one and click Switch — git automatically creates a local copy that
+   tracks the remote, so subsequent pushes and pulls work normally.
+
+The same flow lets you **merge from a remote branch**: after Fetch, the remote
+branches show up in **⇄ Merge…** too (shown as `origin/branch-name` in the
+confirmation).
 
 ### Merge a branch back into master
 
