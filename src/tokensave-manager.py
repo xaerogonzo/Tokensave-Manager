@@ -14,20 +14,15 @@ import subprocess
 import threading
 import queue
 import time
-import logging
-import logging.handlers
-import ctypes
 import sys
 import dataclasses
 from datetime import datetime
 import tkinter as tk
 from tkinter import ttk, filedialog, messagebox, simpledialog
 from tkinter import font as tkfont
-import math
 import tempfile
 import textwrap
 import pystray
-from PIL import Image, ImageDraw
 
 # Round 4 Phase A: shared immutable constants live in src/constants.py.
 # Anything runtime-mutable belongs in src/state.py (ManagerConfig) instead.
@@ -43,7 +38,6 @@ from constants import (
     C,
     _BASE_DIR,
     _CONFIG_PATH,
-    LOG_DIR,
     LOG_FILE,
 )
 from helpers.detection import (
@@ -71,6 +65,9 @@ from helpers.llm import (
 # _call_anthropic, _call_openai_compat, _iter_sse_events live in helpers.llm
 # but are internal to _call_llm — no external callers need them imported here.
 from helpers.scaffold import _scaffold_git_hook
+from helpers.runtime import (
+    log, _acquire_instance_lock, _bring_existing_to_front, _make_tray_icon,
+)
 
 
 # _TOKENSAVE_UPDATE_RE moved to constants.py (Round 4 Phase A)
@@ -1773,21 +1770,8 @@ def _git_push_with_tags(path: str) -> tuple:
 # moved to helpers/scaffold.py (Round 4 Phase A)
 
 
-def _setup_logger():
-    os.makedirs(LOG_DIR, exist_ok=True)
-    handler = logging.handlers.RotatingFileHandler(
-        LOG_FILE, maxBytes=500_000, backupCount=5, encoding="utf-8"
-    )
-    handler.setFormatter(logging.Formatter(
-        "%(asctime)s %(levelname)-8s %(message)s",
-        datefmt="%Y-%m-%d %H:%M:%S",
-    ))
-    logger = logging.getLogger("tsm")
-    logger.setLevel(logging.DEBUG)
-    logger.addHandler(handler)
-    return logger
-
-log = _setup_logger()
+# _setup_logger() and `log = _setup_logger()` moved to helpers/runtime.py
+# (Round 4 Phase A). `log` is imported above.
 
 # ── Prompt snippets ────────────────────────────────────────────────────────────
 
@@ -2177,42 +2161,8 @@ def load_basic_instructions_template():
         "## Project-Specific Rules\n\n[Replace or delete this section.]\n"
     )
 
-# ── Single-instance ───────────────────────────────────────────────────────────
-
-_MUTEX_NAME = "TokenSaveManager_SingleInstance"
-_mutex_handle = None
-
-def _acquire_instance_lock():
-    """Return True if this is the first instance, False if another is running."""
-    global _mutex_handle
-    _mutex_handle = ctypes.windll.kernel32.CreateMutexW(None, False, _MUTEX_NAME)
-    return ctypes.windll.kernel32.GetLastError() != 183  # 183 = ERROR_ALREADY_EXISTS
-
-def _bring_existing_to_front():
-    """Find the existing window by title and restore it."""
-    hwnd = ctypes.windll.user32.FindWindowW(None, "TokenSave Manager")
-    if hwnd:
-        ctypes.windll.user32.ShowWindow(hwnd, 9)   # SW_RESTORE
-        ctypes.windll.user32.SetForegroundWindow(hwnd)
-
-# ── Tray icon ─────────────────────────────────────────────────────────────────
-
-def _make_tray_icon():
-    """Generate a 64×64 tray icon: dark circle with a white star."""
-    size = 64
-    img = Image.new("RGBA", (size, size), (0, 0, 0, 0))
-    d = ImageDraw.Draw(img)
-    bg = (30, 30, 46, 255)   # Catppuccin Mocha base
-    d.ellipse([2, 2, size - 2, size - 2], fill=bg)
-    # Simple 5-point star approximation using a polygon
-    cx, cy, r_out, r_in = size / 2, size / 2, 26, 11
-    points = []
-    for i in range(10):
-        angle = math.radians(-90 + i * 36)
-        r = r_out if i % 2 == 0 else r_in
-        points.append((cx + r * math.cos(angle), cy + r * math.sin(angle)))
-    d.polygon(points, fill=(137, 180, 250, 255))  # Catppuccin blue
-    return img
+# _MUTEX_NAME, _mutex_handle, _acquire_instance_lock, _bring_existing_to_front,
+# _make_tray_icon all moved to helpers/runtime.py (Round 4 Phase A).
 
 # ── Projects tab controller ────────────────────────────────────────────────────
 
