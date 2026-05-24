@@ -55,6 +55,7 @@ from helpers.shadow_links import (
     generate_shadow_links,
     update_gitignore_for_shadows,
 )
+from controllers.codegraph_ctrl import CodeGraphController
 from dialogs.ai_code_review import AICodeReviewDialog
 from dialogs.assign_category import AssignCategoryDialog
 from dialogs.gitignore import GitignoreDialog
@@ -124,6 +125,11 @@ class ProjectsTabController:
         self._on_set_running = on_set_running
         self._on_settings    = on_settings
 
+        # ── Sub-controllers ───────────────────────────────────────────────────
+        # Constructed after self._tab exists (codegraph_ctrl needs the frame).
+        # Deferred until after _build_projects_tab() below so _tab is ready.
+        self._codegraph: CodeGraphController | None = None  # set in _build_projects_tab
+
         # Controller-level subprocess tracking (parallel to App._current_proc)
         # Workers managed by THIS controller set/clear this attribute so that
         # App._auto_refresh can see whether the controller is busy.
@@ -138,6 +144,16 @@ class ProjectsTabController:
         notebook.add(self._tab, text="  Projects  ")
         self._build_projects_tab()
         self._build_context_menu()
+
+        self._codegraph = CodeGraphController(
+            tab=self._tab,
+            cfg=cfg,
+            on_log=on_log,
+            on_shell=on_shell,
+            on_refresh=on_refresh,
+            on_commit_offer=self._offer_commit_after_change,
+            on_settings=on_settings,
+        )
 
     # ── Convenience ───────────────────────────────────────────────────────────
 
@@ -281,20 +297,7 @@ class ProjectsTabController:
             parent=self._root)
         return False
 
-    def _require_codegraph_installed(self) -> bool:
-        if self._cfg.codegraph_exe and os.path.isfile(self._cfg.codegraph_exe):
-            return True
-        result = messagebox.askyesno(
-            "CodeGraph is not installed",
-            "CodeGraph is not installed on this machine.\n\n"
-            "CodeGraph is an alternative code-graph tool that builds a "
-            "per-project SQLite index for Claude Code to query. It complements "
-            "tokensave — both can be enabled on the same project.\n\n"
-            "Open Settings now to install it?",
-            parent=self._root)
-        if result:
-            self._on_settings()
-        return False
+    # _require_codegraph_installed was moved to CodeGraphController._require_installed
 
     def _offer_commit_after_change(self, path: str, summary_label: str) -> None:
         """After a manager action, check if tree is dirty and offer to commit."""
@@ -1060,103 +1063,23 @@ class ProjectsTabController:
 
     # ── CodeGraph commands ────────────────────────────────────────────────────
 
+    # ── CodeGraph commands — delegate to CodeGraphController ─────────────────
+
     def cmd_codegraph_init(self) -> None:
-        path = self._selected_path()
-        if not path:
-            return
-        if not self._require_codegraph_installed():
-            return
-        if _is_codegraph_project(path):
-            messagebox.showinfo("Already initialised",
-                f"{os.path.basename(path)} already has CodeGraph initialised.",
-                parent=self._root)
-            return
-        name = os.path.basename(path)
-        self._on_log(f"Running codegraph init in {name}…", C["peach"])
-
-        def worker():
-            out, rc = self._on_shell(
-                [self._cfg.codegraph_exe, "init", "--index", path], path)
-            col = C["green"] if rc == 0 else C["red"]
-            for line in out.strip().splitlines()[-8:]:
-                self._on_log(f"  {line}", col)
-            self._tab.after(0, self._on_refresh)
-            self._tab.after(0, lambda: self._offer_commit_after_change(
-                path, "CodeGraph init files"))
-
-        threading.Thread(target=worker, daemon=True).start()
+        if path := self._selected_path():
+            self._codegraph.cmd_init(path)
 
     def cmd_codegraph_sync(self) -> None:
-        path = self._selected_path()
-        if not path:
-            return
-        if not self._require_codegraph_installed():
-            return
-        if not _is_codegraph_project(path):
-            messagebox.showinfo("Not initialised",
-                f"{os.path.basename(path)} hasn't been initialised with "
-                "CodeGraph yet.\n\nRight-click → 🧠 CodeGraph Init first.",
-                parent=self._root)
-            return
-        name = os.path.basename(path)
-        self._on_log(f"Running codegraph sync in {name}…", C["peach"])
-
-        def worker():
-            out, rc = self._on_shell([self._cfg.codegraph_exe, "sync", path], path)
-            col = C["green"] if rc == 0 else C["red"]
-            for line in out.strip().splitlines()[-8:]:
-                self._on_log(f"  {line}", col)
-            self._tab.after(0, self._on_refresh)
-
-        threading.Thread(target=worker, daemon=True).start()
+        if path := self._selected_path():
+            self._codegraph.cmd_sync(path)
 
     def cmd_codegraph_status(self) -> None:
-        path = self._selected_path()
-        if not path:
-            return
-        if not self._require_codegraph_installed():
-            return
-        if not _is_codegraph_project(path):
-            messagebox.showinfo("Not initialised",
-                f"{os.path.basename(path)} hasn't been initialised with "
-                "CodeGraph yet.\n\nRight-click → 🧠 CodeGraph Init first.",
-                parent=self._root)
-            return
-        name = os.path.basename(path)
-        self._on_log(f"Running codegraph status in {name}…", C["peach"])
-
-        def worker():
-            out, rc = self._on_shell([self._cfg.codegraph_exe, "status", path], path)
-            col = C["green"] if rc == 0 else C["red"]
-            for line in out.strip().splitlines():
-                self._on_log(f"  {line}", col)
-
-        threading.Thread(target=worker, daemon=True).start()
+        if path := self._selected_path():
+            self._codegraph.cmd_status(path)
 
     def cmd_codegraph_remove(self) -> None:
-        path = self._selected_path()
-        if not path:
-            return
-        name = os.path.basename(path)
-        cg_dir = os.path.join(path, ".codegraph")
-        if not os.path.isdir(cg_dir):
-            messagebox.showinfo("Nothing to remove",
-                f"{name} has no CodeGraph index.", parent=self._root)
-            return
-        if not messagebox.askyesno(
-                "Remove CodeGraph index?",
-                f"Delete the CodeGraph index for {name}?\n\n"
-                f"This removes .codegraph/ from the project folder. Your "
-                "source files are not touched. You can re-create the index "
-                "later via 🧠 CodeGraph Init.",
-                parent=self._root):
-            return
-        try:
-            shutil.rmtree(cg_dir)
-            self._on_log(f"  Removed .codegraph/ from {name}", C["green"])
-        except OSError as e:
-            self._on_log(f"  Could not remove .codegraph/: {e}", C["red"])
-        self._on_refresh()
+        if path := self._selected_path():
+            self._codegraph.cmd_remove(path)
 
     # ── Git commands (Projects-tab variants) ──────────────────────────────────
 
