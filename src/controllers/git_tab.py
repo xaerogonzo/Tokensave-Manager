@@ -233,6 +233,8 @@ class GitTabController:
                                  command=self.cmd_git_push)
         btn_pull    = ttk.Button(row1, text="⬇  Pull",
                                  command=self.cmd_git_pull)
+        btn_fetch   = ttk.Button(row1, text="📡  Fetch",
+                                 command=self.cmd_git_fetch)
         btn_commit  = ttk.Button(row1, text="📝  Commit…",
                                  command=lambda: self._on_commit(self._git_path)
                                          if self._git_path else None)
@@ -253,7 +255,7 @@ class GitTabController:
         btn_release = ttk.Button(row2, text="📦  Release…",
                                  command=self.cmd_git_release)
 
-        for btn in (btn_push, btn_pull, btn_commit, btn_undo,
+        for btn in (btn_push, btn_pull, btn_fetch, btn_commit, btn_undo,
                     btn_new, btn_switch, btn_merge, btn_del, btn_openpr,
                     btn_mergepr, btn_release):
             btn.pack(side=tk.LEFT, padx=(0, 6))
@@ -268,6 +270,11 @@ class GitTabController:
             "Use this if you made changes on another computer,\n"
             "or if a collaborator pushed new work.\n\n"
             "Requires a remote (GitHub URL) to be set first.")
+        _Tooltip(btn_fetch,
+            "Download the latest list of remote branches without merging any changes.\n"
+            "Use this before Switch Branch… to see branches created on other\n"
+            "machines or by collaborators.\n\n"
+            "Safe to run at any time — it never modifies your local branches.")
         _Tooltip(btn_commit,
             "Save a snapshot of your current changes.\n"
             "Like a save point in a game — you can always come back here.\n\n"
@@ -566,6 +573,41 @@ class GitTabController:
                         "GitHub needs to verify your identity.\n\n"
                         "Open a terminal in this project folder and run:\n"
                         "    git push\n\n"
+                        "A browser window will open asking you to log in to GitHub.\n"
+                        "After that, this button will work normally.",
+                        parent=self._root))
+            finally:
+                self._tab.after(0, self._git_end_op)
+
+        threading.Thread(target=worker, daemon=True).start()
+
+    def cmd_git_fetch(self):
+        """Fetch remote refs (--prune) without merging. Updates remote-tracking branches."""
+        path = self._git_path
+        if not path or self._git_op_in_flight:
+            return
+        name = os.path.basename(path)
+        self._on_log(f"[{name}] Fetching…", C["peach"])
+        self._git_begin_op()
+
+        def worker():
+            try:
+                out, rc = self._on_shell(
+                    [self._cfg.git_exe, "-C", path, "fetch", "--prune"], path,
+                    env=_GIT_ENV_NO_PROMPT)
+                col = C["green"] if rc == 0 else C["red"]
+                lines = out.strip().splitlines()
+                if rc == 0 and not lines:
+                    self._log_queue.put((f"  [{name}] Already up to date.", col))
+                else:
+                    for line in lines[-6:]:
+                        self._log_queue.put((f"  {line}", col))
+                if rc != 0 and _is_auth_error(out):
+                    self._tab.after(0, lambda: messagebox.showinfo(
+                        "GitHub Authentication Required",
+                        "GitHub needs to verify your identity.\n\n"
+                        "Open a terminal in this project folder and run:\n"
+                        "    git fetch\n\n"
                         "A browser window will open asking you to log in to GitHub.\n"
                         "After that, this button will work normally.",
                         parent=self._root))
@@ -970,23 +1012,39 @@ class GitTabController:
         threading.Thread(target=worker, daemon=True).start()
 
     def cmd_git_switch_branch(self):
-        """Open Switch Branch dialog."""
+        """Open Switch Branch dialog (local + remote-tracking branches)."""
         path = self._git_path
         if not path:
             return
-        out, rc = self._on_shell([self._cfg.git_exe, "-C", path, "branch"], path)
-        if rc != 0:
-            messagebox.showerror("Git Error", out.strip(), parent=self._root)
+        git = self._cfg.git_exe
+        out_loc, rc1 = self._on_shell([git, "-C", path, "branch"], path)
+        if rc1 != 0:
+            messagebox.showerror("Git Error", out_loc.strip(), parent=self._root)
             return
-        branches = []
-        current  = ""
-        for line in out.strip().splitlines():
+        local_branches = []
+        current = ""
+        for line in out_loc.strip().splitlines():
             if line.startswith("* "):
                 current = line[2:].strip()
             else:
-                branches.append(line.strip())
-        SwitchBranchDialog(self._root, path, branches, current,
-                           self._do_git_switch_branch)
+                local_branches.append(line.strip())
+
+        # Collect remote-tracking branches, skip those already checked out locally
+        remote_branches = []
+        out_rem, rc2 = self._on_shell([git, "-C", path, "branch", "-r"], path)
+        if rc2 == 0:
+            local_set = set(local_branches) | {current}
+            for line in out_rem.strip().splitlines():
+                name = line.strip()
+                if "->" in name:          # skip "origin/HEAD -> origin/main"
+                    continue
+                bare = name.split("/", 1)[-1] if "/" in name else name
+                if bare not in local_set:
+                    remote_branches.append(bare)
+
+        SwitchBranchDialog(self._root, path, local_branches, current,
+                           self._do_git_switch_branch,
+                           remote_branches=remote_branches)
 
     def _do_git_switch_branch(self, path: str, name: str):
         self._git_begin_op()
@@ -1012,14 +1070,15 @@ class GitTabController:
         threading.Thread(target=worker, daemon=True).start()
 
     def cmd_git_merge(self):
-        """Merge another branch INTO the current branch."""
+        """Merge another branch INTO the current branch (local + remote-tracking)."""
         path = self._git_path
         if not path:
             return
         if self._git_op_in_flight:
             return
 
-        out, rc = self._on_shell([self._cfg.git_exe, "-C", path, "branch"], path)
+        git = self._cfg.git_exe
+        out, rc = self._on_shell([git, "-C", path, "branch"], path)
         if rc != 0:
             messagebox.showerror("Git Error", out.strip(), parent=self._root)
             return
@@ -1030,7 +1089,21 @@ class GitTabController:
                 current = line[2:].strip()
             else:
                 non_current.append(line.strip())
-        if not non_current:
+
+        # Remote-tracking branches not already checked out
+        remote_branches = []
+        out_rem, rc2 = self._on_shell([git, "-C", path, "branch", "-r"], path)
+        if rc2 == 0:
+            local_set = set(non_current) | {current}
+            for line in out_rem.strip().splitlines():
+                name = line.strip()
+                if "->" in name:
+                    continue
+                bare = name.split("/", 1)[-1] if "/" in name else name
+                if bare not in local_set:
+                    remote_branches.append(bare)
+
+        if not non_current and not remote_branches:
             messagebox.showinfo("No Other Branches",
                 "There are no other branches to merge from.", parent=self._root)
             return
@@ -1038,14 +1111,20 @@ class GitTabController:
         proj = os.path.basename(path)
         source = SwitchBranchDialog.pick(self._root,
             f"Merge into {current} — {proj}",
-            non_current, parent_widget=self._root)
+            non_current, parent_widget=self._root,
+            remote_branches=remote_branches)
         if not source:
             return
 
+        # For remote-only picks, merge via origin/<name> to avoid ambiguity
+        is_remote = source in remote_branches
+        merge_ref = f"origin/{source}" if is_remote else source
+        display   = f"origin/{source}" if is_remote else source
+
         if not messagebox.askyesno(
                 "Merge Branch",
-                f"Merge '{source}' INTO '{current}'?\n\n"
-                f"This brings commits from '{source}' into '{current}'.\n"
+                f"Merge '{display}' INTO '{current}'?\n\n"
+                f"This brings commits from '{display}' into '{current}'.\n"
                 "Your working tree must be clean.\n\n"
                 "If conflicts occur, resolve them in your editor, then\n"
                 "Commit the result.",
@@ -1057,11 +1136,11 @@ class GitTabController:
         def worker():
             try:
                 out, rc = self._on_shell(
-                    [self._cfg.git_exe, "-C", path, "merge", "--no-edit", source], path)
+                    [git, "-C", path, "merge", "--no-edit", merge_ref], path)
                 col = C["green"] if rc == 0 else C["red"]
                 if rc == 0:
                     self._log_queue.put((
-                        f"  [{proj}] Merged '{source}' into '{current}'", col))
+                        f"  [{proj}] Merged '{display}' into '{current}'", col))
                     for line in out.strip().splitlines()[-4:]:
                         self._log_queue.put((f"    {line}", col))
                 else:
@@ -1069,7 +1148,7 @@ class GitTabController:
                     if "conflict" in out_l:
                         self._tab.after(0, lambda: messagebox.showwarning(
                             "Merge Conflicts",
-                            f"Merging '{source}' into '{current}' produced conflicts.\n\n"
+                            f"Merging '{display}' into '{current}' produced conflicts.\n\n"
                             "Open the project in your editor and look for files\n"
                             "marked with conflict markers (<<<<<< / >>>>>>).\n"
                             "Resolve them, then use 📝 Commit… to commit the result.\n\n"
