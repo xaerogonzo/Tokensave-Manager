@@ -167,13 +167,22 @@ Three functions look genuinely unused after Phase E (grep-verified, NOT Tk-callb
 
 Plus two genuine unused imports in the same file: `dataclasses.dataclass` (L26) and `typing.Callable` (L27) — leftover from the legacy ToolSpec class.
 
-### 💭 Genuine dead-code cleanup in `src/agent_tools.py` (10-minute pass)
-Three functions look genuinely unused after Phase E (grep-verified, NOT Tk-callback false positives):
-- `_read_file_range` at `agent_tools.py:218` — superseded by inline handling in the `read_file` tool handler. **Verify** no caller remains, then delete.
-- `_suggest_paths_for_missing_file` at `agent_tools.py:249` — docstring claims it's called from `read_file`'s error path; verify the wiring still routes through it.
-- `_slim_tokensave_context` at `agent_tools.py:452` — verify the `tokensave_context` tool handler still calls it.
+### 🔮 Stage 2 (Ask-tab agent) usability refinements
 
-Plus two genuine unused imports in the same file: `dataclasses.dataclass` (L26) and `typing.Callable` (L27) — leftover from the legacy ToolSpec class.
+Surfaced via Roadmap-2 hands-on testing with `ollama` + `qwen2.5-coder:14b`. The agent works but quality is rough around the edges. Backlogged rather than fixed inline (the agent dispatch is a hot path; refinements deserve their own thought-out commit set).
+
+- **Tool-call deduplication.** Observed: model called `git_log({})` immediately followed by `git_log({"n": 20})` — same result, wasted iteration (default `n` is 20). The dispatcher could keep a per-run cache of `(tool_name, args_hash) → result` and return a cached result with `[cached from earlier in this run]` prefix, OR push back to the model with a "you already ran this — pick a different angle" hint. Low-risk; doesn't change tool semantics.
+- **Final-message streaming.** Currently the assistant's final answer arrives as one chunk at the end of the loop. Streaming the final-turn tokens (per the AGENT_ARCHITECTURE doc note) would make long answers feel responsive instead of opaque. Non-streaming the tool-call turns is correct — they're structured JSON.
+- **Loop-stall surfacing.** When the agent hits the iteration cap OR an unrecoverable HTTP error, the chat just shows a generic "✗  Error" indicator. The detailed reason already lives in `LocalAgent._last_error` — surface it in the chat (with the same one-line summary the `on_error` callback already gets).
+- **Single-source-of-truth for tool defaults in descriptions.** The `git_log` description says "Default 20" but the parameters JSON Schema doesn't set a default, so the model can't reliably pick "the default" without naming `n` explicitly. Either set `"default": 20` in the schema (preferred — lets the model omit `n`) or strip the "Default 20" from the prose so it doesn't mislead.
+
+### 🔮 Stage 0 (commit-message generation) quality refinements
+
+Surfaced via Roadmap-2 hands-on testing — clicking Suggest on a small docs-only diff produced the generic `docs: update documentation`, never invoking the LLM.
+
+- **`min_diff_lines` gate is too aggressive for small but meaningful changes.** Default 30 means a focused 5-line bug fix or a 10-line docs improvement falls through to the filename heuristic. Two paths: (a) lower the default to 10, accepting more LLM calls; (b) keep the line gate but add an opt-in path (e.g. shift-click Suggest = "use LLM regardless of size"). (b) is safer.
+- **File-name fallback is too generic for `docs/upstream-issues/`-style paths.** The current heuristic produces "docs: update documentation" when ALL changed files are markdown — but the actual subject (which issue draft was edited) is right there in the filename. A small `_SCOPE_PATTERNS` addition keyed off `docs/upstream-issues/<name>.md` → `docs(upstream): <name>` would catch this class.
+- **No surfacing of WHICH strategy fired.** Tooltip on the Suggest button or one-liner status ("via LLM" / "via CHANGELOG" / "via diff" / "via filename") would let the user know whether the generic message is the best the chain could do or whether the LLM was silently bypassed.
 
 ### 💭 File the two upstream tokensave issues
 Drafts in `docs/upstream-issues/`:
