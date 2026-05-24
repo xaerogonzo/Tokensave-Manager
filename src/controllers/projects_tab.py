@@ -20,9 +20,6 @@ from __future__ import annotations
 
 import os
 import re
-import shlex
-import shutil
-import subprocess
 import threading
 import time
 import tkinter as tk
@@ -43,19 +40,15 @@ from helpers.project_discovery import (
     fmt_age,
 )
 from helpers.runtime import log
-from helpers.shadow_links import (
-    DEFAULT_SHADOW_EXT_MAP,
-    generate_shadow_links,
-    update_gitignore_for_shadows,
-)
 from controllers.codegraph_ctrl import CodeGraphController
 from controllers.doctor_ctrl import DoctorController
 from controllers.scaffold_ctrl import ScaffoldRetrofitController
 from controllers.sync_ctrl import SyncStatusController
+from controllers.fileops_ctrl import FileOpsController
+from controllers.shadowlinks_ctrl import ShadowLinksController
 from dialogs.ai_code_review import AICodeReviewDialog
 from dialogs.assign_category import AssignCategoryDialog
 from dialogs.gitignore import GitignoreDialog
-from dialogs.shadow_links import ShadowLinksDialog
 from dialogs.untrack_ignored import UntrackIgnoredDialog
 
 if TYPE_CHECKING:
@@ -174,6 +167,20 @@ class ProjectsTabController:
             on_run=on_run,
             on_run_capture=on_run_capture,
             get_projects=get_projects,
+        )
+        self._fileops = FileOpsController(
+            tab=self._tab,
+            cfg=cfg,
+            on_log=on_log,
+            on_refresh=on_refresh,
+        )
+        self._shadowlinks = ShadowLinksController(
+            tab=self._tab,
+            cfg=cfg,
+            on_log=on_log,
+            on_refresh=on_refresh,
+            on_run_capture=on_run_capture,
+            on_commit_offer=self._offer_commit_after_change,
         )
 
     # ── Convenience ───────────────────────────────────────────────────────────
@@ -756,120 +763,29 @@ class ProjectsTabController:
 
     # ── File / editor / path commands ─────────────────────────────────────────
 
+    # ── File-ops commands — delegate to FileOpsController ────────────────────
+
     def cmd_open_folder(self) -> None:
-        path = self._selected_path()
-        if not path:
-            return
-        os.startfile(path)
+        if path := self._selected_path():
+            self._fileops.cmd_open_folder(path)
 
     def cmd_open_editor(self) -> None:
-        path = self._selected_path()
-        if not path:
-            return
-        editor_str = self._cfg.raw.get("editor_cmd", "code")
-        try:
-            cmd = shlex.split(editor_str)
-            cmd.append(path)
-            subprocess.Popen(cmd, creationflags=CREATE_NO_WINDOW)
-        except FileNotFoundError:
-            messagebox.showerror(
-                "Editor not found",
-                f"Could not launch '{editor_str}'.\n\n"
-                "Set the correct editor command in Settings.",
-                parent=self._root,
-            )
+        if path := self._selected_path():
+            self._fileops.cmd_open_editor(path)
 
     def cmd_copy_path(self) -> None:
-        path = self._selected_path()
-        if not path:
-            return
-        self._root.clipboard_clear()
-        self._root.clipboard_append(path)
-        self._on_log(f"Copied: {path}", C["sky"])
+        if path := self._selected_path():
+            self._fileops.cmd_copy_path(path)
 
     def cmd_remove(self) -> None:
-        path = self._selected_path()
-        if not path:
-            return
-        name = os.path.basename(path)
-        ts_dir = os.path.join(path, ".tokensave")
-        if not os.path.isdir(ts_dir):
-            messagebox.showinfo("Nothing to remove",
-                f"{name} has no tokensave index.", parent=self._root)
-            return
-        if not messagebox.askyesno(
-            "Remove index",
-            f"Delete the tokensave index for:\n{path}\n\n"
-            f"This removes the .tokensave/ directory only.\n"
-            f"Your project files are not affected.\n\n"
-            f"Continue?",
-            icon="warning", parent=self._root,
-        ):
-            return
-        try:
-            shutil.rmtree(ts_dir)
-            self._on_log(f"Removed .tokensave/ from {name}", C["peach"])
-            log.info(f"REMOVE index {ts_dir}")
-            self._on_refresh()
-        except Exception as e:
-            self._on_log(f"Error removing index: {e}", C["red"])
-            log.exception(f"REMOVE failed: {ts_dir}")
-            messagebox.showerror("Remove failed", str(e), parent=self._root)
+        if path := self._selected_path():
+            self._fileops.cmd_remove(path)
 
-    # ── Shadow Links ──────────────────────────────────────────────────────────
+    # ── Shadow Links — delegate to ShadowLinksController ─────────────────────
 
     def cmd_shadow_links(self) -> None:
-        path = self._selected_path()
-        if not path:
-            return
-        ShadowLinksDialog(self._root, path, self._do_shadow_links)
-
-    def _do_shadow_links(self, path: str, ext_map: dict,
-                         run_sync: bool = True) -> None:
-        """Generate shadow hardlinks in a background thread, then optionally sync."""
-        name = os.path.basename(path)
-
-        def worker():
-            rc = 0
-            try:
-                self._on_log(f"Generating shadow links for {name}…", C["peach"])
-                log.info(f"SHADOW LINKS  {path}  map={ext_map}")
-                created, skipped, failed = generate_shadow_links(path, ext_map)
-                update_gitignore_for_shadows(path, ext_map)
-                msg_parts = [f"Created: {created}"]
-                if skipped:
-                    msg_parts.append(f"Already existed: {skipped}")
-                if failed:
-                    msg_parts.append(f"Failed: {failed}")
-                summary = "  ".join(msg_parts)
-                self._on_log(f"  Shadow links: {summary}", C["green"])
-                log.info(f"SHADOW LINKS done: {summary}")
-
-                if run_sync and self._cfg.tokensave_exe and created > 0:
-                    self._on_log("  Running tokensave sync…", C["blue"])
-                    raw, rc, elapsed = self._on_run_capture(
-                        ["sync"], path, "shadow-sync")
-                    out = _ANSI.sub("", raw).strip()
-                    col = C["green"] if rc == 0 else C["red"]
-                    for line in out.splitlines()[-4:]:
-                        self._on_log(f"    {line}", col)
-
-                self._tab.after(0, self._on_refresh)
-                self._tab.after(0, lambda: messagebox.showinfo(
-                    "Shadow Links",
-                    f"{name}:\n\n{summary}"
-                    + (f"\n\nSync {'completed' if rc == 0 else 'failed'}."
-                       if run_sync and created > 0 else ""),
-                    parent=self._root))
-                self._tab.after(0, lambda: self._offer_commit_after_change(
-                    path, "shadow links + .gitignore"))
-            except Exception as e:
-                log.exception(f"SHADOW LINKS failed: {path}")
-                self._on_log(f"  Error: {e}", C["red"])
-                self._tab.after(0, lambda: messagebox.showerror(
-                    "Shadow Links failed", str(e), parent=self._root))
-
-        threading.Thread(target=worker, daemon=True).start()
+        if path := self._selected_path():
+            self._shadowlinks.cmd_shadow_links(path)
 
     # ── Category assignment ───────────────────────────────────────────────────
 
