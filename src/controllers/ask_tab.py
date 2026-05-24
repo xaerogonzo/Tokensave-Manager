@@ -117,9 +117,46 @@ class AskTabController:
         self._ask_messages: list = []
         self._ask_stop_event: threading.Event | None = None
         self._ask_thread: threading.Thread | None = None
+        # Active proposal bridges for the in-flight agent run. App.cancel_all_proposals
+        # iterates this set on root shutdown so worker threads never deadlock.
+        self._active_bridges: set = set()
+        self._bridges_lock = threading.Lock()
         self._tab = tk.Frame(notebook, bg=C["base"])
         notebook.add(self._tab, text="  🤖 Ask  ")
         self._build()
+
+    # ── Phase 1 (Roadmap-2): write-proposal bridge ────────────────────────
+
+    def _ask_open_proposal(self, proposal):
+        """Bridge callback passed to LocalAgent.on_write_proposal.
+
+        Called from the agent worker thread. Creates a ProposalBridge,
+        registers it for shutdown cancellation, invokes it (blocks the
+        worker on a bounded event.wait), then deregisters.
+
+        Returns (accepted: bool, final_content: str | None).
+        """
+        from dialogs.proposal import ProposalBridge   # lazy import (Tk surface)
+        root = self._tab.winfo_toplevel()
+        bridge = ProposalBridge(root, proposal, timeout_s=300.0)
+        with self._bridges_lock:
+            self._active_bridges.add(bridge)
+        try:
+            return bridge.invoke()
+        finally:
+            with self._bridges_lock:
+                self._active_bridges.discard(bridge)
+
+    def cancel_all_proposals(self):
+        """Called by App's WM_DELETE_WINDOW handler. Releases all worker
+        threads waiting on open proposals so the app can shut down cleanly."""
+        with self._bridges_lock:
+            bridges = list(self._active_bridges)
+        for b in bridges:
+            try:
+                b.cancel()
+            except Exception:
+                log.exception("ProposalBridge.cancel raised on shutdown")
 
     def _build(self):
         tab = self._tab
@@ -304,8 +341,17 @@ class AskTabController:
         stop_event = threading.Event()
         self._ask_stop_event = stop_event
 
-        tools = _agent_tools_mod.build_tools(self._ask_path, self._cfg.tokensave_exe)
-        agent_instance = _agent_mod.LocalAgent(llm_cfg, self._ask_path, tools)
+        # Phase 1 (Roadmap-2): build with write tool enabled, supply the
+        # bridge callback. Each agent run gets its own bridge — never
+        # shared, so an abandoned proposal can't starve concurrent runs.
+        # The bridge is registered with the App's active-bridge set so the
+        # WM_DELETE_WINDOW handler can cancel it on shutdown.
+        tools = _agent_tools_mod.build_tools(
+            self._ask_path, self._cfg.tokensave_exe, with_write=True)
+        agent_instance = _agent_mod.LocalAgent(
+            llm_cfg, self._ask_path, tools,
+            on_write_proposal=self._ask_open_proposal,
+        )
         self._ask_spawn_worker(agent_instance, stop_event)
 
     # ── _ask_send helpers ────────────────────────────────────────────────────

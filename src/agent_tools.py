@@ -21,11 +21,15 @@ from reading `C:\\Users\\...` or other locations outside the project root.
 
 from __future__ import annotations
 
+import hashlib
 import json
 import os
 import subprocess
 from dataclasses import dataclass
-from typing import Callable
+from typing import Callable, TYPE_CHECKING
+
+if TYPE_CHECKING:
+    from dialogs.proposal import WriteProposal
 
 CREATE_NO_WINDOW = 0x08000000   # mirrors constants.CREATE_NO_WINDOW
 
@@ -68,15 +72,31 @@ class ToolSpec:
         LocalAgent catches anything that does slip through.
     is_write : bool
         Mark `True` for tools that mutate state (write files, run
-        commits, change config). v1 has no write tools — Stage 3+ will
-        add them with ProposalDialog gating. **Mis-labelling a write
-        tool as read is a security defect.**
+        commits, change config). Write tools are routed through the
+        agent's `on_write_proposal` bridge for ProposalDialog gating
+        before `post_accept` runs. **Mis-labelling a write tool as read
+        is a security defect.**
+    proposal_builder : Callable[[dict], WriteProposal | str] | None
+        For write tools (`is_write=True`): function that takes the JSON-
+        decoded arguments dict and returns either a `WriteProposal` (which
+        gets shown to the user via ProposalDialog) OR an error string
+        starting with `[tool error]` (validation failure — no dialog, no
+        write, error returned to the model directly). None for read tools.
+    post_accept : Callable[[WriteProposal, str], str] | None
+        For write tools: function that does the actual file mutation AFTER
+        the user accepts. Takes the original WriteProposal plus the
+        final (possibly user-edited) content; returns a result string the
+        model sees (e.g. "wrote 24 lines to src/X.py"). Must perform the
+        race-safe hash recheck against `proposal.original_hash` before
+        writing. None for read tools.
     """
     name: str
     description: str
     parameters: dict
     handler: Callable[[dict], str]
     is_write: bool = False
+    proposal_builder: Callable[[dict], "WriteProposal | str"] | None = None
+    post_accept: Callable[["WriteProposal", str], str] | None = None
 
     def to_openai_tool(self) -> dict:
         """Render this ToolSpec as an OpenAI-style tools[] entry.
@@ -672,12 +692,265 @@ def _tool_tokensave_context(project_path: str, tokensave_exe: str) -> ToolSpec:
 
 
 # ───────────────────────────────────────────────────────────────────────
+# Write tool — Stage 3: gated by ProposalDialog via agent's bridge
+# ───────────────────────────────────────────────────────────────────────
+
+_WRITE_FILE_LARGE_LINES = 400  # threshold for the "prefer minimal edits" warning
+
+_WRITE_FILE_DESCRIPTION = (
+    "Write a file in the project. The user MUST review and accept "
+    "your proposed content via a dialog before the write happens — "
+    "this tool is gated by user approval, never autonomous.\n\n"
+    "When to use:\n"
+    "- The user has asked you to change a file (e.g. \"fix the bug "
+    "in foo.py\", \"add a docstring to bar()\").\n"
+    "- After reading the current file (use read_file FIRST so your "
+    "`content` is built on top of the real existing file, not your "
+    "guess of what's there).\n\n"
+    "Arguments:\n"
+    "- `path`: project-relative target path (forward slashes preferred).\n"
+    f"- `content`: the complete new file contents (this is a FULL "
+    f"REWRITE — for files over {_WRITE_FILE_LARGE_LINES} lines, "
+    "PREFER minimal edits and preserve unrelated content verbatim. "
+    "Full-file regeneration on large files frequently strips "
+    "imports, reorders sections, and stomps comments).\n"
+    "- `rationale`: one-sentence explanation of WHY this edit is "
+    "needed. The user sees this in the approval dialog.\n\n"
+    "What happens:\n"
+    "1. The dialog opens with a side-by-side diff (original vs "
+    "proposed). The user can edit your proposed content directly "
+    "in the dialog before accepting.\n"
+    "2. If the user accepts: the file is written atomically; you get "
+    "back \"Wrote N lines to <path>.\".\n"
+    "3. If the user rejects, closes, or doesn't act within 5 minutes: "
+    "you get back a `[write rejected]` string. Do NOT retry "
+    "automatically — explain to the user what you tried."
+)
+
+_WRITE_FILE_PARAMETERS = {
+    "type": "object",
+    "properties": {
+        "path": {
+            "type": "string",
+            "description": "Project-relative path to the file to write.",
+        },
+        "content": {
+            "type": "string",
+            "description": "Complete new file contents.",
+        },
+        "rationale": {
+            "type": "string",
+            "description": "One-sentence justification, shown to the user.",
+        },
+    },
+    "required": ["path", "content", "rationale"],
+    "additionalProperties": False,
+}
+
+
+def _validate_write_args(args: dict) -> tuple[str, str, str] | str:
+    """Return (path, content, rationale) or an `[tool error]` string."""
+    path = (args.get("path") or "").strip()
+    content = args.get("content")
+    rationale = (args.get("rationale") or "").strip()
+    if not path:
+        return "[tool error] missing required arg: path"
+    if content is None:
+        return "[tool error] missing required arg: content"
+    if not rationale:
+        return ("[tool error] missing required arg: rationale "
+                "(explain WHY the edit is needed, in one sentence)")
+    return path, str(content), rationale
+
+
+def _capture_original_file(full: str) -> tuple[str, str, float] | str:
+    """Read existing file or return defaults for a new file.
+
+    Returns (content, sha256_hex, mtime) on success, or an error string.
+    For a missing file: returns ("", "", 0.0). For existing-but-not-file:
+    returns an error string. The empty hash is the signal that the file
+    didn't exist at proposal-build time.
+    """
+    if not os.path.exists(full):
+        return "", "", 0.0
+    if not os.path.isfile(full):
+        return f"[tool error] target '{full}' exists but is not a regular file"
+    try:
+        with open(full, encoding="utf-8") as f:
+            original_content = f.read()
+    except OSError as e:
+        return f"[tool error] could not read existing file: {e}"
+    original_hash = hashlib.sha256(original_content.encode("utf-8")).hexdigest()
+    try:
+        original_mtime = os.path.getmtime(full)
+    except OSError:
+        original_mtime = 0.0
+    return original_content, original_hash, original_mtime
+
+
+def _compute_dirs_to_create(project_path: str, full: str) -> list[str]:
+    """Return project-relative directory paths (top-down) that don't exist
+    yet and would be created by an `os.makedirs(parent, exist_ok=True)`
+    call before writing `full`. Surfaced in the ProposalDialog so the user
+    sees the full side-effect set.
+    """
+    parent = os.path.dirname(full)
+    if not parent or os.path.isdir(parent):
+        return []
+    missing: list[str] = []
+    walk = parent
+    project_real = os.path.realpath(project_path)
+    while walk and walk != project_real and not os.path.isdir(walk):
+        missing.append(walk)
+        new_walk = os.path.dirname(walk)
+        if new_walk == walk:
+            break
+        walk = new_walk
+    return [
+        os.path.relpath(d, project_path).replace("\\", "/") + "/"
+        for d in reversed(missing)
+    ]
+
+
+def _check_write_race(proposal: "WriteProposal") -> str | None:
+    """Re-read the file at write-time; return error string if changed, else None.
+
+    Hash is authoritative. The empty-hash + file-now-exists case is also
+    a race (someone created the file between proposal-build and accept).
+    """
+    full = proposal.filepath
+    current_hash = ""
+    if os.path.exists(full):
+        try:
+            with open(full, encoding="utf-8") as f:
+                current_hash = hashlib.sha256(
+                    f.read().encode("utf-8")).hexdigest()
+        except OSError as e:
+            return f"[tool error] could not re-read target for race check: {e}"
+    if proposal.original_hash and current_hash != proposal.original_hash:
+        return ("[write rejected: file changed on disk while proposal was "
+                "open. Re-issue the write_file call after re-reading.]")
+    if not proposal.original_hash and current_hash:
+        return ("[write rejected: target was created on disk while proposal "
+                "was open. Re-read before issuing a new write_file call.]")
+    return None
+
+
+def _atomic_write_file(full: str, content: str) -> str | None:
+    """Write `content` to `full` atomically via .tmp + os.replace.
+
+    Returns None on success, `[tool error]` string on failure. Creates parent
+    directories if missing (same set already surfaced in the proposal's
+    dirs_to_create). Always ends file with newline.
+    """
+    parent = os.path.dirname(full)
+    if parent and not os.path.isdir(parent):
+        try:
+            os.makedirs(parent, exist_ok=True)
+        except OSError as e:
+            return f"[tool error] could not create parent directory: {e}"
+    tmp = full + ".tmp"
+    try:
+        with open(tmp, "w", encoding="utf-8", newline="\n") as f:
+            f.write(content)
+            if not content.endswith("\n"):
+                f.write("\n")
+        os.replace(tmp, full)
+    except OSError as e:
+        try:
+            if os.path.exists(tmp):
+                os.remove(tmp)
+        except OSError:
+            pass
+        return f"[tool error] write failed: {e}"
+    return None
+
+
+def _tool_write_file(project_path: str) -> ToolSpec:
+    """Write-tool factory. Construction is split into proposal_builder
+    (validates + builds the WriteProposal shown to the user) and
+    post_accept (does the atomic write after the user accepts).
+
+    The two-step shape is what `agent.py:_dispatch_tool` orchestrates: it
+    calls `proposal_builder`, hands the result to the user-approval bridge,
+    then calls `post_accept` only if the user accepted.
+    """
+    # Import lazily so module-load doesn't pull in Tk via dialogs/proposal.py
+    # (agent_tools is imported by the wrapper and CLI tools too).
+    from dialogs.proposal import WriteProposal
+
+    def _builder(args: dict) -> "WriteProposal | str":
+        validated = _validate_write_args(args)
+        if isinstance(validated, str):
+            return validated
+        path, content, rationale = validated
+
+        # Symlink-safe containment — `_under_project` uses os.path.realpath
+        full = _under_project(project_path, path)
+        if full is None:
+            return f"[tool error] path '{path}' is outside the project root"
+        if os.path.islink(full):
+            return f"[tool error] target '{path}' is a symlink; refusing to follow"
+
+        captured = _capture_original_file(full)
+        if isinstance(captured, str):
+            return captured
+        original_content, original_hash, original_mtime = captured
+
+        return WriteProposal(
+            filepath=full,
+            original_content=original_content,
+            proposed_content=content,
+            rationale=rationale,
+            original_hash=original_hash,
+            original_mtime=original_mtime,
+            dirs_to_create=_compute_dirs_to_create(project_path, full),
+        )
+
+    def _post_accept(proposal: "WriteProposal", final_content: str) -> str:
+        race_err = _check_write_race(proposal)
+        if race_err is not None:
+            return race_err
+        write_err = _atomic_write_file(proposal.filepath, final_content)
+        if write_err is not None:
+            return write_err
+        line_count = final_content.count("\n") + (
+            0 if final_content.endswith("\n") else 1)
+        rel = os.path.relpath(proposal.filepath, project_path).replace("\\", "/")
+        return f"Wrote {line_count} lines to {rel}."
+
+    def _handler_unused(_args: dict) -> str:
+        # Defence-in-depth — should NEVER be called. agent._dispatch_tool
+        # routes is_write=True tools through proposal_builder + post_accept
+        # and never invokes spec.handler.
+        return ("[tool error] write_file.handler called directly; this should "
+                "never happen — agent dispatch must route through "
+                "proposal_builder + post_accept.")
+
+    return ToolSpec(
+        name="write_file",
+        description=_WRITE_FILE_DESCRIPTION,
+        parameters=_WRITE_FILE_PARAMETERS,
+        handler=_handler_unused,
+        is_write=True,
+        proposal_builder=_builder,
+        post_accept=_post_accept,
+    )
+
+
+# ───────────────────────────────────────────────────────────────────────
 # Registry builder
 # ───────────────────────────────────────────────────────────────────────
 
-def build_tools(project_path: str, tokensave_exe: str = "") -> dict[str, ToolSpec]:
-    """Construct the tool registry for a given project."""
-    return {
+def build_tools(project_path: str, tokensave_exe: str = "",
+                with_write: bool = False) -> dict[str, ToolSpec]:
+    """Construct the tool registry for a given project.
+
+    `with_write=True` includes the gated `write_file` tool (Stage 3).
+    Default is read-only for backwards compatibility — call sites that
+    want the write tool must opt in explicitly.
+    """
+    tools = {
         "read_file":         _tool_read_file(project_path),
         "list_directory":    _tool_list_directory(project_path),
         "git_log":           _tool_git_log(project_path),
@@ -685,6 +958,9 @@ def build_tools(project_path: str, tokensave_exe: str = "") -> dict[str, ToolSpe
         "tokensave_search":  _tool_tokensave_search(project_path, tokensave_exe),
         "tokensave_context": _tool_tokensave_context(project_path, tokensave_exe),
     }
+    if with_write:
+        tools["write_file"] = _tool_write_file(project_path)
+    return tools
 
 
 def tools_as_openai_array(tools: dict[str, ToolSpec]) -> list[dict]:

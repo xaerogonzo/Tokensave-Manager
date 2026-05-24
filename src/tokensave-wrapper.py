@@ -1,3 +1,4 @@
+# anti-monolith: exempt — MCP wrapper, must stay single-threaded; see docs/MCP_INTEGRATION_GOTCHAS.md
 """
 tokensave-wrapper.py
 Run with pythonw.exe so Claude Desktop gets no console window.

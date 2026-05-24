@@ -150,12 +150,24 @@ class LocalAgent:
     def __init__(self, cfg: dict, project_path: str,
                  tools: dict[str, ToolSpec],
                  max_iterations: int = DEFAULT_MAX_ITERATIONS,
-                 tool_budget_chars: int = DEFAULT_TOOL_BUDGET_CHARS):
+                 tool_budget_chars: int = DEFAULT_TOOL_BUDGET_CHARS,
+                 on_write_proposal: Callable | None = None):
+        """
+        on_write_proposal: Optional bridge for is_write=True tools. Signature:
+            (proposal: WriteProposal) -> tuple[bool, str | None]
+        Called from the agent worker thread (this thread). Implementation
+        is responsible for opening the ProposalDialog on the Tk main thread,
+        blocking on user response, and returning (accepted, final_content).
+        If None, write tools are refused with `[tool error]` — preserves
+        the original read-only-agent invariant for callers that don't
+        opt into write support.
+        """
         self.cfg = cfg
         self.project_path = project_path
         self.tools = tools
         self.max_iterations = max_iterations
         self.tool_budget_chars = tool_budget_chars
+        self._on_write_proposal = on_write_proposal
         # Populated by _chat_completion on the failure path so callers
         # can surface the actual exception detail (HTTP code + body,
         # network error, JSON parse failure) instead of a generic
@@ -438,18 +450,22 @@ class LocalAgent:
 
         Master try/except — anything the handler raises becomes a
         `[tool error] ...` string the model sees, never crashes the loop.
+
+        Read tools (is_write=False) run via spec.handler directly.
+        Write tools (is_write=True) are routed through three steps:
+          1. spec.proposal_builder(args) -> WriteProposal | error str
+          2. self._on_write_proposal(proposal) -> (accepted, content)
+             (blocks the worker until user resolves the dialog)
+          3. spec.post_accept(proposal, content) -> result str
+        If the user rejects (or no bridge is configured), the write is
+        refused and the model sees a `[write rejected ...]` string.
         """
         spec = self.tools.get(name)
         if spec is None:
             return (f"[tool error] unknown tool: {name}. "
                     f"Available: {', '.join(sorted(self.tools.keys()))}")
         if spec.is_write:
-            # Defence-in-depth: v1 should never have any is_write tools in
-            # the registry. If somehow one slips in, refuse to execute
-            # rather than write-without-approval.
-            return (f"[tool error] tool '{name}' is marked is_write=True "
-                    "but write tools require ProposalDialog gating, which "
-                    "is not wired in this build. Refusing to execute.")
+            return self._dispatch_write_tool(name, spec, args)
         try:
             result = spec.handler(args)
             if result is None:
@@ -458,6 +474,39 @@ class LocalAgent:
         except Exception as e:
             log.exception("tool '%s' raised", name)
             return f"[tool error] {type(e).__name__}: {e}"
+
+    def _dispatch_write_tool(self, name: str, spec: ToolSpec, args: dict) -> str:
+        """Route an is_write=True tool through the proposal bridge."""
+        if spec.proposal_builder is None or spec.post_accept is None:
+            return (f"[tool error] write tool '{name}' is missing "
+                    "proposal_builder or post_accept callable. This is a "
+                    "registry-side defect; refusing to execute.")
+        if self._on_write_proposal is None:
+            return (f"[tool error] write tool '{name}' requires a "
+                    "ProposalDialog bridge but none was configured for this "
+                    "agent run. Refusing to execute.")
+        try:
+            proposal_or_err = spec.proposal_builder(args)
+        except Exception as e:
+            log.exception("write tool '%s' proposal_builder raised", name)
+            return f"[tool error] {type(e).__name__}: {e}"
+        if isinstance(proposal_or_err, str):
+            # Validation failure — no dialog, no write
+            return proposal_or_err
+        proposal = proposal_or_err
+        try:
+            accepted, final_content = self._on_write_proposal(proposal)
+        except Exception as e:
+            log.exception("write tool '%s' bridge raised", name)
+            return f"[tool error] proposal bridge failed: {type(e).__name__}: {e}"
+        if not accepted:
+            return "[write rejected by user]"
+        try:
+            result = spec.post_accept(proposal, final_content or "")
+            return result if result is not None else "(write accepted, no output)"
+        except Exception as e:
+            log.exception("write tool '%s' post_accept raised", name)
+            return f"[tool error] write failed: {type(e).__name__}: {e}"
 
     # ── Context-budget trimmer ──────────────────────────────────────────
 

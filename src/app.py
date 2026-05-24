@@ -151,6 +151,14 @@ class App(tk.Tk):
 
     def _quit_app(self, icon=None, item=None):
         log.info("Quit requested from tray")
+        # Phase 1 (Roadmap-2): release any worker threads waiting on open
+        # ProposalDialogs so they don't deadlock when Tk's mainloop ends.
+        # Hide-to-tray does NOT trigger this — the user can still recover
+        # an open proposal by clicking Show from the tray.
+        try:
+            self._ask_ctrl.cancel_all_proposals()
+        except AttributeError:
+            pass  # ask_ctrl not constructed yet (very early failure path)
         if self._tray:
             self._tray.stop()
         self.after(0, self.destroy)
