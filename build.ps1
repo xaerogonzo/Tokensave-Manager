@@ -164,7 +164,7 @@ Write-Host ""
 
 New-Item -ItemType Directory -Force -Path $DIST | Out-Null
 
-Build-Exe "$ROOT\src\tokensave-manager.py" "tokensave-manager.exe" $guiArgs
+Build-Exe "$ROOT\src\app.py" "tokensave-manager.exe" $guiArgs
 Build-Exe "$ROOT\src\tokensave-wrapper.py" "tokensave-wrapper.exe" $cliArgs
 
 # Stage data files next to the exes

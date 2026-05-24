@@ -1,195 +1,71 @@
+"""TokenSave Manager — App + entry point.
+
+Phase E of Round 4 — this is the new module-level entry point. The bat
+launcher (Launch TokenSave Manager.bat) invokes `python src/app.py`,
+which routes through `main()` below.
+
+Architecture (post-Round 4):
+  • `src/state.py`         — ManagerConfig dataclass (runtime-mutable settings)
+  • `src/constants.py`     — immutable constants (palette, regex, paths)
+  • `src/theme.py`         — _Tooltip Tk-coupled UI primitive
+  • `src/helpers/`         — 12 modules of pure / IO helpers
+  • `src/dialogs/`         — 18 tk.Toplevel dialog classes
+  • `src/controllers/`     — 4 tab controllers (Projects / Git / Ask / Snippets)
+  • `src/app.py`           — App + main() (THIS file)
+
+App owns the ManagerConfig instance (`self._cfg = ManagerConfig.load()` at
+construction). Every controller and dialog receives that same instance via
+__init__; they read live values through `self._cfg.X` properties (Rule 3)
+so a Settings save propagates immediately without restart.
+
+The legacy module globals (TOKENSAVE, GIT_EXE, …) that lived in the old
+monolith are GONE — `App._on_settings_saved` no longer rebinds anything
+because nothing reads bare globals anymore.
 """
-TokenSave Manager
-A GUI for managing tokensave projects and controlling which project
-Claude Desktop uses via the wrapper script.
-"""
+
+from __future__ import annotations
 
 import os
 import re
 import subprocess
+import sys
 import threading
 import time
-import sys
 import tkinter as tk
-from tkinter import ttk, messagebox
-# simpledialog (used by SettingsDialog._add_root) moved with the dialog
-# to src/dialogs/settings.py.
-import pystray
-# dataclasses (was used by _ReleaseCtx) + tempfile (was used by ReleaseWizardDialog)
-# moved to dialogs/release_wizard.py in Phase C.2.
+from tkinter import messagebox, ttk
 
-# Round 4 Phase A: shared immutable constants live in src/constants.py.
-# Anything runtime-mutable belongs in src/state.py (ManagerConfig) instead.
+import pystray
+
 from constants import (
-    _ANSI,
-    _TOKENSAVE_UPDATE_RE,
-    CREATE_NO_WINDOW,
     AUTO_REFRESH_MS,
     C,
+    CREATE_NO_WINDOW,
+    LOG_FILE,
+    _ANSI,
     _BASE_DIR,
     _CONFIG_PATH,
-    LOG_FILE,
+    _TOKENSAVE_UPDATE_RE,
 )
-from helpers.detection import _version_lt
-# _detect_git/_detect_gh/_detect_npm/_detect_codegraph/_root_path/_root_label/
-# _is_codegraph_project all live in helpers.detection — used by extracted
-# controllers + dialogs, no remaining monolith caller.
-from helpers.config import _save_config
-# _load_config and _migrate_config also live in helpers.config but are
-# used only via ManagerConfig.load() internally — no monolith caller
-# needs to import them.
-# helpers.shadow_links (generate_shadow_links / update_gitignore_for_shadows /
-# DEFAULT_SHADOW_EXT_MAP) used only by controllers.projects_tab — no monolith caller.
-# helpers.gitignore (_BASELINE_GITIGNORE / _read_gitignore_lines /
-# _write_gitignore_lines / _GITIGNORE_TEMPLATES / _ensure_gitignore /
-# _baseline_patterns) used only by extracted controllers + dialogs.
-# _call_llm, _build_llm_prompt, _call_anthropic, _call_openai_compat,
-# _iter_sse_events, _iter_json_lines also live in helpers.llm — used by
-# extracted dialogs (ai_code_review.py, ollama_model_mgr.py) and
-# helpers.commit_messages, not by the monolith.
-# _call_anthropic, _call_openai_compat, _iter_sse_events live in helpers.llm
-# but are internal to _call_llm — no external callers need them imported here.
-# helpers.scaffold._scaffold_git_hook moved with ProjectsTabController.
-from helpers.runtime import (
-    log, _acquire_instance_lock, _bring_existing_to_front, _make_tray_icon,
-)
-from helpers.project_discovery import find_projects, get_pinned
-# set_pinned / clear_pinned / fmt_age / load_basic_instructions_template moved
-# with ProjectsTabController.
-from helpers.git import (
-    _is_git_repo, _is_local_git_repo, _find_tracked_but_ignored,
-)
-# _parse_git_status_v2 / _format_git_status_cell used only by extracted
-# controllers / dialogs now.
-# _fetch_tags, _git_tag, _git_push_with_tags also in helpers.git — used
-# only by ReleaseWizardDialog (now in dialogs/release_wizard.py).
-# helpers.release functions (_last_release_tag, _commits_since,
-# _classify_commits_for_changelog, _bump_version, _suggest_bump_kind,
-# _render_release_notes, _patch_changelog, _zip_dist, _release_basename,
-# _fmt_size) are all consumed by ReleaseWizardDialog (now in
-# dialogs/release_wizard.py) — no remaining monolith caller needs them.
-# _CONVENTIONAL_RE / _TYPE_TO_SECTION / _SECTION_ORDER also live in
-# helpers.release. Monolith doesn't reference them directly — only
-# _classify_commits_for_changelog and _suggest_bump_kind do, and both
-# moved to helpers/release.py with them.
-from helpers.mcp import _MCP_CONFIGS, _classify_mcp_entry
-# _apply_mcp_fix, _is_claude_running, plus the resolve/wrapper/canonical/
-# checker helpers all live in helpers.mcp — used by MCPConfigDialog and
-# SettingsDialog (now in dialogs/), no remaining monolith caller.
-from helpers.commit_messages import _suggest_commit_message
-# _pending_diff also lives in helpers.commit_messages — only used by the now-extracted
-# AICodeReviewDialog, no remaining monolith caller needs it.
-# All the other sanitizer / strategy / constant helpers live in
-# helpers.commit_messages but no monolith code calls them directly — they
-# are internal to _suggest_commit_message's orchestration. Future dialogs
-# / controllers that need any of them should import from there directly
-# (e.g. `from helpers.commit_messages import _sanitize_commit_message`).
-# _resolve_desktop_cfg_path, _wrapper_path, _canonical_mcp_entry, _McpCtx,
-# _chk_bundled_wrapper / _chk_python_wrapper / _chk_direct_serve, and
-# _MCP_CMD_CHECKERS / _MCP_DESKTOP_CFG_PATH / _MCP_CODE_CFG_PATH also live
-# in helpers.mcp — used only by _classify_mcp_entry / MCPConfigDialog
-# internally, no external callers in the monolith need them imported here.
-
-
-# _TOKENSAVE_UPDATE_RE moved to constants.py (Round 4 Phase A)
-
-# _BASE_DIR / _CONFIG_PATH / LOG_DIR / LOG_FILE moved to constants.py
-# _load_config / _save_config / _migrate_config moved to helpers/config.py
-# (Round 4 Phase A)
-
-
-# MCP-config helpers (_resolve_desktop_cfg_path, _wrapper_path,
-# _canonical_mcp_entry, _McpCtx, _chk_*, _classify_mcp_entry, _apply_mcp_fix,
-# _MCP_DESKTOP_CFG_PATH / _MCP_CODE_CFG_PATH / _MCP_CONFIGS / _MCP_CMD_CHECKERS)
-# moved to helpers/mcp.py (Round 4 Phase A — 4 _classify_mcp_entry call sites
-# updated to pass _cfg).
-
-
-
-# Round 4 Phase A finale: `_state` is the new canonical settings holder
-# (`state.ManagerConfig` instance). All future controllers and dialogs
-# receive `_state` (or `App._cfg` which is the same instance) via
-# `__init__(cfg: ManagerConfig)` and read live values through its
-# property getters — `cfg.git_exe`, `cfg.tokensave_exe`, etc.
-#
-# During the Phase A transition window the legacy module globals
-# (TOKENSAVE / GIT_EXE / etc.) and the legacy `_cfg` dict alias are
-# REBOUND at module load AND in App._on_settings_saved to source their
-# values from `_state` — so existing call sites that haven't migrated
-# yet keep working unchanged. Phases B–E migrate each extracted file's
-# call sites to `self._cfg.X` and the legacy globals get deleted in
-# Phase E once nothing reads them.
-from state import ManagerConfig
-# Round 4 Phase B: dialog classes extracted to src/dialogs/.
-# NewBranchDialog, SetRemoteDialog, SwitchBranchDialog, MergePRDialog,
-# GitHubSetupDialog, ReleaseWizardDialog all moved to consumers in Phase D.2
-# (now only GitTabController instantiates them — imported there directly).
-# SnippetEditDialog moved with SnippetsController to controllers/snippets.py
-# in Phase D.1 — only the controller instantiates that dialog now.
-# AssignCategoryDialog / ScaffoldDialog / ShadowLinksDialog / RetrofitDialog /
-# AICodeReviewDialog / GitignoreDialog all moved with ProjectsTabController
-# (Phase D.3) — only that controller instantiates them.
-from dialogs.untrack_ignored import UntrackIgnoredDialog
-# _ReleaseCtx also lives in dialogs.release_wizard — internal to the dialog,
-# no remaining monolith caller needs it.
-# OllamaModelManagerDialog also in dialogs.ollama_model_mgr — only opened from
-# SettingsDialog (now in dialogs/settings.py) via lazy import; no monolith caller.
-# Round 4 Phase C.3 — final big-dialog batch. SettingsDialog last (depends on
-# MCPConfig + Ollama from C.1/C.2 via lazy in-handler imports per Rule 6).
-from dialogs.mcp_config import MCPConfigDialog
-from dialogs.git_commit import GitCommitDialog
-from dialogs.settings import SettingsDialog
-# Round 4 Phase D.1 — small tab controllers (AskTab + Snippets).
-# Round 4 Phase D.2 — GitTabController.
 from controllers.ask_tab import AskTabController
 from controllers.git_tab import GitTabController
 from controllers.projects_tab import ProjectsTabController
 from controllers.snippets import SnippetsController
-
-_state = ManagerConfig.load()
-_cfg   = _state.raw            # legacy dict alias — shared with _state.raw
-
-TOKENSAVE     = _state.tokensave_exe
-TEMPLATE_DIR  = _state.template_dir
-SEARCH_ROOTS  = _state.search_roots
-GIT_EXE: str  = _state.git_exe
-CODEGRAPH_EXE: str = _state.codegraph_exe
-BASIC_INSTRUCTIONS_TEMPLATE = _state.basic_instructions_template
-BASELINE_INCLUDE_LINE       = _state.baseline_include_line
-
-
-# _detect_git, _detect_gh, _detect_npm, _detect_codegraph, _is_codegraph_project
-# moved to helpers/detection.py (Round 4 Phase A)
-# _root_path and _root_label moved to helpers/detection.py (Round 4 Phase A)
-
-# DESKTOP_PROJECT_FILE, SKIP_DIRS, MAX_DEPTH, CREATE_NO_WINDOW, AUTO_REFRESH_MS,
-# and _GIT_ENV_NO_PROMPT moved to constants.py (Round 4 Phase A).
-
-
-# _Tooltip moved to theme.py (Round 4 Phase A) — no monolith caller now.
-
-
-# _is_auth_error moved to helpers/llm.py (Round 4 Phase A)
-
-# Commit-message helpers (_parse_commit_status / _strat_* / _suggest_commit_message /
-# _strip_md / _escalate_commit_type / _normalize_commit_body / _sanitize_commit_message /
-# _recent_commit_subjects / _find_changelog_file / _pending_diff /
-# _extract_changelog_additions / _extract_scope / _dominant_directory /
-# _message_from_changelog / _diff_added_python_symbols / _suggest_from_diff_content /
-# _suggest_from_filenames / _call_llm_for_commit_message + 6 constants)
-# moved to helpers/commit_messages.py (Round 4 Phase A —
-# 5 external call sites updated: 3 _suggest_commit_message + 2 _pending_diff).
-
-
-
-# _render_release_notes / _patch_changelog / _zip_dist / _release_basename /
-# _fmt_size moved to helpers/release.py (Round 4 Phase A — 3 git-shell call
-# sites in ReleaseWizardDialog updated to pass GIT_EXE).
-
-
-
-# _fetch_tags / _git_tag / _git_push_with_tags moved to helpers/git.py
-# (Round 4 Phase A — 3 sites in ReleaseWizardDialog updated).
+from dialogs.git_commit import GitCommitDialog
+from dialogs.mcp_config import MCPConfigDialog
+from dialogs.settings import SettingsDialog
+from dialogs.untrack_ignored import UntrackIgnoredDialog
+from helpers.commit_messages import _suggest_commit_message
+from helpers.detection import _version_lt
+from helpers.git import _find_tracked_but_ignored, _is_git_repo, _is_local_git_repo
+from helpers.mcp import _MCP_CONFIGS, _classify_mcp_entry
+from helpers.project_discovery import find_projects, get_pinned
+from helpers.runtime import (
+    _acquire_instance_lock,
+    _bring_existing_to_front,
+    _make_tray_icon,
+    log,
+)
+from state import ManagerConfig
 
 
 # ── Prompt snippets (Reference tab) ─────────────────────────────────────────
@@ -426,26 +302,6 @@ PROMPT_SNIPPETS = [
 ]
 
 
-# _PROJECTS_TAB_CONTROLLER_EXTRACTED -- see src/controllers/projects_tab.py
-
-
-# ── Ask tab controller ─────────────────────────────────────────────────────────
-
-# AskTabController moved to src/controllers/ask_tab.py (Round 4 Phase D.1 — cfg: ManagerConfig param added)
-
-
-
-# ── Reference / Snippets tab controller ────────────────────────────────────────
-
-# SnippetsController moved to src/controllers/snippets.py (Round 4 Phase D.1 — cfg: ManagerConfig param added)
-
-
-
-# ── GitTabController ──────────────────────────────────────────────────────────
-
-# _GIT_TAB_CONTROLLER_EXTRACTED -- see src/controllers/git_tab.py
-
-
 class App(tk.Tk):
     def __init__(self):
         super().__init__()
@@ -457,9 +313,9 @@ class App(tk.Tk):
         # dialogs (extracted in Phases B–E) receive this via __init__ and
         # read live values through cfg.git_exe / cfg.tokensave_exe / etc.
         # During the Phase A transition window, legacy module globals
-        # (TOKENSAVE, GIT_EXE, …) still exist and get re-bound by
-        # _on_settings_saved alongside _state.refresh_derived().
-        self._cfg = _state
+        # (self._cfg.tokensave_exe, self._cfg.git_exe, …) still exist and get re-bound by
+        # _on_settings_saved alongside self._cfg.refresh_derived().
+        self._cfg = ManagerConfig.load()
         self._current_proc = None
         self._stop_requested = False
         # Cached tokensave version info.  Current version is populated at
@@ -475,8 +331,8 @@ class App(tk.Tk):
         self._probe_tokensave_version()
         log.info("=" * 60)
         log.info("TokenSave Manager started")
-        log.info(f"  exe      : {TOKENSAVE}")
-        log.info(f"  templates: {TEMPLATE_DIR}")
+        log.info(f"  exe      : {self._cfg.tokensave_exe}")
+        log.info(f"  templates: {self._cfg.template_dir}")
         log.info(f"  log file : {LOG_FILE}")
         self._style()
         self._build()
@@ -623,7 +479,7 @@ class App(tk.Tk):
         self.nb.pack(fill=tk.BOTH, expand=True, padx=0, pady=0)
 
         self._projects = ProjectsTabController(
-            self.nb, _state,
+            self.nb, self._cfg,
             get_projects=lambda: self.projects,
             on_run=self._run,
             on_run_capture=self._run_capture,
@@ -636,16 +492,16 @@ class App(tk.Tk):
             on_settings=self.cmd_settings,
         )
         self._git = GitTabController(
-            self.nb, _state,
+            self.nb, self._cfg,
             get_path=self._get_git_path,
             on_log=self._log,
             on_shell=self._shell_capture,
             on_commit=self._open_commit_dialog,
         )
         self._ask_ctrl = AskTabController(
-            self.nb, self._get_ask_project_path, _state)
+            self.nb, self._get_ask_project_path, self._cfg)
         self._snippets_ctrl = SnippetsController(
-            self.nb, _state, PROMPT_SNIPPETS)
+            self.nb, self._cfg, PROMPT_SNIPPETS)
         self._build_help_tab()
 
         self.nb.bind("<<NotebookTabChanged>>", self._on_tab_changed)
@@ -1337,11 +1193,11 @@ class App(tk.Tk):
             ins("Active project pin:  ", "body")
             ins("%USERPROFILE%\\.tokensave\\desktop-project.txt\n", "code")
             ins("Baseline rules:      ", "body")
-            ins(os.path.join(TEMPLATE_DIR, "project-baseline.md") + "\n", "code")
+            ins(os.path.join(self._cfg.template_dir, "project-baseline.md") + "\n", "code")
             ins("Project template:    ", "body")
-            ins(os.path.join(TEMPLATE_DIR, "claude-md-template.md") + "\n", "code")
+            ins(os.path.join(self._cfg.template_dir, "claude-md-template.md") + "\n", "code")
             ins("Nuitka templates:    ", "body")
-            ins(os.path.join(TEMPLATE_DIR, "nuitka-build.ps1.template") + "\n", "code")
+            ins(os.path.join(self._cfg.template_dir, "nuitka-build.ps1.template") + "\n", "code")
             ins("Wrapper script:      ", "body")
             if os.environ.get("NUITKA_ONEFILE_PARENT"):
                 _wrapper = os.path.join(_BASE_DIR, "tokensave-wrapper.exe")
@@ -1375,7 +1231,7 @@ class App(tk.Tk):
         self._help_show(_fill)
 
     def refresh(self):
-        self.projects = find_projects(SEARCH_ROOTS)
+        self.projects = find_projects(self._cfg.search_roots)
         pinned = get_pinned()
         self.active_path = pinned or (self.projects[0]["path"] if self.projects else None)
 
@@ -1398,22 +1254,22 @@ class App(tk.Tk):
 
     def _check_config(self):
         problems = []
-        if not TOKENSAVE or not os.path.isfile(TOKENSAVE):
+        if not self._cfg.tokensave_exe or not os.path.isfile(self._cfg.tokensave_exe):
             problems.append("tokensave.exe path is missing or invalid")
-        if not TEMPLATE_DIR or not os.path.isdir(TEMPLATE_DIR):
+        if not self._cfg.template_dir or not os.path.isdir(self._cfg.template_dir):
             problems.append("Template directory is missing or invalid")
 
         # MCP-config drift detection — opens the configurator instead of
         # Settings when there are no other problems, since that's the most
         # actionable thing the user can do.
-        skips = (_cfg.get("mcp_skip_warnings") or []) \
-                if isinstance(_cfg, dict) else []
+        skips = (self._cfg.raw.get("mcp_skip_warnings") or []) \
+                if isinstance(self._cfg.raw, dict) else []
         mcp_drift = []
         for label, path in _MCP_CONFIGS:
             if path in skips:
                 continue
             try:
-                info = _classify_mcp_entry(path, _cfg)
+                info = _classify_mcp_entry(path, self._cfg.raw)
             except Exception:
                 # Defensive — never crash startup just because we can't read
                 # a Claude config file. The dialog can surface details.
@@ -1429,7 +1285,7 @@ class App(tk.Tk):
             note = "Please set the correct paths before using the manager."
             self._log("Config problem: " + " | ".join(problems), C["red"])
             SettingsDialog(
-                self, _state, _save_config, self._on_settings_saved,
+                self, self._cfg, self._cfg.save, self._on_settings_saved,
                 startup_note=(note + "\n\n"
                               + "\n".join(f"• {p}" for p in problems)))
             return
@@ -1447,7 +1303,7 @@ class App(tk.Tk):
 
         # Open the configurator after a short delay so the main window has
         # finished laying out — feels less like an interruption.
-        self.after(800, lambda: MCPConfigDialog(self, _state))
+        self.after(800, lambda: MCPConfigDialog(self, self._cfg))
 
     def _auto_refresh(self):
         ctrl_idle = (not hasattr(self, "_projects") or self._projects.current_proc is None)
@@ -1503,7 +1359,7 @@ class App(tk.Tk):
                 env["NO_COLOR"] = "1"
                 env["TERM"] = "dumb"
                 proc = subprocess.Popen(
-                    [TOKENSAVE] + args,
+                    [self._cfg.tokensave_exe] + args,
                     cwd=cwd,
                     stdout=subprocess.PIPE,
                     stderr=subprocess.STDOUT,
@@ -1566,8 +1422,8 @@ class App(tk.Tk):
                     self._log("Done.", C["green"])
                     log.info(f"DONE exit=0  [{elapsed:.1f}s]")
                     if (args and args[0] == "sync"
-                            and _cfg.get("auto_commit_after_sync")
-                            and _is_git_repo(cwd, GIT_EXE)):
+                            and self._cfg.raw.get("auto_commit_after_sync")
+                            and _is_git_repo(cwd, self._cfg.git_exe)):
                         self._auto_commit_after_sync(cwd)
                 else:
                     self._log(f"Exited with code {proc.returncode}", C["red"])
@@ -1584,33 +1440,33 @@ class App(tk.Tk):
     def _auto_commit_after_sync(self, cwd: str) -> None:
         """Commit staged changes after a successful sync, using LLM or amend-stacking."""
         self._log("  Auto-committing sync changes…", C["peach"])
-        self._shell_capture([GIT_EXE, "-C", cwd, "add", "-A"], cwd)
+        self._shell_capture([self._cfg.git_exe, "-C", cwd, "add", "-A"], cwd)
         _, staged_rc = self._shell_capture(
-            [GIT_EXE, "-C", cwd, "diff", "--cached", "--quiet"], cwd)
+            [self._cfg.git_exe, "-C", cwd, "diff", "--cached", "--quiet"], cwd)
         if staged_rc == 0:
             return  # nothing staged
 
-        llm_cfg = _cfg.get("commit_message_llm") or {}
+        llm_cfg = self._cfg.raw.get("commit_message_llm") or {}
         use_llm = bool(llm_cfg.get("enabled") and llm_cfg.get("use_for_sync_autocommit"))
 
         if use_llm:
             # LLM mode: each sync gets a unique message; no amend-stacking.
             self._log("  Composing AI commit message…", C["peach"])
             status_out, _ = self._shell_capture(
-                [GIT_EXE, "-C", cwd, "status", "--short"], cwd)
-            ai_msg = _suggest_commit_message(cwd, status_out, _cfg, GIT_EXE) or "chore: tokensave sync"
-            commit_cmd = [GIT_EXE, "-C", cwd, "commit", "-m", ai_msg.split("\n", 1)[0]]
+                [self._cfg.git_exe, "-C", cwd, "status", "--short"], cwd)
+            ai_msg = _suggest_commit_message(cwd, status_out, self._cfg.raw, self._cfg.git_exe) or "chore: tokensave sync"
+            commit_cmd = [self._cfg.git_exe, "-C", cwd, "commit", "-m", ai_msg.split("\n", 1)[0]]
             if "\n\n" in ai_msg:
                 commit_cmd.extend(["-m", ai_msg.split("\n\n", 1)[1]])
         else:
             # Default amend-stacking: repeated syncs collapse into one commit.
             last_out, _ = self._shell_capture(
-                [GIT_EXE, "-C", cwd, "log", "-1", "--format=%s"], cwd)
+                [self._cfg.git_exe, "-C", cwd, "log", "-1", "--format=%s"], cwd)
             if last_out.strip() == "chore: tokensave sync":
-                commit_cmd = [GIT_EXE, "-C", cwd, "commit", "--amend", "--no-edit"]
+                commit_cmd = [self._cfg.git_exe, "-C", cwd, "commit", "--amend", "--no-edit"]
                 self._log("  Amending previous sync commit…", C["peach"])
             else:
-                commit_cmd = [GIT_EXE, "-C", cwd, "commit", "-m", "chore: tokensave sync"]
+                commit_cmd = [self._cfg.git_exe, "-C", cwd, "commit", "-m", "chore: tokensave sync"]
 
         cout, crc = self._shell_capture(commit_cmd, cwd)
         col = C["green"] if crc == 0 else C["red"]
@@ -1635,7 +1491,7 @@ class App(tk.Tk):
             env["NO_COLOR"] = "1"
             env["TERM"] = "dumb"
             proc = subprocess.Popen(
-                [TOKENSAVE] + args,
+                [self._cfg.tokensave_exe] + args,
                 cwd=cwd,
                 stdout=subprocess.PIPE,
                 stderr=subprocess.STDOUT,
@@ -1691,11 +1547,11 @@ class App(tk.Tk):
         the cache as None, which the Settings UI handles gracefully.
         """
         def _worker():
-            if not TOKENSAVE or not os.path.isfile(TOKENSAVE):
+            if not self._cfg.tokensave_exe or not os.path.isfile(self._cfg.tokensave_exe):
                 return
             try:
                 r = subprocess.run(
-                    [TOKENSAVE, "--version"],
+                    [self._cfg.tokensave_exe, "--version"],
                     capture_output=True, text=True, timeout=5,
                     creationflags=CREATE_NO_WINDOW,
                     encoding="utf-8", errors="replace")
@@ -1728,10 +1584,10 @@ class App(tk.Tk):
     # Hourly poll cadence — GitHub allows 60 unauthenticated requests/hour
     # per IP, so once an hour is comfortably within the limit and keeps
     # the update notification fresh enough that users won't miss a release
-    # for long. Tunable via _cfg["tokensave_update_poll_hours"] if a user
+    # for long. Tunable via self._cfg.raw["tokensave_update_poll_hours"] if a user
     # wants to be more or less aggressive.
     def _tokensave_update_poll_interval(self) -> float:
-        hours = float(_cfg.get("tokensave_update_poll_hours", 1.0))
+        hours = float(self._cfg.raw.get("tokensave_update_poll_hours", 1.0))
         return max(0.25, hours) * 3600.0  # never poll more than 4x/hour
 
     def _tokensave_update_poll_loop(self):
@@ -1808,7 +1664,7 @@ class App(tk.Tk):
         the Settings button auto-hides until the next sync re-reports an
         update.
         """
-        if not TOKENSAVE or not os.path.isfile(TOKENSAVE):
+        if not self._cfg.tokensave_exe or not os.path.isfile(self._cfg.tokensave_exe):
             messagebox.showwarning(
                 "tokensave not found",
                 "Set the tokensave.exe path in Settings first.",
@@ -1842,7 +1698,7 @@ class App(tk.Tk):
         # will re-populate it anyway.
         self._tokensave_available_version = None
         # cwd is the tokensave.exe folder — works for any upgrade flow.
-        self._run(["upgrade"], cwd=os.path.dirname(TOKENSAVE),
+        self._run(["upgrade"], cwd=os.path.dirname(self._cfg.tokensave_exe),
                   label="upgrade")
 
     # ── Commit dialog (shared by Projects context menu, Git tab, and
@@ -1860,7 +1716,7 @@ class App(tk.Tk):
         the user would have to come back and untrack anyway.
         """
         if _is_local_git_repo(path):
-            stale = _find_tracked_but_ignored(path, GIT_EXE)
+            stale = _find_tracked_but_ignored(path, self._cfg.git_exe)
             if stale:
                 n = len(stale)
                 preview = "\n".join(f"  • {f}" for f in stale[:5])
@@ -1888,9 +1744,9 @@ class App(tk.Tk):
                     return
         # No conflicts, OR user chose to proceed anyway
         status_out, _ = self._shell_capture(
-            [GIT_EXE, "-C", path, "status", "--short"], path)
-        is_repo = _is_git_repo(path, GIT_EXE)
-        GitCommitDialog(self, path, status_out, is_repo, self._do_git_commit, _state)
+            [self._cfg.git_exe, "-C", path, "status", "--short"], path)
+        is_repo = _is_git_repo(path, self._cfg.git_exe)
+        GitCommitDialog(self, path, status_out, is_repo, self._do_git_commit, self._cfg)
 
     def _offer_commit_after_change(self, path: str, summary_label: str) -> None:
         """After a manager action (Ensure .gitignore, Scaffold, Retrofit, etc.),
@@ -1904,7 +1760,7 @@ class App(tk.Tk):
         if not _is_local_git_repo(path):
             return
         status_out, _ = self._shell_capture(
-            [GIT_EXE, "-C", path, "status", "--porcelain"], path)
+            [self._cfg.git_exe, "-C", path, "status", "--porcelain"], path)
         if not status_out.strip():
             self._log("  Working tree clean — nothing to commit.", C["overlay0"])
             return
@@ -1945,7 +1801,7 @@ class App(tk.Tk):
             try:
                 if files_to_add:
                     out, rc = self._shell_capture(
-                        [GIT_EXE, "-C", path, "add", "--"] + files_to_add, path)
+                        [self._cfg.git_exe, "-C", path, "add", "--"] + files_to_add, path)
                     if rc != 0:
                         if "ignored by one of your .gitignore files" in out:
                             offending = [
@@ -1972,7 +1828,7 @@ class App(tk.Tk):
                 self._log(f"[{name}] Committing ({len(all_paths)} file"
                           f"{'s' if len(all_paths) != 1 else ''})…",
                           C["peach"])
-                commit_cmd = ([GIT_EXE, "-C", path, "commit", "-m", message,
+                commit_cmd = ([self._cfg.git_exe, "-C", path, "commit", "-m", message,
                                "--"] + all_paths)
                 cout, crc = self._shell_capture(commit_cmd, path)
                 col = C["green"] if crc == 0 else C["red"]
@@ -1985,119 +1841,36 @@ class App(tk.Tk):
         threading.Thread(target=worker, daemon=True).start()
 
     def cmd_settings(self):
-        SettingsDialog(self, _state, _save_config, self._on_settings_saved)
+        SettingsDialog(self, self._cfg, self._cfg.save, self._on_settings_saved)
 
     def _on_settings_saved(self):
-        global TOKENSAVE, TEMPLATE_DIR, SEARCH_ROOTS, GIT_EXE, CODEGRAPH_EXE
-        global BASIC_INSTRUCTIONS_TEMPLATE, BASELINE_INCLUDE_LINE
-        # ManagerConfig.raw is the same dict object as _cfg, so SettingsDialog's
-        # mutations are already visible — we just need to recompute the cached
-        # derived fields (git_exe, codegraph_exe) and re-bind the legacy globals
-        # so any caller still reading them gets the new values. Phases B–E
-        # migrate readers to `self._cfg.X` and the global rebind goes away.
-        _state.refresh_derived()
-        TOKENSAVE     = _state.tokensave_exe
-        TEMPLATE_DIR  = _state.template_dir
-        SEARCH_ROOTS  = _state.search_roots
-        GIT_EXE       = _state.git_exe
-        CODEGRAPH_EXE = _state.codegraph_exe
-        BASIC_INSTRUCTIONS_TEMPLATE = _state.basic_instructions_template
-        BASELINE_INCLUDE_LINE       = _state.baseline_include_line
+        # Phase E: legacy module globals are gone — only need to recompute
+        # the cached derived fields (git_exe / codegraph_exe). All controllers
+        # and dialogs hold `self._cfg` (the live ManagerConfig instance), so
+        # the new values propagate automatically without re-binding.
+        self._cfg.refresh_derived()
         self.refresh()
         self._log("Settings saved and applied.", C["green"])
-
-# ── Retrofit dialog ────────────────────────────────────────────────────────────
-
-# RetrofitDialog moved to src/dialogs/retrofit.py (Round 4 Phase B)
-
-
-
-# ── Scaffold dialog ────────────────────────────────────────────────────────────
-
-# ScaffoldDialog moved to src/dialogs/scaffold.py (Round 4 Phase B)
-
-
-
-# ── Settings dialog ────────────────────────────────────────────────────────────
-
-# SettingsDialog+_probe_loaded_model moved to src/dialogs/settings.py (Round 4 Phase C.3)
-
-
-
-
-# ── Snippet edit dialog ────────────────────────────────────────────────────────
-
-# SnippetEditDialog moved to src/dialogs/snippet_edit.py (Round 4 Phase B)
-
-
-
-# ── Shadow Links dialog ────────────────────────────────────────────────────────
-
-# ShadowLinksDialog moved to src/dialogs/shadow_links.py (Round 4 Phase B)
-
-
-
-# ── Git Commit dialog ──────────────────────────────────────────────────────────
-
-# ── Git helper dialogs ────────────────────────────────────────────────────────
-
-# SetRemoteDialog moved to src/dialogs/set_remote.py (Round 4 Phase B)
-
-
-
-# MergePRDialog moved to src/dialogs/merge_pr.py (Round 4 Phase B)
-
-
-
-# NewBranchDialog moved to src/dialogs/new_branch.py (Round 4 Phase B)
-
-
-
-# SwitchBranchDialog moved to src/dialogs/switch_branch.py (Round 4 Phase B)
-
-
-
-# ── Assign Category dialog ────────────────────────────────────────────────────
-
-# AssignCategoryDialog moved to src/dialogs/assign_category.py (Round 4 Phase B)
-
-
-
-# GitHubSetupDialog moved to src/dialogs/github_setup.py (Round 4 Phase C.1 — cfg: ManagerConfig param added)
-
-
-
-# ReleaseWizard+_ReleaseCtx moved to src/dialogs/release_wizard.py (Round 4 Phase C.2)
-
-
-
-
-# UntrackIgnoredDialog moved to src/dialogs/untrack_ignored.py (Round 4 Phase B)
-# GitignoreDialog moved to src/dialogs/gitignore.py (Round 4 Phase C.1 — cfg: ManagerConfig param added)
-# _iter_json_lines moved to helpers/llm.py (Round 4 Phase A)
-
-# OllamaModelManagerDialog moved to src/dialogs/ollama_model_mgr.py (Round 4 Phase C.2)
-
-
-
-# _is_claude_running moved to helpers/mcp.py (Round 4 Phase A).
-
-
-
-
-# MCPConfigDialog moved to src/dialogs/mcp_config.py (Round 4 Phase C.3)
-
-
-
-# GitCommitDialog moved to src/dialogs/git_commit.py (Round 4 Phase C.3)
-
 
 
 # ── Entry point ────────────────────────────────────────────────────────────────
 
-if __name__ == "__main__":
+
+def main() -> None:
+    """Module-level entry point. Invoked by `python src/app.py` (via the
+    Launch TokenSave Manager.bat) and by the Nuitka-bundled .exe.
+
+    Behaviour matches the legacy monolith's __main__ guard:
+      • Single-instance lock via _acquire_instance_lock
+      • If already running, bring the existing window to front and exit
+      • Otherwise, construct App() and enter the Tk main loop
+    """
     if not _acquire_instance_lock():
         _bring_existing_to_front()
         sys.exit(0)
     app = App()
     app.mainloop()
+
+
+if __name__ == "__main__":
+    main()
