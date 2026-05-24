@@ -86,7 +86,18 @@ class AICodeReviewDialog(tk.Toplevel):
         self._review_token = 0
         self._cancelled = False
 
-        # ── Header ───────────────────────────────────────────────────────
+        self._build_header_section(path)
+        paned = self._build_paned_split()
+        self._build_diff_pane(paned)
+        self._build_review_pane(paned)
+        self._build_buttons_section()
+
+        # Load diff & kick off review
+        self._load_diff()
+        self._start_review()
+
+    def _build_header_section(self, path: str):
+        """Title row + live status label (spinner / provider info)."""
         hdr = tk.Frame(self, bg=C["base"])
         hdr.pack(fill=tk.X, padx=20, pady=(14, 6))
         tk.Label(hdr, text="🔍  AI Code Review",
@@ -95,20 +106,23 @@ class AICodeReviewDialog(tk.Toplevel):
         tk.Label(hdr, text=os.path.basename(path),
                  font=("Segoe UI", 10),
                  bg=C["base"], fg=C["overlay0"]).pack(side=tk.LEFT, padx=(10, 0))
-
-        # Live status (spinner + provider/model info)
         self._status_lbl = tk.Label(
             self, text="", font=("Segoe UI", 9, "italic"),
             bg=C["base"], fg=C["peach"],
             justify=tk.LEFT, anchor=tk.W)
         self._status_lbl.pack(fill=tk.X, padx=20, pady=(0, 6))
 
-        # ── Split: diff (top) + review output (bottom) ───────────────────
+    def _build_paned_split(self):
+        """The vertical PanedWindow that hosts the diff pane (top) and
+        the review pane (bottom). Returns the paned widget so the two
+        pane-builders can `paned.add(...)` into it."""
         paned = tk.PanedWindow(self, orient=tk.VERTICAL, bg=C["base"],
                                 sashwidth=6, sashrelief=tk.FLAT)
         paned.pack(fill=tk.BOTH, expand=True, padx=20, pady=(0, 8))
+        return paned
 
-        # Diff view
+    def _build_diff_pane(self, paned: tk.PanedWindow):
+        """Top pane: git-diff Text widget with both scrollbars + diff colour tags."""
         diff_frame = tk.LabelFrame(
             paned, text=" Pending diff (git diff HEAD) ",
             bg=C["base"], fg=C["subtext"],
@@ -138,7 +152,8 @@ class AICodeReviewDialog(tk.Toplevel):
                                       font=("Consolas", 9, "bold"))
         paned.add(diff_frame, minsize=120, stretch="always")
 
-        # Review output
+    def _build_review_pane(self, paned: tk.PanedWindow):
+        """Bottom pane: review Text widget + vertical scrollbar + severity-header tags."""
         rev_frame = tk.LabelFrame(
             paned, text=" AI review ",
             bg=C["base"], fg=C["subtext"],
@@ -169,7 +184,8 @@ class AICodeReviewDialog(tk.Toplevel):
             font=("Segoe UI", 11, "bold"), spacing1=8, spacing3=2)
         paned.add(rev_frame, minsize=150, stretch="always")
 
-        # ── Action buttons ──────────────────────────────────────────────
+    def _build_buttons_section(self):
+        """Action button row: Copy / Regenerate / Stop / Close."""
         btn_row = tk.Frame(self, bg=C["base"])
         btn_row.pack(fill=tk.X, padx=20, pady=(0, 14))
         self._copy_btn = ttk.Button(
@@ -185,10 +201,6 @@ class AICodeReviewDialog(tk.Toplevel):
         self._stop_btn.pack(side=tk.LEFT, padx=(0, 6))
         ttk.Button(btn_row, text="Close",
                    command=self.destroy).pack(side=tk.RIGHT)
-
-        # ── Load diff & kick off review ─────────────────────────────────
-        self._load_diff()
-        self._start_review()
 
     # ─────────────────────────────────────────────────────────────────────
 
@@ -220,15 +232,10 @@ class AICodeReviewDialog(tk.Toplevel):
     def _start_review(self):
         """Kick off (or restart) the LLM review on a background thread.
 
-        Streams tokens from the LLM into the review pane as they arrive, so
-        the user sees output building up in real time instead of staring at
-        a spinner for 30+ seconds. Tokens are batched on the worker side
-        (every ~8 deltas or 50 ms, whichever first) before being pushed to
-        the Tk main thread via `self.after` — a fast local model can emit
-        80+ tokens/s and 1:1 self.after calls would saturate Tk's event
-        loop. The accumulated full text is still returned at end-of-stream
-        so the existing `_render_review` (which applies severity-section
-        colour tags) can do its final pass.
+        Orchestrator: takes a fresh review-token, resets UI state to the
+        "waiting" view, builds the user prompt, then hands off to
+        `_spawn_review_worker` for the streaming worker construction. Keeps
+        the state-reset and worker-thread setup as two readable steps.
         """
         diff = _pending_diff(self._path, git_exe=self._cfg.git_exe, lines_of_context=3)
         if not diff:
@@ -254,17 +261,31 @@ class AICodeReviewDialog(tk.Toplevel):
         self._stop_btn.configure(state=tk.NORMAL)
 
         max_chars = int(self._llm_cfg.get("max_diff_chars", 24000))
-        # Construct the user prompt — just the diff with context.
         user_prompt = (
             f"Review the following git diff. Project: "
             f"{os.path.basename(self._path)}.\n\n"
             f"```diff\n{diff[:max_chars]}\n```"
             + ("\n\n[diff truncated for length]" if len(diff) > max_chars else "")
         )
+        self._spawn_review_worker(token, user_prompt)
 
-        # Worker-thread-only batching buffer. No lock needed because both
-        # `_on_token` and the final-flush call run on the worker thread, and
-        # the captured snapshot is passed by value into `self.after`.
+    def _spawn_review_worker(self, token: int, user_prompt: str):
+        """Set up the token-batched streaming closures and spawn the worker.
+
+        Streams tokens from the LLM into the review pane as they arrive, so
+        the user sees output building up in real time instead of staring at
+        a spinner for 30+ seconds. Tokens are batched on the worker side
+        (every ~32 chars or 50 ms, whichever first) before being pushed to
+        the Tk main thread via `self.after` — a fast local model can emit
+        80+ tokens/s and 1:1 self.after calls would saturate Tk's event
+        loop. The accumulated full text is still returned at end-of-stream
+        so the existing `_render_review` (which applies severity-section
+        colour tags) can do its final pass.
+
+        Worker-thread-only batching buffer: no lock needed because both
+        `_on_token` and the final-flush call run on the worker thread, and
+        each snapshot is passed by value into `self.after`.
+        """
         batch_text: list[str] = []
         batch_chars = [0]
         last_flush = [time.monotonic()]
