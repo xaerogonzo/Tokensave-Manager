@@ -49,12 +49,12 @@ from controllers.git_tab import GitTabController
 from controllers.help_tab import HelpTabController
 from controllers.projects_tab import ProjectsTabController
 from controllers.snippets import SnippetsController
+from controllers.update_poller import UpdatePollerController
 from dialogs.git_commit import GitCommitDialog
 from dialogs.mcp_config import MCPConfigDialog
 from dialogs.settings import SettingsDialog
 from dialogs.untrack_ignored import UntrackIgnoredDialog
 from helpers.commit_messages import _suggest_commit_message
-from helpers.detection import _version_lt
 from helpers.git import _find_tracked_but_ignored, _is_git_repo, _is_local_git_repo
 from helpers.mcp import _MCP_CONFIGS, _classify_mcp_entry
 from helpers.project_discovery import find_projects, get_pinned
@@ -88,17 +88,17 @@ class App(tk.Tk):
         self._cfg = ManagerConfig.load()
         self._current_proc = None
         self._stop_requested = False
-        # Cached tokensave version info.  Current version is populated at
-        # App startup via `tokensave --version` (fast, no network).
-        # Available-update version is populated by the output parser in
-        # `_run` when tokensave emits "Update available: vA → vB" at the
-        # end of a sync — that line is opportunistic (tokensave appears
-        # to throttle update checks to once per day), so SettingsDialog
-        # ALWAYS shows the Upgrade button with the current version, and
-        # only labels it with the target version when one is known.
-        self._tokensave_current_version: str | None = None
-        self._tokensave_available_version: str | None = None
-        self._probe_tokensave_version()
+        # Version probe + update-check background loop.
+        # _update_poller owns _tokensave_current_version and
+        # _tokensave_available_version as properties; App._run() writes
+        # them via the controller when it parses opportunistic sync output.
+        self._update_poller = UpdatePollerController(
+            cfg=self._cfg,
+            on_log=self._log,
+            on_run=self._run,
+            root=self,
+        )
+        self._update_poller.start()
         log.info("=" * 60)
         log.info("TokenSave Manager started")
         log.info(f"  exe      : {self._cfg.tokensave_exe}")
@@ -537,8 +537,8 @@ class App(tk.Tk):
                     m = _TOKENSAVE_UPDATE_RE.search(stripped)
                     if m:
                         cur_v, new_v = m.group(1), m.group(2)
-                        self._tokensave_current_version = cur_v
-                        self._tokensave_available_version = new_v
+                        self._update_poller.current_version = cur_v
+                        self._update_poller.available_version = new_v
                         self._log(stripped, C["yellow"])
                         self._log(
                             f"  → tokensave {cur_v} → {new_v} ready to "
@@ -671,169 +671,21 @@ class App(tk.Tk):
         except FileNotFoundError:
             return (f"Error: '{cmd[0]}' not found on system PATH.", 1)
 
-    def _probe_tokensave_version(self):
-        """Best-effort read of the installed tokensave version.
+    # ── Update poller (version probe + GitHub update-check) ─────────────────
 
-        Runs `tokensave --version` once at App startup (in a background
-        thread to avoid blocking the GUI). Output looks like
-        "tokensave 5.1.1" — we extract the version string and cache it
-        on the instance. Failures (binary missing, weird output) leave
-        the cache as None, which the Settings UI handles gracefully.
-        """
-        def _worker():
-            if not self._cfg.tokensave_exe or not os.path.isfile(self._cfg.tokensave_exe):
-                return
-            try:
-                r = subprocess.run(
-                    [self._cfg.tokensave_exe, "--version"],
-                    capture_output=True, text=True, timeout=5,
-                    creationflags=CREATE_NO_WINDOW,
-                    encoding="utf-8", errors="replace")
-            except (OSError, subprocess.TimeoutExpired):
-                return
-            out = (r.stdout or "").strip()
-            m = re.search(r'(\d+\.\d+\.\d+(?:\.\d+)?)', out)
-            if m:
-                self._tokensave_current_version = m.group(1)
-                log.debug(f"tokensave installed version: "
-                          f"{self._tokensave_current_version}")
-                # Kick off a single update check right after we know the
-                # local version. Subsequent checks fire from the hourly
-                # poller below.
-                self._check_tokensave_updates()
-        threading.Thread(target=_worker, daemon=True,
-                         name="tokensave-version-probe").start()
-        # Hourly background poller. Cheap (one GitHub API call, no auth);
-        # safe to run forever as a daemon thread.
-        threading.Thread(target=self._tokensave_update_poll_loop,
-                         daemon=True,
-                         name="tokensave-update-poll").start()
+    @property
+    def _tokensave_current_version(self) -> str | None:
+        """Backward-compat accessor for SettingsDialog."""
+        return self._update_poller.current_version
 
-    # GitHub releases API endpoint for tokensave. Hardcoded since the
-    # tokensave repo URL is referenced in README.md and is unlikely to
-    # change. If it does, this is a one-line update.
-    _TOKENSAVE_RELEASES_API = (
-        "https://api.github.com/repos/aovestdipaperino/tokensave/releases/latest")
-
-    # Hourly poll cadence — GitHub allows 60 unauthenticated requests/hour
-    # per IP, so once an hour is comfortably within the limit and keeps
-    # the update notification fresh enough that users won't miss a release
-    # for long. Tunable via self._cfg.raw["tokensave_update_poll_hours"] if a user
-    # wants to be more or less aggressive.
-    def _tokensave_update_poll_interval(self) -> float:
-        hours = float(self._cfg.raw.get("tokensave_update_poll_hours", 1.0))
-        return max(0.25, hours) * 3600.0  # never poll more than 4x/hour
-
-    def _tokensave_update_poll_loop(self):
-        """Daemon: re-check GitHub for new tokensave releases periodically.
-
-        Doesn't trigger any UI prompts — just refreshes the cached
-        `_tokensave_available_version` so the Settings dialog reflects
-        the current state next time it's opened. The OUTPUT-pane hint
-        line is only logged on FRESH discovery (transition from "no
-        update known" → "update available"), not on every poll, to avoid
-        spamming the log.
-        """
-        while True:
-            time.sleep(self._tokensave_update_poll_interval())
-            self._check_tokensave_updates()
-
-    def _check_tokensave_updates(self):
-        """Single-shot check against the tokensave releases API.
-
-        Compares against `_tokensave_current_version` (set by the local
-        --version probe). When a strictly-newer version is found AND it
-        wasn't known before, logs a peach hint to the OUTPUT pane so
-        users see the update offer without opening Settings.
-        """
-        import urllib.request, urllib.error, json as _json
-        if not self._tokensave_current_version:
-            return  # nothing to compare against yet
-        try:
-            req = urllib.request.Request(
-                self._TOKENSAVE_RELEASES_API,
-                headers={"Accept": "application/vnd.github+json",
-                         "User-Agent": "tokensave-manager"})
-            with urllib.request.urlopen(req, timeout=8) as resp:
-                data = _json.loads(resp.read().decode("utf-8"))
-        except (urllib.error.URLError, urllib.error.HTTPError,
-                TimeoutError, _json.JSONDecodeError, OSError) as e:
-            # Common when offline or rate-limited. Silent — try again
-            # next interval.
-            log.debug(f"tokensave update check failed: {type(e).__name__}: {e}")
-            return
-        tag = (data.get("tag_name") or "").strip().lstrip("v")
-        m = re.match(r'(\d+\.\d+\.\d+(?:\.\d+)?)', tag)
-        if not m:
-            return
-        latest = m.group(1)
-        cur = self._tokensave_current_version
-        if not _version_lt(cur, latest):
-            return  # current is up-to-date or ahead (unlikely but possible)
-        prev_known = self._tokensave_available_version
-        self._tokensave_available_version = latest
-        if prev_known != latest:
-            # Fresh discovery — surface it. (Skip the log line if the
-            # poller is just re-confirming a version we already knew
-            # about.)
-            self._log(
-                f"  → tokensave {cur} → {latest} ready to install.  "
-                f"Settings → 'Upgrade tokensave to v{latest}' to apply, "
-                f"or run 'tokensave upgrade' from a shell.",
-                C["peach"])
-            log.info(f"UPDATE-AVAILABLE  {cur} -> {latest}  (via GitHub API)")
+    @property
+    def _tokensave_available_version(self) -> str | None:
+        """Backward-compat accessor for SettingsDialog."""
+        return self._update_poller.available_version
 
     def cmd_upgrade_tokensave(self):
-        """Run `tokensave upgrade` from the manager.
-
-        Streams output to the OUTPUT pane via the existing _run path. cwd
-        doesn't matter for upgrade (it operates on the installed binary,
-        not any specific project) so we use the tokensave_exe's directory
-        as a stable choice. On success, the upgrade replaces the binary
-        on disk; future sync / MCP-server spawns pick up the new version
-        automatically, but the currently-running MCP wrappers continue
-        serving from the old binary until Claude is restarted.
-
-        Clears the cached `_tokensave_available_version` on success so
-        the Settings button auto-hides until the next sync re-reports an
-        update.
-        """
-        if not self._cfg.tokensave_exe or not os.path.isfile(self._cfg.tokensave_exe):
-            messagebox.showwarning(
-                "tokensave not found",
-                "Set the tokensave.exe path in Settings first.",
-                parent=self)
-            return
-        # Confirm — upgrades replace a binary and we want the user fully
-        # aware. Skip the prompt if no version metadata is known (still
-        # useful — runs the upgrade command which itself shows what'll
-        # happen).
-        target = self._tokensave_available_version
-        cur = self._tokensave_current_version
-        if target:
-            msg = (f"Upgrade tokensave from v{cur or '?'} to v{target}?\n\n")
-        elif cur:
-            msg = (f"Run `tokensave upgrade`?  (Currently installed: "
-                   f"v{cur}.)\n\n"
-                   "tokensave will check GitHub for a newer release and "
-                   "apply it.  No-op if you're already on the latest.\n\n")
-        else:
-            msg = ("Run `tokensave upgrade`?\n\n"
-                   "tokensave will check GitHub for a newer release and "
-                   "apply it.  No-op if you're already on the latest.\n\n")
-        msg += (
-            "This replaces the tokensave binary on disk.  Currently-running\n"
-            "MCP wrappers continue serving from the old binary until you\n"
-            "restart Claude Desktop / Claude Code.")
-        if not messagebox.askyesno("Upgrade tokensave", msg, parent=self):
-            return
-        # Clear cache so the Settings button hides until the next sync
-        # reports a fresh update.  If the upgrade fails, the next sync
-        # will re-populate it anyway.
-        self._tokensave_available_version = None
-        # cwd is the tokensave.exe folder — works for any upgrade flow.
-        self._run(["upgrade"], cwd=os.path.dirname(self._cfg.tokensave_exe),
-                  label="upgrade")
+        """Thin wrapper — delegates to UpdatePollerController."""
+        self._update_poller.cmd_upgrade()
 
     # ── Commit dialog (shared by Projects context menu, Git tab, and
     #    offer-commit-after-change flow) ──────────────────────────────────────
