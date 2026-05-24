@@ -8132,6 +8132,28 @@ class ScaffoldDialog(tk.Toplevel):
 
 # ── Settings dialog ────────────────────────────────────────────────────────────
 
+def _probe_loaded_model(base_url: str) -> str:
+    """Query the /v1/models endpoint and return the first non-embedding model id.
+
+    Used by AI-preset buttons to auto-fill the Model field when the local
+    server is reachable. Returns "" on any network or parse failure.
+    """
+    import urllib.request, urllib.error, json as _json
+    try:
+        req = urllib.request.Request(base_url.rstrip("/") + "/v1/models")
+        with urllib.request.urlopen(req, timeout=2) as resp:
+            data = _json.loads(resp.read().decode("utf-8"))
+    except (urllib.error.URLError, urllib.error.HTTPError,
+            TimeoutError, OSError, _json.JSONDecodeError):
+        return ""
+    for m in (data.get("data") or []):
+        mid = m.get("id", "")
+        lid = mid.lower()
+        if mid and "embed" not in lid and "rerank" not in lid and "whisper" not in lid:
+            return mid
+    return ""
+
+
 class SettingsDialog(tk.Toplevel):
     """Edit manager-config.json through the GUI."""
 
@@ -8358,32 +8380,16 @@ class SettingsDialog(tk.Toplevel):
                  bg=C["base"], fg=C["subtext"],
                  font=("Segoe UI", 9)).pack(anchor=tk.W, padx=20)
 
+        # Path entry + Browse/Auto-detect buttons
         cg_path_row = tk.Frame(self._cg_section, bg=C["base"])
         cg_path_row.pack(fill=tk.X, padx=20, pady=(4, 0))
         self._cg_exe_var = tk.StringVar(value=cfg.get("codegraph_exe", ""))
         self._cg_exe_entry = ttk.Entry(cg_path_row, textvariable=self._cg_exe_var, width=44)
         self._cg_exe_entry.pack(side=tk.LEFT, padx=(0, 6))
+        ttk.Button(cg_path_row, text="Browse…",      command=self._cg_browse).pack(side=tk.LEFT, padx=(0, 6))
+        ttk.Button(cg_path_row, text="Auto-detect",  command=self._cg_autodetect).pack(side=tk.LEFT, padx=(0, 6))
 
-        def _browse_cg():
-            p = filedialog.askopenfilename(
-                title="Select codegraph executable",
-                filetypes=[("Executable", "*.cmd;*.exe;*.bat"), ("All", "*.*")],
-                initialdir=os.path.expandvars(r"%APPDATA%\npm"), parent=self)
-            if p:
-                self._cg_exe_var.set(p)
-                self._verify_codegraph(p)
-
-        def _autodetect_cg():
-            found = _detect_codegraph()
-            if found:
-                self._cg_exe_var.set(found)
-                self._verify_codegraph(found)
-            else:
-                self._cg_status_lbl.config(text="✗  not installed", fg=C["red"])
-
-        ttk.Button(cg_path_row, text="Browse…", command=_browse_cg).pack(side=tk.LEFT, padx=(0, 6))
-        ttk.Button(cg_path_row, text="Auto-detect", command=_autodetect_cg).pack(side=tk.LEFT, padx=(0, 6))
-
+        # Status label
         cg_install_row = tk.Frame(self._cg_section, bg=C["base"])
         cg_install_row.pack(fill=tk.X, padx=20, pady=(6, 0))
         self._cg_status_lbl = tk.Label(cg_install_row, text="Checking…",
@@ -8392,88 +8398,113 @@ class SettingsDialog(tk.Toplevel):
                                        wraplength=420, anchor=tk.W)
         self._cg_status_lbl.pack(side=tk.LEFT, padx=(0, 12), fill=tk.X, expand=True)
 
+        # Install / Check-again buttons
         cg_btn_row = tk.Frame(self._cg_section, bg=C["base"])
         cg_btn_row.pack(fill=tk.X, padx=20, pady=(4, 0))
-        npm_path = _detect_npm()
-
-        def _check_cg_status():
-            found = _detect_codegraph()
-            if found:
-                self._cg_status_lbl.config(text=f"✓  {found}", fg=C["green"])
-                self._cg_install_btn.configure(state=tk.DISABLED)
-                if not self._cg_exe_var.get():
-                    self._cg_exe_var.set(found)
-            else:
-                self._cg_status_lbl.config(text="✗  not installed", fg=C["red"])
-                state = tk.NORMAL if _detect_npm() else tk.DISABLED
-                self._cg_install_btn.configure(state=state)
-
-        def _cg_finish_install(ok: bool, msg: str):
-            if ok:
-                path = _detect_codegraph()
-                if path:
-                    self._cg_exe_var.set(path)
-                    self._cg_status_lbl.config(text=f"✓  Installed — {path}", fg=C["green"])
-                else:
-                    self._cg_status_lbl.config(
-                        text="✓  Installed.  Click 'Check again' to confirm.", fg=C["green"])
-                self._cg_install_btn.configure(state=tk.NORMAL)
-            else:
-                self._cg_status_lbl.config(text=msg, fg=C["red"])
-                self._cg_install_btn.configure(state=tk.NORMAL)
-                if "\n" in msg:
-                    messagebox.showerror("CodeGraph install failed", msg, parent=self)
-
-        def _install_cg():
-            npm = _detect_npm()
-            if not npm:
-                self._cg_status_lbl.config(
-                    text="✗  npm not found — install Node.js 18+ first (https://nodejs.org)",
-                    fg=C["red"])
-                return
-            self._cg_install_btn.configure(state=tk.DISABLED)
-            self._cg_status_lbl.config(
-                text="Installing…  (this may take a couple of minutes)", fg=C["yellow"])
-            def worker():
-                try:
-                    result = subprocess.run(
-                        [npm, "install", "-g", "@colbymchenry/codegraph"],
-                        capture_output=True, text=True, timeout=300,
-                        creationflags=CREATE_NO_WINDOW, encoding="utf-8", errors="replace")
-                except subprocess.TimeoutExpired:
-                    self.after(0, lambda: _cg_finish_install(
-                        ok=False, msg="Install timed out after 5 minutes."))
-                    return
-                except FileNotFoundError as e:
-                    self.after(0, lambda: _cg_finish_install(ok=False, msg=f"npm not found: {e}"))
-                    return
-                if result.returncode == 0:
-                    self.after(0, lambda: _cg_finish_install(ok=True, msg="✓ Installed successfully."))
-                else:
-                    err_text = (result.stderr or result.stdout or "").strip()
-                    hint = ""
-                    if "EPERM" in err_text or "EACCES" in err_text:
-                        hint = ("\n\nThis usually happens when Node.js was "
-                                "installed system-wide. Either run TokenSave "
-                                "Manager as administrator OR reinstall "
-                                "Node.js as a per-user install (the Node "
-                                "installer offers this option).")
-                    tail = "\n".join(err_text.splitlines()[-8:]) or "(no output)"
-                    self.after(0, lambda: _cg_finish_install(
-                        ok=False, msg=f"✗  Install failed (exit {result.returncode}):\n\n{tail}{hint}"))
-            threading.Thread(target=worker, daemon=True).start()
-
-        self._cg_install_btn = ttk.Button(cg_btn_row, text="Install via npm", command=_install_cg)
+        self._cg_install_btn = ttk.Button(cg_btn_row, text="Install via npm", command=self._cg_install)
         self._cg_install_btn.pack(side=tk.LEFT, padx=(0, 6))
-        ttk.Button(cg_btn_row, text="Check again", command=_check_cg_status).pack(side=tk.LEFT, padx=(0, 6))
-        if not npm_path:
+        ttk.Button(cg_btn_row, text="Check again", command=self._cg_check_status).pack(side=tk.LEFT, padx=(0, 6))
+        if not _detect_npm():
             self._cg_install_btn.configure(state=tk.DISABLED)
+
         tk.Label(self._cg_section,
                  text="  npm install -g @colbymchenry/codegraph  —  requires Node.js 18+ on PATH.\n"
                       "  Per-project actions live in the right-click menu (🧠 CodeGraph …).",
                  font=("Segoe UI", 8), bg=C["base"], fg=C["overlay0"],
                  justify=tk.LEFT).pack(anchor=tk.W, padx=20, pady=(4, 0))
-        self.after(200, _check_cg_status)
+        self.after(200, self._cg_check_status)
+
+    # ── CodeGraph section helpers ────────────────────────────────────────────
+
+    def _cg_browse(self):
+        """Browse for the codegraph executable."""
+        p = filedialog.askopenfilename(
+            title="Select codegraph executable",
+            filetypes=[("Executable", "*.cmd;*.exe;*.bat"), ("All", "*.*")],
+            initialdir=os.path.expandvars(r"%APPDATA%\npm"), parent=self)
+        if p:
+            self._cg_exe_var.set(p)
+            self._verify_codegraph(p)
+
+    def _cg_autodetect(self):
+        """Auto-detect the codegraph executable from PATH."""
+        found = _detect_codegraph()
+        if found:
+            self._cg_exe_var.set(found)
+            self._verify_codegraph(found)
+        else:
+            self._cg_status_lbl.config(text="✗  not installed", fg=C["red"])
+
+    def _cg_check_status(self):
+        """Detect codegraph on PATH and update the status label + install button."""
+        found = _detect_codegraph()
+        if found:
+            self._cg_status_lbl.config(text=f"✓  {found}", fg=C["green"])
+            self._cg_install_btn.configure(state=tk.DISABLED)
+            if not self._cg_exe_var.get():
+                self._cg_exe_var.set(found)
+        else:
+            self._cg_status_lbl.config(text="✗  not installed", fg=C["red"])
+            state = tk.NORMAL if _detect_npm() else tk.DISABLED
+            self._cg_install_btn.configure(state=state)
+
+    def _cg_on_install_done(self, ok: bool, msg: str):
+        """Main-thread callback: update UI after the npm install worker finishes."""
+        if ok:
+            path = _detect_codegraph()
+            if path:
+                self._cg_exe_var.set(path)
+                self._cg_status_lbl.config(text=f"✓  Installed — {path}", fg=C["green"])
+            else:
+                self._cg_status_lbl.config(
+                    text="✓  Installed.  Click 'Check again' to confirm.", fg=C["green"])
+            self._cg_install_btn.configure(state=tk.NORMAL)
+        else:
+            self._cg_status_lbl.config(text=msg, fg=C["red"])
+            self._cg_install_btn.configure(state=tk.NORMAL)
+            if "\n" in msg:
+                messagebox.showerror("CodeGraph install failed", msg, parent=self)
+
+    def _cg_install(self):
+        """Install codegraph via npm in a background thread."""
+        npm = _detect_npm()
+        if not npm:
+            self._cg_status_lbl.config(
+                text="✗  npm not found — install Node.js 18+ first (https://nodejs.org)",
+                fg=C["red"])
+            return
+        self._cg_install_btn.configure(state=tk.DISABLED)
+        self._cg_status_lbl.config(
+            text="Installing…  (this may take a couple of minutes)", fg=C["yellow"])
+
+        def worker():
+            try:
+                result = subprocess.run(
+                    [npm, "install", "-g", "@colbymchenry/codegraph"],
+                    capture_output=True, text=True, timeout=300,
+                    creationflags=CREATE_NO_WINDOW, encoding="utf-8", errors="replace")
+            except subprocess.TimeoutExpired:
+                self.after(0, self._cg_on_install_done, False, "Install timed out after 5 minutes.")
+                return
+            except FileNotFoundError as e:
+                self.after(0, self._cg_on_install_done, False, f"npm not found: {e}")
+                return
+            if result.returncode == 0:
+                self.after(0, self._cg_on_install_done, True, "✓ Installed successfully.")
+            else:
+                err_text = (result.stderr or result.stdout or "").strip()
+                hint = ""
+                if "EPERM" in err_text or "EACCES" in err_text:
+                    hint = ("\n\nThis usually happens when Node.js was "
+                            "installed system-wide. Either run TokenSave "
+                            "Manager as administrator OR reinstall "
+                            "Node.js as a per-user install (the Node "
+                            "installer offers this option).")
+                tail = "\n".join(err_text.splitlines()[-8:]) or "(no output)"
+                self.after(0, self._cg_on_install_done, False,
+                           f"✗  Install failed (exit {result.returncode}):\n\n{tail}{hint}")
+
+        threading.Thread(target=worker, daemon=True).start()
 
     def _build_roots_section(self, body, cfg):
         """Search roots two-column Treeview (label + path)."""
@@ -8586,55 +8617,52 @@ class SettingsDialog(tk.Toplevel):
             activebackground=C["base"], activeforeground=C["text"],
             font=("Segoe UI", 10)).pack(anchor=tk.W, padx=20, pady=(0, 4))
 
-        # Provider / model / key / base URL grid
+        self._build_ai_provider_grid(body, llm_cfg)
+        self._build_ai_presets(body)
+        self._build_ai_options(body, llm_cfg)
+
+    # ── AI-section sub-builders ──────────────────────────────────────────────
+
+    def _build_ai_provider_grid(self, body, llm_cfg):
+        """Provider / model / key / base-URL 4-row grid."""
         llm_grid = tk.Frame(body, bg=C["base"])
         llm_grid.pack(fill=tk.X, padx=36, pady=(0, 6))
 
-        def _row(parent, label_txt, widget):
-            row = tk.Frame(parent, bg=C["base"])
+        def _row(label_txt, widget):
+            row = tk.Frame(llm_grid, bg=C["base"])
             row.pack(fill=tk.X, pady=2)
             tk.Label(row, text=label_txt, width=18, anchor=tk.W,
                      font=("Segoe UI", 9), bg=C["base"],
                      fg=C["subtext"]).pack(side=tk.LEFT)
             widget.pack(side=tk.LEFT, fill=tk.X, expand=True)
-            return row
 
         self._var_llm_provider = tk.StringVar(value=llm_cfg.get("provider", "anthropic"))
         provider_box = ttk.Combobox(llm_grid, textvariable=self._var_llm_provider,
             values=["ollama", "anthropic", "openai", "openai_compatible"],
             state="readonly", width=22)
-        _row(llm_grid, "Provider:", provider_box)
+        _row("Provider:", provider_box)
 
         self._var_llm_model = tk.StringVar(value=llm_cfg.get("model", "claude-haiku-4-5"))
-        _row(llm_grid, "Model:", ttk.Entry(llm_grid, textvariable=self._var_llm_model))
+        _row("Model:", ttk.Entry(llm_grid, textvariable=self._var_llm_model))
 
         self._var_llm_keyenv = tk.StringVar(value=llm_cfg.get("api_key_env", "ANTHROPIC_API_KEY"))
-        _row(llm_grid, "API key env var:", ttk.Entry(llm_grid, textvariable=self._var_llm_keyenv))
+        _row("API key env var:", ttk.Entry(llm_grid, textvariable=self._var_llm_keyenv))
 
         self._var_llm_base_url = tk.StringVar(value=llm_cfg.get("base_url", ""))
-        _row(llm_grid, "Base URL:", ttk.Entry(llm_grid, textvariable=self._var_llm_base_url))
+        _row("Base URL:", ttk.Entry(llm_grid, textvariable=self._var_llm_base_url))
 
-        # Quick presets
+    def _build_ai_presets(self, body):
+        """Anthropic / LM Studio / Ollama quick-preset buttons + feedback label."""
         preset_row = tk.Frame(body, bg=C["base"])
         preset_row.pack(anchor=tk.W, padx=36, pady=(0, 4))
         tk.Label(preset_row, text="Quick presets:", font=("Segoe UI", 9),
                  bg=C["base"], fg=C["subtext"]).pack(side=tk.LEFT, padx=(0, 8))
 
-        def _probe_loaded_model(base_url: str) -> str:
-            import urllib.request, urllib.error, json as _json
-            try:
-                req = urllib.request.Request(base_url.rstrip("/") + "/v1/models")
-                with urllib.request.urlopen(req, timeout=2) as resp:
-                    data = _json.loads(resp.read().decode("utf-8"))
-            except (urllib.error.URLError, urllib.error.HTTPError,
-                    TimeoutError, OSError, _json.JSONDecodeError):
-                return ""
-            for m in (data.get("data") or []):
-                mid = m.get("id", "")
-                lid = mid.lower()
-                if mid and "embed" not in lid and "rerank" not in lid and "whisper" not in lid:
-                    return mid
-            return ""
+        # Hint label must exist BEFORE the preset callbacks reference it.
+        self._llm_preset_hint = tk.Label(body, text="", font=("Segoe UI", 8),
+                                         bg=C["base"], fg=C["overlay0"],
+                                         justify=tk.LEFT, wraplength=620, anchor=tk.W)
+        self._llm_preset_hint.pack(anchor=tk.W, padx=36, pady=(2, 0), fill=tk.X)
 
         def _apply_lm_studio():
             self._var_llm_provider.set("openai_compatible")
@@ -8684,13 +8712,8 @@ class SettingsDialog(tk.Toplevel):
         ttk.Button(preset_row, text="LM Studio", command=_apply_lm_studio).pack(side=tk.LEFT, padx=(0, 4))
         ttk.Button(preset_row, text="Ollama",    command=_apply_ollama).pack(side=tk.LEFT)
 
-        # Preset feedback line — stays blank until user clicks a preset
-        self._llm_preset_hint = tk.Label(body, text="", font=("Segoe UI", 8),
-                                         bg=C["base"], fg=C["overlay0"],
-                                         justify=tk.LEFT, wraplength=620, anchor=tk.W)
-        self._llm_preset_hint.pack(anchor=tk.W, padx=36, pady=(2, 0), fill=tk.X)
-
-        # Min diff lines
+    def _build_ai_options(self, body, llm_cfg):
+        """Min-diff-lines spinner, sync auto-commit toggle, disclaimer."""
         min_row = tk.Frame(body, bg=C["base"])
         min_row.pack(anchor=tk.W, padx=36, pady=(2, 0))
         self._var_llm_min_diff = tk.StringVar(value=str(llm_cfg.get("min_diff_lines", 30)))
