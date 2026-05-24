@@ -69,28 +69,47 @@ class GitCommitDialog(tk.Toplevel):
         self.minsize(540, 480)
         self.grab_set()
         self.transient(parent)
-        self._path     = path
-        self._callback = callback
-        self._is_repo  = is_repo
+        self._path       = path
+        self._callback   = callback
+        self._is_repo    = is_repo
         self._status_raw = status_text
-        self._cfg = cfg
+        self._cfg        = cfg
+        self._files      = self._parse_status(status_text, is_repo)
+        # Async-suggestion infrastructure (see _populate_suggestion docstring).
+        self._suggestion_token = 0
+        self._user_has_edited  = False
 
-        # Parse status into [(xy, fname), ...] — same logic as Git tab.
-        # CRITICAL: do NOT call .strip() on status_text BEFORE splitlines().
-        # `git status --short` lines have a 2-char status (XY) + 1 space +
-        # path. For working-tree-modified files the first char is a space
-        # (" M file.py"). Calling strip() on the whole multi-line string
-        # eats that leading space from the FIRST line only, shifting its
-        # columns by 1, which caused `line[3:]` to drop the first character
-        # of the path — e.g. ".claude/settings.json" became
-        # "claude/settings.json" and git add failed with pathspec error.
-        self._files = []
+        self._build_header(path)
+        self._build_file_list(is_repo)
+        self._build_quick_select(is_repo)
+        ttk.Separator(self, orient="horizontal").pack(fill=tk.X, padx=20, pady=(2, 8))
+        self._build_message_area(is_repo, status_text)
+        self._build_actions(is_repo)
+        self._size_and_centre(parent)
+
+    # ── Construction helpers ─────────────────────────────────────────────────
+
+    @staticmethod
+    def _parse_status(status_text: str, is_repo: bool) -> list:
+        """Parse `git status --short` output into [(xy, fname), ...].
+
+        CRITICAL: do NOT call .strip() on status_text BEFORE splitlines().
+        `git status --short` lines have a 2-char status (XY) + 1 space +
+        path. For working-tree-modified files the first char is a space
+        (" M file.py"). Calling strip() on the whole multi-line string
+        eats that leading space from the FIRST line only, shifting its
+        columns by 1, which caused `line[3:]` to drop the first character
+        of the path — e.g. ".claude/settings.json" became
+        "claude/settings.json" and git add failed with pathspec error.
+        """
+        files = []
         if is_repo:
             for line in status_text.splitlines():
                 if len(line) >= 4:
-                    self._files.append((line[:2], line[3:]))
+                    files.append((line[:2], line[3:]))
+        return files
 
-        # ── Header ──
+    def _build_header(self, path: str) -> None:
         tk.Label(self,
                  text="📝  Git Commit",
                  font=("Segoe UI", 11, "bold"),
@@ -101,7 +120,8 @@ class GitCommitDialog(tk.Toplevel):
                  fg=C["overlay0"]).pack(anchor=tk.W, padx=20, pady=(0, 10))
         ttk.Separator(self, orient="horizontal").pack(fill=tk.X, padx=20, pady=(0, 8))
 
-        # ── File checklist ──
+    def _build_file_list(self, is_repo: bool) -> None:
+        """Build the scrollable file checklist (canvas + body) and populate it."""
         hdr_row = tk.Frame(self, bg=C["base"])
         hdr_row.pack(fill=tk.X, padx=20, pady=(0, 4))
         tk.Label(hdr_row,
@@ -140,80 +160,72 @@ class GitCommitDialog(tk.Toplevel):
         self._canvas.bind_all("<MouseWheel>", _mw)
         self.bind("<Destroy>", lambda e: self._canvas.unbind_all("<MouseWheel>"))
 
-        # Populate the checklist
-        self._file_vars: list = []   # parallel to self._files — list of (BooleanVar, fname)
+        # Populate
+        self._file_vars: list = []   # parallel to self._files — list of (var, fname, xy)
         if not is_repo:
             tk.Label(self._list_body,
                      text="⚠  Not a git repository — run 🔧 Git Init first.",
                      bg=C["mantle"], fg=C["red"],
                      font=("Segoe UI", 9), padx=10, pady=10).pack(anchor=tk.W)
-        elif not self._files:
+            return
+        if not self._files:
             tk.Label(self._list_body,
                      text="(nothing to commit — working tree clean)",
                      bg=C["mantle"], fg=C["overlay0"],
                      font=("Segoe UI", 9), padx=10, pady=10).pack(anchor=tk.W)
-        else:
-            for xy, fname in self._files:
-                var = tk.BooleanVar(value=True)
-                self._file_vars.append((var, fname, xy))
-                row = tk.Frame(self._list_body, bg=C["mantle"])
-                row.pack(fill=tk.X, padx=4, pady=1)
-                # Status badge — colored char in a fixed-width slot
-                xy_clean = xy.strip() or "?"
-                status_char = xy_clean[0]
-                color = {
-                    "M": C["yellow"], "A": C["green"], "D": C["red"],
-                    "R": C["sky"], "C": C["sky"], "U": C["red"],
-                    "?": C["blue"], "!": C["overlay0"],
-                }.get(status_char, C["text"])
-                desc = self._STATUS_DESC.get(status_char, status_char)
-                cb = tk.Checkbutton(row, variable=var,
-                                    bg=C["mantle"], activebackground=C["mantle"],
-                                    selectcolor=C["surface0"])
-                cb.pack(side=tk.LEFT)
-                tk.Label(row, text=xy_clean, width=3, anchor=tk.W,
-                         font=("Consolas", 9, "bold"),
-                         bg=C["mantle"], fg=color).pack(side=tk.LEFT)
-                tk.Label(row, text=fname, anchor=tk.W,
-                         font=("Consolas", 9),
-                         bg=C["mantle"], fg=C["text"]).pack(side=tk.LEFT, padx=(2, 6))
-                tk.Label(row, text=f"({desc})", anchor=tk.W,
-                         font=("Segoe UI", 8, "italic"),
-                         bg=C["mantle"], fg=C["overlay0"]).pack(side=tk.LEFT)
+            return
+        for xy, fname in self._files:
+            self._add_file_row(xy, fname)
 
-        # ── Quick-select buttons ──
-        if is_repo and self._files:
-            sel_row = tk.Frame(self, bg=C["base"])
-            sel_row.pack(fill=tk.X, padx=20, pady=(0, 8))
-            ttk.Button(sel_row, text="Select All",
-                       command=lambda: self._set_all(True)).pack(side=tk.LEFT, padx=(0, 6))
-            ttk.Button(sel_row, text="Select None",
-                       command=lambda: self._set_all(False)).pack(side=tk.LEFT, padx=(0, 6))
-            ttk.Button(sel_row, text="Modified Only  (skip untracked)",
-                       command=self._select_modified).pack(side=tk.LEFT)
+    def _add_file_row(self, xy: str, fname: str) -> None:
+        """Render one checkbox + colour-coded status badge + filename row."""
+        var = tk.BooleanVar(value=True)
+        self._file_vars.append((var, fname, xy))
+        row = tk.Frame(self._list_body, bg=C["mantle"])
+        row.pack(fill=tk.X, padx=4, pady=1)
+        xy_clean = xy.strip() or "?"
+        status_char = xy_clean[0]
+        color = {
+            "M": C["yellow"], "A": C["green"], "D": C["red"],
+            "R": C["sky"], "C": C["sky"], "U": C["red"],
+            "?": C["blue"], "!": C["overlay0"],
+        }.get(status_char, C["text"])
+        desc = self._STATUS_DESC.get(status_char, status_char)
+        cb = tk.Checkbutton(row, variable=var,
+                            bg=C["mantle"], activebackground=C["mantle"],
+                            selectcolor=C["surface0"])
+        cb.pack(side=tk.LEFT)
+        tk.Label(row, text=xy_clean, width=3, anchor=tk.W,
+                 font=("Consolas", 9, "bold"),
+                 bg=C["mantle"], fg=color).pack(side=tk.LEFT)
+        tk.Label(row, text=fname, anchor=tk.W,
+                 font=("Consolas", 9),
+                 bg=C["mantle"], fg=C["text"]).pack(side=tk.LEFT, padx=(2, 6))
+        tk.Label(row, text=f"({desc})", anchor=tk.W,
+                 font=("Segoe UI", 8, "italic"),
+                 bg=C["mantle"], fg=C["overlay0"]).pack(side=tk.LEFT)
 
-        ttk.Separator(self, orient="horizontal").pack(fill=tk.X, padx=20, pady=(2, 8))
+    def _build_quick_select(self, is_repo: bool) -> None:
+        if not (is_repo and self._files):
+            return
+        sel_row = tk.Frame(self, bg=C["base"])
+        sel_row.pack(fill=tk.X, padx=20, pady=(0, 8))
+        ttk.Button(sel_row, text="Select All",
+                   command=lambda: self._set_all(True)).pack(side=tk.LEFT, padx=(0, 6))
+        ttk.Button(sel_row, text="Select None",
+                   command=lambda: self._set_all(False)).pack(side=tk.LEFT, padx=(0, 6))
+        ttk.Button(sel_row, text="Modified Only  (skip untracked)",
+                   command=self._select_modified).pack(side=tk.LEFT)
 
-        # ── Commit message ──
-        # Async-suggestion infrastructure:
-        # `_suggestion_token` is bumped every time a new request is issued
-        # (initial fill or 💡 Suggest click). The background worker stamps its
-        # result with the token it captured at launch — if a newer request has
-        # since started, the stale result is discarded.
-        # `_user_has_edited` flips to True the moment the user touches the
-        # field, after which background results are silently dropped so we
-        # never overwrite their typing.
-        self._suggestion_token = 0
-        self._user_has_edited = False
-
+    def _build_message_area(self, is_repo: bool, status_text: str) -> None:
+        """Commit-message field + spinner label + Suggest button + key bindings."""
         msg_hdr = tk.Frame(self, bg=C["base"])
         msg_hdr.pack(fill=tk.X, padx=20, pady=(0, 4))
         tk.Label(msg_hdr,
                  text="Commit message:",
                  font=("Segoe UI", 9, "bold"),
                  bg=C["base"], fg=C["text"]).pack(side=tk.LEFT)
-        # Spinner / status label between header and Suggest button — empty
-        # when idle, "⟳ Generating with AI…" while the worker runs.
+        # Spinner / status label — empty when idle, "⟳ Generating…" while async.
         self._suggest_status_lbl = tk.Label(
             msg_hdr, text="", font=("Segoe UI", 8, "italic"),
             bg=C["base"], fg=C["peach"])
@@ -230,11 +242,9 @@ class GitCommitDialog(tk.Toplevel):
                                 padx=8, pady=6, wrap=tk.WORD)
         self._msg_txt.pack(fill=tk.X)
 
-        # Mark the field as user-edited on any keypress (other than navigation).
-        # This is how the async result knows to NOT overwrite the user's input.
+        # Mark field as user-edited on any non-navigation keypress so async
+        # results don't overwrite typing.
         def _on_key(event):
-            # Skip pure navigation / modifier keys so clicking around doesn't
-            # falsely lock the field.
             if event.keysym in ("Left", "Right", "Up", "Down", "Home", "End",
                                  "Prior", "Next", "Shift_L", "Shift_R",
                                  "Control_L", "Control_R", "Alt_L", "Alt_R",
@@ -243,13 +253,12 @@ class GitCommitDialog(tk.Toplevel):
             self._user_has_edited = True
         self._msg_txt.bind("<KeyPress>", _on_key, add="+")
 
-        # Kick off the initial suggestion (sync if heuristic-only, async if LLM
-        # might be involved — see `_populate_suggestion`).
         if is_repo:
             self._populate_suggestion(status_text, source="initial")
         self._msg_txt.focus_set()
 
-        # ── Action buttons ──
+    def _build_actions(self, is_repo: bool) -> None:
+        """Commit / Cancel buttons + Ctrl+Enter binding."""
         btn_row = tk.Frame(self, bg=C["base"])
         btn_row.pack(fill=tk.X, padx=20, pady=(0, 16))
         self._commit_btn = ttk.Button(btn_row, text="Commit Selected",
@@ -259,10 +268,9 @@ class GitCommitDialog(tk.Toplevel):
         self._commit_btn.pack(side=tk.LEFT, padx=(0, 8))
         ttk.Button(btn_row, text="Cancel",
                    command=self.destroy).pack(side=tk.LEFT)
-
-        # Ctrl+Enter = commit
         self._msg_txt.bind("<Control-Return>", lambda e: self._apply())
 
+    def _size_and_centre(self, parent) -> None:
         self.update_idletasks()
         content_h = self.winfo_reqheight() + 20
         max_h = max(420, parent.winfo_height() - 60)

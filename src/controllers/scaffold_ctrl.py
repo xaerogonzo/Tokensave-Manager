@@ -228,53 +228,80 @@ class ScaffoldRetrofitController:
                      add_git_hook: bool = False) -> None:
         """Run the retrofit in a background thread."""
         name = os.path.basename(path)
+        flags = {
+            "tokensave":          add_tokensave,
+            "basic_instructions": add_basic_instructions,
+            "nuitka":             add_nuitka,
+            "shadow_links":       add_shadow_links,
+            "shadow_ext_map":     shadow_ext_map or DEFAULT_SHADOW_EXT_MAP,
+            "git_hook":           add_git_hook,
+        }
 
         def worker():
             try:
-                log.info(f"RETROFIT {path}  ts={add_tokensave} bi={add_basic_instructions} "
-                         f"nuitka={add_nuitka}")
-                self._on_log(f"Retrofitting {name}…", C["peach"])
-                actions: list[str] = []
-
-                if add_tokensave:
-                    actions.extend(self._retrofit_add_tokensave(path, name))
-                if add_basic_instructions:
-                    actions.extend(self._retrofit_add_basic_instructions(path))
-                if add_nuitka:
-                    actions.extend(self._scaffold_nuitka_build(path))
-                if add_shadow_links:
-                    actions.extend(self._retrofit_add_shadow_links(
-                        path, shadow_ext_map or DEFAULT_SHADOW_EXT_MAP))
-                if add_git_hook:
-                    hook_actions = _scaffold_git_hook(path)
-                    for action in hook_actions:
-                        self._on_log(f"  {action}", C["green"])
-                    actions.extend(hook_actions)
-
-                log.info(f"RETROFIT complete: {actions or 'nothing changed'}")
-                self._on_log(f"Retrofit complete: {path}", C["green"])
-                self._tab.after(0, self._on_refresh)
-
-                if actions:
-                    summary = "\n".join(f"  ✔ {a}" for a in actions)
-                    msg = f"{name}:\n\n{summary}"
-                    if any(a.startswith("Created build.ps1") for a in actions):
-                        msg += ("\n\nNext step: open build.ps1 and replace "
-                                "[ENTRY_SCRIPT] and [OUTPUT_NAME] before building.")
-                else:
-                    msg = f"{name}:\n\n  Everything was already up to date — nothing changed."
-                self._tab.after(0, lambda: messagebox.showinfo(
-                    "Retrofit complete", msg, parent=self._root))
-                if actions:
-                    self._tab.after(0, lambda: self._on_commit_offer(path, "retrofit additions"))
-
+                self._log_retrofit_start(path, name, flags)
+                actions = self._run_retrofit_steps(path, name, flags)
+                self._retrofit_finish(path, name, actions)
             except Exception as e:
-                log.exception(f"RETROFIT failed: {path}")
-                self._on_log(f"  Error: {e}", C["red"])
-                self._tab.after(0, lambda: messagebox.showerror(
-                    "Retrofit failed", str(e), parent=self._root))
+                self._retrofit_error(path, e)
 
         threading.Thread(target=worker, daemon=True).start()
+
+    # ── _do_retrofit helpers ──────────────────────────────────────────────────
+
+    def _log_retrofit_start(self, path: str, name: str, flags: dict) -> None:
+        log.info(f"RETROFIT {path}  ts={flags['tokensave']} "
+                 f"bi={flags['basic_instructions']} nuitka={flags['nuitka']}")
+        self._on_log(f"Retrofitting {name}…", C["peach"])
+
+    def _run_retrofit_steps(self, path: str, name: str, flags: dict) -> list[str]:
+        """Run each enabled retrofit step in order. Returns combined action list."""
+        actions: list[str] = []
+        if flags["tokensave"]:
+            actions.extend(self._retrofit_add_tokensave(path, name))
+        if flags["basic_instructions"]:
+            actions.extend(self._retrofit_add_basic_instructions(path))
+        if flags["nuitka"]:
+            actions.extend(self._scaffold_nuitka_build(path))
+        if flags["shadow_links"]:
+            actions.extend(self._retrofit_add_shadow_links(path, flags["shadow_ext_map"]))
+        if flags["git_hook"]:
+            hook_actions = _scaffold_git_hook(path)
+            for action in hook_actions:
+                self._on_log(f"  {action}", C["green"])
+            actions.extend(hook_actions)
+        return actions
+
+    def _retrofit_finish(self, path: str, name: str, actions: list[str]) -> None:
+        """Log completion, refresh, show summary messagebox, and offer commit."""
+        log.info(f"RETROFIT complete: {actions or 'nothing changed'}")
+        self._on_log(f"Retrofit complete: {path}", C["green"])
+        self._tab.after(0, self._on_refresh)
+
+        msg = self._build_retrofit_summary(name, actions)
+        self._tab.after(0, lambda: messagebox.showinfo(
+            "Retrofit complete", msg, parent=self._root))
+        if actions:
+            self._tab.after(0, lambda: self._on_commit_offer(path, "retrofit additions"))
+
+    @staticmethod
+    def _build_retrofit_summary(name: str, actions: list[str]) -> str:
+        """Build the user-visible summary string from the actions list."""
+        if not actions:
+            return f"{name}:\n\n  Everything was already up to date — nothing changed."
+        summary = "\n".join(f"  ✔ {a}" for a in actions)
+        msg = f"{name}:\n\n{summary}"
+        if any(a.startswith("Created build.ps1") for a in actions):
+            msg += ("\n\nNext step: open build.ps1 and replace "
+                    "[ENTRY_SCRIPT] and [OUTPUT_NAME] before building.")
+        return msg
+
+    def _retrofit_error(self, path: str, e: Exception) -> None:
+        """Handle worker exceptions — log + error messagebox on main thread."""
+        log.exception(f"RETROFIT failed: {path}")
+        self._on_log(f"  Error: {e}", C["red"])
+        self._tab.after(0, lambda: messagebox.showerror(
+            "Retrofit failed", str(e), parent=self._root))
 
     def _retrofit_add_tokensave(self, path: str, name: str) -> list[str]:
         """Prepend the @include line to CLAUDE.md (or create it). Returns actions taken."""

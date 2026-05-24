@@ -30,6 +30,7 @@ from constants import C
 from helpers.commit_messages import _pending_diff
 from helpers.llm import _call_llm
 from helpers.runtime import log
+from helpers.ui import append_text
 
 if TYPE_CHECKING:
     from state import ManagerConfig
@@ -331,13 +332,13 @@ class AICodeReviewDialog(tk.Toplevel):
         """
         if not text:
             return
-        self._rev_txt.configure(state=tk.NORMAL)
+        # First-token placeholder clear (specific to this widget — keep inline).
         if not getattr(self, "_streaming_started", False):
+            self._rev_txt.configure(state=tk.NORMAL)
             self._rev_txt.delete("1.0", tk.END)
+            self._rev_txt.configure(state=tk.DISABLED)
             self._streaming_started = True
-        self._rev_txt.insert(tk.END, text)
-        self._rev_txt.see(tk.END)
-        self._rev_txt.configure(state=tk.DISABLED)
+        append_text(self._rev_txt, text)
 
     def _on_review_ready(self, token: int, result):
         """Main-thread callback: receive the LLM result."""

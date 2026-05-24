@@ -27,6 +27,7 @@ from typing import TYPE_CHECKING
 
 from constants import C
 from helpers.runtime import log
+from helpers.ui import append_text
 
 if TYPE_CHECKING:
     from state import ManagerConfig
@@ -235,12 +236,7 @@ class AskTabController:
         self._ask_log.configure(state=tk.DISABLED)
 
     def _ask_append(self, text: str, tag: str = "assistant"):
-        if not text:
-            return
-        self._ask_log.configure(state=tk.NORMAL)
-        self._ask_log.insert(tk.END, text, tag)
-        self._ask_log.see(tk.END)
-        self._ask_log.configure(state=tk.DISABLED)
+        append_text(self._ask_log, text, tag)
 
     def _ask_refresh_header(self):
         if self._ask_path:
@@ -280,14 +276,41 @@ class AskTabController:
         self._ask_stop_btn.configure(state=tk.DISABLED)
 
     def _ask_send(self):
+        """Top-level send handler — orchestrates validation + agent run."""
         text = self._ask_entry.get().strip()
         if not text:
             return
+        llm_cfg = self._ask_preflight()
+        if llm_cfg is None:
+            return  # validation already showed the error
+
+        try:
+            import agent as _agent_mod
+            import agent_tools as _agent_tools_mod
+        except ImportError as e:
+            self._ask_append(f"Could not import agent module: {e}\n", "error")
+            return
+
+        self._ask_prepare_ui(text)
+
+        stop_event = threading.Event()
+        self._ask_stop_event = stop_event
+
+        tools = _agent_tools_mod.build_tools(self._ask_path, self._cfg.tokensave_exe)
+        agent_instance = _agent_mod.LocalAgent(llm_cfg, self._ask_path, tools)
+        self._ask_spawn_worker(agent_instance, stop_event)
+
+    # ── _ask_send helpers ────────────────────────────────────────────────────
+
+    def _ask_preflight(self) -> "dict | None":
+        """Validate preconditions for sending. Returns llm_cfg dict on success,
+        None if any check fails (the appropriate error has already been shown).
+        """
         if self._ask_thread and self._ask_thread.is_alive():
             self._ask_status.configure(
                 text="A request is already running — click Stop first.",
                 fg=C["yellow"])
-            return
+            return None
 
         path = self._get_project_path()
         if path:
@@ -295,7 +318,7 @@ class AskTabController:
         if not self._ask_path:
             self._ask_append(
                 "Select a project in the Projects tab first.\n\n", "error")
-            return
+            return None
 
         raw = self._cfg.raw
         llm_cfg = (raw.get("commit_message_llm") or {}) if isinstance(raw, dict) else {}
@@ -303,16 +326,11 @@ class AskTabController:
             self._ask_append(
                 "AI is disabled. Open Settings → AI commit messages and "
                 "tick the enable box, then try again.\n\n", "error")
-            return
+            return None
+        return llm_cfg
 
-        try:
-            import agent as _agent_mod
-            import agent_tools as _agent_tools_mod
-        except ImportError as e:
-            self._ask_append(
-                f"Could not import agent module: {e}\n", "error")
-            return
-
+    def _ask_prepare_ui(self, text: str) -> None:
+        """Update the chat pane + button states + message history before sending."""
         self._ask_refresh_header()
         self._ask_append(f"\n👤  {text}\n\n", "user")
         self._ask_entry.delete(0, tk.END)
@@ -321,7 +339,6 @@ class AskTabController:
             fg=C["peach"])
         self._ask_send_btn.configure(state=tk.DISABLED)
         self._ask_stop_btn.configure(state=tk.NORMAL)
-
         if not self._ask_messages:
             self._ask_messages.append({
                 "role": "system",
@@ -329,13 +346,8 @@ class AskTabController:
             })
         self._ask_messages.append({"role": "user", "content": text})
 
-        stop_event = threading.Event()
-        self._ask_stop_event = stop_event
-
-        tokensave_exe = self._cfg.tokensave_exe
-        tools = _agent_tools_mod.build_tools(self._ask_path, tokensave_exe)
-        agent_instance = _agent_mod.LocalAgent(llm_cfg, self._ask_path, tools)
-
+    def _ask_build_callbacks(self) -> dict:
+        """Build the on_* callback dict passed into LocalAgent.run()."""
         def _on_tool_call(name, args):
             short_args = json.dumps(args, ensure_ascii=False)
             if len(short_args) > 120:
@@ -352,43 +364,47 @@ class AskTabController:
             self._tab.after(0, self._ask_append, f"🤖  {text}\n\n", "assistant")
 
         def _on_done(final_text):
-            def _ui():
-                if final_text is None:
-                    self._ask_status.configure(
-                        text="✓  Done (no final answer text — model only "
-                             "issued tool calls).",
-                        fg=C["green"])
-                else:
-                    self._ask_status.configure(text="✓  Done.", fg=C["green"])
-                self._ask_send_btn.configure(state=tk.NORMAL)
-                self._ask_stop_btn.configure(state=tk.DISABLED)
-                self._ask_stop_event = None
-            self._tab.after(0, _ui)
+            self._tab.after(0, self._ask_finish, final_text, False, "")
 
         def _on_error(msg):
-            def _ui():
-                self._ask_append(f"⚠  {msg}\n\n", "error")
-                self._ask_status.configure(text="✗  Error.", fg=C["red"])
-                self._ask_send_btn.configure(state=tk.NORMAL)
-                self._ask_stop_btn.configure(state=tk.DISABLED)
-                self._ask_stop_event = None
-            self._tab.after(0, _ui)
+            self._tab.after(0, self._ask_finish, None, True, msg)
+
+        return {
+            "on_tool_call":         _on_tool_call,
+            "on_tool_result":       _on_tool_result,
+            "on_assistant_message": _on_assistant_message,
+            "on_done":              _on_done,
+            "on_error":             _on_error,
+        }
+
+    def _ask_finish(self, final_text, is_error: bool, error_msg: str) -> None:
+        """Main-thread terminal state — called from both _on_done and _on_error."""
+        if is_error:
+            self._ask_append(f"⚠  {error_msg}\n\n", "error")
+            self._ask_status.configure(text="✗  Error.", fg=C["red"])
+        elif final_text is None:
+            self._ask_status.configure(
+                text="✓  Done (no final answer text — model only issued tool calls).",
+                fg=C["green"])
+        else:
+            self._ask_status.configure(text="✓  Done.", fg=C["green"])
+        self._ask_send_btn.configure(state=tk.NORMAL)
+        self._ask_stop_btn.configure(state=tk.DISABLED)
+        self._ask_stop_event = None
+
+    def _ask_spawn_worker(self, agent_instance, stop_event) -> None:
+        """Spawn the daemon thread that runs agent.run() with our callbacks."""
+        callbacks = self._ask_build_callbacks()
 
         def _worker():
             try:
-                agent_instance.run(
-                    self._ask_messages,
-                    on_tool_call=_on_tool_call,
-                    on_tool_result=_on_tool_result,
-                    on_assistant_message=_on_assistant_message,
-                    on_done=_on_done,
-                    on_error=_on_error,
-                    stop_event=stop_event,
-                )
+                agent_instance.run(self._ask_messages,
+                                   stop_event=stop_event, **callbacks)
             except Exception as e:
                 log.exception("Ask worker crashed")
                 try:
-                    self._tab.after(0, _on_error, f"{type(e).__name__}: {e}")
+                    self._tab.after(0, self._ask_finish, None, True,
+                                    f"{type(e).__name__}: {e}")
                 except RuntimeError:
                     pass
 
