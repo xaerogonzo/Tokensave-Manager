@@ -53,6 +53,23 @@ from helpers.detection import (
     _root_path, _root_label,
 )
 from helpers.config import _load_config, _save_config, _migrate_config
+from helpers.shadow_links import (
+    generate_shadow_links, update_gitignore_for_shadows,
+)
+# remove_shadow_links also lives in helpers.shadow_links — not imported here
+# because the monolith doesn't call it (dead-code orphan from R3 cleanup; kept
+# in the helper so a future controller can pick it back up if needed).
+from helpers.gitignore import (
+    _read_gitignore_lines, _write_gitignore_lines,
+    _BASELINE_GITIGNORE, _GITIGNORE_TEMPLATES,
+)
+# _ensure_gitignore, _baseline_patterns also in helpers.gitignore (same
+# orphaned-but-preserved rationale).
+from helpers.llm import (
+    _is_auth_error, _build_llm_prompt, _iter_json_lines, _call_llm,
+)
+# _call_anthropic, _call_openai_compat, _iter_sse_events live in helpers.llm
+# but are internal to _call_llm — no external callers need them imported here.
 
 
 # _TOKENSAVE_UPDATE_RE moved to constants.py (Round 4 Phase A)
@@ -387,17 +404,7 @@ BASELINE_INCLUDE_LINE = f"@{TEMPLATE_DIR}\\project-baseline.md"
 from theme import _Tooltip  # re-exported for in-file references
 
 
-def _is_auth_error(text: str) -> bool:
-    """Return True if git output looks like an authentication failure."""
-    t = text.lower()
-    return any(s in t for s in (
-        "authentication failed",
-        "could not read username",
-        "permission denied",
-        "fatal: authentication",
-        "remote: repository not found",
-        "invalid username or password",
-    ))
+# _is_auth_error moved to helpers/llm.py (Round 4 Phase A)
 
 def _parse_commit_status(status_text: str) -> "tuple[list[tuple[str,str]], bool]":
     """Parse `git status --short` output into (files, has_source) for the commit strategies."""
@@ -514,95 +521,8 @@ DEFAULT_SHADOW_EXT_MAP = {
     "DECORATE": ".cpp",   # extensionless lump — matched by exact filename
 }
 
-_SHADOW_SKIP_DIRS = {".tokensave", ".git", "node_modules", "__pycache__",
-                     ".venv", "venv", "target", "build", "dist", "out"}
-
-
-def generate_shadow_links(path: str, ext_map: dict) -> tuple:
-    """
-    Walk *path* and create NTFS hardlinks so tokensave can index
-    non-standard extensions via an existing tree-sitter grammar.
-
-    Two matching modes, determined by key format:
-    - Dot-prefixed keys (".zsc") match by file extension → Blood.zsc → Blood.zsc.cpp
-    - Non-dot keys ("DECORATE") match by exact filename, case-insensitive →
-      DECORATE → DECORATE.cpp  (handles extensionless Doom lumps)
-
-    Existing shadow files are left untouched.
-    Returns (created, skipped, failed) counts.
-    """
-    created = skipped = failed = 0
-    ext_keys  = {k: v for k, v in ext_map.items() if k.startswith(".")}
-    name_keys = {k.upper(): v for k, v in ext_map.items() if not k.startswith(".")}
-    for root, dirs, files in os.walk(path):
-        dirs[:] = [d for d in dirs if d not in _SHADOW_SKIP_DIRS]
-        for fname in files:
-            _, ext = os.path.splitext(fname)
-            if ext in ext_keys:
-                shadow_suffix = ext_keys[ext]
-            elif fname.upper() in name_keys:
-                shadow_suffix = name_keys[fname.upper()]
-            else:
-                continue
-            src = os.path.join(root, fname)
-            dst = src + shadow_suffix
-            if os.path.exists(dst):
-                skipped += 1
-            else:
-                try:
-                    os.link(src, dst)
-                    created += 1
-                except OSError:
-                    failed += 1
-    return created, skipped, failed
-
-
-def remove_shadow_links(path: str, ext_map: dict) -> int:
-    """Delete all shadow hardlink files created by generate_shadow_links."""
-    removed = 0
-    suffixes  = set(ext_map.values())
-    src_exts  = {k for k in ext_map if k.startswith(".")}
-    src_names = {k.upper() for k in ext_map if not k.startswith(".")}
-    for root, dirs, files in os.walk(path):
-        dirs[:] = [d for d in dirs if d not in _SHADOW_SKIP_DIRS]
-        for fname in files:
-            for suf in suffixes:
-                if fname.endswith(suf):
-                    base = fname[:-len(suf)]
-                    if (any(base.endswith(e) for e in src_exts) or
-                            base.upper() in src_names):
-                        try:
-                            os.remove(os.path.join(root, fname))
-                            removed += 1
-                        except OSError:
-                            pass
-    return removed
-
-
-def update_gitignore_for_shadows(path: str, ext_map: dict):
-    """
-    Append shadow-file patterns to .gitignore (if not already present).
-    Creates .gitignore if it doesn't exist.
-    Extension-based entries use a glob (*.zsc.cpp); exact-name entries use
-    a literal filename (DECORATE.cpp) — no leading wildcard.
-    """
-    gi_path = os.path.join(path, ".gitignore")
-    patterns = []
-    for key, val in ext_map.items():
-        if key.startswith("."):
-            patterns.append(f"*{key}{val}")   # glob:  *.zsc.cpp
-        else:
-            patterns.append(f"{key}{val}")    # exact: DECORATE.cpp
-    try:
-        existing = open(gi_path, encoding="utf-8", errors="ignore").read() \
-                   if os.path.isfile(gi_path) else ""
-        to_add = [p for p in patterns if p not in existing]
-        if to_add:
-            header = "\n# tokensave shadow extension hardlinks\n"
-            with open(gi_path, "a", encoding="utf-8") as f:
-                f.write(header + "\n".join(to_add) + "\n")
-    except OSError:
-        pass
+# _SHADOW_SKIP_DIRS, generate_shadow_links, remove_shadow_links,
+# update_gitignore_for_shadows moved to helpers/shadow_links.py (Round 4 Phase A)
 
 
 def _is_git_repo(path: str) -> bool:
@@ -742,185 +662,10 @@ def _format_git_status_cell(status: dict | None, has_git: bool) -> tuple:
     return (text, tag)
 
 
-# Baseline .gitignore written by cmd_git_init when none exists yet.
-_BASELINE_GITIGNORE = """\
-# Machine-specific config (if your project uses one)
-*.local.json
+# _BASELINE_GITIGNORE / _ensure_gitignore / _baseline_patterns /
+# _read_gitignore_lines / _write_gitignore_lines / _GITIGNORE_TEMPLATES
+# all moved to helpers/gitignore.py (Round 4 Phase A) — start of deleted block.
 
-# Claude Code local session settings
-.claude/
-
-# tokensave index (machine-specific binary database)
-.tokensave/
-
-# CodeGraph SQLite index — machine-specific binary database.
-# IMPORTANT: do NOT blanket-ignore .codegraph/ — CodeGraph deliberately
-# expects .codegraph/config.json to be TRACKED (per-project indexing
-# configuration intended to be shared across machines). CodeGraph itself
-# writes a .codegraph/.gitignore that handles binary-DB exclusion.
-.codegraph/codegraph.db
-.codegraph/codegraph.db-*
-
-# Python cache
-__pycache__/
-*.pyc
-*.pyo
-
-# Nuitka build output
-*.onefile-build/
-*.build/
-dist/
-build/
-
-# Virtual environments
-.venv/
-venv/
-
-# Logs
-logs/
-
-# OS noise
-Thumbs.db
-.DS_Store
-"""
-
-# ---------------------------------------------------------------------------
-
-def _ensure_gitignore(path: str) -> list:
-    """Merge _BASELINE_GITIGNORE entries into the project's .gitignore.
-
-    Non-destructive: reads existing content and only appends lines that are
-    not already present (exact-match, ignoring blank lines and comments).
-    Returns a list of human-readable result strings for logging.
-    """
-    gi_path = os.path.join(path, ".gitignore")
-
-    existing_raw = ""
-    if os.path.isfile(gi_path):
-        try:
-            with open(gi_path, encoding="utf-8", errors="replace") as f:
-                existing_raw = f.read()
-        except OSError as e:
-            return [f"Could not read .gitignore: {e}"]
-
-    # Build a set of non-blank, non-comment lines that are already present
-    existing_lines = set()
-    for ln in existing_raw.splitlines():
-        s = ln.strip()
-        if s and not s.startswith("#"):
-            existing_lines.add(s)
-
-    # Find baseline entries that are missing
-    missing = []
-    for ln in _BASELINE_GITIGNORE.splitlines():
-        s = ln.strip()
-        if s and not s.startswith("#") and s not in existing_lines:
-            missing.append(ln)
-
-    if not missing:
-        return ["✔ .gitignore already contains all baseline entries — nothing to add"]
-
-    # Append missing entries with a header comment
-    addition = "\n\n# Added by TokenSave Manager (baseline entries)\n" + "\n".join(missing) + "\n"
-    try:
-        with open(gi_path, "a", encoding="utf-8") as f:
-            f.write(addition)
-    except OSError as e:
-        return [f"Could not update .gitignore: {e}"]
-
-    return [
-        f"✔ .gitignore {'created' if not existing_raw else 'updated'} — "
-        f"added {len(missing)} missing {'entry' if len(missing) == 1 else 'entries'}:",
-        *[f"  + {ln}" for ln in missing if ln.strip()],
-    ]
-
-
-# ─── Gitignore management helpers (used by GitignoreDialog) ─────────────────
-
-def _baseline_patterns() -> list:
-    """Return _BASELINE_GITIGNORE as a flat list of pattern lines.
-
-    Strips comments and blank lines so the result can be fed directly into
-    _GITIGNORE_TEMPLATES as the canonical Baseline category. Keeps a single
-    source of truth between cmd_git_init's auto-write and the dialog.
-    """
-    return [ln.strip() for ln in _BASELINE_GITIGNORE.splitlines()
-            if ln.strip() and not ln.strip().startswith("#")]
-
-
-def _read_gitignore_lines(path: str) -> list:
-    """Read `<path>/.gitignore` and return its lines (no terminal newlines).
-
-    Returns an empty list when the file doesn't exist. Uses utf-8-sig so any
-    UTF-8 BOM (sometimes written by PowerShell) is silently stripped.
-    """
-    gi_path = os.path.join(path, ".gitignore")
-    if not os.path.isfile(gi_path):
-        return []
-    try:
-        with open(gi_path, encoding="utf-8-sig", errors="replace") as f:
-            return f.read().splitlines()
-    except OSError:
-        return []
-
-
-def _write_gitignore_lines(path: str, lines: list) -> None:
-    """Atomically write `lines` to `<path>/.gitignore`.
-
-    Writes to `.gitignore.tmp` first then renames — protects against
-    half-written files if the process is killed. Ensures a trailing newline.
-    Raises OSError on failure; caller logs/displays.
-    """
-    gi_path  = os.path.join(path, ".gitignore")
-    tmp_path = gi_path + ".tmp"
-    text = "\n".join(lines)
-    if not text.endswith("\n"):
-        text += "\n"
-    with open(tmp_path, "w", encoding="utf-8", newline="\n") as f:
-        f.write(text)
-    os.replace(tmp_path, gi_path)
-
-
-# Categories of gitignore patterns offered as one-click "inject" buttons in
-# GitignoreDialog. The Baseline entry is derived from _BASELINE_GITIGNORE at
-# module load so we never have to keep two lists in sync.
-_GITIGNORE_TEMPLATES = {
-    "Baseline (TokenSave standard)": _baseline_patterns(),
-    "Python": [
-        "__pycache__/", "*.pyc", "*.pyo", "*.egg-info/",
-        ".pytest_cache/", ".mypy_cache/", ".ruff_cache/",
-        ".tox/", ".coverage", "htmlcov/",
-    ],
-    "Node.js": [
-        "node_modules/", "npm-debug.log*", "yarn-debug.log*",
-        "yarn-error.log*", ".pnpm-debug.log*", ".next/", "out/",
-    ],
-    "Rust": [
-        "target/", "**/*.rs.bk",
-    ],
-    "Java / JVM": [
-        "*.class", "*.jar", ".gradle/", "build/", "target/",
-    ],
-    ".NET / Visual Studio": [
-        "bin/", "obj/", "*.user", "*.suo", "*.userprefs", ".vs/",
-    ],
-    "VS Code": [
-        ".vscode/",
-    ],
-    "JetBrains IDEs": [
-        ".idea/", "*.iml",
-    ],
-    "macOS": [
-        ".DS_Store", "._*", ".Spotlight-V100", ".Trashes",
-    ],
-    "Windows": [
-        "Thumbs.db", "ehthumbs.db", "Desktop.ini",
-    ],
-    "Nuitka": [
-        "*.build/", "*.dist/", "*.onefile-build/", "dist/",
-        "nuitka-crash-report.xml",
-    ],
-}
 
 
 # ─── Release-wizard helpers ─────────────────────────────────────────────────
@@ -1703,251 +1448,8 @@ def _suggest_from_diff_content(repo_path: str, files: list) -> tuple:
     return "", ""
 
 
-def _build_llm_prompt(diff: str, recent: list, max_diff_chars: int) -> tuple:
-    """Construct (system, user) prompt text for the LLM call."""
-    system = (
-        "You write conventional-commit messages. Output ONE commit message:\n"
-        "- Subject line MUST be 72 chars or less, imperative mood "
-        "(use add/fix/update, NOT added/fixed/updated).\n"
-        "- Start with a conventional-commit prefix: "
-        "feat / fix / chore / docs / refactor / perf / test / build / ci.\n"
-        "- Optionally include scope: feat(scope): subject.\n"
-        "- Blank line, then a body wrapped at 72 chars per line.\n"
-        "- Match the existing tone from the recent commit subjects.\n"
-        "- Output ONLY the commit message. NO preamble, NO markdown, "
-        "NO quotes, NO code fences, NO explanation."
-    )
-    recent_lines = "\n".join(f"- {s}" for s in recent[:5]) if recent else "(no prior commits)"
-    user = (
-        f"Recent commit subjects (tone reference):\n{recent_lines}\n\n"
-        f"Staged diff (truncated to {max_diff_chars} chars):\n"
-        f"```diff\n{diff[:max_diff_chars]}\n```"
-    )
-    return system, user
-
-
-def _iter_sse_events(response):
-    """Yield decoded `data:` payloads from an HTTPResponse byte stream.
-
-    Both Anthropic and OpenAI-compatible streaming use SSE (`data: <json>\\n`
-    lines, terminator `data: [DONE]` for OpenAI). Network buffering can split
-    a JSON payload mid-line, so we accumulate raw bytes in a bytearray and
-    only yield once we've seen a complete `\\n`-terminated line. CRLF is
-    handled via `rstrip("\\r")`. Non-data lines (event:, id:, retry:, blank
-    keep-alives, SSE comments starting with `:`) are skipped.
-
-    The generator stops when the underlying socket closes — the caller does
-    not need to handle StopIteration specially.
-    """
-    buf = bytearray()
-    while True:
-        try:
-            chunk = response.read(4096)
-        except (OSError, ConnectionError):
-            return
-        if not chunk:
-            # Final partial line (rare for well-behaved servers).
-            if buf:
-                line = buf.decode("utf-8", errors="replace").rstrip("\r")
-                if line.startswith("data: "):
-                    yield line[6:]
-            return
-        buf.extend(chunk)
-        while True:
-            i = buf.find(b"\n")
-            if i < 0:
-                break
-            raw = bytes(buf[:i])
-            del buf[:i + 1]
-            line = raw.decode("utf-8", errors="replace").rstrip("\r")
-            if line.startswith("data: "):
-                yield line[6:]
-
-
-def _call_anthropic(api_key: str, model: str, system_prompt: str, user_prompt: str,
-                    max_tokens: int, timeout: int, on_token) -> str | None:
-    """Anthropic Messages API — streaming and non-streaming. Pure execution layer;
-    validation and error handling live in the _call_llm dispatcher."""
-    import urllib.request
-    payload = {
-        "model": model or "claude-haiku-4-5",
-        "max_tokens": max_tokens,
-        "system": system_prompt,
-        "messages": [{"role": "user", "content": user_prompt}],
-    }
-    if on_token is not None:
-        payload["stream"] = True
-    req = urllib.request.Request(
-        "https://api.anthropic.com/v1/messages",
-        method="POST",
-        data=json.dumps(payload).encode("utf-8"),
-        headers={
-            "Content-Type": "application/json",
-            "x-api-key": api_key,
-            "anthropic-version": "2023-06-01",
-        },
-    )
-    if on_token is not None:
-        with urllib.request.urlopen(req, timeout=timeout) as resp:
-            pieces = []
-            for event in _iter_sse_events(resp):
-                try:
-                    data = json.loads(event)
-                except json.JSONDecodeError:
-                    continue
-                # Anthropic streams content_block_delta events with
-                # {"delta": {"type":"text_delta","text":"..."}}
-                if data.get("type") == "content_block_delta":
-                    delta = (data.get("delta") or {}).get("text", "")
-                    if delta:
-                        pieces.append(delta)
-                        try:
-                            on_token(delta)
-                        except Exception:
-                            log.exception("on_token callback raised")
-        return "".join(pieces).strip() or None
-    with urllib.request.urlopen(req, timeout=timeout) as resp:
-        data = json.loads(resp.read().decode("utf-8"))
-    blocks = data.get("content") or []
-    text = "".join(b.get("text", "") for b in blocks if b.get("type") == "text")
-    return text.strip() or None
-
-
-def _call_openai_compat(url: str, api_key: str, model: str,
-                        system_prompt: str, user_prompt: str,
-                        max_tokens: int, timeout: int, on_token) -> str | None:
-    """OpenAI Chat Completions — covers openai, openai_compatible, and ollama.
-    Caller resolves the endpoint URL before dispatching here."""
-    import urllib.request
-    payload = {
-        "model": model or "gpt-4o-mini",
-        "messages": [
-            {"role": "system", "content": system_prompt},
-            {"role": "user", "content": user_prompt},
-        ],
-        "max_tokens": max_tokens,
-        "temperature": 0.3,
-    }
-    if on_token is not None:
-        payload["stream"] = True
-    headers = {"Content-Type": "application/json"}
-    if api_key:
-        headers["Authorization"] = f"Bearer {api_key}"
-    req = urllib.request.Request(
-        url, method="POST",
-        data=json.dumps(payload).encode("utf-8"),
-        headers=headers,
-    )
-    if on_token is not None:
-        with urllib.request.urlopen(req, timeout=timeout) as resp:
-            pieces = []
-            for event in _iter_sse_events(resp):
-                if event == "[DONE]":
-                    break
-                try:
-                    data = json.loads(event)
-                except json.JSONDecodeError:
-                    continue
-                choices = data.get("choices") or []
-                if not choices:
-                    continue
-                delta_obj = choices[0].get("delta") or {}
-                delta = delta_obj.get("content") or ""
-                if delta:
-                    pieces.append(delta)
-                    try:
-                        on_token(delta)
-                    except Exception:
-                        log.exception("on_token callback raised")
-        return "".join(pieces).strip() or None
-    with urllib.request.urlopen(req, timeout=timeout) as resp:
-        data = json.loads(resp.read().decode("utf-8"))
-    choices = data.get("choices") or []
-    if not choices:
-        return None
-    msg = choices[0].get("message") or {}
-    return (msg.get("content") or "").strip() or None
-
-
-def _call_llm(cfg: dict, system_prompt: str, user_prompt: str,
-              max_tokens: int = 1500, timeout: int | None = None,
-              on_token=None) -> str | None:
-    """General-purpose LLM call. Returns raw text or None on ANY failure.
-
-    Used by the commit-message orchestrator AND the AI Code Review feature
-    AND any future agentic stages. Stays propose-only by design — this
-    function returns text; what the caller does with that text is their
-    concern (e.g. displaying in a dialog, parsing tool calls, etc.).
-
-    Supported providers (`cfg["provider"]`):
-      * "anthropic"        — native Messages API at api.anthropic.com
-      * "openai"           — OpenAI Chat Completions at api.openai.com
-      * "openai_compatible" — any OpenAI-compatible endpoint
-            (Ollama at http://localhost:11434, LM Studio at :1234,
-             vLLM, llama-server, LocalAI, etc.)
-      * "ollama"           — friendly alias for openai_compatible with the
-            default Ollama base URL filled in if none was set.
-
-    Returns None on any error: no key, missing model, network failure,
-    timeout, provider error, empty response. Caller falls back appropriately.
-
-    Streaming (when `on_token` is provided): the function sends
-    `"stream": true` to the provider and calls `on_token(delta_text)` for
-    each text chunk as it arrives. The full accumulated text is still
-    returned at the end (so existing callers can continue to use the return
-    value unchanged). If the provider doesn't support streaming for the
-    given configuration, the function silently falls back to the blocking
-    path — `on_token` simply doesn't get called.
-
-    The `on_token` callback runs on whichever thread called `_call_llm`.
-    Callers that need to push deltas to a Tk UI must wrap it in a
-    `self.after(0, ...)` schedule (see AICodeReviewDialog._start_review).
-    """
-    import urllib.error
-
-    if not cfg.get("enabled"):
-        return None
-
-    # Reasoning models on consumer GPUs can take 30-60+ seconds. Auto-promote
-    # any timeout below 30 to 90 (users who explicitly picked 30/60 keep their value).
-    if timeout is None:
-        raw_timeout = int(cfg.get("timeout_seconds", 90))
-        timeout = 90 if raw_timeout < 30 else raw_timeout
-
-    provider    = (cfg.get("provider") or "anthropic").lower()
-    model       = cfg.get("model") or ""
-    base_url    = (cfg.get("base_url") or "").rstrip("/")
-    api_key_env = cfg.get("api_key_env") or ""
-    api_key     = os.environ.get(api_key_env, "") if api_key_env else ""
-
-    # "ollama" is a friendly alias — falls through to OpenAI-compatible with
-    # the default Ollama base URL if none was set.
-    if provider == "ollama":
-        provider = "openai_compatible"
-        if not base_url:
-            base_url = "http://localhost:11434"
-
-    try:
-        if provider == "anthropic":
-            if not api_key:
-                return None
-            return _call_anthropic(api_key, model, system_prompt, user_prompt,
-                                   max_tokens, timeout, on_token)
-        if provider in ("openai", "openai_compatible"):
-            if provider == "openai":
-                url = "https://api.openai.com/v1/chat/completions"
-            else:
-                if not base_url:
-                    return None
-                url = base_url + "/v1/chat/completions"
-            return _call_openai_compat(url, api_key, model, system_prompt, user_prompt,
-                                       max_tokens, timeout, on_token)
-    except (urllib.error.URLError, urllib.error.HTTPError,
-            TimeoutError, json.JSONDecodeError, KeyError, OSError):
-        return None
-
-    return None
-
+# _build_llm_prompt / _iter_sse_events / _call_anthropic / _call_openai_compat / _call_llm
+# moved to helpers/llm.py (Round 4 Phase A)
 
 def _call_llm_for_commit_message(cfg: dict, repo_path: str) -> str | None:
     """Commit-message-specific LLM wrapper. Composes the prompt and calls _call_llm.
@@ -11207,45 +10709,7 @@ class GitignoreDialog(tk.Toplevel):
         self._app._offer_commit_after_change(path, ".gitignore")
 
 
-def _iter_json_lines(response):
-    """Yield decoded JSON objects from a newline-delimited JSON byte stream.
-
-    Used for Ollama's /api/pull progress stream — each line is a complete
-    JSON object terminated by `\\n`. Same byte-aligned accumulator pattern
-    as `_iter_sse_events` (network buffering can split a line in half).
-    Decode errors on individual lines are silently skipped — the next valid
-    line usually has the same status info we missed.
-    """
-    import json as _json
-    buf = bytearray()
-    while True:
-        try:
-            chunk = response.read(4096)
-        except (OSError, ConnectionError):
-            return
-        if not chunk:
-            if buf:
-                line = buf.decode("utf-8", errors="replace").strip()
-                if line:
-                    try:
-                        yield _json.loads(line)
-                    except _json.JSONDecodeError:
-                        pass
-            return
-        buf.extend(chunk)
-        while True:
-            i = buf.find(b"\n")
-            if i < 0:
-                break
-            raw = bytes(buf[:i])
-            del buf[:i + 1]
-            line = raw.decode("utf-8", errors="replace").strip()
-            if not line:
-                continue
-            try:
-                yield _json.loads(line)
-            except _json.JSONDecodeError:
-                continue
+# _iter_json_lines moved to helpers/llm.py (Round 4 Phase A)
 
 
 class OllamaModelManagerDialog(tk.Toplevel):
