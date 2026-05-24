@@ -108,10 +108,20 @@ class GitHubSetupDialog(tk.Toplevel):
     # ── build ────────────────────────────────────────────────────────────────
 
     def _build(self):
+        """Orchestrator — wizard step-by-step layout."""
         body = self._body   # all widgets pack into the scrollable canvas child frame
-        P    = dict(padx=20)
+        self._build_header_section(body)
+        self._build_step1_identity_section(body)
+        self._build_step2_signin_section(body)
+        self._build_step3_repo_section(body)
+        self._build_step4_remote_section(body)
+        self._build_step5_push_section(body)
+        self._build_releases_section(body)
+        self._build_close_section(body)
 
-        # ── Header ───────────────────────────────────────────────────────────
+    def _build_header_section(self, body):
+        """Wizard title + project name + divider."""
+        P = dict(padx=20)
         tk.Label(body, text="🐙  GitHub Setup",
                  font=("Segoe UI", 12, "bold"),
                  bg=C["base"], fg=C["blue"]).pack(anchor=tk.W, pady=(16, 2), **P)
@@ -120,7 +130,8 @@ class GitHubSetupDialog(tk.Toplevel):
                  fg=C["overlay0"]).pack(anchor=tk.W, pady=(0, 6), **P)
         ttk.Separator(body, orient="horizontal").pack(fill=tk.X, padx=20, pady=(0, 10))
 
-        # ── Step 1: Git identity ─────────────────────────────────────────────
+    def _build_step1_identity_section(self, body):
+        """Step 1 — git config user.name + user.email + Save Identity."""
         self._s1_icon = self._step_header(body, "1",
             "Your name & email  (shown on every commit)")
 
@@ -139,7 +150,8 @@ class GitHubSetupDialog(tk.Toplevel):
         ttk.Button(id_frame, text="Save Identity",
                    command=self._save_identity).pack(anchor=tk.W, pady=(6, 0))
 
-        # ── Step 2: Sign in / create GitHub account ──────────────────────────
+    def _build_step2_signin_section(self, body):
+        """Step 2 — Sign in / Create account buttons + helper text."""
         self._s2_icon = self._step_header(body, "2",
             "Sign in to GitHub  (or create a free account)")
         s2 = tk.Frame(body, bg=C["base"])
@@ -154,7 +166,8 @@ class GitHubSetupDialog(tk.Toplevel):
                  font=("Segoe UI", 8), bg=C["base"],
                  fg=C["overlay0"]).pack(anchor=tk.W, padx=(44, 20), pady=(0, 10))
 
-        # ── Step 3: Create repository ────────────────────────────────────────
+    def _build_step3_repo_section(self, body):
+        """Step 3 — instructions + Open github.com/new button."""
         self._s3_icon = self._step_header(body, "3",
             "Create a new repository on GitHub")
         s3 = tk.Frame(body, bg=C["base"])
@@ -168,7 +181,8 @@ class GitHubSetupDialog(tk.Toplevel):
         ttk.Button(s3, text="Open github.com/new →",
                    command=lambda: os.startfile("https://github.com/new")).pack(anchor=tk.W)
 
-        # ── Step 4: Set remote URL ───────────────────────────────────────────
+    def _build_step4_remote_section(self, body):
+        """Step 4 — repo URL entry + Set button + example label."""
         self._s4_icon = self._step_header(body, "4",
             "Paste your repository URL here")
         s4 = tk.Frame(body, bg=C["base"])
@@ -183,7 +197,8 @@ class GitHubSetupDialog(tk.Toplevel):
                  font=("Segoe UI", 8), bg=C["base"],
                  fg=C["overlay0"]).pack(anchor=tk.W, pady=(4, 0))
 
-        # ── Step 5: Push ─────────────────────────────────────────────────────
+    def _build_step5_push_section(self, body):
+        """Step 5 — push instructions + Push button."""
         self._s5_icon = self._step_header(body, "5",
             "Upload your code to GitHub")
         s5 = tk.Frame(body, bg=C["base"])
@@ -198,7 +213,8 @@ class GitHubSetupDialog(tk.Toplevel):
                                     command=self._do_push)
         self._push_btn.pack(anchor=tk.W)
 
-        # ── Releases section ─────────────────────────────────────────────────
+    def _build_releases_section(self, body):
+        """Optional Releases section (gh-CLI gated) or install-gh prompt."""
         ttk.Separator(body, orient="horizontal").pack(fill=tk.X, padx=20, pady=(10, 10))
         tk.Label(body, text="📦  GitHub Releases  (share your built .exe)",
                  font=("Segoe UI", 10, "bold"),
@@ -209,33 +225,42 @@ class GitHubSetupDialog(tk.Toplevel):
                  font=("Segoe UI", 9), bg=C["base"], fg=C["subtext"],
                  justify=tk.LEFT).pack(anchor=tk.W, padx=20, pady=(0, 8))
 
-        gh_on_path = bool(shutil.which("gh"))
-        if gh_on_path:
-            rel_grid = tk.Frame(body, bg=C["base"])
-            rel_grid.pack(anchor=tk.W, padx=20, pady=(0, 6))
-            for col, (lbl, var, w) in enumerate([
-                    ("Tag:", self._tag_var, 9),
-                    ("Title:", self._rel_title_var, 22)]):
-                tk.Label(rel_grid, text=lbl, bg=C["base"], fg=C["text"],
-                         font=("Segoe UI", 9)).grid(
-                         row=0, column=col*2, sticky=tk.W,
-                         padx=(0 if col == 0 else 12, 4))
-                ttk.Entry(rel_grid, textvariable=var, width=w,
-                          font=("Segoe UI", 9)).grid(row=0, column=col*2+1, sticky=tk.W)
-            ttk.Button(body, text="📦  Create Release",
-                       command=self._create_release).pack(anchor=tk.W, padx=20, pady=(0, 4))
+        if shutil.which("gh"):
+            self._build_releases_gh_form(body)
         else:
-            tk.Label(body,
-                     text="Install GitHub CLI to enable one-click releases from here:",
-                     font=("Segoe UI", 9), bg=C["base"], fg=C["text"]).pack(anchor=tk.W, padx=20)
-            ttk.Button(body, text="Get GitHub CLI  (cli.github.com) →",
-                       command=lambda: os.startfile("https://cli.github.com")).pack(
-                       anchor=tk.W, padx=20, pady=(4, 4))
-            tk.Label(body,
-                     text="After installing, re-open this dialog to enable releases.",
-                     font=("Segoe UI", 8), bg=C["base"],
-                     fg=C["overlay0"]).pack(anchor=tk.W, padx=20, pady=(0, 4))
+            self._build_releases_install_prompt(body)
 
+    def _build_releases_gh_form(self, body):
+        """Tag / Title entry grid + Create Release button (gh on PATH)."""
+        rel_grid = tk.Frame(body, bg=C["base"])
+        rel_grid.pack(anchor=tk.W, padx=20, pady=(0, 6))
+        for col, (lbl, var, w) in enumerate([
+                ("Tag:", self._tag_var, 9),
+                ("Title:", self._rel_title_var, 22)]):
+            tk.Label(rel_grid, text=lbl, bg=C["base"], fg=C["text"],
+                     font=("Segoe UI", 9)).grid(
+                     row=0, column=col*2, sticky=tk.W,
+                     padx=(0 if col == 0 else 12, 4))
+            ttk.Entry(rel_grid, textvariable=var, width=w,
+                      font=("Segoe UI", 9)).grid(row=0, column=col*2+1, sticky=tk.W)
+        ttk.Button(body, text="📦  Create Release",
+                   command=self._create_release).pack(anchor=tk.W, padx=20, pady=(0, 4))
+
+    def _build_releases_install_prompt(self, body):
+        """Install-gh prompt (gh not on PATH)."""
+        tk.Label(body,
+                 text="Install GitHub CLI to enable one-click releases from here:",
+                 font=("Segoe UI", 9), bg=C["base"], fg=C["text"]).pack(anchor=tk.W, padx=20)
+        ttk.Button(body, text="Get GitHub CLI  (cli.github.com) →",
+                   command=lambda: os.startfile("https://cli.github.com")).pack(
+                   anchor=tk.W, padx=20, pady=(4, 4))
+        tk.Label(body,
+                 text="After installing, re-open this dialog to enable releases.",
+                 font=("Segoe UI", 8), bg=C["base"],
+                 fg=C["overlay0"]).pack(anchor=tk.W, padx=20, pady=(0, 4))
+
+    def _build_close_section(self, body):
+        """Bottom divider + Close button."""
         ttk.Separator(body, orient="horizontal").pack(fill=tk.X, padx=20, pady=(10, 10))
         ttk.Button(body, text="Close", command=self.destroy).pack(
             anchor=tk.E, padx=20, pady=(0, 16))
