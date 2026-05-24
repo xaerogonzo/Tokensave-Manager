@@ -176,6 +176,15 @@ Surfaced via Roadmap-2 hands-on testing with `ollama` + `qwen2.5-coder:14b`. The
 - **Loop-stall surfacing.** When the agent hits the iteration cap OR an unrecoverable HTTP error, the chat just shows a generic "✗  Error" indicator. The detailed reason already lives in `LocalAgent._last_error` — surface it in the chat (with the same one-line summary the `on_error` callback already gets).
 - **Single-source-of-truth for tool defaults in descriptions.** The `git_log` description says "Default 20" but the parameters JSON Schema doesn't set a default, so the model can't reliably pick "the default" without naming `n` explicitly. Either set `"default": 20` in the schema (preferred — lets the model omit `n`) or strip the "Default 20" from the prose so it doesn't mislead.
 
+### 💭 Pre-commit AI review — Claude Code Stop-hook variant
+
+When Roadmap-2 Phase 5b shipped the pre-commit AI review hook, we considered three variants: git pre-commit hook only / Claude Code Stop hook only / both. We went with **git pre-commit hook only** after weighing trade-offs:
+
+- **Git pre-commit hook** fires at the single moment that matters (a commit is about to land), reviews exactly `git diff --cached` (no ambiguity about what's being reviewed), produces one signal per commit, and can actually block. Works for human changes too, not just Claude-driven ones.
+- **Claude Code Stop hook** fires on EVERY Claude turn — including tiny ones and non-code ones — doesn't naturally know which files Claude touched vs. what was already dirty, can't block git operations anyway, and is the fastest path to "user disables the hook after a week of false positives."
+
+The git hook covers ~95% of the safety value with cleaner semantics. Revisit only if real-world usage uncovers a specific gap the pre-commit hook can't fill — e.g. "I want a heads-up the moment Claude finishes a risky operation, before I even think about staging." Until then, ship the simpler thing.
+
 ### 🔮 Stage 0 (commit-message generation) quality refinements
 
 Surfaced via Roadmap-2 hands-on testing — clicking Suggest on a small docs-only diff produced the generic `docs: update documentation`, never invoking the LLM.
