@@ -81,13 +81,27 @@ class OllamaModelManagerDialog(tk.Toplevel):
         self._pull_cancelled = False
         self._pull_active = False
 
-        # ── Header: server URL + check ──────────────────────────────────
+        self._build_header_section()
+        self._build_server_url_section()
+        self._build_installed_models_section()
+        self._build_pull_section()
+        self._build_close_section()
+
+        self.protocol("WM_DELETE_WINDOW", self._on_close)
+        # Initial population.
+        self.after(80, self._check_connection)
+        self.after(160, self._refresh_models)
+
+    def _build_header_section(self):
+        """Title row."""
         hdr = tk.Frame(self, bg=C["base"])
         hdr.pack(fill=tk.X, padx=18, pady=(14, 4))
         tk.Label(hdr, text="🦙  Ollama Model Manager",
                  font=("Segoe UI", 13, "bold"),
                  bg=C["base"], fg=C["blue"]).pack(side=tk.LEFT)
 
+    def _build_server_url_section(self):
+        """Server-URL entry + Check-connection button + status label."""
         url_row = tk.Frame(self, bg=C["base"])
         url_row.pack(fill=tk.X, padx=18, pady=(2, 2))
         tk.Label(url_row, text="Server:", width=8, anchor=tk.W,
@@ -106,7 +120,8 @@ class OllamaModelManagerDialog(tk.Toplevel):
             justify=tk.LEFT, anchor=tk.W)
         self._conn_lbl.pack(fill=tk.X, padx=18, pady=(0, 8))
 
-        # ── Installed models list ───────────────────────────────────────
+    def _build_installed_models_section(self):
+        """Installed-models LabelFrame: Treeview + scrollbar + per-model buttons."""
         list_frame = tk.LabelFrame(
             self, text=" Installed models ",
             bg=C["base"], fg=C["subtext"],
@@ -144,7 +159,8 @@ class OllamaModelManagerDialog(tk.Toplevel):
             command=self._delete_selected, state=tk.DISABLED)
         self._del_btn.pack(side=tk.LEFT, padx=(8, 0))
 
-        # ── Pull section ────────────────────────────────────────────────
+    def _build_pull_section(self):
+        """Pull LabelFrame: preset combobox + Pull button + progress bar + status."""
         pull_frame = tk.LabelFrame(
             self, text=" Pull a new model ",
             bg=C["base"], fg=C["subtext"],
@@ -175,17 +191,12 @@ class OllamaModelManagerDialog(tk.Toplevel):
             anchor=tk.W, justify=tk.LEFT)
         self._pull_status.pack(fill=tk.X, padx=8, pady=(0, 6))
 
-        # ── Close ───────────────────────────────────────────────────────
+    def _build_close_section(self):
+        """Bottom Close button row."""
         btn_row = tk.Frame(self, bg=C["base"])
         btn_row.pack(fill=tk.X, padx=18, pady=(0, 14))
         ttk.Button(btn_row, text="Close",
                    command=self._on_close).pack(side=tk.RIGHT)
-
-        self.protocol("WM_DELETE_WINDOW", self._on_close)
-
-        # Initial population.
-        self.after(80, self._check_connection)
-        self.after(160, self._refresh_models)
 
     # ── Networking helpers ──────────────────────────────────────────────
 
