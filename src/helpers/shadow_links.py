@@ -17,6 +17,18 @@ from __future__ import annotations
 import os
 
 
+# Default extension map: ZScript → C++, ACS → C, DECORATE lump → C++.
+# Keys starting with '.' are matched against the file extension
+#   (e.g. ".zsc" matches "Blood.zsc" → shadow "Blood.zsc.cpp").
+# Keys WITHOUT a leading dot are matched by exact filename, case-insensitive
+#   (e.g. "DECORATE" matches the extensionless lump → shadow "DECORATE.cpp").
+DEFAULT_SHADOW_EXT_MAP = {
+    ".zs":  ".cpp",
+    ".zsc": ".cpp",
+    ".acs": ".c",
+    "DECORATE": ".cpp",   # extensionless lump — matched by exact filename
+}
+
 # Suffixes that share inode with their source via os.link(). The skip set
 # below prevents walking into virtualenvs, build outputs, etc.
 _SHADOW_SKIP_DIRS = {".tokensave", ".git", "node_modules", "__pycache__",
