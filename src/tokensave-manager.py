@@ -7902,6 +7902,35 @@ class App(tk.Tk):
         is_repo = _is_git_repo(path)
         GitCommitDialog(self, path, status_out, is_repo, self._do_git_commit)
 
+    def _offer_commit_after_change(self, path: str, summary_label: str) -> None:
+        """After a manager action (Ensure .gitignore, Scaffold, Retrofit, etc.),
+        check whether the working tree is dirty and offer a commit dialog if so.
+
+        Called directly by dialogs that hold a reference to App (e.g.
+        GitignoreDialog via self._app._offer_commit_after_change). The
+        ProjectsTabController has its own copy for internal flows; this one
+        serves external callers that go through App.
+        """
+        if not _is_local_git_repo(path):
+            return
+        status_out, _ = self._shell_capture(
+            [GIT_EXE, "-C", path, "status", "--porcelain"], path)
+        if not status_out.strip():
+            self._log("  Working tree clean — nothing to commit.", C["overlay0"])
+            return
+        name = os.path.basename(path)
+        if messagebox.askyesno(
+                "Commit this change?",
+                f"Manager updated {summary_label} in {name}.\n\n"
+                "Commit this change now?\n\n"
+                "Click 'Yes' to open the Commit dialog with the changed files "
+                "ready to stage. Click 'No' to leave the working tree dirty.",
+                parent=self):
+            self._open_commit_dialog(path)
+        else:
+            self._log("  Working tree left dirty — commit when you're ready.",
+                      C["yellow"])
+
     def _do_git_commit(self, path: str, message: str, selected: list):
         """Stage and commit the picked files. `selected` is a list of
         (filename, xy) tuples from the GitCommitDialog.
