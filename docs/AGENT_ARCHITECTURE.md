@@ -71,6 +71,21 @@ New notebook tab **🤖 Ask**. Built on three pieces:
 - **Path containment.** Every `path`-bearing tool argument is resolved via `os.path.realpath` and rejected if it ends up outside `project_path` (case-insensitive comparison on Windows).
 - **Streaming uses byte-aligned SSE parsing** to handle mid-line network fragmentation, with worker-side token batching (~50 ms / 8 tokens) to avoid Tk event-loop saturation.
 
+### `_chat_completion` decomposition (Round 3 code health)
+
+`LocalAgent._chat_completion` was a 112-line, CC=17 function that tangled three concerns: provider normalisation, request payload construction, and HTTP transport + error mapping. Decomposed into four named helpers (all on `LocalAgent`):
+
+| Method | Responsibility |
+|---|---|
+| `_normalize_provider(provider, base_url)` | Canonicalises `"ollama"` → `"openai_compatible"`, detects port 11434 in the base URL. Returns `(provider, base_url, is_ollama)`. |
+| `_resolve_chat_url(provider, base_url)` | Returns the `/v1/chat/completions` URL string, or `None` and sets `self._last_error` on unsupported provider. |
+| `_build_chat_payload(messages, is_ollama, model)` | Assembles the request dict; injects `options.num_ctx` for Ollama. |
+| `_execute_chat_request(url, payload, headers, timeout)` | HTTP POST; maps all four exception types (`HTTPError`, `URLError`, `TimeoutError`, `JSONDecodeError`) to `self._last_error` strings. Returns parsed JSON or `None`. |
+
+`_chat_completion` is now a 26-line orchestrator: normalise → resolve URL → build payload → attach auth header → execute. Target CC ≤ 5 achieved; 7 return sites consolidated to ≤ 3.
+
+---
+
 ### Field-tested fixes that landed in this cycle ([Unreleased])
 
 These came out of actual Ask-tab usage, not whiteboard design:
