@@ -1067,11 +1067,11 @@ class GitTabController:
         def _fetch():
             from helpers.pr_draft import generate_pr_draft   # lazy import
             result = generate_pr_draft(self._cfg, path)
-            self._tab.after(0, lambda text=result: self._show_pr_draft_dialog(text))
+            self._tab.after(0, lambda text=result: self._show_pr_draft_dialog(text, path))
 
         threading.Thread(target=_fetch, daemon=True).start()
 
-    def _show_pr_draft_dialog(self, text: str | None):
+    def _show_pr_draft_dialog(self, text: "str | None", path: str):
         if not self._tab.winfo_exists():
             return
         if not text:
@@ -1104,6 +1104,26 @@ class GitTabController:
         btn_row = tk.Frame(dlg, bg=C["base"], padx=12, pady=8)
         btn_row.pack(fill=tk.X)
         ttk.Button(btn_row, text="Copy to clipboard", command=_copy).pack(side=tk.LEFT)
+
+        # Open-PR-on-GitHub button — gated by `gh` availability so users without
+        # the CLI don't see a button that just errors. Phase 5a wires this to
+        # `gh pr create --web --body-file <tmp>` which opens the browser with
+        # the body pre-filled; the user picks title / base / draft state there.
+        gh_exe = shutil.which("gh")
+        open_btn = ttk.Button(
+            btn_row, text="🔗  Open PR on GitHub",
+            command=lambda: self._open_pr_via_gh(gh_exe, path, text, dlg))
+        open_btn.pack(side=tk.LEFT, padx=(6, 0))
+        if not gh_exe:
+            open_btn.configure(state=tk.DISABLED)
+            _Tooltip(open_btn,
+                "GitHub CLI not on PATH.  Install gh (cli.github.com) "
+                "to open a pre-filled PR-create page in your browser.")
+        else:
+            _Tooltip(open_btn,
+                "Open github.com's New PR page with this body pre-filled. "
+                "You pick the title, base branch, and draft state there.")
+
         ttk.Button(btn_row, text="Close", command=dlg.destroy).pack(side=tk.RIGHT)
 
         dlg.update_idletasks()
@@ -1114,3 +1134,46 @@ class GitTabController:
             dlg.geometry(f"{w}x{h}+{max(0, px)}+{max(0, py)}")
         except tk.TclError:
             dlg.geometry(f"{w}x{h}")
+
+    def _open_pr_via_gh(self, gh_exe: str, path: str, body_text: str, dlg) -> None:
+        """Write body to a temp file and spawn `gh pr create --web --body-file`.
+
+        Using a temp file (rather than `--body` with the literal string) avoids
+        Windows command-line length limits AND multi-line / quote escaping
+        problems entirely. `--web` opens the GitHub New-PR page in the user's
+        default browser with the body pre-filled; gh itself exits immediately
+        after spawning the browser, so we don't need to capture output.
+
+        Failures (missing remote, no commits to PR, gh auth not set up, etc.)
+        surface as a messagebox so the user isn't left wondering why nothing
+        happened.
+        """
+        import tempfile
+        try:
+            with tempfile.NamedTemporaryFile(
+                    mode="w", encoding="utf-8", suffix=".md",
+                    prefix="pr-body-", delete=False) as f:
+                f.write(body_text)
+                tmp_path = f.name
+        except OSError as e:
+            messagebox.showerror(
+                "Open PR on GitHub failed",
+                f"Could not write temp body file: {e}",
+                parent=dlg)
+            return
+        try:
+            # cwd=path so `gh` picks up the project's repo / remote
+            subprocess.Popen(
+                [gh_exe, "pr", "create", "--web", "--body-file", tmp_path],
+                cwd=path, creationflags=CREATE_NO_WINDOW)
+            self._on_log(
+                "  Opening GitHub New-PR page in your browser…", C["sky"])
+        except OSError as e:
+            messagebox.showerror(
+                "Open PR on GitHub failed",
+                f"Could not spawn gh: {e}",
+                parent=dlg)
+            return
+        # NB: tmp_path is left on disk intentionally. gh reads it lazily after
+        # the browser opens, so deleting it immediately would race. The OS will
+        # clean it up from %TEMP% eventually.
