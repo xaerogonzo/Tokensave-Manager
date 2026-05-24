@@ -166,6 +166,8 @@ Must be updated when the project moves to a new location or machine.
 | `mcp_skip_warnings` | List of absolute paths. MCP config files the user has dismissed warnings about. Honoured by `_check_config`'s startup banner. Managed via `MCPConfigDialog`'s Skip button. |
 | `tokensave_update_poll_hours` | Float, default 1.0 (min 0.25). Hourly GitHub releases poller cadence for tokensave update detection. |
 | `builtin_snippet_overrides` | Dict `{title: text}`. Per-prompt overrides for the built-in Claude prompt snippets defined in `src/prompts.py`. Edit via Reference tab → select a built-in → Edit. Reset via Reset button OR save with empty body (implicit reset — pops the key). The defaults in `src/prompts.py` are immutable ROM; this dict is the RAM overlay. Default `{}`. |
+| `codegraph_exe` | Optional absolute path to the codegraph CLI. Blank = auto-detect (`.cmd`-first via `shutil.which`, then `%APPDATA%\npm\codegraph.cmd`). Configurable via Settings → CodeGraph section → exe path row (Browse / Auto-detect). Empty string when not installed — never the bare command name. |
+| `claude_cli_exe` | Optional absolute path to the Claude Code CLI (`claude.cmd` from `npm install -g @anthropic-ai/claude-code`). Blank = auto-detect (`.cmd`-first via `shutil.which`, then `%APPDATA%\npm\claude.cmd`). Configurable via Settings → Git tools → Claude Code CLI row (Browse / Auto-detect). Used by the Git tab's Draft PR button CLI execution path — spawns a detached terminal (`CREATE_NEW_CONSOLE + cmd.exe /k`) rather than capturing stdout. |
 
 ---
 
