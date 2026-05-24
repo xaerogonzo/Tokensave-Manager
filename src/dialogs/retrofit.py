@@ -17,7 +17,7 @@ from helpers.shadow_links import DEFAULT_SHADOW_EXT_MAP
 
 
 class RetrofitDialog(tk.Toplevel):
-    """Small dialog with two checkboxes for the retrofit options."""
+    """Small dialog with checkboxes for the retrofit options."""
 
     def __init__(self, parent, path, callback):
         super().__init__(parent)
@@ -25,6 +25,7 @@ class RetrofitDialog(tk.Toplevel):
         self.configure(bg=C["base"])
         self.resizable(False, False)
         self.grab_set()
+        self.transient(parent)
         self.callback = callback
         self.path = path
 
@@ -35,125 +36,92 @@ class RetrofitDialog(tk.Toplevel):
                  bg=C["base"], fg=C["blue"]).pack(anchor=tk.W, padx=20, pady=(16, 4))
 
         tk.Label(self, text=os.path.basename(path),
-                 font=("Segoe UI", 9), bg=C["base"], fg=C["overlay0"]).pack(
-                 anchor=tk.W, padx=20, pady=(0, 10))
+                 font=("Segoe UI", 9), bg=C["base"],
+                 fg=C["overlay0"]).pack(anchor=tk.W, padx=20, pady=(0, 10))
 
         # Checkbox: tokensave integration
-        self.var_ts = tk.BooleanVar(value=True)
-        tk.Checkbutton(self,
-            text="Add tokensave rules to CLAUDE.md",
-            variable=self.var_ts,
-            bg=C["base"], fg=C["text"], selectcolor=C["surface0"],
-            activebackground=C["base"], activeforeground=C["text"],
-            font=("Segoe UI", 10)).pack(anchor=tk.W, **pad)
-
-        tk.Label(self,
-            text="  Prepends an @include line so Claude always loads the\n"
-                 "  tokensave lookup table. Non-destructive — existing content kept.",
-            font=("Segoe UI", 8), bg=C["base"], fg=C["overlay0"],
-            justify=tk.LEFT).pack(anchor=tk.W, padx=36, pady=(0, 6))
+        self.var_ts = self._opt_row(
+            "Add tokensave rules to CLAUDE.md",
+            "  Prepends an @include line so Claude always loads the\n"
+            "  tokensave lookup table. Non-destructive — existing content kept.",
+            pad, default=True)
 
         # Checkbox: BASIC_INSTRUCTIONS.md
-        self.var_bi = tk.BooleanVar(value=True)
-        tk.Checkbutton(self,
-            text="Also create BASIC_INSTRUCTIONS.md",
-            variable=self.var_bi,
-            bg=C["base"], fg=C["text"], selectcolor=C["surface0"],
-            activebackground=C["base"], activeforeground=C["text"],
-            font=("Segoe UI", 10)).pack(anchor=tk.W, **pad)
+        self.var_bi = self._opt_row(
+            "Also create BASIC_INSTRUCTIONS.md",
+            "  Drops a full project template (overview, architecture,\n"
+            "  key files, rules) for Claude to fill in on first use.",
+            pad, default=True)
 
-        tk.Label(self,
-            text="  Drops a full project template (overview, architecture,\n"
-                 "  key files, rules) for Claude to fill in on first use.",
-            font=("Segoe UI", 8), bg=C["base"], fg=C["overlay0"],
-            justify=tk.LEFT).pack(anchor=tk.W, padx=36, pady=(0, 6))
-
-        # Separator
         ttk.Separator(self, orient="horizontal").pack(fill=tk.X, padx=20, pady=(4, 4))
 
         # Checkbox: Nuitka build files
         has_ps1 = os.path.isfile(os.path.join(path, "build.ps1"))
-        nuitka_note = "  (build.ps1 already exists)" if has_ps1 else "  (build.ps1 + build.bat)"
-        self.var_nuitka = tk.BooleanVar(value=False)
-        tk.Checkbutton(self,
-            text="Add Nuitka build files",
-            variable=self.var_nuitka,
-            bg=C["base"], fg=C["text"], selectcolor=C["surface0"],
-            activebackground=C["base"], activeforeground=C["text"],
-            font=("Segoe UI", 10)).pack(anchor=tk.W, **pad)
+        nuitka_note = (
+            "  Copies build templates from the templates folder.\n"
+            "  Edit [ENTRY_SCRIPT] and [OUTPUT_NAME] in build.ps1 before building.\n"
+            + ("  (build.ps1 already exists)" if has_ps1 else "  (build.ps1 + build.bat)")
+        )
+        self.var_nuitka = self._opt_row(
+            "Add Nuitka build files", nuitka_note, pad, default=False)
 
-        tk.Label(self,
-            text=f"  Copies build templates from the templates folder.{chr(10)}"
-                 "  Edit [ENTRY_SCRIPT] and [OUTPUT_NAME] in build.ps1 before building.\n"
-                 f"  {nuitka_note.strip()}",
-            font=("Segoe UI", 8), bg=C["base"], fg=C["overlay0"],
-            justify=tk.LEFT).pack(anchor=tk.W, padx=36, pady=(0, 6))
-
-        # Separator
         ttk.Separator(self, orient="horizontal").pack(fill=tk.X, padx=20, pady=(4, 4))
 
         # Checkbox: Shadow extension links
-        self.var_shadow = tk.BooleanVar(value=False)
-        tk.Checkbutton(self,
-            text="Generate shadow extension links",
-            variable=self.var_shadow,
-            bg=C["base"], fg=C["text"], selectcolor=C["surface0"],
-            activebackground=C["base"], activeforeground=C["text"],
-            font=("Segoe UI", 10)).pack(anchor=tk.W, **pad)
-
-        # Count existing shadow files
         existing_shadows = sum(
             1 for r, _, fs in os.walk(path)
             for f in fs
             if any(f.endswith(src + tgt)
                    for src, tgt in DEFAULT_SHADOW_EXT_MAP.items())
         )
-        shadow_note = (f"  {existing_shadows} shadow file(s) already exist."
-                       if existing_shadows else
-                       "  None exist yet — click Apply to create them.")
-        tk.Label(self,
-            text="  Creates NTFS hardlinks (.zs→.cpp, .zsc→.cpp, .acs→.c, DECORATE→.cpp)\n"
-                 "  so tokensave can parse ZScript/ACS/DECORATE as C++/C. Zero disk cost.\n"
-                 "  Adds gitignore patterns. Use 🔗 Shadow Links… for custom mappings.\n"
-                 f"  {shadow_note.strip()}",
-            font=("Segoe UI", 8), bg=C["base"], fg=C["overlay0"],
-            justify=tk.LEFT).pack(anchor=tk.W, padx=36, pady=(0, 6))
+        shadow_note = (
+            "  Creates NTFS hardlinks (.zs→.cpp, .zsc→.cpp, .acs→.c, DECORATE→.cpp)\n"
+            "  so tokensave can parse ZScript/ACS/DECORATE as C++/C. Zero disk cost.\n"
+            "  Adds gitignore patterns. Use 🔗 Shadow Links… for custom mappings.\n"
+            + (f"  {existing_shadows} shadow file(s) already exist."
+               if existing_shadows else
+               "  None exist yet — click Apply to create them.")
+        )
+        self.var_shadow = self._opt_row(
+            "Generate shadow extension links", shadow_note, pad, default=False)
 
-        # Separator
         ttk.Separator(self, orient="horizontal").pack(fill=tk.X, padx=20, pady=(4, 4))
 
         # Checkbox: Auto-commit Stop hook
         hook_settings = os.path.join(path, ".claude", "settings.json")
-        hook_note = "  (already present)" if os.path.isfile(hook_settings) else "  (.claude/settings.json)"
-        self.var_hook = tk.BooleanVar(value=False)
-        tk.Checkbutton(self,
-            text="Add auto-commit Stop hook",
-            variable=self.var_hook,
-            bg=C["base"], fg=C["text"], selectcolor=C["surface0"],
-            activebackground=C["base"], activeforeground=C["text"],
-            font=("Segoe UI", 10)).pack(anchor=tk.W, **pad)
-
-        tk.Label(self,
-            text="  Auto-commits when Claude finishes a session in this project.\n"
-                 "  Only commits when the working tree has changes. Safe on clean repos.\n"
-                 f"  {hook_note.strip()}",
-            font=("Segoe UI", 8), bg=C["base"], fg=C["overlay0"],
-            justify=tk.LEFT).pack(anchor=tk.W, padx=36, pady=(0, 12))
+        hook_note = (
+            "  Auto-commits when Claude finishes a session in this project.\n"
+            "  Only commits when the working tree has changes. Safe on clean repos.\n"
+            + ("  (already present)" if os.path.isfile(hook_settings)
+               else "  (.claude/settings.json)")
+        )
+        self.var_hook = self._opt_row(
+            "Add auto-commit Stop hook", hook_note, pad, default=False)
 
         # Buttons
         btn_frame = tk.Frame(self, bg=C["base"])
         btn_frame.pack(fill=tk.X, padx=20, pady=(0, 16))
-
         ttk.Button(btn_frame, text="Apply", style="Primary.TButton",
                    command=self._apply).pack(side=tk.LEFT, padx=(0, 8))
         ttk.Button(btn_frame, text="Cancel",
                    command=self.destroy).pack(side=tk.LEFT)
 
         self.update_idletasks()
-        # Centre over parent
         px = parent.winfo_x() + (parent.winfo_width()  - self.winfo_width())  // 2
         py = parent.winfo_y() + (parent.winfo_height() - self.winfo_height()) // 2
         self.geometry(f"+{px}+{py}")
+
+    # ── Internal ──────────────────────────────────────────────────────────────
+
+    def _opt_row(self, label: str, note: str, pad: dict,
+                 default: bool = False) -> tk.BooleanVar:
+        """Render one ttk.Checkbutton + description label, return its BooleanVar."""
+        var = tk.BooleanVar(value=default)
+        ttk.Checkbutton(self, text=label, variable=var).pack(anchor=tk.W, **pad)
+        tk.Label(self, text=note,
+                 font=("Segoe UI", 8), bg=C["base"], fg=C["overlay0"],
+                 justify=tk.LEFT).pack(anchor=tk.W, padx=36, pady=(0, 6))
+        return var
 
     def _apply(self):
         ts     = self.var_ts.get()

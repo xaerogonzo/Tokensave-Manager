@@ -27,6 +27,7 @@ class ScaffoldDialog(tk.Toplevel):
         self.transient(parent)
         self.path = path
         self.callback = callback
+        self._parent = parent
 
         has_bi = os.path.isfile(os.path.join(path, "BASIC_INSTRUCTIONS.md"))
         has_db = os.path.isfile(os.path.join(path, ".tokensave", "tokensave.db"))
@@ -111,6 +112,11 @@ class ScaffoldDialog(tk.Toplevel):
         ttk.Button(btn_row, text="Apply", style="Primary.TButton",
                    command=self._apply).pack(side=tk.LEFT, padx=(0, 8))
         ttk.Button(btn_row, text="Cancel", command=self.destroy).pack(side=tk.LEFT)
+
+        self.update_idletasks()
+        px = self._parent.winfo_x() + (self._parent.winfo_width()  - self.winfo_width())  // 2
+        py = self._parent.winfo_y() + (self._parent.winfo_height() - self.winfo_height()) // 2
+        self.geometry(f"+{px}+{py}")
 
     def _apply(self):
         create_bi       = self._bi_var.get()
