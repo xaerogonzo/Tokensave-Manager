@@ -69,6 +69,11 @@ from helpers.project_discovery import (
     find_projects, get_pinned, set_pinned, clear_pinned,
     fmt_age, load_basic_instructions_template,
 )
+from helpers.git import (
+    _is_git_repo, _find_tracked_but_ignored, _is_local_git_repo,
+    _parse_git_status_v2, _format_git_status_cell,
+    _fetch_tags, _git_tag, _git_push_with_tags,
+)
 
 
 # _TOKENSAVE_UPDATE_RE moved to constants.py (Round 4 Phase A)
@@ -524,141 +529,9 @@ DEFAULT_SHADOW_EXT_MAP = {
 # update_gitignore_for_shadows moved to helpers/shadow_links.py (Round 4 Phase A)
 
 
-def _is_git_repo(path: str) -> bool:
-    """Return True if *path* is inside an initialised git repository.
-
-    NOTE: this walks UPWARD via `git rev-parse --git-dir` — so a project
-    folder inside a parent git repo will also return True. For the strict
-    'this folder IS a repo root' check, use _is_local_git_repo instead.
-    """
-    try:
-        proc = subprocess.run(
-            [GIT_EXE,"-C", path, "rev-parse", "--git-dir"],
-            stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
-            creationflags=CREATE_NO_WINDOW,
-        )
-        return proc.returncode == 0
-    except FileNotFoundError:
-        return False
-
-
-def _find_tracked_but_ignored(path: str) -> list:
-    """Return a list of paths that are TRACKED by git in `path` but ALSO
-    match a pattern in `.gitignore`.
-
-    Uses `git ls-files -ci --exclude-standard`:
-      -c  show cached (tracked) files
-      -i  filter to those that are ignored
-      --exclude-standard  use the project's actual .gitignore rules
-
-    Returns paths relative to the repo root, one per line, empty string
-    filtered out. Returns [] if the call fails (not a repo, git missing,
-    etc.) — caller can treat empty as "nothing to do".
-
-    This is the canonical way to find the "stale tracking" problem: a
-    file that was committed before being added to .gitignore. Git will
-    keep tracking it until `git rm --cached <file>` is run, even though
-    .gitignore implies the user no longer wants it in the repo.
-    """
-    try:
-        proc = subprocess.run(
-            [GIT_EXE, "-C", path,
-             "ls-files", "-ci", "--exclude-standard"],
-            capture_output=True, text=True, timeout=10,
-            encoding="utf-8", errors="replace",
-            creationflags=CREATE_NO_WINDOW,
-        )
-    except (FileNotFoundError, subprocess.TimeoutExpired):
-        return []
-    if proc.returncode != 0:
-        return []
-    return [ln for ln in proc.stdout.splitlines() if ln.strip()]
-
-
-def _is_local_git_repo(path: str) -> bool:
-    """Return True only if *path* itself is a git repo root.
-
-    Strict local check — does NOT walk upward. Use this whenever the
-    intent is 'should we treat this folder as its own version-controlled
-    project?' (e.g. commit-prompt flows, .gitignore writes).
-
-    Uses os.path.exists rather than os.path.isdir because git worktrees
-    store `.git` as a flat text file pointing to the main repo's .git/.
-    os.path.isdir would miss those; os.path.exists handles both.
-    """
-    return os.path.exists(os.path.join(path, ".git"))
-
-
-def _parse_git_status_v2(text: str) -> dict:
-    """Parse `git status --porcelain=v2 --branch` output.
-
-    Returns a dict with keys:
-      dirty      — True if any working-tree or index changes exist
-      ahead      — int, commits ahead of upstream (0 if no upstream)
-      behind     — int, commits behind upstream
-      has_remote — True if `# branch.upstream <name>` line is present
-
-    Pure function — never raises; bad input returns the empty default.
-    """
-    result = {"dirty": False, "ahead": 0, "behind": 0, "has_remote": False}
-    for line in text.splitlines():
-        if line.startswith("# branch.upstream "):
-            result["has_remote"] = True
-        elif line.startswith("# branch.ab "):
-            # Format: "# branch.ab +N -M"
-            try:
-                parts = line.split()
-                # parts: ['#', 'branch.ab', '+N', '-M']
-                result["ahead"]  = int(parts[2].lstrip("+"))
-                result["behind"] = int(parts[3].lstrip("-"))
-            except (ValueError, IndexError):
-                pass
-        elif line and line[0] in ("1", "2", "u", "?"):
-            # Tracked-modified (1), renamed/copied (2), unmerged (u), untracked (?)
-            result["dirty"] = True
-    return result
-
-
-def _format_git_status_cell(status: dict | None, has_git: bool) -> tuple:
-    """Return (display_text, tag_name) for the Git column on the Projects tab.
-
-    status: dict from _parse_git_status_v2, or None if not yet computed
-    has_git: True if the project has a .git/ directory at all
-
-    Tags map to colours in _build_projects_tab via tree.tag_configure.
-    """
-    if not has_git:
-        return ("—", "git_none")
-    if status is None:
-        return ("…", "git_pending")
-    if not status["has_remote"]:
-        # Repo exists but no remote — can't be ahead/behind
-        if status["dirty"]:
-            return ("●", "git_dirty")
-        return ("✓", "git_clean")
-    dirty  = status["dirty"]
-    ahead  = status["ahead"]
-    behind = status["behind"]
-    if not dirty and ahead == 0 and behind == 0:
-        return ("✓", "git_clean")
-    parts = []
-    if dirty:
-        parts.append("●")
-    if ahead:
-        parts.append(f"↑{ahead}")
-    if behind:
-        parts.append(f"↓{behind}")
-    text = "".join(parts)
-    # Tag priority: mixed (dirty + remote drift) > behind > ahead > dirty
-    if dirty and (ahead or behind):
-        tag = "git_mixed"
-    elif behind:
-        tag = "git_behind"
-    elif ahead:
-        tag = "git_ahead"
-    else:
-        tag = "git_dirty"
-    return (text, tag)
+# _is_git_repo / _find_tracked_but_ignored / _is_local_git_repo /
+# _parse_git_status_v2 / _format_git_status_cell moved to helpers/git.py
+# (Round 4 Phase A — Rule 1 call-site avalanche: 4 sites updated).
 
 
 # _BASELINE_GITIGNORE / _ensure_gitignore / _baseline_patterns /
@@ -1709,72 +1582,11 @@ def _fmt_size(byte_count: int) -> str:
     return f"{byte_count / 1024 / 1024:.1f} MB"
 
 
-def _fetch_tags(path: str) -> None:
-    """Pull tags from origin so ``_last_release_tag`` reflects releases that
-    were created remotely without a local ``git tag`` step.
-
-    Why this exists: pre-v1.0.4 releases of this manager (and any release
-    created by ``gh release create`` directly) only tag remotely. The local
-    tree has no record of those tags until ``git fetch --tags`` runs. If
-    the wizard relies purely on ``git describe --tags --abbrev=0``, it'll
-    pick up an old prerelease like ``v1.0.0-alpha.1`` and suggest bumps
-    from THAT, not the real current version.
-
-    Silent on failure — wizard still works with whatever local tags exist.
-    Short timeout (5 s) so a flaky network doesn't block dialog open for
-    long.
-    """
-    try:
-        subprocess.run(
-            [GIT_EXE, "-C", path, "fetch", "--tags", "--quiet", "origin"],
-            capture_output=True, text=True, timeout=5,
-            creationflags=CREATE_NO_WINDOW,
-        )
-    except (FileNotFoundError, subprocess.TimeoutExpired, OSError):
-        pass
+# _fetch_tags / _git_tag / _git_push_with_tags moved to helpers/git.py
+# (Round 4 Phase A — 3 sites in ReleaseWizardDialog updated).
 
 
-def _git_tag(path: str, tag: str, message: str) -> tuple:
-    """Create an annotated local tag. Returns (stdout+stderr, rc)."""
-    try:
-        proc = subprocess.run(
-            [GIT_EXE, "-C", path, "tag", "-a", tag, "-m", message],
-            capture_output=True, text=True, timeout=10,
-            encoding="utf-8", errors="replace",
-            creationflags=CREATE_NO_WINDOW,
-        )
-    except (FileNotFoundError, subprocess.TimeoutExpired) as exc:
-        return (f"Error invoking git: {exc}", 1)
-    out = (proc.stdout or "") + (proc.stderr or "")
-    return (out, proc.returncode)
-
-
-def _git_push_with_tags(path: str) -> tuple:
-    """Push HEAD plus the new annotated tag in one network round-trip."""
-    try:
-        proc = subprocess.run(
-            [GIT_EXE, "-C", path, "push", "origin", "HEAD", "--follow-tags"],
-            capture_output=True, text=True, timeout=120,
-            encoding="utf-8", errors="replace",
-            creationflags=CREATE_NO_WINDOW,
-        )
-    except (FileNotFoundError, subprocess.TimeoutExpired) as exc:
-        return (f"Error invoking git: {exc}", 1)
-    out = (proc.stdout or "") + (proc.stderr or "")
-    return (out, proc.returncode)
-
-
-# ─── End release-wizard helpers ─────────────────────────────────────────────
-
-
-# _STOP_HOOK_CMD / _LEGACY_STOP_HOOK_CMD / _AUTO_COMMIT_HELPER / _scaffold_git_hook
-# moved to helpers/scaffold.py (Round 4 Phase A)
-
-
-# _setup_logger() and `log = _setup_logger()` moved to helpers/runtime.py
-# (Round 4 Phase A). `log` is imported above.
-
-# ── Prompt snippets ────────────────────────────────────────────────────────────
+# ── Prompt snippets (Reference tab) ─────────────────────────────────────────
 
 PROMPT_SNIPPETS = [
     # ─────────────────────────── 🧭 EXPLORATION ───────────────────────────
@@ -2006,14 +1818,6 @@ PROMPT_SNIPPETS = [
         "Module Detail Sections. Cite file:line throughout."
     ),
 ]
-
-# C (Catppuccin Mocha palette) moved to constants.py (Round 4 Phase A)
-
-# ── Helpers ────────────────────────────────────────────────────────────────────
-
-# find_projects, get_pinned, set_pinned, clear_pinned, fmt_age,
-# load_basic_instructions_template moved to helpers/project_discovery.py
-# (Round 4 Phase A)
 
 
 class ProjectsTabController:
@@ -3160,7 +2964,7 @@ class ProjectsTabController:
         if not path:
             return
         name = os.path.basename(path)
-        if _is_git_repo(path):
+        if _is_git_repo(path, GIT_EXE):
             messagebox.showinfo(
                 "Already a repository",
                 f"{name} is already a git repository.",
@@ -3217,7 +3021,7 @@ class ProjectsTabController:
                 "tracking isn't a concept here.",
                 parent=self._root)
             return
-        files = _find_tracked_but_ignored(path)
+        files = _find_tracked_but_ignored(path, GIT_EXE)
         if not files:
             messagebox.showinfo("Nothing to untrack",
                 f"No tracked-but-ignored files found in "
@@ -6491,7 +6295,7 @@ class App(tk.Tk):
                     log.info(f"DONE exit=0  [{elapsed:.1f}s]")
                     if (args and args[0] == "sync"
                             and _cfg.get("auto_commit_after_sync")
-                            and _is_git_repo(cwd)):
+                            and _is_git_repo(cwd, GIT_EXE)):
                         self._auto_commit_after_sync(cwd)
                 else:
                     self._log(f"Exited with code {proc.returncode}", C["red"])
@@ -6784,7 +6588,7 @@ class App(tk.Tk):
         the user would have to come back and untrack anyway.
         """
         if _is_local_git_repo(path):
-            stale = _find_tracked_but_ignored(path)
+            stale = _find_tracked_but_ignored(path, GIT_EXE)
             if stale:
                 n = len(stale)
                 preview = "\n".join(f"  • {f}" for f in stale[:5])
@@ -6813,7 +6617,7 @@ class App(tk.Tk):
         # No conflicts, OR user chose to proceed anyway
         status_out, _ = self._shell_capture(
             [GIT_EXE, "-C", path, "status", "--short"], path)
-        is_repo = _is_git_repo(path)
+        is_repo = _is_git_repo(path, GIT_EXE)
         GitCommitDialog(self, path, status_out, is_repo, self._do_git_commit)
 
     def _offer_commit_after_change(self, path: str, summary_label: str) -> None:
@@ -9108,7 +8912,7 @@ class ReleaseWizardDialog(tk.Toplevel):
         # releases created remotely (e.g. legacy `gh release create` calls
         # that never tagged locally). Silent + 5s timeout — never blocks
         # dialog open on flaky networks.
-        _fetch_tags(path)
+        _fetch_tags(path, GIT_EXE)
         self._last_tag       = _last_release_tag(path)
         self._commits        = _commits_since(path, self._last_tag)
         self._suggested_kind = _suggest_bump_kind(self._commits)
@@ -9719,7 +9523,7 @@ class ReleaseWizardDialog(tk.Toplevel):
     def _pub_tag(self, ctx: "_ReleaseCtx") -> bool:
         """Step 6: create a local annotated tag."""
         self._set_status(f"Creating local tag {ctx.tag}…", fg=C["peach"])
-        out, rc = _git_tag(self._path, ctx.tag, ctx.title)
+        out, rc = _git_tag(self._path, ctx.tag, ctx.title, GIT_EXE)
         if rc != 0:
             self._fail(
                 f"git tag {ctx.tag} failed — possibly already exists locally.\n"
@@ -9733,7 +9537,7 @@ class ReleaseWizardDialog(tk.Toplevel):
     def _pub_push(self, ctx: "_ReleaseCtx") -> bool:
         """Step 7: push commits + tag to origin in one round-trip."""
         self._set_status(f"Pushing {ctx.tag} to origin…", fg=C["peach"])
-        out, rc = _git_push_with_tags(self._path)
+        out, rc = _git_push_with_tags(self._path, GIT_EXE)
         if rc != 0:
             self._fail(
                 f"Push failed (rc={rc}).\n{out[-300:]}\n\n"
@@ -10339,7 +10143,7 @@ class GitignoreDialog(tk.Toplevel):
         # Only relevant when at least one addition was made AND this is a
         # local git repo; pure removals or non-git projects skip this.
         if added_n > 0 and _is_local_git_repo(path):
-            stale = _find_tracked_but_ignored(path)
+            stale = _find_tracked_but_ignored(path, GIT_EXE)
             if stale:
                 ask = messagebox.askyesno(
                     "Untrack files that match your new rules?",
