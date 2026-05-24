@@ -292,7 +292,23 @@ GitTabController (standalone class, App._git)
     └── _git_begin_op() / _git_end_op() — disable/enable all Git tab buttons during in-flight operations
 
 SnippetsController (standalone class, App._snippets_ctrl)
-    └── Reference tab snippet list: _refresh_snippet_list() + _add_snippet / _edit_snippet / _delete_snippet / _on_snippet_saved
+    ├── Reference tab snippet list: _refresh_snippet_list() + _add_snippet / _edit_snippet / _delete_snippet / _reset_snippet / _on_snippet_saved
+    ├── Built-in catalogue lives in src/prompts.py (immutable ROM). User edits
+    │   layer on top via cfg.raw["builtin_snippet_overrides"] (RAM overlay) —
+    │   Reset just pops the override key, defaults are never destructively
+    │   modified. Saving an empty override body is treated as an implicit
+    │   reset (pops the key rather than persisting an empty string).
+    ├── Placeholder substitution: snippets may contain [[double-bracket]]
+    │   tokens (single [brackets] are reserved for markdown links and
+    │   footnote refs). Selecting a snippet renders Label+Entry pairs in
+    │   a 2-column grid below the preview; Copy substitutes filled values.
+    │   Empty fields leave [[token]] as literal text in the clipboard.
+    │   Pure helpers _extract_placeholders / _substitute_placeholders sit
+    │   at module scope so they're unit-testable without a Tk root.
+    └── Layout-jitter prevention: action buttons are packed side=tk.BOTTOM
+        FIRST, then placeholder frame, then preview last with expand=True.
+        Result: adding/removing placeholder fields shrinks/grows the preview
+        but never moves the Copy/Edit/Reset/Delete row Y-coordinate.
 
 AskTabController (standalone class, App._ask_ctrl)
     ├── 🤖 Ask tab: chat log Text, Send/Stop/Clear controls, _ask_messages conversation history

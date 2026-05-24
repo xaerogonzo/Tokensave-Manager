@@ -165,6 +165,7 @@ Must be updated when the project moves to a new location or machine.
 | `commit_message_llm` | Dict. AI-commit + general LLM settings. Keys include `enabled`, `provider`, `model`, `api_key_env`, `base_url`, `min_diff_lines`, `max_diff_chars`, `timeout_seconds`, `use_for_sync_autocommit`, `num_ctx` (Ollama context window, default 32768). Read by both `_call_llm` (Stage 0/1) and `LocalAgent` (Stage 2 — the 🤖 Ask tab). |
 | `mcp_skip_warnings` | List of absolute paths. MCP config files the user has dismissed warnings about. Honoured by `_check_config`'s startup banner. Managed via `MCPConfigDialog`'s Skip button. |
 | `tokensave_update_poll_hours` | Float, default 1.0 (min 0.25). Hourly GitHub releases poller cadence for tokensave update detection. |
+| `builtin_snippet_overrides` | Dict `{title: text}`. Per-prompt overrides for the built-in Claude prompt snippets defined in `src/prompts.py`. Edit via Reference tab → select a built-in → Edit. Reset via Reset button OR save with empty body (implicit reset — pops the key). The defaults in `src/prompts.py` are immutable ROM; this dict is the RAM overlay. Default `{}`. |
 
 ---
 
