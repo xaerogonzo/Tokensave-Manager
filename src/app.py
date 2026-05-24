@@ -283,8 +283,23 @@ class App(tk.Tk):
                  font=("Segoe UI", 8, "bold"),
                  bg=C["base"], fg=C["overlay0"]).pack(side=tk.LEFT)
 
+        # Daemon status indicator (left side, after OUTPUT label)
+        self._daemon_indicator = tk.Label(
+            log_header, text="●",
+            fg=C["overlay0"], bg=C["base"],
+            font=("Segoe UI", 11))
+        self._daemon_indicator.pack(side=tk.LEFT, padx=(10, 2))
+        self._daemon_lbl = tk.Label(
+            log_header, text="daemon …",
+            fg=C["overlay0"], bg=C["base"],
+            font=("Segoe UI", 8))
+        self._daemon_lbl.pack(side=tk.LEFT)
+
         ttk.Button(log_header, text="View Log",
                    command=self._open_log).pack(side=tk.RIGHT, padx=(0, 6))
+
+        ttk.Button(log_header, text="Cost",
+                   command=self._open_cost_viewer).pack(side=tk.RIGHT, padx=(0, 6))
 
         self._stop_btn = ttk.Button(log_header, text="■  Stop",
                                     style="Danger.TButton",
@@ -308,6 +323,56 @@ class App(tk.Tk):
         self.log.configure(yscrollcommand=lsb.set)
         self.log.pack(side=tk.LEFT, fill=tk.X, expand=True)
         lsb.pack(side=tk.RIGHT, fill=tk.Y)
+
+        # Kick off the daemon status polling loop
+        self._daemon_polling = False
+        self._poll_daemon_status()
+
+    # ── Daemon status polling ───────────────────────────────────────────────
+
+    def _poll_daemon_status(self):
+        """Fetch daemon status in a background thread every 5 seconds.
+
+        Guards against pile-up (self._daemon_polling flag) and against the
+        loop dying silently on subprocess errors (finally block reschedules
+        unconditionally so the indicator never permanently freezes).
+        """
+        if self._daemon_polling:
+            return
+        self._daemon_polling = True
+
+        def _worker():
+            try:
+                from helpers.daemon_cost import get_daemon_status   # lazy import
+                status = get_daemon_status(self._cfg.tokensave_exe)
+                self.after(0, lambda s=status: self._apply_daemon_status(s))
+            finally:
+                self._daemon_polling = False
+                self.after(5000, self._poll_daemon_status)
+
+        import threading
+        threading.Thread(target=_worker, daemon=True).start()
+
+    def _apply_daemon_status(self, status: dict):
+        if not self.winfo_exists():
+            return
+        if status.get("error"):
+            self._daemon_indicator.configure(fg=C["overlay0"])
+            self._daemon_lbl.configure(text="daemon: n/a")
+            return
+        if status["running"]:
+            pid_str = f"  (PID {status['pid']})" if status["pid"] else ""
+            self._daemon_indicator.configure(fg=C["green"])
+            self._daemon_lbl.configure(text=f"daemon: running{pid_str}")
+        else:
+            self._daemon_indicator.configure(fg=C["overlay0"])
+            self._daemon_lbl.configure(text="daemon: stopped")
+
+    # ── Cost viewer ─────────────────────────────────────────────────────────
+
+    def _open_cost_viewer(self):
+        from dialogs.cost_viewer import CostViewerDialog   # lazy import
+        CostViewerDialog(self, self._cfg)
 
     # ── Tab / project navigation ────────────────────────────────────────────
 

@@ -254,10 +254,12 @@ class GitTabController:
                                  command=self.cmd_git_merge_pr)
         btn_release = ttk.Button(row2, text="📦  Release…",
                                  command=self.cmd_git_release)
+        btn_draft_pr = ttk.Button(row2, text="Draft PR…",
+                                  command=self.cmd_draft_pr)
 
         for btn in (btn_push, btn_pull, btn_fetch, btn_commit, btn_undo,
                     btn_new, btn_switch, btn_merge, btn_del, btn_openpr,
-                    btn_mergepr, btn_release):
+                    btn_mergepr, btn_release, btn_draft_pr):
             btn.pack(side=tk.LEFT, padx=(0, 6))
 
         _Tooltip(btn_push,
@@ -332,10 +334,22 @@ class GitTabController:
             "notes before publishing.\n\n"
             "Requires: GitHub CLI (`gh`) installed AND a remote set.")
 
+        _Tooltip(btn_draft_pr,
+            "Draft a PR description using AI.\n\n"
+            "Primary click: uses Claude Code CLI if configured, otherwise the API key.\n"
+            "Right-click or Shift+click: choose which tool to use.\n\n"
+            "CLI mode opens a new terminal window running `claude` with a write\n"
+            "instruction — your app stays unblocked while it runs.\n"
+            "API mode drafts the description inline and shows it in a dialog.")
+        btn_draft_pr.bind("<Button-3>",
+            lambda e: self._show_draft_pr_menu(e, btn_draft_pr))
+        btn_draft_pr.bind("<Shift-Button-1>",
+            lambda e: self._show_draft_pr_menu(e, btn_draft_pr))
+
         self._git_all_btns       = [self._btn_set_remote, btn_push, btn_pull,
                                      btn_commit, btn_undo, btn_new,
                                      btn_switch, btn_merge, btn_del, btn_openpr,
-                                     btn_mergepr, btn_release]
+                                     btn_mergepr, btn_release, btn_draft_pr]
         self._git_push_pull_btns = [btn_push, btn_pull, btn_openpr]
         self._git_release_btns   = [btn_release, btn_mergepr]
 
@@ -1318,3 +1332,108 @@ class GitTabController:
                         parent=self._root))
         finally:
             self._tab.after(0, self._git_end_op)
+
+    # ── Draft PR description ────────────────────────────────────────────────
+
+    def cmd_draft_pr(self):
+        """Draft a PR description using the preferred AI tool.
+
+        Primary-click behaviour: uses Claude Code CLI if configured, otherwise
+        falls back to the API key path. Shift-click / right-click shows a menu
+        to override the choice.
+        """
+        path = self._git_path
+        if not path:
+            return
+        cli = self._cfg.claude_cli_exe
+        has_api = bool(self._cfg.raw.get("commit_message_llm", {}).get("api_key", "").strip()
+                       or self._cfg.raw.get("commit_message_llm", {}).get("provider", "") == "ollama")
+        if cli:
+            self._draft_pr_via_cli(path)
+        elif has_api:
+            self._draft_pr_via_api(path)
+        else:
+            messagebox.showinfo(
+                "No AI configured",
+                "Configure a Claude Code CLI path or an API key in Settings to use Draft PR.",
+                parent=self._root)
+
+    def _show_draft_pr_menu(self, event, btn):
+        """Show an override menu for right-click / Shift+click on Draft PR."""
+        path = self._git_path
+        if not path:
+            return
+        menu = tk.Menu(self._tab, tearoff=0)
+        menu.add_command(label="Use Claude Code CLI",
+                         command=lambda: self._draft_pr_via_cli(path))
+        menu.add_command(label="Use API key (inline dialog)",
+                         command=lambda: self._draft_pr_via_api(path))
+        try:
+            menu.tk_popup(event.x_root, event.y_root)
+        finally:
+            menu.grab_release()
+
+    def _draft_pr_via_cli(self, path: str):
+        from helpers.claude_cli import spawn_claude_cli   # lazy import
+        instruction = (
+            "Review my uncommitted git changes and write a PR description "
+            "to PR_DRAFT.md in the project root."
+        )
+        ok, err = spawn_claude_cli(self._cfg.claude_cli_exe, path, instruction)
+        if not ok:
+            messagebox.showerror("Claude Code CLI error", err, parent=self._root)
+
+    def _draft_pr_via_api(self, path: str):
+        import threading
+        self._on_log("  Drafting PR description via API…", C["blue"])
+
+        def _fetch():
+            from helpers.pr_draft import generate_pr_draft   # lazy import
+            result = generate_pr_draft(self._cfg, path)
+            self._tab.after(0, lambda text=result: self._show_pr_draft_dialog(text))
+
+        threading.Thread(target=_fetch, daemon=True).start()
+
+    def _show_pr_draft_dialog(self, text: str | None):
+        if not self._tab.winfo_exists():
+            return
+        if not text:
+            messagebox.showinfo("Draft PR", "No response from AI — check your API settings.",
+                                parent=self._root)
+            return
+        dlg = tk.Toplevel(self._root)
+        dlg.title("PR Description Draft")
+        dlg.configure(bg=C["base"])
+        dlg.resizable(True, True)
+        dlg.minsize(600, 400)
+        dlg.transient(self._root)
+
+        txt = tk.Text(dlg, wrap=tk.NONE, bg=C["mantle"], fg=C["text"],
+                      font=("Consolas", 9), relief=tk.FLAT, padx=8, pady=6)
+        vsb = ttk.Scrollbar(dlg, orient="vertical",   command=txt.yview)
+        hsb = ttk.Scrollbar(dlg, orient="horizontal", command=txt.xview)
+        txt.configure(yscrollcommand=vsb.set, xscrollcommand=hsb.set)
+        txt.insert(tk.END, text)
+        txt.configure(state=tk.DISABLED)
+
+        hsb.pack(side=tk.BOTTOM, fill=tk.X)
+        vsb.pack(side=tk.RIGHT,  fill=tk.Y)
+        txt.pack(side=tk.LEFT,   fill=tk.BOTH, expand=True)
+
+        def _copy():
+            dlg.clipboard_clear()
+            dlg.clipboard_append(text)
+
+        btn_row = tk.Frame(dlg, bg=C["base"], padx=12, pady=8)
+        btn_row.pack(fill=tk.X)
+        ttk.Button(btn_row, text="Copy to clipboard", command=_copy).pack(side=tk.LEFT)
+        ttk.Button(btn_row, text="Close", command=dlg.destroy).pack(side=tk.RIGHT)
+
+        dlg.update_idletasks()
+        w, h = 720, 520
+        try:
+            px = self._root.winfo_x() + (self._root.winfo_width()  - w) // 2
+            py = self._root.winfo_y() + (self._root.winfo_height() - h) // 2
+            dlg.geometry(f"{w}x{h}+{max(0, px)}+{max(0, py)}")
+        except tk.TclError:
+            dlg.geometry(f"{w}x{h}")
