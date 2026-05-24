@@ -1508,90 +1508,38 @@ class ProjectsTabController:
                 log.info(f"RETROFIT {path}  ts={add_tokensave} bi={add_basic_instructions} "
                          f"nuitka={add_nuitka}")
                 self._on_log(f"Retrofitting {name}…", C["peach"])
-                actions_taken = []
+                actions: list[str] = []
 
                 if add_tokensave:
-                    claude_md = os.path.join(path, "CLAUDE.md")
-                    include_line = self._cfg.baseline_include_line
-                    if os.path.isfile(claude_md):
-                        content = open(claude_md, encoding="utf-8", errors="ignore").read()
-                        if "project-baseline.md" in content:
-                            log.info("  CLAUDE.md already has @include — skipped")
-                            self._on_log("  Tokensave already integrated in CLAUDE.md — skipped",
-                                         C["overlay0"])
-                        else:
-                            with open(claude_md, "r+", encoding="utf-8") as f:
-                                existing = f.read()
-                                f.seek(0)
-                                f.write(include_line + "\n\n" + existing)
-                            log.info("  prepended @include to CLAUDE.md")
-                            self._on_log("  Added tokensave @include to CLAUDE.md", C["green"])
-                            actions_taken.append("Added tokensave rules to CLAUDE.md")
-                    else:
-                        with open(claude_md, "w", encoding="utf-8") as f:
-                            f.write(
-                                f"# {name} — Claude Instructions\n\n"
-                                f"{include_line}\n"
-                            )
-                        log.info("  created CLAUDE.md with @include")
-                        self._on_log("  Created CLAUDE.md with tokensave @include", C["green"])
-                        actions_taken.append("Created CLAUDE.md with tokensave rules")
-
+                    actions.extend(self._retrofit_add_tokensave(path, name))
                 if add_basic_instructions:
-                    basic_md = os.path.join(path, "BASIC_INSTRUCTIONS.md")
-                    if os.path.isfile(basic_md):
-                        log.info("  BASIC_INSTRUCTIONS.md already exists — skipped")
-                        self._on_log("  BASIC_INSTRUCTIONS.md already exists — skipped",
-                                     C["overlay0"])
-                    else:
-                        template = load_basic_instructions_template(
-                            self._cfg.basic_instructions_template, self._cfg.baseline_include_line)
-                        with open(basic_md, "w", encoding="utf-8") as f:
-                            f.write(template)
-                        log.info("  created BASIC_INSTRUCTIONS.md")
-                        self._on_log("  Created BASIC_INSTRUCTIONS.md", C["green"])
-                        actions_taken.append("Created BASIC_INSTRUCTIONS.md")
-
+                    actions.extend(self._retrofit_add_basic_instructions(path))
                 if add_nuitka:
-                    nuitka_actions = self._scaffold_nuitka_build(path)
-                    actions_taken.extend(nuitka_actions)
-
+                    actions.extend(self._scaffold_nuitka_build(path))
                 if add_shadow_links:
-                    ext_map = shadow_ext_map or DEFAULT_SHADOW_EXT_MAP
-                    self._on_log("  Generating shadow extension links…", C["peach"])
-                    created, skipped, failed = generate_shadow_links(path, ext_map)
-                    update_gitignore_for_shadows(path, ext_map)
-                    sl_msg = f"Shadow links: created {created}"
-                    if skipped:
-                        sl_msg += f", {skipped} already existed"
-                    if failed:
-                        sl_msg += f", {failed} failed"
-                    self._on_log(f"  {sl_msg}", C["green"])
-                    log.info(f"  {sl_msg}")
-                    if created > 0:
-                        actions_taken.append(sl_msg)
-
+                    actions.extend(self._retrofit_add_shadow_links(
+                        path, shadow_ext_map or DEFAULT_SHADOW_EXT_MAP))
                 if add_git_hook:
                     hook_actions = _scaffold_git_hook(path)
                     for action in hook_actions:
                         self._on_log(f"  {action}", C["green"])
-                    actions_taken.extend(hook_actions)
+                    actions.extend(hook_actions)
 
-                log.info(f"RETROFIT complete: {actions_taken or 'nothing changed'}")
+                log.info(f"RETROFIT complete: {actions or 'nothing changed'}")
                 self._on_log(f"Retrofit complete: {path}", C["green"])
                 self._tab.after(0, self._on_refresh)
 
-                if actions_taken:
-                    summary = "\n".join(f"  ✔ {a}" for a in actions_taken)
+                if actions:
+                    summary = "\n".join(f"  ✔ {a}" for a in actions)
                     msg = f"{name}:\n\n{summary}"
-                    if any(a.startswith("Created build.ps1") for a in actions_taken):
+                    if any(a.startswith("Created build.ps1") for a in actions):
                         msg += ("\n\nNext step: open build.ps1 and replace "
                                 "[ENTRY_SCRIPT] and [OUTPUT_NAME] before building.")
                 else:
                     msg = f"{name}:\n\n  Everything was already up to date — nothing changed."
                 self._tab.after(0, lambda: messagebox.showinfo(
                     "Retrofit complete", msg, parent=self._root))
-                if actions_taken:
+                if actions:
                     self._tab.after(0, lambda: self._offer_commit_after_change(
                         path, "retrofit additions"))
 
@@ -1602,3 +1550,57 @@ class ProjectsTabController:
                     "Retrofit failed", str(e), parent=self._root))
 
         threading.Thread(target=worker, daemon=True).start()
+
+    # ── Retrofit step helpers (called from _do_retrofit's worker thread) ──
+
+    def _retrofit_add_tokensave(self, path: str, name: str) -> list[str]:
+        """Prepend the @include line to CLAUDE.md (or create it). Returns actions taken."""
+        claude_md = os.path.join(path, "CLAUDE.md")
+        include_line = self._cfg.baseline_include_line
+        if os.path.isfile(claude_md):
+            content = open(claude_md, encoding="utf-8", errors="ignore").read()
+            if "project-baseline.md" in content:
+                log.info("  CLAUDE.md already has @include — skipped")
+                self._on_log("  Tokensave already integrated in CLAUDE.md — skipped", C["overlay0"])
+                return []
+            with open(claude_md, "r+", encoding="utf-8") as f:
+                existing = f.read()
+                f.seek(0)
+                f.write(include_line + "\n\n" + existing)
+            log.info("  prepended @include to CLAUDE.md")
+            self._on_log("  Added tokensave @include to CLAUDE.md", C["green"])
+            return ["Added tokensave rules to CLAUDE.md"]
+        with open(claude_md, "w", encoding="utf-8") as f:
+            f.write(f"# {name} — Claude Instructions\n\n{include_line}\n")
+        log.info("  created CLAUDE.md with @include")
+        self._on_log("  Created CLAUDE.md with tokensave @include", C["green"])
+        return ["Created CLAUDE.md with tokensave rules"]
+
+    def _retrofit_add_basic_instructions(self, path: str) -> list[str]:
+        """Write BASIC_INSTRUCTIONS.md from the template. Returns actions taken."""
+        basic_md = os.path.join(path, "BASIC_INSTRUCTIONS.md")
+        if os.path.isfile(basic_md):
+            log.info("  BASIC_INSTRUCTIONS.md already exists — skipped")
+            self._on_log("  BASIC_INSTRUCTIONS.md already exists — skipped", C["overlay0"])
+            return []
+        template = load_basic_instructions_template(
+            self._cfg.basic_instructions_template, self._cfg.baseline_include_line)
+        with open(basic_md, "w", encoding="utf-8") as f:
+            f.write(template)
+        log.info("  created BASIC_INSTRUCTIONS.md")
+        self._on_log("  Created BASIC_INSTRUCTIONS.md", C["green"])
+        return ["Created BASIC_INSTRUCTIONS.md"]
+
+    def _retrofit_add_shadow_links(self, path: str, ext_map: dict) -> list[str]:
+        """Generate shadow extension links and update .gitignore. Returns actions taken."""
+        self._on_log("  Generating shadow extension links…", C["peach"])
+        created, skipped, failed = generate_shadow_links(path, ext_map)
+        update_gitignore_for_shadows(path, ext_map)
+        msg = f"Shadow links: created {created}"
+        if skipped:
+            msg += f", {skipped} already existed"
+        if failed:
+            msg += f", {failed} failed"
+        self._on_log(f"  {msg}", C["green"])
+        log.info(f"  {msg}")
+        return [msg] if created > 0 else []
