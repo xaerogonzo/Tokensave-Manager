@@ -41,7 +41,10 @@ from helpers.detection import (
     _is_codegraph_project,
     _root_path, _root_label,
 )
-from helpers.config import _load_config, _save_config, _migrate_config
+from helpers.config import _save_config
+# _load_config and _migrate_config also live in helpers.config but are
+# used only via ManagerConfig.load() internally — no monolith caller
+# needs to import them.
 from helpers.shadow_links import (
     generate_shadow_links, update_gitignore_for_shadows,
     DEFAULT_SHADOW_EXT_MAP,
@@ -116,33 +119,36 @@ from helpers.commit_messages import _suggest_commit_message, _pending_diff
 
 
 
-_cfg = _migrate_config(_load_config())
+# Round 4 Phase A finale: `_state` is the new canonical settings holder
+# (`state.ManagerConfig` instance). All future controllers and dialogs
+# receive `_state` (or `App._cfg` which is the same instance) via
+# `__init__(cfg: ManagerConfig)` and read live values through its
+# property getters — `cfg.git_exe`, `cfg.tokensave_exe`, etc.
+#
+# During the Phase A transition window the legacy module globals
+# (TOKENSAVE / GIT_EXE / etc.) and the legacy `_cfg` dict alias are
+# REBOUND at module load AND in App._on_settings_saved to source their
+# values from `_state` — so existing call sites that haven't migrated
+# yet keep working unchanged. Phases B–E migrate each extracted file's
+# call sites to `self._cfg.X` and the legacy globals get deleted in
+# Phase E once nothing reads them.
+from state import ManagerConfig
 
-TOKENSAVE    = _cfg.get("tokensave_exe", "")
-TEMPLATE_DIR = _cfg.get("template_dir", "") or os.path.join(_BASE_DIR, "templates")
-SEARCH_ROOTS = _cfg.get("search_roots", [])
+_state = ManagerConfig.load()
+_cfg   = _state.raw            # legacy dict alias — shared with _state.raw
+
+TOKENSAVE     = _state.tokensave_exe
+TEMPLATE_DIR  = _state.template_dir
+SEARCH_ROOTS  = _state.search_roots
+GIT_EXE: str  = _state.git_exe
+CODEGRAPH_EXE: str = _state.codegraph_exe
+BASIC_INSTRUCTIONS_TEMPLATE = _state.basic_instructions_template
+BASELINE_INCLUDE_LINE       = _state.baseline_include_line
 
 
 # _detect_git, _detect_gh, _detect_npm, _detect_codegraph, _is_codegraph_project
 # moved to helpers/detection.py (Round 4 Phase A)
-
-
-# Resolved at startup; updated whenever Settings are saved.
-# All git subprocess calls use this variable so the user only has to
-# configure the path in one place.
-GIT_EXE: str = _cfg.get("git_exe") or _detect_git()
-
-# Resolved at startup; rebuilt in _on_settings_saved. Empty string when not
-# installed (codegraph is optional, distributed via npm — not bundled).
-CODEGRAPH_EXE: str = _cfg.get("codegraph_exe") or _detect_codegraph()
-
-
-# ── Search-root helpers (support both legacy str and new {"path":…,"label":…} format) ──
-
 # _root_path and _root_label moved to helpers/detection.py (Round 4 Phase A)
-
-BASIC_INSTRUCTIONS_TEMPLATE = os.path.join(TEMPLATE_DIR, "claude-md-template.md")
-BASELINE_INCLUDE_LINE = f"@{TEMPLATE_DIR}\\project-baseline.md"
 
 # DESKTOP_PROJECT_FILE, SKIP_DIRS, MAX_DEPTH, CREATE_NO_WINDOW, AUTO_REFRESH_MS,
 # and _GIT_ENV_NO_PROMPT moved to constants.py (Round 4 Phase A).
@@ -3779,6 +3785,13 @@ class App(tk.Tk):
         self.geometry("760x600")
         self.minsize(600, 520)
         self.configure(bg=C["base"])
+        # Hold the canonical ManagerConfig instance. Future controllers and
+        # dialogs (extracted in Phases B–E) receive this via __init__ and
+        # read live values through cfg.git_exe / cfg.tokensave_exe / etc.
+        # During the Phase A transition window, legacy module globals
+        # (TOKENSAVE, GIT_EXE, …) still exist and get re-bound by
+        # _on_settings_saved alongside _state.refresh_derived().
+        self._cfg = _state
         self._current_proc = None
         self._stop_requested = False
         # Cached tokensave version info.  Current version is populated at
@@ -5307,13 +5320,19 @@ class App(tk.Tk):
     def _on_settings_saved(self):
         global TOKENSAVE, TEMPLATE_DIR, SEARCH_ROOTS, GIT_EXE, CODEGRAPH_EXE
         global BASIC_INSTRUCTIONS_TEMPLATE, BASELINE_INCLUDE_LINE
-        TOKENSAVE     = _cfg.get("tokensave_exe", "")
-        TEMPLATE_DIR  = _cfg.get("template_dir", "")
-        SEARCH_ROOTS  = _cfg.get("search_roots", [])
-        GIT_EXE       = _cfg.get("git_exe") or _detect_git()
-        CODEGRAPH_EXE = _cfg.get("codegraph_exe") or _detect_codegraph()
-        BASIC_INSTRUCTIONS_TEMPLATE = os.path.join(TEMPLATE_DIR, "claude-md-template.md")
-        BASELINE_INCLUDE_LINE = f"@{TEMPLATE_DIR}\\project-baseline.md"
+        # ManagerConfig.raw is the same dict object as _cfg, so SettingsDialog's
+        # mutations are already visible — we just need to recompute the cached
+        # derived fields (git_exe, codegraph_exe) and re-bind the legacy globals
+        # so any caller still reading them gets the new values. Phases B–E
+        # migrate readers to `self._cfg.X` and the global rebind goes away.
+        _state.refresh_derived()
+        TOKENSAVE     = _state.tokensave_exe
+        TEMPLATE_DIR  = _state.template_dir
+        SEARCH_ROOTS  = _state.search_roots
+        GIT_EXE       = _state.git_exe
+        CODEGRAPH_EXE = _state.codegraph_exe
+        BASIC_INSTRUCTIONS_TEMPLATE = _state.basic_instructions_template
+        BASELINE_INCLUDE_LINE       = _state.baseline_include_line
         self.refresh()
         self._log("Settings saved and applied.", C["green"])
 
