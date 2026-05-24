@@ -597,7 +597,7 @@ class ReleaseWizardDialog(tk.Toplevel):
               temp_path: str | None = None):
         """Surface a copy-pasteable recovery message and end the op."""
         self._set_status(message, fg=C["red"])
-        self._app._log(f"  ✗ Release aborted", C["red"])
+        self._app._log("  ✗ Release aborted", C["red"])
         for line in message.splitlines():
             if line.strip():
                 self._app._log(f"    {line}", C["red"])

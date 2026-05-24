@@ -318,8 +318,9 @@ class SettingsDialog(tk.Toplevel):
                             fg=C["red"]))
                         self.after(0, lambda: self._gh_install_btn.configure(state=tk.NORMAL))
                 except Exception as ex:
-                    self.after(0, lambda: self._gh_status_lbl.config(
-                        text=f"✗  Error: {ex}", fg=C["red"]))
+                    err_msg = str(ex)
+                    self.after(0, lambda m=err_msg: self._gh_status_lbl.config(
+                        text=f"✗  Error: {m}", fg=C["red"]))
                     self.after(0, lambda: self._gh_install_btn.configure(state=tk.NORMAL))
             threading.Thread(target=worker, daemon=True).start()
 
@@ -769,7 +770,7 @@ class SettingsDialog(tk.Toplevel):
         default_lbl = os.path.basename(p.rstrip("/\\"))
         lbl = simpledialog.askstring(
             "Category label",
-            f"Label for this category:\n(shown as the group header in the project list)",
+            "Label for this category:\n(shown as the group header in the project list)",
             initialvalue=default_lbl,
             parent=self,
         )

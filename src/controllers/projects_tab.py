@@ -19,14 +19,13 @@ Per Round 4 plan rules:
 from __future__ import annotations
 
 import os
-import re
 import threading
 import time
 import tkinter as tk
-from tkinter import filedialog, messagebox, ttk
+from tkinter import messagebox, ttk
 from typing import TYPE_CHECKING
 
-from constants import C, CREATE_NO_WINDOW, _ANSI
+from constants import C
 from helpers.detection import _root_label
 from helpers.git import (
     _format_git_status_cell,
@@ -36,7 +35,6 @@ from helpers.git import (
 from helpers.project_discovery import (
     fmt_age,
 )
-from helpers.runtime import log
 from controllers.codegraph_ctrl import CodeGraphController
 from controllers.doctor_ctrl import DoctorController
 from controllers.scaffold_ctrl import ScaffoldRetrofitController
@@ -352,7 +350,7 @@ class ProjectsTabController:
                 parent=self._root):
             self._on_commit(path)
         else:
-            self._on_log(f"  Working tree left dirty — commit when you're ready.",
+            self._on_log("  Working tree left dirty — commit when you're ready.",
                          C["yellow"])
 
     # ── UI build ──────────────────────────────────────────────────────────────

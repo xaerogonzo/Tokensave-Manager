@@ -26,7 +26,6 @@ because nothing reads bare globals anymore.
 from __future__ import annotations
 
 import os
-import re
 import subprocess
 import sys
 import threading
@@ -864,7 +863,7 @@ class App(tk.Tk):
                                 "Some of the files you selected are already "
                                 "tracked by git AND match a .gitignore rule. "
                                 "Git refuses to re-add them in this state.\n\n"
-                                f"Affected paths:\n  "
+                                "Affected paths:\n  "
                                 + "\n  ".join(offending[:10])
                                 + ("\n  …" if len(offending) > 10 else "")
                                 + "\n\nFix: right-click → "

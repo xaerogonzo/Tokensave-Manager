@@ -26,7 +26,6 @@ import tkinter as tk
 from constants import C
 from helpers.git import _find_tracked_but_ignored, _is_git_repo, _is_local_git_repo
 from helpers.gitignore import _BASELINE_GITIGNORE
-from helpers.runtime import log
 from dialogs.ai_code_review import AICodeReviewDialog
 from dialogs.gitignore import GitignoreDialog
 from dialogs.untrack_ignored import UntrackIgnoredDialog
@@ -131,7 +130,7 @@ class GitOpsController:
                 self._on_log(f"  Warning: could not write .gitignore: {e}", C["yellow"])
         if messagebox.askyesno(
             "Initial commit",
-            f"git init succeeded.\n\nCreate an initial commit now?\n"
+            "git init succeeded.\n\nCreate an initial commit now?\n"
             "(stages all files with 'git add -A')",
             parent=self._root,
         ):

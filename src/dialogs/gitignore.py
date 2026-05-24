@@ -340,7 +340,7 @@ class GitignoreDialog(tk.Toplevel):
     def _template_tooltip_text(self, cat_name: str) -> str:
         """Tooltip text listing the patterns this category contributes."""
         pats = _GITIGNORE_TEMPLATES.get(cat_name, [])
-        return f"Click to add to .gitignore:\n" + "\n".join(f"  {p}" for p in pats)
+        return "Click to add to .gitignore:\n" + "\n".join(f"  {p}" for p in pats)
 
     # ── Untracked files panel ─────────────────────────────────────────────
 

@@ -823,7 +823,6 @@ class GitTabController:
 
     def _post_merge_pr_sync(self, path: str):
         """After a successful PR merge, switch to master and pull."""
-        name = os.path.basename(path)
         base = "master"
         try:
             r = subprocess.run(
