@@ -761,8 +761,6 @@ class ProjectsTabController:
 
         threading.Thread(target=worker, daemon=True).start()
 
-    # ── File / editor / path commands ─────────────────────────────────────────
-
     # ── File-ops commands — delegate to FileOpsController ────────────────────
 
     def cmd_open_folder(self) -> None:
@@ -827,8 +825,6 @@ class ProjectsTabController:
             self._on_log(f"  Assigned {os.path.basename(path)} → {cat}{sub_str}", C["blue"])
         self._cfg.save()
         self._on_refresh()
-
-    # ── Scaffold / Retrofit ───────────────────────────────────────────────────
 
     # ── Scaffold / Retrofit commands — delegate to ScaffoldRetrofitController ──
 
