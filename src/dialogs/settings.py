@@ -591,33 +591,51 @@ class SettingsDialog(tk.Toplevel):
             base = "http://localhost:1234"
             self._var_llm_base_url.set(base)
             self._var_llm_keyenv.set("")
-            detected = _probe_loaded_model(base)
-            if detected:
-                self._var_llm_model.set(detected)
-                self._llm_preset_hint.configure(text=f"✓  Using loaded model: {detected}", fg=C["green"])
-            else:
-                self._llm_preset_hint.configure(
-                    text="⚠  LM Studio server not reachable at http://localhost:1234 — "
-                         "start the Local Server in LM Studio's '</>' panel and load a model, "
-                         "then click this preset again.", fg=C["peach"])
+            self._llm_preset_hint.configure(text="⏳  Checking LM Studio server…", fg=C["overlay0"])
+
+            def _probe():
+                detected = _probe_loaded_model(base)
+                def _apply():
+                    if not self.winfo_exists():
+                        return
+                    if detected:
+                        self._var_llm_model.set(detected)
+                        self._llm_preset_hint.configure(text=f"✓  Using loaded model: {detected}", fg=C["green"])
+                    else:
+                        self._llm_preset_hint.configure(
+                            text="⚠  LM Studio server not reachable at http://localhost:1234 — "
+                                 "start the Local Server in LM Studio's '</>' panel and load a model, "
+                                 "then click this preset again.", fg=C["peach"])
+                self.after(0, _apply)
+            import threading as _threading
+            _threading.Thread(target=_probe, daemon=True).start()
 
         def _apply_ollama():
             self._var_llm_provider.set("ollama")
             base = "http://localhost:11434"
             self._var_llm_base_url.set(base)
             self._var_llm_keyenv.set("")
-            detected = _probe_loaded_model(base)
-            if detected:
-                self._var_llm_model.set(detected)
-                self._llm_preset_hint.configure(text=f"✓  Using Ollama model: {detected}", fg=C["green"])
-            else:
-                if not self._var_llm_model.get() or "claude" in self._var_llm_model.get():
-                    self._var_llm_model.set("qwen2.5-coder:14b")
-                self._llm_preset_hint.configure(
-                    text="⚠  Ollama not reachable at http://localhost:11434 — "
-                         "make sure the Ollama service is running and run "
-                         "`ollama pull qwen2.5-coder:14b` (or any chat model), "
-                         "then click this preset again.", fg=C["peach"])
+            self._llm_preset_hint.configure(text="⏳  Checking Ollama server…", fg=C["overlay0"])
+
+            def _probe():
+                detected = _probe_loaded_model(base)
+                def _apply():
+                    if not self.winfo_exists():
+                        return
+                    if detected:
+                        self._var_llm_model.set(detected)
+                        self._llm_preset_hint.configure(text=f"✓  Using Ollama model: {detected}", fg=C["green"])
+                    else:
+                        if not self._var_llm_model.get() or "claude" in self._var_llm_model.get():
+                            self._var_llm_model.set("qwen2.5-coder:14b")
+                        self._llm_preset_hint.configure(
+                            text="⚠  Ollama not reachable at http://localhost:11434 — "
+                                 "make sure the Ollama service is running and run "
+                                 "`ollama pull qwen2.5-coder:14b` (or any chat model), "
+                                 "then click this preset again.", fg=C["peach"])
+                self.after(0, _apply)
+            import threading as _threading
+            _threading.Thread(target=_probe, daemon=True).start()
 
         def _apply_anthropic():
             self._var_llm_provider.set("anthropic")
@@ -844,6 +862,6 @@ class SettingsDialog(tk.Toplevel):
         raw["commit_message_llm"] = existing_llm
         raw["git_exe"]       = self._git_exe_var.get().strip()
         raw["codegraph_exe"] = self._cg_exe_var.get().strip()
-        self._save_fn(raw)
+        self._save_fn()
         self.destroy()
         self._callback()
