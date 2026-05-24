@@ -69,6 +69,12 @@ When implementing, please consider language-specific calibration for `coverage_d
 
 Six chained tool calls. See `src/prompts.py` in the TokenSave Manager project (the `📊 Full health audit` snippet) for the exact prompt that drives an LLM through the composition.
 
+## Environment
+
+- tokensave 5.1.2
+- Windows (NTFS, paths permitted to contain spaces)
+- Claude Code (the version Claude Desktop bundles —
+
 ## Author note
 
 Filed by a TokenSave Manager user. Project: https://github.com/(your-fork-or-source)
