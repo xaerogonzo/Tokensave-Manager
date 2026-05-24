@@ -27,7 +27,7 @@ import subprocess
 from dataclasses import dataclass
 from typing import Callable
 
-CREATE_NO_WINDOW = 0x08000000   # mirrors tokensave-manager.py
+CREATE_NO_WINDOW = 0x08000000   # mirrors constants.CREATE_NO_WINDOW
 
 # Per-tool output caps. Individual caps + the cumulative context budget in
 # LocalAgent together prevent context-window saturation.
@@ -174,7 +174,8 @@ def _make_read_file(project_path: str):
 
         # Line-range mode: when start_line / end_line are provided, read
         # only that window. Critical for files larger than 50 KB
-        # (tokensave-manager.py at ~370 KB is the obvious example) —
+        # (controllers/projects_tab.py and dialogs/settings.py are the
+        # largest post-Round-4 files, ~70–80 KB each) —
         # without this, the model can't ever see anything past the
         # first 50 KB of byte-truncated output. tokensave_search hands
         # back precise line numbers for symbols; the model is expected
@@ -505,8 +506,9 @@ def _tool_read_file(project_path: str) -> ToolSpec:
             "TOOL FOR ANSWERING 'why does X behave like Y' or 'how "
             "does X work' questions — when the user names a file, "
             "read it directly instead of searching.\n\n"
-            "FOR LARGE FILES (e.g. src/tokensave-manager.py which is "
-            "over 50 KB): pass `start_line` and `end_line` to read a "
+            "FOR LARGE FILES (e.g. src/controllers/projects_tab.py or "
+            "src/dialogs/settings.py which are over 50 KB): pass "
+            "`start_line` and `end_line` to read a "
             "specific section. tokensave_search returns the exact "
             "line number where each symbol is DEFINED — pass that "
             "as `start_line` and set `end_line` 150-200 lines later "

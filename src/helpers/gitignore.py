@@ -5,7 +5,7 @@ string; the two templates (_BASELINE_GITIGNORE and _GITIGNORE_TEMPLATES)
 live here so there's a single source of truth between cmd_git_init's
 auto-write and the GitignoreDialog category buttons.
 
-No module globals from tokensave-manager.py are read.
+No module globals from app.py are read — pure functions.
 """
 
 from __future__ import annotations

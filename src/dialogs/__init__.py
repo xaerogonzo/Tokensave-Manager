@@ -9,6 +9,7 @@ parameter; pure UI widgets that just gather user input via callbacks
 
 The split follows the boundaries that survived three rounds of intra-file
 refactoring before Phase B carved them out — each class was already a
-self-contained widget in `src/tokensave-manager.py`; this just moves the
-class verbatim into its own file.
+self-contained widget in the legacy `src/tokensave-manager.py` monolith;
+this just moves the class verbatim into its own file. (Monolith was
+deleted in Phase E — `src/app.py` is the current entry point.)
 """

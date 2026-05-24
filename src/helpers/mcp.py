@@ -95,7 +95,7 @@ def _wrapper_path() -> str:
     """Where tokensave-wrapper lives for this installation.
 
     In a Nuitka onefile build the wrapper is a sibling .exe; in source mode
-    it's the .py next to tokensave-manager.py. Matches the same lookup the
+    it's the .py next to app.py (under src/). Matches the same lookup the
     Reference tab already does.
     """
     if os.environ.get("NUITKA_ONEFILE_PARENT"):

@@ -24,11 +24,71 @@ Token Save Manager Source/
 ├── build.ps1                      Nuitka compile pipeline — produces dist\ exes
 ├── build.bat                      Launcher for build.ps1 (bypasses execution policy)
 │
-├── src/
-│   ├── tokensave-manager.py       Main GUI application (~12,500 lines as of [Unreleased])
+├── src/                           Post-Round-4 layout: App + main() in app.py, every
+│   │                              other concern in a subpackage (no monolith).
+│   ├── app.py                     Entry point — App(tk.Tk) + main(). Constructs the
+│   │                              single ManagerConfig instance and passes it down to
+│   │                              every controller/dialog. ~1,800 lines including
+│   │                              PROMPT_SNIPPETS + Help-tab section bodies.
+│   ├── state.py                   ManagerConfig dataclass (runtime-mutable settings;
+│   │                              read-only @property getters; mutated via
+│   │                              raw.update() + save() + refresh_derived()).
+│   ├── constants.py               Immutable constants: C palette, regex tables,
+│   │                              CREATE_NO_WINDOW, _ANSI, _GIT_ENV_NO_PROMPT,
+│   │                              paths (_BASE_DIR, _CONFIG_PATH, LOG_FILE).
+│   ├── theme.py                   _Tooltip widget (Tk-coupled UI primitive).
 │   ├── tokensave-wrapper.py       Claude Desktop auto-detection wrapper (~120 lines)
 │   ├── agent.py                   LocalAgent loop for the 🤖 Ask tab (Stage 2)
-│   └── agent_tools.py             ToolSpec registry (6 read-only tools) (Stage 2)
+│   ├── agent_tools.py             ToolSpec registry (6 read-only tools) (Stage 2)
+│   │
+│   ├── helpers/                   12 modules of pure / IO helpers — no UI deps.
+│   │   ├── config.py              _load_config, _save_config, _migrate_config
+│   │   ├── detection.py           _detect_git/_gh/_npm/_codegraph, _root_path/_label, _version_lt
+│   │   ├── runtime.py             log, _setup_logger, _acquire_instance_lock, _make_tray_icon
+│   │   ├── project_discovery.py   find_projects(roots), get/set/clear_pinned, fmt_age
+│   │   ├── git.py                 _is_git_repo, _parse_git_status_v2, _format_git_status_cell,
+│   │   │                          _find_tracked_but_ignored, _fetch_tags, _git_tag, _git_push_with_tags
+│   │   ├── gitignore.py           _ensure_gitignore, _read/_write_gitignore_lines,
+│   │   │                          _BASELINE_GITIGNORE, _GITIGNORE_TEMPLATES
+│   │   ├── shadow_links.py        generate/remove_shadow_links, update_gitignore_for_shadows,
+│   │   │                          DEFAULT_SHADOW_EXT_MAP
+│   │   ├── scaffold.py            _scaffold_git_hook + _AUTO_COMMIT_HELPER script body
+│   │   ├── mcp.py                 _classify_mcp_entry, _apply_mcp_fix, _resolve_desktop_cfg_path,
+│   │   │                          _wrapper_path, _canonical_mcp_entry, _is_claude_running,
+│   │   │                          _MCP_CONFIGS, _MCP_CMD_CHECKERS
+│   │   ├── llm.py                 _call_llm, _call_anthropic, _call_openai_compat,
+│   │   │                          _iter_sse_events, _iter_json_lines, _is_auth_error
+│   │   ├── commit_messages.py     _suggest_commit_message + 4 _strat_* strategies + sanitiser
+│   │   │                          cluster + _pending_diff + _call_llm_for_commit_message
+│   │   └── release.py             _last_release_tag, _commits_since, _classify_commits_for_changelog,
+│   │                              _bump_version, _suggest_bump_kind, _render_release_notes,
+│   │                              _patch_changelog, _zip_dist, _release_basename, _fmt_size
+│   │
+│   ├── dialogs/                   18 tk.Toplevel dialog classes — one per file.
+│   │   ├── settings.py            SettingsDialog (+ _probe_loaded_model helper)
+│   │   ├── release_wizard.py      ReleaseWizardDialog + _ReleaseCtx (paired)
+│   │   ├── mcp_config.py          MCPConfigDialog
+│   │   ├── ai_code_review.py      AICodeReviewDialog
+│   │   ├── git_commit.py          GitCommitDialog
+│   │   ├── ollama_model_mgr.py    OllamaModelManagerDialog
+│   │   ├── gitignore.py           GitignoreDialog
+│   │   ├── github_setup.py        GitHubSetupDialog
+│   │   ├── retrofit.py            RetrofitDialog
+│   │   ├── scaffold.py            ScaffoldDialog
+│   │   ├── snippet_edit.py        SnippetEditDialog
+│   │   ├── shadow_links.py        ShadowLinksDialog
+│   │   ├── set_remote.py          SetRemoteDialog
+│   │   ├── merge_pr.py            MergePRDialog
+│   │   ├── new_branch.py          NewBranchDialog
+│   │   ├── switch_branch.py       SwitchBranchDialog (+ static pick() helper)
+│   │   ├── assign_category.py     AssignCategoryDialog
+│   │   └── untrack_ignored.py     UntrackIgnoredDialog
+│   │
+│   └── controllers/               4 tab controllers — each owns one notebook tab.
+│       ├── projects_tab.py        ProjectsTabController (~1,540 lines)
+│       ├── git_tab.py             GitTabController (~1,200 lines)
+│       ├── ask_tab.py             AskTabController (~360 lines)
+│       └── snippets.py            SnippetsController (~260 lines)
 │
 ├── templates/                     Data files used by the manager + shipped in dist\
 │   ├── claude-md-template.md      BASIC_INSTRUCTIONS.md template for other projects
@@ -65,7 +125,101 @@ Token Save Manager Source/
 
 ---
 
-## `src/tokensave-manager.py` — Main Application
+## Application architecture (post-Round 4)
+
+### Module-load graph
+
+```
+app.py
+  ├── state.py           — ManagerConfig (loaded once in App.__init__)
+  ├── constants.py       — palette, regex, paths
+  ├── theme.py           — _Tooltip
+  ├── helpers/*          — pure / IO helpers (no UI)
+  ├── dialogs/*          — 18 tk.Toplevel classes
+  └── controllers/*      — 4 tab controllers
+        └── controllers/* each import the dialogs they instantiate
+            (lazy in-handler imports for any cross-dialog cycle risk —
+             see Rule 6 in CHANGELOG Round 4 Phase C decisions).
+```
+
+`state.py` sits at the bottom of the import graph. It uses lazy imports inside
+`refresh_derived()` for `helpers.detection._detect_git` etc. so importing
+`ManagerConfig` from a controller or dialog under `TYPE_CHECKING` is safe and
+free of circular-import risk.
+
+### The ManagerConfig contract
+
+`App.__init__` constructs `self._cfg = ManagerConfig.load()` exactly once. Every
+controller and dialog that needs settings access takes `cfg: ManagerConfig` via
+`__init__` and stores it as `self._cfg`. Reads happen at execution time
+(`self._cfg.git_exe`, `self._cfg.raw.get("editor_cmd")`) — **never** snapshot in
+`__init__` (this is "Rule 3" in the CHANGELOG's Round 4 plan).
+
+The seven derived fields are read-only `@property` getters that raise
+`AttributeError` on direct assignment. The single supported mutation path is:
+
+```python
+self._cfg.raw.update(new_values_from_settings_dialog)
+self._cfg.save()              # persist to manager-config.json
+self._cfg.refresh_derived()   # recompute cached git_exe / codegraph_exe
+```
+
+That sequence is performed by `App._on_settings_saved`. Every other holder of
+`self._cfg` automatically sees the new values because they're reading through
+the same instance.
+
+### Entry point
+
+```python
+# src/app.py — bottom of file
+def main() -> None:
+    if not _acquire_instance_lock():
+        _bring_existing_to_front()
+        sys.exit(0)
+    app = App()
+    app.mainloop()
+
+if __name__ == "__main__":
+    main()
+```
+
+`Launch TokenSave Manager.bat` invokes `python src/app.py`. `build.ps1` passes
+`src/app.py` as the Nuitka entry point; the compiled binary is still named
+`tokensave-manager.exe` for backward-compat with the bundled-wrapper detection
+in `helpers/mcp.py`.
+
+### Legacy section (pre-Round 4 monolith)
+
+The sections that follow were written when the GUI lived in a single
+`src/tokensave-manager.py` file with module-level globals (`TOKENSAVE`,
+`GIT_EXE`, `CODEGRAPH_EXE`, `BASIC_INSTRUCTIONS_TEMPLATE`,
+`BASELINE_INCLUDE_LINE`, `_cfg`). Those globals are **gone**. The semantics
+described below are still correct — substitute the global names mentally as
+you read:
+
+| Legacy reference (in this doc) | Post-Round-4 equivalent |
+|---|---|
+| `GIT_EXE` | `self._cfg.git_exe` |
+| `TOKENSAVE` | `self._cfg.tokensave_exe` |
+| `TEMPLATE_DIR` | `self._cfg.template_dir` |
+| `CODEGRAPH_EXE` | `self._cfg.codegraph_exe` |
+| `SEARCH_ROOTS` | `self._cfg.search_roots` |
+| `BASIC_INSTRUCTIONS_TEMPLATE` | `self._cfg.basic_instructions_template` |
+| `BASELINE_INCLUDE_LINE` | `self._cfg.baseline_include_line` |
+| `_cfg[k]` / `_cfg.get(k)` | `self._cfg.raw[k]` / `self._cfg.raw.get(k)` |
+| `_save_config(_cfg)` | `self._cfg.save()` |
+| `global GIT_EXE; GIT_EXE = …` in `_on_settings_saved` | `self._cfg.refresh_derived()` (single call) |
+| Module-level helpers (e.g. `_is_git_repo`) | Same name, now in `helpers/<module>.py` (e.g. `helpers/git.py`) |
+| Dialog / controller classes | Same names, now one per file under `dialogs/` or `controllers/` |
+
+Round 4 was a structural-only refactor — no behaviour changes. Every rule
+about thread boundaries, `self.after(0, ...)`, `_git_begin_op` /
+`_git_end_op`, `_offer_commit_after_change`, etc. is unchanged; only the
+file location changed.
+
+---
+
+## `src/app.py` — Main Application (legacy text)
 
 Single-file tkinter application (~12,500 lines as of [Unreleased]). Entry point is `if __name__ == "__main__": App().mainloop()`. Size has grown substantially this cycle from the addition of Stages 1–2 AI features, the MCP configurator, the Ollama Model Manager, and various dialog classes — see the "Dialog classes added [Unreleased]" subsection below for the new ones.
 
@@ -295,7 +449,7 @@ The 🤖 Ask tab is built as methods on the `App` class (`_build_ask_tab`, `_ask
 ### Configuration (`manager-config.json`)
 
 All machine-specific values live in `manager-config.json` at the project root.
-Loaded at startup by both `tokensave-manager.py` and `tokensave-wrapper.py` via `_load_config()`.
+Loaded at startup by both `app.py` (via `ManagerConfig.load()` → `helpers/config.py::_load_config()`) and `tokensave-wrapper.py` (directly via `_load_config()`).
 Read with `encoding="utf-8-sig"` to silently strip any UTF-8 BOM that PowerShell may have written.
 Editable through the Settings dialog without touching JSON directly.
 

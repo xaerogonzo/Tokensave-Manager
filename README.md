@@ -218,7 +218,7 @@ copy manager-config.example.json manager-config.json
 
 Or run directly:
 ```powershell
-pythonw src/tokensave-manager.py
+pythonw src/app.py
 ```
 
 ---
@@ -376,12 +376,12 @@ Stage 2 of the agentic-AI roadmap (see `docs/AGENT_ARCHITECTURE.md` and `docs/RO
 │                                                                   │
 │  👤  Where is the commit-message generator?                       │
 │  🔧  tokensave_search({"query": "commit message generator"})      │
-│      _suggest_commit_message (function) - src/...:2136            │
-│  🔧  read_file({"path": "src/tokensave-manager.py",               │
-│                  "start_line": 2136, "end_line": 2300})           │
+│      _suggest_commit_message (function) - helpers/commit...       │
+│  🔧  read_file({"path": "src/helpers/commit_messages.py",         │
+│                  "start_line": 1, "end_line": 200})               │
 │      <body of _suggest_commit_message with line numbers>          │
 │  🤖  The commit-message generator lives in                        │
-│      _suggest_commit_message at src/tokensave-manager.py:2136.    │
+│      _suggest_commit_message at src/helpers/commit_messages.py.   │
 │      It runs a strategy chain: LLM → CHANGELOG bullets → diff…    │
 ├───────────────────────────────────────────────────────────────────┤
 │ [type your question here…                          ] [Send] [Stop]│
@@ -594,18 +594,25 @@ Token Save Manager Source/
 ├── CHANGELOG.md                   Feature history
 ├── TOKENSAVE_GUIDE.md             Full tokensave CLI + MCP reference
 │
-├── src/
-│   ├── tokensave-manager.py       Main GUI (~12,500 lines as of [Unreleased])
+├── src/                           Post-Round-4 layout: App + main() in app.py,
+│   │                              everything else in subpackages.
+│   ├── app.py                     Entry point — App(tk.Tk) + main()
+│   ├── state.py                   ManagerConfig dataclass (runtime-mutable settings)
+│   ├── constants.py               Immutable constants (palette, regex, paths)
+│   ├── theme.py                   _Tooltip widget
 │   ├── tokensave-wrapper.py       Claude Desktop MCP wrapper (~120 lines —
 │   │                              MUST stay single-threaded and pass
 │   │                              sys.stdin/stdout/stderr explicitly to
 │   │                              Popen; see MCP_INTEGRATION_GOTCHAS.md)
 │   ├── agent.py                   LocalAgent loop for the 🤖 Ask tab
 │   │                              (~600 lines, Stage 2)
-│   └── agent_tools.py             ToolSpec registry: read_file,
-│                                  list_directory, git_log, git_diff,
-│                                  tokensave_search, tokensave_context
-│                                  (~500 lines, Stage 2)
+│   ├── agent_tools.py             ToolSpec registry: read_file,
+│   │                              list_directory, git_log, git_diff,
+│   │                              tokensave_search, tokensave_context
+│   │                              (~500 lines, Stage 2)
+│   ├── helpers/                   12 modules of pure / IO helpers (no UI)
+│   ├── dialogs/                   18 tk.Toplevel dialog classes (one per file)
+│   └── controllers/               4 tab controllers (Projects/Git/Ask/Snippets)
 │
 ├── templates/
 │   ├── claude-md-template.md      BASIC_INSTRUCTIONS template for new projects

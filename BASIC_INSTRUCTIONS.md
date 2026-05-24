@@ -8,7 +8,7 @@
 
 **Name:** TokenSave Manager  
 **Stack:** Python 3, tkinter/ttk (GUI), subprocess (tokensave CLI), threading, pystray (tray icon), Pillow  
-**Entry point:** `Launch TokenSave Manager.bat` → reads `python_exe` from `manager-config.json` → `src/tokensave-manager.py`  
+**Entry point:** `Launch TokenSave Manager.bat` → reads `python_exe` from `manager-config.json` → `src/app.py`  
 **Purpose:** Windows GUI for managing tokensave MCP project integrations — switching active projects for Claude Desktop, syncing indexes, scaffolding new projects with Claude instruction templates and/or Nuitka build pipelines, and managing search roots via a Settings dialog.
 
 **Current source location:** `D:\Claude Co worker\Token Save Manager Source\`  
@@ -22,7 +22,7 @@
 Token Save Manager Source/
 ├── manager-config.json            Machine-specific config (all hardcoded paths live here)  — gitignored
 ├── manager-config.example.json    Clean template with placeholder paths — committed for new users
-├── Launch TokenSave Manager.bat   Reads python_exe from config, launches src/tokensave-manager.py
+├── Launch TokenSave Manager.bat   Reads python_exe from config, launches src/app.py
 ├── build.ps1                      Nuitka compile pipeline — produces dist\ exes
 ├── build.bat                      Double-click launcher for build.ps1
 ├── BASIC_INSTRUCTIONS.md          This file
@@ -30,14 +30,83 @@ Token Save Manager Source/
 ├── TOKENSAVE_GUIDE.md             Full tokensave CLI + MCP reference
 ├── .gitignore                     Excludes manager-config.json, .claude/, .tokensave/, dist/, etc.
 │
-├── src/
-│   ├── tokensave-manager.py       Main GUI (~12,500 lines) — App class + many dialog classes
+├── src/                           Post-Round-4 layout: App + main() in app.py,
+│   │                              everything else in subpackages (no monolith).
+│   ├── app.py                     Entry point — App(tk.Tk) class + main(). Owns the
+│   │                              single ManagerConfig instance and passes it down
+│   │                              to every controller/dialog.
+│   ├── state.py                   ManagerConfig dataclass (runtime-mutable settings;
+│   │                              read-only @property getters; mutated via
+│   │                              raw.update() + save() + refresh_derived()).
+│   ├── constants.py               Immutable constants: C palette, regex tables,
+│   │                              CREATE_NO_WINDOW, _ANSI, _GIT_ENV_NO_PROMPT,
+│   │                              paths (_BASE_DIR, _CONFIG_PATH, LOG_FILE).
+│   ├── theme.py                   _Tooltip widget (Tk-coupled UI primitive).
 │   ├── tokensave-wrapper.py       Claude Desktop auto-detection wrapper (MUST stay single-threaded
 │   │                              AND pass sys.stdin/stdout/stderr to Popen explicitly — see
-│   │                              docs/MCP_INTEGRATION_GOTCHAS.md before touching)
-│   ├── agent.py                   LocalAgent loop for the 🤖 Ask tab (Stage 2 — read-only tool calling)
-│   └── agent_tools.py             ToolSpec registry: 6 read-only tools (read_file, list_directory,
-│                                  git_log, git_diff, tokensave_search, tokensave_context)
+│   │                              docs/MCP_INTEGRATION_GOTCHAS.md before touching).
+│   ├── agent.py                   LocalAgent loop for the 🤖 Ask tab (Stage 2 — read-only tool calling).
+│   ├── agent_tools.py             ToolSpec registry: 6 read-only tools (read_file, list_directory,
+│   │                              git_log, git_diff, tokensave_search, tokensave_context).
+│   │
+│   ├── helpers/                   Pure / IO helpers — no UI dependencies. Each module
+│   │   │                          takes only the parameters it needs (Rule 1).
+│   │   ├── config.py              _load_config, _save_config, _migrate_config
+│   │   ├── detection.py           _detect_git, _detect_gh, _detect_npm, _detect_codegraph,
+│   │   │                          _is_codegraph_project, _root_path, _root_label, _version_lt
+│   │   ├── runtime.py             log, _setup_logger, _acquire_instance_lock,
+│   │   │                          _bring_existing_to_front, _make_tray_icon
+│   │   ├── project_discovery.py   find_projects(roots), get_pinned, set_pinned,
+│   │   │                          clear_pinned, fmt_age, load_basic_instructions_template
+│   │   ├── git.py                 _is_git_repo, _is_local_git_repo, _parse_git_status_v2,
+│   │   │                          _format_git_status_cell, _find_tracked_but_ignored,
+│   │   │                          _fetch_tags, _git_tag, _git_push_with_tags
+│   │   ├── gitignore.py           _ensure_gitignore, _baseline_patterns, _read_gitignore_lines,
+│   │   │                          _write_gitignore_lines, _BASELINE_GITIGNORE, _GITIGNORE_TEMPLATES
+│   │   ├── shadow_links.py        generate_shadow_links, remove_shadow_links,
+│   │   │                          update_gitignore_for_shadows, DEFAULT_SHADOW_EXT_MAP
+│   │   ├── scaffold.py            _scaffold_git_hook + _AUTO_COMMIT_HELPER script body
+│   │   ├── mcp.py                 _resolve_desktop_cfg_path, _wrapper_path, _canonical_mcp_entry,
+│   │   │                          _classify_mcp_entry, _apply_mcp_fix, _is_claude_running,
+│   │   │                          _MCP_CONFIGS, _MCP_CMD_CHECKERS
+│   │   ├── llm.py                 _call_llm, _call_anthropic, _call_openai_compat,
+│   │   │                          _iter_sse_events, _iter_json_lines, _is_auth_error
+│   │   ├── commit_messages.py     _suggest_commit_message (orchestrator) + 4 _strat_*
+│   │   │                          strategy fns + sanitiser cluster (_sanitize_commit_message,
+│   │   │                          _strip_md, _escalate_commit_type, _normalize_commit_body) +
+│   │   │                          _pending_diff, _call_llm_for_commit_message
+│   │   └── release.py             _last_release_tag, _commits_since, _classify_commits_for_changelog,
+│   │                              _bump_version, _suggest_bump_kind, _render_release_notes,
+│   │                              _patch_changelog, _zip_dist, _release_basename, _fmt_size
+│   │
+│   ├── dialogs/                   18 tk.Toplevel dialog classes. Each takes
+│   │   │                          cfg: ManagerConfig via __init__ when it needs to read
+│   │   │                          settings; bare-data dialogs (NewBranch, SwitchBranch,
+│   │   │                          AssignCategory, etc.) skip it.
+│   │   ├── settings.py            SettingsDialog (+_probe_loaded_model helper)
+│   │   ├── release_wizard.py      ReleaseWizardDialog + _ReleaseCtx (paired)
+│   │   ├── mcp_config.py          MCPConfigDialog — mutates cfg.raw["mcp_skip_warnings"]
+│   │   ├── ai_code_review.py      AICodeReviewDialog — takes both llm_cfg dict + cfg
+│   │   ├── git_commit.py          GitCommitDialog
+│   │   ├── ollama_model_mgr.py    OllamaModelManagerDialog
+│   │   ├── gitignore.py           GitignoreDialog (lazy-imports UntrackIgnoredDialog)
+│   │   ├── github_setup.py        GitHubSetupDialog
+│   │   ├── retrofit.py            RetrofitDialog
+│   │   ├── scaffold.py            ScaffoldDialog
+│   │   ├── snippet_edit.py        SnippetEditDialog
+│   │   ├── shadow_links.py        ShadowLinksDialog
+│   │   ├── set_remote.py          SetRemoteDialog
+│   │   ├── merge_pr.py            MergePRDialog
+│   │   ├── new_branch.py          NewBranchDialog
+│   │   ├── switch_branch.py       SwitchBranchDialog (+ static pick() helper)
+│   │   ├── assign_category.py     AssignCategoryDialog
+│   │   └── untrack_ignored.py     UntrackIgnoredDialog
+│   │
+│   └── controllers/               4 tab controllers — each owns one notebook tab.
+│       ├── projects_tab.py        ProjectsTabController — Projects tree + per-project commands
+│       ├── git_tab.py             GitTabController — Git tab + 11 git action buttons
+│       ├── ask_tab.py             AskTabController — 🤖 Ask tab + agent thread plumbing
+│       └── snippets.py            SnippetsController — 📚 Reference tab
 │
 ├── templates/                     Data files used by the manager (all shipped in dist\templates\)
 │   ├── claude-md-template.md      BASIC_INSTRUCTIONS template written into scaffolded projects
@@ -114,7 +183,14 @@ Must be updated when the project moves to a new location or machine.
 
 | File | Role |
 |------|------|
-| `src/tokensave-manager.py` | Entire GUI — `App(tk.Tk)` + `RetrofitDialog`, `ScaffoldDialog`, `SettingsDialog`, `SnippetEditDialog`, `ShadowLinksDialog`, `AssignCategoryDialog`, `SetRemoteDialog`, `NewBranchDialog`, `SwitchBranchDialog`, `GitCommitDialog`, `GitHubSetupDialog` |
+| `src/app.py` | Entry point — `App(tk.Tk)` + `main()`. Constructs the single `ManagerConfig` instance and the 4 controllers; everything else is imported from `src/controllers/`, `src/dialogs/`, `src/helpers/`. |
+| `src/state.py` | `ManagerConfig` dataclass — runtime-mutable settings with read-only `@property` getters. Only writable surface is `cfg.raw` (the underlying dict). Mutation path: `cfg.raw.update(...) + cfg.save() + cfg.refresh_derived()`. |
+| `src/controllers/projects_tab.py` | `ProjectsTabController` — Projects tab + per-project commands (sync, status, doctor, scaffold, retrofit, codegraph, shadow links, etc.). |
+| `src/controllers/git_tab.py` | `GitTabController` — Git tab + 11 action buttons (push/pull/commit/branch ops/merge/release/etc.). |
+| `src/controllers/ask_tab.py` | `AskTabController` — 🤖 Ask tab; lazy-imports `agent` / `agent_tools` on first Send. |
+| `src/controllers/snippets.py` | `SnippetsController` — 📚 Reference tab; manages user-defined snippet edits. |
+| `src/dialogs/` | 18 `tk.Toplevel` dialog classes, one per file. See the Project Structure tree above for the full list. |
+| `src/helpers/` | 12 modules of pure / IO helpers (git, llm, mcp, commit_messages, release, etc.). No UI dependencies — safe to import from anywhere. |
 | `src/tokensave-wrapper.py` | MCP server wrapper for Claude Desktop — reads same `manager-config.json` |
 | `manager-config.json` | Single source of truth for all machine-specific paths |
 | `templates/project-baseline.md` | @included by every retrofitted project's CLAUDE.md — edit here to update all |
@@ -165,7 +241,9 @@ See `templates/NUITKA_GOTCHAS.md` for known pitfalls (BOM in config, cp1252 subp
 
 ## Project-Specific Rules
 
-- **`manager-config.json` is the only file with absolute paths.** All other path logic derives from `__file__` or reads from config. Never hardcode paths back into `tokensave-manager.py` or `tokensave-wrapper.py`.
+> **Post-Round-4 reading note.** Rules below were written when the GUI lived in a 13 k-line monolith with module-level globals (`TOKENSAVE`, `GIT_EXE`, `CODEGRAPH_EXE`, `BASIC_INSTRUCTIONS_TEMPLATE`, `BASELINE_INCLUDE_LINE`, `_cfg`). Those globals are **gone** — every controller and dialog now reads through `self._cfg.tokensave_exe` / `self._cfg.git_exe` / `self._cfg.raw.get(...)` etc., where `self._cfg` is the single `ManagerConfig` instance constructed in `App.__init__`. The **semantics** of every rule below are still correct — substitute the global names mentally as you read. Where a rule references `_save_config(_cfg)`, the modern equivalent is `self._cfg.save()`; where it references `global GIT_EXE; GIT_EXE = ...` rebinds in `_on_settings_saved`, those are no longer needed because `cfg.refresh_derived()` propagates new values to every holder automatically (Rule 3 of the Round 4 plan: never cache derived cfg values in `__init__`). The dialog/controller boundary rules (when to call `self.after(0, ...)`, when to use `_git_begin_op`, the `_offer_commit_after_change` contract, etc.) are unchanged and live in their respective subpackage files now.
+
+- **`manager-config.json` is the only file with absolute paths.** All other path logic derives from `__file__` or reads from config. Never hardcode paths back into `src/app.py`, `src/state.py`, or `src/tokensave-wrapper.py`.
 - **`template_dir` is the source of truth** for template paths. `BASIC_INSTRUCTIONS_TEMPLATE` and `BASELINE_INCLUDE_LINE` are derived from it automatically.
 - **`project-baseline.md` is shared across all retrofitted projects.** Changes propagate immediately to every project that has been retrofitted — edit carefully.
 - **All tkinter widget updates must go through `self.after(0, ...)`** when called from a background thread. Direct widget calls from threads will crash.

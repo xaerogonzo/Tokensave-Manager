@@ -15,9 +15,9 @@ architectural rules in `docs/AGENT_ARCHITECTURE.md`:
   - Cumulative tool-output context budget prevents 8 iterations × 50 KB from
     blowing past local-model context windows
 
-This module does its OWN HTTP (not via tokensave-manager.py's _call_llm)
-because tool calling requires inspecting the raw response for tool_calls,
-which _call_llm doesn't expose. The provider dispatch mirrors _call_llm's
+This module does its OWN HTTP (not via helpers/llm.py's _call_llm) because
+tool calling requires inspecting the raw response for tool_calls, which
+_call_llm doesn't expose. The provider dispatch mirrors _call_llm's
 openai_compatible branch.
 
 Anthropic provider is not currently supported for tool calling in this v1 —
