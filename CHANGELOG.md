@@ -4,6 +4,16 @@
 ## [Unreleased]
 
 ### Added
+- **Roadmap-2 Phase 4 — `BranchManagementController` extracted from `GitTabController`.** Same callback-injection pattern as the Round-5 sub-controllers under `src/controllers/<feature>_ctrl.py` (no parent reference; all state reached through injected callables). 13 methods moved into the new `src/controllers/branch_mgmt_ctrl.py`:
+  - **New branch**: `cmd_git_new_branch`, `_do_git_new_branch`
+  - **Switch branch**: `cmd_git_switch_branch`, `_do_git_switch_branch`
+  - **Merge branch**: `cmd_git_merge` (was complexity 14 inline; now an orchestrator delegating to `_prepare_merge_sources` + `_confirm_merge` + `_merge_worker` + `_explain_merge_failure` — each under the complexity cap)
+  - **Delete branch flow**: `cmd_git_delete_branch`, `_confirm_branch_delete`, `_do_delete_branch`, plus the 5-step delete pipeline (`_del_branch_worker` → `_del_branch_ask_force` → `_del_branch_force_worker` → `_del_branch_offer_remote` → `_del_branch_remote_worker`)
+  - **Out of scope**: `cmd_git_merge_pr` (GitHub PR merge — different domain, stays in `git_tab.py`)
+- Controller wiring: `BranchManagementController` is constructed in `GitTabController.__init__` and the 4 branch buttons in the Git tab toolbar (`🌿 New Branch`, `🔀 Switch Branch…`, `⇄ Merge…`, `🗑 Delete Branch…`) now delegate via `self._branch_mgmt.cmd_*`. Callbacks injected: `get_git_path`, `on_shell`, `log_queue` (shared with parent so log-line ordering is preserved), `on_begin_op` / `on_end_op` (the git-op lock pattern), `is_op_in_flight`.
+- Result: `GitTabController` drops from 50 → **37 direct methods** (under the 40-method cap), the in-progress merge clean-up reduces the cluster's max complexity from 14 to ≤9. `BranchManagementController` ships with 19 methods and zero Doctor violations.
+- Also: `dialogs/new_branch.NewBranchDialog` and `dialogs/switch_branch.SwitchBranchDialog` imports moved out of `git_tab.py` (now only referenced from the sub-controller). Pyflakes baseline stays at zero.
+
 - **Document Ollama + LM Studio simultaneous-loading gotcha.** Both inference engines reserve RAM/VRAM independently and don't share state. Running them at the same time can cause Ollama to refuse loading a model with `HTTP 500: "model requires more system memory (X GiB) than is available (Y GiB)"` — the error message points at total system memory without hinting that another inference daemon is holding the difference. Documented in two places:
   - **Persistent ⓘ note in Settings → AI commit messages** (below the Quick presets row) — point-of-use guidance with the concrete workarounds (LM Studio Eject; `ollama stop <model>`).
   - **New "Provider gotchas" subsection in `docs/AGENT_ARCHITECTURE.md`** — also covers `num_ctx` defaults and LM Studio's separate "Start Server" requirement.
