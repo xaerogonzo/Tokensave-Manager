@@ -27,15 +27,12 @@ from tkinter import filedialog, messagebox, ttk
 from typing import TYPE_CHECKING
 
 from constants import C, CREATE_NO_WINDOW, _ANSI
-from helpers.detection import _is_codegraph_project, _root_label
+from helpers.detection import _root_label
 from helpers.git import (
-    _find_tracked_but_ignored,
     _format_git_status_cell,
-    _is_git_repo,
     _is_local_git_repo,
     _parse_git_status_v2,
 )
-from helpers.gitignore import _BASELINE_GITIGNORE
 from helpers.project_discovery import (
     fmt_age,
 )
@@ -45,11 +42,9 @@ from controllers.doctor_ctrl import DoctorController
 from controllers.scaffold_ctrl import ScaffoldRetrofitController
 from controllers.sync_ctrl import SyncStatusController
 from controllers.fileops_ctrl import FileOpsController
+from controllers.git_ops_ctrl import GitOpsController
 from controllers.shadowlinks_ctrl import ShadowLinksController
-from dialogs.ai_code_review import AICodeReviewDialog
 from dialogs.assign_category import AssignCategoryDialog
-from dialogs.gitignore import GitignoreDialog
-from dialogs.untrack_ignored import UntrackIgnoredDialog
 
 if TYPE_CHECKING:
     from state import ManagerConfig
@@ -167,6 +162,17 @@ class ProjectsTabController:
             on_run=on_run,
             on_run_capture=on_run_capture,
             get_projects=get_projects,
+        )
+        self._gitops = GitOpsController(
+            tab=self._tab,
+            notebook=notebook,
+            cfg=cfg,
+            on_log=on_log,
+            on_shell=on_shell,
+            on_refresh=on_refresh,
+            on_commit_offer=self._offer_commit_after_change,
+            on_commit=on_commit,
+            on_project_select=on_project_select,
         )
         self._fileops = FileOpsController(
             tab=self._tab,
@@ -607,159 +613,31 @@ class ProjectsTabController:
 
     # ── Git commands (Projects-tab variants) ──────────────────────────────────
 
+    # ── Git-feature commands — delegate to GitOpsController ──────────────────
+
     def cmd_git_log(self) -> None:
-        """Navigate to the Git tab and show live status/log for the selected project."""
-        path = self._selected_path()
-        if not path:
-            return
-        # Switch to Git tab first so is_visible() is True when on_project_select fires.
-        try:
-            for idx in range(self._notebook.index("end")):
-                if self._notebook.tab(idx, "text").strip() == "Git":
-                    self._notebook.select(idx)
-                    break
-        except tk.TclError:
-            pass
-        # Now fire the project-select callback — App._on_project_select wires
-        # set_active_path + refresh on GitTabController.
-        self._on_project_select(path)
+        if path := self._selected_path():
+            self._gitops.cmd_git_log(path)
 
     def cmd_git_commit(self) -> None:
-        """Open the Git Commit dialog for the selected project."""
-        path = self._selected_path()
-        if path:
-            self._on_commit(path)
+        if path := self._selected_path():
+            self._gitops.cmd_git_commit(path)
 
     def cmd_ai_code_review(self) -> None:
-        """Open the AI Code Review dialog for the selected project."""
-        path = self._selected_path()
-        if not path:
-            return
-        if not _is_local_git_repo(path):
-            messagebox.showinfo(
-                "Not a git repo",
-                f"{os.path.basename(path)} doesn't have a .git folder, "
-                "so there's no pending diff to review.",
-                parent=self._root)
-            return
-        llm_cfg = self._cfg.raw.get("commit_message_llm") or {}
-        if not llm_cfg.get("enabled"):
-            messagebox.showinfo(
-                "AI is not enabled",
-                "Open Settings → 'AI commit messages' and enable AI to use "
-                "this feature.",
-                parent=self._root)
-            return
-        AICodeReviewDialog(self._root, path, llm_cfg, self._cfg)
+        if path := self._selected_path():
+            self._gitops.cmd_ai_code_review(path)
 
     def cmd_git_init(self) -> None:
-        """Initialise a git repository in the selected project folder."""
-        path = self._selected_path()
-        if not path:
-            return
-        name = os.path.basename(path)
-        if _is_git_repo(path, self._cfg.git_exe):
-            messagebox.showinfo(
-                "Already a repository",
-                f"{name} is already a git repository.",
-                parent=self._root,
-            )
-            return
-        self._on_log(f"Running git init in {name}…", C["peach"])
-        out, rc = self._on_shell([self._cfg.git_exe, "-C", path, "init"], path)
-        col = C["green"] if rc == 0 else C["red"]
-        for line in out.strip().splitlines():
-            self._on_log(f"  {line}", col)
-        if rc != 0:
-            self._on_refresh()
-            return
-        gi_path = os.path.join(path, ".gitignore")
-        if not os.path.isfile(gi_path):
-            try:
-                with open(gi_path, "w", encoding="utf-8") as f:
-                    f.write(_BASELINE_GITIGNORE)
-                self._on_log("  Created baseline .gitignore", C["green"])
-            except OSError as e:
-                self._on_log(f"  Warning: could not write .gitignore: {e}", C["yellow"])
-        if messagebox.askyesno(
-            "Initial commit",
-            f"git init succeeded.\n\nCreate an initial commit now?\n"
-            "(stages all files with 'git add -A')",
-            parent=self._root,
-        ):
-            def do_commit():
-                self._on_shell([self._cfg.git_exe, "-C", path, "add", "-A"], path)
-                cout, crc = self._on_shell(
-                    [self._cfg.git_exe, "-C", path, "commit", "-m", "Initial commit"], path)
-                ccol = C["green"] if crc == 0 else C["red"]
-                for line in cout.strip().splitlines()[-4:]:
-                    self._tab.after(0, lambda l=line: self._on_log(f"  {l}", ccol))
-                self._tab.after(0, self._on_refresh)
-            threading.Thread(target=do_commit, daemon=True).start()
-        else:
-            self._on_refresh()
+        if path := self._selected_path():
+            self._gitops.cmd_git_init(path)
 
     def cmd_manage_gitignore(self) -> None:
-        path = self._selected_path()
-        if not path:
-            return
-        GitignoreDialog(self._root, path, self._cfg)
+        if path := self._selected_path():
+            self._gitops.cmd_manage_gitignore(path)
 
     def cmd_untrack_ignored(self) -> None:
-        path = self._selected_path()
-        if not path:
-            return
-        if not _is_local_git_repo(path):
-            messagebox.showinfo("Not a git repo",
-                f"{os.path.basename(path)} is not a git repository — "
-                "tracking isn't a concept here.",
-                parent=self._root)
-            return
-        files = _find_tracked_but_ignored(path, self._cfg.git_exe)
-        if not files:
-            messagebox.showinfo("Nothing to untrack",
-                f"No tracked-but-ignored files found in "
-                f"{os.path.basename(path)}.\n\n"
-                "Either nothing is tracked yet, or all tracked files "
-                "are consistent with your .gitignore — which is the "
-                "healthy state.",
-                parent=self._root)
-            return
-        UntrackIgnoredDialog(self._root, path, files,
-                             on_confirm=self._do_untrack_ignored)
-
-    def _do_untrack_ignored(self, path: str, files: list) -> None:
-        """Worker: run `git rm --cached -- <files>` in a background thread."""
-        if not files:
-            return
-        name = os.path.basename(path)
-        self._on_log(f"Untracking {len(files)} file"
-                     f"{'s' if len(files) != 1 else ''} in {name}…",
-                     C["peach"])
-
-        def worker():
-            try:
-                out, rc = self._on_shell(
-                    [self._cfg.git_exe, "-C", path, "rm", "-r", "--cached", "--"] + files,
-                    path)
-                col = C["green"] if rc == 0 else C["red"]
-                for line in out.strip().splitlines()[-6:]:
-                    self._on_log(f"  {line}", col)
-                if rc != 0:
-                    return
-                self._on_log(
-                    f"  ✓ Untracked {len(files)} file"
-                    f"{'s' if len(files) != 1 else ''} — "
-                    "local copies preserved",
-                    C["green"])
-            finally:
-                self._tab.after(0, self._on_refresh)
-                self._tab.after(0, lambda: self._offer_commit_after_change(
-                    path,
-                    f"untrack {len(files)} ignored file"
-                    f"{'s' if len(files) != 1 else ''}"))
-
-        threading.Thread(target=worker, daemon=True).start()
+        if path := self._selected_path():
+            self._gitops.cmd_untrack_ignored(path)
 
     # ── File-ops commands — delegate to FileOpsController ────────────────────
 
