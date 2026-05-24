@@ -36,7 +36,7 @@ if TYPE_CHECKING:
 
 # ── Monolith-audit constants (canonical thresholds — see BASIC_INSTRUCTIONS Rule A) ──
 
-_CAP_FILE_LINES         = 800
+_CAP_FILE_LINES         = 1500  # Doctor warning threshold (BASIC_INSTRUCTIONS aspires to 800)
 _CAP_METHOD_LINES       = 100
 _CAP_CLASS_METHODS      = 40
 _CAP_COMPLEXITY         = 10
@@ -388,12 +388,28 @@ _AUDIT_SKIP_DIRS = frozenset({
     ".build", ".onefile-build",
 })
 
+# Non-Python source / prose extensions that get a line-count-only audit.
+# Data formats (.json, .xml, .yaml) are intentionally excluded — line count
+# isn't meaningful for serialised data.
+_AUDIT_TEXT_EXTS = frozenset({
+    ".ps1", ".psm1", ".bat", ".cmd", ".sh", ".lua",
+    ".js", ".jsx", ".ts", ".tsx", ".mjs", ".cjs", ".vue", ".svelte",
+    ".rs", ".go", ".java", ".c", ".cc", ".cpp", ".h", ".hpp",
+    ".cs", ".rb", ".swift", ".kt", ".php", ".sql",
+    ".html", ".css", ".scss", ".md",
+})
+
 
 def _audit_project_tree(
     project_path: str,
     skip_rel_paths: set[str],
 ) -> tuple[list[str], list[str], int]:
-    """Walk *.py files under project_path; return (violations, exempts, count)."""
+    """Walk audit-eligible files; return (violations, exempts, files_scanned).
+
+    Python files (`*.py`) get the full AST audit (methods, classes,
+    complexity). Non-Python source/prose files (see `_AUDIT_TEXT_EXTS`)
+    get a line-count-only check against the same file cap.
+    """
     violations: list[str] = []
     exempt_notes: list[str] = []
     files_scanned = 0
@@ -401,14 +417,18 @@ def _audit_project_tree(
     for root, dirs, files in os.walk(project_path):
         dirs[:] = [d for d in dirs if d not in _AUDIT_SKIP_DIRS]
         for fname in files:
-            if not fname.endswith(".py"):
-                continue
+            ext = os.path.splitext(fname)[1].lower()
             full = os.path.join(root, fname)
             rel = os.path.relpath(full, project_path).replace("\\", "/")
             if rel in skip_rel_paths:
                 continue
+            if ext == ".py":
+                result = _audit_python_file(full)
+            elif ext in _AUDIT_TEXT_EXTS:
+                result = _audit_text_file(full)
+            else:
+                continue
             files_scanned += 1
-            result = _audit_python_file(full)
             if result is None:
                 continue
             if result["exempt"]:
@@ -417,6 +437,34 @@ def _audit_project_tree(
                 violations.extend(f"  {rel}: {v}" for v in result["violations"])
 
     return violations, exempt_notes, files_scanned
+
+
+def _audit_text_file(path: str) -> dict | None:
+    """Line-count-only audit for non-Python source / prose files.
+
+    Honours the same `# anti-monolith: exempt — <reason>` rationale comment.
+    The regex matches the bare phrase, so any comment syntax wrapping it
+    works: `# ...` (sh/ps1/lua), `// ...` (js/c/rust), `<!-- ... -->` (md/html).
+    Scans the first 20 lines for the exemption marker.
+    """
+    try:
+        with open(path, encoding="utf-8", errors="replace") as f:
+            source = f.read()
+    except OSError:
+        return None
+
+    head = "\n".join(source.splitlines()[:20])
+    m = _EXEMPT_RE.search(head)
+    if m:
+        reason = m.group(1).strip()
+        if reason:
+            return {"exempt": True, "exempt_reason": reason, "violations": []}
+
+    line_count = source.count("\n") + 1
+    if line_count > _CAP_FILE_LINES:
+        return {"exempt": False, "exempt_reason": None,
+                "violations": [f"file is {line_count} lines (cap {_CAP_FILE_LINES})"]}
+    return {"exempt": False, "exempt_reason": None, "violations": []}
 
 
 def _audit_method_node(

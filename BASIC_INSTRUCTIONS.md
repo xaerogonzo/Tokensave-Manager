@@ -15,7 +15,7 @@ this codebase.
 
 | Cap | Threshold | Notes |
 |---|---|---|
-| File length | **800 lines** | UI/layout files exempt (see carve-out) |
+| File length | **aim for ≤800 lines; Doctor warns at 1500** | Files between 800–1500 are an aspirational target, not an audit failure. Above 1500 → propose a split. UI/layout files exempt (see carve-out) |
 | Method length | **100 lines** | Logic methods only; declarative layout exempt if complexity ≤ 3 |
 | Class method count | **40 direct methods** | AST count of direct `FunctionDef` / `AsyncFunctionDef` children of `ClassDef`; nested defs, decorators, lambdas don't count |
 | Cyclomatic complexity | **10** | `tokensave_complexity` is canonical (see semantics below) |
