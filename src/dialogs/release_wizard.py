@@ -203,10 +203,25 @@ class ReleaseWizardDialog(tk.Toplevel):
     # ── UI ─────────────────────────────────────────────────────────────────
 
     def _build_ui(self):
-        body = self._body
-        P = dict(padx=20)
+        """Orchestrator — each numbered wizard step is its own builder.
 
-        # Header ─────────────────────────────────────────────────────────────
+        Split per on-screen section (semantic grouping per BASIC_INSTRUCTIONS
+        Rule A — never geometry-based chunks). The helper text and bottom
+        publish row bracket the 6 numbered steps in screen order.
+        """
+        body = self._body
+        self._build_header_section(body)
+        self._build_version_section(body)
+        self._build_title_section(body)
+        self._build_notes_section(body)
+        self._build_build_section(body)
+        self._build_artefact_section(body)
+        self._build_changelog_section(body)
+        self._build_publish_section(body)
+
+    def _build_header_section(self, body):
+        """Title, repo name, commit-count line, divider."""
+        P = dict(padx=20)
         tk.Label(body, text="📦  Release Wizard",
                  font=("Segoe UI", 13, "bold"),
                  bg=C["base"], fg=C["blue"]).pack(anchor=tk.W, pady=(16, 0), **P)
@@ -219,10 +234,10 @@ class ReleaseWizardDialog(tk.Toplevel):
                  text=f"{n} commit{'s' if n != 1 else ''} since {prior}",
                  font=("Segoe UI", 9), bg=C["base"],
                  fg=C["overlay0"]).pack(anchor=tk.W, pady=(0, 10), **P)
-
         ttk.Separator(body, orient="horizontal").pack(fill=tk.X, padx=20, pady=(0, 12))
 
-        # ── 1. Version ──────────────────────────────────────────────────────
+    def _build_version_section(self, body):
+        """Step 1 — bump radios + custom tag entry + live resolved-tag preview."""
         self._section_header(body, "1", "Version")
         ver_frame = tk.Frame(body, bg=C["base"])
         ver_frame.pack(fill=tk.X, padx=(44, 20), pady=(0, 4))
@@ -275,12 +290,14 @@ class ReleaseWizardDialog(tk.Toplevel):
         self._override_var.trace_add("write",
             lambda *_: self._refresh_resolved_tag())
 
-        # ── 2. Title ────────────────────────────────────────────────────────
+    def _build_title_section(self, body):
+        """Step 2 — title entry."""
         self._section_header(body, "2", "Title")
         ttk.Entry(body, textvariable=self._title_var, font=("Segoe UI", 10)
                   ).pack(fill=tk.X, padx=(44, 20), pady=(0, 12))
 
-        # ── 3. Release notes ────────────────────────────────────────────────
+    def _build_notes_section(self, body):
+        """Step 3 — helper text + regenerate/copy buttons + notes textarea."""
         self._section_header(body, "3", "Release notes  (editable)")
 
         # Helper text BELOW the section header but ABOVE the textarea, so
@@ -313,7 +330,8 @@ class ReleaseWizardDialog(tk.Toplevel):
         self._notes_txt.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
         nt_vsb.pack(side=tk.RIGHT, fill=tk.Y)
 
-        # ── 4. Build ────────────────────────────────────────────────────────
+    def _build_build_section(self, body):
+        """Step 4 — optional build-script checkbox (or "no build script" notice)."""
         self._section_header(body, "4", "Build step")
         build_frame = tk.Frame(body, bg=C["base"])
         build_frame.pack(fill=tk.X, padx=(44, 20), pady=(0, 12))
@@ -341,7 +359,8 @@ class ReleaseWizardDialog(tk.Toplevel):
                      font=("Segoe UI", 8), bg=C["base"],
                      fg=C["overlay0"]).pack(anchor=tk.W)
 
-        # ── 5. Artefact ─────────────────────────────────────────────────────
+    def _build_artefact_section(self, body):
+        """Step 5 — zip artefact preview label."""
         self._section_header(body, "5", "Artefact")
         self._artefact_lbl = tk.Label(body, text="(will be computed at publish time)",
                                        font=("Segoe UI", 9), bg=C["base"],
@@ -349,7 +368,8 @@ class ReleaseWizardDialog(tk.Toplevel):
         self._artefact_lbl.pack(anchor=tk.W, padx=(44, 20), pady=(0, 12))
         self._refresh_artefact_preview()
 
-        # ── 6. CHANGELOG sync ───────────────────────────────────────────────
+    def _build_changelog_section(self, body):
+        """Step 6 — CHANGELOG.md sync checkbox (or "no changelog" notice)."""
         self._section_header(body, "6", "CHANGELOG.md sync")
         cl_frame = tk.Frame(body, bg=C["base"])
         cl_frame.pack(fill=tk.X, padx=(44, 20), pady=(0, 12))
@@ -371,7 +391,8 @@ class ReleaseWizardDialog(tk.Toplevel):
                      font=("Segoe UI", 9), bg=C["base"], fg=C["overlay0"],
                      justify=tk.LEFT, wraplength=520).pack(anchor=tk.W)
 
-        # ── Publish row ─────────────────────────────────────────────────────
+    def _build_publish_section(self, body):
+        """Bottom row — Publish + Cancel buttons + status label."""
         ttk.Separator(body, orient="horizontal").pack(fill=tk.X, padx=20, pady=(8, 12))
         btn_row = tk.Frame(body, bg=C["base"])
         btn_row.pack(anchor=tk.W, padx=20, pady=(0, 18))
