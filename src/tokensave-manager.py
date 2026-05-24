@@ -29,7 +29,19 @@ import textwrap
 import pystray
 from PIL import Image, ImageDraw
 
-_ANSI = re.compile(r'\x1b(?:[@-Z\\-_]|\[[0-9;]*[ -/]*[@-~])')
+# Round 4 Phase A: shared immutable constants live in src/constants.py.
+# Anything runtime-mutable belongs in src/state.py (ManagerConfig) instead.
+from constants import (
+    _ANSI,
+    _TOKENSAVE_UPDATE_RE,
+    SKIP_DIRS,
+    MAX_DEPTH,
+    CREATE_NO_WINDOW,
+    AUTO_REFRESH_MS,
+    _GIT_ENV_NO_PROMPT,
+    DESKTOP_PROJECT_FILE,
+    C,
+)
 
 def _version_lt(a: str, b: str) -> bool:
     """Return True if version string `a` is strictly less than `b`.
@@ -54,14 +66,7 @@ def _version_lt(a: str, b: str) -> bool:
     return pa < pb
 
 
-# tokensave emits this line at the end of any sync when a newer release is
-# available on GitHub. Capture both versions so the manager can display
-# "Upgrade v5.1.1 → v5.1.2" in Settings and decide when the button should
-# show up. Accepts an arrow rendered as either Unicode → or ASCII -> /=>,
-# and tolerates either the bare "5.1.2" or "v5.1.2" form.
-_TOKENSAVE_UPDATE_RE = re.compile(
-    r'Update available:\s*v?(\d+\.\d+\.\d+(?:\.\d+)?)\s*'
-    r'(?:→|->|=>)\s*v?(\d+\.\d+\.\d+(?:\.\d+)?)')
+# _TOKENSAVE_UPDATE_RE moved to constants.py (Round 4 Phase A)
 
 # ── Paths ─────────────────────────────────────────────────────────────────────
 # Under Nuitka --onefile, NUITKA_ONEFILE_PARENT is the actual .exe path.
@@ -539,75 +544,12 @@ def _root_label(r):
 BASIC_INSTRUCTIONS_TEMPLATE = os.path.join(TEMPLATE_DIR, "claude-md-template.md")
 BASELINE_INCLUDE_LINE = f"@{TEMPLATE_DIR}\\project-baseline.md"
 
-DESKTOP_PROJECT_FILE = os.path.join(
-    os.environ.get("USERPROFILE", os.path.expanduser("~")),
-    ".tokensave", "desktop-project.txt",
-)
-SKIP_DIRS = {
-    ".git", "node_modules", "__pycache__", ".venv", "venv",
-    "target", "build", "dist", "out", ".gradle", "bin", "obj",
-}
-MAX_DEPTH = 4
-CREATE_NO_WINDOW = 0x08000000
-AUTO_REFRESH_MS = 60_000  # auto-refresh project list every 60 s
-
-# Git network operations — prevents infinite hang when credentials aren't cached.
-# GIT_TERMINAL_PROMPT=0 tells git to fail immediately instead of waiting for
-# stdin. Compatible with Git Credential Manager (GCM authenticates via browser,
-# not stdin, so this env var doesn't interfere with it).
-_GIT_ENV_NO_PROMPT = {**os.environ, "GIT_TERMINAL_PROMPT": "0"}
+# DESKTOP_PROJECT_FILE, SKIP_DIRS, MAX_DEPTH, CREATE_NO_WINDOW, AUTO_REFRESH_MS,
+# and _GIT_ENV_NO_PROMPT moved to constants.py (Round 4 Phase A).
 
 
-class _Tooltip:
-    """Hover tooltip for tkinter widgets.
-
-    Shows a small popup after `delay` ms; hides on leave or click.
-    Text wraps at ~300 px so multi-line tips stay readable.
-    """
-    _DELAY = 650   # ms before appearing
-
-    def __init__(self, widget, text: str):
-        self._widget  = widget
-        self._text    = text
-        self._job     = None
-        self._tip_win = None
-        widget.bind("<Enter>",       self._schedule,  add="+")
-        widget.bind("<Leave>",       self._cancel,    add="+")
-        widget.bind("<ButtonPress>", self._cancel,    add="+")
-
-    def _schedule(self, _event=None):
-        self._cancel()
-        self._job = self._widget.after(self._DELAY, self._show)
-
-    def _cancel(self, _event=None):
-        if self._job:
-            self._widget.after_cancel(self._job)
-            self._job = None
-        if self._tip_win:
-            self._tip_win.destroy()
-            self._tip_win = None
-
-    def _show(self):
-        self._job = None
-        try:
-            x = self._widget.winfo_rootx() + 12
-            y = self._widget.winfo_rooty() + self._widget.winfo_height() + 6
-        except Exception:
-            return
-        self._tip_win = win = tk.Toplevel(self._widget)
-        win.wm_overrideredirect(True)   # no title bar / border
-        win.wm_attributes("-topmost", True)
-        win.wm_geometry(f"+{x}+{y}")
-        win.configure(bg=C["surface1"])
-        # Thin border effect via a 1-px frame
-        outer = tk.Frame(win, bg=C["overlay0"], padx=1, pady=1)
-        outer.pack()
-        tk.Label(outer, text=self._text,
-                 font=("Segoe UI", 9),
-                 bg=C["surface1"], fg=C["text"],
-                 padx=10, pady=6,
-                 wraplength=300,
-                 justify=tk.LEFT).pack()
+# _Tooltip moved to theme.py (Round 4 Phase A)
+from theme import _Tooltip  # re-exported for in-file references
 
 
 def _is_auth_error(text: str) -> bool:
@@ -2892,25 +2834,7 @@ PROMPT_SNIPPETS = [
     ),
 ]
 
-# ── Colours (Catppuccin Mocha) ─────────────────────────────────────────────────
-
-C = {
-    "base":     "#1e1e2e",
-    "mantle":   "#181825",
-    "crust":    "#11111b",
-    "surface0": "#313244",
-    "surface1": "#45475a",
-    "overlay0": "#6c7086",
-    "text":     "#cdd6f4",
-    "subtext":  "#bac2de",
-    "blue":     "#89b4fa",
-    "green":    "#a6e3a1",
-    "yellow":   "#f9e2af",
-    "red":      "#f38ba8",
-    "lavender": "#b4befe",
-    "sky":      "#89dceb",
-    "peach":    "#fab387",
-}
+# C (Catppuccin Mocha palette) moved to constants.py (Round 4 Phase A)
 
 # ── Helpers ────────────────────────────────────────────────────────────────────
 
