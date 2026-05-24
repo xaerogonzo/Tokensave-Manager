@@ -114,6 +114,49 @@ Turns the manager into a project-memory tool:
 
 ---
 
+## Code-health backlog (post-Round-4)
+
+Round 4 split the monolith into subpackages (equality 0.16 → 0.57, quality 5,689 → 7,003) but explicitly **deferred intra-file decomposition**. The post-Round-4 audit (May 2026) surfaced these candidates — pick any one as a Round 5 mini-pass when energy allows. All are structural-only, no behaviour change.
+
+### 🟡 Round 5 — App._help_* extraction (highest-leverage single change)
+Move the 16 `_help_*` section methods from `src/app.py` (currently the largest file at ~5,266 measured lines) into a new `src/app_help.py` module. Pure mechanical lift — none of the methods reference instance state beyond `self._hw()` and `self._help_show()`, both of which can move with them or become standalone module-level helpers.
+
+**Expected impact:** `src/app.py` drops from ~5,266 → ~3,500 lines; equality climbs past 0.65; quality signal toward 8,000+.
+
+### 🔮 AskTabController._ask_send decomposition (CC=15)
+At `src/controllers/ask_tab.py:281`, this 116-line method handles message prep + agent dispatch + the streaming callback closure. Same pattern as Round 3's `LocalAgent._chat_completion` split: extract `_prepare_ask_messages`, `_dispatch_agent`, and the streaming callback into named methods. Worth doing before any Stage 3+ feature lands new code on top.
+
+### 🔮 Big dialog `__init__` splits (8 methods, all >100 lines)
+| File | Method | Lines |
+|---|---|---|
+| `src/dialogs/git_commit.py:55` | `GitCommitDialog.__init__` | 218 |
+| `src/dialogs/release_wizard.py:204` | `_build_ui` | 186 |
+| `src/dialogs/gitignore.py:60` | `GitignoreDialog.__init__` | 142 |
+| `src/dialogs/retrofit.py:21` | `RetrofitDialog.__init__` | 135 |
+| `src/dialogs/github_setup.py:109` | `_build` | 132 |
+| `src/controllers/snippets.py:46` | `SnippetsController._build` | 130 |
+| `src/dialogs/ollama_model_mgr.py:66` | `__init__` | 122 |
+| `src/dialogs/ai_code_review.py:71` | `__init__` | 119 |
+
+All have low CC (≤ 4) — they're straight-line layout code. Apply the same pattern Round 3 used for `SettingsDialog._build_ai_section`: split each into `_build_<section>` helpers. Pure readability / diff-size win, zero correctness risk.
+
+### 💭 Genuine dead-code cleanup in `src/agent_tools.py` (10-minute pass)
+Three functions look genuinely unused after Phase E (grep-verified, NOT Tk-callback false positives):
+- `_read_file_range` at `agent_tools.py:218` — superseded by inline handling in the `read_file` tool handler. **Verify** no caller remains, then delete.
+- `_suggest_paths_for_missing_file` at `agent_tools.py:249` — docstring claims it's called from `read_file`'s error path; verify the wiring still routes through it.
+- `_slim_tokensave_context` at `agent_tools.py:452` — verify the `tokensave_context` tool handler still calls it.
+
+Plus two genuine unused imports in the same file: `dataclasses.dataclass` (L26) and `typing.Callable` (L27) — leftover from the legacy ToolSpec class.
+
+### 💭 File the two upstream tokensave issues
+Drafts in `docs/upstream-issues/`:
+- `tokensave-health-details.md` — request `tokensave_health details=true` to return the sub-score breakdown in one call
+- `tokensave-redundancy-tool.md` — request `tokensave_redundancy` AST-level functional-duplication detector
+
+Both have "strip any proprietary code before filing" notes per `~/.claude/CLAUDE.md`. The redundancy ask would let `tokensave_health` surface a real Redundancy sub-score (currently impossible — there's no project-wide aggregate primitive).
+
+---
+
 ## Open ideas (no stage yet)
 
 Smaller / exploratory ideas that don't justify a full stage:
