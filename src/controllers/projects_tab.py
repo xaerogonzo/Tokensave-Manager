@@ -56,6 +56,7 @@ from helpers.shadow_links import (
     update_gitignore_for_shadows,
 )
 from controllers.codegraph_ctrl import CodeGraphController
+from controllers.doctor_ctrl import DoctorController
 from dialogs.ai_code_review import AICodeReviewDialog
 from dialogs.assign_category import AssignCategoryDialog
 from dialogs.gitignore import GitignoreDialog
@@ -153,6 +154,13 @@ class ProjectsTabController:
             on_refresh=on_refresh,
             on_commit_offer=self._offer_commit_after_change,
             on_settings=on_settings,
+        )
+        self._doctor = DoctorController(
+            tab=self._tab,
+            cfg=cfg,
+            on_log=on_log,
+            on_set_running=on_set_running,
+            on_set_proc=lambda p: setattr(self, "current_proc", p),
         )
 
     # ── Convenience ───────────────────────────────────────────────────────────
@@ -872,194 +880,15 @@ class ProjectsTabController:
         ):
             self._on_run(["sync", "--force"], cwd=path, label=os.path.basename(path))
 
+    # ── Doctor command — delegates to DoctorController ───────────────────────
+
     def cmd_doctor(self) -> None:
         path = self._selected_path()
         if not path:
             return
         if not self._require_tokensave(path):
             return
-        self._run_doctor_with_purge_offer(path)
-
-    def _run_doctor_with_purge_offer(self, path: str) -> None:
-        """Run `tokensave doctor`, stream output, and offer to purge stale entries."""
-        label = os.path.basename(path)
-
-        def worker():
-            cmd_str = "tokensave doctor"
-            self._on_log(f"$ {cmd_str}  [{label}]", C["blue"])
-            self._tab.after(0, self._on_set_running, True, label)
-            log.info(f"RUN  {cmd_str}")
-            output_lines: list = []
-            t0 = time.monotonic()
-            try:
-                env = os.environ.copy()
-                env["NO_COLOR"] = "1"
-                env["TERM"] = "dumb"
-                proc = subprocess.Popen(
-                    [self._cfg.tokensave_exe, "doctor"],
-                    cwd=path,
-                    stdout=subprocess.PIPE,
-                    stderr=subprocess.STDOUT,
-                    text=True, encoding="utf-8", errors="replace",
-                    env=env,
-                    creationflags=CREATE_NO_WINDOW,
-                )
-                self.current_proc = proc
-                for line in proc.stdout:
-                    stripped = _ANSI.sub("", line).rstrip()
-                    if not stripped:
-                        continue
-                    output_lines.append(stripped)
-                    self._on_log(stripped)
-                proc.wait()
-                elapsed = time.monotonic() - t0
-                if proc.returncode == 0:
-                    self._on_log("Done.", C["green"])
-                    log.info(f"DONE exit=0  [{elapsed:.1f}s]")
-                else:
-                    self._on_log(f"Exited with code {proc.returncode}", C["red"])
-                    log.warning(f"DONE exit={proc.returncode}  [{elapsed:.1f}s]")
-                stale_paths = self._extract_doctor_stale_paths(output_lines)
-                if stale_paths and proc.returncode == 0:
-                    self._tab.after(0, self._offer_doctor_purge, path, stale_paths)
-            except Exception as e:
-                self._on_log(f"Error: {e}", C["red"])
-                log.exception("EXCEPTION in cmd_doctor")
-            finally:
-                self.current_proc = None
-                self._tab.after(0, self._on_set_running, False, "")
-
-        threading.Thread(target=worker, daemon=True, name="doctor-worker").start()
-
-    @staticmethod
-    def _extract_doctor_stale_paths(output_lines: list) -> list:
-        """Parse tokensave doctor's stdout for the stale-entries section."""
-        bullet_re = re.compile(r"^\s*[•\*\-]\s+(.+?)\s*$")
-        in_block = False
-        paths: list = []
-        for line in output_lines:
-            if "stale project" in line and "global DB" in line:
-                in_block = True
-                continue
-            if not in_block:
-                continue
-            if "Re-run" in line and "tokensave doctor" in line:
-                break
-            m = bullet_re.match(line)
-            if m:
-                paths.append(m.group(1).strip())
-            elif paths and not line.startswith(" ") and not line.startswith("\t"):
-                break
-        return paths
-
-    def _offer_doctor_purge(self, path: str, stale_paths: list) -> None:
-        n = len(stale_paths)
-        bullets = "\n".join(f"  • {p}" for p in stale_paths)
-        msg = (f"tokensave doctor found {n} stale project entr"
-               f"{'y' if n == 1 else 'ies'} in the global DB.\n\n"
-               f"{bullets}\n\n"
-               "These projects were registered but their `.tokensave/` "
-               "folders are gone — most likely deleted folders.\n\n"
-               "Purge them now?  The manager will re-run `tokensave "
-               "doctor` with `y` piped to confirm the interactive "
-               "purge prompt.")
-        if not messagebox.askyesno(
-                "Purge stale tokensave projects?",
-                msg, parent=self._root):
-            self._on_log("  (purge skipped — stale entries left in place)", C["overlay0"])
-            return
-        self._run_doctor_purge(path)
-
-    def _run_doctor_purge(self, path: str) -> None:
-        """Re-run `tokensave doctor` with `y` piped to confirm the purge prompt."""
-        label = "doctor (purge)"
-
-        def worker():
-            self._on_log(f"$ tokensave doctor  [{label}]", C["blue"])
-            self._tab.after(0, self._on_set_running, True, label)
-            captured: list = []
-            try:
-                env = os.environ.copy()
-                env["NO_COLOR"] = "1"
-                env["TERM"] = "dumb"
-                proc = subprocess.Popen(
-                    [self._cfg.tokensave_exe, "doctor"],
-                    cwd=path,
-                    stdin=subprocess.PIPE,
-                    stdout=subprocess.PIPE,
-                    stderr=subprocess.STDOUT,
-                    text=True, encoding="utf-8", errors="replace",
-                    env=env,
-                    creationflags=CREATE_NO_WINDOW,
-                )
-                self.current_proc = proc
-                try:
-                    proc.stdin.write("y\ny\ny\ny\ny\n")
-                    proc.stdin.flush()
-                    proc.stdin.close()
-                except (OSError, BrokenPipeError):
-                    pass
-                for line in proc.stdout:
-                    stripped = _ANSI.sub("", line).rstrip()
-                    if not stripped:
-                        continue
-                    captured.append(stripped)
-                    self._on_log(stripped)
-                proc.wait()
-                self._on_log(
-                    "Done." if proc.returncode == 0
-                    else f"Exited with code {proc.returncode}",
-                    C["green"] if proc.returncode == 0 else C["red"])
-                still_stale = self._extract_doctor_stale_paths(captured)
-                if still_stale:
-                    self._on_log(
-                        f"  ⚠ Purge didn't take — tokensave still "
-                        f"reports {len(still_stale)} stale entr"
-                        f"{'y' if len(still_stale) == 1 else 'ies'}. "
-                        f"tokensave doctor needs a real terminal "
-                        f"(piped stdin doesn't trigger the prompt).",
-                        C["peach"])
-                    self._tab.after(0, self._offer_doctor_in_cmd, path, len(still_stale))
-                else:
-                    self._on_log("  ✓ Stale entries purged.", C["green"])
-            except Exception as e:
-                self._on_log(f"Error: {e}", C["red"])
-                log.exception("EXCEPTION in doctor purge")
-            finally:
-                self.current_proc = None
-                self._tab.after(0, self._on_set_running, False, "")
-
-        threading.Thread(target=worker, daemon=True, name="doctor-purge").start()
-
-    def _offer_doctor_in_cmd(self, path: str, n_stale: int) -> None:
-        plural = "entry" if n_stale == 1 else "entries"
-        if not messagebox.askyesno(
-                "Open Doctor in a new terminal?",
-                f"The piped-stdin purge didn't work — tokensave needs "
-                f"a real terminal for its interactive 'y/n' prompt.\n\n"
-                f"Open a new cmd.exe window with `tokensave doctor` "
-                f"running there?  You'll see the {n_stale} stale "
-                f"{plural} listed and tokensave will ask you to "
-                f"confirm — type 'y' and press Enter to purge.\n\n"
-                f"The window stays open after, so you can close it "
-                f"yourself when done.",
-                parent=self._root):
-            self._on_log(
-                "  (terminal-purge skipped — stale entries still in DB)",
-                C["overlay0"])
-            return
-        try:
-            cmd_line = f'cmd.exe /k ""{self._cfg.tokensave_exe}" doctor"'
-            subprocess.Popen(
-                cmd_line,
-                cwd=path,
-                creationflags=subprocess.CREATE_NEW_CONSOLE)
-            self._on_log(
-                "  Opened cmd.exe — type 'y' at the prompt to purge, "
-                "then close the window.",
-                C["sky"])
-        except OSError as e:
-            self._on_log(f"  ✗ Could not launch cmd.exe: {e}", C["red"])
+        self._doctor.cmd_doctor(path)
 
     # ── CodeGraph commands ────────────────────────────────────────────────────
 
