@@ -82,7 +82,20 @@ class GitignoreDialog(tk.Toplevel):
         self._normal_font = tkfont.Font(family="Consolas", size=9)
         self._strike_font = tkfont.Font(family="Consolas", size=9, overstrike=1)
 
-        # ── Header ─────────────────────────────────────────────────────────
+        self._build_header_section(path)
+        self._build_current_entries_section()
+        self._build_template_buttons_section()
+        if _is_local_git_repo(path):
+            self._build_untracked_panel()
+        self._build_custom_entry_section()
+        self._build_pending_changes_section()
+        self._build_save_buttons_section()
+
+        self._update_pending_panel()
+        self._centre_on_parent(parent)
+
+    def _build_header_section(self, path: str):
+        """Title + .gitignore path + functional-pattern count."""
         hdr = tk.Frame(self, bg=C["base"], padx=18, pady=14)
         hdr.pack(fill=tk.X)
         tk.Label(hdr, text="📋  .gitignore", bg=C["base"], fg=C["blue"],
@@ -101,7 +114,8 @@ class GitignoreDialog(tk.Toplevel):
             bg=C["base"], fg=C["overlay0"], font=("Segoe UI", 8))
         self._count_lbl.pack(side=tk.LEFT)
 
-        # ── Current entries: scrollable canvas + body Frame ────────────────
+    def _build_current_entries_section(self):
+        """Scrollable canvas hosting one row widget per non-blank .gitignore line."""
         cur_label = tk.Label(self, text="CURRENT ENTRIES",
                              bg=C["base"], fg=C["overlay0"],
                              font=("Segoe UI", 8, "bold"))
@@ -129,7 +143,8 @@ class GitignoreDialog(tk.Toplevel):
 
         self._populate_current_entries()
 
-        # ── Template Inject buttons (action, not state — see plan) ────────
+    def _build_template_buttons_section(self):
+        """6-per-row grid of `+ <category>` buttons; tooltips show what each adds."""
         tmpl_label = tk.Label(self,
             text="INJECT TEMPLATE PATTERNS  (one-click — hover to see what each adds)",
             bg=C["base"], fg=C["overlay0"], font=("Segoe UI", 8, "bold"))
@@ -137,7 +152,6 @@ class GitignoreDialog(tk.Toplevel):
         tmpl_wrap = tk.Frame(self, bg=C["base"])
         tmpl_wrap.pack(fill=tk.X, padx=18, pady=(0, 8))
 
-        # Two-row grid of buttons; up to 6 per row
         per_row = 6
         for i, cat_name in enumerate(_GITIGNORE_TEMPLATES.keys()):
             row, col = divmod(i, per_row)
@@ -147,11 +161,8 @@ class GitignoreDialog(tk.Toplevel):
                      sticky=tk.W)
             _Tooltip(btn, self._template_tooltip_text(cat_name))
 
-        # ── Untracked files panel (git repos only) ────────────────────────
-        if _is_local_git_repo(path):
-            self._build_untracked_panel()
-
-        # ── Custom entry ──────────────────────────────────────────────────
+    def _build_custom_entry_section(self):
+        """Custom-pattern entry + Add / Browse buttons + hint label."""
         custom_wrap = tk.Frame(self, bg=C["base"])
         custom_wrap.pack(fill=tk.X, padx=18, pady=(4, 0))
         tk.Label(custom_wrap, text="Custom entry:", bg=C["base"], fg=C["text"],
@@ -171,7 +182,8 @@ class GitignoreDialog(tk.Toplevel):
                                      fg=C["overlay0"], font=("Segoe UI", 8))
         self._custom_hint.pack(anchor=tk.W, padx=18)
 
-        # ── Pending changes panel ────────────────────────────────────────
+    def _build_pending_changes_section(self):
+        """Read-only Text widget showing the +/- diff of pending edits."""
         pend_label = tk.Label(self, text="PENDING CHANGES",
                               bg=C["base"], fg=C["overlay0"],
                               font=("Segoe UI", 8, "bold"))
@@ -188,7 +200,8 @@ class GitignoreDialog(tk.Toplevel):
         self._pend_txt.tag_configure("rem",  foreground=C["red"])
         self._pend_txt.tag_configure("dim",  foreground=C["overlay0"])
 
-        # ── Save / Cancel ────────────────────────────────────────────────
+    def _build_save_buttons_section(self):
+        """Bottom Save / Cancel button row."""
         btns = tk.Frame(self, bg=C["base"], padx=18, pady=10)
         btns.pack(fill=tk.X)
         self._save_btn = ttk.Button(btns, text="Save changes",
@@ -197,9 +210,8 @@ class GitignoreDialog(tk.Toplevel):
         ttk.Button(btns, text="Cancel",
                    command=self.destroy).pack(side=tk.RIGHT)
 
-        self._update_pending_panel()
-
-        # Centre on parent
+    def _centre_on_parent(self, parent):
+        """Position the dialog roughly centred on the parent window."""
         self.update_idletasks()
         w, h = 640, 620
         try:
