@@ -67,10 +67,12 @@ All tools are read-only — the agent CANNOT write files, run commits, or modify
 
 Provider support: Ollama / OpenAI / OpenAI-compatible (LM Studio, vLLM, etc.) all do tool calling natively. Anthropic falls back to a one-shot completion without tools — adding native Anthropic tool-use is a known follow-up.
 
-### 🔮 Stage 3 — CHANGELOG drafter
-*Status: planned*
+### 🟡 Stage 3 — CHANGELOG drafter
+*Status: ProposalDialog UI sandbox shipped (Roadmap-1); agent wiring planned for Roadmap-2*
 
 Right-click → **📝 Draft CHANGELOG entry…**. Agent reads commits since the last release tag, classifies them, drafts CHANGELOG bullets. A ProposalDialog presents the old-vs-new diff with **Apply / Reject / Edit then Apply** buttons. First feature with a write tool, but every write goes through the same approval gate.
+
+**Roadmap-1 progress:** `dialogs/proposal.py` ships the `WriteProposal` dataclass + `ProposalDialog` UI (draggable `tk.PanedWindow`, both panes scrollable with `wrap=tk.NONE`, editable proposed pane, `if __name__ == "__main__":` standalone harness). Agent-side wiring (a write tool in `agent_tools.py` that constructs `WriteProposal`, calls `ProposalDialog(root, proposal, on_accept)` via `root.after(0, ...)`, and blocks on a `threading.Event` until the user clicks Accept or Reject) is queued for Roadmap-2.
 
 ### 🔮 Stage 4 — Refactor scout
 *Status: planned*
@@ -84,14 +86,14 @@ Adds opt-in autonomous execution for specific tool categories (e.g. "auto-write 
 
 ---
 
-### 💭 Stage 6 — Workflow accelerators
-*Status: considering*
+### 🟡 Stage 6 — Workflow accelerators
+*Status: PR draft shipped (Roadmap-1); pre-commit hook and release narrative still planned*
 
 Bundles three commit/release workflow features that share the same "AI drafts → user approves → manager applies" pattern:
 
-- **Pre-commit AI review hook** — Claude Code Stop hook (or pre-commit git hook) that runs the Stage 1 reviewer on the pending diff and blocks the commit if any 🔴 High-severity findings are present. Override via `--no-verify` or a "Commit anyway" button.
-- **PR description generator** — Right-click → 🐙 Draft PR description… Agent calls `tokensave_pr_context` + `tokensave_diff_context` + `git_log` for the branch and produces a PR title + body with Summary, Changes, Testing, and Review Questions sections. Opens GitHub's compare page with the description pre-filled (uses `gh pr create --web --body`).
-- **Release-notes narrative writer** — Extends Release Wizard with an AI-generated summary paragraph above the bullet list ("This release focuses on X and Y…"). Drafts inside the existing wizard textarea so the user can edit before publishing.
+- **Pre-commit AI review hook** *(planned)* — Claude Code Stop hook (or pre-commit git hook) that runs the Stage 1 reviewer on the pending diff and blocks the commit if any 🔴 High-severity findings are present. Override via `--no-verify` or a "Commit anyway" button.
+- **PR description generator** ✅ *(shipped Roadmap-1)* — `Draft PR…` button in the Git tab. Primary click runs the Claude Code CLI if configured (opens a detached terminal — `helpers/claude_cli.py`), otherwise calls the API path (`helpers/pr_draft.py` → in-app dialog with Copy button). Right-click / Shift+click pops a menu to explicitly override. The follow-up "auto-open `gh pr create --web --body`" wiring is queued for Roadmap-2.
+- **Release-notes narrative writer** *(planned)* — Extends Release Wizard with an AI-generated summary paragraph above the bullet list ("This release focuses on X and Y…"). Drafts inside the existing wizard textarea so the user can edit before publishing. `helpers/changelog_patch.py` (`insert_changelog_release` — atomic `## [Unreleased]` patcher) was shipped in Roadmap-1 as the foundation; wiring into the wizard is queued for Roadmap-2.
 
 ### 💭 Stage 7 — Quality assurance suite
 *Status: considering*
@@ -114,29 +116,24 @@ Turns the manager into a project-memory tool:
 
 ---
 
-## Code-health backlog (post-Round-4)
+## Code-health backlog (post-Round-5 / Roadmap-1)
 
-Round 4 split the monolith into subpackages (equality 0.16 → 0.57, quality 5,689 → 7,003) but explicitly **deferred intra-file decomposition**. The post-Round-4 audit (May 2026) surfaced these candidates — pick any one as a Round 5 mini-pass when energy allows. All are structural-only, no behaviour change.
+Round 4 split the monolith into subpackages (equality 0.16 → 0.57, quality 5,689 → 7,003). Round 5 extracted 9 sub-controllers from `ProjectsTabController` + 2 from `App`, cleared `_do_retrofit`, `_ask_send`, `GitCommitDialog.__init__`, and the dialog duplication audit. Roadmap-1 added 6 new features + cleared the pyflakes baseline to zero. The remaining backlog:
 
-### 🟡 Round 5 — App._help_* extraction (highest-leverage single change)
-Move the 16 `_help_*` section methods from `src/app.py` (currently the largest file at ~5,266 measured lines) into a new `src/app_help.py` module. Pure mechanical lift — none of the methods reference instance state beyond `self._hw()` and `self._help_show()`, both of which can move with them or become standalone module-level helpers.
+### 🔮 W2 — `_render_block` complex branch tangle (dialogs/mcp_config.py:154)
+11 branches handling different MCP config row states. Refactor into a dispatch table keyed on row classification. Worth doing before extending MCP support to additional editors.
 
-**Expected impact:** `src/app.py` drops from ~5,266 → ~3,500 lines; equality climbs past 0.65; quality signal toward 8,000+.
+### 🔮 W4 — `ReleaseWizardDialog._build_ui` (~186 lines)
+Split per wizard step into `_build_version_step`, `_build_notes_step`, `_build_summary_step`. The flat 186-line method makes it hard to add a "narrative writer" step (planned for Stage 6).
 
-### 🔮 AskTabController._ask_send decomposition (CC=15)
-At `src/controllers/ask_tab.py:281`, this 116-line method handles message prep + agent dispatch + the streaming callback closure. Same pattern as Round 3's `LocalAgent._chat_completion` split: extract `_prepare_ask_messages`, `_dispatch_agent`, and the streaming callback into named methods. Worth doing before any Stage 3+ feature lands new code on top.
+### 🔮 W5 — `GitTabController` god class (~44 direct methods, now ~50 after Draft PR)
+Extract the branch-management cluster (`cmd_git_new_branch`, `cmd_git_switch_branch`, `cmd_git_merge`, `cmd_git_delete_branch`, related workers) into a `BranchManagementController` sub-controller. Same callback-injection pattern as Round 5's projects-tab extractions.
 
-### 🔮 Big dialog `__init__` splits (8 methods, all >100 lines)
-| File | Method | Lines |
-|---|---|---|
-| `src/dialogs/git_commit.py:55` | `GitCommitDialog.__init__` | 218 |
-| `src/dialogs/release_wizard.py:204` | `_build_ui` | 186 |
-| `src/dialogs/gitignore.py:60` | `GitignoreDialog.__init__` | 142 |
-| `src/dialogs/retrofit.py:21` | `RetrofitDialog.__init__` | 135 |
-| `src/dialogs/github_setup.py:109` | `_build` | 132 |
-| `src/controllers/snippets.py:46` | `SnippetsController._build` | 130 |
-| `src/dialogs/ollama_model_mgr.py:66` | `__init__` | 122 |
-| `src/dialogs/ai_code_review.py:71` | `__init__` | 119 |
+### 🔮 ProposalDialog → agent_tools wiring (Roadmap-2 prerequisite)
+The Stage 3 CHANGELOG drafter is blocked on a write-tool path: `agent_tools.py` needs a `write_file` tool that builds `WriteProposal(filepath, original, proposed, rationale)`, calls `ProposalDialog(root, proposal, on_accept)` via `root.after(0, ...)`, and blocks on a `threading.Event` until the user resolves the dialog. Once shipped, Stage 3 + most of Stage 7 unlock.
+
+### 🔮 ReleaseWizard → changelog_patch wiring (Roadmap-2 follow-on)
+`helpers/changelog_patch.py:insert_changelog_release` shipped in Roadmap-1 as a pure helper but isn't wired anywhere yet. ReleaseWizard's "publish release" path is the natural call site — insert the new version block under `## [Unreleased]` after the user confirms notes.
 
 All have low CC (≤ 4) — they're straight-line layout code. Apply the same pattern Round 3 used for `SettingsDialog._build_ai_section`: split each into `_build_<section>` helpers. Pure readability / diff-size win, zero correctness risk.
 

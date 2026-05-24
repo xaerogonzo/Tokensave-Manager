@@ -41,9 +41,10 @@ Token Save Manager Source/
 │   ├── agent.py                   LocalAgent loop for the 🤖 Ask tab (Stage 2)
 │   ├── agent_tools.py             ToolSpec registry (6 read-only tools) (Stage 2)
 │   │
-│   ├── helpers/                   12 modules of pure / IO helpers — no UI deps.
+│   ├── helpers/                   16 modules of pure / IO helpers — no UI deps.
 │   │   ├── config.py              _load_config, _save_config, _migrate_config
-│   │   ├── detection.py           _detect_git/_gh/_npm/_codegraph, _root_path/_label, _version_lt
+│   │   ├── detection.py           _detect_git/_gh/_npm/_codegraph/_claude_cli,
+│   │   │                          _root_path/_label, _version_lt
 │   │   ├── runtime.py             log, _setup_logger, _acquire_instance_lock, _make_tray_icon
 │   │   ├── project_discovery.py   find_projects(roots), get/set/clear_pinned, fmt_age
 │   │   ├── git.py                 _is_git_repo, _parse_git_status_v2, _format_git_status_cell,
@@ -60,11 +61,20 @@ Token Save Manager Source/
 │   │   │                          _iter_sse_events, _iter_json_lines, _is_auth_error
 │   │   ├── commit_messages.py     _suggest_commit_message + 4 _strat_* strategies + sanitiser
 │   │   │                          cluster + _pending_diff + _call_llm_for_commit_message
-│   │   └── release.py             _last_release_tag, _commits_since, _classify_commits_for_changelog,
-│   │                              _bump_version, _suggest_bump_kind, _render_release_notes,
-│   │                              _patch_changelog, _zip_dist, _release_basename, _fmt_size
+│   │   ├── release.py             _last_release_tag, _commits_since, _classify_commits_for_changelog,
+│   │   │                          _bump_version, _suggest_bump_kind, _render_release_notes,
+│   │   │                          _patch_changelog, _zip_dist, _release_basename, _fmt_size
+│   │   ├── daemon_cost.py         get_daemon_status, toggle_daemon, parse_tokensave_cost
+│   │   │                          (parses `tokensave daemon --status` + `tokensave cost`)
+│   │   ├── pr_draft.py            generate_pr_draft — LLM-backed structured PR description
+│   │   │                          (Summary / Technical / Threat Model / Verification)
+│   │   ├── changelog_patch.py     insert_changelog_release — atomic ## [Unreleased] patcher
+│   │   │                          (pure; not wired to UI yet — ReleaseWizard integration
+│   │   │                          queued for Roadmap-2)
+│   │   └── claude_cli.py          spawn_claude_cli — detached cmd.exe via CREATE_NEW_CONSOLE
+│   │                              with ""outer"" multi-quote fix + \r\n strip (TTY safety)
 │   │
-│   ├── dialogs/                   18 tk.Toplevel dialog classes — one per file.
+│   ├── dialogs/                   20 tk.Toplevel dialog classes — one per file.
 │   │   ├── settings.py            SettingsDialog (+ _probe_loaded_model helper)
 │   │   ├── release_wizard.py      ReleaseWizardDialog + _ReleaseCtx (paired)
 │   │   ├── mcp_config.py          MCPConfigDialog
@@ -82,13 +92,31 @@ Token Save Manager Source/
 │   │   ├── new_branch.py          NewBranchDialog
 │   │   ├── switch_branch.py       SwitchBranchDialog (+ static pick() helper)
 │   │   ├── assign_category.py     AssignCategoryDialog
-│   │   └── untrack_ignored.py     UntrackIgnoredDialog
+│   │   ├── untrack_ignored.py     UntrackIgnoredDialog
+│   │   ├── cost_viewer.py         CostViewerDialog (2x2 metric grid; bg-threaded fetch)
+│   │   └── proposal.py            WriteProposal dataclass + ProposalDialog (PanedWindow,
+│   │                              wrap=NONE + 2-axis scrollbars; standalone __main__ harness)
 │   │
-│   └── controllers/               4 tab controllers — each owns one notebook tab.
-│       ├── projects_tab.py        ProjectsTabController (~1,540 lines)
-│       ├── git_tab.py             GitTabController (~1,200 lines)
-│       ├── ask_tab.py             AskTabController (~360 lines)
-│       └── snippets.py            SnippetsController (~260 lines)
+│   └── controllers/               Tab controllers + Round-5 sub-controllers extracted
+│       │                          from the original god classes. Each takes cfg via
+│       │                          callback injection (never a parent reference).
+│       ├── projects_tab.py        ProjectsTabController (thin orchestrator after Round 5
+│       │                          extracted 9 sub-controllers — ~44 direct methods)
+│       ├── git_tab.py             GitTabController (push/pull/branch/merge/release/
+│       │                          Draft PR — ~50 direct methods after Roadmap-1)
+│       ├── ask_tab.py             AskTabController (🤖 Ask tab — Stage 2 chat)
+│       ├── snippets.py            SnippetsController (📚 Reference tab)
+│       ├── help_tab.py            HelpTabController (❓ Help tab; extracted from App)
+│       ├── update_poller.py       UpdatePollerController (tokensave version probe +
+│       │                          GitHub release polling; extracted from App)
+│       ├── codegraph_ctrl.py      CodeGraphController (init/sync/status/remove)
+│       ├── doctor_ctrl.py         DoctorController (tokensave doctor + purge)
+│       ├── scaffold_ctrl.py       ScaffoldRetrofitController
+│       ├── sync_ctrl.py           SyncStatusController (sync, sync_all, force_sync)
+│       ├── fileops_ctrl.py        FileOpsController (open folder/editor, copy path)
+│       ├── shadowlinks_ctrl.py    ShadowLinksController
+│       └── git_ops_ctrl.py        GitOpsController (git log/commit/AI-review/init/
+│                                  manage-gitignore/untrack-ignored from Projects tab)
 │
 ├── templates/                     Data files used by the manager + shipped in dist\
 │   ├── claude-md-template.md      BASIC_INSTRUCTIONS.md template for other projects
