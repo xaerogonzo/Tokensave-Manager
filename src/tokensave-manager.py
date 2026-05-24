@@ -7855,6 +7855,116 @@ class App(tk.Tk):
         self._run(["upgrade"], cwd=os.path.dirname(TOKENSAVE),
                   label="upgrade")
 
+    # ── Commit dialog (shared by Projects context menu, Git tab, and
+    #    offer-commit-after-change flow) ──────────────────────────────────────
+
+    def _open_commit_dialog(self, path: str):
+        """Open GitCommitDialog for a given project path. Reused by
+        `cmd_git_commit` (Projects-tab right-click) AND by the
+        offer-commit-after-change flow that runs after Ensure .gitignore,
+        Shadow Links, Scaffold, and Retrofit.
+
+        Pre-flight check: if the project has tracked-but-ignored files,
+        offer to run Untrack Ignored Files FIRST. Otherwise the commit
+        attempt would inevitably hit git's "paths are ignored" error and
+        the user would have to come back and untrack anyway.
+        """
+        if _is_local_git_repo(path):
+            stale = _find_tracked_but_ignored(path)
+            if stale:
+                n = len(stale)
+                preview = "\n".join(f"  • {f}" for f in stale[:5])
+                if n > 5:
+                    preview += f"\n  • …and {n - 5} more"
+                choice = messagebox.askyesnocancel(
+                    "Tracked-but-ignored files detected",
+                    f"{n} file{'s' if n != 1 else ''} in this project "
+                    f"{'are' if n != 1 else 'is'} tracked by git BUT also "
+                    "match a .gitignore rule. Committing in this state "
+                    "usually surfaces git's 'paths are ignored' error and "
+                    "blocks the commit.\n\n"
+                    f"Affected:\n{preview}\n\n"
+                    "Yes  → run 🧹 Untrack Ignored Files first (recommended)\n"
+                    "No   → open the commit dialog anyway\n"
+                    "Cancel → close, do nothing",
+                    parent=self)
+                if choice is None:   # Cancel
+                    return
+                if choice:           # Yes — untrack first, that flow then
+                                     # offers a fresh commit prompt of its own
+                    UntrackIgnoredDialog(self, path, stale,
+                        reason="tracked but listed in .gitignore "
+                               "(blocks commit until untracked)")
+                    return
+        # No conflicts, OR user chose to proceed anyway
+        status_out, _ = self._shell_capture(
+            [GIT_EXE, "-C", path, "status", "--short"], path)
+        is_repo = _is_git_repo(path)
+        GitCommitDialog(self, path, status_out, is_repo, self._do_git_commit)
+
+    def _do_git_commit(self, path: str, message: str, selected: list):
+        """Stage and commit the picked files. `selected` is a list of
+        (filename, xy) tuples from the GitCommitDialog.
+        """
+        if not selected:
+            return
+        # Backward-compat: callers passing legacy list-of-strings still
+        # work; treat unknown XY as needs-add.
+        if selected and isinstance(selected[0], str):
+            selected = [(fname, "??") for fname in selected]
+
+        name = os.path.basename(path)
+        all_paths = [fname for fname, _xy in selected]
+        # xy[1] == ' ' means "no working-tree change" — file is fully
+        # captured in the index already (staged D, A, M, R, etc.).
+        files_to_add = [fname for fname, xy in selected
+                        if len(xy) >= 2 and xy[1] != ' ']
+
+        self._git._git_begin_op()
+
+        def worker():
+            try:
+                if files_to_add:
+                    out, rc = self._shell_capture(
+                        [GIT_EXE, "-C", path, "add", "--"] + files_to_add, path)
+                    if rc != 0:
+                        if "ignored by one of your .gitignore files" in out:
+                            offending = [
+                                ln.strip() for ln in out.splitlines()
+                                if ln.strip() and not ln.strip().startswith(
+                                    ("hint:", "The following", "warning:"))]
+                            self.after(0, lambda: messagebox.showwarning(
+                                "Tracked-but-ignored files",
+                                "Some of the files you selected are already "
+                                "tracked by git AND match a .gitignore rule. "
+                                "Git refuses to re-add them in this state.\n\n"
+                                f"Affected paths:\n  "
+                                + "\n  ".join(offending[:10])
+                                + ("\n  …" if len(offending) > 10 else "")
+                                + "\n\nFix: right-click → "
+                                "🧹 Untrack Ignored Files… → untrack those "
+                                "paths first. Then commit the result.",
+                                parent=self))
+                        else:
+                            self.after(0, lambda: self._log(
+                                f"git add failed: {out.strip()}", C["red"]))
+                        return
+
+                self._log(f"[{name}] Committing ({len(all_paths)} file"
+                          f"{'s' if len(all_paths) != 1 else ''})…",
+                          C["peach"])
+                commit_cmd = ([GIT_EXE, "-C", path, "commit", "-m", message,
+                               "--"] + all_paths)
+                cout, crc = self._shell_capture(commit_cmd, path)
+                col = C["green"] if crc == 0 else C["red"]
+                for line in cout.strip().splitlines()[-4:]:
+                    self.after(0, lambda l=line: self._log(f"  {l}", col))
+                self.after(0, self.refresh)
+            finally:
+                self.after(0, self._git._git_end_op)
+
+        threading.Thread(target=worker, daemon=True).start()
+
     def cmd_settings(self):
         SettingsDialog(self, _cfg, _save_config, self._on_settings_saved)
 
