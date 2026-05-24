@@ -116,26 +116,56 @@ Turns the manager into a project-memory tool:
 
 ---
 
-## Code-health backlog (post-Round-5 / Roadmap-1)
+## Code-health backlog
 
-Round 4 split the monolith into subpackages (equality 0.16 → 0.57, quality 5,689 → 7,003). Round 5 extracted 9 sub-controllers from `ProjectsTabController` + 2 from `App`, cleared `_do_retrofit`, `_ask_send`, `GitCommitDialog.__init__`, and the dialog duplication audit. Roadmap-1 added 6 new features + cleared the pyflakes baseline to zero. The remaining backlog:
+Round 4 split the monolith into subpackages (equality 0.16 → 0.57, quality 5,689 → 7,003). Round 5 extracted 9 sub-controllers from `ProjectsTabController` + 2 from `App`. Roadmap-1 added 6 new features + cleared the pyflakes baseline to zero. Roadmap-2 added the Doctor monolith audit (file/method/class/complexity caps surfaced automatically) and shipped Phases 0, 1, 2.
 
-### 🔮 W2 — `_render_block` complex branch tangle (dialogs/mcp_config.py:154)
-11 branches handling different MCP config row states. Refactor into a dispatch table keyed on row classification. Worth doing before extending MCP support to additional editors.
+### Roadmap-2 scope (in-progress)
 
-### 🔮 W4 — `ReleaseWizardDialog._build_ui` (~186 lines)
-Split per wizard step into `_build_version_step`, `_build_notes_step`, `_build_summary_step`. The flat 186-line method makes it hard to add a "narrative writer" step (planned for Stage 6).
+- ✅ **ProposalDialog → agent_tools wiring** (Phase 1, shipped 2026-05-24). `write_file` tool gated behind ProposalDialog with race-safe `_resolve`, hash-recheck, symlink protection, app-shutdown bridge cancellation. Unblocks Stage 3 CHANGELOG drafter and most of Stage 7.
+- ✅ **ReleaseWizard → changelog_patch wiring** (Phase 2, shipped 2026-05-24). `insert_changelog_release` extended with idempotent-replace + boundary precision; `helpers/release.py:_patch_changelog` deleted (single canonical patcher).
+- 🟡 **W4 — `ReleaseWizardDialog._build_ui` (~186 lines)** → Phase 3 splits it per wizard step (`_build_version_section`, `_build_notes_section`, `_build_publish_section`).
+- 🟡 **W5 — `GitTabController` god class (~50 direct methods after Draft PR)** → Phase 4 extracts the branch-management cluster (`cmd_git_new_branch`, `cmd_git_switch_branch`, `cmd_git_merge`, `cmd_git_delete_branch`, workers) into `src/controllers/branch_mgmt_ctrl.py`. Same callback-injection pattern as Round 5.
+- 🟡 **Phase 4.5 — Dialog `__init__` split sweep**. Apply Phase 3's per-section split pattern to 6 dialog constructors that exceed the 100-line method cap: `gitignore.py` (148), `github_setup.py` (132), `ollama_model_mgr.py` (122), `ai_code_review.py` (119 + `_start_review` 102), `untrack_ignored.py` (112), `merge_pr.py` (110). One commit per dialog. Plus `ai_code_review.py:_start_review` (behaviour code, not layout — split by function, not line count).
+- 🔮 **W2 — `_render_block` complex branch tangle (dialogs/mcp_config.py:154, 109 lines)**. 11 branches handling different MCP config row states. Refactor into a dispatch table keyed on row classification. Worth doing before extending MCP support to additional editors. Deferred from Roadmap-2 scope; revisit in Roadmap-3.
 
-### 🔮 W5 — `GitTabController` god class (~44 direct methods, now ~50 after Draft PR)
-Extract the branch-management cluster (`cmd_git_new_branch`, `cmd_git_switch_branch`, `cmd_git_merge`, `cmd_git_delete_branch`, related workers) into a `BranchManagementController` sub-controller. Same callback-injection pattern as Round 5's projects-tab extractions.
+### Roadmap-3 code-health backlog (post-Roadmap-2 Doctor snapshot)
 
-### 🔮 ProposalDialog → agent_tools wiring (Roadmap-2 prerequisite)
-The Stage 3 CHANGELOG drafter is blocked on a write-tool path: `agent_tools.py` needs a `write_file` tool that builds `WriteProposal(filepath, original, proposed, rationale)`, calls `ProposalDialog(root, proposal, on_accept)` via `root.after(0, ...)`, and blocks on a `threading.Event` until the user resolves the dialog. Once shipped, Stage 3 + most of Stage 7 unlock.
+Doctor's full project audit surfaced 49 violations across 22 files at the start of Roadmap-2. After Phases 3 + 4 + 4.5 close out, ~30 violations will remain — all genuine branching logic that needs per-helper refactoring, NOT template-able sweeps. Treat each cluster as an independent Roadmap-3 work item, not all-at-once.
 
-### 🔮 ReleaseWizard → changelog_patch wiring (Roadmap-2 follow-on)
-`helpers/changelog_patch.py:insert_changelog_release` shipped in Roadmap-1 as a pure helper but isn't wired anywhere yet. ReleaseWizard's "publish release" path is the natural call site — insert the new version block under `## [Unreleased]` after the user confirms notes.
+**Helper complexity (highest value — central to AI feature stack):**
+- 🔮 `helpers/commit_messages.py` — 5 functions over cap (`_suggest_from_diff_content`=21, `_extract_changelog_additions`=18, `_message_from_changelog`=18, `_suggest_from_filenames`=18, `_sanitize_commit_message`=13). Multi-strategy orchestrator chain — natural shape is each `_strat_*` function in its own helper module.
+- 🔮 `helpers/llm.py` — 4 functions over cap (`_call_openai_compat`=20, `_call_llm`=15, `_call_anthropic`=14, `_iter_json_lines`=11). Provider-dispatch + SSE-parsing. Cleanest split is per-provider sub-module (`llm/anthropic.py`, `llm/openai_compat.py`, `llm/sse.py`).
 
-All have low CC (≤ 4) — they're straight-line layout code. Apply the same pattern Round 3 used for `SettingsDialog._build_ai_section`: split each into `_build_<section>` helpers. Pure readability / diff-size win, zero correctness risk.
+**Helper complexity (lower-stakes — promote when actually touching the affected code):**
+- 🔮 `helpers/git.py` `_format_git_status_cell`=16
+- 🔮 `helpers/project_discovery.py` `find_projects`=16
+- 🔮 `helpers/scaffold.py` `_scaffold_git_hook`=14
+- 🔮 `helpers/gitignore.py` `_ensure_gitignore`=13
+- 🔮 `helpers/release.py` `_classify_commits_for_changelog`=12, `_suggest_bump_kind`=11
+- 🔮 `helpers/shadow_links.py` `remove_shadow_links`=11
+
+**Controllers / dialogs (behaviour complexity, not layout — Phase 4.5 doesn't cover these):**
+- 🔮 `controllers/projects_tab.py` class 44 methods (over 40 even after Round 5's 9 extractions) + `__init__` 109 lines + `rebuild_tree` complexity 13. Diminishing returns on further extraction; consider grandfathering via `doctor_skip_monolith_paths` if Phase 4 makes it the heaviest controller and no clean further split exists.
+- 🔮 `controllers/snippets.py` `_on_snippet_saved`=11
+- 🔮 `dialogs/mcp_config.py` `_apply`=11
+- 🔮 `dialogs/ollama_model_mgr.py` `_fetch_context_length`=12, `_worker`=12
+- 🔮 `dialogs/release_wizard.py` `_refresh_artefact_preview`=15
+- 🔮 `dialogs/gitignore.py` `_on_save`=12
+- 🔮 `dialogs/ai_code_review.py` `_render_review`=11
+
+**Agent / app pre-existing (called out in Roadmap-2 plan as do-not-touch within Phase 1):**
+- 🔮 `agent.py` `run()`=18, `_rescue_tool_call_from_content`=19/101 lines, `_run_anthropic_oneshot`=20
+- 🔮 `agent_tools.py` `_suggest_paths_for_missing_file`=11, `_read_file`=13, `_runner`=17
+- 🔮 `app.py` `_check_config`=14, `worker`=14
+
+### 💭 Genuine dead-code cleanup in `src/agent_tools.py` (10-minute pass)
+Three functions look genuinely unused after Phase E (grep-verified, NOT Tk-callback false positives):
+- `_read_file_range` at `agent_tools.py:218` — superseded by inline handling in the `read_file` tool handler. **Verify** no caller remains, then delete.
+- `_suggest_paths_for_missing_file` at `agent_tools.py:249` — docstring claims it's called from `read_file`'s error path; verify the wiring still routes through it.
+- `_slim_tokensave_context` at `agent_tools.py:452` — verify the `tokensave_context` tool handler still calls it.
+
+Plus two genuine unused imports in the same file: `dataclasses.dataclass` (L26) and `typing.Callable` (L27) — leftover from the legacy ToolSpec class.
 
 ### 💭 Genuine dead-code cleanup in `src/agent_tools.py` (10-minute pass)
 Three functions look genuinely unused after Phase E (grep-verified, NOT Tk-callback false positives):
