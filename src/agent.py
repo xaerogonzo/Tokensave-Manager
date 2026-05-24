@@ -496,76 +496,89 @@ class LocalAgent:
     # ── HTTP: OpenAI-compatible chat completion with tools ──────────────
 
     def _chat_completion(self, messages: list[dict]) -> dict | None:
-        """POST one /v1/chat/completions request with the tools array
-        and return the parsed response dict, or None on failure.
+        """POST one /v1/chat/completions request and return parsed JSON or None.
 
-        On failure, stores a detailed error message on `self._last_error`
-        (and logs it) so the calling `run()` can pass that detail to
-        `on_error` instead of a generic "LLM request failed" message.
-
-        For Ollama: passes `options.num_ctx` (default 32768) to bump the
-        per-request context window. Ollama's default `num_ctx` is 2048
-        tokens — drastically below what most modern models actually
-        support, and easily exceeded after 2-3 tool-call iterations
-        where each tool result can be hundreds of bytes. Symptom: 4xx
-        or 5xx response after a few successful round trips with no
-        obvious cause. Setting this explicitly via the OpenAI-compat
-        `options` extension fixes it. Non-Ollama providers ignore the
-        field. Tunable via `cfg["num_ctx"]`.
+        Resolves provider settings, builds the payload, executes the request.
+        On any failure, stores a human-readable message on self._last_error.
         """
         provider = (self.cfg.get("provider") or "anthropic").lower()
         base_url = (self.cfg.get("base_url") or "").rstrip("/")
-        model = self.cfg.get("model") or ""
+        model    = self.cfg.get("model") or ""
         api_key_env = self.cfg.get("api_key_env") or ""
-        api_key = os.environ.get(api_key_env, "") if api_key_env else ""
-        timeout = int(self.cfg.get("timeout_seconds", DEFAULT_HTTP_TIMEOUT))
+        api_key  = os.environ.get(api_key_env, "") if api_key_env else ""
+        timeout  = int(self.cfg.get("timeout_seconds", DEFAULT_HTTP_TIMEOUT))
         if timeout < 60:
             timeout = DEFAULT_HTTP_TIMEOUT
-        is_ollama = (provider == "ollama")
 
-        # ollama → openai_compatible alias (matches _call_llm).
+        provider, base_url, is_ollama = self._normalize_provider(provider, base_url)
+        url = self._resolve_chat_url(provider, base_url)
+        if url is None:
+            return None
+
+        payload = self._build_chat_payload(messages, is_ollama, model)
+        headers = {"Content-Type": "application/json"}
+        if api_key:
+            headers["Authorization"] = f"Bearer {api_key}"
+
+        return self._execute_chat_request(url, payload, headers, timeout)
+
+    def _normalize_provider(
+            self, provider: str, base_url: str) -> tuple[str, str, bool]:
+        """Normalize 'ollama' to 'openai_compatible' and detect the Ollama port.
+
+        Returns (provider, base_url, is_ollama). is_ollama drives the
+        num_ctx injection in _build_chat_payload.
+        """
+        is_ollama = (provider == "ollama")
         if provider == "ollama":
             provider = "openai_compatible"
             if not base_url:
                 base_url = "http://localhost:11434"
-        # Also flag a configured openai_compatible pointing at the default
-        # Ollama port — same context-window concern applies.
+        # openai_compatible pointed at the default Ollama port needs num_ctx too.
         if not is_ollama and provider == "openai_compatible" \
                 and base_url and "11434" in base_url:
             is_ollama = True
+        return provider, base_url, is_ollama
 
+    def _resolve_chat_url(self, provider: str, base_url: str) -> str | None:
+        """Return the /v1/chat/completions URL, or None (sets self._last_error)."""
         if provider == "openai":
-            url = "https://api.openai.com/v1/chat/completions"
-        elif provider == "openai_compatible":
+            return "https://api.openai.com/v1/chat/completions"
+        if provider == "openai_compatible":
             if not base_url:
-                self._last_error = ("openai_compatible provider has no "
-                                    "base_url set — open Settings → AI "
-                                    "commit messages and configure it.")
+                self._last_error = (
+                    "openai_compatible provider has no base_url set — "
+                    "open Settings → AI commit messages and configure it.")
                 return None
-            url = base_url + "/v1/chat/completions"
-        else:
-            self._last_error = (
-                f"provider '{provider}' is not supported for tool calling. "
-                "Use 'ollama', 'openai', or 'openai_compatible'.")
-            return None
+            return base_url + "/v1/chat/completions"
+        self._last_error = (
+            f"provider '{provider}' is not supported for tool calling. "
+            "Use 'ollama', 'openai', or 'openai_compatible'.")
+        return None
 
-        payload = {
+    def _build_chat_payload(
+            self, messages: list[dict], is_ollama: bool, model: str) -> dict:
+        """Assemble the /v1/chat/completions request body.
+
+        Injects options.num_ctx for Ollama to work around the 2048-token
+        default context window (tunable via cfg["num_ctx"]).
+        """
+        payload: dict = {
             "model": model or "qwen2.5-coder:14b",
             "messages": messages,
             "temperature": 0.2,
             "tools": tools_as_openai_array(self.tools),
             "tool_choice": "auto",
         }
-        # Ollama-specific: bump num_ctx via the options field. Other
-        # OpenAI-compatible servers (LM Studio, vLLM) ignore this.
         if is_ollama:
             num_ctx = int(self.cfg.get("num_ctx", 32768))
             payload["options"] = {"num_ctx": num_ctx}
+        return payload
 
-        headers = {"Content-Type": "application/json"}
-        if api_key:
-            headers["Authorization"] = f"Bearer {api_key}"
-
+    def _execute_chat_request(
+            self, url: str, payload: dict,
+            headers: dict, timeout: int) -> dict | None:
+        """POST payload to url; parse and return JSON, or set self._last_error."""
         req = urllib.request.Request(
             url, method="POST",
             data=json.dumps(payload).encode("utf-8"),
@@ -573,11 +586,10 @@ class LocalAgent:
         )
         try:
             with urllib.request.urlopen(req, timeout=timeout) as resp:
-                data = json.loads(resp.read().decode("utf-8"))
+                return json.loads(resp.read().decode("utf-8"))
         except urllib.error.HTTPError as e:
-            # Read the body — Ollama / OpenAI both put useful diagnostics
-            # there (e.g. "context length exceeded", "model not found",
-            # "invalid tool schema").
+            # Ollama / OpenAI put useful diagnostics in the body
+            # ("context length exceeded", "model not found", etc.).
             try:
                 body = e.read().decode("utf-8", errors="replace")[:600]
             except OSError:
@@ -586,7 +598,6 @@ class LocalAgent:
                 f"HTTP {e.code} from {url}: {e.reason}. "
                 f"Response body: {body}")
             log.warning("chat completion HTTP %d: %s", e.code, body[:200])
-            return None
         except (urllib.error.URLError, TimeoutError) as e:
             reason = getattr(e, "reason", str(e))
             self._last_error = (
@@ -594,19 +605,16 @@ class LocalAgent:
                 f"{reason}. Is the LLM server running and reachable?")
             log.warning("chat completion network failure: %s: %s",
                         type(e).__name__, reason)
-            return None
         except json.JSONDecodeError as e:
             self._last_error = (
                 f"Server at {url} returned non-JSON response: {e}. "
                 "Provider misconfiguration or wrong URL?")
             log.warning("chat completion JSON decode failed: %s", e)
-            return None
         except OSError as e:
             self._last_error = (
                 f"OS error talking to {url}: {type(e).__name__}: {e}")
             log.warning("chat completion OS error: %s", e)
-            return None
-        return data
+        return None
 
     # ── Anthropic fallback (no tools in v1) ─────────────────────────────
 

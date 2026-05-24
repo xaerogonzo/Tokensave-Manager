@@ -6349,115 +6349,118 @@ class GitTabController:
         return branch
 
     def _do_delete_branch(self, path: str, branch: str) -> None:
-        """Execute local (and optionally remote) branch deletion on background threads."""
+        """Start the local-branch-delete flow on a background thread."""
         self._git_begin_op()
+        threading.Thread(
+            target=self._del_branch_worker, args=(path, branch),
+            daemon=True).start()
 
-        def worker():
-            try:
-                out, rc = self._on_shell(
-                    [GIT_EXE, "-C", path, "branch", "-d", branch], path)
-                if rc == 0:
-                    self._log_queue.put((
-                        f"  [{os.path.basename(path)}] Deleted branch '{branch}'",
-                        C["green"]))
-                    self._tab.after(0, lambda: offer_remote_delete(branch))
-                    return
-                out_l = out.lower()
-                if "not fully merged" in out_l or "unmerged" in out_l:
-                    self._tab.after(0, ask_force)
-                else:
-                    self._tab.after(0, lambda: messagebox.showerror(
-                        "Delete Failed",
-                        f"Could not delete branch '{branch}':\n\n{out.strip()}",
-                        parent=self._root))
-                    self._tab.after(0, self._git_end_op)
-            except Exception:
+    # ── Branch-delete helpers (one per step; thread boundary in name) ────────
+    # Methods named *_worker run on a background thread → use self._tab.after()
+    # for any UI touch. Other methods run on the main thread → Tkinter-safe.
+
+    def _del_branch_worker(self, path: str, branch: str) -> None:
+        """Thread: attempt safe delete (`git branch -d`). Route to next step."""
+        try:
+            out, rc = self._on_shell(
+                [GIT_EXE, "-C", path, "branch", "-d", branch], path)
+            if rc == 0:
+                self._log_queue.put((
+                    f"  [{os.path.basename(path)}] Deleted branch '{branch}'",
+                    C["green"]))
+                self._tab.after(0, self._del_branch_offer_remote, path, branch)
+                return
+            out_l = out.lower()
+            if "not fully merged" in out_l or "unmerged" in out_l:
+                self._tab.after(0, self._del_branch_ask_force, path, branch)
+            else:
+                self._tab.after(0, lambda: messagebox.showerror(
+                    "Delete Failed",
+                    f"Could not delete branch '{branch}':\n\n{out.strip()}",
+                    parent=self._root))
                 self._tab.after(0, self._git_end_op)
-                raise
+        except Exception:
+            self._tab.after(0, self._git_end_op)
+            raise
 
-        def ask_force():
-            if not messagebox.askyesno(
-                    "Force Delete?",
-                    f"Branch '{branch}' has unmerged changes.\n\n"
-                    "Force-delete anyway?\n"
-                    "This permanently discards those commits.",
-                    parent=self._root):
-                self._git_end_op()
+    def _del_branch_ask_force(self, path: str, branch: str) -> None:
+        """Main thread: ask user whether to force-delete an unmerged branch."""
+        if not messagebox.askyesno(
+                "Force Delete?",
+                f"Branch '{branch}' has unmerged changes.\n\n"
+                "Force-delete anyway?\n"
+                "This permanently discards those commits.",
+                parent=self._root):
+            self._git_end_op()
+            return
+        threading.Thread(
+            target=self._del_branch_force_worker, args=(path, branch),
+            daemon=True).start()
+
+    def _del_branch_force_worker(self, path: str, branch: str) -> None:
+        """Thread: force-delete (`git branch -D`). Route to remote-offer on success."""
+        try:
+            o2, r2 = self._on_shell(
+                [GIT_EXE, "-C", path, "branch", "-D", branch], path)
+            col = C["green"] if r2 == 0 else C["red"]
+            msg = f"Force-deleted '{branch}'" if r2 == 0 else o2.strip()
+            self._log_queue.put((f"  [{os.path.basename(path)}] {msg}", col))
+            if r2 == 0:
+                self._tab.after(0, self._del_branch_offer_remote, path, branch)
                 return
+        finally:
+            self._tab.after(0, self._git_end_op)
 
-            def force_worker():
-                try:
-                    o2, r2 = self._on_shell(
-                        [GIT_EXE, "-C", path, "branch", "-D", branch], path)
-                    col = C["green"] if r2 == 0 else C["red"]
-                    msg = f"Force-deleted '{branch}'" if r2 == 0 else o2.strip()
-                    self._log_queue.put((
-                        f"  [{os.path.basename(path)}] {msg}", col))
-                    if r2 == 0:
-                        self._tab.after(0, lambda: offer_remote_delete(branch))
-                        return
-                finally:
-                    self._tab.after(0, self._git_end_op)
+    def _del_branch_offer_remote(self, path: str, branch: str) -> None:
+        """Main thread: check for a remote copy; ask user whether to delete it too."""
+        rbo, rbrc = self._on_shell(
+            [GIT_EXE, "-C", path, "branch", "-r"], path)
+        has_remote = rbrc == 0 and any(
+            line.strip().split(" ", 1)[0] == f"origin/{branch}"
+            for line in rbo.strip().splitlines())
+        if not has_remote:
+            self._git_end_op()
+            return
+        if not messagebox.askyesno(
+                "Delete from GitHub too?",
+                f"'{branch}' is deleted locally, but a copy still\n"
+                f"exists on GitHub (origin/{branch}).\n\n"
+                "Also delete it from GitHub?\n"
+                "(This is the same as running\n"
+                f"  git push origin --delete {branch})",
+                parent=self._root):
+            self._git_end_op()
+            return
+        threading.Thread(
+            target=self._del_branch_remote_worker, args=(path, branch),
+            daemon=True).start()
 
-            threading.Thread(target=force_worker, daemon=True).start()
-
-        def offer_remote_delete(deleted_branch: str):
-            rbo, rbrc = self._on_shell(
-                [GIT_EXE, "-C", path, "branch", "-r"], path)
-            has_remote = False
-            if rbrc == 0:
-                target = f"origin/{deleted_branch}"
-                for line in rbo.strip().splitlines():
-                    if line.strip().split(" ", 1)[0] == target:
-                        has_remote = True
-                        break
-            if not has_remote:
-                self._git_end_op()
-                return
-
-            if not messagebox.askyesno(
-                    "Delete from GitHub too?",
-                    f"'{deleted_branch}' is deleted locally, but a copy still\n"
-                    f"exists on GitHub (origin/{deleted_branch}).\n\n"
-                    "Also delete it from GitHub?\n"
-                    "(This is the same as running\n"
-                    f"  git push origin --delete {deleted_branch})",
-                    parent=self._root):
-                self._git_end_op()
-                return
-
-            def remote_worker():
-                try:
-                    ro, rrc = self._on_shell(
-                        [GIT_EXE, "-C", path, "push", "origin", "--delete",
-                         deleted_branch],
-                        path, env=_GIT_ENV_NO_PROMPT)
-                    col = C["green"] if rrc == 0 else C["red"]
-                    if rrc == 0:
-                        self._log_queue.put((
-                            f"  [{os.path.basename(path)}] "
-                            f"Deleted 'origin/{deleted_branch}' from GitHub",
-                            col))
-                    else:
-                        self._log_queue.put((
-                            f"  [{os.path.basename(path)}] Remote delete failed",
-                            col))
-                        for line in ro.strip().splitlines()[-4:]:
-                            self._log_queue.put((f"    {line}", col))
-                        if _is_auth_error(ro):
-                            self._tab.after(0, lambda: messagebox.showinfo(
-                                "GitHub Authentication Required",
-                                "GitHub needs to verify your identity.\n\n"
-                                "Open a terminal in the project folder and run:\n"
-                                f"    git push origin --delete {deleted_branch}\n\n"
-                                "A browser window will open asking you to log in.",
-                                parent=self._root))
-                finally:
-                    self._tab.after(0, self._git_end_op)
-
-            threading.Thread(target=remote_worker, daemon=True).start()
-
-        threading.Thread(target=worker, daemon=True).start()
+    def _del_branch_remote_worker(self, path: str, branch: str) -> None:
+        """Thread: `git push origin --delete <branch>`. Log result."""
+        try:
+            ro, rrc = self._on_shell(
+                [GIT_EXE, "-C", path, "push", "origin", "--delete", branch],
+                path, env=_GIT_ENV_NO_PROMPT)
+            col = C["green"] if rrc == 0 else C["red"]
+            if rrc == 0:
+                self._log_queue.put((
+                    f"  [{os.path.basename(path)}] "
+                    f"Deleted 'origin/{branch}' from GitHub", col))
+            else:
+                self._log_queue.put((
+                    f"  [{os.path.basename(path)}] Remote delete failed", col))
+                for line in ro.strip().splitlines()[-4:]:
+                    self._log_queue.put((f"    {line}", col))
+                if _is_auth_error(ro):
+                    self._tab.after(0, lambda: messagebox.showinfo(
+                        "GitHub Authentication Required",
+                        "GitHub needs to verify your identity.\n\n"
+                        "Open a terminal in the project folder and run:\n"
+                        f"    git push origin --delete {branch}\n\n"
+                        "A browser window will open asking you to log in.",
+                        parent=self._root))
+        finally:
+            self._tab.after(0, self._git_end_op)
 
 
 # ── App ────────────────────────────────────────────────────────────────────────
