@@ -17,6 +17,19 @@ import os
 import re
 
 
+# ── Repo base dir (works under both python.exe and Nuitka --onefile) ─────────
+# Under Nuitka --onefile, NUITKA_ONEFILE_PARENT is the actual .exe path.
+# In dev mode, constants.py lives in src/ so go up one level to repo root.
+if os.environ.get("NUITKA_ONEFILE_PARENT"):
+    _BASE_DIR = os.path.dirname(os.path.abspath(os.environ["NUITKA_ONEFILE_PARENT"]))
+else:
+    _BASE_DIR = os.path.normpath(os.path.join(os.path.dirname(os.path.abspath(__file__)), ".."))
+
+_CONFIG_PATH = os.path.join(_BASE_DIR, "manager-config.json")
+LOG_DIR      = os.path.join(_BASE_DIR, "logs")
+LOG_FILE     = os.path.join(LOG_DIR, "manager.log")
+
+
 # ── ANSI escape stripper ──────────────────────────────────────────────────────
 # Used by App._run when streaming subprocess output to the OUTPUT pane so
 # tokensave's coloured output doesn't render as raw escape sequences.
