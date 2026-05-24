@@ -4,6 +4,10 @@
 ## [Unreleased]
 
 ### Added
+- **Document Ollama + LM Studio simultaneous-loading gotcha.** Both inference engines reserve RAM/VRAM independently and don't share state. Running them at the same time can cause Ollama to refuse loading a model with `HTTP 500: "model requires more system memory (X GiB) than is available (Y GiB)"` — the error message points at total system memory without hinting that another inference daemon is holding the difference. Documented in two places:
+  - **Persistent ⓘ note in Settings → AI commit messages** (below the Quick presets row) — point-of-use guidance with the concrete workarounds (LM Studio Eject; `ollama stop <model>`).
+  - **New "Provider gotchas" subsection in `docs/AGENT_ARCHITECTURE.md`** — also covers `num_ctx` defaults and LM Studio's separate "Start Server" requirement.
+
 - **Roadmap-2 Phase 3 — `ReleaseWizardDialog._build_ui` split per wizard step.** The 186-line orchestrator is now an 8-line method that calls one builder per on-screen section: `_build_header_section`, `_build_version_section`, `_build_title_section`, `_build_notes_section`, `_build_build_section`, `_build_artefact_section`, `_build_changelog_section`, `_build_publish_section`. Each builder is named for the user-visible wizard step it owns (semantic grouping per BASIC_INSTRUCTIONS Rule A — not arbitrary geometry chunks). Zero behaviour change; pure layout refactor. All 8 builders qualify for the Doctor layout-method carve-out (`_build_*_section` name + complexity ≤ 3) so the 100-line method cap no longer flags the wizard.
 
 - **Roadmap-2 Phase 2 — ReleaseWizard wired to `changelog_patch`; daemon control UI in the footer.** Two unrelated-but-paired pieces of plumbing:

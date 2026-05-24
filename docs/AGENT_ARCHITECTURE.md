@@ -25,6 +25,17 @@ Autonomous execution (Stage 5+) will be opt-in per tool with an explicit allowli
 | **Tool registry** | `ToolSpec` dataclass entries in `src/agent_tools.py`. v1 ships six READ-ONLY tools: `read_file`, `list_directory`, `git_log`, `git_diff`, `tokensave_search`, `tokensave_context`. Path-bearing arguments validated by `_under_project` (real-path containment check) to prevent the model from reading outside the project root. |
 | **UI gate** | Future: `ProposalDialog(tk.Toplevel)` for any `is_write=True` tool call (Stage 3+). |
 
+### Provider gotchas (real things that have bitten users)
+
+- **Running Ollama and LM Studio simultaneously can break model loading.** Both inference engines load their model into RAM/VRAM independently — they don't share state and don't know about each other. If LM Studio has a 7B model loaded and you ask Ollama to load a 14B model, Ollama's memory-availability check refuses with `HTTP 500: "model requires more system memory (X GiB) than is available (Y GiB)"`. The error message points at total system memory and doesn't hint that another inference daemon is holding the difference.
+  - **Workaround**: unload one model before loading the other. LM Studio: Eject button in the model dropdown. Ollama: `ollama ps` then `ollama stop <model>`.
+  - **Why the manager doesn't auto-detect this**: the manager only knows about ONE provider at a time (whichever is selected in Settings → AI commit messages). Polling both engines on every LLM call would add latency to the happy path.
+  - **Symptom in the manager**: `_call_llm` returns `None` silently (intentional — commit-message generation must never block a commit because of an LLM error). The Ask tab agent path DOES surface the full HTTP body via `LocalAgent._last_error`, so the chat will show you the "more system memory" message verbatim.
+
+- **`num_ctx` for Ollama defaults to 32 768** in `commit_message_llm`. If you're running a model that only supports a smaller context, requests may be silently truncated. Check the model's actual context limit (`ollama show <model>`) and tune the setting if needed.
+
+- **LM Studio's OpenAI-compatible server must be explicitly started** (`</>` panel → "Start Server"). Loading a model in the chat UI does NOT start the server. If you've configured LM Studio in Settings but `_call_llm` returns `None`, this is the most likely cause.
+
 ---
 
 ## What's built today (Stage 0 + Stage 1 + Stage 2)

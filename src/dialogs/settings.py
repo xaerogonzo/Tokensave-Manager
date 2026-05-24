@@ -694,6 +694,20 @@ class SettingsDialog(tk.Toplevel):
         ttk.Button(preset_row, text="LM Studio", command=_apply_lm_studio).pack(side=tk.LEFT, padx=(0, 4))
         ttk.Button(preset_row, text="Ollama",    command=_apply_ollama).pack(side=tk.LEFT)
 
+        # Persistent gotcha note — both Ollama and LM Studio load models into
+        # RAM/VRAM independently. Running them at the same time can starve the
+        # second loader (the error message blames "system memory" without
+        # hinting that another inference daemon is holding the difference).
+        tk.Label(body,
+                 text=("ⓘ  Running Ollama and LM Studio at the same time can "
+                       "break model loading — both reserve RAM/VRAM "
+                       "independently. If a load fails with \"more system "
+                       "memory\" while the other tool is running, unload one "
+                       "first (LM Studio → Eject;  `ollama stop <model>`)."),
+                 font=("Segoe UI", 8), bg=C["base"], fg=C["overlay0"],
+                 justify=tk.LEFT, wraplength=620, anchor=tk.W
+                 ).pack(anchor=tk.W, padx=36, pady=(4, 0), fill=tk.X)
+
     def _build_ai_options(self, body, llm_cfg):
         """Min-diff-lines spinner, sync auto-commit toggle, disclaimer."""
         min_row = tk.Frame(body, bg=C["base"])
