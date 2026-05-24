@@ -38,10 +38,18 @@ Token Save Manager Source/
 │   │                              paths (_BASE_DIR, _CONFIG_PATH, LOG_FILE).
 │   ├── theme.py                   _Tooltip widget (Tk-coupled UI primitive).
 │   ├── tokensave-wrapper.py       Claude Desktop auto-detection wrapper (~120 lines)
-│   ├── agent.py                   LocalAgent loop for the 🤖 Ask tab (Stage 2)
-│   ├── agent_tools.py             ToolSpec registry (6 read-only tools) (Stage 2)
+│   ├── agent.py                   LocalAgent loop for the 🤖 Ask tab — Stage 2
+│   │                              read-only tool calling + Stage 3 write-tool dispatch
+│   │                              via injected on_write_proposal bridge
+│   ├── agent_tools.py             ToolSpec registry — 6 read-only tools + opt-in
+│   │                              `write_file` via build_tools(with_write=True);
+│   │                              write tools route through ProposalBridge per Stage 3
+│   ├── precommit_review.py        Standalone entry point for the git pre-commit AI
+│   │                              review hook — reads `git diff --cached`, dispatches
+│   │                              to backend, parses severity, exits 0 (warn) or 1
+│   │                              (block per threshold). Fail-open on every error.
 │   │
-│   ├── helpers/                   16 modules of pure / IO helpers — no UI deps.
+│   ├── helpers/                   19 modules of pure / IO helpers — no UI deps.
 │   │   ├── config.py              _load_config, _save_config, _migrate_config
 │   │   ├── detection.py           _detect_git/_gh/_npm/_codegraph/_claude_cli,
 │   │   │                          _root_path/_label, _version_lt
@@ -63,16 +71,25 @@ Token Save Manager Source/
 │   │   │                          cluster + _pending_diff + _call_llm_for_commit_message
 │   │   ├── release.py             _last_release_tag, _commits_since, _classify_commits_for_changelog,
 │   │   │                          _bump_version, _suggest_bump_kind, _render_release_notes,
-│   │   │                          _patch_changelog, _zip_dist, _release_basename, _fmt_size
-│   │   ├── daemon_cost.py         get_daemon_status, toggle_daemon, parse_tokensave_cost
-│   │   │                          (parses `tokensave daemon --status` + `tokensave cost`)
+│   │   │                          _zip_dist, _release_basename, _fmt_size
+│   │   │                          (Roadmap-2 P2: _patch_changelog removed; canonical
+│   │   │                          implementation now lives in helpers/changelog_patch.py)
+│   │   ├── daemon_cost.py         get_daemon_status, toggle_daemon, toggle_autostart,
+│   │   │                          parse_tokensave_cost
+│   │   │                          (parses `tokensave daemon --status` + `tokensave cost`;
+│   │   │                          P2 fixed `--start` bug and added autostart toggle)
 │   │   ├── pr_draft.py            generate_pr_draft — LLM-backed structured PR description
 │   │   │                          (Summary / Technical / Threat Model / Verification)
-│   │   ├── changelog_patch.py     insert_changelog_release — atomic ## [Unreleased] patcher
-│   │   │                          (pure; not wired to UI yet — ReleaseWizard integration
-│   │   │                          queued for Roadmap-2)
-│   │   └── claude_cli.py          spawn_claude_cli — detached cmd.exe via CREATE_NEW_CONSOLE
-│   │                              with ""outer"" multi-quote fix + \r\n strip (TTY safety)
+│   │   ├── changelog_patch.py     insert_changelog_release — IDEMPOTENT atomic patcher
+│   │   │                          (replaces existing ## [version] block bounded by next
+│   │   │                          ^## \[ line; falls back to insertion under
+│   │   │                          ## [Unreleased]). Wired into ReleaseWizard P2.
+│   │   ├── claude_cli.py          spawn_claude_cli — detached cmd.exe via CREATE_NEW_CONSOLE
+│   │   │                          with ""outer"" multi-quote fix + \r\n strip (TTY safety)
+│   │   └── precommit_hook.py      install/remove/detect git pre-commit AI review hook
+│   │                              + the review runner (run_review, parse_severity_summary,
+│   │                              severity_blocks_commit, backend dispatch for
+│   │                              "auto"/"claude_cli"/"llm"). Roadmap-2 P5b.
 │   │
 │   ├── dialogs/                   20 tk.Toplevel dialog classes — one per file.
 │   │   ├── settings.py            SettingsDialog (+ _probe_loaded_model helper)
@@ -94,23 +111,35 @@ Token Save Manager Source/
 │   │   ├── assign_category.py     AssignCategoryDialog
 │   │   ├── untrack_ignored.py     UntrackIgnoredDialog
 │   │   ├── cost_viewer.py         CostViewerDialog (2x2 metric grid; bg-threaded fetch)
-│   │   └── proposal.py            WriteProposal dataclass + ProposalDialog (PanedWindow,
-│   │                              wrap=NONE + 2-axis scrollbars; standalone __main__ harness)
+│   │   └── proposal.py            WriteProposal dataclass + ProposalDialog +
+│   │                              ProposalBridge (P1 — race-safe _resolve under Lock,
+│   │                              5-min event.wait timeout, WM_DELETE_WINDOW = reject,
+│   │                              post-timeout expired-state UX, automated test harness
+│   │                              in __main__ covering 4 race-safety paths)
 │   │
 │   └── controllers/               Tab controllers + Round-5 sub-controllers extracted
 │       │                          from the original god classes. Each takes cfg via
 │       │                          callback injection (never a parent reference).
 │       ├── projects_tab.py        ProjectsTabController (thin orchestrator after Round 5
-│       │                          extracted 9 sub-controllers — ~44 direct methods)
-│       ├── git_tab.py             GitTabController (push/pull/branch/merge/release/
-│       │                          Draft PR — ~50 direct methods after Roadmap-1)
+│       │                          extracted 9 sub-controllers — ~45 direct methods after
+│       │                          Roadmap-2 P5b added one wrapper)
+│       ├── git_tab.py             GitTabController (push/pull/release/Draft PR/Open PR
+│       │                          on GitHub — ~38 direct methods after Roadmap-2 P4
+│       │                          extracted BranchManagementController)
+│       ├── branch_mgmt_ctrl.py    BranchManagementController (P4 — new/switch/merge/
+│       │                          delete-branch cluster extracted from GitTabController;
+│       │                          merge orchestration decomposed into _prepare_merge_sources
+│       │                          + _confirm_merge + _merge_worker + _explain_merge_failure)
 │       ├── ask_tab.py             AskTabController (🤖 Ask tab — Stage 2 chat)
 │       ├── snippets.py            SnippetsController (📚 Reference tab)
 │       ├── help_tab.py            HelpTabController (❓ Help tab; extracted from App)
 │       ├── update_poller.py       UpdatePollerController (tokensave version probe +
 │       │                          GitHub release polling; extracted from App)
 │       ├── codegraph_ctrl.py      CodeGraphController (init/sync/status/remove)
-│       ├── doctor_ctrl.py         DoctorController (tokensave doctor + purge)
+│       ├── doctor_ctrl.py         DoctorController (tokensave doctor + purge + P0
+│       │                          monolith audit: file/method/class/complexity caps via
+│       │                          AST walk + non-Python line-count check; exposes
+│       │                          count_methods_in_class for verification scripts)
 │       ├── scaffold_ctrl.py       ScaffoldRetrofitController
 │       ├── sync_ctrl.py           SyncStatusController (sync, sync_all, force_sync)
 │       ├── fileops_ctrl.py        FileOpsController (open folder/editor, copy path)

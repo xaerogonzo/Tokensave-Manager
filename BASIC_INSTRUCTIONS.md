@@ -148,9 +148,15 @@ Token Save Manager Source/
 │   │                              AND pass sys.stdin/stdout/stderr to Popen explicitly — see
 │   │                              docs/MCP_INTEGRATION_GOTCHAS.md before touching).
 │   ├── prompts.py                 Built-in Claude prompt snippets (ROM defaults; overrides in cfg).
-│   ├── agent.py                   LocalAgent loop for the 🤖 Ask tab (Stage 2 — read-only tool calling).
+│   ├── agent.py                   LocalAgent loop for the 🤖 Ask tab — Stage 2 read-only
+│   │                              tool calling + Stage 3 write-tool dispatch via the
+│   │                              injected on_write_proposal bridge.
 │   ├── agent_tools.py             ToolSpec registry: 6 read-only tools (read_file, list_directory,
-│   │                              git_log, git_diff, tokensave_search, tokensave_context).
+│   │                              git_log, git_diff, tokensave_search, tokensave_context) +
+│   │                              opt-in write_file via build_tools(with_write=True).
+│   ├── precommit_review.py        Entry point for the git pre-commit AI review hook
+│   │                              (Roadmap-2 P5b). Standalone — invoked by
+│   │                              .git/hooks/pre-commit; bootstraps sys.path to src/.
 │   │
 │   ├── helpers/                   Pure / IO helpers — no UI dependencies. Each module
 │   │   │                          takes only the parameters it needs.
@@ -180,11 +186,21 @@ Token Save Manager Source/
 │   │   │                          _call_llm_for_commit_message
 │   │   ├── release.py             _last_release_tag, _commits_since, _classify_commits_for_changelog,
 │   │   │                          _bump_version, _suggest_bump_kind, _render_release_notes,
-│   │   │                          _patch_changelog, _zip_dist, _release_basename, _fmt_size
-│   │   ├── changelog_patch.py     insert_changelog_release (atomic [Unreleased] anchor patcher)
+│   │   │                          _zip_dist, _release_basename, _fmt_size
+│   │   │                          (Roadmap-2 P2: _patch_changelog removed — use
+│   │   │                          helpers/changelog_patch.py)
+│   │   ├── changelog_patch.py     insert_changelog_release (idempotent atomic patcher —
+│   │   │                          replaces existing ## [version] block bounded by next
+│   │   │                          ^## \[ line; falls back to insertion under
+│   │   │                          ## [Unreleased]. Wired into ReleaseWizard.)
 │   │   ├── pr_draft.py            generate_pr_draft (LLM-based PR description drafting)
-│   │   ├── daemon_cost.py         get_daemon_status, toggle_daemon, parse_tokensave_cost
-│   │   └── claude_cli.py          spawn_claude_cli (detached terminal via CREATE_NEW_CONSOLE)
+│   │   ├── daemon_cost.py         get_daemon_status, toggle_daemon, toggle_autostart,
+│   │   │                          parse_tokensave_cost
+│   │   ├── claude_cli.py          spawn_claude_cli (detached terminal via CREATE_NEW_CONSOLE)
+│   │   └── precommit_hook.py      install/remove/detect git pre-commit hook + review
+│   │                              runner (P5b). 3-value backend dispatch
+│   │                              (auto/claude_cli/llm); severity parser; sentinel marker
+│   │                              for install/remove symmetry. Fail-open invariant.
 │   │
 │   ├── dialogs/                   tk.Toplevel dialog classes. Each takes cfg: ManagerConfig
 │   │   │                          via __init__ when it needs to read settings; bare-data
@@ -208,22 +224,33 @@ Token Save Manager Source/
 │   │   ├── assign_category.py     AssignCategoryDialog
 │   │   ├── untrack_ignored.py     UntrackIgnoredDialog
 │   │   ├── cost_viewer.py         CostViewerDialog (📊 button in app footer)
-│   │   └── proposal.py            WriteProposal dataclass + ProposalDialog (write-tool approval gate)
+│   │   └── proposal.py            WriteProposal dataclass + ProposalDialog +
+│   │                              ProposalBridge (P1 — race-safe agent worker ↔ Tk main
+│   │                              coordinator; 5-min event.wait; first-resolution-wins;
+│   │                              automated test harness in __main__)
 │   │
 │   └── controllers/               Tab + sub-controllers.
 │       ├── projects_tab.py        ProjectsTabController — Projects tree + thin command wrappers
-│       ├── git_tab.py             GitTabController — Git tab + 11 git action buttons
-│       ├── ask_tab.py             AskTabController — 🤖 Ask tab + agent thread plumbing
+│       ├── git_tab.py             GitTabController — Git tab + push/pull/release/Draft PR/
+│       │                          Open PR on GitHub. ~38 methods after P4 extracted
+│       │                          BranchManagementController.
+│       ├── branch_mgmt_ctrl.py    BranchManagementController (P4 — new/switch/merge/
+│       │                          delete-branch cluster; callback injection from GitTab)
+│       ├── ask_tab.py             AskTabController — 🤖 Ask tab + agent thread plumbing +
+│       │                          ProposalBridge registration for write-tool gating
 │       ├── snippets.py            SnippetsController — 📚 Reference tab
 │       ├── help_tab.py            HelpTabController — ❓ Help tab (16 sections)
 │       ├── update_poller.py       UpdatePollerController — tokensave version probe + GH update check
-│       ├── doctor_ctrl.py         Doctor command (tokensave doctor + purge flow + monolith audit)
+│       ├── doctor_ctrl.py         Doctor command (tokensave doctor + purge flow +
+│       │                          P0 monolith audit: file/method/class/complexity caps via
+│       │                          AST walk + non-Python line-count check)
 │       ├── scaffold_ctrl.py       Scaffold + Retrofit commands
 │       ├── sync_ctrl.py           Sync / Status / Set-active / Force-sync
 │       ├── fileops_ctrl.py        File ops (open folder/editor, copy path, remove index)
 │       ├── shadowlinks_ctrl.py    Shadow links dialog + background generation
 │       ├── codegraph_ctrl.py      CodeGraph init / sync / status / remove
-│       └── git_ops_ctrl.py        Git ops from Projects tab (init, log, commit, AI review, gitignore, untrack)
+│       └── git_ops_ctrl.py        Git ops from Projects tab (init, log, commit, AI review,
+│                                  gitignore, untrack, P5b pre-commit hook install/remove)
 │
 ├── templates/                     Data files used by the manager (all shipped in dist\templates\)
 │   ├── claude-md-template.md      BASIC_INSTRUCTIONS template written into scaffolded projects
@@ -370,6 +397,7 @@ Rules are grouped by subsystem. The top **Working Rules** section governs *how* 
 - **Treeview iids**: Category/sub-category rows use `iid="cat:<name>"` / `iid="sub:<cat>:<sub>"`. Project rows use `iid="proj:<path>"`. `_selected_path()` and `_on_right_click()` both guard by checking `iid.startswith("proj:")` — never assume the selected row is a project row.
 - **`except as e` deferred-lambda NameError**: Python clears the exception variable at the end of the `except` block, so `except Exception as e: ... after(0, lambda: messagebox.showerror("...", str(e)))` will NameError when the lambda fires. Fix: `err_msg = str(e)` then `lambda m=err_msg:`. Already fixed in `dialogs/settings.py`, `controllers/shadowlinks_ctrl.py` — match this pattern.
 - **Late-binding lambda in loops**: when generating rows in a for loop, capture loop variables as default kwargs: `lambda f=filepath, b=btn: handler(f, b)`. Without `f=filepath`, every callback captures the last loop value.
+- **`ProposalBridge` threading invariants** (Roadmap-2 P1 — applies to ANY future agent write-tool work that wires through `dialogs/proposal.py:ProposalBridge`): (1) `event.wait()` only ever runs on the agent worker thread — NEVER the Tk main thread. (2) Dialog construction and destruction always happen on Tk main via `root.after(0, ...)`. (3) `_resolve()` is idempotent under a `threading.Lock` — first resolution wins; late clicks after timeout, double-callbacks, and external cancellation all reduce to no-ops. (4) Disk I/O happens on the agent worker thread (in `post_accept`), not Tk main, so AV / OneDrive / Defender stalls can't hitch the GUI. (5) Each agent run gets its OWN bridge instance — never share, or an abandoned proposal can starve concurrent runs. (6) `AskTabController` registers active bridges in a Lock-guarded set; `App._quit_app` calls `cancel_all_proposals()` before destroy so worker threads never deadlock on a destroyed Tk event loop.
 
 ### Git Operations
 

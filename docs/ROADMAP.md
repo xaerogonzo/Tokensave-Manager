@@ -68,11 +68,11 @@ All tools are read-only — the agent CANNOT write files, run commits, or modify
 Provider support: Ollama / OpenAI / OpenAI-compatible (LM Studio, vLLM, etc.) all do tool calling natively. Anthropic falls back to a one-shot completion without tools — adding native Anthropic tool-use is a known follow-up.
 
 ### 🟡 Stage 3 — CHANGELOG drafter
-*Status: ProposalDialog UI sandbox shipped (Roadmap-1); agent wiring planned for Roadmap-2*
+*Status: write-tool plumbing shipped (Roadmap-2 Phase 1); CHANGELOG-specific drafter still TBD*
 
 Right-click → **📝 Draft CHANGELOG entry…**. Agent reads commits since the last release tag, classifies them, drafts CHANGELOG bullets. A ProposalDialog presents the old-vs-new diff with **Apply / Reject / Edit then Apply** buttons. First feature with a write tool, but every write goes through the same approval gate.
 
-**Roadmap-1 progress:** `dialogs/proposal.py` ships the `WriteProposal` dataclass + `ProposalDialog` UI (draggable `tk.PanedWindow`, both panes scrollable with `wrap=tk.NONE`, editable proposed pane, `if __name__ == "__main__":` standalone harness). Agent-side wiring (a write tool in `agent_tools.py` that constructs `WriteProposal`, calls `ProposalDialog(root, proposal, on_accept)` via `root.after(0, ...)`, and blocks on a `threading.Event` until the user clicks Accept or Reject) is queued for Roadmap-2.
+**Roadmap-2 progress:** the write-tool path is fully shipped. `agent_tools.py:_tool_write_file` builds a `WriteProposal` (with race-safe `original_hash` + symlink-safe path containment + side-effect surfacing for `dirs_to_create`); the agent dispatches it through `LocalAgent.on_write_proposal` → `ProposalBridge` → `ProposalDialog`; on accept, `_atomic_write_file` re-checks the hash and writes via `.tmp` + `os.replace`. The CHANGELOG-specific drafter (commit classifier + bullet renderer + right-click entry) is the remaining work — straightforward now that the write path is proven.
 
 ### 🔮 Stage 4 — Refactor scout
 *Status: planned*
@@ -87,13 +87,13 @@ Adds opt-in autonomous execution for specific tool categories (e.g. "auto-write 
 ---
 
 ### 🟡 Stage 6 — Workflow accelerators
-*Status: PR draft shipped (Roadmap-1); pre-commit hook and release narrative still planned*
+*Status: PR draft + Open-on-GitHub + pre-commit hook shipped (Roadmap-1/2); release narrative still planned*
 
 Bundles three commit/release workflow features that share the same "AI drafts → user approves → manager applies" pattern:
 
-- **Pre-commit AI review hook** *(planned)* — Claude Code Stop hook (or pre-commit git hook) that runs the Stage 1 reviewer on the pending diff and blocks the commit if any 🔴 High-severity findings are present. Override via `--no-verify` or a "Commit anyway" button.
-- **PR description generator** ✅ *(shipped Roadmap-1)* — `Draft PR…` button in the Git tab. Primary click runs the Claude Code CLI if configured (opens a detached terminal — `helpers/claude_cli.py`), otherwise calls the API path (`helpers/pr_draft.py` → in-app dialog with Copy button). Right-click / Shift+click pops a menu to explicitly override. The follow-up "auto-open `gh pr create --web --body`" wiring is queued for Roadmap-2.
-- **Release-notes narrative writer** *(planned)* — Extends Release Wizard with an AI-generated summary paragraph above the bullet list ("This release focuses on X and Y…"). Drafts inside the existing wizard textarea so the user can edit before publishing. `helpers/changelog_patch.py` (`insert_changelog_release` — atomic `## [Unreleased]` patcher) was shipped in Roadmap-1 as the foundation; wiring into the wizard is queued for Roadmap-2.
+- **PR description generator** ✅ *(shipped Roadmap-1)* — `Draft PR…` button in the Git tab. Primary click runs the Claude Code CLI if configured (opens a detached terminal — `helpers/claude_cli.py`), otherwise calls the API path (`helpers/pr_draft.py` → in-app dialog with Copy button). Right-click / Shift+click pops a menu to explicitly override. **Roadmap-2 P5a** added an "🔗 Open PR on GitHub" button in the same dialog: writes the body to a temp `.md` and spawns `gh pr create --web --body-file <tmp>` so the GitHub New-PR page opens pre-filled.
+- **Pre-commit AI review hook** ✅ *(shipped Roadmap-2 P5b)* — Right-click → 🔍 Pre-commit AI Review hook…. Installs a git pre-commit hook (POSIX shell script + Python reviewer at `src/precommit_review.py`) that reads `git diff --cached` and runs an AI code review. Three-value backend choice via `precommit_review_backend` in `manager-config.json`: `"auto"` (prefer Claude Code subscription via `claude --print`, fall back to configured LLM), `"claude_cli"` (force CC), `"llm"` (force per-token provider). Three-value severity threshold (`precommit_severity_threshold`: `"none"` warn-only default / `"medium"` / `"high"`) decides whether findings block. Fail-open invariant: every error path exits 0 with a stderr notice. Override always available via `git commit --no-verify`. Stop-hook variant deliberately deferred — see "Pre-commit AI review — Stop-hook variant" entry in the Roadmap-3 backlog.
+- **Release-notes narrative writer** *(planned)* — Extends Release Wizard with an AI-generated summary paragraph above the bullet list ("This release focuses on X and Y…"). Drafts inside the existing wizard textarea so the user can edit before publishing. `helpers/changelog_patch.py:insert_changelog_release` (atomic idempotent `## [Unreleased]` patcher) is now wired into ReleaseWizard's publish path (Roadmap-2 P2), so the narrative just needs to fit into the existing notes string before insertion.
 
 ### 💭 Stage 7 — Quality assurance suite
 *Status: considering*
@@ -120,13 +120,17 @@ Turns the manager into a project-memory tool:
 
 Round 4 split the monolith into subpackages (equality 0.16 → 0.57, quality 5,689 → 7,003). Round 5 extracted 9 sub-controllers from `ProjectsTabController` + 2 from `App`. Roadmap-1 added 6 new features + cleared the pyflakes baseline to zero. Roadmap-2 added the Doctor monolith audit (file/method/class/complexity caps surfaced automatically) and shipped Phases 0, 1, 2.
 
-### Roadmap-2 scope (in-progress)
+### Roadmap-2 scope — all shipped (2026-05-24)
 
-- ✅ **ProposalDialog → agent_tools wiring** (Phase 1, shipped 2026-05-24). `write_file` tool gated behind ProposalDialog with race-safe `_resolve`, hash-recheck, symlink protection, app-shutdown bridge cancellation. Unblocks Stage 3 CHANGELOG drafter and most of Stage 7.
-- ✅ **ReleaseWizard → changelog_patch wiring** (Phase 2, shipped 2026-05-24). `insert_changelog_release` extended with idempotent-replace + boundary precision; `helpers/release.py:_patch_changelog` deleted (single canonical patcher).
-- 🟡 **W4 — `ReleaseWizardDialog._build_ui` (~186 lines)** → Phase 3 splits it per wizard step (`_build_version_section`, `_build_notes_section`, `_build_publish_section`).
-- 🟡 **W5 — `GitTabController` god class (~50 direct methods after Draft PR)** → Phase 4 extracts the branch-management cluster (`cmd_git_new_branch`, `cmd_git_switch_branch`, `cmd_git_merge`, `cmd_git_delete_branch`, workers) into `src/controllers/branch_mgmt_ctrl.py`. Same callback-injection pattern as Round 5.
-- 🟡 **Phase 4.5 — Dialog `__init__` split sweep**. Apply Phase 3's per-section split pattern to 6 dialog constructors that exceed the 100-line method cap: `gitignore.py` (148), `github_setup.py` (132), `ollama_model_mgr.py` (122), `ai_code_review.py` (119 + `_start_review` 102), `untrack_ignored.py` (112), `merge_pr.py` (110). One commit per dialog. Plus `ai_code_review.py:_start_review` (behaviour code, not layout — split by function, not line count).
+- ✅ **Phase 0 — Anti-monolith governance + Doctor audit.** `BASIC_INSTRUCTIONS.md` rewritten with rules A–H (caps, doc discipline, tokensave-first, guard-rails, surface-don't-decide, refactor budget, metric hierarchy, governance hygiene). `DoctorController` gained a monolith-audit pass (AST-walks every `*.py`; non-Python line-count check; hybrid layout-method carve-out; top-of-file `# anti-monolith: exempt — <reason>` opt-out). Ask-tab system prompt steers code-health questions to `tokensave_god_class` / `tokensave_complexity` / `tokensave_largest`.
+- ✅ **Phase 1 — `write_file` tool + `ProposalDialog` bridge.** Lifts the read-only-agent invariant. `ToolSpec` gains `proposal_builder` + `post_accept`. Race-safe via SHA-256 hash recheck at write time. Symlink-safe `_under_project` containment. `ProposalBridge` coordinates worker ↔ Tk main with `threading.Event`, lock-guarded `_resolve`, post-timeout expired-state UX (no auto-close), app-shutdown cancellation. Inline test harness covers 4 race-safety paths.
+- ✅ **Phase 2 — `ReleaseWizard` → `changelog_patch` wiring + daemon control UI.** `insert_changelog_release` extended with idempotent-replace + boundary precision (next `^## \[` line stops the replacement). `helpers/release.py:_patch_changelog` deleted (single canonical patcher). Daemon footer indicator gained a right-click menu: Start / Stop / Install autostart / Disable autostart, with async + status-confirm pattern. Fixed pre-existing `toggle_daemon` bug (was passing nonexistent `--start` flag).
+- ✅ **Phase 3 — `ReleaseWizardDialog._build_ui` split per wizard step.** 186-line `_build_ui` → 8-line orchestrator + 8 named section builders (header / version / title / notes / build / artefact / changelog / publish). Pure layout refactor.
+- ✅ **Phase 4 — `BranchManagementController` extracted from `GitTabController`.** 13 methods moved to `src/controllers/branch_mgmt_ctrl.py` via callback injection. `cmd_git_merge` (complexity 14 inline) decomposed into 5 helpers. `GitTabController` 50 → 38 direct methods (under 40 cap).
+- ✅ **Phase 4.5 — Dialog `__init__` split sweep.** Applied Phase 3's per-section split pattern to 6 dialog constructors: `merge_pr.py`, `untrack_ignored.py`, `ai_code_review.py` (`__init__` + `_start_review` behaviour split), `ollama_model_mgr.py`, `github_setup.py`, `gitignore.py`. One commit per dialog. Project audit dropped from 49 violations (start of P2) → 39.
+- ✅ **Phase 5a — "Open PR on GitHub" button.** Added to the PR draft dialog next to Copy. Writes body to temp `.md`, spawns `gh pr create --web --body-file <tmp>` with `cwd=<project>`. `--body-file` (not `--body "..."`) sidesteps Windows command-line length limits and quote escaping. Button greyed + tooltipped when `gh` isn't on PATH.
+- ✅ **Phase 5b — Pre-commit AI review hook (warn-only).** Right-click → 🔍 Pre-commit AI Review hook… installs a git pre-commit hook that runs `git diff --cached` through an AI code review. Three-value backend choice (`precommit_review_backend`: `"auto"` / `"claude_cli"` / `"llm"`). Fail-open invariant on every error path. POSIX shell script with hard-coded `python.exe` + reviewer paths; sentinel marker for install/remove symmetry; refuses to touch a hook the user installed themselves. **Stop-hook variant explicitly deferred** — see the "Pre-commit AI review — Stop-hook variant" entry below for rationale.
+
 - 🔮 **W2 — `_render_block` complex branch tangle (dialogs/mcp_config.py:154, 109 lines)**. 11 branches handling different MCP config row states. Refactor into a dispatch table keyed on row classification. Worth doing before extending MCP support to additional editors. Deferred from Roadmap-2 scope; revisit in Roadmap-3.
 
 ### Roadmap-3 code-health backlog (post-Roadmap-2 Doctor snapshot)
@@ -252,6 +256,16 @@ To be explicit about what we're NOT building:
 ## Status updates
 
 This file is updated whenever a stage ships or its design materially changes.
+
+**Last updated: 2026-05-24** — Roadmap-2 shipped in full (Phases 0, 1, 2, 3, 4, 4.5, 5a, 5b). Highlights:
+
+- **Phase 0 — Anti-monolith governance.** `BASIC_INSTRUCTIONS.md` rewritten with 8 working rules (A–H); Doctor gained an AST-based monolith audit with hybrid layout-method carve-out.
+- **Phase 1 — Stage 3 unlock.** `write_file` agent tool gated through `ProposalDialog` + race-safe `ProposalBridge`. Lifts the read-only-agent invariant; unblocks the CHANGELOG drafter and most of Stage 7.
+- **Phase 2 — Daemon UI + canonical changelog patcher.** Footer indicator right-click menu (Start / Stop / Install autostart); `insert_changelog_release` extended with idempotent replace + boundary precision and wired into ReleaseWizard. Fixed pre-existing `toggle_daemon` `--start` bug.
+- **Phases 3 + 4 + 4.5 — Targeted architectural cleanup.** `ReleaseWizardDialog._build_ui` split per wizard step; `BranchManagementController` extracted from `GitTabController` (50 → 38 methods, under 40 cap); 6 dialog `__init__` constructors split using the same per-section template.
+- **Phase 5a — `gh pr create --web` button** in the PR draft dialog. `--body-file` (not `--body`) sidesteps Windows command-line quoting.
+- **Phase 5b — Pre-commit AI review hook** with three-value backend choice (`"auto"` / `"claude_cli"` / `"llm"`) and three-value severity threshold (`"none"` warn-only default / `"medium"` / `"high"`). Fail-open invariant on every error path. Stop-hook variant deliberately deferred (logged with rationale in the Roadmap-3 backlog).
+- **Doctor monolith audit dropped project violations from 49 → 39** across Phases 3 + 4 + 4.5 + 5b combined, without bundling unrelated cleanup. Remaining 30+ violations logged in the Roadmap-3 code-health backlog by priority.
 
 **Last updated: 2026-05-23** — Stages 0, 1, AND 2 all shipped this cycle. Highlights:
 
