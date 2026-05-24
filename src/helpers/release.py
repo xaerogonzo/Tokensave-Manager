@@ -271,68 +271,10 @@ def _render_release_notes(version: str, date: str, sections: dict,
     return "\n".join(lines) + "\n"
 
 
-def _patch_changelog(changelog_path: str, version: str, date: str,
-                     notes_md: str) -> tuple:
-    """Insert or replace a version section in CHANGELOG.md.
-
-    Idempotent: if a section with the same version header already exists,
-    its block (header line through the next ``## [`` line or EOF) is
-    REPLACED with ``notes_md``. Otherwise the new section is inserted
-    directly below the ``## [Unreleased]`` anchor.
-
-    If neither the version section nor the ``## [Unreleased]`` anchor is
-    present, returns ``(False, "missing anchor")`` and writes nothing —
-    the caller surfaces this rather than producing a malformed file.
-
-    Atomic write: writes to ``.tmp`` then ``os.replace``.
-
-    Returns ``(ok: bool, message: str)``.
-    """
-    clean_version = version.lstrip("v")
-    try:
-        with open(changelog_path, encoding="utf-8") as f:
-            text = f.read()
-    except OSError as exc:
-        return (False, f"Could not read {changelog_path}: {exc}")
-
-    new_block = notes_md if notes_md.endswith("\n") else notes_md + "\n"
-    new_block = new_block.rstrip("\n") + "\n\n"   # ensure one blank line after
-
-    # Try to find an existing section for this version.
-    section_re = re.compile(
-        rf"(?ms)^## \[{re.escape(clean_version)}\][^\n]*\n.*?(?=^## \[|\Z)"
-    )
-    m = section_re.search(text)
-    if m:
-        # Replace existing section.
-        updated = text[:m.start()] + new_block + text[m.end():]
-    else:
-        # Insert below ## [Unreleased].
-        anchor_re = re.compile(r"(?m)^## \[Unreleased\][^\n]*\n")
-        am = anchor_re.search(text)
-        if not am:
-            return (False, "CHANGELOG.md is missing the `## [Unreleased]` anchor")
-        insert_at = am.end()
-        # Skip any blank lines directly after the anchor so the new section
-        # ends up flush against (Unreleased) but with one blank line padding.
-        tail = text[insert_at:]
-        leading_blanks = len(tail) - len(tail.lstrip("\n"))
-        # Keep exactly one blank line between [Unreleased] and the new section.
-        updated = (text[:insert_at]
-                   + "\n"
-                   + new_block
-                   + tail[leading_blanks:])
-
-    # Atomic write
-    tmp_path = changelog_path + ".tmp"
-    try:
-        with open(tmp_path, "w", encoding="utf-8", newline="\n") as f:
-            f.write(updated)
-        os.replace(tmp_path, changelog_path)
-    except OSError as exc:
-        return (False, f"Could not write {changelog_path}: {exc}")
-
-    return (True, "replaced" if m else "inserted")
+# `_patch_changelog` was removed in Roadmap-2 Phase 2 — its idempotent
+# replace logic moved into `helpers.changelog_patch.insert_changelog_release`
+# (the single canonical implementation). Update the import in
+# `dialogs/release_wizard.py` if you're searching for the new entry point.
 
 
 # ── Artefact zipping ─────────────────────────────────────────────────────────

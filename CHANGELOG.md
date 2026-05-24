@@ -4,6 +4,19 @@
 ## [Unreleased]
 
 ### Added
+- **Roadmap-2 Phase 2 — ReleaseWizard wired to `changelog_patch`; daemon control UI in the footer.** Two unrelated-but-paired pieces of plumbing:
+  - **`insert_changelog_release` is now the single canonical CHANGELOG patcher.** Extended with idempotent-replace semantics (if a `## [version]` section already exists, its block is replaced from the version header through the next `^## \[` line or EOF; otherwise the new section is inserted under `## [Unreleased]`). The boundary regex prevents accidentally eating adjacent sections — the next release's content survives untouched. `helpers/release.py:_patch_changelog` has been removed; the only caller (`ReleaseWizardDialog._pub_patch_changelog`) now uses the new helper directly. Drops a vestigial `date` parameter that was passed but never read.
+  - **Daemon start/stop/autostart-install via right-click on the footer indicator.** The existing `●  daemon …` indicator (Roadmap-1) gains a right-click (or left-click — both bound for discoverability) context menu with state-aware items:
+    - When running: **Stop daemon**. When stopped: **Start daemon**.
+    - When autostart is off: **Install autostart (run on boot)**. When on: **Disable autostart**.
+    - Separator + **Open Cost Viewer…** (parallel to the existing toolbar button).
+    - Plus a graceful degraded state ("(daemon status not yet polled)" / "Error: …") with a link to Settings when `tokensave.exe` isn't configured.
+  - **`toggle_daemon` fixed**: was calling `tokensave daemon --start` which doesn't exist (verified via `tokensave daemon --help` — daemon starts via bare `tokensave daemon`, which forks by default; `--foreground` is the opt-in). Pre-existing Roadmap-1 bug that never fired because nothing called `toggle_daemon` until now.
+  - **New `toggle_autostart(tokensave_exe, enable)` helper** in `helpers/daemon_cost.py` — calls `--enable-autostart` / `--disable-autostart` (both confirmed via `--help`).
+  - **Async + status-confirm pattern**: every action spawns a `threading.Thread`, updates the label to `Starting daemon…` immediately, runs the CLI, then on completion either shows `✓ Starting daemon` (success) or pops a `messagebox.showerror` with the captured stderr (failure). After 800ms the status poll re-fires so the indicator settles to the real new state. Daemon failures never silently disappear.
+  - **Cursor changes to `hand2`** on hover over the indicator so it looks clickable.
+  - `App` class kept under the 40-method cap by inlining the 4 daemon action wrappers as menu-bound lambdas with early-binding default args (menu labels already document each action).
+
 - **Roadmap-2 Phase 1 — Stage 3 unlock: `write_file` tool + `ProposalDialog` bridge.** The Ask-tab agent can now propose file edits, gated behind the existing `ProposalDialog`. End-to-end flow:
   - **New `write_file` tool in `agent_tools.py`** (`is_write=True`). Tool description forbids blind rewrites on files over 400 lines (model is instructed to prefer minimal edits). `ToolSpec` gained two new fields: `proposal_builder(args) -> WriteProposal | error_str` (validates + builds the proposal shown to the user) and `post_accept(proposal, final_content) -> result_str` (does the actual atomic write after user accepts). Read tools are unchanged. `build_tools(..., with_write=True)` opt-in keeps the registry backwards compatible.
   - **Race-safe writes.** Each proposal captures `original_hash = sha256(original_content)` at build time. `post_accept` re-reads the file at write-time and aborts if the hash differs ("user edited the file while the proposal was open" — model gets a `[write rejected: file changed on disk ...]` string and is told to re-read). `original_mtime` is captured too but used for diagnostics only — hash is authoritative because timestamps drift across git checkout / OneDrive / FS precision. New-file path also detects race (file created between build and accept).

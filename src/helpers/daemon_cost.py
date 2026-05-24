@@ -50,13 +50,18 @@ def get_daemon_status(tokensave_exe: str) -> dict:
 def toggle_daemon(tokensave_exe: str, enable: bool) -> tuple[bool, str]:
     """Start or stop the tokensave daemon.
 
+    Start path: bare `tokensave daemon` — tokensave forks itself into the
+    background by default (verified via `tokensave daemon --help` —
+    `--foreground` is the OPT-IN flag, no `--start` flag exists).
+    Stop path: `tokensave daemon --stop`.
+
     Returns:
         (success: bool, message: str)
     """
-    action = "start" if enable else "stop"
+    args = [tokensave_exe, "daemon"] if enable else [tokensave_exe, "daemon", "--stop"]
     try:
         proc = subprocess.Popen(
-            [tokensave_exe, "daemon", f"--{action}"],
+            args,
             stdout=subprocess.PIPE,
             stderr=subprocess.PIPE,
             creationflags=CREATE_NO_WINDOW,
@@ -66,8 +71,38 @@ def toggle_daemon(tokensave_exe: str, enable: bool) -> tuple[bool, str]:
         )
         stdout, stderr = proc.communicate(timeout=10)
         if proc.returncode == 0:
-            return True, stdout.strip()
-        return False, stderr.strip()
+            return True, stdout.strip() or stderr.strip()
+        return False, stderr.strip() or stdout.strip()
+    except Exception as e:
+        return False, str(e)
+
+
+def toggle_autostart(tokensave_exe: str, enable: bool) -> tuple[bool, str]:
+    """Install or remove the daemon autostart service.
+
+    Calls `tokensave daemon --enable-autostart` / `--disable-autostart`
+    (both confirmed via `tokensave daemon --help`). On Windows this
+    typically registers a scheduled task; on macOS a launchd plist; on
+    Linux a systemd user unit.
+
+    Returns:
+        (success: bool, message: str)
+    """
+    flag = "--enable-autostart" if enable else "--disable-autostart"
+    try:
+        proc = subprocess.Popen(
+            [tokensave_exe, "daemon", flag],
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            creationflags=CREATE_NO_WINDOW,
+            text=True,
+            encoding="utf-8",
+            errors="replace",
+        )
+        stdout, stderr = proc.communicate(timeout=15)
+        if proc.returncode == 0:
+            return True, stdout.strip() or stderr.strip()
+        return False, stderr.strip() or stdout.strip()
     except Exception as e:
         return False, str(e)
 

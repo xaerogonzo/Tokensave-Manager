@@ -33,7 +33,6 @@ import re
 import tempfile
 import threading
 import tkinter as tk
-from datetime import datetime
 from tkinter import ttk, messagebox
 from typing import TYPE_CHECKING
 
@@ -42,8 +41,9 @@ from helpers.release import (
     _release_basename, _last_release_tag, _commits_since,
     _suggest_bump_kind, _bump_version,
     _classify_commits_for_changelog, _render_release_notes,
-    _patch_changelog, _zip_dist, _fmt_size,
+    _zip_dist, _fmt_size,
 )
+from helpers.changelog_patch import insert_changelog_release
 from helpers.git import _fetch_tags, _git_tag, _git_push_with_tags
 
 if TYPE_CHECKING:
@@ -681,10 +681,9 @@ class ReleaseWizardDialog(tk.Toplevel):
         if not (self._sync_cl_var.get() and self._has_changelog):
             return True
         self._set_status("Patching CHANGELOG.md…", fg=C["peach"])
-        ok, msg = _patch_changelog(
+        ok, msg = insert_changelog_release(
             self._changelog_path,
             ctx.tag.lstrip("v"),
-            datetime.now().strftime("%Y-%m-%d"),
             ctx.notes,
         )
         if not ok:

@@ -290,17 +290,25 @@ class App(tk.Tk):
                  font=("Segoe UI", 8, "bold"),
                  bg=C["base"], fg=C["overlay0"]).pack(side=tk.LEFT)
 
-        # Daemon status indicator (left side, after OUTPUT label)
+        # Daemon status indicator (left side, after OUTPUT label).
+        # Right-click either widget opens the daemon control menu.
+        # Cursor switches to "hand2" on hover so the indicator looks clickable.
         self._daemon_indicator = tk.Label(
             log_header, text="●",
             fg=C["overlay0"], bg=C["base"],
-            font=("Segoe UI", 11))
+            font=("Segoe UI", 11), cursor="hand2")
         self._daemon_indicator.pack(side=tk.LEFT, padx=(10, 2))
         self._daemon_lbl = tk.Label(
             log_header, text="daemon …",
             fg=C["overlay0"], bg=C["base"],
-            font=("Segoe UI", 8))
+            font=("Segoe UI", 8), cursor="hand2")
         self._daemon_lbl.pack(side=tk.LEFT)
+        for w in (self._daemon_indicator, self._daemon_lbl):
+            w.bind("<Button-3>", self._daemon_show_menu)
+            w.bind("<Button-1>", self._daemon_show_menu)  # left-click too — more discoverable
+        # Last known daemon status — menu reads this to decide which items to show.
+        # None until the first poll completes.
+        self._daemon_status: dict | None = None
 
         ttk.Button(log_header, text="View Log",
                    command=self._open_log).pack(side=tk.RIGHT, padx=(0, 6))
@@ -363,6 +371,7 @@ class App(tk.Tk):
     def _apply_daemon_status(self, status: dict):
         if not self.winfo_exists():
             return
+        self._daemon_status = status   # menu reads this on right-click
         if status.get("error"):
             self._daemon_indicator.configure(fg=C["overlay0"])
             self._daemon_lbl.configure(text="daemon: n/a")
@@ -374,6 +383,87 @@ class App(tk.Tk):
         else:
             self._daemon_indicator.configure(fg=C["overlay0"])
             self._daemon_lbl.configure(text="daemon: stopped")
+
+    # ── Daemon right-click menu + actions ───────────────────────────────────
+
+    def _daemon_show_menu(self, event):
+        """Pop the daemon control menu. Items vary by current state.
+
+        Reads self._daemon_status (None until first poll completes). The
+        4 daemon actions are inlined as menu commands rather than separate
+        methods — keeps App's method count under the 40 cap and the menu
+        labels already document what each does.
+        """
+        from helpers.daemon_cost import toggle_daemon, toggle_autostart
+        menu = tk.Menu(self, tearoff=0)
+        status = self._daemon_status
+        if status is None:
+            menu.add_command(label="(daemon status not yet polled)", state=tk.DISABLED)
+        elif status.get("error"):
+            menu.add_command(label=f"Error: {status['error'][:60]}", state=tk.DISABLED)
+            menu.add_separator()
+            menu.add_command(label="Check Settings → tokensave path",
+                             command=self.cmd_settings)
+        else:
+            if status["running"]:
+                menu.add_command(label="Stop daemon",
+                                 command=lambda: self._daemon_run_action(
+                                     "Stopping daemon",
+                                     lambda exe: toggle_daemon(exe, False),
+                                     C["overlay0"]))
+            else:
+                menu.add_command(label="Start daemon",
+                                 command=lambda: self._daemon_run_action(
+                                     "Starting daemon",
+                                     lambda exe: toggle_daemon(exe, True),
+                                     C["green"]))
+            menu.add_separator()
+            if status["autostart"]:
+                menu.add_command(label="Disable autostart",
+                                 command=lambda: self._daemon_run_action(
+                                     "Removing autostart",
+                                     lambda exe: toggle_autostart(exe, False),
+                                     C["overlay0"]))
+            else:
+                menu.add_command(label="Install autostart (run on boot)",
+                                 command=lambda: self._daemon_run_action(
+                                     "Installing autostart",
+                                     lambda exe: toggle_autostart(exe, True),
+                                     C["green"]))
+        menu.add_separator()
+        menu.add_command(label="Open Cost Viewer…", command=self._open_cost_viewer)
+        try:
+            menu.tk_popup(event.x_root, event.y_root)
+        finally:
+            menu.grab_release()
+
+    def _daemon_run_action(self, label: str, action_fn, success_color: str):
+        """Run a daemon action in a worker thread; refresh status on completion."""
+        if not self._cfg.tokensave_exe:
+            messagebox.showerror("Daemon action", "tokensave.exe path is not configured "
+                                 "(Settings → tokensave path).", parent=self)
+            return
+        self._daemon_lbl.configure(text=f"{label}…", fg=C["peach"])
+        import threading
+
+        def _worker():
+            ok, msg = action_fn(self._cfg.tokensave_exe)
+            self.after(0, lambda o=ok, m=msg: self._daemon_after_action(label, o, m, success_color))
+
+        threading.Thread(target=_worker, daemon=True).start()
+
+    def _daemon_after_action(self, label: str, ok: bool, msg: str, success_color: str):
+        if not self.winfo_exists():
+            return
+        if ok:
+            self._daemon_lbl.configure(text=f"✓ {label}", fg=success_color)
+        else:
+            messagebox.showerror(f"Daemon: {label} failed",
+                                 msg or "(no output)", parent=self)
+            self._daemon_lbl.configure(text=f"✗ {label} failed", fg=C["red"])
+        # Re-poll so the indicator + label settle to actual current state.
+        # Wait a tick — some operations (start) need a moment to land.
+        self.after(800, self._poll_daemon_status)
 
     # ── Cost viewer ─────────────────────────────────────────────────────────
 
