@@ -29,12 +29,9 @@ import pystray
 from constants import (
     _ANSI,
     _TOKENSAVE_UPDATE_RE,
-    SKIP_DIRS,
-    MAX_DEPTH,
     CREATE_NO_WINDOW,
     AUTO_REFRESH_MS,
     _GIT_ENV_NO_PROMPT,
-    DESKTOP_PROJECT_FILE,
     C,
     _BASE_DIR,
     _CONFIG_PATH,
@@ -67,6 +64,10 @@ from helpers.llm import (
 from helpers.scaffold import _scaffold_git_hook
 from helpers.runtime import (
     log, _acquire_instance_lock, _bring_existing_to_front, _make_tray_icon,
+)
+from helpers.project_discovery import (
+    find_projects, get_pinned, set_pinned, clear_pinned,
+    fmt_age, load_basic_instructions_template,
 )
 
 
@@ -2010,161 +2011,10 @@ PROMPT_SNIPPETS = [
 
 # ── Helpers ────────────────────────────────────────────────────────────────────
 
-def find_projects():
-    """Discover projects under every configured search root.
+# find_projects, get_pinned, set_pinned, clear_pinned, fmt_age,
+# load_basic_instructions_template moved to helpers/project_discovery.py
+# (Round 4 Phase A)
 
-    A folder qualifies if it contains any of:
-      - a tokensave index  (.tokensave/tokensave.db)  — full tokensave features
-      - a CodeGraph index  (.codegraph/codegraph.db)  — full CodeGraph features
-      - a git repository   (.git/)                    — git features only
-
-    All three types are shown in the Projects tab. Each tool's commands show a
-    friendly 'not initialised yet' prompt when called on a project that doesn't
-    have its index — keeping tokensave and CodeGraph as equal citizens.
-    """
-    projects = []
-    seen: set = set()
-    for root in SEARCH_ROOTS:
-        rpath  = _root_path(root)
-        rlabel = _root_label(root)
-        if not os.path.isdir(rpath):
-            continue
-        for dirpath, dirnames, _ in os.walk(rpath):
-            rel = os.path.relpath(dirpath, rpath)
-            depth = 0 if rel == "." else rel.count(os.sep) + 1
-            if depth >= MAX_DEPTH:
-                dirnames.clear()
-                continue
-
-            # Check for markers BEFORE filtering dirnames
-            has_ts  = ".tokensave" in dirnames
-            has_git = ".git"       in dirnames
-            has_cg  = ".codegraph" in dirnames
-
-            # Strip hidden dirs and known noise from further traversal
-            dirnames[:] = [d for d in dirnames if d not in SKIP_DIRS
-                           and not d.startswith(".")]
-
-            if not (has_ts or has_git or has_cg):
-                continue
-            if dirpath in seen:
-                continue
-            seen.add(dirpath)
-
-            # mtime: tokensave db age if available, else last git commit,
-            # else codegraph db mtime (last full-build), else dirpath.
-            #
-            # tokensave uses SQLite in WAL mode. Incremental syncs write to
-            # tokensave.db-wal; the main tokensave.db file's mtime only
-            # advances when SQLite checkpoints (typically on close, or after
-            # `sync --force`). So `getmtime(tokensave.db)` shows stale "6h
-            # ago" even right after an incremental sync that's clearly
-            # touched the index. Take the MAX mtime across the .db + WAL +
-            # SHM sibling files so the "Last Synced" column tracks actual
-            # sync activity, not just the last full checkpoint.
-            if has_ts:
-                db = os.path.join(dirpath, ".tokensave", "tokensave.db")
-                ts_dir = os.path.join(dirpath, ".tokensave")
-                mtime_candidates = []
-                for fname in ("tokensave.db", "tokensave.db-wal",
-                              "tokensave.db-shm"):
-                    full = os.path.join(ts_dir, fname)
-                    try:
-                        mtime_candidates.append(os.path.getmtime(full))
-                    except OSError:
-                        pass
-                if mtime_candidates:
-                    mtime = max(mtime_candidates)
-                else:
-                    mtime = os.path.getmtime(dirpath)
-            elif has_git:
-                db    = None
-                git_dir    = os.path.join(dirpath, ".git")
-                commit_msg = os.path.join(git_dir, "COMMIT_EDITMSG")
-                mtime = (os.path.getmtime(commit_msg)
-                         if os.path.isfile(commit_msg)
-                         else os.path.getmtime(git_dir))
-            else:   # codegraph-only
-                db    = None
-                cg_db = os.path.join(dirpath, ".codegraph", "codegraph.db")
-                mtime = os.path.getmtime(cg_db) if os.path.isfile(cg_db) else os.path.getmtime(dirpath)
-
-            projects.append({
-                "path":          dirpath,
-                "name":          os.path.basename(dirpath),
-                "db":            db,
-                "mtime":         mtime,
-                "root_label":    rlabel,
-                "has_tokensave": has_ts,
-                "has_git":       has_git,
-                "has_codegraph": has_cg,
-            })
-    return sorted(projects, key=lambda p: p["mtime"], reverse=True)
-
-
-def get_pinned():
-    if os.path.isfile(DESKTOP_PROJECT_FILE):
-        p = open(DESKTOP_PROJECT_FILE, encoding="utf-8").read().strip()
-        if p and os.path.isfile(os.path.join(p, ".tokensave", "tokensave.db")):
-            return p
-    return None
-
-
-def set_pinned(path):
-    os.makedirs(os.path.dirname(DESKTOP_PROJECT_FILE), exist_ok=True)
-    with open(DESKTOP_PROJECT_FILE, "w", encoding="utf-8") as f:
-        f.write(path)
-
-
-def clear_pinned():
-    if os.path.isfile(DESKTOP_PROJECT_FILE):
-        os.remove(DESKTOP_PROJECT_FILE)
-
-
-def fmt_age(mtime):
-    diff = datetime.now().timestamp() - mtime
-    if diff < 60:         return "just now"
-    if diff < 3600:       return f"{int(diff / 60)}m ago"
-    if diff < 86400:      return f"{int(diff / 3600)}h ago"
-    if diff < 86400 * 7:  return f"{int(diff / 86400)}d ago"
-    return datetime.fromtimestamp(mtime).strftime("%b %d")
-
-
-def load_basic_instructions_template():
-    """Load the BASIC_INSTRUCTIONS.md template text, or return a minimal fallback."""
-    if os.path.isfile(BASIC_INSTRUCTIONS_TEMPLATE):
-        raw = open(BASIC_INSTRUCTIONS_TEMPLATE, encoding="utf-8").read()
-        # Replace any @<path>/project-baseline.md line with the current computed path
-        # so the written BASIC_INSTRUCTIONS.md always points to the right location.
-        # Use a lambda so BASELINE_INCLUDE_LINE is never parsed as a regex
-        # replacement string — Windows paths contain backslashes that re.sub
-        # would misinterpret as escape sequences (e.g. \p → bad escape error).
-        raw = re.sub(r"^@[^\n]*project-baseline\.md",
-                     lambda _: BASELINE_INCLUDE_LINE, raw, flags=re.MULTILINE)
-        return raw
-    # Minimal inline fallback if template file is missing
-    return (
-        "# [PROJECT NAME] — Basic Instructions\n\n"
-        "<!-- CLAUDE: Replace all [PLACEHOLDER] sections on first use. -->\n\n"
-        f"{BASELINE_INCLUDE_LINE}\n\n"
-        "---\n\n"
-        "## Project Overview\n\n"
-        "**Name:** [PROJECT NAME]\n"
-        "**Stack:** [Languages and frameworks]\n"
-        "**Entry point:** [Main file or command]\n"
-        "**Purpose:** [One sentence]\n\n"
-        "---\n\n"
-        "## Architecture\n\n[Replace with high-level structure.]\n\n"
-        "---\n\n"
-        "## Key Files\n\n[Replace with important files and their roles.]\n\n"
-        "---\n\n"
-        "## Project-Specific Rules\n\n[Replace or delete this section.]\n"
-    )
-
-# _MUTEX_NAME, _mutex_handle, _acquire_instance_lock, _bring_existing_to_front,
-# _make_tray_icon all moved to helpers/runtime.py (Round 4 Phase A).
-
-# ── Projects tab controller ────────────────────────────────────────────────────
 
 class ProjectsTabController:
     """Owns the Projects tab UI and all per-project commands.
@@ -2681,7 +2531,8 @@ class ProjectsTabController:
         if create_bi:
             basic_md = os.path.join(path, "BASIC_INSTRUCTIONS.md")
             try:
-                template = load_basic_instructions_template()
+                template = load_basic_instructions_template(
+                    BASIC_INSTRUCTIONS_TEMPLATE, BASELINE_INCLUDE_LINE)
                 with open(basic_md, "w", encoding="utf-8") as f:
                     f.write(template)
                 self._on_log(f"  Created BASIC_INSTRUCTIONS.md in {name}", C["green"])
@@ -3642,7 +3493,8 @@ class ProjectsTabController:
                         self._on_log("  BASIC_INSTRUCTIONS.md already exists — skipped",
                                      C["overlay0"])
                     else:
-                        template = load_basic_instructions_template()
+                        template = load_basic_instructions_template(
+                            BASIC_INSTRUCTIONS_TEMPLATE, BASELINE_INCLUDE_LINE)
                         with open(basic_md, "w", encoding="utf-8") as f:
                             f.write(template)
                         log.info("  created BASIC_INSTRUCTIONS.md")
@@ -6447,7 +6299,7 @@ class App(tk.Tk):
         self._help_show(_fill)
 
     def refresh(self):
-        self.projects = find_projects()
+        self.projects = find_projects(SEARCH_ROOTS)
         pinned = get_pinned()
         self.active_path = pinned or (self.projects[0]["path"] if self.projects else None)
 
