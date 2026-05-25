@@ -57,10 +57,20 @@ _SECTION_ORDER = ["Breaking", "Added", "Fixed", "Changed", "Docs", "Other"]
 # ── Git tag / log helpers (take git_exe per Rule 1) ──────────────────────────
 
 def _last_release_tag(path: str, git_exe: str) -> str | None:
-    """Return the most recent annotated/lightweight tag, or None if no tags."""
+    """Return the most recent semver tag reachable from HEAD, or None.
+
+    Uses `git tag --merged HEAD --sort=-version:refname` so only tags that
+    are true ancestors of the current commit are considered, then picks the
+    first one whose core looks like MAJOR.MINOR.PATCH.  This avoids the
+    `git describe` pitfall where a non-semver tag (e.g. `round4-complete`)
+    that is closer by commit distance beats a semver tag on a parallel branch.
+    """
+    import re as _re
+    _SEMVER_RE = _re.compile(r"^v?\d+\.\d+\.\d+")
     try:
         proc = subprocess.run(
-            [git_exe, "-C", path, "describe", "--tags", "--abbrev=0"],
+            [git_exe, "-C", path, "tag", "--merged", "HEAD",
+             "--sort=-version:refname"],
             capture_output=True, text=True, timeout=10,
             encoding="utf-8", errors="replace",
             creationflags=CREATE_NO_WINDOW,
@@ -69,8 +79,11 @@ def _last_release_tag(path: str, git_exe: str) -> str | None:
         return None
     if proc.returncode != 0:
         return None
-    tag = proc.stdout.strip()
-    return tag or None
+    for line in proc.stdout.splitlines():
+        tag = line.strip()
+        if tag and _SEMVER_RE.match(tag):
+            return tag
+    return None
 
 
 def _commits_since(path: str, ref: str | None, git_exe: str) -> list:
