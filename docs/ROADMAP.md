@@ -147,15 +147,15 @@ Round 4 split the monolith into subpackages (equality 0.16 → 0.57, quality 5,6
 - ✅ **Phase 5a — "Open PR on GitHub" button.** Added to the PR draft dialog next to Copy. Writes body to temp `.md`, spawns `gh pr create --web --body-file <tmp>` with `cwd=<project>`. `--body-file` (not `--body "..."`) sidesteps Windows command-line length limits and quote escaping. Button greyed + tooltipped when `gh` isn't on PATH.
 - ✅ **Phase 5b — Pre-commit AI review hook (warn-only).** Right-click → 🔍 Pre-commit AI Review hook… installs a git pre-commit hook that runs `git diff --cached` through an AI code review. Three-value backend choice (`precommit_review_backend`: `"auto"` / `"claude_cli"` / `"llm"`). Fail-open invariant on every error path. POSIX shell script with hard-coded `python.exe` + reviewer paths; sentinel marker for install/remove symmetry; refuses to touch a hook the user installed themselves. **Stop-hook variant explicitly deferred** — see the "Pre-commit AI review — Stop-hook variant" entry below for rationale.
 
-- 🔮 **W2 — `_render_block` complex branch tangle (dialogs/mcp_config.py:154, 109 lines)**. 11 branches handling different MCP config row states. Refactor into a dispatch table keyed on row classification. Worth doing before extending MCP support to additional editors. Deferred from Roadmap-2 scope; revisit in Roadmap-3.
+- ✅ **W2 — `_render_block` complex branch tangle (dialogs/mcp_config.py:154, 109 lines)**. Shipped Roadmap-3 Phase 4a. Extracted into `_render_block_header`, `_render_block_diff`, `_render_block_actions` sub-helpers; orchestrator is now ~15 lines. Required before extending MCP support to additional editors.
 
 ### Roadmap-3 code-health backlog (post-Roadmap-2 Doctor snapshot)
 
 Doctor's full project audit surfaced 49 violations across 22 files at the start of Roadmap-2. After Phases 3 + 4 + 4.5 close out, ~30 violations will remain — all genuine branching logic that needs per-helper refactoring, NOT template-able sweeps. Treat each cluster as an independent Roadmap-3 work item, not all-at-once.
 
 **Helper complexity (highest value — central to AI feature stack):**
-- 🔮 `helpers/commit_messages.py` — 5 functions over cap (`_suggest_from_diff_content`=21, `_extract_changelog_additions`=18, `_message_from_changelog`=18, `_suggest_from_filenames`=18, `_sanitize_commit_message`=13). Multi-strategy orchestrator chain — natural shape is each `_strat_*` function in its own helper module.
-- 🔮 `helpers/llm.py` — 4 functions over cap (`_call_openai_compat`=20, `_call_llm`=15, `_call_anthropic`=14, `_iter_json_lines`=11). Provider-dispatch + SSE-parsing. Cleanest split is per-provider sub-module (`llm/anthropic.py`, `llm/openai_compat.py`, `llm/sse.py`).
+- ✅ `helpers/commit_messages.py` — Roadmap-3 Phase 4b. Introduced `CommitSuggestion(message, strategy)` dataclass; refactored to named `_strat_*` strategy chain; lowered `min_diff_lines` default 30 → 10. Sub-module split deferred — intra-file extraction was sufficient for Roadmap-3.
+- ✅ `helpers/llm.py` — Roadmap-3 Phase 4c. Extracted `_stream_anthropic_response` and `_stream_openai_response` from the two provider functions; both transports now sub-CC-10. Sub-module split (`llm/anthropic.py` etc.) deferred; ownership boundaries not stable enough yet to justify import overhead.
 
 **Helper complexity (lower-stakes — promote when actually touching the affected code):**
 - 🔮 `helpers/git.py` `_format_git_status_cell`=16
@@ -185,16 +185,16 @@ Three functions look genuinely unused after Phase E (grep-verified, NOT Tk-callb
 - `_suggest_paths_for_missing_file` at `agent_tools.py:249` — docstring claims it's called from `read_file`'s error path; verify the wiring still routes through it.
 - `_slim_tokensave_context` at `agent_tools.py:452` — verify the `tokensave_context` tool handler still calls it.
 
-Plus two genuine unused imports in the same file: `dataclasses.dataclass` (L26) and `typing.Callable` (L27) — leftover from the legacy ToolSpec class.
+**Roadmap-3 Phase 4d verdict:** The two "confirmed unused imports" (`dataclasses.dataclass` L26, `typing.Callable` L27) are actively used — `dataclass` decorates `ToolSpec` itself; `Callable` appears in multiple `ToolSpec` field annotations. Both claims in the plan were stale. Nothing deleted.
 
-### 🔮 Stage 2 (Ask-tab agent) usability refinements
+### Stage 2 (Ask-tab agent) usability refinements
 
-Surfaced via Roadmap-2 hands-on testing with `ollama` + `qwen2.5-coder:14b`. The agent works but quality is rough around the edges. Backlogged rather than fixed inline (the agent dispatch is a hot path; refinements deserve their own thought-out commit set).
+Surfaced via Roadmap-2 hands-on testing with `ollama` + `qwen2.5-coder:14b`. Backlogged from Roadmap-2; shipped in Roadmap-3 Phase 5.
 
-- **Tool-call deduplication.** Observed: model called `git_log({})` immediately followed by `git_log({"n": 20})` — same result, wasted iteration (default `n` is 20). The dispatcher could keep a per-run cache of `(tool_name, args_hash) → result` and return a cached result with `[cached from earlier in this run]` prefix, OR push back to the model with a "you already ran this — pick a different angle" hint. Low-risk; doesn't change tool semantics.
-- **Final-message streaming.** Currently the assistant's final answer arrives as one chunk at the end of the loop. Streaming the final-turn tokens (per the AGENT_ARCHITECTURE doc note) would make long answers feel responsive instead of opaque. Non-streaming the tool-call turns is correct — they're structured JSON.
-- **Loop-stall surfacing.** When the agent hits the iteration cap OR an unrecoverable HTTP error, the chat just shows a generic "✗  Error" indicator. The detailed reason already lives in `LocalAgent._last_error` — surface it in the chat (with the same one-line summary the `on_error` callback already gets).
-- **Single-source-of-truth for tool defaults in descriptions.** The `git_log` description says "Default 20" but the parameters JSON Schema doesn't set a default, so the model can't reliably pick "the default" without naming `n` explicitly. Either set `"default": 20` in the schema (preferred — lets the model omit `n`) or strip the "Default 20" from the prose so it doesn't mislead.
+- ✅ **Tool-call deduplication (Phase 5b).** `LocalAgent` gained `_CACHEABLE_TOOLS = {"tokensave_search", "tokensave_context"}` and a `_tool_cache: dict[str, str]` cleared at the start of every `run()`. Cache key: `f"{name}:{md5(json.dumps(args, sort_keys=True))}"`  — `sort_keys=True` collapses dict-order variations from the LLM. Cache hits annotate the UI callback only; LLM sees the verbatim original payload so it doesn't parrot `[cached]` into its reasoning. `read_file`, `list_directory`, `git_*` excluded — repo/filesystem state can change mid-run.
+- 🔮 **Final-message streaming.** Still planned. Currently the assistant's final answer arrives as one chunk at the end of the loop. Streaming the final-turn tokens would make long answers feel responsive. Non-streaming tool-call turns is correct — they're structured JSON.
+- ✅ **Loop-stall surfacing (Phase 5c).** New `_sanitize_error()` in `agent.py` collapses errors to a single line, redacts `Authorization: … / Bearer <token>` headers (two-pass regex for full `Authorization: Bearer` pattern then bare `Bearer <token>`), caps at 240 chars. Wired into both the HTTP-error path and the iteration-cap path; iteration-cap message now appends `Last error: <sanitized>`.
+- ✅ **Single-source-of-truth for `git_log` default (Phase 5d).** `n` parameter in the `git_log` tool's JSON Schema now has `"default": 20`. Model no longer redundantly passes `n: 20`.
 
 ### 💭 Pre-commit AI review — Claude Code Stop-hook variant
 
@@ -205,13 +205,13 @@ When Roadmap-2 Phase 5b shipped the pre-commit AI review hook, we considered thr
 
 The git hook covers ~95% of the safety value with cleaner semantics. Revisit only if real-world usage uncovers a specific gap the pre-commit hook can't fill — e.g. "I want a heads-up the moment Claude finishes a risky operation, before I even think about staging." Until then, ship the simpler thing.
 
-### 🔮 Stage 0 (commit-message generation) quality refinements
+### Stage 0 (commit-message generation) quality refinements
 
 Surfaced via Roadmap-2 hands-on testing — clicking Suggest on a small docs-only diff produced the generic `docs: update documentation`, never invoking the LLM.
 
-- **`min_diff_lines` gate is too aggressive for small but meaningful changes.** Default 30 means a focused 5-line bug fix or a 10-line docs improvement falls through to the filename heuristic. Two paths: (a) lower the default to 10, accepting more LLM calls; (b) keep the line gate but add an opt-in path (e.g. shift-click Suggest = "use LLM regardless of size"). (b) is safer.
-- **File-name fallback is too generic for `docs/upstream-issues/`-style paths.** The current heuristic produces "docs: update documentation" when ALL changed files are markdown — but the actual subject (which issue draft was edited) is right there in the filename. A small `_SCOPE_PATTERNS` addition keyed off `docs/upstream-issues/<name>.md` → `docs(upstream): <name>` would catch this class.
-- **No surfacing of WHICH strategy fired.** Tooltip on the Suggest button or one-liner status ("via LLM" / "via CHANGELOG" / "via diff" / "via filename") would let the user know whether the generic message is the best the chain could do or whether the LLM was silently bypassed.
+- ✅ **`min_diff_lines` gate lowered (Phase 5a / 4b).** Default lowered 30 → 10; small but meaningful changes (focused bug fixes, docs improvements) now reach the LLM instead of falling through to the filename heuristic. Also applies in Settings — display default and save fallback both updated.
+- 🔮 **File-name fallback is too generic for `docs/upstream-issues/`-style paths.** The current heuristic produces "docs: update documentation" when ALL changed files are markdown — a `_SCOPE_PATTERNS` addition keyed off `docs/upstream-issues/<name>.md` → `docs(upstream): <name>` would catch this class.
+- ✅ **Strategy surfacing (Phase 5a).** `CommitSuggestion(message, strategy)` dataclass (Phase 4b) feeds into a coloured `via LLM` / `via CHANGELOG` / `via diff` / `via filename` / `via fallback` / `error — using fallback` badge in the commit dialog so the user always knows which path fired.
 
 ### ✅ Skill awareness / prompting (Roadmap-3 Phase 3 — catalog shipped)
 
@@ -241,17 +241,15 @@ Same class of problem the manager exists to solve: Claude Code skills (e.g. `con
 
 **Trigger:** when the user finds themselves re-discovering a skill the manager should have surfaced. Each rediscovery makes the case for one of the options above more concrete. Catalog tab is the safest first step; the prompting variants are higher value but higher fatigue risk.
 
-### 🔮 Draft PR refinements (surfaced via Roadmap-2 post-ship dogfooding)
+### ✅ Draft PR refinements (Roadmap-3 Phase 2 — all shipped)
 
-Surfaced when the user clicked Draft PR on the Roadmap-2 branch at PR-creation time. Three independent refinements:
+Surfaced when the user clicked Draft PR on the Roadmap-2 branch at PR-creation time. All three refinements shipped in Roadmap-3 Phase 2.
 
-- **CLI instruction prompt is wrong for PR-creation use.** The Roadmap-1 Claude-CLI hand-off sends `"Review my uncommitted git changes and write a PR description to PR_DRAFT.md in the project root."` — but at PR time the working tree is usually clean (you commit, push, then click Draft PR). Claude correctly reports "no uncommitted changes" instead of drafting anything useful. The instruction should be `git log master..HEAD` + `git diff master..HEAD` based (commits between current branch and the upstream / default branch). The base-branch detection logic from `_call_anthropic`'s commit-message path may be reusable. Located in the CLI-path callsite in `src/controllers/git_tab.py` (or wherever the instruction string lives).
+- ✅ **CLI instruction prompt fixed (Phase 2a).** `_draft_pr_via_cli` now detects the base branch via a 7-step fallback chain (tracked upstream → `origin/HEAD` → `refs/remotes/origin/main` → `refs/remotes/origin/master` → local `main` → local `master` → hard error) and generates `git log <base>..HEAD` + `git diff <base>...HEAD` (triple-dot for merge-base diff). Each step is wrapped in try/except; failure surfaces a clear dialog rather than passing a wrong instruction to Claude. `_detect_base_branch(path, git_exe)` is a module-level function in `src/controllers/git_tab.py`.
 
-- **Draft PR backend preference setting** (analogous to `precommit_review_backend` from P5b). Currently the routing is hard-coded: CLI if `claude_cli_exe` set, else API. A user with both Claude Code AND Ollama configured has no way to say "I want to default to Ollama for PR drafts even though I have Claude CLI installed." Add `draft_pr_backend` in `manager-config.json` with values `"auto"` (current behaviour: prefer CLI), `"claude_cli"`, `"llm"`. Right-click menu still gives per-click override.
+- ✅ **`draft_pr_backend` config key (Phase 2b).** New `ManagerConfig.draft_pr_backend` property (`"auto"` / `"claude_cli"` / `"llm"`). `auto` preserves previous behaviour. Exposed in Settings → Behavior as three radio buttons. Tech-debt note: `precommit_review_backend` + `draft_pr_backend` are the second and third feature-specific backend selectors — consolidate into `ai_backends: {draft_pr, precommit_review, commit_message}` in a future config migration.
 
-- **Phase 5a "Open PR on GitHub" button needs end-to-end verification** in actual use. Untested by the user during Roadmap-2 because (a) left-click defaults to the CLI hand-off when `claude_cli_exe` is set so the dialog never opens, and (b) the API path would burn Anthropic credits which the user wanted to avoid. Verification path: confirm the API route via Ollama (`commit_message_llm` provider) produces text in the dialog, then verify the new button correctly writes a temp file + spawns `gh pr create --web --body-file`. Should "just work" given Phase 5a's design but isn't proven against an Ollama backend yet.
-
-- **Investigate Claude Code hook path-quoting errors.** Roadmap-2 dogfooding surfaced repeated `UserPromptSubmit hook error: Failed with non-blocking status code: /usr/bin/bash: line 1: D:/Claude: No such file or directory` and matching `Stop hook error` messages in the user's Claude Code terminal. Cause: a hook entry somewhere in `~/.claude/settings.json` or project `.claude/settings.json` references an unquoted Windows path containing spaces (`D:\Claude Co worker\...`), so bash splits at the first space and tries to execute `D:/Claude`. Candidates: the Roadmap-1 `_scaffold_git_hook` auto-commit Stop hook, or some manually-added entry. Fix: audit the hook commands and ensure paths-with-spaces are double-quoted. Not blocking but noisy.
+- ✅ **Hook path-quoting fixed (Phase 2c).** Added `_shell_quote_win(path)` helper in `helpers/scaffold.py` — wraps a path in double-quotes if it contains spaces. The Stop hook command now embeds the absolute path through this helper. Idempotency check recognises all three legacy forms. `BASIC_INSTRUCTIONS.md` Subprocess section updated with the quoting rule.
 
 ### 💭 File the two upstream tokensave issues
 Drafts in `docs/upstream-issues/`:
@@ -312,6 +310,15 @@ To be explicit about what we're NOT building:
 ## Status updates
 
 This file is updated whenever a stage ships or its design materially changes.
+
+**Last updated: 2026-05-24** — Roadmap-3 shipped in full (Phases 1–6). Highlights:
+
+- **Phase 1 — Stage 3 CHANGELOG drafter.** `ai_tasks_ctrl.py` introduced as the AI-task orchestration layer. `update_unreleased()` in `helpers/changelog_patch.py`. LLM merges any existing `[Unreleased]` content before drafting bullets. `ProposalDialog` gate with old-vs-new diff + commit offer.
+- **Phase 2 — Draft PR refinements.** 7-step base-branch fallback chain; triple-dot merge-base diff; `draft_pr_backend` config key; hook path-quoting (`_shell_quote_win`).
+- **Phase 3 — Skill awareness catalog.** Reference tab "CLAUDE SKILLS" panel: lazy frontmatter parser (no PyYAML), Refresh button, ▷ Run skill (detached CLI + `(path, skill_name) → Popen` duplicate guard).
+- **Phase 4 — Code-health sweep.** `_render_block` W2 Doctor violation fixed (3 sub-helpers). `CommitSuggestion(message, strategy)` dataclass. `helpers/llm.py` streaming helpers extracted. Dead-code audit: `dataclass` and `Callable` imports confirmed live — no-op.
+- **Phase 5 — Stage 0 & 2 polish.** Strategy badge UI in commit dialog (`via LLM / via CHANGELOG / …`). Per-run tool-call cache for `tokensave_*` tools (`sort_keys` hash). `_sanitize_error()` for auth-header redaction. `git_log` schema `"default": 20`. `min_diff_lines` 30 → 10.
+- **Phase 6 — Stage 4 Refactor scout.** Deterministic SQL analytics (no LLM for finding generation). `Finding` dataclass with stable md5 IDs. Modal findings panel with per-card checkboxes and three batch destinations (clipboard / Claude CLI / Ask tab). `seed_question(text, path)` on `AskTabController`. Daemon `--stop` fallback via PID-based `taskkill` (Windows `--stop` bug workaround). Upstream issue docs in `docs/upstream-issues/`.
 
 **Last updated: 2026-05-24** — Roadmap-2 shipped in full (Phases 0, 1, 2, 3, 4, 4.5, 5a, 5b). Highlights:
 

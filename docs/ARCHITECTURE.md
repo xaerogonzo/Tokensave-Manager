@@ -49,7 +49,7 @@ Token Save Manager Source/
 │   │                              to backend, parses severity, exits 0 (warn) or 1
 │   │                              (block per threshold). Fail-open on every error.
 │   │
-│   ├── helpers/                   19 modules of pure / IO helpers — no UI deps.
+│   ├── helpers/                   20 modules of pure / IO helpers — no UI deps.
 │   │   ├── config.py              _load_config, _save_config, _migrate_config
 │   │   ├── detection.py           _detect_git/_gh/_npm/_codegraph/_claude_cli,
 │   │   │                          _root_path/_label, _version_lt
@@ -75,9 +75,11 @@ Token Save Manager Source/
 │   │   │                          (Roadmap-2 P2: _patch_changelog removed; canonical
 │   │   │                          implementation now lives in helpers/changelog_patch.py)
 │   │   ├── daemon_cost.py         get_daemon_status, toggle_daemon, toggle_autostart,
-│   │   │                          parse_tokensave_cost
+│   │   │                          parse_tokensave_cost, _stop_daemon, _kill_pid
 │   │   │                          (parses `tokensave daemon --status` + `tokensave cost`;
-│   │   │                          P2 fixed `--start` bug and added autostart toggle)
+│   │   │                          P2 fixed `--start` bug + autostart toggle;
+│   │   │                          R3 added _stop_daemon with PID-based taskkill fallback
+│   │   │                          because tokensave --stop is broken on Windows)
 │   │   ├── pr_draft.py            generate_pr_draft — LLM-backed structured PR description
 │   │   │                          (Summary / Technical / Threat Model / Verification)
 │   │   ├── changelog_patch.py     insert_changelog_release (versioned release patcher);
@@ -89,12 +91,21 @@ Token Save Manager Source/
 │   │   │                          ## [Unreleased]). Wired into ReleaseWizard P2.
 │   │   ├── claude_cli.py          spawn_claude_cli — detached cmd.exe via CREATE_NEW_CONSOLE
 │   │   │                          with ""outer"" multi-quote fix + \r\n strip (TTY safety)
-│   │   └── precommit_hook.py      install/remove/detect git pre-commit AI review hook
-│   │                              + the review runner (run_review, parse_severity_summary,
-│   │                              severity_blocks_commit, backend dispatch for
-│   │                              "auto"/"claude_cli"/"llm"). Roadmap-2 P5b.
+│   │   ├── precommit_hook.py      install/remove/detect git pre-commit AI review hook
+│   │   │                          + the review runner (run_review, parse_severity_summary,
+│   │   │                          severity_blocks_commit, backend dispatch for
+│   │   │                          "auto"/"claude_cli"/"llm"). Roadmap-2 P5b.
+│   │   └── refactor_scout.py      Pure-function SQL analytics against .tokensave/tokensave.db.
+│   │                              Finding @dataclass (stable md5 ID, kind, file, symbol,
+│   │                              line, message, evidence). Four _scout_* query functions:
+│   │                              complexity (CC>10), god_class (>40 methods), god_file
+│   │                              (>1500 lines), dead_code (no incoming call edges, filtered
+│   │                              by conservative entry-point allowlist). run_scout() returns
+│   │                              (findings_by_kind, suppressed_count). Helper functions for
+│   │                              formatting investigate context, writing temp .md briefings
+│   │                              for CLI handoff, and batch briefings. Roadmap-3 P6.
 │   │
-│   ├── dialogs/                   20 tk.Toplevel dialog classes — one per file.
+│   ├── dialogs/                   21 tk.Toplevel dialog classes — one per file.
 │   │   ├── settings.py            SettingsDialog (+ _probe_loaded_model helper)
 │   │   ├── release_wizard.py      ReleaseWizardDialog + _ReleaseCtx (paired)
 │   │   ├── mcp_config.py          MCPConfigDialog
@@ -114,6 +125,13 @@ Token Save Manager Source/
 │   │   ├── assign_category.py     AssignCategoryDialog
 │   │   ├── untrack_ignored.py     UntrackIgnoredDialog
 │   │   ├── cost_viewer.py         CostViewerDialog (2x2 metric grid; bg-threaded fetch)
+│   │   ├── refactor_scout.py      RefactorScoutDialog — scrollable findings panel grouped
+│   │   │                          by kind. Per-card checkboxes + selection toolbar (All/None/
+│   │   │                          per-kind). Three batch footer actions: clipboard briefing,
+│   │   │                          Claude CLI temp-file handoff, Ask-tab seed. Per-card:
+│   │   │                          Investigate (seeds Ask tab) + Ignore (persists md5 ID).
+│   │   │                          _clean_symbol strips tokensave's doubled file-path prefix.
+│   │   │                          MouseWheel binding unregistered on close. Roadmap-3 P6.
 │   │   └── proposal.py            WriteProposal dataclass + ProposalDialog +
 │   │                              ProposalBridge (P1 — race-safe _resolve under Lock,
 │   │                              5-min event.wait timeout, WM_DELETE_WINDOW = reject,
@@ -133,7 +151,10 @@ Token Save Manager Source/
 │       │                          delete-branch cluster extracted from GitTabController;
 │       │                          merge orchestration decomposed into _prepare_merge_sources
 │       │                          + _confirm_merge + _merge_worker + _explain_merge_failure)
-│       ├── ask_tab.py             AskTabController (🤖 Ask tab — Stage 2 chat)
+│       ├── ask_tab.py             AskTabController (🤖 Ask tab — Stage 2 chat).
+│       │                          seed_question(text, path) — public method added R3 P6;
+│       │                          switches notebook tab, populates entry, auto-sends after
+│       │                          50ms tick defer. Refuses while agent run is in flight.
 │       ├── snippets.py            SnippetsController (📚 Reference tab)
 │       ├── help_tab.py            HelpTabController (❓ Help tab; extracted from App)
 │       ├── update_poller.py       UpdatePollerController (tokensave version probe +
@@ -149,10 +170,13 @@ Token Save Manager Source/
 │       ├── shadowlinks_ctrl.py    ShadowLinksController
 │       ├── git_ops_ctrl.py        GitOpsController (git log/commit/AI-review/init/
 │       │                          manage-gitignore/untrack-ignored from Projects tab)
-│       └── ai_tasks_ctrl.py       AITasksController — long-running AI write tasks
-│                                  (Stage 3 CHANGELOG drafter; future: refactor scout,
-│                                  release narrative). Per-task per-project lock.
+│       └── ai_tasks_ctrl.py       AITasksController — long-running AI write tasks.
+│                                  Shipped: Stage 3 CHANGELOG drafter (cmd_draft_changelog),
+│                                  Stage 4 Refactor scout (cmd_refactor_scout). Planned:
+│                                  release narrative. Per-task per-project lock (_running set).
 │                                  Orchestrates only; all shared infra in helpers/.
+│                                  CLI briefing via temp .md file-handoff pattern
+│                                  (avoids cmd.exe /k newline-as-Enter quirk).
 │
 ├── templates/                     Data files used by the manager + shipped in dist\
 │   ├── claude-md-template.md      BASIC_INSTRUCTIONS.md template for other projects
@@ -184,7 +208,12 @@ Token Save Manager Source/
     │                               Connectors UI vs legacy config, live-reload paths
     ├── GITHUB_GUIDE.md             Beginner GitHub guide (concepts, setup, daily workflow)
     └── upstream-issues/            Drafts of bugs to file against upstream tools
-        └── tokensave-hook-quoting.md   tokensave install --agent claude path-quoting bug
+        ├── tokensave-hook-quoting.md       tokensave install --agent claude path-quoting bug
+        ├── tokensave-health-details.md     Request: tokensave_health details=true sub-scores
+        ├── tokensave-redundancy-tool.md    Request: tokensave_redundancy AST duplication detector
+        ├── tokensave-daemon-stop-windows.md    --stop broken on Windows (service handle error)
+        ├── tokensave-daemon-child-no-window.md Daemon worker subprocesses flash cmd windows
+        └── tokensave-daemon-status-autostart.md Daemon autostart not reflected in --status
 ```
 
 ---
