@@ -14,6 +14,10 @@ Status legend:
 
 *(Planning phase — no stages committed yet. Add items here as they are decided.)*
 
+### ✅ Tasks tab — Claude Code session + worktree visibility. Shipped Roadmap-5 (2026-05-25). Details in CHANGELOG.md.
+
+### ✅ Claude CLI commit message fix (`--append-system-prompt` removed). Shipped Roadmap-5 (2026-05-25). Details in CHANGELOG.md.
+
 ---
 
 ## Major direction: local AI assistant integration
@@ -222,7 +226,9 @@ To be explicit about what we're NOT building:
 
 This file is updated whenever a stage ships or its design materially changes.
 
-**Last updated: 2026-05-25** — Roadmap-5 shipped. Highlights: Claude CLI model selector; pre-commit hook hang fix (Opus → Haiku); commit-message Claude CLI parity; Draft PR direct GitHub PR creation. Details in CHANGELOG.md.
+**Last updated: 2026-05-25** — Roadmap-5 continued. Additional: Tasks tab (Claude Code session + worktree visibility); Claude CLI commit message quality fix (`--append-system-prompt` removed). Details in CHANGELOG.md.
+
+✅ **2026-05-25 (earlier)** — Roadmap-5 initial ship. Highlights: Claude CLI model selector; pre-commit hook hang fix (Opus → Haiku); commit-message Claude CLI parity; Draft PR direct GitHub PR creation. Details in CHANGELOG.md.
 
 ✅ **2026-05-24** — Roadmap-3 shipped in full (Phases 1–6). Details in CHANGELOG.md.
 
