@@ -1,4 +1,6 @@
-# Upstream issue draft — `tokensave daemon --status` should surface autostart state
+# Upstream issue — `tokensave daemon --status` autostart visibility
+
+> **STATUS: MOOT — daemon removed entirely in tokensave v6.0.0.**
 
 **Repo:** https://github.com/aovestdipaperino/tokensave
 **Suggested title:** `tokensave daemon --status: include autostart enabled/disabled in output`

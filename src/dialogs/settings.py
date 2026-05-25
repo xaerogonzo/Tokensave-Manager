@@ -187,6 +187,8 @@ class SettingsDialog(tk.Toplevel):
             hint_fg = C["overlay0"]
         ttk.Button(upgrade_row, text=btn_label, style=btn_style,
                    command=host.cmd_upgrade_tokensave).pack(side=tk.LEFT)
+        ttk.Button(upgrade_row, text="🔍  Check integration",
+                   command=host.cmd_integration_check).pack(side=tk.LEFT, padx=(8, 0))
         tk.Label(body, text=hint, bg=C["base"], fg=hint_fg,
                  font=("Segoe UI", 8), justify=tk.LEFT,
                  anchor=tk.W).pack(fill=tk.X, padx=20, pady=(0, 4))

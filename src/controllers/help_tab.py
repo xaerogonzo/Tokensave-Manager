@@ -179,7 +179,7 @@ class HelpTabController:
             ins("  ╳  Close (X button)  ", "body"); ins("Hides the window to the system tray — the app keeps running.\n", "dim")
             ins("  _  Minimize           ", "body"); ins("Minimizes normally to the taskbar.\n", "dim")
             ins("  Tray icon → Show      ", "body"); ins("Restores the window to its last position and size.\n", "dim")
-            ins("  Tray icon → Quit      ", "body"); ins("Fully exits the app (stops the daemon connection too).\n", "dim")
+            ins("  Tray icon → Quit      ", "body"); ins("Fully exits the app.\n", "dim")
             br()
             p("The window position and size are saved automatically when you hide to tray "
               "and restored the next time you click Show.")
@@ -699,7 +699,6 @@ class HelpTabController:
             br()
             h2("What it doesn't do (yet)")
             ins("  • tokensave branch management (branch add/list/gc)\n", "dim")
-            ins("  • Daemon start/stop/status\n", "dim")
             ins("  • Cost tracking (tokensave cost)\n", "dim")
             ins("  • Cross-platform support (Windows only)\n", "dim")
             ins("  • Inline git diff / commit details\n", "dim")

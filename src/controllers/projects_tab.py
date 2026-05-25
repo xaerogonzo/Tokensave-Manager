@@ -42,7 +42,7 @@ from controllers.sync_ctrl import SyncStatusController
 from controllers.fileops_ctrl import FileOpsController
 from controllers.git_ops_ctrl import GitOpsController
 from controllers.shadowlinks_ctrl import ShadowLinksController
-from controllers.ai_tasks_ctrl import AITasksController, TASK_DRAFT_CHANGELOG
+from controllers.ai_tasks_ctrl import AITasksController
 from dialogs.assign_category import AssignCategoryDialog
 
 if TYPE_CHECKING:
@@ -476,6 +476,7 @@ class ProjectsTabController:
         m.add_command(label="📝  Draft CHANGELOG entry…", command=self.cmd_draft_changelog)
         m.add_command(label="🔬  Refactor scout…",         command=self.cmd_refactor_scout)
         m.add_command(label="✓  Run checks…",              command=self.cmd_run_checks)
+        m.add_command(label="🔄  Integration check",        command=self.cmd_integration_check)
         m.add_separator()
         m.add_command(label="📂  Open Folder",    command=self.cmd_open_folder)
         m.add_command(label="✏   Open in Editor", command=self.cmd_open_editor)
@@ -672,6 +673,10 @@ class ProjectsTabController:
     def cmd_run_checks(self) -> None:
         if path := self._selected_path():
             self._ai_tasks.cmd_run_checks(path)
+
+    def cmd_integration_check(self) -> None:
+        """Delegate to App.cmd_integration_check (project-independent)."""
+        self._root.cmd_integration_check()
 
     # ── File-ops commands — delegate to FileOpsController ────────────────────
 

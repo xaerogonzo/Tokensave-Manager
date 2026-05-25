@@ -42,7 +42,7 @@ import tkinter as tk
 from tkinter import ttk, messagebox
 from typing import TYPE_CHECKING
 
-from constants import C, CREATE_NO_WINDOW, _BASE_DIR
+from constants import C, _BASE_DIR
 from dialogs.snippet_edit import SnippetEditDialog
 
 if TYPE_CHECKING:

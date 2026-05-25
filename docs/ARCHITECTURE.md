@@ -33,8 +33,10 @@ Token Save Manager Source/
 │   │                              other concern in a subpackage (no monolith).
 │   ├── app.py                     Entry point — App(tk.Tk) + main(). Constructs the
 │   │                              single ManagerConfig instance and passes it down to
-│   │                              every controller/dialog. ~1,800 lines including
-│   │                              PROMPT_SNIPPETS + Help-tab section bodies.
+│   │                              every controller/dialog. ~1,640 lines after v6
+│   │                              daemon UI removal (~162 lines deleted: daemon
+│   │                              indicator widget, 5-second polling loop, and
+│   │                              5 daemon action methods).
 │   ├── state.py                   ManagerConfig dataclass (runtime-mutable settings;
 │   │                              read-only @property getters; mutated via
 │   │                              raw.update() + save() + refresh_derived()).
@@ -82,12 +84,11 @@ Token Save Manager Source/
 │   │   │                          _zip_dist, _release_basename, _fmt_size
 │   │   │                          (Roadmap-2 P2: _patch_changelog removed; canonical
 │   │   │                          implementation now lives in helpers/changelog_patch.py)
-│   │   ├── daemon_cost.py         get_daemon_status, toggle_daemon, toggle_autostart,
-│   │   │                          parse_tokensave_cost, _stop_daemon, _kill_pid
-│   │   │                          (parses `tokensave daemon --status` + `tokensave cost`;
-│   │   │                          P2 fixed `--start` bug + autostart toggle;
-│   │   │                          R3 added _stop_daemon with PID-based taskkill fallback
-│   │   │                          because tokensave --stop is broken on Windows)
+│   │   ├── daemon_cost.py         parse_tokensave_cost(tokensave_exe, scope) ONLY.
+│   │   │                          All daemon functions removed in tokensave v6.0.0
+│   │   │                          integration (daemon mode dropped upstream).
+│   │   │                          Previously held: get_daemon_status, toggle_daemon,
+│   │   │                          toggle_autostart, _stop_daemon, _kill_pid.
 │   │   ├── pr_draft.py            generate_pr_draft — LLM-backed structured PR description
 │   │   │                          (Summary / Technical / Threat Model / Verification)
 │   │   ├── changelog_patch.py     insert_changelog_release (versioned release patcher);
@@ -183,7 +184,11 @@ Token Save Manager Source/
 │       ├── snippets.py            SnippetsController (📚 Reference tab)
 │       ├── help_tab.py            HelpTabController (❓ Help tab; extracted from App)
 │       ├── update_poller.py       UpdatePollerController (tokensave version probe +
-│       │                          GitHub release polling; extracted from App)
+│       │                          GitHub release polling; extracted from App).
+│       │                          Also exposes cmd_integration_check() — runs
+│       │                          scripts/check_tokensave_integration.py in a
+│       │                          background thread and shows output in a
+│       │                          scrolledtext Toplevel dialog)
 │       ├── codegraph_ctrl.py      CodeGraphController (init/sync/status/remove)
 │       ├── doctor_ctrl.py         DoctorController (tokensave doctor + purge + P0
 │       │                          monolith audit: file/method/class/complexity caps via
@@ -206,6 +211,19 @@ Token Save Manager Source/
 │                                  Orchestrates only; all shared infra in helpers/.
 │                                  CLI briefing via temp .md file-handoff pattern
 │                                  (avoids cmd.exe /k newline-as-Enter quirk).
+│
+├── scripts/                       Source-only developer tools (NOT shipped in dist\)
+│   └── check_tokensave_integration.py
+│                                  Free deterministic audit script (~130 lines, pure
+│                                  stdlib). Checks: (1) installed tokensave version via
+│                                  --version, (2) upstream-issues/ STATUS fields,
+│                                  (3) stale snippet references (tools listed in
+│                                  CHANGELOG ### Removed that still appear in
+│                                  src/prompts.py snippet bodies). Exit code always 0.
+│                                  Run AFTER tokensave upgrade + git pull so local files
+│                                  match the new version. Launched by the manager's
+│                                  "🔍 Check integration" button (Settings) or right-click
+│                                  menu; also runnable standalone from a terminal.
 │
 ├── templates/                     Data files used by the manager + shipped in dist\
 │   ├── claude-md-template.md      BASIC_INSTRUCTIONS.md template for other projects
@@ -232,17 +250,19 @@ Token Save Manager Source/
     ├── ARCHITECTURE.md             This file
     ├── ARCHITECTURE_TOKENSAVE.md   tokensave tool internals reference
     ├── AGENT_ARCHITECTURE.md       LocalAgent loop + tool registry + propose-only rules
+    ├── UPGRADE_INTEGRATION.md      Tokensave upgrade workflow — 4-step sequence (upgrade →
+    │                               git pull → 🔍 Check integration → 🔄 audit snippet)
     ├── ROADMAP.md                  Staged plan for local AI features (Stages 0–8)
     ├── MCP_INTEGRATION_GOTCHAS.md  Field manual: UWP path redirection, wrapper stdio bug,
     │                               Connectors UI vs legacy config, live-reload paths
     ├── GITHUB_GUIDE.md             Beginner GitHub guide (concepts, setup, daily workflow)
-    └── upstream-issues/            Drafts of bugs to file against upstream tools
-        ├── tokensave-hook-quoting.md       tokensave install --agent claude path-quoting bug
-        ├── tokensave-health-details.md     Request: tokensave_health details=true sub-scores
-        ├── tokensave-redundancy-tool.md    Request: tokensave_redundancy AST duplication detector
-        ├── tokensave-daemon-stop-windows.md    --stop broken on Windows (service handle error)
-        ├── tokensave-daemon-child-no-window.md Daemon worker subprocesses flash cmd windows
-        └── tokensave-daemon-status-autostart.md Daemon autostart not reflected in --status
+    └── upstream-issues/            Drafts of bugs filed against upstream tools
+        ├── tokensave-hook-quoting.md       [FIXED v6.0.0 #81] path-quoting bug in install --agent claude
+        ├── tokensave-health-details.md     [FIXED v6.0.0 #82] tokensave_health details=true sub-scores
+        ├── tokensave-redundancy-tool.md    [SHIPPED v6.0.0 #83] tokensave_redundancy AST duplicate detector
+        ├── tokensave-daemon-stop-windows.md    [MOOT v6.0.0] --stop broken on Windows (daemon removed)
+        ├── tokensave-daemon-child-no-window.md [MOOT v6.0.0] Daemon worker cmd-window flash (daemon removed)
+        └── tokensave-daemon-status-autostart.md [MOOT v6.0.0] Daemon autostart state in --status (daemon removed)
 ```
 
 ---
@@ -257,7 +277,7 @@ app.py
   ├── constants.py       — palette, regex, paths
   ├── theme.py           — _Tooltip
   ├── helpers/*          — pure / IO helpers (no UI)
-  ├── dialogs/*          — 18 tk.Toplevel classes
+  ├── dialogs/*          — 22 tk.Toplevel classes
   └── controllers/*      — 4 tab controllers
         └── controllers/* each import the dialogs they instantiate
             (lazy in-handler imports for any cross-dialog cycle risk —

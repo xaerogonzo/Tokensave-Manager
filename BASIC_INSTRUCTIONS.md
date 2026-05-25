@@ -64,6 +64,7 @@ Verification gate: *"What docs did I touch?"* — if the answer is "none" and th
 
 - Reading code to answer a question? Use `tokensave_context` first. Don't use Read/Glob/Grep for code research when tokensave is available (see global `~/.claude/CLAUDE.md`).
 - Before deleting "unused" code: grep-verify. Tk-callback false positives are documented in `~/.claude/projects/D--Claude-Co-worker-Token-Save-Manager-Source/memory/tokensave_python_false_positives.md`.
+- **When tokensave releases a new version**: run the integration check BEFORE merging manager changes. Sequence: (1) `tokensave upgrade`, (2) `git pull` this repo, (3) Settings → "🔍 Check integration" or `python scripts/check_tokensave_integration.py`, (4) copy the "🔄 Integration audit" snippet from the Reference tab and run it in a Claude Code CLI session. See `docs/UPGRADE_INTEGRATION.md` for the full workflow.
 
 ### D. Project guard-rails (the high-impact subset)
 
@@ -277,6 +278,7 @@ Token Save Manager Source/
     ├── ARCHITECTURE.md             Manager architecture reference
     ├── ARCHITECTURE_TOKENSAVE.md   tokensave tool internals reference
     ├── AGENT_ARCHITECTURE.md       LocalAgent + tool registry + locked propose-only rules
+    ├── UPGRADE_INTEGRATION.md      Tokensave upgrade workflow (4-step: upgrade → pull → check → audit)
     ├── ROADMAP.md                  Staged plan for local AI features
     ├── MCP_INTEGRATION_GOTCHAS.md  Postmortem field manual — READ before changing the wrapper
     ├── GITHUB_GUIDE.md             Beginner GitHub guide
@@ -328,6 +330,7 @@ Must be updated when the project moves to a new location or machine.
 | `Launch TokenSave Manager.bat` | Reads `python_exe` from `manager-config.json` via PowerShell, launches manager |
 | `docs/ARCHITECTURE.md` | Class structure, UI layout, data flow, threading model, config system |
 | `docs/ARCHITECTURE_TOKENSAVE.md` | How tokensave.exe works internally |
+| `docs/UPGRADE_INTEGRATION.md` | Tokensave upgrade workflow — run after each new tokensave release |
 | `docs/GITHUB_GUIDE.md` | Beginner GitHub guide — shipped in `dist\docs\` |
 | `docs/ROADMAP.md` | Staged plan for local AI features |
 | `CHANGELOG.md` | Feature history |

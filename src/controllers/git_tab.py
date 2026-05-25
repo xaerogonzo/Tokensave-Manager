@@ -1392,7 +1392,7 @@ class GitTabController:
                     parent=dlg))
                 return
             except OSError as e:
-                dlg.after(0, lambda: messagebox.showerror("Create PR", str(e), parent=dlg))
+                dlg.after(0, lambda msg=str(e): messagebox.showerror("Create PR", msg, parent=dlg))
                 return
 
             if result.returncode != 0:

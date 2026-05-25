@@ -1,4 +1,8 @@
-# Upstream issue draft — `tokensave daemon --stop` fails on Windows with "failed to open service"
+# Upstream issue — `tokensave daemon --stop` fails on Windows
+
+> **STATUS: MOOT — daemon removed entirely in tokensave v6.0.0.**
+> File-watching now lives inside the MCP server. Manager daemon_cost.py
+> daemon functions removed; _poll_daemon_status loop and daemon UI deleted.
 
 **Repo:** https://github.com/aovestdipaperino/tokensave
 **Suggested title:** `tokensave daemon --stop` errors out on Windows when the daemon was started ad-hoc (no service installed)

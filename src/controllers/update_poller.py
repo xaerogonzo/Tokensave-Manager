@@ -14,12 +14,14 @@ from __future__ import annotations
 import os
 import re
 import subprocess
+import sys
 import threading
 import time
-from tkinter import messagebox
+from tkinter import messagebox, scrolledtext, ttk
+import tkinter as tk
 from typing import TYPE_CHECKING, Callable
 
-from constants import C, CREATE_NO_WINDOW
+from constants import C, CREATE_NO_WINDOW, _BASE_DIR
 from helpers.detection import _version_lt
 from helpers.runtime import log
 
@@ -141,6 +143,71 @@ class UpdatePollerController:
             label="upgrade",
         )
 
+    def cmd_integration_check(self) -> None:
+        """Run scripts/check_tokensave_integration.py and show the output.
+
+        Source-only: the script lives in the repo's scripts/ directory and is
+        not shipped in the compiled dist. When the script is absent (compiled
+        exe mode), shows a friendly info dialog instead of an error.
+        """
+        script = os.path.join(_BASE_DIR, "scripts", "check_tokensave_integration.py")
+        if not os.path.isfile(script):
+            messagebox.showinfo(
+                "Source-only tool",
+                "check_tokensave_integration.py is only available when running\n"
+                "TokenSave Manager from source (not from the compiled exe).\n\n"
+                "Clone the repo and run  python src/app.py  to use this tool.",
+                parent=self._root,
+            )
+            return
+        threading.Thread(
+            target=self._integration_check_worker,
+            args=(script,),
+            daemon=True,
+            name="tokensave-integration-check",
+        ).start()
+
+    def _integration_check_worker(self, script: str) -> None:
+        """Background worker: run the integration check script and surface output."""
+        try:
+            r = subprocess.run(
+                [sys.executable, script],
+                capture_output=True,
+                text=True,
+                timeout=15,
+                encoding="utf-8",
+                errors="replace",
+                cwd=_BASE_DIR,
+                creationflags=CREATE_NO_WINDOW,
+            )
+            output = (r.stdout or "").strip() or (r.stderr or "").strip() or "(no output)"
+        except subprocess.TimeoutExpired:
+            output = "⚠ Timed out after 15 s."
+        except Exception as e:
+            output = f"⚠ Error running script: {e}"
+        self._root.after(0, lambda o=output: self._show_integration_output(o))
+
+    def _show_integration_output(self, text: str) -> None:
+        """Main-thread: pop a scrollable read-only text dialog with the report."""
+        dlg = tk.Toplevel(self._root)
+        dlg.title("Tokensave integration check")
+        dlg.configure(bg=C["base"])
+        dlg.resizable(True, True)
+        dlg.geometry("700x420")
+        dlg.transient(self._root)
+
+        st = scrolledtext.ScrolledText(
+            dlg, wrap=tk.WORD, font=("Consolas", 10),
+            bg=C["mantle"], fg=C["text"], insertbackground=C["text"],
+            relief=tk.FLAT, padx=10, pady=10,
+        )
+        st.pack(fill=tk.BOTH, expand=True, padx=10, pady=(10, 4))
+        st.insert(tk.END, text)
+        st.configure(state=tk.DISABLED)
+
+        ttk.Button(dlg, text="Close", command=dlg.destroy).pack(pady=(0, 10))
+        dlg.focus_set()
+
     # ── Internal workers ──────────────────────────────────────────────────────
 
     def _probe_worker(self) -> None:
@@ -239,5 +306,11 @@ class UpdatePollerController:
                 f"Settings → 'Upgrade tokensave to v{latest}' to apply, "
                 f"or run 'tokensave upgrade' from a shell.",
                 C["peach"],
+            )
+            self._on_log(
+                "  → Integration workflow: upgrade tokensave → git pull "
+                "this repo → python scripts/check_tokensave_integration.py "
+                "→ '🔄 Integration audit' snippet in Reference tab.",
+                C["subtext"],
             )
             log.info(f"UPDATE-AVAILABLE  {cur} -> {latest}  (via GitHub API)")

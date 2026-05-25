@@ -1,4 +1,7 @@
-# Upstream issue draft — Daemon-spawned re-index workers flash cmd windows on Windows
+# Upstream issue — Daemon-spawned re-index workers flash cmd windows on Windows
+
+> **STATUS: MOOT — daemon removed entirely in tokensave v6.0.0.**
+> The watcher now runs inside the MCP server process; no separate daemon spawns workers.
 
 **Repo:** https://github.com/aovestdipaperino/tokensave
 **Suggested title:** Daemon's re-index worker subprocesses don't pass `CREATE_NO_WINDOW` on Windows — every file save flashes a console

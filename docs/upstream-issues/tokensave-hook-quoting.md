@@ -1,6 +1,11 @@
 <!--
-Draft issue body for tokensave upstream — file at:
-  https://github.com/aovestdipaperino/tokensave/issues/new
+STATUS: FIXED in tokensave v6.0.0 (issue #81).
+tokensave install now writes {"command": "...", "args": ["hook-..."]} shape.
+Doctor auto-rewrites legacy single-string hooks. Manager daemon_cost.py
+daemon functions removed; manager no longer calls tokensave daemon --status.
+
+Draft issue body for tokensave upstream — filed at:
+  https://github.com/aovestdipaperino/tokensave/issues/81
 
 This file is not the issue itself — it's the source-of-truth draft so we
 can iterate before publishing. Once filed, paste the resulting issue URL

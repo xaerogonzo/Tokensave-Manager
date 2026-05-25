@@ -22,8 +22,7 @@ from tkinter import ttk
 from typing import Callable
 
 from constants import C
-from helpers.refactor_scout import (EVIDENCE_MAX_LINES, Finding,
-                                     format_investigate_context, kind_label)
+from helpers.refactor_scout import EVIDENCE_MAX_LINES, Finding, kind_label
 
 
 _KIND_COLOUR = {

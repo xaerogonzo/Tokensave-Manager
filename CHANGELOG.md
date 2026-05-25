@@ -3,6 +3,47 @@
 
 ## [Unreleased]
 
+### Added (tokensave v6.0.0 / v6.1.0 integration)
+- **✓ Run checks… — pre-merge quality gate.** Right-click any project → **✓ Run checks…** opens a concurrent four-check dialog:
+  - **Python syntax** (`python -m compileall src/ -q`) — free, always-on by default.
+  - **pyflakes** (`python -m pyflakes src/`) — free, always-on by default.
+  - **Doctor audit** — calls `_audit_project_tree` directly as a pure function (no subprocess); returns `(violations, exempt_notes, files_scanned)` so the result appears in under a second.
+  - **Claude Code review** — opt-in (off by default, uses API tokens). Diffs `git diff <base>...HEAD` (triple-dot PR scope). A large-diff warning (`>10 k chars`) fires on the main thread before the executor starts so `messagebox.askyesno` is Tkinter-safe. Base branch is resolved via `_detect_base_branch` (same 7-step fallback chain used by Draft PR).
+  - All four checks run concurrently via `concurrent.futures.ThreadPoolExecutor`; result rows update live with ✓ / ✗ / ⏳ / — as each future resolves.
+  - Check toggle state persists to `cfg.raw["checks_enabled"]` (merged with `_DEFAULT_CHECKS = {"syntax": True, "pyflakes": True, "doctor": True, "claude": False}` so new check types never cause `KeyError`).
+  - Dialog close calls `self._executor.shutdown(wait=False, cancel_futures=True)` — queued futures are cancelled; already-running subprocesses complete naturally (Doctor is sub-5s, Claude has a 45s timeout).
+  - New files: `src/dialogs/checks_dialog.py`. New controller method: `AITasksController.cmd_run_checks` + `TASK_RUN_CHECKS` lock constant in `src/controllers/ai_tasks_ctrl.py`. New menu entry in `src/controllers/projects_tab.py`.
+- **GitHub Actions CI.** `.github/workflows/ci.yml` runs Python syntax check (`compileall`) and `pyflakes` on every push and pull request using free GitHub-hosted runners (ubuntu-latest, Python 3.11). No secrets, no paid minutes. Doctor and Claude review are local-only (require the manager environment). A ✓ or ✗ badge appears on every PR automatically.
+- **tokensave v6.1.0 MCP tools added to Reference tab snippets.** Four new prompt snippets in the "🔗 v6 NEW TOOLS" section of `src/prompts.py`:
+  - **🔗 Call chain between two symbols** — `tokensave_call_chain`
+  - **🔗 Health sub-score breakdown** — `tokensave_health(details=true)` drill-in workflow
+  - **🔗 Exact symbol lookup** — `tokensave_find_exact_symbol`
+  - **🔗 File dependency map** — `tokensave_file_dependents`
+- **tokensave v6.0.0 upstream issues resolved** — three issues filed from this project shipped in tokensave v6.0.0:
+  - **Issue #81 — hook-quoting fix.** `tokensave install --agent claude` now quotes paths with spaces correctly. Manager's own `_shell_quote_win` workaround in `helpers/scaffold.py` remains for older tokensave versions; the upstream issue docs are marked `STATUS: FIXED`.
+  - **Issue #82 — `tokensave_health(details=true)`.** `tokensave_health` now accepts `details=true` and returns per-dimension sub-scores: acyclicity, depth, equality/gini, redundancy, modularity, coverage discipline. Manager's "📊 Full health audit" snippet updated to call `tokensave_health(details=true)`. Upstream issue doc: `STATUS: FIXED`.
+  - **Issue #83 — `tokensave_redundancy`.** New MCP tool blends AST-shape hash, CFG hash, call-sequence hash, and 5-gram token-shingle Jaccard similarity into `definite` / `likely` / `naming_only` severity buckets. Fingerprints persist in the `node_fingerprints` table (schema v10). Manager's "🪦 Redundancy hunt" snippet rewritten to call `tokensave_redundancy` directly (was a 5-step manual LLM chain against `tokensave_similar` + `tokensave_node`). Upstream issue doc: `STATUS: SHIPPED`.
+
+### Changed (tokensave v6 integration)
+- **`_detect_base_branch` upstream-tracking fix.** Step 1 of the 7-step fallback chain now skips when the tracked upstream equals `origin/<current-branch>` (the branch is tracking itself — not a valid PR merge target). Previously this caused Draft PR and Run checks to use `origin/Roadmap-5` as the PR base instead of `origin/master`, producing a zero diff. Fix: compare `out` against `f"origin/{current}"` before returning. Verified end-to-end: base branch now resolves to `origin/master` on feature branches.
+- **"📊 Full health audit" snippet updated** to use `tokensave_health(details=true)` and include a `tokensave_redundancy` step in the workflow (was 6 separate tool calls to assemble sub-scores manually).
+- **"🪦 Redundancy hunt" snippet rewritten** — now calls `tokensave_redundancy` directly instead of the old 5-step `tokensave_similar` + `tokensave_node` + LLM body-compare chain.
+- **`src/controllers/help_tab.py`** — removed daemon references from the Help tab text ("stops the daemon connection too" phrase removed from the Quit description; "Daemon start/stop/status" bullet removed from the "What it doesn't do" list).
+
+### Fixed (tokensave v6 integration)
+- **CI pyflakes failures fixed** — six pre-existing unused-import warnings across five files removed to reach a clean pyflakes baseline:
+  - `src/dialogs/refactor_scout.py`: removed `format_investigate_context` (not used in dialog — only in `ai_tasks_ctrl.py`).
+  - `src/helpers/precommit_hook.py`: removed unused `import subprocess` and `from constants import CREATE_NO_WINDOW`.
+  - `src/controllers/projects_tab.py`: removed `TASK_DRAFT_CHANGELOG` from the `ai_tasks_ctrl` import (only `TASK_RUN_CHECKS` is used in this file).
+  - `src/controllers/snippets.py`: removed `CREATE_NO_WINDOW` from the `constants` import.
+- **Lambda closure bug fixed in `_create_pr_via_gh`** (`src/controllers/git_tab.py`). Python 3 deletes the `except`-clause variable (`e`) at the end of the `except` block; a `lambda: str(e)` in a `self.after(0, ...)` callback would `NameError` at runtime. Fixed by capturing the value immediately: `lambda msg=str(e): messagebox.showerror("Create PR", msg, parent=dlg)`. pyflakes correctly flagged this as "local variable `e` is assigned but never used" + "undefined name `e`" in the deferred lambda.
+
+### Removed (tokensave v6 integration — breaking change)
+- **Daemon UI removed.** tokensave v6.0.0 dropped the `tokensave daemon` command entirely. File-watching now lives inside the MCP server process; no separate daemon spawns or needs management. All daemon-related UI and polling has been removed from the manager:
+  - **`src/app.py`**: removed `self._daemon_indicator` widget, `self._daemon_lbl` widget, `self._daemon_status` state variable, `self._daemon_polling` flag, `self._poll_daemon_status()` call in `__init__`, and five daemon methods (`_poll_daemon_status`, `_apply_daemon_status`, `_daemon_show_menu`, `_daemon_run_action`, `_daemon_after_action`) — ~162 lines deleted. The `📊 Cost` button and `CostViewerDialog` are unaffected; `tokensave cost` still works in v6.
+  - **`src/helpers/daemon_cost.py`**: removed `get_daemon_status`, `_kill_pid`, `_stop_daemon`, `toggle_daemon`, `toggle_autostart`, and the `_DETACHED_PROCESS` / `_CREATE_NEW_PROCESS_GROUP` Windows constants (~252 lines removed). Only `parse_tokensave_cost(tokensave_exe, scope)` remains.
+  - **Upstream issue docs marked MOOT**: `tokensave-daemon-status-autostart.md`, `tokensave-daemon-stop-windows.md`, `tokensave-daemon-child-no-window.md` all marked `STATUS: MOOT — daemon removed entirely in tokensave v6.0.0`.
+
 ### Added (Roadmap-5)
 - **Claude CLI model selector.** New `claude_cli_model` config key in `manager-config.json` (default `"claude-haiku-4-5-20251001"`). Exposed as a free-text combobox in Settings → Claude Code CLI (values: Haiku 4.5 / Sonnet 4.6 / Opus 4.7 / empty = use CLI default). Every manager-spawned `claude --print` call now passes `--model <id>` via an updated `call_claude_cli_print(model="")` signature. Empty string omits the flag entirely, deferring to `~/.claude/settings.json`. Stderr from failed `claude --print` calls is now logged (capped at 400 chars, guarded by `sys.stderr is not None` for windowed-exe safety) so typo'd model IDs surface diagnostics rather than silently failing.
 - **Pre-commit hook hang fix.** Switching `claude_cli_model` to Haiku 4.5 resolves the "Committing… (hangs)" symptom caused by Opus 4.7 being too slow on large diffs. Pre-commit timeout raised 30 → 45 s as headroom for users who intentionally choose Opus. Diff already capped at 24 000 chars.
