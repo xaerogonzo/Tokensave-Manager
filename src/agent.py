@@ -31,6 +31,7 @@ from __future__ import annotations
 import json
 import logging
 import os
+import re
 import threading
 import urllib.error
 import urllib.request
@@ -126,6 +127,46 @@ def _extract_balanced_json_substrings(text: str) -> list[str]:
     return results
 
 
+def _is_tool_error(result: str) -> bool:
+    """True when a tool result string indicates a failure that should NOT cache.
+
+    Tool handlers signal failures with the `[tool error]` prefix (per the
+    convention in agent_tools.py). `[tool note]` and successful outputs are
+    cacheable. We never want to memoize a transient failure across cache
+    hits within the same run.
+    """
+    head = result.lstrip()[:32].lower() if isinstance(result, str) else ""
+    return head.startswith("[tool error]")
+
+
+# Two-pass redaction. The header regex eats everything from the colon to the
+# next whitespace AFTER a leading bearer keyword (if present), so
+# "Authorization: Bearer sk-abc..." doesn't leak the token half. The bearer
+# regex catches bare "Bearer <token>" sequences not preceded by a header name.
+_HEADER_SECRET_RE = re.compile(
+    r"(?i)\b(authorization|x-api-key|api[-_ ]?key)\s*[:=]\s*"
+    r"(?:bearer\s+)?\S+")
+_BEARER_RE = re.compile(r"(?i)\bbearer\s+\S+")
+
+
+def _sanitize_error(text: str) -> str:
+    """Compress an exception/HTTP error message into one safe chat-friendly line.
+
+    - Trims to the first non-empty line (strips stack traces and verbose bodies).
+    - Removes anything matching Authorization: / api-key: / Bearer <token>.
+    - Caps length at 240 chars.
+
+    Used by the loop-stall surface (iteration cap / unrecoverable HTTP error)
+    so the chat window never receives raw tracebacks or partial auth headers.
+    """
+    if not text:
+        return ""
+    first = next((ln.strip() for ln in str(text).splitlines() if ln.strip()), "")
+    cleaned = _HEADER_SECRET_RE.sub(r"\1: <redacted>", first)
+    cleaned = _BEARER_RE.sub("Bearer <redacted>", cleaned)
+    return cleaned[:240]
+
+
 # ───────────────────────────────────────────────────────────────────────
 # LocalAgent
 # ───────────────────────────────────────────────────────────────────────
@@ -146,6 +187,13 @@ class LocalAgent:
     streaming WOULD be valuable — but adding it later is non-breaking, so
     we ship without first.
     """
+
+    # Read-only deterministic tools whose results are safe to cache for the
+    # duration of a single run(). Excludes read_file / list_directory / git_*
+    # because filesystem and repo state can change mid-run (write_file tool,
+    # hooks, user editing externally). tokensave_* queries hit the indexed DB
+    # which doesn't see disk changes until re-indexed, so they're stable.
+    _CACHEABLE_TOOLS = frozenset({"tokensave_search", "tokensave_context"})
 
     def __init__(self, cfg: dict, project_path: str,
                  tools: dict[str, ToolSpec],
@@ -173,6 +221,12 @@ class LocalAgent:
         # network error, JSON parse failure) instead of a generic
         # "LLM request failed" message.
         self._last_error: str | None = None
+        # Per-run tool-call cache (cleared at the top of each run()).
+        # ONLY deterministic read-only tools are cached — see _CACHEABLE_TOOLS.
+        # Filesystem, git, and read_file results are NOT cached because they
+        # can legitimately change within a single agent run (write_file,
+        # hooks, or the user editing files externally).
+        self._tool_cache: dict[str, str] = {}
 
     # ── Public entry point ──────────────────────────────────────────────
 
@@ -218,6 +272,9 @@ class LocalAgent:
                 messages, on_assistant_message, on_done, on_error)
             return
 
+        # Per-run tool cache: empty at the start of every conversation turn so
+        # tokensave_search/tokensave_context results don't leak across turns.
+        self._tool_cache.clear()
         last_assistant_text: str | None = None
         try:
             for iteration in range(self.max_iterations):
@@ -231,7 +288,7 @@ class LocalAgent:
                 response = self._chat_completion(messages)
                 if response is None:
                     if on_error:
-                        detail = self._last_error or (
+                        detail = _sanitize_error(self._last_error) or (
                             "no detail (check the manager's log file for "
                             "tokensave-manager.agent warnings)")
                         on_error(f"LLM request failed.  {detail}")
@@ -253,14 +310,17 @@ class LocalAgent:
                 # Loop again — model gets to see the tool outputs.
             # Iteration cap exhausted.
             if on_error:
-                on_error(f"Iteration cap ({self.max_iterations}) reached. "
-                         "The model kept calling tools without producing a "
-                         "final answer — try rephrasing the question, or "
-                         "raise max_iterations.")
+                tail = _sanitize_error(self._last_error)
+                detail = f"  Last error: {tail}" if tail else ""
+                on_error(
+                    f"Iteration cap ({self.max_iterations}) reached. "
+                    "The model kept calling tools without producing a "
+                    "final answer — try rephrasing the question, or "
+                    f"raise max_iterations.{detail}")
         except Exception as e:
             log.exception("LocalAgent.run failed")
             if on_error:
-                on_error(f"Agent crashed: {type(e).__name__}: {e}")
+                on_error(_sanitize_error(f"Agent crashed: {type(e).__name__}: {e}"))
 
     # ── Response parsing ────────────────────────────────────────────────
 
@@ -323,11 +383,23 @@ class LocalAgent:
                 except Exception:
                     log.exception("on_tool_call callback raised")
 
-            result = self._dispatch_tool(name, args)
+            cache_key = self._cache_key_for(name, args)
+            cached = self._tool_cache.get(cache_key) if cache_key else None
+            if cached is not None:
+                result = cached
+                # Annotate ONLY the UI callback — the LLM still sees the
+                # original payload verbatim so it doesn't over-focus on the
+                # "[cached]" marker and parrot it into its reasoning.
+                display = "[cached]\n" + result
+            else:
+                result = self._dispatch_tool(name, args)
+                display = result
+                if cache_key and not _is_tool_error(result):
+                    self._tool_cache[cache_key] = result
 
             if on_tool_result:
                 try:
-                    on_tool_result(name, result)
+                    on_tool_result(name, display)
                 except Exception:
                     log.exception("on_tool_result callback raised")
 
@@ -337,6 +409,23 @@ class LocalAgent:
                 "name": name,
                 "content": result,
             })
+
+    def _cache_key_for(self, name: str, args: dict) -> str | None:
+        """Return a stable cache key for cacheable tool calls, or None.
+
+        Uses sort_keys=True on the args JSON so two LLM calls with identical
+        arguments in different key orders share a cache entry. Returns None
+        for tools NOT in _CACHEABLE_TOOLS so the caller skips the cache path.
+        """
+        if name not in self._CACHEABLE_TOOLS:
+            return None
+        import hashlib
+        try:
+            args_blob = json.dumps(args or {}, sort_keys=True,
+                                    ensure_ascii=False, default=str)
+        except (TypeError, ValueError):
+            return None
+        return f"{name}:{hashlib.md5(args_blob.encode('utf-8')).hexdigest()}"
 
     # ── Tool dispatch ───────────────────────────────────────────────────
 

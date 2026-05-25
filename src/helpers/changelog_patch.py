@@ -55,6 +55,98 @@ import os
 import re
 
 
+def update_unreleased(
+    changelog_path: str,
+    notes_md: str,
+) -> tuple[bool, str]:
+    """Replace the content of the ## [Unreleased] block in CHANGELOG.md.
+
+    The replacement spans from the line AFTER the ``## [Unreleased]`` header
+    to (but not including) the next ``## [`` line, or EOF if no versioned
+    section exists yet (new projects with only an [Unreleased] block).
+
+    If the block already has user-written content it is passed to the caller
+    as ``existing_content`` via the returned message so the LLM can integrate
+    it. This function does the atomic write; the caller is responsible for
+    having already folded existing content into ``notes_md``.
+
+    Args:
+        changelog_path: Absolute path to CHANGELOG.md.
+        notes_md:       Replacement markdown content for the [Unreleased]
+                        block, NOT including the ``## [Unreleased]`` header
+                        line itself.  Should end with a trailing newline.
+
+    Returns:
+        (success: bool, message: str).  On failure, nothing is written.
+    """
+    if not os.path.exists(changelog_path):
+        return False, "CHANGELOG.md not found"
+
+    try:
+        with open(changelog_path, encoding="utf-8-sig") as f:
+            text = f.read()
+    except OSError as e:
+        return False, f"Could not read CHANGELOG.md: {e}"
+
+    anchor_re = re.compile(r"(?m)^## \[Unreleased\][^\n]*\n")
+    am = anchor_re.search(text)
+    if not am:
+        return False, "Could not locate '## [Unreleased]' anchor"
+
+    block_start = am.end()
+
+    # Find the next versioned section header (^## [), or use EOF.
+    # Treating EOF as a valid boundary is critical for projects that have
+    # an [Unreleased] section but no versioned release yet.
+    next_re = re.compile(r"(?m)^## \[")
+    nm = next_re.search(text, block_start)
+    block_end = nm.start() if nm else len(text)
+
+    new_block = "\n" + notes_md.strip("\n") + "\n\n"
+    updated = text[:block_start] + new_block + text[block_end:]
+
+    tmp_path = changelog_path + ".tmp"
+    try:
+        with open(tmp_path, "w", encoding="utf-8", newline="\n") as f:
+            f.write(updated)
+        os.replace(tmp_path, changelog_path)
+    except OSError as e:
+        try:
+            if os.path.exists(tmp_path):
+                os.remove(tmp_path)
+        except OSError:
+            pass
+        return False, f"Failed writing changelog: {e}"
+
+    return True, "unreleased block updated"
+
+
+def read_unreleased(changelog_path: str) -> str:
+    """Return the current content of the ## [Unreleased] block (body only).
+
+    Returns an empty string if the file doesn't exist, has no [Unreleased]
+    anchor, or if the block body is empty.
+    """
+    if not os.path.exists(changelog_path):
+        return ""
+    try:
+        with open(changelog_path, encoding="utf-8-sig") as f:
+            text = f.read()
+    except OSError:
+        return ""
+
+    anchor_re = re.compile(r"(?m)^## \[Unreleased\][^\n]*\n")
+    am = anchor_re.search(text)
+    if not am:
+        return ""
+
+    block_start = am.end()
+    next_re = re.compile(r"(?m)^## \[")
+    nm = next_re.search(text, block_start)
+    block_end = nm.start() if nm else len(text)
+    return text[block_start:block_end].strip()
+
+
 def insert_changelog_release(
     changelog_path: str,
     version: str,

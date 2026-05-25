@@ -159,6 +159,10 @@ class App(tk.Tk):
             self._ask_ctrl.cancel_all_proposals()
         except AttributeError:
             pass  # ask_ctrl not constructed yet (very early failure path)
+        try:
+            self._projects.cancel_ai_proposals()
+        except AttributeError:
+            pass
         if self._tray:
             self._tray.stop()
         self.after(0, self.destroy)
@@ -267,6 +271,10 @@ class App(tk.Tk):
             on_project_select=self._on_project_selected,
             on_set_running=self._set_running,
             on_settings=self.cmd_settings,
+            # Deferred resolution — _ask_ctrl is built two lines below us.
+            # The lambda is only invoked when the user clicks Investigate
+            # on a refactor scout finding, long after construction.
+            on_seed_ask=lambda text, path: self._ask_ctrl.seed_question(text, path),
         )
         self._git = GitTabController(
             self.nb, self._cfg,
@@ -278,7 +286,8 @@ class App(tk.Tk):
         self._ask_ctrl = AskTabController(
             self.nb, self._get_ask_project_path, self._cfg)
         self._snippets_ctrl = SnippetsController(
-            self.nb, self._cfg, PROMPT_SNIPPETS)
+            self.nb, self._cfg, PROMPT_SNIPPETS,
+            get_path=self._get_ask_project_path)
         self._help_ctrl = HelpTabController(self.nb, self._cfg)
 
         self.nb.bind("<<NotebookTabChanged>>", self._on_tab_changed)
@@ -397,14 +406,30 @@ class App(tk.Tk):
         from helpers.daemon_cost import toggle_daemon, toggle_autostart
         menu = tk.Menu(self, tearoff=0)
         status = self._daemon_status
+
+        # Treat "daemon not running" errors as a stopped state, not a fatal
+        # error — tokensave returns non-zero from `daemon --status` when the
+        # daemon isn't running, but the executable itself is fine and Start /
+        # Install autostart should still be offered.
+        err_text = (status or {}).get("error") or ""
+        is_not_running_err = bool(err_text) and (
+            "not running" in err_text.lower()
+            or "not started" in err_text.lower()
+            or "no daemon" in err_text.lower()
+        )
+
         if status is None:
             menu.add_command(label="(daemon status not yet polled)", state=tk.DISABLED)
-        elif status.get("error"):
-            menu.add_command(label=f"Error: {status['error'][:60]}", state=tk.DISABLED)
+        elif err_text and not is_not_running_err:
+            menu.add_command(label=f"Error: {err_text[:60]}", state=tk.DISABLED)
             menu.add_separator()
             menu.add_command(label="Check Settings → tokensave path",
                              command=self.cmd_settings)
         else:
+            # is_not_running_err falls through here with status["running"] = False
+            # and status["autostart"] = False as defaults from get_daemon_status.
+            if is_not_running_err:
+                status = {"running": False, "autostart": False}
             if status["running"]:
                 menu.add_command(label="Stop daemon",
                                  command=lambda: self._daemon_run_action(
@@ -750,7 +775,8 @@ class App(tk.Tk):
             self._log("  Composing AI commit message…", C["peach"])
             status_out, _ = self._shell_capture(
                 [self._cfg.git_exe, "-C", cwd, "status", "--short"], cwd)
-            ai_msg = _suggest_commit_message(cwd, status_out, self._cfg.raw, self._cfg.git_exe) or "chore: tokensave sync"
+            _suggestion = _suggest_commit_message(cwd, status_out, self._cfg.raw, self._cfg.git_exe)
+            ai_msg = _suggestion.message or "chore: tokensave sync"
             commit_cmd = [self._cfg.git_exe, "-C", cwd, "commit", "-m", ai_msg.split("\n", 1)[0]]
             if "\n\n" in ai_msg:
                 commit_cmd.extend(["-m", ai_msg.split("\n\n", 1)[1]])

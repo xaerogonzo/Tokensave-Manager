@@ -70,6 +70,14 @@ class ManagerConfig:
         return self.raw.get("search_roots", [])
 
     @property
+    def draft_pr_backend(self) -> str:
+        """Backend for the Draft PR feature: 'auto' | 'claude_cli' | 'llm'.
+
+        'auto' prefers Claude Code CLI if configured, falls back to API key.
+        """
+        return (self.raw.get("draft_pr_backend") or "auto").lower()
+
+    @property
     def basic_instructions_template(self) -> str:
         """Absolute path to the BASIC_INSTRUCTIONS.md template (derives from template_dir)."""
         return os.path.join(self.template_dir, "claude-md-template.md")

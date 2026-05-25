@@ -5,7 +5,7 @@ Six sections in a scrollable canvas:
   2. Git tools        — git_exe + GitHub CLI (gh) install/detect
   3. CodeGraph        — codegraph executable path + npm install
   4. Search roots     — Treeview of (label, path) categories
-  5. Behavior         — auto-commit toggle + MCP integration + Ollama
+  5. Behavior         — auto-commit toggle + MCP integration + Draft PR backend + Ollama
   6. AI commit msgs   — provider/model/key/preset/options
 
 The Save handler is the canonical cfg-mutation path. It mutates
@@ -551,6 +551,24 @@ class SettingsDialog(tk.Toplevel):
             font=("Segoe UI", 8), bg=C["base"], fg=C["overlay0"],
             justify=tk.LEFT).pack(anchor=tk.W, padx=36, pady=(0, 8))
 
+        # ── Draft PR backend ─────────────────────────────────────────────
+        ttk.Separator(body, orient="horizontal").pack(fill=tk.X, padx=20, pady=(8, 8))
+        tk.Label(body, text="Draft PR backend",
+                 font=("Segoe UI", 10, "bold"),
+                 bg=C["base"], fg=C["text"]).pack(anchor=tk.W, padx=20, pady=(0, 2))
+        self._var_draft_pr_backend = tk.StringVar(
+            value=raw.get("draft_pr_backend") or "auto")
+        backend_row = tk.Frame(body, bg=C["base"])
+        backend_row.pack(anchor=tk.W, padx=20, pady=(0, 4))
+        for val, label in [("auto", "Auto"), ("claude_cli", "Claude Code CLI"), ("llm", "API key")]:
+            ttk.Radiobutton(backend_row, text=label, value=val,
+                            variable=self._var_draft_pr_backend).pack(side=tk.LEFT, padx=(0, 14))
+        tk.Label(body,
+            text="  Auto: prefers Claude Code CLI if configured, falls back to API key.\n"
+                 "  Force-select to pin a backend regardless of what else is configured.",
+            font=("Segoe UI", 8), bg=C["base"], fg=C["overlay0"],
+            justify=tk.LEFT).pack(anchor=tk.W, padx=36, pady=(0, 8))
+
         # ── Ollama ────────────────────────────────────────────────────────
         ttk.Separator(body, orient="horizontal").pack(fill=tk.X, padx=20, pady=(8, 8))
         tk.Label(body, text="Ollama", font=("Segoe UI", 10, "bold"),
@@ -712,7 +730,7 @@ class SettingsDialog(tk.Toplevel):
         """Min-diff-lines spinner, sync auto-commit toggle, disclaimer."""
         min_row = tk.Frame(body, bg=C["base"])
         min_row.pack(anchor=tk.W, padx=36, pady=(2, 0))
-        self._var_llm_min_diff = tk.StringVar(value=str(llm_cfg.get("min_diff_lines", 30)))
+        self._var_llm_min_diff = tk.StringVar(value=str(llm_cfg.get("min_diff_lines", 10)))
         tk.Label(min_row, text="Min diff lines (smaller commits skip AI):",
                  font=("Segoe UI", 9), bg=C["base"],
                  fg=C["subtext"]).pack(side=tk.LEFT, padx=(0, 6))
@@ -896,13 +914,14 @@ class SettingsDialog(tk.Toplevel):
             for iid in self._roots_tv.get_children()
         ]
         raw["auto_commit_after_sync"] = self._var_autocommit.get()
+        raw["draft_pr_backend"] = self._var_draft_pr_backend.get()
         # Persist AI commit-message settings (preserves any unknown keys
         # the user may have added manually via JSON edit).
         existing_llm = raw.get("commit_message_llm") or {}
         try:
             min_diff_lines = int(self._var_llm_min_diff.get())
         except ValueError:
-            min_diff_lines = 30
+            min_diff_lines = 10
         existing_llm.update({
             "enabled":     self._var_llm_enabled.get(),
             "provider":    self._var_llm_provider.get().strip() or "anthropic",

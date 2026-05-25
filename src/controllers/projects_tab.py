@@ -42,6 +42,7 @@ from controllers.sync_ctrl import SyncStatusController
 from controllers.fileops_ctrl import FileOpsController
 from controllers.git_ops_ctrl import GitOpsController
 from controllers.shadowlinks_ctrl import ShadowLinksController
+from controllers.ai_tasks_ctrl import AITasksController, TASK_DRAFT_CHANGELOG
 from dialogs.assign_category import AssignCategoryDialog
 
 if TYPE_CHECKING:
@@ -91,6 +92,9 @@ class ProjectsTabController:
         on_project_select,     # (path) -> None  (fired on row click)
         on_set_running,        # (running: bool, label: str) -> None  (App._set_running)
         on_settings,           # () -> None  (App.cmd_settings)
+        on_seed_ask=None,      # (text, path) -> None — refactor-scout Investigate;
+                               # passed as a lambda from App because AskTabController
+                               # doesn't exist yet at our construction time.
     ):
         self._notebook       = notebook
         self._cfg            = cfg
@@ -104,6 +108,7 @@ class ProjectsTabController:
         self._on_project_select = on_project_select
         self._on_set_running = on_set_running
         self._on_settings    = on_settings
+        self._on_seed_ask    = on_seed_ask
 
         # ── Sub-controllers ───────────────────────────────────────────────────
         # Constructed after self._tab exists (codegraph_ctrl needs the frame).
@@ -186,6 +191,13 @@ class ProjectsTabController:
             on_run_capture=on_run_capture,
             on_commit_offer=self._offer_commit_after_change,
         )
+        self._ai_tasks = AITasksController(
+            tab=self._tab,
+            cfg=cfg,
+            on_log=on_log,
+            on_commit_offer=self._offer_commit_after_change,
+            on_seed_ask=self._on_seed_ask,
+        )
 
     # ── Convenience ───────────────────────────────────────────────────────────
 
@@ -205,6 +217,10 @@ class ProjectsTabController:
         if iid.startswith("proj:"):
             return iid[5:]
         return None
+
+    def cancel_ai_proposals(self) -> None:
+        """Forward shutdown cancellation to AITasksController."""
+        self._ai_tasks.cancel_all_proposals()
 
     def stop(self):
         """Cancel any in-flight controller worker (called by App._stop_current)."""
@@ -457,6 +473,8 @@ class ProjectsTabController:
         m.add_command(label="📋  Manage .gitignore…",      command=self.cmd_manage_gitignore)
         m.add_command(label="🧹  Untrack Ignored Files…",  command=self.cmd_untrack_ignored)
         m.add_command(label="🔍  Pre-commit AI Review hook…", command=self.cmd_precommit_hook)
+        m.add_command(label="📝  Draft CHANGELOG entry…", command=self.cmd_draft_changelog)
+        m.add_command(label="🔬  Refactor scout…",         command=self.cmd_refactor_scout)
         m.add_separator()
         m.add_command(label="📂  Open Folder",    command=self.cmd_open_folder)
         m.add_command(label="✏   Open in Editor", command=self.cmd_open_editor)
@@ -641,6 +659,14 @@ class ProjectsTabController:
     def cmd_untrack_ignored(self) -> None:
         if path := self._selected_path():
             self._gitops.cmd_untrack_ignored(path)
+
+    def cmd_draft_changelog(self) -> None:
+        if path := self._selected_path():
+            self._ai_tasks.cmd_draft_changelog(path)
+
+    def cmd_refactor_scout(self) -> None:
+        if path := self._selected_path():
+            self._ai_tasks.cmd_refactor_scout(path)
 
     # ── File-ops commands — delegate to FileOpsController ────────────────────
 

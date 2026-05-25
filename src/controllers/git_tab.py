@@ -41,6 +41,62 @@ if TYPE_CHECKING:
     from state import ManagerConfig
 
 
+def _detect_base_branch(path: str, git_exe: str) -> "str | None":
+    """Detect the PR base branch via a 7-step fallback chain.
+
+    Returns a ref string suitable for `git log <base>..HEAD` and
+    `git diff <base>...HEAD`, or None if detection fails completely.
+
+    Known limitation: assumes origin-centric workflow. Fork workflows with
+    both upstream and origin remotes may resolve to the wrong base.
+    """
+    _git = git_exe or "git"
+
+    def _run(*args):
+        try:
+            proc = subprocess.run(
+                [_git, "-C", path] + list(args),
+                capture_output=True, text=True, timeout=5,
+                creationflags=CREATE_NO_WINDOW,
+            )
+            return proc.returncode, proc.stdout.strip()
+        except Exception:
+            return 1, ""
+
+    # Step 1: tracked upstream (e.g. "origin/main")
+    rc, out = _run("rev-parse", "--abbrev-ref", "--symbolic-full-name", "@{u}")
+    if rc == 0 and out:
+        return out
+
+    # Step 2: repo default via origin/HEAD pointer (may not exist on all clones)
+    rc, out = _run("symbolic-ref", "refs/remotes/origin/HEAD")
+    if rc == 0 and out:
+        return out.replace("refs/remotes/", "")
+
+    # Step 3: check origin/main exists as a remote-tracking branch
+    rc, _ = _run("rev-parse", "--verify", "refs/remotes/origin/main")
+    if rc == 0:
+        return "origin/main"
+
+    # Step 4: check origin/master exists
+    rc, _ = _run("rev-parse", "--verify", "refs/remotes/origin/master")
+    if rc == 0:
+        return "origin/master"
+
+    # Step 5: main as a local branch
+    rc, _ = _run("rev-parse", "--verify", "main")
+    if rc == 0:
+        return "main"
+
+    # Step 6: master as a local branch
+    rc, _ = _run("rev-parse", "--verify", "master")
+    if rc == 0:
+        return "master"
+
+    # Step 7: could not detect
+    return None
+
+
 class GitTabController:
     """Owns the Git tab UI and all git operations.
 
@@ -1013,27 +1069,49 @@ class GitTabController:
     # ── Draft PR description ────────────────────────────────────────────────
 
     def cmd_draft_pr(self):
-        """Draft a PR description using the preferred AI tool.
+        """Draft a PR description using the configured AI backend.
 
-        Primary-click behaviour: uses Claude Code CLI if configured, otherwise
-        falls back to the API key path. Shift-click / right-click shows a menu
-        to override the choice.
+        Backend is resolved from `draft_pr_backend` config key:
+          "auto"       — CLI if available, else API key
+          "claude_cli" — force Claude Code CLI
+          "llm"        — force API key path
+        Shift-click / right-click shows an override menu.
         """
         path = self._git_path
         if not path:
             return
+        backend = self._cfg.draft_pr_backend
         cli = self._cfg.claude_cli_exe
         has_api = bool(self._cfg.raw.get("commit_message_llm", {}).get("api_key", "").strip()
                        or self._cfg.raw.get("commit_message_llm", {}).get("provider", "") == "ollama")
-        if cli:
-            self._draft_pr_via_cli(path)
-        elif has_api:
-            self._draft_pr_via_api(path)
-        else:
-            messagebox.showinfo(
-                "No AI configured",
-                "Configure a Claude Code CLI path or an API key in Settings to use Draft PR.",
-                parent=self._root)
+        if backend == "claude_cli":
+            if cli:
+                self._draft_pr_via_cli(path)
+            else:
+                messagebox.showinfo(
+                    "No CLI configured",
+                    "draft_pr_backend=claude_cli but no Claude Code CLI path is set.\n"
+                    "Configure it in Settings → Git tools.",
+                    parent=self._root)
+        elif backend == "llm":
+            if has_api:
+                self._draft_pr_via_api(path)
+            else:
+                messagebox.showinfo(
+                    "No API configured",
+                    "draft_pr_backend=llm but no API key is configured.\n"
+                    "Add a key in Settings → AI commit messages.",
+                    parent=self._root)
+        else:  # "auto"
+            if cli:
+                self._draft_pr_via_cli(path)
+            elif has_api:
+                self._draft_pr_via_api(path)
+            else:
+                messagebox.showinfo(
+                    "No AI configured",
+                    "Configure a Claude Code CLI path or an API key in Settings to use Draft PR.",
+                    parent=self._root)
 
     def _show_draft_pr_menu(self, event, btn):
         """Show an override menu for right-click / Shift+click on Draft PR."""
@@ -1052,9 +1130,25 @@ class GitTabController:
 
     def _draft_pr_via_cli(self, path: str):
         from helpers.claude_cli import spawn_claude_cli   # lazy import
+        base = _detect_base_branch(path, self._cfg.git_exe)
+        if base is None:
+            messagebox.showerror(
+                "Draft PR — base branch not found",
+                "Could not detect the base branch for this PR.\n\n"
+                "Push to a remote, or set a tracking branch with:\n"
+                "  git branch --set-upstream-to=origin/<base> <branch>",
+                parent=self._root)
+            return
+        # triple-dot `git diff base...HEAD` computes diff(merge-base(base,HEAD), HEAD)
+        # — this isolates only this branch's commits, excluding upstream changes that
+        # landed on base after branching. Do not change to double-dot.
         instruction = (
-            "Review my uncommitted git changes and write a PR description "
-            "to PR_DRAFT.md in the project root."
+            f"Draft a PR description for this branch against `{base}`.\n"
+            f"Run `git log {base}..HEAD --oneline` to see the commits, then\n"
+            f"`git diff {base}...HEAD` to see the full diff (triple-dot gives the\n"
+            f"merge-base diff, isolating only this branch's changes — not upstream).\n"
+            f"Write the PR description to PR_DRAFT.md in the project root.\n"
+            f"Include: a one-line summary, bullet list of key changes, and a testing checklist."
         )
         ok, err = spawn_claude_cli(self._cfg.claude_cli_exe, path, instruction)
         if not ok:

@@ -36,15 +36,76 @@ from __future__ import annotations
 
 import os
 import re
+import subprocess
+import sys
 import tkinter as tk
 from tkinter import ttk, messagebox
 from typing import TYPE_CHECKING
 
-from constants import C, _BASE_DIR
+from constants import C, CREATE_NO_WINDOW, _BASE_DIR
 from dialogs.snippet_edit import SnippetEditDialog
 
 if TYPE_CHECKING:
+    from typing import Callable
     from state import ManagerConfig
+
+
+def _skills_dir() -> str:
+    """Return the global Claude Code skills directory (~/.claude/skills)."""
+    return os.path.join(os.path.expanduser("~"), ".claude", "skills")
+
+
+def _parse_skill_file(path: str) -> "dict | None":
+    """Parse a skill .md file and return a dict with name/description/body.
+
+    Uses an ultra-minimal YAML-like frontmatter parser: detects '---' fences,
+    reads only top-level 'key: value' lines (no nesting, no lists, no multiline).
+    Falls back to filename for name and first non-blank body line for description
+    when frontmatter is absent or unparseable.
+
+    Returns None if the file cannot be read.
+    """
+    try:
+        with open(path, encoding="utf-8") as f:
+            content = f.read()
+    except OSError:
+        return None
+
+    basename = os.path.splitext(os.path.basename(path))[0]
+    fm: dict = {}
+    body = content
+
+    if content.startswith("---"):
+        lines = content.split("\n")
+        fence_count = 0
+        fm_lines = []
+        body_lines = []
+        for i, line in enumerate(lines):
+            if line.strip() == "---":
+                fence_count += 1
+                if fence_count == 2:
+                    body_lines = lines[i + 1:]
+                    break
+                continue
+            if fence_count == 1:
+                fm_lines.append(line)
+        for line in fm_lines:
+            if ":" in line:
+                key, _, val = line.partition(":")
+                fm[key.strip()] = val.strip()
+        body = "\n".join(body_lines).strip()
+
+    name = fm.get("name") or basename
+    description = fm.get("description") or ""
+    if not description:
+        # Derive from first non-blank body line
+        for line in body.splitlines():
+            stripped = line.strip().lstrip("#").strip()
+            if stripped:
+                description = stripped[:120]
+                break
+
+    return {"name": name, "description": description, "body": body, "path": path}
 
 
 # Double-bracket on purpose — single [brackets] are reserved for markdown
@@ -78,16 +139,22 @@ class SnippetsController:
     """Owns the Reference/Snippets tab UI."""
 
     def __init__(self, notebook: ttk.Notebook, cfg: "ManagerConfig",
-                 prompt_snippets: list):
+                 prompt_snippets: list,
+                 get_path: "Callable[[], str | None] | None" = None):
         """
         prompt_snippets: the static `PROMPT_SNIPPETS` list from src/prompts.py.
             Passed in (rather than imported) so this controller doesn't have
             to know which module owns the built-in snippet catalogue. The
             controller treats this list as IMMUTABLE — overrides layer on top
             via `cfg.raw["builtin_snippet_overrides"]`, never mutate this.
+
+        get_path: optional callback returning the currently selected project path.
+            Used as cwd for skill launches. Falls back to _BASE_DIR when None
+            or when it returns None.
         """
         self._cfg = cfg
         self._prompt_snippets = prompt_snippets
+        self._get_path = get_path
 
         # Per-session partial-fill cache: snippet title → token → typed value.
         # In-memory only; not persisted to manager-config.json (transient
@@ -100,9 +167,17 @@ class SnippetsController:
         # Bound after _build() runs.
         self._placeholder_entries: dict = {}
 
+        # Skills catalog state — None means "not loaded yet" (lazy).
+        self._skills_cache: "list[dict] | None" = None
+        # Duplicate-launch guard: (project_path, skill_name) → Popen handle.
+        # proc.poll() returns None while the terminal window is open.
+        self._skill_procs: "dict[tuple[str, str], subprocess.Popen]" = {}
+
         self._tab = tk.Frame(notebook, bg=C["base"])
         notebook.add(self._tab, text="  Reference  ")
         self._build()
+        # Lazy-load skills on first tab show (not at startup).
+        self._tab.bind("<Map>", self._on_tab_shown, add="+")
 
     # ── UI build ──────────────────────────────────────────────────────────────
 
@@ -164,6 +239,9 @@ class SnippetsController:
         cli_row("tokensave branch gc",           "Clean up deleted branches")
 
         cli_txt.configure(state=tk.DISABLED)
+
+        # ── Middle: Claude skills catalog ─────────────────────────────────────
+        self._build_skills_section(tab)
 
         # ── Bottom: Claude prompt snippets ────────────────────────────────────
         snippets_header = tk.Frame(tab, bg=C["base"])
@@ -256,6 +334,199 @@ class SnippetsController:
 
         self._refresh_snippet_list()
         self.snippet_lb.bind("<<ListboxSelect>>", self._on_snippet_select)
+
+    # ── Skills section ───────────────────────────────────────────────────────
+
+    def _build_skills_section(self, tab: tk.Frame) -> None:
+        """Build the CLAUDE SKILLS panel (header + listbox + description + Run)."""
+        skills_header = tk.Frame(tab, bg=C["base"])
+        skills_header.pack(fill=tk.X, padx=14, pady=(12, 4))
+
+        tk.Label(skills_header, text="CLAUDE SKILLS",
+                 font=("Segoe UI", 8, "bold"),
+                 bg=C["base"], fg=C["overlay0"]).pack(side=tk.LEFT)
+
+        self._skills_refresh_btn = ttk.Button(
+            skills_header, text="↻  Refresh", command=self._refresh_skills)
+        self._skills_refresh_btn.pack(side=tk.RIGHT)
+
+        skills_frame = tk.Frame(tab, bg=C["base"])
+        skills_frame.pack(fill=tk.X, padx=14, pady=(0, 4))
+
+        # Left: skill name listbox
+        list_wrap = tk.Frame(skills_frame, bg=C["mantle"])
+        list_wrap.pack(side=tk.LEFT, fill=tk.Y)
+
+        self._skills_lb = tk.Listbox(
+            list_wrap, width=28, height=5,
+            font=("Segoe UI", 9),
+            bg=C["mantle"], fg=C["text"],
+            selectbackground=C["surface1"], selectforeground=C["text"],
+            activestyle="none", relief=tk.FLAT, borderwidth=0, highlightthickness=0,
+        )
+        skills_sb = ttk.Scrollbar(list_wrap, orient="vertical",
+                                   command=self._skills_lb.yview)
+        self._skills_lb.configure(yscrollcommand=skills_sb.set)
+        self._skills_lb.pack(side=tk.LEFT, fill=tk.Y)
+        skills_sb.pack(side=tk.RIGHT, fill=tk.Y)
+
+        # Right: description + Run button
+        right = tk.Frame(skills_frame, bg=C["base"])
+        right.pack(side=tk.LEFT, fill=tk.BOTH, expand=True, padx=(8, 0))
+
+        # Run button row (bottom-anchored so description expands above it)
+        run_row = tk.Frame(right, bg=C["base"])
+        run_row.pack(side=tk.BOTTOM, fill=tk.X, pady=(4, 0))
+
+        self._skill_run_btn = ttk.Button(
+            run_row, text="▷  Run skill", command=self._run_skill,
+            state=tk.DISABLED)
+        self._skill_run_btn.pack(side=tk.LEFT)
+
+        self._skill_run_status = tk.Label(
+            run_row, text="", font=("Segoe UI", 8),
+            bg=C["base"], fg=C["overlay0"])
+        self._skill_run_status.pack(side=tk.LEFT, padx=(10, 0))
+
+        # Description area
+        desc_wrap = tk.Frame(right, bg=C["mantle"])
+        desc_wrap.pack(fill=tk.BOTH, expand=True)
+
+        self._skill_desc = tk.Text(
+            desc_wrap, height=4, font=("Segoe UI", 9),
+            bg=C["mantle"], fg=C["subtext"],
+            relief=tk.FLAT, padx=10, pady=8, wrap=tk.WORD,
+            cursor="arrow", state=tk.DISABLED,
+        )
+        self._skill_desc.pack(fill=tk.BOTH, expand=True)
+
+        # Initial placeholder text (replaced when skills load)
+        self._skill_set_desc("Select a skill to see its description.")
+
+        self._skills_lb.bind("<<ListboxSelect>>", self._on_skill_select)
+
+    def _skill_set_desc(self, text: str, fg: str = "") -> None:
+        """Update the skill description Text widget."""
+        self._skill_desc.configure(state=tk.NORMAL)
+        self._skill_desc.delete("1.0", tk.END)
+        self._skill_desc.insert(tk.END, text)
+        self._skill_desc.configure(
+            state=tk.DISABLED,
+            fg=fg or C["subtext"],
+        )
+
+    def _on_tab_shown(self, _event=None) -> None:
+        """Triggered by <Map> on first tab show. Loads skills if not yet cached."""
+        if self._skills_cache is None:
+            self._load_skills()
+
+    def _load_skills(self) -> None:
+        """Scan ~/.claude/skills/ for .md files and populate the skills listbox."""
+        sdir = _skills_dir()
+        skills: list = []
+        if os.path.isdir(sdir):
+            for fname in sorted(os.listdir(sdir)):
+                if not fname.endswith(".md"):
+                    continue
+                parsed = _parse_skill_file(os.path.join(sdir, fname))
+                if parsed:
+                    skills.append(parsed)
+        self._skills_cache = skills
+        self._refresh_skills_ui()
+
+    def _refresh_skills(self) -> None:
+        """Force a reload of the skills catalog (Refresh button handler)."""
+        self._skills_cache = None
+        self._skills_lb.delete(0, tk.END)
+        self._skill_set_desc("Refreshing…", fg=C["overlay0"])
+        self._skill_run_btn.configure(state=tk.DISABLED)
+        self._load_skills()
+
+    def _refresh_skills_ui(self) -> None:
+        """Repopulate the listbox from self._skills_cache."""
+        self._skills_lb.delete(0, tk.END)
+        if not self._skills_cache:
+            self._skill_set_desc(
+                "No skills found in ~/.claude/skills/\n\n"
+                "Install skills from the Claude Code marketplace or create\n"
+                ".md files with YAML frontmatter in ~/.claude/skills/.",
+                fg=C["overlay0"],
+            )
+            self._skill_run_btn.configure(state=tk.DISABLED)
+            return
+
+        for skill in self._skills_cache:
+            self._skills_lb.insert(tk.END, f"  /{skill['name']}")
+        self._skill_set_desc("Select a skill to see its description.")
+
+    def _on_skill_select(self, _event=None) -> None:
+        sel = self._skills_lb.curselection()
+        if not sel or self._skills_cache is None:
+            return
+        idx = sel[0]
+        if idx >= len(self._skills_cache):
+            return
+        skill = self._skills_cache[idx]
+        desc = skill["description"] or skill["body"] or "(no description)"
+        self._skill_set_desc(desc)
+        self._skill_run_btn.configure(state=tk.NORMAL)
+        self._skill_run_status.configure(text="")
+
+    def _run_skill(self) -> None:
+        """Launch a detached Claude CLI terminal for the selected skill."""
+        sel = self._skills_lb.curselection()
+        if not sel or self._skills_cache is None:
+            return
+        idx = sel[0]
+        if idx >= len(self._skills_cache):
+            return
+        skill = self._skills_cache[idx]
+        skill_name = skill["name"]
+
+        cli = self._cfg.claude_cli_exe
+        if not cli:
+            self._skill_run_status.configure(
+                text="Configure Claude CLI in Settings first.", fg=C["peach"])
+            return
+
+        project_path = (
+            (self._get_path() if self._get_path else None) or _BASE_DIR
+        )
+        key = (project_path, skill_name)
+
+        # Duplicate-launch guard: block re-launch if terminal is still open.
+        if key in self._skill_procs:
+            proc = self._skill_procs[key]
+            if proc.poll() is None:
+                self._skill_run_status.configure(
+                    text=f"/{skill_name} already running.", fg=C["overlay0"])
+                return
+            del self._skill_procs[key]
+
+        try:
+            if sys.platform == "win32":
+                # ""outer"" quoting — same pattern as helpers/claude_cli.py.
+                # Instruction /<skill_name> invokes the skill on session start.
+                instruction = f"/{skill_name}"
+                cmd_str = f'cmd.exe /k ""{cli}" "{instruction}""'
+                proc = subprocess.Popen(
+                    cmd_str,
+                    cwd=project_path,
+                    creationflags=subprocess.CREATE_NEW_CONSOLE,
+                )
+            else:
+                proc = subprocess.Popen(
+                    [cli, f"/{skill_name}"],
+                    cwd=project_path,
+                )
+        except Exception as exc:
+            messagebox.showerror("Skill launch failed", str(exc), parent=self._tab)
+            return
+
+        self._skill_procs[key] = proc
+        self._skill_run_status.configure(
+            text=f"Launched /{skill_name}.", fg=C["green"])
+        self._tab.after(3000, lambda: self._skill_run_status.configure(text=""))
 
     # ── Snippet listbox & metadata ───────────────────────────────────────────
 

@@ -80,9 +80,12 @@ Token Save Manager Source/
 │   │   │                          P2 fixed `--start` bug and added autostart toggle)
 │   │   ├── pr_draft.py            generate_pr_draft — LLM-backed structured PR description
 │   │   │                          (Summary / Technical / Threat Model / Verification)
-│   │   ├── changelog_patch.py     insert_changelog_release — IDEMPOTENT atomic patcher
-│   │   │                          (replaces existing ## [version] block bounded by next
-│   │   │                          ^## \[ line; falls back to insertion under
+│   │   ├── changelog_patch.py     insert_changelog_release (versioned release patcher);
+│   │   │                          update_unreleased (replaces [Unreleased] body, EOF-safe);
+│   │   │                          read_unreleased (returns current [Unreleased] body for
+│   │   │                          LLM integration). All atomic via .tmp + os.replace.
+│   │   │                          (original insert_changelog_release: replaces ## [version]
+│   │   │                          block bounded by next ^## \[ line; falls back to insertion under
 │   │   │                          ## [Unreleased]). Wired into ReleaseWizard P2.
 │   │   ├── claude_cli.py          spawn_claude_cli — detached cmd.exe via CREATE_NEW_CONSOLE
 │   │   │                          with ""outer"" multi-quote fix + \r\n strip (TTY safety)
@@ -144,8 +147,12 @@ Token Save Manager Source/
 │       ├── sync_ctrl.py           SyncStatusController (sync, sync_all, force_sync)
 │       ├── fileops_ctrl.py        FileOpsController (open folder/editor, copy path)
 │       ├── shadowlinks_ctrl.py    ShadowLinksController
-│       └── git_ops_ctrl.py        GitOpsController (git log/commit/AI-review/init/
-│                                  manage-gitignore/untrack-ignored from Projects tab)
+│       ├── git_ops_ctrl.py        GitOpsController (git log/commit/AI-review/init/
+│       │                          manage-gitignore/untrack-ignored from Projects tab)
+│       └── ai_tasks_ctrl.py       AITasksController — long-running AI write tasks
+│                                  (Stage 3 CHANGELOG drafter; future: refactor scout,
+│                                  release narrative). Per-task per-project lock.
+│                                  Orchestrates only; all shared infra in helpers/.
 │
 ├── templates/                     Data files used by the manager + shipped in dist\
 │   ├── claude-md-template.md      BASIC_INSTRUCTIONS.md template for other projects

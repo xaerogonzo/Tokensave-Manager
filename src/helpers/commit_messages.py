@@ -1,6 +1,6 @@
 """Smart commit-message generation — multi-strategy orchestrator + sanitizer.
 
-Public entry point: ``_suggest_commit_message(repo_path, status_text, cfg, git_exe)``.
+Public entry point: ``_suggest_commit_message(repo_path, status_text, cfg, git_exe) -> CommitSuggestion``.
 
 The orchestrator tries strategies in order — LLM (opt-in), CHANGELOG bullet
 parsing, diff-content analysis, file-name patterns — and returns the first
@@ -23,6 +23,7 @@ from __future__ import annotations
 
 import os
 import re
+from dataclasses import dataclass
 import subprocess
 import textwrap
 from collections import Counter
@@ -703,7 +704,7 @@ def _call_llm_for_commit_message(cfg: dict, repo_path: str, git_exe: str) -> str
     if not diff:
         return None
     diff_lines = diff.count("\n")
-    if diff_lines < int(cfg.get("min_diff_lines", 30)):
+    if diff_lines < int(cfg.get("min_diff_lines", 10)):
         return None
 
     max_chars = int(cfg.get("max_diff_chars", 24000))
@@ -760,14 +761,21 @@ def _strat_filenames(status_text: str) -> "tuple[str, str] | None":
     return (result, "") if result else None
 
 
+@dataclass
+class CommitSuggestion:
+    message: str
+    strategy: str  # "llm" | "changelog" | "diff" | "filenames" | "backstop" | "none"
+
+
 def _suggest_commit_message(repo_path: str = "", status_text: str = "",
                             cfg: dict | None = None,
-                            git_exe: str = "") -> str:
+                            git_exe: str = "") -> CommitSuggestion:
     """Generate a conventional-commit-style message for the staged changes.
 
     Multi-strategy orchestrator — tries the highest-quality strategy first
-    and falls through to weaker ones on empty results. Returns "" only if
-    every strategy yields nothing AND there are no staged files at all.
+    and falls through to weaker ones on empty results. Returns a
+    CommitSuggestion with message="" only if every strategy yields nothing
+    AND there are no staged files at all.
 
     `repo_path` is optional for backwards compatibility — if empty, only
     the file-name strategy runs (it doesn't need shell access). `cfg` is
@@ -777,13 +785,13 @@ def _suggest_commit_message(repo_path: str = "", status_text: str = "",
     files, has_source = _parse_commit_status(status_text)
     cfg = cfg or {}
 
-    strategies = [
-        lambda: _strat_llm(repo_path, has_source, cfg, git_exe) if git_exe else None,
-        lambda: _strat_changelog(repo_path, files, git_exe) if git_exe else None,
-        lambda: _strat_diff(repo_path, files, git_exe) if git_exe else None,
-        lambda: _strat_filenames(status_text),
+    named_strategies = [
+        ("llm",       lambda: _strat_llm(repo_path, has_source, cfg, git_exe) if git_exe else None),
+        ("changelog", lambda: _strat_changelog(repo_path, files, git_exe) if git_exe else None),
+        ("diff",      lambda: _strat_diff(repo_path, files, git_exe) if git_exe else None),
+        ("filenames", lambda: _strat_filenames(status_text)),
     ]
-    for strategy in strategies:
+    for name, strategy in named_strategies:
         try:
             result = strategy()
         except Exception:
@@ -793,13 +801,18 @@ def _suggest_commit_message(repo_path: str = "", status_text: str = "",
         subj, body = _sanitize_commit_message(
             result[0], result[1], has_source_changes=has_source)
         if subj:
-            return subj + (("\n\n" + body) if body else "")
+            return CommitSuggestion(
+                message=subj + (("\n\n" + body) if body else ""),
+                strategy=name,
+            )
 
     # Generic backstop — reached only when every strategy was empty or
     # produced a filename-listing that sanitization rejected.
     if files:
         if has_source:
             scope = _dominant_directory(files)
-            return f"refactor({scope}): update sources" if scope else "refactor: update sources"
-        return "chore: update files"
-    return ""
+            msg = f"refactor({scope}): update sources" if scope else "refactor: update sources"
+        else:
+            msg = "chore: update files"
+        return CommitSuggestion(message=msg, strategy="backstop")
+    return CommitSuggestion(message="", strategy="none")

@@ -67,17 +67,33 @@ All tools are read-only — the agent CANNOT write files, run commits, or modify
 
 Provider support: Ollama / OpenAI / OpenAI-compatible (LM Studio, vLLM, etc.) all do tool calling natively. Anthropic falls back to a one-shot completion without tools — adding native Anthropic tool-use is a known follow-up.
 
-### 🟡 Stage 3 — CHANGELOG drafter
-*Status: write-tool plumbing shipped (Roadmap-2 Phase 1); CHANGELOG-specific drafter still TBD*
+### ✅ Stage 3 — CHANGELOG drafter
+*Status: shipped (Roadmap-3 Phase 1)*
 
 Right-click → **📝 Draft CHANGELOG entry…**. Agent reads commits since the last release tag, classifies them, drafts CHANGELOG bullets. A ProposalDialog presents the old-vs-new diff with **Apply / Reject / Edit then Apply** buttons. First feature with a write tool, but every write goes through the same approval gate.
 
-**Roadmap-2 progress:** the write-tool path is fully shipped. `agent_tools.py:_tool_write_file` builds a `WriteProposal` (with race-safe `original_hash` + symlink-safe path containment + side-effect surfacing for `dirs_to_create`); the agent dispatches it through `LocalAgent.on_write_proposal` → `ProposalBridge` → `ProposalDialog`; on accept, `_atomic_write_file` re-checks the hash and writes via `.tmp` + `os.replace`. The CHANGELOG-specific drafter (commit classifier + bullet renderer + right-click entry) is the remaining work — straightforward now that the write path is proven.
+Right-click any git project → **📝 Draft CHANGELOG entry…**. Reads commits since last release tag via `_commits_since` + `_classify_commits_for_changelog` (`helpers/release.py`), refines via LLM, presents old-vs-new diff via `ProposalDialog`. On accept, `update_unreleased()` in `helpers/changelog_patch.py` writes atomically. If the `[Unreleased]` block already has user-written content it is injected into the LLM prompt for integration. All orchestration lives in `src/controllers/ai_tasks_ctrl.py` (the new AI-task layer introduced in Roadmap-3).
 
-### 🔮 Stage 4 — Refactor scout
-*Status: planned*
+### ✅ Stage 4 — Refactor scout
+*Status: shipped Roadmap-3 Phase 6*
 
-Right-click → **🔬 Refactor scout…**. Agent calls tokensave's analytics tools (`tokensave_dead_code`, `tokensave_god_class`, `tokensave_circular`, etc.) and produces a structured report with plain-English explanations per finding. Each finding has Investigate / Ignore actions. Findings marked Ignore persist in `manager-config.json` and won't reappear.
+Right-click any project with a tokensave index → **🔬 Refactor scout…** opens a modal findings panel grouped by kind (high cyclomatic complexity, god class, oversized file, possibly unused). Findings come from **deterministic SQL queries against `.tokensave/tokensave.db`** — no LLM call happens at scout time, so findings can never hallucinate "consider using X pattern" advice; they're grounded in the canonical thresholds from `BASIC_INSTRUCTIONS.md` (CC > 10, > 40 direct methods per class, file > 1500 lines, no incoming call edges).
+
+Each finding card shows the metric (`CC=22`, `methods=47`), the symbol's `file:line`, and a verbatim source snippet capped at 10 lines. Two per-card actions:
+
+- **🔍 Investigate in Ask tab** — `helpers/refactor_scout.format_investigate_context(finding)` builds a structured prompt (file, symbol, line, metric, verbatim evidence) that bounds the LLM with explicit instructions: *"explain WHY this fired and suggest a concrete, scoped refactor. Do NOT re-run the analytics tools — the scout already gathered the evidence. Focus on the named symbol only — do not propose architecture-wide rewrites."* The Ask tab is switched to via `AskTabController.seed_question` and auto-sent after a 50 ms tick.
+- **🚫 Ignore** — appends a stable finding ID (`md5(kind + file + symbol)[:16]`) to `cfg.raw["refactor_scout_ignored"]` and persists immediately for crash safety. The dialog header shows `"N findings (M suppressed)"`. The footer carries **↺ Clear all suppressions**.
+
+Implementation files:
+
+- `src/helpers/refactor_scout.py` — pure-function module: `@dataclass Finding`, four `_scout_*` query functions, `run_scout(project_path, ignored_ids)`. Read-only SQLite URI connection. Dead-code filter uses a conservative entry-point allowlist (`__*__`, `_on_*`, `cmd_*`, `_build_*`, `_render_*`, test methods, `tests/` directory) so tokensave's call-graph misses on dynamic dispatch don't drown real findings.
+- `src/dialogs/refactor_scout.py` — modal `RefactorScoutDialog` (scrollable canvas wrapper, per-card frames).
+- `src/controllers/ai_tasks_ctrl.py` — `cmd_refactor_scout(path)` + worker + `_open_refactor_scout_dialog`. New optional `on_seed_ask` constructor param (None → Investigate disabled).
+- `src/controllers/ask_tab.py` — new `seed_question(text, path)` public method; refuses while another agent run is in flight.
+- `src/controllers/projects_tab.py` — delegate + menu item under the existing Git cluster.
+- `src/app.py` — passes `on_seed_ask=lambda text, path: self._ask_ctrl.seed_question(text, path)` (deferred lambda — `_ask_ctrl` is constructed after `_projects`).
+
+Hallucination-mitigation choices that diverge from the original plan: (1) the scout is fully deterministic instead of an "agent task" — analytics come from SQL, not from the model picking tools; (2) Investigate auto-sends instead of pre-filling for user review, because the single-line Ask entry can't legibly display a multi-line prompt anyway (the chat log carries the full prompt as the visible record). Both choices are stronger guards against the "AI-prettified noise" failure mode the plan flagged.
 
 ### 💭 Stage 5 — Limited autonomous mode
 *Status: considering, revisit after Stages 1-4 ship*
@@ -197,9 +213,11 @@ Surfaced via Roadmap-2 hands-on testing — clicking Suggest on a small docs-onl
 - **File-name fallback is too generic for `docs/upstream-issues/`-style paths.** The current heuristic produces "docs: update documentation" when ALL changed files are markdown — but the actual subject (which issue draft was edited) is right there in the filename. A small `_SCOPE_PATTERNS` addition keyed off `docs/upstream-issues/<name>.md` → `docs(upstream): <name>` would catch this class.
 - **No surfacing of WHICH strategy fired.** Tooltip on the Suggest button or one-liner status ("via LLM" / "via CHANGELOG" / "via diff" / "via filename") would let the user know whether the generic message is the best the chain could do or whether the LLM was silently bypassed.
 
-### 🔮 Skill awareness / prompting
+### ✅ Skill awareness / prompting (Roadmap-3 Phase 3 — catalog shipped)
 
 Same class of problem the manager exists to solve: Claude Code skills (e.g. `consolidate-memory`, `verify`, `code-review`, `security-review`, the custom plugins) are powerful but only useful if the user remembers they exist at the right moment. After Roadmap-2 the user noted: *"I forgot consolidate-memory existed until Claude suggested it before a new chat."* That's the failure mode — by-memory discovery.
+
+**Shipped (Phase 3):** Skills catalog in the Reference tab. Lazily scans `~/.claude/skills/` on first tab open; lists `/<name>` + description; Refresh button for newly installed skills; **▷ Run skill** button opens a detached Claude CLI terminal in the current project directory with `/<skill-name>` as the opening instruction. Duplicate-launch guard via `(path, skill_name) → Popen` tracking.
 
 **Design space (pick when ready; not committing yet):**
 
