@@ -659,7 +659,8 @@ class HelpTabController:
 
     def _help_git_concepts(self):
         _doc = os.path.join(_BASE_DIR, "docs", "GITHUB_GUIDE.md")
-        _ask = "Explain git fundamentals — commit, branch, push, pull — for someone who has never used git"
+        _ask = ("My git push got rejected with 'non-fast-forward' — "
+                "why does this happen and how do I fix it in this project?")
 
         def _fill():
             h1, h2, p, warn, ok, dim, br, ins = self._hw()
@@ -679,11 +680,22 @@ class HelpTabController:
               "inside it. That folder stores every commit ever made. The whole thing "
               "— your files plus that history — is called a repository.")
             br()
-            h2("Branch — a parallel version")
-            p("Imagine photocopying your project so you can experiment on the copy "
-              "without touching the original. That's a branch. When you're happy "
-              "with the experiment, you can merge it back. The default branch is "
-              "usually called 'master' or 'main'.")
+            h2("Branch — a parallel save slot")
+            p("Imagine photocopying your entire project so you can experiment on the "
+              "copy without touching the original. That's a branch. The default branch "
+              "is usually called 'master' or 'main'. When you're happy with the "
+              "experiment you Merge it back. If you hate it, delete the branch and "
+              "nothing on main ever changed.")
+            br()
+            h2("Merge vs Rebase")
+            p("Both bring changes from one branch into another, but they look different "
+              "in history:")
+            ins("  Merge  — creates a single 'merge commit' that joins both branches.\n"
+                "           Safe, non-destructive, easy to understand. This manager\n"
+                "           always uses merge.\n", "body")
+            ins("  Rebase — rewrites your commits as if you had started from the latest\n"
+                "           main. Produces a cleaner linear history but rewrites commit\n"
+                "           IDs (risky on shared branches). Use with caution.\n", "body")
             br()
             h2("Remote — a copy on GitHub")
             p("A remote is a second home for your repository, stored on GitHub's "
@@ -712,12 +724,25 @@ class HelpTabController:
               "automatically — it stages everything in the working tree, which is "
               "almost always what you want.")
             br()
+            h2(".gitignore — telling git what to skip")
+            p("A file called .gitignore at the root of your project lists patterns of "
+              "files git should never track. Common entries:")
+            ins("  __pycache__/      — Python bytecode (rebuilds automatically)\n", "body")
+            ins("  *.pyc             — compiled Python files\n", "body")
+            ins("  dist/             — Nuitka build output\n", "body")
+            ins("  .env              — secrets / API keys (NEVER commit these)\n", "body")
+            ins("  *.log             — log files\n", "body")
+            p("The Scaffold dialog pre-populates a .gitignore for you based on the "
+              "project type. To add a pattern manually, open .gitignore in any editor "
+              "and add one pattern per line.")
+            br()
             ok("Bottom line: commit often, push when you're done for the day.")
         self._help_show(_fill, doc_path=_doc, ask_text=_ask, explain_text=_ask)
 
     def _help_git_workflow(self):
         _doc = os.path.join(_BASE_DIR, "docs", "GITHUB_GUIDE.md")
-        _ask = "Walk me through the daily git workflow in this manager step by step"
+        _ask = ("I merged a branch and got a merge conflict — walk me through "
+                "resolving it in this project step by step")
 
         def _fill():
             h1, h2, p, warn, ok, dim, br, ins = self._hw()
@@ -888,50 +913,88 @@ class HelpTabController:
 
     def _help_codegraph(self):
         _doc = os.path.join(_BASE_DIR, "README.md")
-        _ask = "Explain CodeGraph: what it does, how it compares to tokensave, when to use each"
+        _ask = ("tokensave sync finished but I still can't find a function "
+                "I just added — why might that happen and how do I fix it?")
 
         def _fill():
             h1, h2, p, warn, ok, dim, br, ins = self._hw()
-            h1("CodeGraph (alternative code-graph tool)")
-            p("CodeGraph is a separate MCP server that does what tokensave does — "
-              "builds a per-project code-graph index and exposes it to Claude Code. "
-              "The two don't conflict; a project can have both at once.")
+            h1("Code Graph & CodeGraph")
+            p("This section covers two things: tokensave's own code graph (the "
+              ".tokensave/ index this manager builds), and CodeGraph — a separate "
+              "alternative tool that does the same job differently.")
             br()
-            h2("When to use which")
+
+            h2("What a code graph is")
+            p("A code graph is a searchable index of your project's symbols — "
+              "functions, classes, methods, constants — and the relationships between "
+              "them (which function calls which, which file imports which module). "
+              "Nodes are symbols; edges are call/use relationships.")
+            p("Claude uses the code graph to answer structural questions about your "
+              "project — 'where is X defined', 'what calls this function', 'which "
+              "files depend on this module' — without reading every file each time.")
+            br()
+
+            h2("tokensave init vs sync")
+            ins("  tokensave init  ", "body")
+            ins("Builds the index from scratch. Run once when you first add a\n"
+                "                project. Creates .tokensave/ inside the project.\n", "dim")
+            ins("  tokensave sync  ", "body")
+            ins("Incremental update — only re-processes files changed since\n"
+                "                the last sync. Much faster; run after editing code.\n", "dim")
+            br()
+            h2("Force Re-sync vs incremental Sync")
+            p("Right-click a project → ⟳ Force Re-sync wipes the existing index "
+              "and rebuilds from scratch. Use it when:")
+            ins("  • Sync finished but a recently-added function can't be found\n", "body")
+            ins("  • You renamed many files or did a large refactor\n", "body")
+            ins("  • tokensave was upgraded to a new version\n", "body")
+            ins("  • The .tokensave/ folder was manually edited\n", "body")
+            br()
+            p("For day-to-day edits, the incremental ↺ Sync is sufficient and much "
+              "faster (seconds vs. minutes on large projects).")
+            br()
+            h2("Language support")
+            p("tokensave extracts symbols from Python, TypeScript/JavaScript, Rust, "
+              "and Go by default. Files in other languages are indexed for text "
+              "search but don't contribute nodes or edges to the graph.")
+            br()
+
+            h2("How Claude uses it (MCP server)")
+            p("The wrapper script `tokensave-wrapper.py` acts as an MCP server. "
+              "When Claude Desktop starts with the active project pinned (★ Set as "
+              "Active), the wrapper exposes the code graph as MCP tools Claude can "
+              "call: tokensave_context, tokensave_search, tokensave_callers, "
+              "tokensave_callees, tokensave_body, and others.")
+            warn("⚠  Claude Desktop reads the active project at startup and locks to "
+                 "it for the session. If you change the pinned project, restart "
+                 "Claude Desktop to pick it up.")
+            br()
+
+            h2("CodeGraph — alternative code-graph tool")
+            p("CodeGraph is a separate npm package that also builds a per-project "
+              "code-graph and exposes it to Claude Code via MCP. The two don't "
+              "conflict; a project can have both at once.")
             ins("  • tokensave — bundled with the manager; full-featured; manual sync\n", "body")
             ins("  • CodeGraph — auto-syncs while its MCP server is running; faster\n", "body")
             ins("                for very large codebases (e.g. 25k-file repos)\n", "body")
             br()
-            warn("⚠  About CodeGraph's auto-sync: the file watcher only runs while "
-                 "CodeGraph's MCP server is active inside an open Claude Code session. "
-                 "If you edit code with Claude Code closed, those edits won't be "
-                 "picked up automatically until the next session — at which point "
-                 "the watcher catches up. You can also right-click → 🧠 CodeGraph Sync "
-                 "to force an incremental update manually.")
+            warn("⚠  CodeGraph's auto-sync only runs while its MCP server is active "
+                 "inside an open Claude Code session. Edits made with Claude Code "
+                 "closed won't be picked up until the next session.")
             br()
-            h2("Install")
+            h2("CodeGraph — Install & Use")
             ins("  Settings → CodeGraph → Install via npm  ", "body")
             ins("(requires Node.js 18+)\n", "dim")
-            br()
-            h2("Use")
             ins("  Right-click any project → 🧠 CodeGraph Init  →  then 🧠 Sync / Status\n", "body")
             ins("  CG column in the Projects tab shows ✓ for initialised projects.\n", "body")
-            br()
-            h2("Why the manager doesn't run `codegraph install`")
-            p("CodeGraph registers itself with Claude Code (and Cursor / Codex / "
-              "opencode if you use them) via its own one-time installer: "
-              "`npx @colbymchenry/codegraph`. The TokenSave Manager intentionally "
-              "stays out of that flow — we handle per-project lifecycle only "
-              "(init / sync / status / remove). This means tokensave and CodeGraph "
-              "can both write their own sections into your global ~/.claude.json "
-              "without fighting each other.")
         self._help_show(_fill, doc_path=_doc, ask_text=_ask, explain_text=_ask)
 
     # ── New sections ───────────────────────────────────────────────────────────
 
     def _help_ai_features(self):
         _doc = os.path.join(_BASE_DIR, "README.md")
-        _ask = "Explain all the AI features in TokenSave Manager — code review, Ask tab, Ollama, smart commit messages, Claude CLI integration"
+        _ask = ("My commit message suggestions keep saying 'docs: update' for "
+                "code-only changes — what's wrong with the suggestion strategy?")
 
         def _fill():
             h1, h2, p, warn, ok, dim, br, ins = self._hw()
@@ -941,55 +1004,87 @@ class HelpTabController:
               "without it.")
             br()
 
+            h2("Feature overview")
+            ins("  Feature                 LLM used\n", "body")
+            ins("  ─────────────────────── ─────────────────────────────────────\n", "dim")
+            ins("  🤖 Ask tab              Configured provider (Ollama / OpenAI /\n"
+                "                          Anthropic / LM Studio)\n", "body")
+            ins("  🔍 Help → Explain btn   Same configured provider\n", "body")
+            ins("  💡 Commit msg Suggest   Claude CLI → provider → heuristics\n", "body")
+            ins("  🔍 AI Code Review       Claude CLI → provider\n", "body")
+            ins("  📝 Draft CHANGELOG      Claude CLI\n", "body")
+            ins("  🐙 Draft PR             Claude CLI\n", "body")
+            ins("  Pre-commit hook         auto (Claude CLI → provider) or explicit\n", "body")
+            ins("  AI Tasks tab            Claude CLI agent sessions\n", "body")
+            br()
+
+            h2("🤖 Ask Tab (bounded agent)")
+            p("An embedded agent that answers questions about your active project. "
+              "Type a question in the Ask tab, press Send. The agent runs up to 8 "
+              "iterations and streams its response. Tools available to it:")
+            ins("  • read_file          — read a file at a given path + line range\n", "body")
+            ins("  • list_directory     — list files in a folder\n", "body")
+            ins("  • git_log            — recent commit history\n", "body")
+            ins("  • git_diff           — pending uncommitted diff\n", "body")
+            ins("  • tokensave_search   — find defined symbols by name\n", "body")
+            ins("  • tokensave_context  — subgraph for a natural-language query\n", "body")
+            p("tokensave tools only work when the project has a .tokensave/ index. "
+              "For general knowledge questions (git concepts, Python syntax, etc.) "
+              "the agent answers directly — no tool calls needed.")
+            br()
+
             h2("🔍 AI Code Review")
             p("Right-click a project → 🔍 AI Code Review… — streams a severity-coloured "
               "review of your staged or HEAD diff. Uses the configured LLM or Claude CLI. "
-              "Results appear in a live-updating dialog with icons:")
+              "Results appear in a live-updating dialog:")
             ins("  ✗ critical  ⚠ warning  ℹ info  ✓ pass\n", "body")
-            br()
-
-            h2("Ask Tab (bounded agent)")
-            p("An embedded 8-iteration agent that answers questions about your codebase. "
-              "Type a question, pick a project, click Ask. The agent has six read-only "
-              "tokensave tools (context, search, callers, callees, body, outline) and "
-              "stays bounded to prevent runaway token spend. Results stream line-by-line.")
-            br()
-
-            h2("Ollama Model Manager")
-            p("Settings → Ollama → Manage Models — browse, pull, and delete local Ollama "
-              "models without leaving the manager. Models listed here are available for AI "
-              "commit messages, AI code review, pre-commit hook review, and the inline "
-              "Explain button in this Help tab.")
             br()
 
             h2("💡 Smart commit messages")
             p("The 📝 Commit… dialog uses a multi-strategy chain to suggest a message:")
             ins("  1. CHANGELOG.md bullets (if you added an entry today)\n", "body")
-            ins("  2. Diff content — added/changed definitions, file types\n", "body")
-            ins("  3. File-name heuristics (legacy fallback)\n", "body")
-            p("When an AI backend is configured, an AI step runs first and the chain "
-              "falls back to heuristics silently on any failure. Click 💡 Suggest to "
-              "regenerate at any time. Configure the backend in Settings → Commit Message.")
+            ins("  2. AI backend (Claude CLI or configured provider)\n", "body")
+            ins("  3. Diff content — added/changed definitions, file types\n", "body")
+            ins("  4. File-name heuristics (legacy fallback)\n", "body")
+            p("Click 💡 Suggest to regenerate. Configure the backend in Settings → "
+              "Commit Message AI.")
             br()
 
             h2("Claude CLI integration")
             p("Settings → Claude Code CLI → Exe path wires in the claude binary. "
-              "The manager uses it for:")
-            ins("  • 💡 Suggest strategy in the commit dialog\n", "body")
-            ins("  • 🔍 AI Code Review streaming\n", "body")
-            ins("  • 📝 Draft CHANGELOG entry\n", "body")
-            ins("  • 🐙 Draft PR description\n", "body")
-            ins("  • ✓ Run checks → Claude review step\n", "body")
+              "Used by code review, Draft CHANGELOG, Draft PR, Run checks, and "
+              "the AI Tasks tab. Configure the model (Haiku / Sonnet / Opus) in the "
+              "same Settings section.")
+            br()
+
+            h2("Ollama Model Manager")
+            p("Settings → Ollama → Manage Models — browse, pull, and delete local Ollama "
+              "models. Models pulled here are available as a provider option for all "
+              "AI features above that use the configured provider.")
+            br()
+
+            h2("When AI features are unavailable")
+            ins("  No provider configured  ", "body")
+            ins("AI features that need a provider show 'AI disabled' and\n"
+                "                        fall through to heuristics. Configure in Settings.\n", "dim")
+            ins("  No .tokensave/ index    ", "body")
+            ins("tokensave_search / context return 'run tokensave init\n"
+                "                        first'. Other Ask tools still work.\n", "dim")
+            ins("  Claude CLI not found    ", "body")
+            ins("Features that require Claude CLI show a warning and\n"
+                "                        skip that step. Set Exe path in Settings.\n", "dim")
             br()
 
             h2("📊 Cost tracking")
-            p("The 📊 Cost button (bottom of the main window) shows a running tally of "
-              "API tokens and estimated cost for this session. Covers all LLM calls made "
-              "through the manager's own LLM helper — commit message suggestions, code "
-              "reviews, pre-commit hook, and inline Explain in this Help tab.")
+            p("The 📊 Cost button shows a running tally of API tokens and estimated "
+              "cost for this session — commit messages, reviews, pre-commit, and "
+              "inline Explain in this Help tab.")
         self._help_show(_fill, doc_path=_doc, ask_text=_ask, explain_text=_ask)
 
     def _help_precommit_hook(self):
+        _ask = ("The pre-commit hook is blocking my commit — the AI review ran but I "
+                "disagree with it. How do I override it for just this one commit?")
+
         def _fill():
             h1, h2, p, warn, ok, dim, br, ins = self._hw()
             h1("Pre-commit AI Review Hook")
@@ -999,6 +1094,14 @@ class HelpTabController:
               "before every commit. If the review finds critical issues it warns you — the "
               "commit still proceeds (fail-open guarantee). The review runs in the "
               "background using the configured LLM or Claude CLI backend.")
+            br()
+
+            h2("Where the hook lives")
+            p("The hook file is written to:")
+            ins("  <project>/.git/hooks/pre-commit\n", "body")
+            p("It's a plain shell script. You can open and read it any time. "
+              "Uninstalling (via the manager dialog) removes only that file — nothing "
+              "else in your project is touched.")
             br()
 
             h2("Installing the hook")
@@ -1018,16 +1121,23 @@ class HelpTabController:
             p("Change the backend in Settings → Pre-commit section.")
             br()
 
-            h2("Fail-open guarantee")
+            h2("Bypassing the hook in an emergency")
+            p("If the hook is blocking a commit you know is fine, use:")
+            ins("  git commit --no-verify -m \"your message\"\n", "body")
+            p("This skips ALL hooks for that one commit. Use sparingly — the hook is "
+              "there to catch real issues. The manager never force-sets --no-verify.")
+            br()
+
+            h2("If the AI provider is offline")
             p("If the AI call fails (timeout, network error, unconfigured provider), the "
-              "hook exits 0 and the commit proceeds normally. A warning message is printed "
-              "to the terminal. Your workflow is never blocked by an AI service failure.")
+              "hook exits 0 and the commit proceeds normally — this is the fail-open "
+              "guarantee. A warning message is printed to the terminal. Your workflow "
+              "is never hard-blocked by an AI service failure.")
             br()
 
             warn("⚠  The hook only fires for projects where it is installed. Right-click "
-                 "each project individually to install. The hook file lives at "
-                 ".git/hooks/pre-commit inside the project folder.")
-        self._help_show(_fill)
+                 "each project individually to install.")
+        self._help_show(_fill, ask_text=_ask)
 
     def _help_run_checks(self):
         def _fill():

@@ -25,7 +25,11 @@ import tkinter as tk
 from tkinter import ttk
 from typing import TYPE_CHECKING
 
-from constants import C
+import datetime
+import subprocess
+import sys
+
+from constants import C, LOG_DIR
 from helpers.runtime import log
 from helpers.ui import append_text
 
@@ -40,6 +44,8 @@ class AskTabController:
     holding a reference to the App instance.
     """
 
+    _ASK_LOG_FILE = os.path.join(LOG_DIR, "ask_sessions.md")
+
     _ASK_SYSTEM_PROMPT = (
         "You are a code-aware assistant for the user's current project. "
         "You have access to READ-ONLY tools that let you read files, list "
@@ -51,7 +57,11 @@ class AskTabController:
         "content field. After the tool result is returned to you as a "
         "role:'tool' message, continue your reasoning and either call "
         "another tool or give a final text answer.\n"
-        "- Do NOT guess about file contents or code that you have not read.\n"
+        "- Do NOT guess about THIS project's file contents or code unless you "
+        "have already read it. For general knowledge questions (concepts, "
+        "language syntax, tool documentation, best practices, what 'git "
+        "rebase' does, etc.) answer directly from knowledge — no tool call "
+        "needed.\n"
         "- Cite file:line locations when you reference code.\n\n"
         "Tool-selection guide (CRITICAL — wrong tool choice wastes "
         "iterations):\n"
@@ -83,12 +93,13 @@ class AskTabController:
         "- **git_log / git_diff** for change history and pending work.\n\n"
         "Error handling:\n"
         "- If a tool returns an error message starting with '[tool error]', "
-        "DO NOT report the failure to the user. Instead, read the error "
-        "carefully — it usually contains a concrete suggestion (e.g. "
-        "'a file named X exists at src/X — retry with that path'). "
-        "Apply the suggestion and call the tool again. Only report failure "
-        "to the user as a last resort, after at least 2 retry attempts "
-        "with different approaches.\n"
+        "read it carefully — it sometimes contains a concrete suggestion "
+        "(e.g. 'a file named X exists at src/X — retry with that path'). "
+        "Follow that specific suggestion exactly once. Do NOT blindly retry "
+        "the same call or try minor path/argument tweaks on your own "
+        "(e.g. adding './', changing slashes, guessing alternate filenames). "
+        "If it still fails after one targeted retry, report the error "
+        "directly to the user and continue from what you already know.\n"
         "- If tokensave_search returns no results, that means the query "
         "isn't a symbol name. Switch to read_file (if you have a target "
         "file in mind) or list_directory (to discover one) — don't keep "
@@ -223,6 +234,11 @@ class AskTabController:
 
         ttk.Button(hdr, text="Clear history",
                    command=self._ask_clear).pack(side=tk.RIGHT)
+        self._session_log_btn = ttk.Button(
+            hdr, text="📄 Session log",
+            command=self._open_session_log,
+            state=tk.DISABLED)
+        self._session_log_btn.pack(side=tk.RIGHT, padx=(0, 6))
 
         # ── Status line (under header) ──────────────────────────────────
         self._ask_status = tk.Label(
@@ -301,6 +317,10 @@ class AskTabController:
             font=("Segoe UI", 9, "italic"))
 
         self._ask_set_intro()
+
+        # Enable session-log button immediately if a previous log exists
+        if os.path.isfile(self._ASK_LOG_FILE):
+            self._session_log_btn.configure(state=tk.NORMAL)
 
     def on_tab_selected(self):
         """Called by App._on_tab_changed when the Ask tab is focused."""
@@ -542,6 +562,45 @@ class AskTabController:
             self._stream_buffer.clear()
             self._ask_append(text, "assistant")
 
+    def _open_session_log(self) -> None:
+        """Open ask_sessions.md in the system default viewer (cross-platform)."""
+        path = self._ASK_LOG_FILE
+        if not os.path.isfile(path):
+            return
+        try:
+            if sys.platform == "win32":
+                os.startfile(path)  # type: ignore[attr-defined]
+            elif sys.platform == "darwin":
+                subprocess.run(["open", path], check=True)
+            else:
+                subprocess.run(["xdg-open", path], check=True)
+        except Exception as exc:
+            log.warning("Could not open session log: %s", exc)
+
+    def _persist_exchange(self, user_text: str, assistant_text: str) -> None:
+        """Append the completed Q&A pair to logs/ask_sessions.md.
+
+        Called after every successful non-error agent response so the
+        conversation survives app restarts and can be reviewed in any editor.
+        Creates the logs/ directory and the file on first use.
+        """
+        try:
+            os.makedirs(LOG_DIR, exist_ok=True)
+            ts = datetime.datetime.now().strftime("%Y-%m-%d %H:%M")
+            project = (os.path.basename(self._ask_path)
+                       if self._ask_path else "—")
+            with open(self._ASK_LOG_FILE, "a", encoding="utf-8") as f:
+                f.write(f"\n---\n**{ts} | {project}**\n\n")
+                f.write(f"**Q:** {user_text.strip()}\n\n")
+                f.write(f"**A:** {assistant_text.strip()}\n")
+            # Enable the button on first successful write
+            try:
+                self._session_log_btn.configure(state=tk.NORMAL)
+            except tk.TclError:
+                pass
+        except OSError as exc:
+            log.warning("Could not write ask session log: %s", exc)
+
     def _ask_finish(self, final_text, is_error: bool, error_msg: str,
                     stream_started: "list[bool] | None" = None) -> None:
         """Main-thread terminal state — called from both _on_done and _on_error."""
@@ -560,6 +619,13 @@ class AskTabController:
                 tail = self._ask_log.get("end-3c", "end-1c")
                 if not tail.endswith("\n\n"):
                     self._ask_append("\n\n", "assistant")
+            # Persist the exchange to disk (survives app restarts)
+            last_user = next(
+                (m["content"] for m in reversed(self._ask_messages)
+                 if m.get("role") == "user"),
+                "")
+            if last_user and final_text:
+                self._persist_exchange(last_user, final_text)
         self._ask_send_btn.configure(state=tk.NORMAL)
         self._ask_stop_btn.configure(state=tk.DISABLED)
         self._ask_stop_event = None
