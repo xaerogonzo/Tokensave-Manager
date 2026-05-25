@@ -120,6 +120,10 @@ class AskTabController:
         "specific edits in your answer and let them apply them manually."
     )
 
+    # Timeout for claude --print calls in the Ask tab.  Generous (2 min) to
+    # accommodate Opus-class responses and slow local networks.
+    _CLAUDE_CLI_TIMEOUT = 120
+
     def __init__(self, notebook: ttk.Notebook, get_project_path,
                  cfg: "ManagerConfig"):
         self._get_project_path = get_project_path
@@ -349,12 +353,25 @@ class AskTabController:
     def _ask_set_intro(self):
         self._ask_log.configure(state=tk.NORMAL)
         self._ask_log.delete("1.0", tk.END)
-        self._ask_log.insert(tk.END,
-            "Ready. Ask anything about the selected project — I'll use "
-            "read_file, list_directory, git_log, git_diff, and (when "
-            "available) tokensave_search / tokensave_context to find "
-            "answers. I cannot modify files.\n\n",
-            "info")
+        # Show different intro based on configured provider.
+        raw = self._cfg.raw
+        cfg = ((raw.get("ask_tab_llm") or raw.get("commit_message_llm") or {})
+               if isinstance(raw, dict) else {})
+        if cfg.get("provider") == "claude_cli":
+            intro = (
+                "Ready (Claude CLI mode). Ask anything — responses come from "
+                "claude --print.\n"
+                "⚠  No tool access: read_file / tokensave_search are unavailable. "
+                "Great for general questions, explanations, and code advice.\n\n"
+            )
+        else:
+            intro = (
+                "Ready. Ask anything about the selected project — I'll use "
+                "read_file, list_directory, git_log, git_diff, and (when "
+                "available) tokensave_search / tokensave_context to find "
+                "answers. I cannot modify files.\n\n"
+            )
+        self._ask_log.insert(tk.END, intro, "info")
         self._ask_log.configure(state=tk.DISABLED)
 
     def _ask_append(self, text: str, tag: str = "assistant"):
@@ -367,7 +384,8 @@ class AskTabController:
         else:
             self._ask_project_lbl.configure(text="(no project selected)")
         raw = self._cfg.raw
-        cfg = (raw.get("commit_message_llm") or {}) if isinstance(raw, dict) else {}
+        cfg = ((raw.get("ask_tab_llm") or raw.get("commit_message_llm") or {})
+               if isinstance(raw, dict) else {})
         provider = cfg.get("provider") or "?"
         model = cfg.get("model") or "?"
         enabled = bool(cfg.get("enabled"))
@@ -377,7 +395,7 @@ class AskTabController:
                 fg=C["overlay0"])
         else:
             self._ask_model_lbl.configure(
-                text="[AI is disabled — Settings → AI commit messages]",
+                text="[AI is disabled — Settings → Ask Tab AI]",
                 fg=C["red"])
 
     def _ask_clear(self):
@@ -406,6 +424,11 @@ class AskTabController:
         if llm_cfg is None:
             return  # validation already showed the error
 
+        # Claude CLI path: bypass LocalAgent, use call_claude_cli_print directly.
+        if llm_cfg.get("provider") == "claude_cli":
+            self._ask_send_claude_cli(llm_cfg)
+            return
+
         try:
             import agent as _agent_mod
             import agent_tools as _agent_tools_mod
@@ -433,6 +456,79 @@ class AskTabController:
 
     # ── _ask_send helpers ────────────────────────────────────────────────────
 
+    def _ask_send_claude_cli(self, llm_cfg: dict) -> None:
+        """Send via `claude --print` (no tool access; conversation as text context).
+
+        Called from _ask_send when provider == "claude_cli". Bypasses LocalAgent
+        entirely — claude --print is not tool-calling-aware so the agent loop
+        isn't needed. The full conversation history is serialised as plain text
+        context, with the current user message sent cleanly as the final turn.
+        """
+        from helpers.claude_cli import call_claude_cli_print
+
+        claude_exe = self._cfg.claude_cli_exe or ""
+        if not claude_exe:
+            self._ask_append(
+                "Claude CLI is not configured. Set the path in "
+                "Settings → Claude Code CLI.\n\n", "error")
+            return
+
+        text = self._ask_entry.get().strip()
+        self._ask_prepare_ui(text)
+
+        model = llm_cfg.get("model") or ""
+        stop_event = threading.Event()
+        self._ask_stop_event = stop_event
+
+        def _worker():
+            # Build history from _ask_messages[:-1] (prior turns only).
+            # _ask_prepare_ui already appended the current question as the
+            # last entry, so include that as the clean terminal turn below.
+            history_parts: list[str] = []
+            for m in self._ask_messages[:-1]:
+                role = m.get("role", "")
+                content = (m.get("content") or "").strip()
+                if role == "user" and content:
+                    history_parts.append(f"User: {content}")
+                elif role == "assistant" and content:
+                    history_parts.append(f"Assistant: {content}")
+            context_str = "\n\n".join(history_parts)
+            current_query = (self._ask_messages[-1].get("content") or "").strip()
+            if context_str:
+                prompt = (
+                    f"Here is our ongoing conversation context:\n\n"
+                    f"{context_str}\n\n"
+                    f"Now answer this question:\n{current_query}"
+                )
+            else:
+                prompt = current_query
+
+            result = call_claude_cli_print(
+                claude_exe, prompt,
+                system_prompt=self._ASK_SYSTEM_PROMPT,
+                timeout=self._CLAUDE_CLI_TIMEOUT,
+                model=model,
+                cwd=self._ask_path,  # loads project CLAUDE.md as context
+            )
+            if stop_event.is_set():
+                return
+            if result:
+                self._ask_messages.append({"role": "assistant", "content": result})
+                self._tab.after(0, self._ask_finish, result, False, "")
+            else:
+                self._tab.after(0, self._ask_finish, None, True,
+                                "Claude CLI call failed or timed out. "
+                                "Check that the claude executable is configured "
+                                "and authenticated (run 'claude --version' to test).")
+
+        self._ask_thread = threading.Thread(target=_worker, daemon=True)
+        self._ask_send_btn.configure(state=tk.DISABLED)
+        self._ask_stop_btn.configure(state=tk.NORMAL)
+        self._ask_status.configure(
+            text="Asking Claude CLI… (no tool access in this mode)",
+            fg=C["overlay0"])
+        self._ask_thread.start()
+
     def _ask_preflight(self) -> "dict | None":
         """Validate preconditions for sending. Returns llm_cfg dict on success,
         None if any check fails (the appropriate error has already been shown).
@@ -452,10 +548,13 @@ class AskTabController:
             return None
 
         raw = self._cfg.raw
-        llm_cfg = (raw.get("commit_message_llm") or {}) if isinstance(raw, dict) else {}
+        # Ask tab has its own config; fall back to commit_message_llm for
+        # migration (users upgrading from a version that didn't have ask_tab_llm).
+        llm_cfg = ((raw.get("ask_tab_llm") or raw.get("commit_message_llm") or {})
+                   if isinstance(raw, dict) else {})
         if not llm_cfg.get("enabled"):
             self._ask_append(
-                "AI is disabled. Open Settings → AI commit messages and "
+                "AI is disabled. Open Settings → Ask Tab AI and "
                 "tick the enable box, then try again.\n\n", "error")
             return None
         return llm_cfg

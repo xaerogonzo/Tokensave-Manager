@@ -456,7 +456,7 @@ def _make_tokensave_runner(project_path: str, tokensave_exe: str,
         # etc. that bloat the wire by ~3-5x without helping the model
         # answer code questions. query output is plain text and passes
         # through unchanged.
-        if cli_subcommand == "context":
+        if subcommand == "context":
             try:
                 parsed = json.loads(out)
                 slimmed = _slim_tokensave_context(parsed)

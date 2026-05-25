@@ -125,6 +125,7 @@ class SettingsDialog(tk.Toplevel):
         self._build_roots_section(body, raw)
         self._build_behavior_section(body, raw)
         self._build_ai_section(body, raw)
+        self._build_ask_ai_section(body, raw)
 
         # ── Save/Cancel — anchored outside the scroll area ────────────────
         btn_row = tk.Frame(self, bg=C["base"])
@@ -685,6 +686,79 @@ class SettingsDialog(tk.Toplevel):
         self._build_ai_presets(body)
         self._build_ai_options(body, llm_cfg)
 
+    def _build_ask_ai_section(self, body, raw):
+        """Ask Tab AI — provider, model, key env, base URL (separate from commit-msg LLM).
+
+        Falls back to commit_message_llm values on first run so existing users
+        see no change; once the user saves, ask_tab_llm is written independently.
+        """
+        ask_cfg = raw.get("ask_tab_llm") or raw.get("commit_message_llm") or {}
+
+        ttk.Separator(body, orient="horizontal").pack(fill=tk.X, padx=20, pady=(8, 8))
+        tk.Label(body, text="Ask Tab AI",
+                 font=("Segoe UI", 10, "bold"),
+                 bg=C["base"], fg=C["text"]).pack(anchor=tk.W, padx=20, pady=(0, 2))
+        tk.Label(body,
+                 text="  Configure the AI backend for the 🤖 Ask tab independently from\n"
+                      "  commit-message AI. Supports all providers plus Claude CLI.",
+                 font=("Segoe UI", 8), bg=C["base"], fg=C["overlay0"],
+                 justify=tk.LEFT).pack(anchor=tk.W, padx=20, pady=(0, 4))
+
+        self._var_ask_enabled = tk.BooleanVar(value=bool(ask_cfg.get("enabled", False)))
+        tk.Checkbutton(body,
+            text="Enable AI in the Ask tab",
+            variable=self._var_ask_enabled,
+            bg=C["base"], fg=C["text"], selectcolor=C["surface0"],
+            activebackground=C["base"], activeforeground=C["text"],
+            font=("Segoe UI", 10)).pack(anchor=tk.W, padx=20, pady=(0, 4))
+
+        ask_grid = tk.Frame(body, bg=C["base"])
+        ask_grid.pack(fill=tk.X, padx=36, pady=(0, 6))
+
+        def _row(label_txt, widget):
+            row = tk.Frame(ask_grid, bg=C["base"])
+            row.pack(fill=tk.X, pady=2)
+            tk.Label(row, text=label_txt, width=18, anchor=tk.W,
+                     font=("Segoe UI", 9), bg=C["base"],
+                     fg=C["subtext"]).pack(side=tk.LEFT)
+            widget.pack(side=tk.LEFT, fill=tk.X, expand=True)
+
+        self._var_ask_provider = tk.StringVar(
+            value=ask_cfg.get("provider", "ollama"))
+        provider_box = ttk.Combobox(ask_grid, textvariable=self._var_ask_provider,
+            values=["claude_cli", "ollama", "anthropic", "openai", "openai_compatible"],
+            state="readonly", width=22)
+        _row("Provider:", provider_box)
+
+        self._var_ask_model = tk.StringVar(value=ask_cfg.get("model", ""))
+        _row("Model:", ttk.Entry(ask_grid, textvariable=self._var_ask_model))
+
+        self._var_ask_keyenv = tk.StringVar(
+            value=ask_cfg.get("api_key_env", "ANTHROPIC_API_KEY"))
+        self._ask_keyenv_entry = ttk.Entry(ask_grid, textvariable=self._var_ask_keyenv)
+        _row("API key env var:", self._ask_keyenv_entry)
+
+        self._var_ask_base_url = tk.StringVar(value=ask_cfg.get("base_url", ""))
+        self._ask_base_url_entry = ttk.Entry(ask_grid, textvariable=self._var_ask_base_url)
+        _row("Base URL:", self._ask_base_url_entry)
+
+        # Reactive: disable key/URL fields when claude_cli is selected (it uses
+        # system-level auth; key env / base URL are irrelevant).
+        def _on_ask_provider_changed(*_):
+            is_cli = self._var_ask_provider.get() == "claude_cli"
+            state = tk.DISABLED if is_cli else tk.NORMAL
+            self._ask_keyenv_entry.configure(state=state)
+            self._ask_base_url_entry.configure(state=state)
+        self._var_ask_provider.trace_add("write", _on_ask_provider_changed)
+        _on_ask_provider_changed()  # apply on initial render
+
+        tk.Label(body,
+            text="  Set provider to 'claude_cli' to use the Claude CLI binary configured\n"
+                 "  in the Paths section above. No API key needed — uses your local auth.\n"
+                 "  Other providers use the same format as AI commit messages.",
+            font=("Segoe UI", 8), bg=C["base"], fg=C["overlay0"],
+            justify=tk.LEFT).pack(anchor=tk.W, padx=36, pady=(0, 8))
+
     # ── AI-section sub-builders ──────────────────────────────────────────────
 
     def _build_ai_provider_grid(self, body, llm_cfg):
@@ -1018,6 +1092,14 @@ class SettingsDialog(tk.Toplevel):
         existing_llm.setdefault("max_diff_chars", 24000)
         existing_llm.setdefault("timeout_seconds", 90)
         raw["commit_message_llm"] = existing_llm
+        # Ask Tab AI config — written independently from commit_message_llm.
+        raw["ask_tab_llm"] = {
+            "enabled":     self._var_ask_enabled.get(),
+            "provider":    self._var_ask_provider.get(),
+            "model":       self._var_ask_model.get().strip(),
+            "api_key_env": self._var_ask_keyenv.get().strip(),
+            "base_url":    self._var_ask_base_url.get().strip(),
+        }
         raw["git_exe"]        = self._git_exe_var.get().strip()
         raw["codegraph_exe"]  = self._cg_exe_var.get().strip()
         raw["claude_cli_exe"]   = self._claude_cli_var.get().strip()
