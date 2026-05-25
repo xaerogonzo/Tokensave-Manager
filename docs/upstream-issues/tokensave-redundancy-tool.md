@@ -85,6 +85,12 @@ Driven by an LLM prompt — see the `🪦 Redundancy hunt` snippet in `src/promp
 - **Semantic duplicates** ("these two functions both implement Levenshtein distance with completely different code") — out of scope; requires LLM-level reasoning. AST/CFG matching is the realistic ceiling.
 - **Generated code** (e.g. `protoc`-output Python) — should probably be excluded by default via a `.tokensaveignore`-style mechanism, or at least flagged with `"likely_generated": true` in the response so audits can filter.
 
+## Environment
+
+- tokensave 5.1.2
+- Windows (NTFS, paths permitted to contain spaces)
+- Claude Code (the version Claude Desktop bundles —
+
 ## Author note
 
 Filed by a TokenSave Manager user. Project: https://github.com/(your-fork-or-source)

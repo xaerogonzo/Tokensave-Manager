@@ -49,7 +49,13 @@ class MergePRDialog(tk.Toplevel):
         # after a successful merge (the same toggle gh's web UI offers).
         self._var_delete_branch = tk.BooleanVar(value=True)
 
-        # ── Header ──────────────────────────────────────────────────────
+        self._build_header_section(path)
+        self._build_pr_list_section(prs)
+        self._build_options_section()
+        self._build_buttons_section()
+
+    def _build_header_section(self, path: str):
+        """Title row + helper-text label."""
         hdr = tk.Frame(self, bg=C["base"])
         hdr.pack(fill=tk.X, padx=18, pady=(14, 4))
         tk.Label(hdr, text="🐙  Merge Pull Request",
@@ -68,7 +74,8 @@ class MergePRDialog(tk.Toplevel):
             justify=tk.LEFT, anchor=tk.W,
             wraplength=780).pack(fill=tk.X, padx=18, pady=(0, 8))
 
-        # ── PR list (Treeview) ──────────────────────────────────────────
+    def _build_pr_list_section(self, prs: list[dict]):
+        """LabelFrame + Treeview + vertical scrollbar; populate rows."""
         list_frame = tk.LabelFrame(
             self, text=f" Open PRs ({len(prs)}) ",
             bg=C["base"], fg=C["subtext"],
@@ -111,7 +118,8 @@ class MergePRDialog(tk.Toplevel):
                                      f"{head} → {base}",
                                      f"+{add} -{rem}"))
 
-        # ── Delete-branch toggle ────────────────────────────────────────
+    def _build_options_section(self):
+        """Delete-source-branch checkbox row."""
         opts_row = tk.Frame(self, bg=C["base"])
         opts_row.pack(fill=tk.X, padx=18, pady=(4, 2))
         tk.Checkbutton(opts_row,
@@ -121,7 +129,8 @@ class MergePRDialog(tk.Toplevel):
             activebackground=C["base"], activeforeground=C["text"],
             font=("Segoe UI", 9)).pack(side=tk.LEFT)
 
-        # ── Strategy buttons + Close ────────────────────────────────────
+    def _build_buttons_section(self):
+        """Three strategy buttons (Merge / Squash / Rebase) + Close."""
         btn_row = tk.Frame(self, bg=C["base"])
         btn_row.pack(fill=tk.X, padx=18, pady=(2, 14))
         self._btn_merge = ttk.Button(

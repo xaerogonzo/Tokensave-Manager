@@ -58,7 +58,14 @@ class UntrackIgnoredDialog(tk.Toplevel):
         self.grab_set()
         self.transient(parent)
 
-        # ── Header ──
+        self._build_header_section(name)
+        self._build_explanation_section(reason)
+        self._build_file_list_section(files)
+        self._build_action_buttons_section(files)
+        self._centre_on_parent(parent)
+
+    def _build_header_section(self, name: str):
+        """Dialog title + project name."""
         hdr = tk.Frame(self, bg=C["base"], padx=18, pady=14)
         hdr.pack(fill=tk.X)
         tk.Label(hdr, text="🧹  Untrack Ignored Files", bg=C["base"],
@@ -66,7 +73,8 @@ class UntrackIgnoredDialog(tk.Toplevel):
         tk.Label(hdr, text=name, bg=C["base"], fg=C["overlay0"],
                  font=("Segoe UI", 9)).pack(anchor=tk.W, pady=(2, 0))
 
-        # ── Explanation ──
+    def _build_explanation_section(self, reason: str):
+        """Wrapping prose explaining what untracking does."""
         expl = tk.Frame(self, bg=C["base"])
         expl.pack(fill=tk.X, padx=18, pady=(0, 6))
         tk.Label(expl,
@@ -83,7 +91,8 @@ class UntrackIgnoredDialog(tk.Toplevel):
                  justify=tk.LEFT, anchor=tk.W,
                  wraplength=500).pack(anchor=tk.W)
 
-        # ── File checklist (scrollable) ──
+    def _build_file_list_section(self, files: list):
+        """Scrollable canvas with a per-file checkbox row (or empty-state label)."""
         tk.Label(self, text="FILES TO UNTRACK",
                  bg=C["base"], fg=C["overlay0"],
                  font=("Segoe UI", 8, "bold")).pack(anchor=tk.W, padx=18, pady=(8, 2))
@@ -126,7 +135,8 @@ class UntrackIgnoredDialog(tk.Toplevel):
                          font=("Consolas", 9),
                          bg=C["mantle"], fg=C["text"]).pack(side=tk.LEFT, padx=(4, 6))
 
-        # ── Quick-select buttons ──
+    def _build_action_buttons_section(self, files: list):
+        """Quick-select row (only if files exist) + Untrack/Cancel buttons."""
         if files:
             sel_row = tk.Frame(self, bg=C["base"])
             sel_row.pack(fill=tk.X, padx=18, pady=(0, 8))
@@ -135,7 +145,6 @@ class UntrackIgnoredDialog(tk.Toplevel):
             ttk.Button(sel_row, text="Select None",
                        command=lambda: self._set_all(False)).pack(side=tk.LEFT)
 
-        # ── Action buttons ──
         btn_row = tk.Frame(self, bg=C["base"])
         btn_row.pack(fill=tk.X, padx=18, pady=(0, 14))
         self._action_btn = ttk.Button(btn_row, text="Untrack Selected",
@@ -145,7 +154,8 @@ class UntrackIgnoredDialog(tk.Toplevel):
         ttk.Button(btn_row, text="Cancel",
                    command=self.destroy).pack(side=tk.LEFT)
 
-        # Centre
+    def _centre_on_parent(self, parent):
+        """Position the dialog roughly centred on the parent window."""
         self.update_idletasks()
         w, h = 580, 520
         try:

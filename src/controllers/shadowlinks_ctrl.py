@@ -96,9 +96,10 @@ class ShadowLinksController:
                 self._tab.after(0, lambda: self._on_commit_offer(
                     path, "shadow links + .gitignore"))
             except Exception as e:
+                err_msg = str(e)
                 log.exception(f"SHADOW LINKS failed: {path}")
-                self._on_log(f"  Error: {e}", C["red"])
-                self._tab.after(0, lambda: messagebox.showerror(
-                    "Shadow Links failed", str(e), parent=self._root))
+                self._on_log(f"  Error: {err_msg}", C["red"])
+                self._tab.after(0, lambda m=err_msg: messagebox.showerror(
+                    "Shadow Links failed", m, parent=self._root))
 
         threading.Thread(target=worker, daemon=True).start()

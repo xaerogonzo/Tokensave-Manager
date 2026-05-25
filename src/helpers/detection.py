@@ -125,6 +125,27 @@ def _detect_codegraph() -> str:
     return ""
 
 
+def _detect_claude_cli() -> str:
+    """Return the path to the Claude Code CLI, else empty string.
+
+    npm installs `claude` as a .cmd shim on Windows — probe that first.
+    Returns "" (not a bare command name) so callers can test `if cfg.claude_cli_exe:` cleanly.
+    If auto-detect fails (e.g. npm global bin not on PATH in this launch context), the user
+    should set the full path manually in Settings (e.g. %APPDATA%\\npm\\claude.cmd).
+    """
+    for name in ("claude.cmd", "claude"):
+        found = shutil.which(name)
+        if found:
+            return found
+    for candidate in [
+        os.path.expandvars(r"%APPDATA%\npm\claude.cmd"),
+        os.path.expandvars(r"%USERPROFILE%\AppData\Roaming\npm\claude.cmd"),
+    ]:
+        if os.path.isfile(candidate):
+            return candidate
+    return ""
+
+
 def _is_codegraph_project(path: str) -> bool:
     """True iff `path` has been initialised by CodeGraph (the .codegraph/
     SQLite database exists)."""

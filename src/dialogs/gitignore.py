@@ -23,12 +23,14 @@ user can immediately clean up the "tracked-but-ignored" footgun.
 from __future__ import annotations
 
 import os
+import subprocess
+import threading
 import tkinter as tk
-from tkinter import ttk, messagebox
+from tkinter import ttk, messagebox, filedialog
 from tkinter import font as tkfont
 from typing import TYPE_CHECKING
 
-from constants import C
+from constants import C, CREATE_NO_WINDOW
 from theme import _Tooltip
 from helpers.gitignore import (
     _read_gitignore_lines, _write_gitignore_lines, _GITIGNORE_TEMPLATES,
@@ -80,7 +82,20 @@ class GitignoreDialog(tk.Toplevel):
         self._normal_font = tkfont.Font(family="Consolas", size=9)
         self._strike_font = tkfont.Font(family="Consolas", size=9, overstrike=1)
 
-        # ── Header ─────────────────────────────────────────────────────────
+        self._build_header_section(path)
+        self._build_current_entries_section()
+        self._build_template_buttons_section()
+        if _is_local_git_repo(path):
+            self._build_untracked_panel()
+        self._build_custom_entry_section()
+        self._build_pending_changes_section()
+        self._build_save_buttons_section()
+
+        self._update_pending_panel()
+        self._centre_on_parent(parent)
+
+    def _build_header_section(self, path: str):
+        """Title + .gitignore path + functional-pattern count."""
         hdr = tk.Frame(self, bg=C["base"], padx=18, pady=14)
         hdr.pack(fill=tk.X)
         tk.Label(hdr, text="📋  .gitignore", bg=C["base"], fg=C["blue"],
@@ -99,7 +114,8 @@ class GitignoreDialog(tk.Toplevel):
             bg=C["base"], fg=C["overlay0"], font=("Segoe UI", 8))
         self._count_lbl.pack(side=tk.LEFT)
 
-        # ── Current entries: scrollable canvas + body Frame ────────────────
+    def _build_current_entries_section(self):
+        """Scrollable canvas hosting one row widget per non-blank .gitignore line."""
         cur_label = tk.Label(self, text="CURRENT ENTRIES",
                              bg=C["base"], fg=C["overlay0"],
                              font=("Segoe UI", 8, "bold"))
@@ -127,7 +143,8 @@ class GitignoreDialog(tk.Toplevel):
 
         self._populate_current_entries()
 
-        # ── Template Inject buttons (action, not state — see plan) ────────
+    def _build_template_buttons_section(self):
+        """6-per-row grid of `+ <category>` buttons; tooltips show what each adds."""
         tmpl_label = tk.Label(self,
             text="INJECT TEMPLATE PATTERNS  (one-click — hover to see what each adds)",
             bg=C["base"], fg=C["overlay0"], font=("Segoe UI", 8, "bold"))
@@ -135,7 +152,6 @@ class GitignoreDialog(tk.Toplevel):
         tmpl_wrap = tk.Frame(self, bg=C["base"])
         tmpl_wrap.pack(fill=tk.X, padx=18, pady=(0, 8))
 
-        # Two-row grid of buttons; up to 6 per row
         per_row = 6
         for i, cat_name in enumerate(_GITIGNORE_TEMPLATES.keys()):
             row, col = divmod(i, per_row)
@@ -145,25 +161,29 @@ class GitignoreDialog(tk.Toplevel):
                      sticky=tk.W)
             _Tooltip(btn, self._template_tooltip_text(cat_name))
 
-        # ── Custom entry ──────────────────────────────────────────────────
+    def _build_custom_entry_section(self):
+        """Custom-pattern entry + Add / Browse buttons + hint label."""
         custom_wrap = tk.Frame(self, bg=C["base"])
         custom_wrap.pack(fill=tk.X, padx=18, pady=(4, 0))
         tk.Label(custom_wrap, text="Custom entry:", bg=C["base"], fg=C["text"],
                  font=("Segoe UI", 9)).pack(side=tk.LEFT, padx=(0, 6))
         self._custom_var = tk.StringVar()
         custom_entry = ttk.Entry(custom_wrap, textvariable=self._custom_var,
-                                  font=("Consolas", 9), width=40)
+                                  font=("Consolas", 9), width=32)
         custom_entry.pack(side=tk.LEFT, fill=tk.X, expand=True,
                           padx=(0, 6))
         custom_entry.bind("<Return>", lambda e: self._add_custom())
         ttk.Button(custom_wrap, text="+ Add",
                    command=self._add_custom).pack(side=tk.LEFT)
+        ttk.Button(custom_wrap, text="Browse...",
+                   command=self._browse_add).pack(side=tk.LEFT, padx=(6, 0))
 
         self._custom_hint = tk.Label(self, text="", bg=C["base"],
                                      fg=C["overlay0"], font=("Segoe UI", 8))
         self._custom_hint.pack(anchor=tk.W, padx=18)
 
-        # ── Pending changes panel ────────────────────────────────────────
+    def _build_pending_changes_section(self):
+        """Read-only Text widget showing the +/- diff of pending edits."""
         pend_label = tk.Label(self, text="PENDING CHANGES",
                               bg=C["base"], fg=C["overlay0"],
                               font=("Segoe UI", 8, "bold"))
@@ -180,7 +200,8 @@ class GitignoreDialog(tk.Toplevel):
         self._pend_txt.tag_configure("rem",  foreground=C["red"])
         self._pend_txt.tag_configure("dim",  foreground=C["overlay0"])
 
-        # ── Save / Cancel ────────────────────────────────────────────────
+    def _build_save_buttons_section(self):
+        """Bottom Save / Cancel button row."""
         btns = tk.Frame(self, bg=C["base"], padx=18, pady=10)
         btns.pack(fill=tk.X)
         self._save_btn = ttk.Button(btns, text="Save changes",
@@ -189,9 +210,8 @@ class GitignoreDialog(tk.Toplevel):
         ttk.Button(btns, text="Cancel",
                    command=self.destroy).pack(side=tk.RIGHT)
 
-        self._update_pending_panel()
-
-        # Centre on parent
+    def _centre_on_parent(self, parent):
+        """Position the dialog roughly centred on the parent window."""
         self.update_idletasks()
         w, h = 640, 620
         try:
@@ -332,7 +352,159 @@ class GitignoreDialog(tk.Toplevel):
     def _template_tooltip_text(self, cat_name: str) -> str:
         """Tooltip text listing the patterns this category contributes."""
         pats = _GITIGNORE_TEMPLATES.get(cat_name, [])
-        return f"Click to add to .gitignore:\n" + "\n".join(f"  {p}" for p in pats)
+        return "Click to add to .gitignore:\n" + "\n".join(f"  {p}" for p in pats)
+
+    # ── Untracked files panel ─────────────────────────────────────────────
+
+    def _build_untracked_panel(self):
+        """Insert a collapsible panel listing untracked files from git ls-files.
+
+        Rows are built in a background thread; the panel is hidden entirely if
+        git is unavailable or returns no untracked files.
+        """
+        self._untracked_frame = tk.LabelFrame(
+            self,
+            text="UNTRACKED FILES  (click + to add a pattern)",
+            fg=C["yellow"], bg=C["base"],
+            font=("Segoe UI", 8, "bold"),
+            labelanchor="nw",
+        )
+        self._untracked_frame.pack(fill=tk.X, padx=18, pady=(4, 4))
+
+        self._untracked_body = tk.Frame(self._untracked_frame, bg=C["mantle"])
+        self._untracked_body.pack(fill=tk.X)
+
+        self._untracked_status = tk.Label(
+            self._untracked_body,
+            text="  Scanning…",
+            bg=C["mantle"], fg=C["overlay0"],
+            font=("Segoe UI", 8, "italic"),
+        )
+        self._untracked_status.pack(anchor=tk.W, padx=4, pady=4)
+
+        threading.Thread(target=self._fetch_untracked, daemon=True).start()
+
+    def _fetch_untracked(self):
+        """Run git ls-files in a background thread and populate the panel."""
+        try:
+            proc = subprocess.Popen(
+                [self._cfg.git_exe, "-C", self._path,
+                 "ls-files", "--others", "--exclude-standard"],
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                creationflags=CREATE_NO_WINDOW,
+                text=True,
+                encoding="utf-8",
+                errors="replace",
+            )
+            stdout, _ = proc.communicate(timeout=10)
+            files = [ln.strip() for ln in stdout.splitlines() if ln.strip()]
+        except Exception:
+            files = []
+        self.after(0, lambda fs=files: self._populate_untracked(fs))
+
+    def _populate_untracked(self, files: list):
+        if not self.winfo_exists():
+            return
+        self._untracked_status.destroy()
+        if not files:
+            tk.Label(
+                self._untracked_body,
+                text="  (no untracked files)",
+                bg=C["mantle"], fg=C["overlay0"],
+                font=("Segoe UI", 8, "italic"),
+            ).pack(anchor=tk.W, padx=4, pady=4)
+            return
+
+        for filepath in files[:40]:   # cap rows at 40 to avoid UI overload
+            row = tk.Frame(self._untracked_body, bg=C["mantle"])
+            row.pack(fill=tk.X, padx=4, pady=1)
+
+            btn_lbl = tk.Label(row, text="[+]", bg=C["mantle"],
+                               fg=C["green"], font=("Consolas", 9, "bold"),
+                               cursor="hand2", padx=6)
+            btn_lbl.pack(side=tk.LEFT)
+
+            file_lbl = tk.Label(row, text=filepath, bg=C["mantle"],
+                                fg=C["text"], font=self._normal_font,
+                                anchor=tk.W)
+            file_lbl.pack(side=tk.LEFT, fill=tk.X, expand=True)
+
+            # Early binding via default keyword args — prevents late-binding trap
+            btn_lbl.bind(
+                "<Button-1>",
+                lambda _e, f=filepath, b=btn_lbl, l=file_lbl:
+                    self._add_from_panel(f, b, l),
+            )
+
+        if len(files) > 40:
+            tk.Label(
+                self._untracked_body,
+                text=f"  … and {len(files) - 40} more (use custom entry)",
+                bg=C["mantle"], fg=C["overlay0"],
+                font=("Segoe UI", 8, "italic"),
+            ).pack(anchor=tk.W, padx=4, pady=2)
+
+    def _add_from_panel(self, filepath: str, btn_lbl: tk.Label, file_lbl: tk.Label):
+        """Add filepath as a gitignore pattern and visually strike through the row."""
+        # Convert to forward-slash and use dirname/ for directories
+        pattern = filepath.replace("\\", "/")
+        if os.path.isdir(os.path.join(self._path, filepath)):
+            pattern = pattern.rstrip("/") + "/"
+        self._custom_var.set(pattern)
+        self._add_custom()
+        # Visual strike-through — no subprocess re-run needed
+        btn_lbl.configure(text="[✓]", fg=C["overlay0"], cursor="")
+        btn_lbl.unbind("<Button-1>")
+        file_lbl.configure(fg=C["overlay0"],
+                           font=tkfont.Font(family="Consolas", size=9, overstrike=1))
+
+    # ── Browse button ─────────────────────────────────────────────────────
+
+    def _browse_add(self):
+        """Open a file/folder picker, relativize the result, add as a pattern."""
+        picked = filedialog.askopenfilename(
+            title="Select a file to add to .gitignore",
+            initialdir=self._path,
+            parent=self,
+        )
+        if not picked:
+            # User might want a directory — offer askdirectory as fallback
+            picked = filedialog.askdirectory(
+                title="Or select a folder to add to .gitignore",
+                initialdir=self._path,
+                parent=self,
+            )
+        if not picked:
+            return
+
+        picked = os.path.normpath(picked)
+        try:
+            rel = os.path.relpath(picked, self._path)
+        except ValueError:
+            # Different drive on Windows
+            messagebox.showwarning(
+                "File outside project",
+                "The selected file must be on the same drive as the project.",
+                parent=self,
+            )
+            return
+
+        if rel.startswith(".."):
+            messagebox.showwarning(
+                "File outside project",
+                "The selected file must be inside the project directory.",
+                parent=self,
+            )
+            return
+
+        # Normalise to forward slashes; append / for directories
+        pattern = rel.replace("\\", "/")
+        if os.path.isdir(picked):
+            pattern = pattern.rstrip("/") + "/"
+
+        self._custom_var.set(pattern)
+        self._add_custom()
 
     # ── Custom entry ─────────────────────────────────────────────────────
 

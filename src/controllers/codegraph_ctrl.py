@@ -25,7 +25,7 @@ from typing import TYPE_CHECKING, Callable
 import tkinter as tk
 from tkinter import messagebox
 
-from helpers.detection import _detect_codegraph, _is_codegraph_project
+from helpers.detection import _is_codegraph_project
 from theme import C
 
 if TYPE_CHECKING:

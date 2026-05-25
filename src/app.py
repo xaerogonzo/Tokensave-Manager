@@ -26,7 +26,6 @@ because nothing reads bare globals anymore.
 from __future__ import annotations
 
 import os
-import re
 import subprocess
 import sys
 import threading
@@ -152,6 +151,14 @@ class App(tk.Tk):
 
     def _quit_app(self, icon=None, item=None):
         log.info("Quit requested from tray")
+        # Phase 1 (Roadmap-2): release any worker threads waiting on open
+        # ProposalDialogs so they don't deadlock when Tk's mainloop ends.
+        # Hide-to-tray does NOT trigger this — the user can still recover
+        # an open proposal by clicking Show from the tray.
+        try:
+            self._ask_ctrl.cancel_all_proposals()
+        except AttributeError:
+            pass  # ask_ctrl not constructed yet (very early failure path)
         if self._tray:
             self._tray.stop()
         self.after(0, self.destroy)
@@ -283,8 +290,31 @@ class App(tk.Tk):
                  font=("Segoe UI", 8, "bold"),
                  bg=C["base"], fg=C["overlay0"]).pack(side=tk.LEFT)
 
+        # Daemon status indicator (left side, after OUTPUT label).
+        # Right-click either widget opens the daemon control menu.
+        # Cursor switches to "hand2" on hover so the indicator looks clickable.
+        self._daemon_indicator = tk.Label(
+            log_header, text="●",
+            fg=C["overlay0"], bg=C["base"],
+            font=("Segoe UI", 11), cursor="hand2")
+        self._daemon_indicator.pack(side=tk.LEFT, padx=(10, 2))
+        self._daemon_lbl = tk.Label(
+            log_header, text="daemon …",
+            fg=C["overlay0"], bg=C["base"],
+            font=("Segoe UI", 8), cursor="hand2")
+        self._daemon_lbl.pack(side=tk.LEFT)
+        for w in (self._daemon_indicator, self._daemon_lbl):
+            w.bind("<Button-3>", self._daemon_show_menu)
+            w.bind("<Button-1>", self._daemon_show_menu)  # left-click too — more discoverable
+        # Last known daemon status — menu reads this to decide which items to show.
+        # None until the first poll completes.
+        self._daemon_status: dict | None = None
+
         ttk.Button(log_header, text="View Log",
                    command=self._open_log).pack(side=tk.RIGHT, padx=(0, 6))
+
+        ttk.Button(log_header, text="Cost",
+                   command=self._open_cost_viewer).pack(side=tk.RIGHT, padx=(0, 6))
 
         self._stop_btn = ttk.Button(log_header, text="■  Stop",
                                     style="Danger.TButton",
@@ -308,6 +338,138 @@ class App(tk.Tk):
         self.log.configure(yscrollcommand=lsb.set)
         self.log.pack(side=tk.LEFT, fill=tk.X, expand=True)
         lsb.pack(side=tk.RIGHT, fill=tk.Y)
+
+        # Kick off the daemon status polling loop
+        self._daemon_polling = False
+        self._poll_daemon_status()
+
+    # ── Daemon status polling ───────────────────────────────────────────────
+
+    def _poll_daemon_status(self):
+        """Fetch daemon status in a background thread every 5 seconds.
+
+        Guards against pile-up (self._daemon_polling flag) and against the
+        loop dying silently on subprocess errors (finally block reschedules
+        unconditionally so the indicator never permanently freezes).
+        """
+        if self._daemon_polling:
+            return
+        self._daemon_polling = True
+
+        def _worker():
+            try:
+                from helpers.daemon_cost import get_daemon_status   # lazy import
+                status = get_daemon_status(self._cfg.tokensave_exe)
+                self.after(0, lambda s=status: self._apply_daemon_status(s))
+            finally:
+                self._daemon_polling = False
+                self.after(5000, self._poll_daemon_status)
+
+        import threading
+        threading.Thread(target=_worker, daemon=True).start()
+
+    def _apply_daemon_status(self, status: dict):
+        if not self.winfo_exists():
+            return
+        self._daemon_status = status   # menu reads this on right-click
+        if status.get("error"):
+            self._daemon_indicator.configure(fg=C["overlay0"])
+            self._daemon_lbl.configure(text="daemon: n/a")
+            return
+        if status["running"]:
+            pid_str = f"  (PID {status['pid']})" if status["pid"] else ""
+            self._daemon_indicator.configure(fg=C["green"])
+            self._daemon_lbl.configure(text=f"daemon: running{pid_str}")
+        else:
+            self._daemon_indicator.configure(fg=C["overlay0"])
+            self._daemon_lbl.configure(text="daemon: stopped")
+
+    # ── Daemon right-click menu + actions ───────────────────────────────────
+
+    def _daemon_show_menu(self, event):
+        """Pop the daemon control menu. Items vary by current state.
+
+        Reads self._daemon_status (None until first poll completes). The
+        4 daemon actions are inlined as menu commands rather than separate
+        methods — keeps App's method count under the 40 cap and the menu
+        labels already document what each does.
+        """
+        from helpers.daemon_cost import toggle_daemon, toggle_autostart
+        menu = tk.Menu(self, tearoff=0)
+        status = self._daemon_status
+        if status is None:
+            menu.add_command(label="(daemon status not yet polled)", state=tk.DISABLED)
+        elif status.get("error"):
+            menu.add_command(label=f"Error: {status['error'][:60]}", state=tk.DISABLED)
+            menu.add_separator()
+            menu.add_command(label="Check Settings → tokensave path",
+                             command=self.cmd_settings)
+        else:
+            if status["running"]:
+                menu.add_command(label="Stop daemon",
+                                 command=lambda: self._daemon_run_action(
+                                     "Stopping daemon",
+                                     lambda exe: toggle_daemon(exe, False),
+                                     C["overlay0"]))
+            else:
+                menu.add_command(label="Start daemon",
+                                 command=lambda: self._daemon_run_action(
+                                     "Starting daemon",
+                                     lambda exe: toggle_daemon(exe, True),
+                                     C["green"]))
+            menu.add_separator()
+            if status["autostart"]:
+                menu.add_command(label="Disable autostart",
+                                 command=lambda: self._daemon_run_action(
+                                     "Removing autostart",
+                                     lambda exe: toggle_autostart(exe, False),
+                                     C["overlay0"]))
+            else:
+                menu.add_command(label="Install autostart (run on boot)",
+                                 command=lambda: self._daemon_run_action(
+                                     "Installing autostart",
+                                     lambda exe: toggle_autostart(exe, True),
+                                     C["green"]))
+        menu.add_separator()
+        menu.add_command(label="Open Cost Viewer…", command=self._open_cost_viewer)
+        try:
+            menu.tk_popup(event.x_root, event.y_root)
+        finally:
+            menu.grab_release()
+
+    def _daemon_run_action(self, label: str, action_fn, success_color: str):
+        """Run a daemon action in a worker thread; refresh status on completion."""
+        if not self._cfg.tokensave_exe:
+            messagebox.showerror("Daemon action", "tokensave.exe path is not configured "
+                                 "(Settings → tokensave path).", parent=self)
+            return
+        self._daemon_lbl.configure(text=f"{label}…", fg=C["peach"])
+        import threading
+
+        def _worker():
+            ok, msg = action_fn(self._cfg.tokensave_exe)
+            self.after(0, lambda o=ok, m=msg: self._daemon_after_action(label, o, m, success_color))
+
+        threading.Thread(target=_worker, daemon=True).start()
+
+    def _daemon_after_action(self, label: str, ok: bool, msg: str, success_color: str):
+        if not self.winfo_exists():
+            return
+        if ok:
+            self._daemon_lbl.configure(text=f"✓ {label}", fg=success_color)
+        else:
+            messagebox.showerror(f"Daemon: {label} failed",
+                                 msg or "(no output)", parent=self)
+            self._daemon_lbl.configure(text=f"✗ {label} failed", fg=C["red"])
+        # Re-poll so the indicator + label settle to actual current state.
+        # Wait a tick — some operations (start) need a moment to land.
+        self.after(800, self._poll_daemon_status)
+
+    # ── Cost viewer ─────────────────────────────────────────────────────────
+
+    def _open_cost_viewer(self):
+        from dialogs.cost_viewer import CostViewerDialog   # lazy import
+        CostViewerDialog(self, self._cfg)
 
     # ── Tab / project navigation ────────────────────────────────────────────
 
@@ -799,7 +961,7 @@ class App(tk.Tk):
                                 "Some of the files you selected are already "
                                 "tracked by git AND match a .gitignore rule. "
                                 "Git refuses to re-add them in this state.\n\n"
-                                f"Affected paths:\n  "
+                                "Affected paths:\n  "
                                 + "\n  ".join(offending[:10])
                                 + ("\n  …" if len(offending) > 10 else "")
                                 + "\n\nFix: right-click → "

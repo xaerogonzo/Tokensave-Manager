@@ -91,6 +91,11 @@ class ManagerConfig:
         """Absolute path to codegraph CLI (empty string if not installed)."""
         return self._cached_codegraph_exe
 
+    @property
+    def claude_cli_exe(self) -> str:
+        """Absolute path to the Claude Code CLI (empty string if not installed)."""
+        return self._cached_claude_cli_exe
+
     # ── Lifecycle ─────────────────────────────────────────────────────────
 
     def __post_init__(self):
@@ -105,9 +110,10 @@ class ManagerConfig:
         mutates `self.raw` (most notably `App._on_settings_saved`).
         """
         # Lazy import — keeps state.py at the bottom of the import graph.
-        from helpers.detection import _detect_git, _detect_codegraph
+        from helpers.detection import _detect_git, _detect_codegraph, _detect_claude_cli
         self._cached_git_exe        = self.raw.get("git_exe")        or _detect_git()
         self._cached_codegraph_exe  = self.raw.get("codegraph_exe")  or _detect_codegraph()
+        self._cached_claude_cli_exe = self.raw.get("claude_cli_exe") or _detect_claude_cli()
 
     # ── Disk I/O ──────────────────────────────────────────────────────────
 

@@ -36,7 +36,7 @@ from typing import TYPE_CHECKING
 
 from constants import C, CREATE_NO_WINDOW
 from helpers.detection import (
-    _detect_git, _detect_gh, _detect_npm, _detect_codegraph,
+    _detect_git, _detect_gh, _detect_npm, _detect_codegraph, _detect_claude_cli,
     _root_path, _root_label,
 )
 from helpers.mcp import _MCP_CONFIGS, _classify_mcp_entry
@@ -233,6 +233,47 @@ class SettingsDialog(tk.Toplevel):
         # the "explicit path or auto-detect" fallback in one property read.
         self.after(100, lambda: self._verify_git(raw.get("git_exe") or self._cfg.git_exe))
 
+        # ── Claude Code CLI ───────────────────────────────────────────────
+        ttk.Separator(body, orient="horizontal").pack(fill=tk.X, padx=20, pady=(12, 8))
+        tk.Label(body,
+                 text="Claude Code CLI  —  path to claude.cmd (npm install -g @anthropic-ai/claude-code)",
+                 bg=C["base"], fg=C["subtext"],
+                 font=("Segoe UI", 9)).pack(anchor=tk.W, padx=20)
+        cli_row = tk.Frame(body, bg=C["base"])
+        cli_row.pack(fill=tk.X, padx=20, pady=(4, 0))
+        self._claude_cli_var = tk.StringVar(value=raw.get("claude_cli_exe", ""))
+        ttk.Entry(cli_row, textvariable=self._claude_cli_var, width=44).pack(
+            side=tk.LEFT, padx=(0, 6))
+        def _browse_claude():
+            p = filedialog.askopenfilename(
+                title="Select claude.cmd or claude",
+                filetypes=[("All files", "*.*")],
+                initialdir=os.path.expandvars(r"%APPDATA%\npm"),
+                parent=self)
+            if p:
+                self._claude_cli_var.set(p)
+        def _autodetect_claude():
+            found = _detect_claude_cli()
+            if found:
+                self._claude_cli_var.set(found)
+                self._claude_cli_status.configure(
+                    text=f"Found: {found}", fg=C["green"])
+            else:
+                self._claude_cli_status.configure(
+                    text="Not found — install with: npm install -g @anthropic-ai/claude-code",
+                    fg=C["red"])
+        ttk.Button(cli_row, text="Browse…",      command=_browse_claude).pack(
+            side=tk.LEFT, padx=(0, 6))
+        ttk.Button(cli_row, text="Auto-detect",  command=_autodetect_claude).pack(
+            side=tk.LEFT, padx=(0, 6))
+        self._claude_cli_status = tk.Label(cli_row, text="", bg=C["base"],
+                                           font=("Segoe UI", 8), fg=C["overlay0"])
+        self._claude_cli_status.pack(side=tk.LEFT, padx=(6, 0))
+        tk.Label(body,
+                 text="  If auto-detect fails, paste the full path (e.g. %APPDATA%\\npm\\claude.cmd).",
+                 font=("Segoe UI", 8), bg=C["base"], fg=C["overlay0"]).pack(
+                 anchor=tk.W, padx=20, pady=(2, 0))
+
         # ── GitHub CLI (gh) ───────────────────────────────────────────────
         ttk.Separator(body, orient="horizontal").pack(fill=tk.X, padx=20, pady=(12, 8))
         tk.Label(body, text="GitHub CLI (gh)  —  enables 'Open PR on GitHub' and release creation",
@@ -277,8 +318,9 @@ class SettingsDialog(tk.Toplevel):
                             fg=C["red"]))
                         self.after(0, lambda: self._gh_install_btn.configure(state=tk.NORMAL))
                 except Exception as ex:
-                    self.after(0, lambda: self._gh_status_lbl.config(
-                        text=f"✗  Error: {ex}", fg=C["red"]))
+                    err_msg = str(ex)
+                    self.after(0, lambda m=err_msg: self._gh_status_lbl.config(
+                        text=f"✗  Error: {m}", fg=C["red"]))
                     self.after(0, lambda: self._gh_install_btn.configure(state=tk.NORMAL))
             threading.Thread(target=worker, daemon=True).start()
 
@@ -652,6 +694,20 @@ class SettingsDialog(tk.Toplevel):
         ttk.Button(preset_row, text="LM Studio", command=_apply_lm_studio).pack(side=tk.LEFT, padx=(0, 4))
         ttk.Button(preset_row, text="Ollama",    command=_apply_ollama).pack(side=tk.LEFT)
 
+        # Persistent gotcha note — both Ollama and LM Studio load models into
+        # RAM/VRAM independently. Running them at the same time can starve the
+        # second loader (the error message blames "system memory" without
+        # hinting that another inference daemon is holding the difference).
+        tk.Label(body,
+                 text=("ⓘ  Running Ollama and LM Studio at the same time can "
+                       "break model loading — both reserve RAM/VRAM "
+                       "independently. If a load fails with \"more system "
+                       "memory\" while the other tool is running, unload one "
+                       "first (LM Studio → Eject;  `ollama stop <model>`)."),
+                 font=("Segoe UI", 8), bg=C["base"], fg=C["overlay0"],
+                 justify=tk.LEFT, wraplength=620, anchor=tk.W
+                 ).pack(anchor=tk.W, padx=36, pady=(4, 0), fill=tk.X)
+
     def _build_ai_options(self, body, llm_cfg):
         """Min-diff-lines spinner, sync auto-commit toggle, disclaimer."""
         min_row = tk.Frame(body, bg=C["base"])
@@ -728,7 +784,7 @@ class SettingsDialog(tk.Toplevel):
         default_lbl = os.path.basename(p.rstrip("/\\"))
         lbl = simpledialog.askstring(
             "Category label",
-            f"Label for this category:\n(shown as the group header in the project list)",
+            "Label for this category:\n(shown as the group header in the project list)",
             initialvalue=default_lbl,
             parent=self,
         )
@@ -860,8 +916,9 @@ class SettingsDialog(tk.Toplevel):
         existing_llm.setdefault("max_diff_chars", 24000)
         existing_llm.setdefault("timeout_seconds", 90)
         raw["commit_message_llm"] = existing_llm
-        raw["git_exe"]       = self._git_exe_var.get().strip()
-        raw["codegraph_exe"] = self._cg_exe_var.get().strip()
+        raw["git_exe"]        = self._git_exe_var.get().strip()
+        raw["codegraph_exe"]  = self._cg_exe_var.get().strip()
+        raw["claude_cli_exe"] = self._claude_cli_var.get().strip()
         self._save_fn()
         self.destroy()
         self._callback()
