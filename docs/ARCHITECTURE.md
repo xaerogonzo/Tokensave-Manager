@@ -16,6 +16,11 @@ See `docs/ARCHITECTURE_TOKENSAVE.md` for how tokensave itself works.
 
 ```
 Token Save Manager Source/
+├── .github/
+│   └── workflows/
+│       └── ci.yml                 GitHub Actions CI — syntax + pyflakes on push/PR
+│                                  (free, deterministic only; Doctor + Claude review
+│                                  are local-only and run via ChecksDialog)
 ├── manager-config.json            Machine-specific config (paths, search roots)  — gitignored
 ├── manager-config.example.json    Clean template with placeholder paths — committed
 ├── TOKENSAVE_GUIDE.md             Full tokensave CLI + MCP reference
@@ -112,7 +117,7 @@ Token Save Manager Source/
 │   │                              formatting investigate context, writing temp .md briefings
 │   │                              for CLI handoff, and batch briefings. Roadmap-3 P6.
 │   │
-│   ├── dialogs/                   21 tk.Toplevel dialog classes — one per file.
+│   ├── dialogs/                   22 tk.Toplevel dialog classes — one per file.
 │   │   ├── settings.py            SettingsDialog (+ _probe_loaded_model helper)
 │   │   ├── release_wizard.py      ReleaseWizardDialog + _ReleaseCtx (paired)
 │   │   ├── mcp_config.py          MCPConfigDialog
@@ -139,6 +144,13 @@ Token Save Manager Source/
 │   │   │                          Investigate (seeds Ask tab) + Ignore (persists md5 ID).
 │   │   │                          _clean_symbol strips tokensave's doubled file-path prefix.
 │   │   │                          MouseWheel binding unregistered on close. Roadmap-3 P6.
+│   │   ├── checks_dialog.py       ChecksDialog — four toggleable pre-merge checks
+│   │   │                          (syntax/pyflakes/doctor/claude). Concurrent
+│   │   │                          ThreadPoolExecutor; large-diff askyesno on main
+│   │   │                          thread; Doctor called via _audit_project_tree
+│   │   │                          directly (pure fn, no subprocess). cfg.raw
+│   │   │                          ["checks_enabled"] persists toggle state.
+│   │   │                          cancel_futures=True on close. Roadmap-3.
 │   │   └── proposal.py            WriteProposal dataclass + ProposalDialog +
 │   │                              ProposalBridge (P1 — race-safe _resolve under Lock,
 │   │                              5-min event.wait timeout, WM_DELETE_WINDOW = reject,
@@ -185,8 +197,12 @@ Token Save Manager Source/
 │       │                          manage-gitignore/untrack-ignored from Projects tab)
 │       └── ai_tasks_ctrl.py       AITasksController — long-running AI write tasks.
 │                                  Shipped: Stage 3 CHANGELOG drafter (cmd_draft_changelog),
-│                                  Stage 4 Refactor scout (cmd_refactor_scout). Planned:
-│                                  release narrative. Per-task per-project lock (_running set).
+│                                  Stage 4 Refactor scout (cmd_refactor_scout),
+│                                  Roadmap-3 check runner (cmd_run_checks /
+│                                  TASK_RUN_CHECKS — opens ChecksDialog on main
+│                                  thread; no background thread needed here, the
+│                                  dialog owns its own ThreadPoolExecutor).
+│                                  Per-task per-project lock (_running set).
 │                                  Orchestrates only; all shared infra in helpers/.
 │                                  CLI briefing via temp .md file-handoff pattern
 │                                  (avoids cmd.exe /k newline-as-Enter quirk).

@@ -1186,7 +1186,8 @@ class GitTabController:
             f"Run `git log {base}..HEAD --oneline` to see the commits, then "
             f"`git diff {base}...HEAD` to see the full diff (triple-dot gives the "
             f"merge-base diff, isolating only this branch's changes — not upstream). "
-            f"Write the PR description to PR_DRAFT.md in the project root. "
+            f"Write the PR description to PR_DRAFT.md in the current working directory "
+            f"(use a relative path — just PR_DRAFT.md, not an absolute path). "
             f"Include: a one-line summary, bullet list of key changes, and a testing checklist. "
             f"{gh_step}"
         )

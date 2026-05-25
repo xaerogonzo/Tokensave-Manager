@@ -475,6 +475,7 @@ class ProjectsTabController:
         m.add_command(label="🔍  Pre-commit AI Review hook…", command=self.cmd_precommit_hook)
         m.add_command(label="📝  Draft CHANGELOG entry…", command=self.cmd_draft_changelog)
         m.add_command(label="🔬  Refactor scout…",         command=self.cmd_refactor_scout)
+        m.add_command(label="✓  Run checks…",              command=self.cmd_run_checks)
         m.add_separator()
         m.add_command(label="📂  Open Folder",    command=self.cmd_open_folder)
         m.add_command(label="✏   Open in Editor", command=self.cmd_open_editor)
@@ -667,6 +668,10 @@ class ProjectsTabController:
     def cmd_refactor_scout(self) -> None:
         if path := self._selected_path():
             self._ai_tasks.cmd_refactor_scout(path)
+
+    def cmd_run_checks(self) -> None:
+        if path := self._selected_path():
+            self._ai_tasks.cmd_run_checks(path)
 
     # ── File-ops commands — delegate to FileOpsController ────────────────────
 

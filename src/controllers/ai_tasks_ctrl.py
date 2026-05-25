@@ -43,6 +43,7 @@ if TYPE_CHECKING:
 # Task name constants (used as the second element of (path, task_name) lock keys)
 TASK_DRAFT_CHANGELOG = "draft_changelog"
 TASK_REFACTOR_SCOUT  = "refactor_scout"
+TASK_RUN_CHECKS      = "run_checks"
 
 
 def _build_changelog_prompt(classified: dict, existing: str) -> "tuple[str, str]":
@@ -526,3 +527,54 @@ class AITasksController:
             self._on_log(f"[scout] Could not launch Claude CLI: {err}", "red")
         else:
             self._on_log(f"[scout] Opened Claude CLI with full report → {report_path}")
+
+    # ── Roadmap-3: pre-merge check runner ────────────────────────────────────
+
+    def cmd_run_checks(self, path: str) -> None:
+        """Right-click → ✓ Run checks…
+
+        Opens ChecksDialog immediately on the main thread. The dialog owns its
+        own ThreadPoolExecutor and runs all enabled checks concurrently inside
+        itself — no background thread is needed here.
+
+        Per-task lock prevents two check dialogs for the same project.
+        """
+        with self._running_lock:
+            if (path, TASK_RUN_CHECKS) in self._running:
+                from tkinter import messagebox
+                messagebox.showinfo(
+                    "Already running",
+                    "A checks dialog is already open for this project.",
+                    parent=self._root,
+                )
+                return
+            self._running.add((path, TASK_RUN_CHECKS))
+
+        self._tab.after(0, self._open_checks_dialog, path)
+
+    def _open_checks_dialog(self, path: str) -> None:
+        """Main-thread: resolve base branch and open ChecksDialog."""
+        try:
+            from controllers.git_tab import _detect_base_branch
+            from dialogs.checks_dialog import ChecksDialog
+
+            git_exe = (self._cfg.raw or {}).get("git_exe") or "git"
+            base = _detect_base_branch(path, git_exe)
+
+            def _on_destroy(event=None) -> None:
+                with self._running_lock:
+                    self._running.discard((path, TASK_RUN_CHECKS))
+
+            dlg = ChecksDialog(
+                parent=self._root,
+                path=path,
+                cfg=self._cfg,
+                base=base,
+                on_log=self._on_log,
+            )
+            dlg.bind("<Destroy>", _on_destroy)
+        except Exception as e:
+            log.exception("AITasksController: could not open ChecksDialog")
+            self._on_log(f"[checks] Error opening dialog: {e}", "red")
+            with self._running_lock:
+                self._running.discard((path, TASK_RUN_CHECKS))
