@@ -197,6 +197,32 @@ Surfaced via Roadmap-2 hands-on testing — clicking Suggest on a small docs-onl
 - **File-name fallback is too generic for `docs/upstream-issues/`-style paths.** The current heuristic produces "docs: update documentation" when ALL changed files are markdown — but the actual subject (which issue draft was edited) is right there in the filename. A small `_SCOPE_PATTERNS` addition keyed off `docs/upstream-issues/<name>.md` → `docs(upstream): <name>` would catch this class.
 - **No surfacing of WHICH strategy fired.** Tooltip on the Suggest button or one-liner status ("via LLM" / "via CHANGELOG" / "via diff" / "via filename") would let the user know whether the generic message is the best the chain could do or whether the LLM was silently bypassed.
 
+### 🔮 Skill awareness / prompting
+
+Same class of problem the manager exists to solve: Claude Code skills (e.g. `consolidate-memory`, `verify`, `code-review`, `security-review`, the custom plugins) are powerful but only useful if the user remembers they exist at the right moment. After Roadmap-2 the user noted: *"I forgot consolidate-memory existed until Claude suggested it before a new chat."* That's the failure mode — by-memory discovery.
+
+**Design space (pick when ready; not committing yet):**
+
+- **Skills catalog in the Reference tab.** Read `~/.claude/skills/` + `~/.claude/plugins/*/skills/` at startup; list each skill name + description (from frontmatter) alongside the existing CLI cheatsheet. Pure read-only surface; zero notification cost. Cheapest first step.
+
+- **Workflow-moment prompts.** Context-aware nudges at specific Git-tab actions:
+  - Before clicking Release… → "Have you updated CHANGELOG.md? Skill `consolidate-memory` can refresh project memory before the release."
+  - After a Roadmap-N branch merges → "Consider running `consolidate-memory` to capture this round's architectural deltas before starting Roadmap-N+1."
+  - Before opening a PR with >500 lines → "Skill `code-review` would surface bugs first."
+  - Manager startup or `Doctor` button → "Skill `tech-debt` would scan this project for refactor candidates."
+
+  Risk: notification fatigue. Mitigation: per-prompt opt-out checkboxes saved in `cfg.raw["skill_prompt_suppressed"]`.
+
+- **Last-used tracking.** Per skill, per project, write a small timestamp to `cfg.raw["skill_last_used"]`. Surface "It's been 30 days since `consolidate-memory` ran on this project" as a passive footer indicator (like the daemon dot). Non-modal; user-driven.
+
+- **Right-click → "Suggest skill for this project"** as an explicit pull. Manager scans recent git activity / file changes / current branch and proposes 1–3 relevant skills with a one-line rationale each. User picks (or dismisses). Pairs naturally with the existing Doctor right-click action.
+
+- **Skill launcher integration.** Add a "Run with Claude Code" button next to each catalog entry that spawns `claude --print` (for non-interactive skills) or `claude` in a detached terminal (for interactive ones — re-uses `helpers/claude_cli.spawn_claude_cli` from R1). Most useful for skills that operate on the current project directory.
+
+- **Workflow bundles.** Curate "Pre-PR", "Pre-release", "End-of-roadmap" bundles that chain multiple skills (e.g. Pre-PR = lint → tests → `code-review` → draft PR → open PR via R2-P5a). Bigger UX commitment but maps directly to the user's "smoother projects" goal.
+
+**Trigger:** when the user finds themselves re-discovering a skill the manager should have surfaced. Each rediscovery makes the case for one of the options above more concrete. Catalog tab is the safest first step; the prompting variants are higher value but higher fatigue risk.
+
 ### 🔮 Draft PR refinements (surfaced via Roadmap-2 post-ship dogfooding)
 
 Surfaced when the user clicked Draft PR on the Roadmap-2 branch at PR-creation time. Three independent refinements:
