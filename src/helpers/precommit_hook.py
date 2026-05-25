@@ -377,7 +377,7 @@ def _dispatch_review_backend(
                   "but claude_cli_exe is not configured — skipping review",
                   file=sys.stderr)
             return None
-        return _call_claude_cli(cfg.claude_cli_exe, user_prompt)
+        return _call_claude_cli(cfg.claude_cli_exe, user_prompt, cfg.claude_cli_model)
 
     if backend == "llm":
         if not has_llm:
@@ -389,7 +389,7 @@ def _dispatch_review_backend(
 
     # "auto" — prefer CC subscription, fall back to per-token LLM provider
     if has_cc:
-        result = _call_claude_cli(cfg.claude_cli_exe, user_prompt)
+        result = _call_claude_cli(cfg.claude_cli_exe, user_prompt, cfg.claude_cli_model)
         if result is not None:
             return result
         # CC failed; fall through to LLM if available
@@ -401,19 +401,23 @@ def _dispatch_review_backend(
     return None
 
 
-def _call_claude_cli(claude_exe: str, user_prompt: str) -> "str | None":
+def _call_claude_cli(claude_exe: str, user_prompt: str, model: str = "") -> "str | None":
     """Invoke `claude --print` with the review system prompt + diff.
 
     Thin wrapper around helpers.claude_cli.call_claude_cli_print — kept
     here so the pre-commit entry point (precommit_review.py) doesn't need
     to import from the full manager helper tree. Logs failures to stderr
     with the [tokensave precommit] prefix expected by the hook script.
+
+    Timeout is 45 s (not 30) to give Opus 4.7 enough headroom on a
+    24 k-char capped diff when users intentionally pick the slower model.
     """
     from helpers.claude_cli import call_claude_cli_print
     result = call_claude_cli_print(
         claude_exe, user_prompt,
         system_prompt=_REVIEW_SYSTEM_PROMPT,
-        timeout=30,
+        timeout=45,
+        model=model,
     )
     if result is None:
         print("[tokensave precommit] claude --print timed out or failed — "

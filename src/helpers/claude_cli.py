@@ -58,6 +58,7 @@ def call_claude_cli_print(
     prompt: str,
     system_prompt: str = "",
     timeout: int = 45,
+    model: str = "",
 ) -> "str | None":
     """Invoke `claude --print` non-interactively and return stdout text.
 
@@ -65,11 +66,20 @@ def call_claude_cli_print(
     strategy. The prompt is piped via stdin rather than as a positional
     arg — argv mangles multi-line / backtick-laden content on Windows.
 
+    Args:
+        model: Pinned model ID (e.g. "claude-haiku-4-5-20251001"). Empty
+               string omits --model so Claude CLI uses its own default
+               from ~/.claude/settings.json.
+
     Returns the stripped stdout string, or None on timeout / error / empty.
+    On non-zero exit, the first 400 chars of stderr are printed to
+    sys.stderr so users can diagnose typo'd model IDs or auth issues.
     """
     if not claude_exe:
         return None
     cmd = [claude_exe, "--print"]
+    if model:
+        cmd += ["--model", model]
     if system_prompt:
         cmd += ["--append-system-prompt", system_prompt]
     try:
@@ -86,6 +96,12 @@ def call_claude_cli_print(
     except OSError:
         return None
     if proc.returncode != 0:
+        err = (proc.stderr or "").strip()
+        # sys.stderr can be None under pythonw.exe / windowed Nuitka builds —
+        # guard the print so an unexpected runtime never crashes the worker.
+        if err and sys.stderr is not None:
+            print(f"[claude_cli] claude --print exited {proc.returncode}: {err[:400]}",
+                  file=sys.stderr)
         return None
     return (proc.stdout or "").strip() or None
 

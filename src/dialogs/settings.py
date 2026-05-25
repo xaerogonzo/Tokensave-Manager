@@ -296,6 +296,33 @@ class SettingsDialog(tk.Toplevel):
         if raw.get("claude_cli_exe"):
             self._claude_install_btn.configure(state=tk.DISABLED)
 
+        # Model dropdown — applies to manager-spawned `claude --print` calls only.
+        # Defensive: cfg.claude_cli_model already guards against None; do the
+        # same here in case the raw dict has the key with a None value.
+        cur_model = raw.get("claude_cli_model")
+        if cur_model is None:
+            cur_model = "claude-haiku-4-5-20251001"
+        self._var_claude_cli_model = tk.StringVar(value=cur_model)
+        model_row = tk.Frame(body, bg=C["base"])
+        model_row.pack(fill=tk.X, padx=20, pady=(4, 0))
+        tk.Label(model_row, text="Model:", width=8, anchor=tk.W,
+                 font=("Segoe UI", 9), bg=C["base"], fg=C["subtext"]).pack(side=tk.LEFT)
+        ttk.Combobox(model_row, textvariable=self._var_claude_cli_model,
+            values=[
+                "claude-haiku-4-5-20251001",
+                "claude-sonnet-4-6",
+                "claude-opus-4-7",
+                "",
+            ],
+            state="normal", width=32).pack(side=tk.LEFT)
+        tk.Label(body,
+            text="  Model used by the manager's automated calls (pre-commit review, commit-message\n"
+                 "  Suggest, Draft PR via CLI). Haiku = fast (3–5 s) and cheap. Opus = slow but deeper.\n"
+                 "  Empty = use whatever ~/.claude/settings.json defaults to. Does NOT affect interactive\n"
+                 "  'claude' sessions you launch from the terminal or Reference tab.",
+            font=("Segoe UI", 8), bg=C["base"], fg=C["overlay0"]).pack(
+            anchor=tk.W, padx=20, pady=(2, 0))
+
     def _build_github_cli_row(self, body):
         """GitHub CLI (gh) detect + install sub-section."""
         ttk.Separator(body, orient="horizontal").pack(fill=tk.X, padx=20, pady=(12, 8))
@@ -991,7 +1018,8 @@ class SettingsDialog(tk.Toplevel):
         raw["commit_message_llm"] = existing_llm
         raw["git_exe"]        = self._git_exe_var.get().strip()
         raw["codegraph_exe"]  = self._cg_exe_var.get().strip()
-        raw["claude_cli_exe"] = self._claude_cli_var.get().strip()
+        raw["claude_cli_exe"]   = self._claude_cli_var.get().strip()
+        raw["claude_cli_model"] = self._var_claude_cli_model.get().strip()
         self._save_fn()
         self.destroy()
         self._callback()

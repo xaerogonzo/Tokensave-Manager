@@ -78,6 +78,21 @@ class ManagerConfig:
         return (self.raw.get("draft_pr_backend") or "auto").lower()
 
     @property
+    def claude_cli_model(self) -> str:
+        """Model passed to manager-spawned `claude --print` calls via --model.
+
+        Empty string means: don't pass --model, let Claude CLI use its own
+        default (from ~/.claude/settings.json — Opus 4.7 for Max subscribers).
+        Defaults to Haiku 4.5 because the manager's automated calls (pre-commit
+        review, commit-message Suggest, Draft PR via CLI) need to be fast.
+        """
+        # Defensive: raw.get(key, default) returns None (not the default) if
+        # the user manually wrote `"claude_cli_model": null` in the JSON, and
+        # tk.StringVar(value=None) coerces to the literal string "None".
+        val = self.raw.get("claude_cli_model")
+        return val if val is not None else "claude-haiku-4-5-20251001"
+
+    @property
     def commit_message_backend(self) -> str:
         """Strategy order for commit-message suggestion.
 

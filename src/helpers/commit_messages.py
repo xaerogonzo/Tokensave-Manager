@@ -699,7 +699,8 @@ _CLAUDE_CLI_COMMIT_SYSTEM = (
 
 
 def _strat_claude_cli(repo_path: str, git_exe: str,
-                      claude_cli_exe: str) -> "tuple[str, str] | None":
+                      claude_cli_exe: str,
+                      claude_cli_model: str = "") -> "tuple[str, str] | None":
     """Strategy: Claude CLI (claude --print). Returns (subject, body) or None."""
     if not claude_cli_exe or not repo_path or not git_exe:
         return None
@@ -710,6 +711,7 @@ def _strat_claude_cli(repo_path: str, git_exe: str,
         claude_cli_exe, diff,
         system_prompt=_CLAUDE_CLI_COMMIT_SYSTEM,
         timeout=45,
+        model=claude_cli_model,
     )
     if not result:
         return None
@@ -829,11 +831,13 @@ def _suggest_commit_message(repo_path: str = "", status_text: str = "",
     files, has_source = _parse_commit_status(status_text)
     cfg = cfg or {}
 
-    backend        = (cfg.get("commit_message_backend") or "auto").lower()
-    claude_cli_exe = cfg.get("claude_cli_exe", "")
+    backend          = (cfg.get("commit_message_backend") or "auto").lower()
+    claude_cli_exe   = cfg.get("claude_cli_exe", "")
+    # raw.get returns None if the JSON key is `null`; coerce defensively.
+    claude_cli_model = cfg.get("claude_cli_model") or ""
 
     # Build strategy chain from backend setting — no if/elif cascade.
-    _cli   = ("claude_cli", lambda: _strat_claude_cli(repo_path, git_exe, claude_cli_exe) if git_exe else None)
+    _cli   = ("claude_cli", lambda: _strat_claude_cli(repo_path, git_exe, claude_cli_exe, claude_cli_model) if git_exe else None)
     _llm   = ("llm",        lambda: _strat_llm(repo_path, has_source, cfg, git_exe) if git_exe else None)
     _cl    = ("changelog",  lambda: _strat_changelog(repo_path, files, git_exe) if git_exe else None)
     _diff  = ("diff",       lambda: _strat_diff(repo_path, files, git_exe) if git_exe else None)

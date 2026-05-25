@@ -183,6 +183,19 @@ class HelpTabController:
             br()
             p("The window position and size are saved automatically when you hide to tray "
               "and restored the next time you click Show.")
+            br()
+            h2("Claude CLI model")
+            p("Settings → Claude Code CLI → Model controls which Claude model the manager "
+              "uses for its automated background calls: pre-commit AI review, the Suggest "
+              "button's Claude CLI strategy, and Draft PR via CLI.")
+            br()
+            ins("  Haiku 4.5 (default)  ", "body"); ins("Fast (3–5 s), cheap, sufficient for code review and commit messages.\n", "dim")
+            ins("  Sonnet 4.6           ", "body"); ins("Balanced — slower but catches more nuance in reviews.\n", "dim")
+            ins("  Opus 4.7             ", "body"); ins("Slow (20–40 s on large diffs) but deepest analysis.\n", "dim")
+            ins("  (empty)              ", "body"); ins("Use whatever ~/.claude/settings.json defaults to.\n", "dim")
+            br()
+            warn("This setting does NOT affect interactive 'claude' sessions you launch "
+                 "from the terminal or the Reference tab — those still use your global default.")
         self._help_show(_fill)
 
     def _help_context_menu(self):
