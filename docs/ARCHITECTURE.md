@@ -33,6 +33,9 @@ Token Save Manager Source/
 │   ├── state.py                   ManagerConfig dataclass (runtime-mutable settings;
 │   │                              read-only @property getters; mutated via
 │   │                              raw.update() + save() + refresh_derived()).
+│   │                              claude_cli_model property — defaults to
+│   │                              "claude-haiku-4-5-20251001"; null-safe (JSON null
+│   │                              returns default, not None).
 │   ├── constants.py               Immutable constants: C palette, regex tables,
 │   │                              CREATE_NO_WINDOW, _ANSI, _GIT_ENV_NO_PROMPT,
 │   │                              paths (_BASE_DIR, _CONFIG_PATH, LOG_FILE).
@@ -90,7 +93,11 @@ Token Save Manager Source/
 │   │   │                          block bounded by next ^## \[ line; falls back to insertion under
 │   │   │                          ## [Unreleased]). Wired into ReleaseWizard P2.
 │   │   ├── claude_cli.py          spawn_claude_cli — detached cmd.exe via CREATE_NEW_CONSOLE
-│   │   │                          with ""outer"" multi-quote fix + \r\n strip (TTY safety)
+│   │   │                          with ""outer"" multi-quote fix + \r\n strip (TTY safety).
+│   │   │                          call_claude_cli_print(model="", cwd=None) — non-interactive
+│   │   │                          --print path; model="" omits --model flag; cwd=~ isolates
+│   │   │                          from project CLAUDE.md (prevents "assistant mode" on small
+│   │   │                          models). Stderr logged on non-zero exit (sys.stderr guard).
 │   │   ├── precommit_hook.py      install/remove/detect git pre-commit AI review hook
 │   │   │                          + the review runner (run_review, parse_severity_summary,
 │   │   │                          severity_blocks_commit, backend dispatch for
@@ -146,7 +153,13 @@ Token Save Manager Source/
 │       │                          Roadmap-2 P5b added one wrapper)
 │       ├── git_tab.py             GitTabController (push/pull/release/Draft PR/Open PR
 │       │                          on GitHub — ~38 direct methods after Roadmap-2 P4
-│       │                          extracted BranchManagementController)
+│       │                          extracted BranchManagementController).
+│       │                          _extract_pr_title — parses first bullet under
+│       │                          ## Summary of Changes for the title field pre-fill.
+│       │                          _create_pr_via_gh — background-threaded gh pr create
+│       │                          (--title/--body-file/--base; strips origin/ prefix;
+│       │                          deletes temp file on success; shows URL + open prompt).
+│       │                          _open_pr_via_gh — gh pr create --web (browser pre-fill).
 │       ├── branch_mgmt_ctrl.py    BranchManagementController (P4 — new/switch/merge/
 │       │                          delete-branch cluster extracted from GitTabController;
 │       │                          merge orchestration decomposed into _prepare_merge_sources

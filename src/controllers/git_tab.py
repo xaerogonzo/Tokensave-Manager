@@ -1169,11 +1169,12 @@ class GitTabController:
         # — this isolates only this branch's commits, excluding upstream changes that
         # landed on base after branching. Do not change to double-dot.
         gh_available = bool(shutil.which("gh"))
+        gh_base = base.split("/")[-1]   # strip "origin/" prefix; gh expects bare branch name
         gh_step = (
             f"Then create the PR on GitHub: push the branch first with "
             f"`git push -u origin HEAD` if it has no remote tracking, then run "
             f"`gh pr create --title <one-line-title> --body-file PR_DRAFT.md "
-            f"--base {base}` (replace <one-line-title> with a short descriptive title) "
+            f"--base {gh_base}` (replace <one-line-title> with a short descriptive title) "
             f"and print the resulting PR URL. "
             f"If the PR is created successfully, delete PR_DRAFT.md from the project root."
             if gh_available else
@@ -1368,13 +1369,15 @@ class GitTabController:
             messagebox.showerror("Create PR", f"Could not write temp file: {e}", parent=dlg)
             return
 
+        gh_base = base.split("/")[-1]  # strip "origin/" prefix; gh needs bare branch name
+
         def _run():
             try:
                 result = subprocess.run(
                     [gh_exe, "pr", "create",
                      "--title", title,
                      "--body-file", tmp_path,
-                     "--base", base],
+                     "--base", gh_base],
                     capture_output=True, text=True, encoding="utf-8",
                     cwd=path, creationflags=CREATE_NO_WINDOW, timeout=30)
             except subprocess.TimeoutExpired:
