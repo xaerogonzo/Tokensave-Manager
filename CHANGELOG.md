@@ -3,6 +3,16 @@
 
 ## [Unreleased]
 
+### Added (Roadmap-5)
+- **Claude CLI model selector.** New `claude_cli_model` config key in `manager-config.json` (default `"claude-haiku-4-5-20251001"`). Exposed as a free-text combobox in Settings → Claude Code CLI (values: Haiku 4.5 / Sonnet 4.6 / Opus 4.7 / empty = use CLI default). Every manager-spawned `claude --print` call now passes `--model <id>` via an updated `call_claude_cli_print(model="")` signature. Empty string omits the flag entirely, deferring to `~/.claude/settings.json`. Stderr from failed `claude --print` calls is now logged (capped at 400 chars, guarded by `sys.stderr is not None` for windowed-exe safety) so typo'd model IDs surface diagnostics rather than silently failing.
+- **Pre-commit hook hang fix.** Switching `claude_cli_model` to Haiku 4.5 resolves the "Committing… (hangs)" symptom caused by Opus 4.7 being too slow on large diffs. Pre-commit timeout raised 30 → 45 s as headroom for users who intentionally choose Opus. Diff already capped at 24 000 chars.
+- **Commit-message quality parity: Claude CLI ≈ Ollama.** `_strat_claude_cli` in `helpers/commit_messages.py` now uses `_build_llm_prompt` (same subject+body format as the Ollama strategy) instead of the old single-line-only system constant. Subprocess cwd set to `~` so project `CLAUDE.md` doesn't make small models reply in "assistant mode" instead of generating a commit message.
+- **Draft PR: direct GitHub PR creation.** The PR draft dialog (API path) now has:
+  - A **PR title field** pre-filled by `_extract_pr_title()` (parses the first bullet under `## Summary of Changes`, falls back to first non-header line, caps at 120 chars). Editable before submitting.
+  - A **"Create PR on GitHub"** button (alongside the renamed "Open in Browser" button) that runs `gh pr create --title … --body-file … --base …` on a background thread, logs the PR URL on success, and offers to open it in the browser — no GitHub form to fill in.
+  - The temp body `.md` file is deleted immediately after a successful direct create (previously left in `%TEMP%`).
+- **Draft PR CLI: end-to-end flow.** The Claude CLI instruction now tells Claude to run `git push -u origin HEAD` (if needed) and `gh pr create … --body-file PR_DRAFT.md` after writing the draft. On success, Claude deletes `PR_DRAFT.md` from the project root (prevents accumulation). If `gh` is not on PATH, Claude is told to skip the `gh` step and treat `PR_DRAFT.md` as the deliverable.
+
 ### Added (Roadmap-3 Phase 6)
 - **Phase 6 follow-up — Batch investigation of refactor scout findings.** Per-card selection checkboxes plus a Select toolbar (`All` / `None` / per-kind quick-select buttons that stack additively, so "all god classes + top complexity" is two clicks). Selection counter ("N selected") lives in the toolbar, visible while scrolling. Three batch actions in the footer:
   - **📋 Copy to clipboard** — formats the selection as one markdown briefing (grouped by kind, instruction footer) and copies. Universal handoff — paste into Claude Desktop, claude.ai web, ChatGPT, any editor. Always available.
