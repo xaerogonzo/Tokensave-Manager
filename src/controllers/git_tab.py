@@ -1172,8 +1172,9 @@ class GitTabController:
         gh_step = (
             f"Then create the PR on GitHub: push the branch first with "
             f"`git push -u origin HEAD` if it has no remote tracking, then run "
-            f"`gh pr create --title \"<one-line title>\" --body-file PR_DRAFT.md "
-            f"--base {base}` and print the resulting PR URL. "
+            f"`gh pr create --title <one-line-title> --body-file PR_DRAFT.md "
+            f"--base {base}` (replace <one-line-title> with a short descriptive title) "
+            f"and print the resulting PR URL. "
             f"If the PR is created successfully, delete PR_DRAFT.md from the project root."
             if gh_available else
             "Note: gh CLI is not on PATH, so the PR_DRAFT.md file is your deliverable — "
