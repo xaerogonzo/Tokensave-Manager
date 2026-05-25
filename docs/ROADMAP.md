@@ -197,6 +197,18 @@ Surfaced via Roadmap-2 hands-on testing — clicking Suggest on a small docs-onl
 - **File-name fallback is too generic for `docs/upstream-issues/`-style paths.** The current heuristic produces "docs: update documentation" when ALL changed files are markdown — but the actual subject (which issue draft was edited) is right there in the filename. A small `_SCOPE_PATTERNS` addition keyed off `docs/upstream-issues/<name>.md` → `docs(upstream): <name>` would catch this class.
 - **No surfacing of WHICH strategy fired.** Tooltip on the Suggest button or one-liner status ("via LLM" / "via CHANGELOG" / "via diff" / "via filename") would let the user know whether the generic message is the best the chain could do or whether the LLM was silently bypassed.
 
+### 🔮 Draft PR refinements (surfaced via Roadmap-2 post-ship dogfooding)
+
+Surfaced when the user clicked Draft PR on the Roadmap-2 branch at PR-creation time. Three independent refinements:
+
+- **CLI instruction prompt is wrong for PR-creation use.** The Roadmap-1 Claude-CLI hand-off sends `"Review my uncommitted git changes and write a PR description to PR_DRAFT.md in the project root."` — but at PR time the working tree is usually clean (you commit, push, then click Draft PR). Claude correctly reports "no uncommitted changes" instead of drafting anything useful. The instruction should be `git log master..HEAD` + `git diff master..HEAD` based (commits between current branch and the upstream / default branch). The base-branch detection logic from `_call_anthropic`'s commit-message path may be reusable. Located in the CLI-path callsite in `src/controllers/git_tab.py` (or wherever the instruction string lives).
+
+- **Draft PR backend preference setting** (analogous to `precommit_review_backend` from P5b). Currently the routing is hard-coded: CLI if `claude_cli_exe` set, else API. A user with both Claude Code AND Ollama configured has no way to say "I want to default to Ollama for PR drafts even though I have Claude CLI installed." Add `draft_pr_backend` in `manager-config.json` with values `"auto"` (current behaviour: prefer CLI), `"claude_cli"`, `"llm"`. Right-click menu still gives per-click override.
+
+- **Phase 5a "Open PR on GitHub" button needs end-to-end verification** in actual use. Untested by the user during Roadmap-2 because (a) left-click defaults to the CLI hand-off when `claude_cli_exe` is set so the dialog never opens, and (b) the API path would burn Anthropic credits which the user wanted to avoid. Verification path: confirm the API route via Ollama (`commit_message_llm` provider) produces text in the dialog, then verify the new button correctly writes a temp file + spawns `gh pr create --web --body-file`. Should "just work" given Phase 5a's design but isn't proven against an Ollama backend yet.
+
+- **Investigate Claude Code hook path-quoting errors.** Roadmap-2 dogfooding surfaced repeated `UserPromptSubmit hook error: Failed with non-blocking status code: /usr/bin/bash: line 1: D:/Claude: No such file or directory` and matching `Stop hook error` messages in the user's Claude Code terminal. Cause: a hook entry somewhere in `~/.claude/settings.json` or project `.claude/settings.json` references an unquoted Windows path containing spaces (`D:\Claude Co worker\...`), so bash splits at the first space and tries to execute `D:/Claude`. Candidates: the Roadmap-1 `_scaffold_git_hook` auto-commit Stop hook, or some manually-added entry. Fix: audit the hook commands and ensure paths-with-spaces are double-quoted. Not blocking but noisy.
+
 ### 💭 File the two upstream tokensave issues
 Drafts in `docs/upstream-issues/`:
 - `tokensave-health-details.md` — request `tokensave_health details=true` to return the sub-score breakdown in one call
