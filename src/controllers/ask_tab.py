@@ -118,6 +118,12 @@ class AskTabController:
         self._ask_messages: list = []
         self._ask_stop_event: threading.Event | None = None
         self._ask_thread: threading.Thread | None = None
+        # Streaming support — buffer accumulates token chunks from the worker
+        # thread; a 50 ms flush loop drains it on the Tk main thread so the
+        # widget is toggled NORMAL/DISABLED at most 20× per second instead of
+        # once per token (which would peg the UI on fast models).
+        self._stream_buffer: list[str] = []
+        self._flush_after_id: str | None = None  # Tk after() handle
         # Active proposal bridges for the in-flight agent run. App.cancel_all_proposals
         # iterates this set on root shutdown so worker threads never deadlock.
         self._active_bridges: set = set()
@@ -461,16 +467,60 @@ class AskTabController:
         def _on_error(msg):
             self._tab.after(0, self._ask_finish, None, True, msg)
 
+        # Streaming delta — worker thread appends to buffer; Tk flush loop
+        # drains it at 20 fps to avoid toggling widget state per-token.
+        _stream_started = [False]
+
+        def _on_stream_delta(chunk):
+            if not _stream_started[0]:
+                _stream_started[0] = True
+                self._stream_buffer.append("🤖  ")
+            self._stream_buffer.append(chunk)
+
         return {
             "on_tool_call":         _on_tool_call,
             "on_tool_result":       _on_tool_result,
             "on_assistant_message": _on_assistant_message,
             "on_done":              _on_done,
             "on_error":             _on_error,
+            "on_stream_delta":      _on_stream_delta,
+            "_stream_started":      _stream_started,
         }
 
-    def _ask_finish(self, final_text, is_error: bool, error_msg: str) -> None:
+    def _start_stream_flush_loop(self) -> None:
+        """Start the 50 ms flush loop that drains _stream_buffer to the UI."""
+        self._stream_buffer = []
+
+        def _flush():
+            if self._stream_buffer:
+                text = "".join(self._stream_buffer)
+                self._stream_buffer.clear()
+                self._ask_append(text, "assistant")
+            # Reschedule while the worker thread is alive.
+            if self._ask_thread and self._ask_thread.is_alive():
+                self._flush_after_id = self._tab.after(50, _flush)
+            else:
+                self._flush_after_id = None
+
+        self._flush_after_id = self._tab.after(50, _flush)
+
+    def _stop_stream_flush_loop(self) -> None:
+        """Cancel the flush loop and drain any remaining buffer."""
+        if self._flush_after_id is not None:
+            try:
+                self._tab.after_cancel(self._flush_after_id)
+            except Exception:
+                pass
+            self._flush_after_id = None
+        if self._stream_buffer:
+            text = "".join(self._stream_buffer)
+            self._stream_buffer.clear()
+            self._ask_append(text, "assistant")
+
+    def _ask_finish(self, final_text, is_error: bool, error_msg: str,
+                    stream_started: "list[bool] | None" = None) -> None:
         """Main-thread terminal state — called from both _on_done and _on_error."""
+        self._stop_stream_flush_loop()
         if is_error:
             self._ask_append(f"⚠  {error_msg}\n\n", "error")
             self._ask_status.configure(text="✗  Error.", fg=C["red"])
@@ -480,6 +530,11 @@ class AskTabController:
                 fg=C["green"])
         else:
             self._ask_status.configure(text="✓  Done.", fg=C["green"])
+            # Append trailing newlines after streamed content if needed.
+            if stream_started and stream_started[0]:
+                tail = self._ask_log.get("end-3c", "end-1c")
+                if not tail.endswith("\n\n"):
+                    self._ask_append("\n\n", "assistant")
         self._ask_send_btn.configure(state=tk.NORMAL)
         self._ask_stop_btn.configure(state=tk.DISABLED)
         self._ask_stop_event = None
@@ -487,6 +542,23 @@ class AskTabController:
     def _ask_spawn_worker(self, agent_instance, stop_event) -> None:
         """Spawn the daemon thread that runs agent.run() with our callbacks."""
         callbacks = self._ask_build_callbacks()
+        stream_started = callbacks.pop("_stream_started")
+        self._start_stream_flush_loop()
+
+        # Wrap on_done / on_error to pass stream_started into _ask_finish.
+        original_done  = callbacks["on_done"]
+        original_error = callbacks["on_error"]
+
+        def _on_done_wrapped(final_text):
+            self._tab.after(0, self._ask_finish, final_text, False, "",
+                            stream_started)
+
+        def _on_error_wrapped(msg):
+            self._tab.after(0, self._ask_finish, None, True, msg,
+                            stream_started)
+
+        callbacks["on_done"]  = _on_done_wrapped
+        callbacks["on_error"] = _on_error_wrapped
 
         def _worker():
             try:
@@ -496,7 +568,8 @@ class AskTabController:
                 log.exception("Ask worker crashed")
                 try:
                     self._tab.after(0, self._ask_finish, None, True,
-                                    f"{type(e).__name__}: {e}")
+                                    f"{type(e).__name__}: {e}",
+                                    stream_started)
                 except RuntimeError:
                     pass
 

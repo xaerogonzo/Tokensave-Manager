@@ -262,61 +262,61 @@ class MCPConfigDialog(tk.Toplevel):
 
     # ── Actions ─────────────────────────────────────────────────────────
 
-    def _apply(self, cfg_path: str, label: str):
-        # Pre-flight: don't apply over a running Claude.  The previous
-        # version of this method used a showwarning that was easy to
-        # dismiss without realising the Apply was a no-op — the row state
-        # didn't change visibly, no main-log entry appeared, and users
-        # walked away thinking the fix had landed.  Now: showerror (which
-        # uses the red-X icon and reads as a rejection, not a hint), a
-        # main-log line in red so the OUTPUT pane records it persistently,
-        # and a forced re-render so any state-change (or lack thereof)
-        # is visible immediately.
+    def _log_to_app(self, text: str, colour: str) -> None:
+        """Write to the persistent OUTPUT pane, silently ignored if unavailable."""
+        try:
+            self.master._log(text, colour)
+        except (AttributeError, tk.TclError):
+            pass
+
+    def _apply_running_guard(self, label: str) -> bool:
+        """Return True and surface an error if the target Claude app is running.
+
+        Writing the MCP config while Claude is live is either ignored (Desktop
+        only reloads at startup) or silently reverted (Desktop writes its cache
+        back to disk every 1–2 minutes). The guard prevents silent no-ops.
+        """
         running = _is_claude_running()
-        if (label == "Claude Desktop" and running["desktop"]) or \
-           (label == "Claude Code" and running["code"]):
-            try:
-                # The parent App is the manager window; reach back to log()
-                # so the message lands in the persistent OUTPUT pane.
-                self.master._log(
-                    f"MCP Apply REFUSED: {label} is still running. "
-                    f"No changes were written. Quit {label} (verify zero "
-                    f"rows in Task Manager) then click Apply again.",
-                    C["red"])
-            except (AttributeError, tk.TclError):
-                pass
-            messagebox.showerror(
-                f"Apply refused — {label} is running",
-                f"{label} is currently running and is reading the MCP "
-                "config from its in-memory cache.  Writing to the file now "
-                "would either be ignored (Desktop only reloads at startup) "
-                "or silently reverted (Desktop writes its cache back to "
-                "disk every 1–2 minutes).\n\n"
-                "★  NO CHANGES WERE WRITTEN  ★\n\n"
-                f"To fix:\n"
-                f"1. Fully quit {label} (tray icon → Quit).\n"
-                f"2. Verify ZERO rows for 'claude' in Task Manager.\n"
-                f"3. Wait ~5 seconds for stragglers (crashpad, renderer).\n"
-                "4. Click Re-detect, then Apply this fix.",
-                parent=self)
-            self._render()
+        if not ((label == "Claude Desktop" and running["desktop"]) or
+                (label == "Claude Code" and running["code"])):
+            return False
+        self._log_to_app(
+            f"MCP Apply REFUSED: {label} is still running. "
+            f"No changes were written. Quit {label} (verify zero "
+            f"rows in Task Manager) then click Apply again.",
+            C["red"])
+        messagebox.showerror(
+            f"Apply refused — {label} is running",
+            f"{label} is currently running and is reading the MCP "
+            "config from its in-memory cache.  Writing to the file now "
+            "would either be ignored (Desktop only reloads at startup) "
+            "or silently reverted (Desktop writes its cache back to "
+            "disk every 1–2 minutes).\n\n"
+            "★  NO CHANGES WERE WRITTEN  ★\n\n"
+            f"To fix:\n"
+            f"1. Fully quit {label} (tray icon → Quit).\n"
+            f"2. Verify ZERO rows for 'claude' in Task Manager.\n"
+            f"3. Wait ~5 seconds for stragglers (crashpad, renderer).\n"
+            "4. Click Re-detect, then Apply this fix.",
+            parent=self)
+        self._render()
+        return True
+
+    def _apply(self, cfg_path: str, label: str):
+        if self._apply_running_guard(label):
             return
 
         proposed = self._config_state[cfg_path]["proposed"]
         ok, msg = _apply_mcp_fix(cfg_path, proposed)
         if ok:
-            try:
-                self.master._log(
-                    f"MCP Apply OK: wrote canonical tokensave entry to "
-                    f"{label} config.  {msg}",
-                    C["green"])
-            except (AttributeError, tk.TclError):
-                pass
+            self._log_to_app(
+                f"MCP Apply OK: wrote canonical tokensave entry to "
+                f"{label} config.  {msg}",
+                C["green"])
             messagebox.showinfo(
                 "Fix applied", f"{msg}\n\n"
                 "Status row below has been refreshed.",
                 parent=self)
-            # Take the path off the skip list if it was on it.
             raw = self._cfg.raw
             skips = (raw.get("mcp_skip_warnings") or []) \
                     if isinstance(raw, dict) else []
@@ -324,15 +324,11 @@ class MCPConfigDialog(tk.Toplevel):
                 skips.remove(cfg_path)
                 raw["mcp_skip_warnings"] = skips
                 self._cfg.save()
-            self._render()
         else:
-            try:
-                self.master._log(
-                    f"MCP Apply FAILED: {label} — {msg}", C["red"])
-            except (AttributeError, tk.TclError):
-                pass
+            self._log_to_app(
+                f"MCP Apply FAILED: {label} — {msg}", C["red"])
             messagebox.showerror("Fix failed", msg, parent=self)
-            self._render()
+        self._render()
 
     def _skip(self, cfg_path: str):
         raw = self._cfg.raw

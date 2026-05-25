@@ -12,11 +12,24 @@ Status legend:
 
 ## Roadmap 6
 
-*(Planning phase — no stages committed yet. Add items here as they are decided.)*
-
 ### ✅ Tasks tab — Claude Code session + worktree visibility. Shipped Roadmap-5 (2026-05-25). Details in CHANGELOG.md.
 
 ### ✅ Claude CLI commit message fix (`--append-system-prompt` removed). Shipped Roadmap-5 (2026-05-25). Details in CHANGELOG.md.
+
+### ✅ Code-health audit + remediation (2026-05-25)
+- Rebuilt tokensave index (eliminated Windows dual-path artifact)
+- Extracted `TrayManager` from `App` (`src/helpers/tray_manager.py`)
+- Reduced `_do_draft_changelog` CC 12 → ≤4 (`src/controllers/ai_tasks_ctrl.py`)
+- Filed upstream tokensave bugs: path-normalization (#87), health details (#82), redundancy tool (#83), install path-with-spaces (#81)
+
+### 🟡 Commit-message scope heuristic fix
+Multi-doc-file commits now use the dominant directory as scope (e.g. `docs(upstream-issues): update`) instead of listing filename stems. (`src/helpers/commit_messages.py`)
+
+### 🟡 `mcp_config._apply` CC reduction
+Extracted `_log_to_app` + `_apply_running_guard` from `_apply`; CC dropped ~11 → ~4. (`src/dialogs/mcp_config.py`)
+
+### 🟡 Ask tab — final-message streaming
+Agent loop now streams the final-turn tokens to the UI in real time via a buffered 50 ms flush loop (prevents Tkinter widget-toggle jitter). Tool-call turns use non-streaming as before. (`src/agent.py`, `src/controllers/ask_tab.py`)
 
 ---
 
@@ -166,12 +179,12 @@ Remaining design space (not yet committed):
 
 ### ✅ Draft PR refinements (Roadmap-3 Phase 2 — all shipped). Shipped 2026-05-24. Details in CHANGELOG.md.
 
-### 💭 File the two upstream tokensave issues
-Drafts in `docs/upstream-issues/`:
-- `tokensave-health-details.md` — request `tokensave_health details=true` to return the sub-score breakdown in one call
-- `tokensave-redundancy-tool.md` — request `tokensave_redundancy` AST-level functional-duplication detector
-
-Both have "strip any proprietary code before filing" notes per `~/.claude/CLAUDE.md`.
+### ✅ File upstream tokensave issues (2026-05-25)
+All four filed and closed:
+- #87 Windows dual-path indexing (path-normalization bug)
+- #82 `tokensave_health details=true` sub-score breakdown
+- #83 `tokensave_redundancy` AST-level functional-duplication detector
+- #81 `tokensave install --agent claude` path-with-spaces quoting bug
 
 ---
 
@@ -226,7 +239,7 @@ To be explicit about what we're NOT building:
 
 This file is updated whenever a stage ships or its design materially changes.
 
-**Last updated: 2026-05-25** — Roadmap-5 continued. Additional: Tasks tab (Claude Code session + worktree visibility); Claude CLI commit message quality fix (`--append-system-prompt` removed). Details in CHANGELOG.md.
+**Last updated: 2026-05-25** — Roadmap-6 in progress. Code-health audit + remediation; commit-message scope fix; `mcp_config._apply` CC reduction; Ask tab final-message streaming. All upstream tokensave issues filed (see above).
 
 ✅ **2026-05-25 (earlier)** — Roadmap-5 initial ship. Highlights: Claude CLI model selector; pre-commit hook hang fix (Opus → Haiku); commit-message Claude CLI parity; Draft PR direct GitHub PR creation. Details in CHANGELOG.md.
 
