@@ -3,6 +3,144 @@
 
 ## [Unreleased]
 
+## [1.1.0] — 2026-05-25
+
+### Added
+- add Tasks tab, fix Claude CLI commit message quality
+- add tokensave integration check workflow and update documentation
+- (src/controllers/git_tab.py) add upstream branch detection logic
+- add pre-merge quality checks with syntax, pyflakes, Doctor audit
+- enhance GitHub PR creation with title field and direct CLI
+- add Claude CLI model selector and direct GitHub PR creation
+- (src/helpers/claude_cli.py) add model parameter to spawn_claude_cli
+- add model selection for Claude CLI in settings and help tab
+- add support for Claude CLI as a commit message backend
+- (roadmap-1) daemon indicator, cost viewer, gitignore overhaul, Draft PR, changelog helper, proposal dialog, Claude CLI integration
+- (git-tab) show remote branches + add Fetch button
+- (settings-dialog) add asynchronous model detection with threading
+- (reference-tab) placeholder fill, built-in overrides, audited prompts
+- enhance tokensave-manager.py with AI features and update
+- (tokensave-manager.py) add Merge PR button and dialog functionality
+- (tokensave-manager.py) enhance Doctor button functionality and
+- (tokensave-manager.py) enhance MCP configurator to recognize
+- add line-range reads to read_file tool and update documentation
+- add tokensave upgrade functionality and update MCP configuration
+- add MCP integration configurator and enhance tokensave-manager.py
+- add streaming AI Code Review and update tokensave-wrapper.py
+- enhance AI commit message generation and settings dialog
+- (release-wizard) hotfix bump option in the Release Wizard + 6 more
+
+### Fixed
+- improve release tag detection to prioritize semver tags
+- clarify usage of --title in GitHub PR creation command
+- (skills) scan plugin commands/ dirs; add Claude CLI install button
+- restore _offer_commit_after_change on App for GitignoreDialog callers
+- restore _open_commit_dialog and _do_git_commit accidentally deleted in R3-P1
+- (git-tab) restore four App methods lost in bulk deletion + fix _cfg reference
+- (tokensave) ask tab system prompt + tool descriptions rewritten for
+
+### Changed
+- pin GitHub Actions versions and remove PR_DRAFT.md
+- consolidate shipped roadmap items, defer to CHANGELOG.md
+- clear pyflakes baseline to zero across src/
+- clear remaining audit backlog (Dup-2, _do_retrofit, _ask_send, GitCommitDialog)
+- (dup4) DRY up RetrofitDialog + standardise dialog behaviour
+- (round5-gitops) extract GitOpsController to git_ops_ctrl.py
+- (round5) clean up stale section-header comments in projects_tab.py
+- (round5-fileops-shadow) extract FileOps + ShadowLinks controllers
+- (round5-sync) extract SyncStatusController to sync_ctrl.py
+- (round5-scaffold) extract ScaffoldRetrofitController to scaffold_ctrl.py
+- (round5-doctor) extract DoctorController to doctor_ctrl.py
+- (projects-tab) extract CodeGraphController to codegraph_ctrl.py
+- (_do_retrofit) extract three retrofit step helpers
+- (round4-E) extract App to src/app.py, delete monolith
+- (round4-D3) extract ProjectsTabController into controllers/projects_tab.py
+- (round4-D2) extract GitTabController into controllers/git_tab.py
+- (round4-D.1) extract Ask + Snippets controllers
+- (round4-C.3) extract MCPConfig + GitCommit + Settings (Phase C complete)
+- (round4-C.2) extract Ollama + ReleaseWizard dialogs
+- (round4-C.1) extract 3 big dialogs (GitHubSetup, AICodeReview, Gitignore)
+- (round4-B) extract 4 final small dialogs (Phase B complete)
+- (round4-B) extract 3 more dialogs (Scaffold, SwitchBranch, AssignCategory)
+- (round4-B) extract 3 small dialogs (NewBranch, SetRemote, SnippetEdit)
+- (round4-A) create state.py + ManagerConfig (Phase A finale)
+- (round4-A) extract helpers/commit_messages.py (large cluster)
+- (round4-A) extract helpers/mcp.py
+- (round4-A) extract helpers/release.py (named-marker delete pattern)
+- (round4-A) extract helpers/git.py (Rule 1 call-site avalanche)
+- (round4-A) extract helpers/project_discovery.py (first sig-change move)
+- (round4-A) extract helpers/runtime.py + clean up stale imports
+- (round4-A) extract helpers/scaffold.py
+- (round4-A) extract helpers/{shadow_links,gitignore,llm}.py
+- (round4-A) extract helpers/config.py + move paths to constants
+- (round4-A) extract helpers/detection.py
+- (round4-A) extract constants.py and theme.py
+- (R3-P1) wire ProjectsTabController into App, remove 1848 lines
+- (R3-P4+P5) flatten _do_delete_branch closures, decompose _chat_completion
+- (R3-P2+P3) decompose _build_ai_section and _build_codegraph_section
+- (R3-P1) wire ProjectsTabController into App, remove 1848 lines of duplicate code
+- (r3-p1) add ProjectsTabController class (commit 1 of 2)
+- (release-wizard) decompose _publish_worker into _pub_* step methods
+- (commit-msg) decompose _suggest_commit_message + _sanitize_commit_message
+- (git-tab) wire GitTabController into App, remove 28 old methods
+- (git-tab) add GitTabController class (App untouched)
+- (mcp) table-driven _classify_mcp_entry via McpContext + checker functions
+- (phase6) decompose build_tools into per-tool factory functions
+- (phase4-5) extract SettingsDialog sections and Ask/Snippets controllers
+- (src/agent.py) extract response parsing and tool execution
+- untrack manager source backups + ignore .backup.* pattern
+
+### Docs
+- (roadmap-3) completion sweep — mark shipped backlog items, add status update, sync ARCHITECTURE
+- (roadmap) log skill-awareness feature for Roadmap-3
+- (roadmap) log Draft PR refinements from Roadmap-2 dogfooding
+- (roadmap) log Stop-hook crossroads decision for phase 5b
+- update documentation
+- (roadmap) Stage 0 + Stage 2 refinement backlogs
+- Ollama + LM Studio simultaneous-loading gotcha
+- (roadmap) log Phase 4.5 + Roadmap-3 code-health backlog
+- add codegraph_exe and claude_cli_exe to BASIC_INSTRUCTIONS key table
+- document Roadmap-1 features across CHANGELOG, README, ROADMAP, ARCHITECTURE
+- document Fetch button + remote branch visibility
+- file upstream-issue drafts + record Round 5 backlog
+- refresh architecture markdowns for post-Round-4 layout
+- (changelog) record Round 4 Phase D complete (3 sub-commits, 4 controllers)
+- (changelog) record Round 4 Phase C complete (3 sub-commits, 8 big dialogs)
+- (changelog) record Round 4 Phase B complete (3 sub-commits, 10 dialogs)
+- (changelog) mark Round 4 Phase A complete (14 sub-commits)
+- (changelog) record Round 4 Phase A.9-A.11 (release/mcp/commit_messages)
+- (changelog) record Round 4 Phase A progress (A.1-A.8, nine commits)
+- (changelog) record Round 4 Phase A progress (A.1-A.3)
+- update ARCHITECTURE + AGENT_ARCHITECTURE for Round 1+2 refactors
+- (changelog) record P4 _publish_worker decomposition in [Unreleased]
+- (changelog) record Round 2 code health refactoring (P1-P3, P5)
+
+### Other
+- Merge branch 'Roadmap-6'
+- Merge pull request #5 from xaerogonzo/Roadmap-5
+- roadmap-4 phases 1-5: window UX, skills, menu polish, code health, templates
+- roadmap-3 phases 1-6: CHANGELOG drafter, Draft PR refinements, skill catalog, code-health sweep, commit-message polish, refactor scout
+- Merge pull request #2 from xaerogonzo/Roadmap-2
+- roadmap-2 phase 6: documentation sweep
+- phase 5b followup: fix three bugs surfaced by end-to-end test
+- roadmap-2 phase 5b: pre-commit AI review hook (warn-only)
+- roadmap-2 phase 5a: Open PR on GitHub button in PR draft dialog
+- phase 4.5: split GitignoreDialog.__init__ per section
+- phase 4.5: split GitHubSetupDialog._build per wizard step
+- phase 4.5: split OllamaModelManagerDialog.__init__ per section
+- phase 4.5: split AICodeReviewDialog __init__ + _start_review
+- phase 4.5: split UntrackIgnoredDialog.__init__ per section
+- phase 4.5: split MergePRDialog.__init__ per section
+- roadmap-2 phase 4: extract BranchManagementController from GitTabController
+- roadmap-2 phase 3: split ReleaseWizardDialog._build_ui per wizard step
+- roadmap-2 phase 2: changelog_patch wiring + daemon control UI
+- roadmap-2 phase 1: write_file tool + ProposalDialog bridge
+- doctor: soften file cap + add non-Python text-file audit
+- roadmap-2 phase 0: anti-monolith governance + Doctor audit
+- Round 5: extract UpdatePollerController from App god class
+- Round 5: extract HelpTabController from App god class
+- Merge pull request #1 from xaerogonzo/Fix
+
 ### Added (tokensave v6.0.0 / v6.1.0 integration)
 - **✓ Run checks… — pre-merge quality gate.** Right-click any project → **✓ Run checks…** opens a concurrent four-check dialog:
   - **Python syntax** (`python -m compileall src/ -q`) — free, always-on by default.
