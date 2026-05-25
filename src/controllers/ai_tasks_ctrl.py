@@ -45,6 +45,40 @@ TASK_DRAFT_CHANGELOG = "draft_changelog"
 TASK_REFACTOR_SCOUT  = "refactor_scout"
 
 
+def _build_changelog_prompt(classified: dict, existing: str) -> "tuple[str, str]":
+    """Build (system_prompt, user_prompt) for the CHANGELOG drafter LLM call."""
+    commit_lines = "\n".join(
+        f"- [{section}] {msg}"
+        for section, msgs in classified.items()
+        for msg in msgs
+    )
+    existing_note = (
+        f"\n\nThe [Unreleased] block already contains these notes "
+        f"— integrate them VERBATIM into your output. "
+        f"Do not drop any user-written content:\n\n{existing}"
+        if existing else ""
+    )
+    system_prompt = (
+        "You are a technical writer generating CHANGELOG.md content. "
+        "Output ONLY valid markdown bullet points grouped under "
+        "### Added, ### Changed, ### Fixed, ### Removed headings as appropriate. "
+        "Rules:\n"
+        "- Collapse trivial internal commits (typo, fmt, revert, chore) — omit them entirely.\n"
+        "- Infer user-facing impact from commit messages; rewrite jargon into plain English.\n"
+        "- De-duplicate near-identical points.\n"
+        "- Preserve existing formatting/layout (bullet style, line wrapping) unless strictly necessary.\n"
+        "- Do NOT include a ## [version] or ## [Unreleased] header — only the body content.\n"
+        "- Do NOT add commentary, preamble, or explanation outside the bullet list."
+    )
+    user_prompt = (
+        f"Here are the commits since the last release, pre-classified by type:\n\n"
+        f"{commit_lines}"
+        f"{existing_note}\n\n"
+        "Draft the [Unreleased] CHANGELOG body."
+    )
+    return system_prompt, user_prompt
+
+
 class AITasksController:
     """Orchestrates long-running AI project tasks for the Projects tab."""
 
@@ -158,6 +192,37 @@ class AITasksController:
             with self._running_lock:
                 self._running.discard((path, TASK_DRAFT_CHANGELOG))
 
+    def _open_changelog_proposal(
+        self, changelog_path: str, drafted: str, existing: str,
+        WriteProposal, ProposalBridge,
+    ) -> "tuple[bool, str]":
+        """Show a ProposalDialog for the drafted CHANGELOG content.
+
+        Returns (accepted, final_content). Registers the bridge in
+        _active_bridges so App._quit_app can cancel cleanly on shutdown.
+        """
+        old_content = existing if existing else "(empty)"
+        rationale = (
+            "Draft [Unreleased] CHANGELOG bullets generated from commits since "
+            "last release tag."
+            + (" Existing notes were preserved — review the diff to confirm."
+               if existing else "")
+        )
+        proposal = WriteProposal(
+            filepath=changelog_path,
+            original_content=old_content,
+            proposed_content=drafted,
+            rationale=rationale,
+        )
+        bridge = ProposalBridge(self._root, proposal, timeout_s=300.0)
+        with self._bridges_lock:
+            self._active_bridges.add(bridge)
+        try:
+            return bridge.invoke()
+        finally:
+            with self._bridges_lock:
+                self._active_bridges.discard(bridge)
+
     def _do_draft_changelog(
         self, path: str, llm_cfg: dict, stop_event: threading.Event
     ) -> None:
@@ -196,40 +261,10 @@ class AITasksController:
         if os.path.exists(changelog_path):
             existing = read_unreleased(changelog_path)
 
-        # ── 4. Build LLM prompt ──────────────────────────────────────────────
+        # ── 4 & 5. Build LLM prompt, call LLM, show proposal ────────────────────
         from helpers.llm import _call_llm
 
-        commit_lines = "\n".join(
-            f"- [{section}] {msg}"
-            for section, msgs in classified.items()
-            for msg in msgs
-        )
-
-        existing_note = (
-            f"\n\nThe [Unreleased] block already contains these notes "
-            f"— integrate them VERBATIM into your output. "
-            f"Do not drop any user-written content:\n\n{existing}"
-            if existing else ""
-        )
-
-        system_prompt = (
-            "You are a technical writer generating CHANGELOG.md content. "
-            "Output ONLY valid markdown bullet points grouped under "
-            "### Added, ### Changed, ### Fixed, ### Removed headings as appropriate. "
-            "Rules:\n"
-            "- Collapse trivial internal commits (typo, fmt, revert, chore) — omit them entirely.\n"
-            "- Infer user-facing impact from commit messages; rewrite jargon into plain English.\n"
-            "- De-duplicate near-identical points.\n"
-            "- Preserve existing formatting/layout (bullet style, line wrapping) unless strictly necessary.\n"
-            "- Do NOT include a ## [version] or ## [Unreleased] header — only the body content.\n"
-            "- Do NOT add commentary, preamble, or explanation outside the bullet list."
-        )
-        user_prompt = (
-            f"Here are the commits since the last release, pre-classified by type:\n\n"
-            f"{commit_lines}"
-            f"{existing_note}\n\n"
-            "Draft the [Unreleased] CHANGELOG body."
-        )
+        system_prompt, user_prompt = _build_changelog_prompt(classified, existing)
 
         if stop_event.is_set():
             return
@@ -255,28 +290,9 @@ class AITasksController:
         if stop_event.is_set():
             return
 
-        # ── 5. Build WriteProposal for ProposalDialog ─────────────────────────
-        old_content = existing if existing else "(empty)"
-
-        proposal = WriteProposal(
-            filepath=changelog_path,
-            original_content=old_content,
-            proposed_content=drafted.strip(),
-            rationale=(
-                "Draft [Unreleased] CHANGELOG bullets generated from commits since "
-                f"last release tag.{' Existing notes were preserved — review the diff to confirm.' if existing else ''}"
-            ),
+        accepted, final_content = self._open_changelog_proposal(
+            changelog_path, drafted.strip(), existing, WriteProposal, ProposalBridge
         )
-
-        # ── 6. Show ProposalDialog on main thread ─────────────────────────────
-        bridge = ProposalBridge(self._root, proposal, timeout_s=300.0)
-        with self._bridges_lock:
-            self._active_bridges.add(bridge)
-        try:
-            accepted, final_content = bridge.invoke()
-        finally:
-            with self._bridges_lock:
-                self._active_bridges.discard(bridge)
 
         if not accepted or not final_content:
             self._tab.after(0, self._on_log, "[CHANGELOG] Draft rejected.")

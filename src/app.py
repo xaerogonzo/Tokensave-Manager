@@ -71,6 +71,24 @@ from state import ManagerConfig
 from prompts import PROMPT_SNIPPETS
 
 
+def _geometry_on_screen(root: "tk.Tk", geom: str) -> bool:
+    """Return True if `geom` ("WxH+X+Y") places the window at least partly on screen.
+
+    Uses a conservative single-monitor check via winfo_screen* so we don't
+    restore a geometry that's entirely off-screen (e.g. after a monitor was
+    disconnected). Allows small negative offsets to tolerate multi-monitor
+    left/above arrangements.
+    """
+    import re as _re
+    m = _re.match(r"\d+x\d+\+(-?\d+)\+(-?\d+)$", geom)
+    if not m:
+        return False
+    x, y = int(m.group(1)), int(m.group(2))
+    sw = root.winfo_screenwidth()
+    sh = root.winfo_screenheight()
+    return x < sw and y < sh and x > -600 and y > -520
+
+
 class App(tk.Tk):
     def __init__(self):
         super().__init__()
@@ -85,6 +103,9 @@ class App(tk.Tk):
         # (self._cfg.tokensave_exe, self._cfg.git_exe, …) still exist and get re-bound by
         # _on_settings_saved alongside self._cfg.refresh_derived().
         self._cfg = ManagerConfig.load()
+        saved_geom = self._cfg.raw.get("window_geometry", "")
+        if saved_geom and _geometry_on_screen(self, saved_geom):
+            self.geometry(saved_geom)
         self._current_proc = None
         self._stop_requested = False
         # Version probe + update-check background loop.
@@ -108,9 +129,9 @@ class App(tk.Tk):
         self.refresh()
         self.after(AUTO_REFRESH_MS, self._auto_refresh)
         self._tray = None
+        self._last_geometry: str = ""
         self._setup_tray()
         self.protocol("WM_DELETE_WINDOW", self._hide_to_tray)
-        self.bind("<Unmap>", self._on_unmap)
         self.after(300, self._check_config)
 
     # ── Tray ───────────────────────────────────────────────────────────────────
@@ -130,21 +151,18 @@ class App(tk.Tk):
         threading.Thread(target=self._tray.run, daemon=True).start()
 
     def _hide_to_tray(self):
+        self._last_geometry = self.geometry()
+        self._cfg.raw["window_geometry"] = self._last_geometry
+        self._cfg.save()
         self.withdraw()
-        log.debug("Window hidden to tray")
-
-    def _on_unmap(self, event):
-        if event.widget is self:
-            self.after(100, self._maybe_hide)
-
-    def _maybe_hide(self):
-        if self.state() == "iconic":
-            self.withdraw()
+        log.debug("Window hidden to tray (geometry saved: %s)", self._last_geometry)
 
     def _show_from_tray(self, icon=None, item=None):
         self.after(0, self._do_show)
 
     def _do_show(self):
+        if self._last_geometry:
+            self.geometry(self._last_geometry)
         self.deiconify()
         self.lift()
         self.focus_force()

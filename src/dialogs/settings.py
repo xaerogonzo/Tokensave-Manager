@@ -199,7 +199,7 @@ class SettingsDialog(tk.Toplevel):
             "editor_cmd", note="(flags supported)")
 
     def _build_git_tools_section(self, body, raw):
-        """Git executable path + GitHub CLI install/detect."""
+        """Git executable path + Claude Code CLI + GitHub CLI install/detect."""
         # ── Git executable ────────────────────────────────────────────────
         ttk.Separator(body, orient="horizontal").pack(fill=tk.X, padx=20, pady=(12, 8))
         tk.Label(body, text="Git executable  —  path to git.exe",
@@ -229,11 +229,14 @@ class SettingsDialog(tk.Toplevel):
         tk.Label(body, text="  Leave blank to auto-detect from PATH or common install locations.",
                  font=("Segoe UI", 8), bg=C["base"], fg=C["overlay0"]).pack(
                  anchor=tk.W, padx=20, pady=(2, 0))
-        # Verify against the saved-or-live git_exe — self._cfg.git_exe handles
-        # the "explicit path or auto-detect" fallback in one property read.
+        # Verify against the saved-or-live git_exe.
         self.after(100, lambda: self._verify_git(raw.get("git_exe") or self._cfg.git_exe))
 
-        # ── Claude Code CLI ───────────────────────────────────────────────
+        self._build_claude_cli_row(body, raw)
+        self._build_github_cli_row(body)
+
+    def _build_claude_cli_row(self, body, raw):
+        """Claude Code CLI path + Install button sub-section."""
         ttk.Separator(body, orient="horizontal").pack(fill=tk.X, padx=20, pady=(12, 8))
         tk.Label(body,
                  text="Claude Code CLI  —  path to claude.cmd (npm install -g @anthropic-ai/claude-code)",
@@ -244,6 +247,7 @@ class SettingsDialog(tk.Toplevel):
         self._claude_cli_var = tk.StringVar(value=raw.get("claude_cli_exe", ""))
         ttk.Entry(cli_row, textvariable=self._claude_cli_var, width=44).pack(
             side=tk.LEFT, padx=(0, 6))
+
         def _browse_claude():
             p = filedialog.askopenfilename(
                 title="Select claude.cmd or claude",
@@ -252,22 +256,19 @@ class SettingsDialog(tk.Toplevel):
                 parent=self)
             if p:
                 self._claude_cli_var.set(p)
+
         def _autodetect_claude():
             found = _detect_claude_cli()
             if found:
                 self._claude_cli_var.set(found)
-                self._claude_cli_status.configure(
-                    text=f"Found: {found}", fg=C["green"])
+                self._claude_cli_status.configure(text=f"Found: {found}", fg=C["green"])
                 self._claude_install_btn.configure(state=tk.DISABLED)
             else:
-                self._claude_cli_status.configure(
-                    text="Not found.", fg=C["red"])
+                self._claude_cli_status.configure(text="Not found.", fg=C["red"])
                 self._claude_install_btn.configure(state=tk.NORMAL)
 
         def _install_claude():
-            # Open a PowerShell window with the npm install command pre-typed.
-            # -NoExit keeps the window open so the user can see the output and
-            # follow any prompts (login, PATH reload notice, etc.).
+            # -NoExit keeps the window open so the user can see output and follow prompts.
             try:
                 subprocess.Popen(
                     ["powershell", "-NoExit", "-Command",
@@ -281,12 +282,9 @@ class SettingsDialog(tk.Toplevel):
                 self._claude_cli_status.configure(
                     text=f"Could not open PowerShell: {ex}", fg=C["red"])
 
-        ttk.Button(cli_row, text="Browse…",      command=_browse_claude).pack(
-            side=tk.LEFT, padx=(0, 6))
-        ttk.Button(cli_row, text="Auto-detect",  command=_autodetect_claude).pack(
-            side=tk.LEFT, padx=(0, 6))
-        self._claude_install_btn = ttk.Button(
-            cli_row, text="Install…", command=_install_claude)
+        ttk.Button(cli_row, text="Browse…",     command=_browse_claude).pack(side=tk.LEFT, padx=(0, 6))
+        ttk.Button(cli_row, text="Auto-detect", command=_autodetect_claude).pack(side=tk.LEFT, padx=(0, 6))
+        self._claude_install_btn = ttk.Button(cli_row, text="Install…", command=_install_claude)
         self._claude_install_btn.pack(side=tk.LEFT, padx=(0, 6))
         self._claude_cli_status = tk.Label(cli_row, text="", bg=C["base"],
                                            font=("Segoe UI", 8), fg=C["overlay0"])
@@ -295,11 +293,11 @@ class SettingsDialog(tk.Toplevel):
                  text="  If auto-detect fails, paste the full path (e.g. %APPDATA%\\npm\\claude.cmd).",
                  font=("Segoe UI", 8), bg=C["base"], fg=C["overlay0"]).pack(
                  anchor=tk.W, padx=20, pady=(2, 0))
-        # Initialise Install button state: disabled when a path is already set.
         if raw.get("claude_cli_exe"):
             self._claude_install_btn.configure(state=tk.DISABLED)
 
-        # ── GitHub CLI (gh) ───────────────────────────────────────────────
+    def _build_github_cli_row(self, body):
+        """GitHub CLI (gh) detect + install sub-section."""
         ttk.Separator(body, orient="horizontal").pack(fill=tk.X, padx=20, pady=(12, 8))
         tk.Label(body, text="GitHub CLI (gh)  —  enables 'Open PR on GitHub' and release creation",
                  bg=C["base"], fg=C["subtext"],
@@ -576,47 +574,53 @@ class SettingsDialog(tk.Toplevel):
             font=("Segoe UI", 8), bg=C["base"], fg=C["overlay0"],
             justify=tk.LEFT).pack(anchor=tk.W, padx=36, pady=(0, 8))
 
-        # ── Draft PR backend ─────────────────────────────────────────────
+        # ── AI backend selection (grouped) ────────────────────────────────
         ttk.Separator(body, orient="horizontal").pack(fill=tk.X, padx=20, pady=(8, 8))
-        tk.Label(body, text="Draft PR backend",
-                 font=("Segoe UI", 10, "bold"),
-                 bg=C["base"], fg=C["text"]).pack(anchor=tk.W, padx=20, pady=(0, 2))
+        lf = tk.LabelFrame(body, text="AI backend selection",
+                           bg=C["base"], fg=C["subtext"],
+                           font=("Segoe UI", 9, "bold"),
+                           relief=tk.GROOVE, bd=1)
+        lf.pack(fill=tk.X, padx=20, pady=(0, 8))
+
+        # Draft PR
+        tk.Label(lf, text="Draft PR",
+                 font=("Segoe UI", 9, "bold"),
+                 bg=C["base"], fg=C["text"]).pack(anchor=tk.W, padx=12, pady=(6, 2))
         self._var_draft_pr_backend = tk.StringVar(
             value=raw.get("draft_pr_backend") or "auto")
-        backend_row = tk.Frame(body, bg=C["base"])
-        backend_row.pack(anchor=tk.W, padx=20, pady=(0, 4))
+        pr_row = tk.Frame(lf, bg=C["base"])
+        pr_row.pack(anchor=tk.W, padx=12, pady=(0, 2))
         for val, label in [("auto", "Auto"), ("claude_cli", "Claude Code CLI"), ("llm", "API key")]:
-            ttk.Radiobutton(backend_row, text=label, value=val,
+            ttk.Radiobutton(pr_row, text=label, value=val,
                             variable=self._var_draft_pr_backend).pack(side=tk.LEFT, padx=(0, 14))
-        tk.Label(body,
-            text="  Auto: prefers Claude Code CLI if configured, falls back to API key.\n"
-                 "  Force-select to pin a backend regardless of what else is configured.",
+        tk.Label(lf,
+            text="  Auto: prefers Claude Code CLI if configured, falls back to API key.",
             font=("Segoe UI", 8), bg=C["base"], fg=C["overlay0"],
-            justify=tk.LEFT).pack(anchor=tk.W, padx=36, pady=(0, 8))
+            justify=tk.LEFT).pack(anchor=tk.W, padx=24, pady=(0, 6))
 
-        # ── Commit message backend ────────────────────────────────────────
-        ttk.Separator(body, orient="horizontal").pack(fill=tk.X, padx=20, pady=(8, 8))
-        tk.Label(body, text="Commit message backend",
-                 font=("Segoe UI", 10, "bold"),
-                 bg=C["base"], fg=C["text"]).pack(anchor=tk.W, padx=20, pady=(0, 2))
+        ttk.Separator(lf, orient="horizontal").pack(fill=tk.X, padx=8, pady=(0, 6))
+
+        # Commit message
+        tk.Label(lf, text="Commit message (Suggest button)",
+                 font=("Segoe UI", 9, "bold"),
+                 bg=C["base"], fg=C["text"]).pack(anchor=tk.W, padx=12, pady=(0, 2))
         self._var_commit_msg_backend = tk.StringVar(
             value=raw.get("commit_message_backend") or "auto")
-        cm_backend_row = tk.Frame(body, bg=C["base"])
-        cm_backend_row.pack(anchor=tk.W, padx=20, pady=(0, 4))
+        cm_row = tk.Frame(lf, bg=C["base"])
+        cm_row.pack(anchor=tk.W, padx=12, pady=(0, 2))
         for val, label in [
             ("auto",       "Claude CLI → LLM"),
             ("llm_first",  "LLM → Claude CLI"),
             ("claude_cli", "Claude CLI only"),
             ("llm",        "LLM only"),
         ]:
-            ttk.Radiobutton(cm_backend_row, text=label, value=val,
+            ttk.Radiobutton(cm_row, text=label, value=val,
                             variable=self._var_commit_msg_backend).pack(
                             side=tk.LEFT, padx=(0, 14))
-        tk.Label(body,
-            text="  Controls which AI backend generates the Suggest button's commit message.\n"
-                 "  Claude CLI uses your subscription (no API credits). LLM uses the provider below.",
+        tk.Label(lf,
+            text="  Claude CLI uses your subscription (no API credits). LLM uses the provider in the AI section below.",
             font=("Segoe UI", 8), bg=C["base"], fg=C["overlay0"],
-            justify=tk.LEFT).pack(anchor=tk.W, padx=36, pady=(0, 8))
+            justify=tk.LEFT).pack(anchor=tk.W, padx=24, pady=(0, 8))
 
         # ── Ollama ────────────────────────────────────────────────────────
         ttk.Separator(body, orient="horizontal").pack(fill=tk.X, padx=20, pady=(8, 8))

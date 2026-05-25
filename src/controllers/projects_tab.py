@@ -464,7 +464,7 @@ class ProjectsTabController:
         m.add_command(label="🧠  CodeGraph Init",          command=self.cmd_codegraph_init)
         m.add_command(label="🧠  CodeGraph Sync",          command=self.cmd_codegraph_sync)
         m.add_command(label="🧠  CodeGraph Status",        command=self.cmd_codegraph_status)
-        m.add_command(label="🧠  Remove CodeGraph Index",  command=self.cmd_codegraph_remove)
+        m.add_command(label="🧠  Remove CodeGraph Index…", command=self.cmd_codegraph_remove)
         m.add_separator()
         m.add_command(label="📜  Git Log",        command=self.cmd_git_log)
         m.add_command(label="📝  Git Commit…",        command=self.cmd_git_commit)

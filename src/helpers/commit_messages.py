@@ -353,6 +353,34 @@ def _pending_diff(repo_path: str, *paths: str, git_exe: str,
     return proc.stdout if proc.returncode == 0 else ""
 
 
+def _parse_diff_bullet(line: str, section: str | None) -> "dict | None":
+    """Parse a `+`-prefixed diff line as a CHANGELOG bullet.
+
+    Returns a bullet dict ``{section, lead_in, description}`` when `line`
+    starts a new bullet under `section`, or None otherwise. Handles the
+    bolded lead-in pattern (**lead** — desc) with a plain-text fallback.
+    """
+    if not section:
+        return None
+    m_bullet = re.match(r"^\s*[-*]\s+(.*)$", line)
+    if not m_bullet:
+        return None
+    text = m_bullet.group(1)
+    m_bold = re.match(
+        r"^\*\*(?P<lead>[^*]+?)\*\*\s*(?:[—\-–:]\s*)?(?P<desc>.+)$",
+        text,
+    )
+    if m_bold:
+        lead = m_bold.group("lead").strip().rstrip(".").strip()
+        desc = m_bold.group("desc").strip()
+    else:
+        first_sent = re.split(r"(?<=[.!?])\s", text, maxsplit=1)[0]
+        lead = (first_sent[:60].rstrip() if len(first_sent) > 60
+                else first_sent).rstrip(".")
+        desc = text[len(first_sent):].strip() or text
+    return {"section": section, "lead_in": lead, "description": desc}
+
+
 def _extract_changelog_additions(repo_path: str, git_exe: str) -> list:
     """Parse the staged CHANGELOG diff into structured bullet records.
 
@@ -380,69 +408,39 @@ def _extract_changelog_additions(repo_path: str, git_exe: str) -> list:
     current_bullet = None
 
     for raw_line in diff.splitlines():
-        # Skip diff metadata
         if raw_line.startswith("---") or raw_line.startswith("+++"):
             continue
         if raw_line.startswith("@@"):
-            # Hunk boundary — section context from a different hunk is no
-            # longer reliable. Reset so we don't misattribute the next bullet.
+            # Hunk boundary — reset section so we don't misattribute next bullet.
             section = None
             current_bullet = None
             continue
 
-        # Classify the line: + (added), - (removed), space (context)
         if raw_line.startswith("+"):
-            line = raw_line[1:]
-            is_added = True
+            line, is_added = raw_line[1:], True
         elif raw_line.startswith(" "):
-            line = raw_line[1:]
-            is_added = False
+            line, is_added = raw_line[1:], False
         elif raw_line.startswith("-"):
-            continue   # ignore removed lines for section/bullet tracking
+            continue
         else:
-            # Should not happen for unified diff output
             continue
 
-        # Section header: ### Added, ### Changed, etc.
-        # Track from BOTH context and added lines so a bullet added under an
-        # existing section header still gets the right section attribution.
+        # Track section headers from both context and added lines.
         m_section = re.match(r"^#{2,4}\s+(\w+)\s*$", line)
         if m_section:
             section = m_section.group(1)
             current_bullet = None
             continue
 
-        # Only PROCESS added lines for bullets — context lines just inform section.
         if not is_added:
             continue
 
-        # New bullet starting with "- "
-        m_bullet = re.match(r"^\s*[-*]\s+(.*)$", line)
-        if m_bullet and section:
-            text = m_bullet.group(1)
-            # Bolded lead-in pattern: handles
-            #   **lead** — desc       (en-dash, em-dash, hyphen, colon)
-            #   **lead.** desc        (period INSIDE the bold; no separator after)
-            #   **lead** desc         (no separator at all)
-            m_bold = re.match(
-                r"^\*\*(?P<lead>[^*]+?)\*\*\s*(?:[—\-–:]\s*)?(?P<desc>.+)$",
-                text,
-            )
-            if m_bold:
-                lead = m_bold.group("lead").strip().rstrip(".").strip()
-                desc = m_bold.group("desc").strip()
-            else:
-                # Fall back to first 60 chars or first sentence as lead
-                first_sent = re.split(r"(?<=[.!?])\s", text, maxsplit=1)[0]
-                lead = (first_sent[:60].rstrip() if len(first_sent) > 60
-                        else first_sent).rstrip(".")
-                desc = text[len(first_sent):].strip() or text
-            current_bullet = {"section": section, "lead_in": lead,
-                              "description": desc}
+        bullet = _parse_diff_bullet(line, section)
+        if bullet is not None:
+            current_bullet = bullet
             bullets.append(current_bullet)
             continue
 
-        # Continuation of a previous bullet (no leading dash)
         if current_bullet and line.strip():
             current_bullet["description"] = (
                 current_bullet["description"] + " " + line.strip()

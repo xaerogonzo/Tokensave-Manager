@@ -80,6 +80,25 @@ def _plugin_command_files() -> list:
     return results
 
 
+def _write_skill_temp(skill_name: str, body: str) -> str:
+    """Write skill body to a temp file and return its path."""
+    import tempfile
+    tmp = os.path.join(tempfile.gettempdir(), f"ts_skill_{skill_name}.md")
+    try:
+        with open(tmp, "w", encoding="utf-8") as f:
+            f.write(body)
+    except OSError:
+        pass
+    return tmp
+
+
+def _copy_to_clipboard(widget: "tk.Widget", text: str) -> None:
+    """Copy text to the system clipboard via Tk."""
+    widget.clipboard_clear()
+    widget.clipboard_append(text)
+    widget.update()
+
+
 def _parse_skill_file(path: str) -> "dict | None":
     """Parse a skill .md file and return a dict with name/description/body.
 
@@ -404,7 +423,7 @@ class SnippetsController:
         run_row.pack(side=tk.BOTTOM, fill=tk.X, pady=(4, 0))
 
         self._skill_run_btn = ttk.Button(
-            run_row, text="▷  Run skill", command=self._run_skill,
+            run_row, text="▷  Open in Claude", command=self._run_skill,
             state=tk.DISABLED)
         self._skill_run_btn.pack(side=tk.LEFT)
 
@@ -511,7 +530,7 @@ class SnippetsController:
         self._skill_run_status.configure(text="")
 
     def _run_skill(self) -> None:
-        """Launch a detached Claude CLI terminal for the selected skill."""
+        """Open a Claude CLI terminal seeded with the selected skill's body content."""
         sel = self._skills_lb.curselection()
         if not sel or self._skills_cache is None:
             return
@@ -527,6 +546,12 @@ class SnippetsController:
                 text="Configure Claude CLI in Settings first.", fg=C["peach"])
             return
 
+        body = (skill.get("body") or "").strip()
+        if not body:
+            self._skill_run_status.configure(
+                text="This skill has no body — nothing to send.", fg=C["peach"])
+            return
+
         project_path = (
             (self._get_path() if self._get_path else None) or _BASE_DIR
         )
@@ -537,16 +562,28 @@ class SnippetsController:
             proc = self._skill_procs[key]
             if proc.poll() is None:
                 self._skill_run_status.configure(
-                    text=f"/{skill_name} already running.", fg=C["overlay0"])
+                    text=f"'{skill_name}' already running.", fg=C["overlay0"])
                 return
             del self._skill_procs[key]
 
+        # Short single-line bodies pass directly as positional arg.
+        # Long/multiline bodies: copy to clipboard so the user can paste
+        # after Claude opens; write to temp file for reference.
+        if len(body) <= 300 and "\n" not in body:
+            instruction = body
+            hint = ""
+        else:
+            _write_skill_temp(skill_name, body)
+            _copy_to_clipboard(self._tab, body)
+            instruction = f"Run the skill: {skill_name}"
+            hint = "Body copied to clipboard — paste into Claude when it opens."
+
         try:
             if sys.platform == "win32":
-                # ""outer"" quoting — same pattern as helpers/claude_cli.py.
-                # Instruction /<skill_name> invokes the skill on session start.
-                instruction = f"/{skill_name}"
-                cmd_str = f'cmd.exe /k ""{cli}" "{instruction}""'
+                # ""outer"" wrapper: satisfies cmd.exe multi-quoted-args rule.
+                # Instruction is the skill body (short) or a brief stand-in (long).
+                instruction_safe = instruction.replace('"', "'")
+                cmd_str = f'cmd.exe /k ""{cli}" "{instruction_safe}""'
                 proc = subprocess.Popen(
                     cmd_str,
                     cwd=project_path,
@@ -554,7 +591,7 @@ class SnippetsController:
                 )
             else:
                 proc = subprocess.Popen(
-                    [cli, f"/{skill_name}"],
+                    [cli, instruction],
                     cwd=project_path,
                 )
         except Exception as exc:
@@ -562,9 +599,12 @@ class SnippetsController:
             return
 
         self._skill_procs[key] = proc
-        self._skill_run_status.configure(
-            text=f"Launched /{skill_name}.", fg=C["green"])
-        self._tab.after(3000, lambda: self._skill_run_status.configure(text=""))
+        if hint:
+            self._skill_run_status.configure(text=hint, fg=C["overlay0"])
+        else:
+            self._skill_run_status.configure(
+                text=f"Launched '{skill_name}'.", fg=C["green"])
+        self._tab.after(5000, lambda: self._skill_run_status.configure(text=""))
 
     # ── Snippet listbox & metadata ───────────────────────────────────────────
 

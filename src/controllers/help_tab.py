@@ -87,6 +87,7 @@ class HelpTabController:
         # ── Sections ──────────────────────────────────────────────────────────
         self._help_sections = [
             ("  Switching Projects",  self._help_switching),
+            ("  Window & Tray",       self._help_window_tray),
             ("  Right-click Menu",    self._help_context_menu),
             ("  Scaffold",            self._help_scaffold),
             ("  Retrofit Existing",   self._help_retrofit),
@@ -165,6 +166,23 @@ class HelpTabController:
             br()
             p("Tip: to go back to whichever project you last synced automatically, "
               "click Auto-detect instead of pinning a specific project.")
+        self._help_show(_fill)
+
+    def _help_window_tray(self):
+        def _fill():
+            h1, h2, p, warn, ok, dim, br, ins = self._hw()
+            h1("Window & Tray")
+            p("TokenSave Manager runs in the system tray so it can stay alive between "
+              "sessions without cluttering the taskbar.")
+            br()
+            h2("Window controls")
+            ins("  ╳  Close (X button)  ", "body"); ins("Hides the window to the system tray — the app keeps running.\n", "dim")
+            ins("  _  Minimize           ", "body"); ins("Minimizes normally to the taskbar.\n", "dim")
+            ins("  Tray icon → Show      ", "body"); ins("Restores the window to its last position and size.\n", "dim")
+            ins("  Tray icon → Quit      ", "body"); ins("Fully exits the app (stops the daemon connection too).\n", "dim")
+            br()
+            p("The window position and size are saved automatically when you hide to tray "
+              "and restored the next time you click Show.")
         self._help_show(_fill)
 
     def _help_context_menu(self):
