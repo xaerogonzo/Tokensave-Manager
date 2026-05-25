@@ -378,13 +378,14 @@ class GitCommitDialog(tk.Toplevel):
         self._show_strategy_badge(result.strategy)
 
     _STRATEGY_BADGES = {
-        "llm":       ("via LLM",       "green"),
-        "changelog": ("via CHANGELOG", "blue"),
-        "diff":      ("via diff",      "subtext"),
-        "filenames": ("via filename",  "subtext"),
-        "backstop":  ("via fallback",  "overlay0"),
-        "error":     ("error — using fallback", "red"),
-        "none":      ("",              "subtext"),
+        "llm":        ("via LLM",        "green"),
+        "claude_cli": ("via Claude CLI", "mauve"),
+        "changelog":  ("via CHANGELOG",  "blue"),
+        "diff":       ("via diff",       "subtext"),
+        "filenames":  ("via filename",   "subtext"),
+        "backstop":   ("via fallback",   "overlay0"),
+        "error":      ("error — using fallback", "red"),
+        "none":       ("",               "subtext"),
     }
 
     def _show_strategy_badge(self, strategy: str):

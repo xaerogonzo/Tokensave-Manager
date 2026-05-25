@@ -61,6 +61,8 @@ After any code change, update the minimum set of docs necessary — **proportion
 - Don't commit generated files, compiled outputs, or secrets
 
 > **TokenSave Manager** (if installed): right-click any project in the manager → **📜 Git Log** to see the last 20 commits and working-tree status without leaving the tool. Use this to orient yourself on what changed recently before diving in.
+>
+> **Prefer the manager's Git Commit dialog over committing via Claude Code CLI.** Right-click the project → **📝 Git Commit…** uses a locally-configured LLM (Ollama, LM Studio, etc.) to draft the message at near-zero cost. Committing via a bash tool call in Claude Code burns Anthropic API tokens for something a local model handles well. This is a preference, not a hard rule — use direct `git commit` when the manager isn't running or the situation clearly calls for it.
 
 ---
 

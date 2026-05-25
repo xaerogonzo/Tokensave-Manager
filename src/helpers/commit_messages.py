@@ -30,6 +30,7 @@ from collections import Counter
 
 from constants import CREATE_NO_WINDOW
 from helpers.llm import _build_llm_prompt, _call_llm
+from helpers.claude_cli import call_claude_cli_print
 
 
 # ── Conventional-commit reverse-lookup + scope vocabulary ────────────────────
@@ -588,7 +589,9 @@ def _suggest_from_diff_content(repo_path: str, files: list, git_exe: str) -> tup
     if exts and exts <= doc_exts:
         if len(files) == 1:
             return f"docs: update {basenames[0]}", ""
-        return "docs: update documentation", ""
+        # Name up to 3 files instead of the generic "documentation"
+        stems = [os.path.splitext(b)[0] for b in sorted(set(basenames))[:3]]
+        return f"docs({', '.join(stems)}): update", ""
 
     # CI workflows
     if ci_paths and len(ci_paths) == len(files):
@@ -674,7 +677,8 @@ def _suggest_from_filenames(status_text: str) -> str:
     code_exts = {".py", ".js", ".ts", ".cs", ".cpp", ".c", ".h", ".rs", ".go", ".java"}
 
     if exts <= doc_exts:
-        return "docs: update documentation"
+        stems = [os.path.splitext(b)[0] for b in sorted(set(basenames))[:3]]
+        return f"docs({', '.join(stems)}): update"
     if exts <= code_exts:
         if len(basenames) <= 3:
             return f"chore: update {', '.join(basenames)}"
@@ -684,6 +688,37 @@ def _suggest_from_filenames(status_text: str) -> str:
     if len(basenames) <= 2:
         return f"chore: update {', '.join(basenames)}"
     return f"chore: update {basenames[0]}, {basenames[1]} + {len(basenames) - 2} more"
+
+
+# ── Claude CLI strategy ───────────────────────────────────────────────────────
+
+_CLAUDE_CLI_COMMIT_SYSTEM = (
+    "You are a git commit message generator. "
+    "Output exactly ONE line: a conventional-commit subject (feat/fix/docs/"
+    "refactor/chore/test/ci/perf). Max 72 characters. Imperative mood. "
+    "No body, no explanation, no markdown, no quotes. Just the subject line."
+)
+
+
+def _strat_claude_cli(repo_path: str, git_exe: str,
+                      claude_cli_exe: str) -> "tuple[str, str] | None":
+    """Strategy: Claude CLI (claude --print). Returns (subject, body) or None."""
+    if not claude_cli_exe or not repo_path or not git_exe:
+        return None
+    diff = _pending_diff(repo_path, git_exe=git_exe)
+    if not diff:
+        return None
+    result = call_claude_cli_print(
+        claude_cli_exe, diff,
+        system_prompt=_CLAUDE_CLI_COMMIT_SYSTEM,
+        timeout=45,
+    )
+    if not result:
+        return None
+    # Claude CLI sometimes prefixes with "Here's a commit message:" etc.;
+    # _sanitize_commit_message strips those — just split subject from body.
+    head, _, tail = result.partition("\n\n")
+    return head.strip(), tail.strip()
 
 
 # ── LLM strategy + orchestrator entry point ──────────────────────────────────
@@ -703,9 +738,20 @@ def _call_llm_for_commit_message(cfg: dict, repo_path: str, git_exe: str) -> str
     diff = _pending_diff(repo_path, git_exe=git_exe)
     if not diff:
         return None
-    diff_lines = diff.count("\n")
-    if diff_lines < int(cfg.get("min_diff_lines", 10)):
-        return None
+    # Skip the min_diff_lines gate for local providers (Ollama, localhost
+    # openai_compatible) — there is no per-token cost, so gating on diff
+    # size only prevents useful suggestions. The gate still applies for
+    # cloud APIs (anthropic, openai) to control spend.
+    provider = cfg.get("provider", "")
+    is_local = (
+        provider == "ollama"
+        or (provider == "openai_compatible"
+            and "localhost" in cfg.get("base_url", ""))
+    )
+    if not is_local:
+        diff_lines = diff.count("\n")
+        if diff_lines < int(cfg.get("min_diff_lines", 10)):
+            return None
 
     max_chars = int(cfg.get("max_diff_chars", 24000))
     recent    = _recent_commit_subjects(repo_path, git_exe, n=5)
@@ -785,12 +831,24 @@ def _suggest_commit_message(repo_path: str = "", status_text: str = "",
     files, has_source = _parse_commit_status(status_text)
     cfg = cfg or {}
 
-    named_strategies = [
-        ("llm",       lambda: _strat_llm(repo_path, has_source, cfg, git_exe) if git_exe else None),
-        ("changelog", lambda: _strat_changelog(repo_path, files, git_exe) if git_exe else None),
-        ("diff",      lambda: _strat_diff(repo_path, files, git_exe) if git_exe else None),
-        ("filenames", lambda: _strat_filenames(status_text)),
-    ]
+    backend        = (cfg.get("commit_message_backend") or "auto").lower()
+    claude_cli_exe = cfg.get("claude_cli_exe", "")
+
+    # Build strategy chain from backend setting — no if/elif cascade.
+    _cli   = ("claude_cli", lambda: _strat_claude_cli(repo_path, git_exe, claude_cli_exe) if git_exe else None)
+    _llm   = ("llm",        lambda: _strat_llm(repo_path, has_source, cfg, git_exe) if git_exe else None)
+    _cl    = ("changelog",  lambda: _strat_changelog(repo_path, files, git_exe) if git_exe else None)
+    _diff  = ("diff",       lambda: _strat_diff(repo_path, files, git_exe) if git_exe else None)
+    _fnames= ("filenames",  lambda: _strat_filenames(status_text))
+
+    if backend == "llm_first":
+        named_strategies = [_llm, _cli, _cl, _diff, _fnames]
+    elif backend == "claude_cli":
+        named_strategies = [_cli, _cl, _diff, _fnames]
+    elif backend == "llm":
+        named_strategies = [_llm, _cl, _diff, _fnames]
+    else:  # "auto" (default)
+        named_strategies = [_cli, _llm, _cl, _diff, _fnames]
     for name, strategy in named_strategies:
         try:
             result = strategy()

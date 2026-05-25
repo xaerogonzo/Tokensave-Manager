@@ -78,6 +78,17 @@ class ManagerConfig:
         return (self.raw.get("draft_pr_backend") or "auto").lower()
 
     @property
+    def commit_message_backend(self) -> str:
+        """Strategy order for commit-message suggestion.
+
+        'auto'      — Claude CLI first → LLM fallback (default)
+        'llm_first' — LLM (Ollama/LM Studio) first → Claude CLI fallback
+        'claude_cli'— Claude CLI only, no LLM fallback
+        'llm'       — LLM only, Claude CLI never fires
+        """
+        return (self.raw.get("commit_message_backend") or "auto").lower()
+
+    @property
     def basic_instructions_template(self) -> str:
         """Absolute path to the BASIC_INSTRUCTIONS.md template (derives from template_dir)."""
         return os.path.join(self.template_dir, "claude-md-template.md")

@@ -404,43 +404,21 @@ def _dispatch_review_backend(
 def _call_claude_cli(claude_exe: str, user_prompt: str) -> "str | None":
     """Invoke `claude --print` with the review system prompt + diff.
 
-    Uses `--append-system-prompt` to inject our reviewer persona. --print
-    is the non-interactive mode (vs. the TTY interactive mode the
-    Draft PR button uses via helpers/claude_cli.py).
-
-    The user prompt is piped via stdin rather than passed as the trailing
-    positional arg. The argv path mangles multi-line / backtick-laden
-    prompts on Windows in ways that produce
-    "Input must be provided either through stdin or as a prompt argument"
-    even though the arg IS present. stdin sidesteps all argv quirks.
-
-    30s timeout — on timeout return None and the caller fail-opens.
+    Thin wrapper around helpers.claude_cli.call_claude_cli_print — kept
+    here so the pre-commit entry point (precommit_review.py) doesn't need
+    to import from the full manager helper tree. Logs failures to stderr
+    with the [tokensave precommit] prefix expected by the hook script.
     """
-    try:
-        proc = subprocess.run(
-            [claude_exe, "--print",
-             "--append-system-prompt", _REVIEW_SYSTEM_PROMPT],
-            input=user_prompt,
-            capture_output=True, text=True,
-            encoding="utf-8", errors="replace",
-            timeout=30,
-            creationflags=CREATE_NO_WINDOW,
-        )
-    except subprocess.TimeoutExpired:
-        print("[tokensave precommit] claude --print timed out after 30s — "
+    from helpers.claude_cli import call_claude_cli_print
+    result = call_claude_cli_print(
+        claude_exe, user_prompt,
+        system_prompt=_REVIEW_SYSTEM_PROMPT,
+        timeout=30,
+    )
+    if result is None:
+        print("[tokensave precommit] claude --print timed out or failed — "
               "skipping review", file=sys.stderr)
-        return None
-    except OSError as e:
-        print(f"[tokensave precommit] claude --print failed to start: {e}",
-              file=sys.stderr)
-        return None
-    if proc.returncode != 0:
-        snippet = (proc.stderr or proc.stdout or "")[:300]
-        print(f"[tokensave precommit] claude --print returned "
-              f"rc={proc.returncode}: {snippet}", file=sys.stderr)
-        return None
-    output = (proc.stdout or "").strip()
-    return output or None
+    return result
 
 
 def _call_via_llm(llm_cfg: dict, user_prompt: str) -> "str | None":

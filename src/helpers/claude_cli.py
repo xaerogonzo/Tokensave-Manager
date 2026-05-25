@@ -25,6 +25,8 @@ from __future__ import annotations
 import subprocess
 import sys
 
+from constants import CREATE_NO_WINDOW
+
 
 def spawn_claude_cli(
     claude_exe: str,
@@ -49,6 +51,43 @@ def spawn_claude_cli(
             "Claude Code CLI is not configured. "
             "Set the path in Settings → Claude Code CLI."
         )
+
+
+def call_claude_cli_print(
+    claude_exe: str,
+    prompt: str,
+    system_prompt: str = "",
+    timeout: int = 45,
+) -> "str | None":
+    """Invoke `claude --print` non-interactively and return stdout text.
+
+    Used by the pre-commit review hook and the commit-message Claude CLI
+    strategy. The prompt is piped via stdin rather than as a positional
+    arg — argv mangles multi-line / backtick-laden content on Windows.
+
+    Returns the stripped stdout string, or None on timeout / error / empty.
+    """
+    if not claude_exe:
+        return None
+    cmd = [claude_exe, "--print"]
+    if system_prompt:
+        cmd += ["--append-system-prompt", system_prompt]
+    try:
+        proc = subprocess.run(
+            cmd,
+            input=prompt,
+            capture_output=True, text=True,
+            encoding="utf-8", errors="replace",
+            timeout=timeout,
+            creationflags=CREATE_NO_WINDOW,
+        )
+    except subprocess.TimeoutExpired:
+        return None
+    except OSError:
+        return None
+    if proc.returncode != 0:
+        return None
+    return (proc.stdout or "").strip() or None
 
     # Strip newlines — a stray \n inside cmd.exe /k fires Enter prematurely.
     instruction = instruction.replace("\r", " ").replace("\n", " ").strip()

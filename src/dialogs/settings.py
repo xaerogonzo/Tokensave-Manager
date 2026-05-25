@@ -594,6 +594,30 @@ class SettingsDialog(tk.Toplevel):
             font=("Segoe UI", 8), bg=C["base"], fg=C["overlay0"],
             justify=tk.LEFT).pack(anchor=tk.W, padx=36, pady=(0, 8))
 
+        # ── Commit message backend ────────────────────────────────────────
+        ttk.Separator(body, orient="horizontal").pack(fill=tk.X, padx=20, pady=(8, 8))
+        tk.Label(body, text="Commit message backend",
+                 font=("Segoe UI", 10, "bold"),
+                 bg=C["base"], fg=C["text"]).pack(anchor=tk.W, padx=20, pady=(0, 2))
+        self._var_commit_msg_backend = tk.StringVar(
+            value=raw.get("commit_message_backend") or "auto")
+        cm_backend_row = tk.Frame(body, bg=C["base"])
+        cm_backend_row.pack(anchor=tk.W, padx=20, pady=(0, 4))
+        for val, label in [
+            ("auto",       "Claude CLI → LLM"),
+            ("llm_first",  "LLM → Claude CLI"),
+            ("claude_cli", "Claude CLI only"),
+            ("llm",        "LLM only"),
+        ]:
+            ttk.Radiobutton(cm_backend_row, text=label, value=val,
+                            variable=self._var_commit_msg_backend).pack(
+                            side=tk.LEFT, padx=(0, 14))
+        tk.Label(body,
+            text="  Controls which AI backend generates the Suggest button's commit message.\n"
+                 "  Claude CLI uses your subscription (no API credits). LLM uses the provider below.",
+            font=("Segoe UI", 8), bg=C["base"], fg=C["overlay0"],
+            justify=tk.LEFT).pack(anchor=tk.W, padx=36, pady=(0, 8))
+
         # ── Ollama ────────────────────────────────────────────────────────
         ttk.Separator(body, orient="horizontal").pack(fill=tk.X, padx=20, pady=(8, 8))
         tk.Label(body, text="Ollama", font=("Segoe UI", 10, "bold"),
@@ -939,7 +963,8 @@ class SettingsDialog(tk.Toplevel):
             for iid in self._roots_tv.get_children()
         ]
         raw["auto_commit_after_sync"] = self._var_autocommit.get()
-        raw["draft_pr_backend"] = self._var_draft_pr_backend.get()
+        raw["draft_pr_backend"]        = self._var_draft_pr_backend.get()
+        raw["commit_message_backend"]  = self._var_commit_msg_backend.get()
         # Persist AI commit-message settings (preserves any unknown keys
         # the user may have added manually via JSON edit).
         existing_llm = raw.get("commit_message_llm") or {}
