@@ -258,14 +258,36 @@ class SettingsDialog(tk.Toplevel):
                 self._claude_cli_var.set(found)
                 self._claude_cli_status.configure(
                     text=f"Found: {found}", fg=C["green"])
+                self._claude_install_btn.configure(state=tk.DISABLED)
             else:
                 self._claude_cli_status.configure(
-                    text="Not found — install with: npm install -g @anthropic-ai/claude-code",
-                    fg=C["red"])
+                    text="Not found.", fg=C["red"])
+                self._claude_install_btn.configure(state=tk.NORMAL)
+
+        def _install_claude():
+            # Open a PowerShell window with the npm install command pre-typed.
+            # -NoExit keeps the window open so the user can see the output and
+            # follow any prompts (login, PATH reload notice, etc.).
+            try:
+                subprocess.Popen(
+                    ["powershell", "-NoExit", "-Command",
+                     "npm install -g @anthropic-ai/claude-code"],
+                    creationflags=subprocess.CREATE_NEW_CONSOLE,
+                )
+                self._claude_cli_status.configure(
+                    text="PowerShell opened — run it, then click Auto-detect when done.",
+                    fg=C["peach"])
+            except Exception as ex:
+                self._claude_cli_status.configure(
+                    text=f"Could not open PowerShell: {ex}", fg=C["red"])
+
         ttk.Button(cli_row, text="Browse…",      command=_browse_claude).pack(
             side=tk.LEFT, padx=(0, 6))
         ttk.Button(cli_row, text="Auto-detect",  command=_autodetect_claude).pack(
             side=tk.LEFT, padx=(0, 6))
+        self._claude_install_btn = ttk.Button(
+            cli_row, text="Install…", command=_install_claude)
+        self._claude_install_btn.pack(side=tk.LEFT, padx=(0, 6))
         self._claude_cli_status = tk.Label(cli_row, text="", bg=C["base"],
                                            font=("Segoe UI", 8), fg=C["overlay0"])
         self._claude_cli_status.pack(side=tk.LEFT, padx=(6, 0))
@@ -273,6 +295,9 @@ class SettingsDialog(tk.Toplevel):
                  text="  If auto-detect fails, paste the full path (e.g. %APPDATA%\\npm\\claude.cmd).",
                  font=("Segoe UI", 8), bg=C["base"], fg=C["overlay0"]).pack(
                  anchor=tk.W, padx=20, pady=(2, 0))
+        # Initialise Install button state: disabled when a path is already set.
+        if raw.get("claude_cli_exe"):
+            self._claude_install_btn.configure(state=tk.DISABLED)
 
         # ── GitHub CLI (gh) ───────────────────────────────────────────────
         ttk.Separator(body, orient="horizontal").pack(fill=tk.X, padx=20, pady=(12, 8))

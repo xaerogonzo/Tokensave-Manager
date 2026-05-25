@@ -55,6 +55,31 @@ def _skills_dir() -> str:
     return os.path.join(os.path.expanduser("~"), ".claude", "skills")
 
 
+def _plugin_command_files() -> list:
+    """Return [(path, plugin_name)] for all .md files inside plugin commands/ dirs.
+
+    Walks ~/.claude/plugins/marketplaces/<marketplace>/plugins/<plugin>/commands/*.md
+    — the location Claude Code uses for skills installed via the marketplace or
+    /install-github. Standalone skills in ~/.claude/skills/ are handled separately.
+    """
+    results = []
+    root = os.path.join(os.path.expanduser("~"), ".claude", "plugins", "marketplaces")
+    if not os.path.isdir(root):
+        return results
+    for marketplace in os.listdir(root):
+        plugins_dir = os.path.join(root, marketplace, "plugins")
+        if not os.path.isdir(plugins_dir):
+            continue
+        for plugin_name in sorted(os.listdir(plugins_dir)):
+            cmds_dir = os.path.join(plugins_dir, plugin_name, "commands")
+            if not os.path.isdir(cmds_dir):
+                continue
+            for fname in sorted(os.listdir(cmds_dir)):
+                if fname.endswith(".md"):
+                    results.append((os.path.join(cmds_dir, fname), plugin_name))
+    return results
+
+
 def _parse_skill_file(path: str) -> "dict | None":
     """Parse a skill .md file and return a dict with name/description/body.
 
@@ -421,17 +446,27 @@ class SnippetsController:
             self._load_skills()
 
     def _load_skills(self) -> None:
-        """Scan ~/.claude/skills/ for .md files and populate the skills listbox."""
-        sdir = _skills_dir()
+        """Scan ~/.claude/skills/ and plugin commands/ dirs for .md skill files."""
         skills: list = []
+
+        # Standalone skills in ~/.claude/skills/
+        sdir = _skills_dir()
         if os.path.isdir(sdir):
             for fname in sorted(os.listdir(sdir)):
-                if not fname.endswith(".md"):
-                    continue
-                parsed = _parse_skill_file(os.path.join(sdir, fname))
-                if parsed:
-                    skills.append(parsed)
-        self._skills_cache = skills
+                if fname.endswith(".md"):
+                    parsed = _parse_skill_file(os.path.join(sdir, fname))
+                    if parsed:
+                        parsed["source"] = "custom"
+                        skills.append(parsed)
+
+        # Plugin marketplace skills (~/.claude/plugins/marketplaces/.../commands/)
+        for path, plugin_name in _plugin_command_files():
+            parsed = _parse_skill_file(path)
+            if parsed:
+                parsed["source"] = plugin_name
+                skills.append(parsed)
+
+        self._skills_cache = sorted(skills, key=lambda s: s["name"])
         self._refresh_skills_ui()
 
     def _refresh_skills(self) -> None:
@@ -447,9 +482,9 @@ class SnippetsController:
         self._skills_lb.delete(0, tk.END)
         if not self._skills_cache:
             self._skill_set_desc(
-                "No skills found in ~/.claude/skills/\n\n"
-                "Install skills from the Claude Code marketplace or create\n"
-                ".md files with YAML frontmatter in ~/.claude/skills/.",
+                "No skills found in ~/.claude/skills/ or installed plugins.\n\n"
+                "Install skills from the Claude Code marketplace with /install-github,\n"
+                "or create .md files with YAML frontmatter in ~/.claude/skills/.",
                 fg=C["overlay0"],
             )
             self._skill_run_btn.configure(state=tk.DISABLED)
@@ -468,6 +503,9 @@ class SnippetsController:
             return
         skill = self._skills_cache[idx]
         desc = skill["description"] or skill["body"] or "(no description)"
+        source = skill.get("source", "")
+        if source and source != "custom":
+            desc = f"[{source}]\n{desc}"
         self._skill_set_desc(desc)
         self._skill_run_btn.configure(state=tk.NORMAL)
         self._skill_run_status.configure(text="")
