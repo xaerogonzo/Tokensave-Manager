@@ -3,6 +3,24 @@
 
 ## [Unreleased]
 
+### Added
+- (gitignore-dialog) 🤖 AI Suggest button — one-click AI-powered gitignore pattern recommendations; CodeGraph SQLite used as zero-cost file listing when available; falls back to os.listdir; reuses ask_tab_llm → commit_message_llm config chain; all suggestions pending until user clicks Save
+- (ask-tab) separate `ask_tab_llm` config key independent of commit-message model; Settings → Ask Tab AI section with reactive field disable for claude_cli provider
+- (ask-tab) Claude CLI provider path (`claude --print`, no tool access, history as text context); intro text warns when tools unavailable
+- (ask-tab) SSE streaming for final-turn tokens via 50 ms buffered flush loop (prevents Tkinter widget-toggle jitter on Windows)
+- (ask-tab) session log persistence — every exchange appended to `logs/ask_sessions.md`; "📄 Session log" button in header enabled on first write
+- (ask-tab) project context injection — active project name + root path injected as second system message on fresh conversations
+- (ask-tab) auto-clear on project switch — conversation history cleared when a different project is selected
+- (help-tab) comprehensive static content overhaul — Merge vs Rebase, .gitignore, Code Graph preamble, per-feature LLM table, Ask tool list, pre-commit bypass docs; ask seeds changed to specific follow-up questions
+
+### Fixed
+- (agent-tools) tokensave CLI subcommands updated: `tokensave query` → `tokensave tool search`, `tokensave context` → `tokensave tool context` (old subcommands removed upstream)
+- (agent-tools) NameError `cli_subcommand` — stale variable reference after previous refactor; fixed to use `subcommand` parameter
+
+### Changed
+- (commit-messages) multi-doc-file commits now use dominant directory as scope (e.g. `docs(upstream-issues): update`) instead of listing filename stems
+- (mcp-config) extracted `_log_to_app` + `_apply_running_guard` from `_apply`; CC reduced
+
 ## [1.1.0] — 2026-05-25
 
 ### Added

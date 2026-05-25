@@ -129,6 +129,7 @@ The manager's design philosophy: **never force a choice you don't want to make**
 - **Retrofit existing project** — adds tokensave MCP rules to an existing `CLAUDE.md` via `@include`, optionally with all the same extras as Scaffold
 - **Shadow Links** — generates NTFS hardlinks of source files with a secondary extension (e.g. `.zsc` → `.zsc.cpp`) so editors with limited language support can still parse them. Right-click → **🔗 Shadow Links…**
 - **Manage .gitignore dialog** — right-click → **📋 Manage .gitignore…** opens a full editor: scrollable list of current entries with per-row `×` remove (real strikethrough font on marked rows), one-click template injection for 11 categories (Baseline, Python, Node.js, Rust, Java/JVM, .NET, VS Code, JetBrains, macOS, Windows, Nuitka), custom-entry field with dedup + sanity check, live `+`/`−` diff preview before saving. Atomic file write; the existing commit-after-change flow then offers to commit the result. The baseline category includes `.tokensave/`, `.codegraph/`, `.claude/`, Python cache, Nuitka output, virtual environments, and OS noise — all auto-protected so binary index DBs never get committed
+  - **🤖 AI Suggest button** — one click scans the project and asks the configured AI (Ollama / Claude CLI / Anthropic / any OpenAI-compatible provider) for gitignore patterns tailored to the actual project's tech stack. Context is gathered without scanning deep trees: if CodeGraph has indexed the project (`.codegraph/codegraph.db` exists), the full file-extension and top-level directory list is read from CodeGraph's SQLite database for zero extra I/O cost — otherwise falls back to `os.listdir`. The AI also sees untracked files (`git ls-files --others`) and the current ignore state so it never repeats patterns already present. Suggestions appear as pending additions in the diff panel (with a `# AI suggested patterns` attribution header) — nothing is written until you click Save. Reuses the `ask_tab_llm → commit_message_llm` config fallback chain so no extra settings are needed.
   - **📂 Browse… button** lets you pick a file or folder via the OS file picker; the path is auto-relativized against the project root and `/` is appended for directories. Cross-drive picks (Windows) and parent-of-project picks both surface a warning instead of producing invalid `..\` patterns.
   - **UNTRACKED FILES panel** (git repos only) lists output from `git ls-files --others --exclude-standard` with a click-to-add `[+]` button per file — populated in a background thread so opening the dialog stays instant even on large repos. Clicking `[+]` strikes through the row visually so you can see what's pending.
 
@@ -668,6 +669,12 @@ See [docs/ROADMAP.md](docs/ROADMAP.md) for the full staged plan (Stages 0–8), 
 See [CHANGELOG.md](CHANGELOG.md) for the full history.
 
 **Recent highlights (Unreleased)** — see CHANGELOG.md for the detailed bullets on each:
+
+**Roadmap-6 — Ask tab + gitignore AI**
+- 🤖 Ask tab — separate `ask_tab_llm` config (independent of commit-message model), Claude CLI provider option, SSE streaming for final-turn tokens, session log persistence (`logs/ask_sessions.md`)
+- 🤖 Gitignore AI Suggest — one-click AI-powered pattern recommendations in the .gitignore editor; CodeGraph SQLite used as a zero-cost project file listing when available
+- Help tab — comprehensive static reference content with per-section follow-up ask prompts
+- tokensave CLI subcommand fix (`tokensave tool search` / `tokensave tool context` — old `query` / `context` subcommands removed upstream)
 
 **Major: local-AI integration (Stages 0–2 of the roadmap)**
 - 🤖 Ask tab — Stage 2 chat interface with bounded tool-calling agent (`src/agent.py` + `src/agent_tools.py`)
