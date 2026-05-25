@@ -64,9 +64,14 @@ def _detect_base_branch(path: str, git_exe: str) -> "str | None":
             return 1, ""
 
     # Step 1: tracked upstream (e.g. "origin/main")
+    # Skip if upstream == origin/<current-branch> — that's the branch tracking
+    # itself, not a merge target. A feature branch on Roadmap-5 tracking
+    # origin/Roadmap-5 should fall through to master/main detection below.
     rc, out = _run("rev-parse", "--abbrev-ref", "--symbolic-full-name", "@{u}")
     if rc == 0 and out:
-        return out
+        _, current = _run("rev-parse", "--abbrev-ref", "HEAD")
+        if out != f"origin/{current}":
+            return out
 
     # Step 2: repo default via origin/HEAD pointer (may not exist on all clones)
     rc, out = _run("symbolic-ref", "refs/remotes/origin/HEAD")
