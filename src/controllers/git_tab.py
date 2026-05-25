@@ -1150,7 +1150,10 @@ class GitTabController:
             f"Write the PR description to PR_DRAFT.md in the project root.\n"
             f"Include: a one-line summary, bullet list of key changes, and a testing checklist."
         )
-        ok, err = spawn_claude_cli(self._cfg.claude_cli_exe, path, instruction)
+        ok, err = spawn_claude_cli(
+            self._cfg.claude_cli_exe, path, instruction,
+            model=self._cfg.claude_cli_model,
+        )
         if not ok:
             messagebox.showerror("Claude Code CLI error", err, parent=self._root)
 

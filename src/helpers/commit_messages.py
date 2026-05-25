@@ -690,33 +690,36 @@ def _suggest_from_filenames(status_text: str) -> str:
 
 # ── Claude CLI strategy ───────────────────────────────────────────────────────
 
-_CLAUDE_CLI_COMMIT_SYSTEM = (
-    "You are a git commit message generator. "
-    "Output exactly ONE line: a conventional-commit subject (feat/fix/docs/"
-    "refactor/chore/test/ci/perf). Max 72 characters. Imperative mood. "
-    "No body, no explanation, no markdown, no quotes. Just the subject line."
-)
-
 
 def _strat_claude_cli(repo_path: str, git_exe: str,
                       claude_cli_exe: str,
                       claude_cli_model: str = "") -> "tuple[str, str] | None":
-    """Strategy: Claude CLI (claude --print). Returns (subject, body) or None."""
+    """Strategy: Claude CLI (claude --print). Returns (subject, body) or None.
+
+    Reuses _build_llm_prompt from helpers.llm so Claude CLI produces the same
+    rich subject+body output Ollama does. Quality differences between backends
+    now reflect the model itself, not asymmetric prompting.
+    """
     if not claude_cli_exe or not repo_path or not git_exe:
         return None
     diff = _pending_diff(repo_path, git_exe=git_exe)
     if not diff:
         return None
+    recent = _recent_commit_subjects(repo_path, git_exe, n=5)
+    system, user = _build_llm_prompt(diff, recent, max_diff_chars=24000)
+    # cwd=home: Claude Code loads <cwd>/CLAUDE.md as project context, which
+    # puts smaller models like Haiku into "assistant mode" — they respond
+    # conversationally to the diff instead of generating a commit message.
+    # Pointing cwd at $HOME isolates this call from any project's CLAUDE.md.
     result = call_claude_cli_print(
-        claude_cli_exe, diff,
-        system_prompt=_CLAUDE_CLI_COMMIT_SYSTEM,
+        claude_cli_exe, user,
+        system_prompt=system,
         timeout=45,
         model=claude_cli_model,
+        cwd=os.path.expanduser("~"),
     )
     if not result:
         return None
-    # Claude CLI sometimes prefixes with "Here's a commit message:" etc.;
-    # _sanitize_commit_message strips those — just split subject from body.
     head, _, tail = result.partition("\n\n")
     return head.strip(), tail.strip()
 
