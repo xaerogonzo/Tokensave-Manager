@@ -224,97 +224,105 @@ class AITasksController:
             with self._bridges_lock:
                 self._active_bridges.discard(bridge)
 
-    def _do_draft_changelog(
-        self, path: str, llm_cfg: dict, stop_event: threading.Event
-    ) -> None:
-        from helpers.release import _commits_since, _classify_commits_for_changelog, _last_release_tag
-        from helpers.changelog_patch import read_unreleased, update_unreleased
-        from dialogs.proposal import ProposalBridge, WriteProposal
+    def _gather_changelog_data(
+        self, path: str, changelog_path: str, stop_event: threading.Event
+    ) -> "tuple[dict, str] | None":
+        """Stages 1–3: fetch commits, classify, read existing unreleased block.
 
-        changelog_path = os.path.join(path, "CHANGELOG.md")
+        Returns (classified, existing) or None on error / nothing-to-draft / cancel.
+        """
+        from helpers.release import (
+            _commits_since, _classify_commits_for_changelog, _last_release_tag,
+        )
+        from helpers.changelog_patch import read_unreleased
 
-        # ── 1. Gather commits since last release tag ─────────────────────────
         try:
             last_tag = _last_release_tag(path)
-            commits = _commits_since(path, last_tag)
+            commits  = _commits_since(path, last_tag)
         except Exception as e:
-            self._tab.after(
-                0, self._on_log,
-                f"[CHANGELOG] Could not read git history: {e}", "red",
-            )
-            return
+            self._tab.after(0, self._on_log,
+                            f"[CHANGELOG] Could not read git history: {e}", "red")
+            return None
 
         if not commits:
-            self._tab.after(
-                0, self._on_log,
-                "[CHANGELOG] No commits found since last tag — nothing to draft.",
-            )
-            return
+            self._tab.after(0, self._on_log,
+                            "[CHANGELOG] No commits found since last tag — nothing to draft.")
+            return None
 
         if stop_event.is_set():
-            return
+            return None
 
-        # ── 2. Classify commits (conventional-commit aware) ──────────────────
         classified = _classify_commits_for_changelog(commits)
+        existing   = read_unreleased(changelog_path) if os.path.exists(changelog_path) else ""
+        return classified, existing
 
-        # ── 3. Read existing [Unreleased] content for LLM integration ────────
-        existing = ""
-        if os.path.exists(changelog_path):
-            existing = read_unreleased(changelog_path)
+    def _call_changelog_llm(
+        self, classified: dict, existing: str, llm_cfg: dict, stop_event: threading.Event
+    ) -> "str | None":
+        """Stages 4–5: build prompt, call LLM, return drafted text.
 
-        # ── 4 & 5. Build LLM prompt, call LLM, show proposal ────────────────────
+        Returns stripped draft string or None on error / empty result / cancel.
+        """
         from helpers.llm import _call_llm
 
         system_prompt, user_prompt = _build_changelog_prompt(classified, existing)
 
         if stop_event.is_set():
-            return
+            return None
 
         self._tab.after(0, self._on_log, "[CHANGELOG] Calling LLM…")
 
         try:
             drafted = _call_llm(llm_cfg, system_prompt, user_prompt)
         except Exception as e:
-            self._tab.after(
-                0, self._on_log,
-                f"[CHANGELOG] LLM call failed: {e}", "red",
-            )
-            return
+            self._tab.after(0, self._on_log,
+                            f"[CHANGELOG] LLM call failed: {e}", "red")
+            return None
 
         if not drafted or not drafted.strip():
-            self._tab.after(
-                0, self._on_log,
-                "[CHANGELOG] LLM returned empty result.", "red",
-            )
+            self._tab.after(0, self._on_log,
+                            "[CHANGELOG] LLM returned empty result.", "red")
+            return None
+
+        return drafted.strip()
+
+    def _do_draft_changelog(
+        self, path: str, llm_cfg: dict, stop_event: threading.Event
+    ) -> None:
+        from helpers.changelog_patch import update_unreleased
+        from dialogs.proposal import ProposalBridge, WriteProposal
+
+        changelog_path = os.path.join(path, "CHANGELOG.md")
+
+        result = self._gather_changelog_data(path, changelog_path, stop_event)
+        if result is None:
+            return
+        classified, existing = result
+
+        drafted = self._call_changelog_llm(classified, existing, llm_cfg, stop_event)
+        if drafted is None:
             return
 
         if stop_event.is_set():
             return
 
         accepted, final_content = self._open_changelog_proposal(
-            changelog_path, drafted.strip(), existing, WriteProposal, ProposalBridge
+            changelog_path, drafted, existing, WriteProposal, ProposalBridge
         )
 
         if not accepted or not final_content:
             self._tab.after(0, self._on_log, "[CHANGELOG] Draft rejected.")
             return
 
-        # ── 7. Write the accepted content ─────────────────────────────────────
         ok, msg = update_unreleased(changelog_path, final_content)
         if ok:
-            self._tab.after(
-                0, self._on_log,
-                f"[CHANGELOG] {msg} — CHANGELOG.md updated.", "green",
-            )
-            self._tab.after(
-                0, self._on_commit_offer,
-                path, "CHANGELOG.md (unreleased draft)",
-            )
+            self._tab.after(0, self._on_log,
+                            f"[CHANGELOG] {msg} — CHANGELOG.md updated.", "green")
+            self._tab.after(0, self._on_commit_offer,
+                            path, "CHANGELOG.md (unreleased draft)")
         else:
-            self._tab.after(
-                0, self._on_log,
-                f"[CHANGELOG] Write failed: {msg}", "red",
-            )
+            self._tab.after(0, self._on_log,
+                            f"[CHANGELOG] Write failed: {msg}", "red")
 
     # ── Stage 4: Refactor scout ──────────────────────────────────────────────
 
