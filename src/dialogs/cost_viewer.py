@@ -90,8 +90,8 @@ class CostViewerDialog(tk.Toplevel):
 
         self._saved_lbl  = self._create_card(card_frame, "Saved Tokens",   "Loading…", 0, 0, C["green"])
         self._value_lbl  = self._create_card(card_frame, "Value Recouped", "Loading…", 0, 1, C["peach"])
-        self._input_lbl  = self._create_card(card_frame, "Input Tokens",   "Loading…", 1, 0, C["subtext0"])
-        self._output_lbl = self._create_card(card_frame, "Output Tokens",  "Loading…", 1, 1, C["subtext0"])
+        self._input_lbl  = self._create_card(card_frame, "Input Tokens",   "Loading…", 1, 0, C["subtext"])
+        self._output_lbl = self._create_card(card_frame, "Output Tokens",  "Loading…", 1, 1, C["subtext"])
 
         # Refresh button
         btn_row = tk.Frame(self.body, bg=C["base"])
@@ -114,7 +114,7 @@ class CostViewerDialog(tk.Toplevel):
         card.grid(row=row, column=col, padx=8, pady=8, sticky="nsew")
         parent.grid_columnconfigure(col, weight=1)
 
-        tk.Label(card, text=title, fg=C["subtext0"], bg=C["surface0"],
+        tk.Label(card, text=title, fg=C["subtext"], bg=C["surface0"],
                  font=("Segoe UI", 10)).pack(anchor="center")
 
         val_lbl = tk.Label(card, text=initial_val,
@@ -142,5 +142,5 @@ class CostViewerDialog(tk.Toplevel):
             return
         self._saved_lbl.configure( text=m["saved"],        fg=C["green"])
         self._value_lbl.configure( text=f"${m['value']}",  fg=C["peach"])
-        self._input_lbl.configure( text=m["input"],         fg=C["subtext0"])
-        self._output_lbl.configure(text=m["output"],        fg=C["subtext0"])
+        self._input_lbl.configure( text=m["input"],         fg=C["subtext"])
+        self._output_lbl.configure(text=m["output"],        fg=C["subtext"])

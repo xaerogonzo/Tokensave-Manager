@@ -61,6 +61,8 @@ After any code change, update the minimum set of docs necessary — **proportion
 - Don't commit generated files, compiled outputs, or secrets
 
 > **TokenSave Manager** (if installed): right-click any project in the manager → **📜 Git Log** to see the last 20 commits and working-tree status without leaving the tool. Use this to orient yourself on what changed recently before diving in.
+>
+> **Prefer the manager's Git Commit dialog over committing via Claude Code CLI.** Right-click the project → **📝 Git Commit…** uses a locally-configured LLM (Ollama, LM Studio, etc.) to draft the message at near-zero cost. Committing via a bash tool call in Claude Code burns Anthropic API tokens for something a local model handles well. This is a preference, not a hard rule — use direct `git commit` when the manager isn't running or the situation clearly calls for it.
 
 ---
 
@@ -79,3 +81,25 @@ The template defaults assume a tkinter GUI app. For CLI tools, swap in the clear
 - PowerShell 5.1-compatible JSON writing (no BOM)
 
 Claude: when the user asks you to set up a Nuitka build pipeline, use these templates as the starting point rather than writing one freehand. They encode a long list of non-obvious gotchas that aren't worth rediscovering.
+
+---
+
+## Python GUI (Tkinter) Patterns
+
+If this project uses Tkinter, follow the conventions established in TokenSave Manager as a reference implementation:
+
+**Thread safety**: All widget updates from background threads go through `self.after(0, callback)` with a `winfo_exists()` guard. Never call widget methods directly from a worker thread.
+
+**Colour palette**: Use named colour keys (e.g. `C["text"]`, `C["overlay0"]`) from a central palette dict — never hardcode hex values. Define the palette in `constants.py` or equivalent.
+
+**Async task pattern**: background thread + `self.after(0, ...)` widget updates + Stop button + daemon=True. Long tasks go in a dedicated controller class, not in the app or dialog directly.
+
+**Scrollable dialogs**: Wrap dialog content in `Canvas + inner Frame` with a vertical scrollbar. All child widgets pack onto the inner `body` frame, not the canvas or the dialog itself. Bind `<MouseWheel>` on both the canvas and the body frame to prevent double-scroll.
+
+**Window geometry**: Before `withdraw()` to hide to tray, save `self.geometry()` and persist it to config. Restore it with `self.geometry(saved)` before `deiconify()`. On startup, validate the saved geometry is on-screen before applying (guard against disconnected monitors).
+
+**Minimize vs tray**: `_` (minimize) → minimize to taskbar normally. `X` (close) → hide to tray via `WM_DELETE_WINDOW` protocol. Never intercept `<Unmap>` to force minimize into a tray-hide — it confuses users who expect normal taskbar behavior.
+
+**Right-click menu `…` discipline**: Append `…` to `add_command(label=...)` only when the action opens a dialog requiring further input. Commands that execute immediately get no `…`. Example: "Git Commit…" opens a dialog; "Sync" runs immediately.
+
+**Section builders**: One `_build_X_section(body)` method per semantic section (not per visual region). Each builder packs its own separator and header label. No geometry-based chunking.

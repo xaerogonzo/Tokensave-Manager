@@ -41,6 +41,93 @@ if TYPE_CHECKING:
     from state import ManagerConfig
 
 
+def _detect_base_branch(path: str, git_exe: str) -> "str | None":
+    """Detect the PR base branch via a 7-step fallback chain.
+
+    Returns a ref string suitable for `git log <base>..HEAD` and
+    `git diff <base>...HEAD`, or None if detection fails completely.
+
+    Known limitation: assumes origin-centric workflow. Fork workflows with
+    both upstream and origin remotes may resolve to the wrong base.
+    """
+    _git = git_exe or "git"
+
+    def _run(*args):
+        try:
+            proc = subprocess.run(
+                [_git, "-C", path] + list(args),
+                capture_output=True, text=True, timeout=5,
+                creationflags=CREATE_NO_WINDOW,
+            )
+            return proc.returncode, proc.stdout.strip()
+        except Exception:
+            return 1, ""
+
+    # Step 1: tracked upstream (e.g. "origin/main")
+    # Skip if upstream == origin/<current-branch> — that's the branch tracking
+    # itself, not a merge target. A feature branch on Roadmap-5 tracking
+    # origin/Roadmap-5 should fall through to master/main detection below.
+    rc, out = _run("rev-parse", "--abbrev-ref", "--symbolic-full-name", "@{u}")
+    if rc == 0 and out:
+        _, current = _run("rev-parse", "--abbrev-ref", "HEAD")
+        if out != f"origin/{current}":
+            return out
+
+    # Step 2: repo default via origin/HEAD pointer (may not exist on all clones)
+    rc, out = _run("symbolic-ref", "refs/remotes/origin/HEAD")
+    if rc == 0 and out:
+        return out.replace("refs/remotes/", "")
+
+    # Step 3: check origin/main exists as a remote-tracking branch
+    rc, _ = _run("rev-parse", "--verify", "refs/remotes/origin/main")
+    if rc == 0:
+        return "origin/main"
+
+    # Step 4: check origin/master exists
+    rc, _ = _run("rev-parse", "--verify", "refs/remotes/origin/master")
+    if rc == 0:
+        return "origin/master"
+
+    # Step 5: main as a local branch
+    rc, _ = _run("rev-parse", "--verify", "main")
+    if rc == 0:
+        return "main"
+
+    # Step 6: master as a local branch
+    rc, _ = _run("rev-parse", "--verify", "master")
+    if rc == 0:
+        return "master"
+
+    # Step 7: could not detect
+    return None
+
+
+def _extract_pr_title(text: str) -> str:
+    """Pull a one-line title from generated PR markdown.
+
+    Looks for the first non-empty bullet under '## Summary of Changes'.
+    Falls back to the first non-empty non-header line in the whole text.
+    """
+    in_summary = False
+    for line in text.splitlines():
+        stripped = line.strip()
+        if stripped.lower().startswith("## summary"):
+            in_summary = True
+            continue
+        if in_summary:
+            if stripped.startswith("#"):
+                break
+            if stripped.startswith(("- ", "* ", "• ")):
+                return stripped.lstrip("-*• ").strip()[:120]
+            if stripped:
+                return stripped[:120]
+    for line in text.splitlines():
+        stripped = line.strip()
+        if stripped and not stripped.startswith("#"):
+            return stripped[:120]
+    return "PR description"
+
+
 class GitTabController:
     """Owns the Git tab UI and all git operations.
 
@@ -1013,27 +1100,49 @@ class GitTabController:
     # ── Draft PR description ────────────────────────────────────────────────
 
     def cmd_draft_pr(self):
-        """Draft a PR description using the preferred AI tool.
+        """Draft a PR description using the configured AI backend.
 
-        Primary-click behaviour: uses Claude Code CLI if configured, otherwise
-        falls back to the API key path. Shift-click / right-click shows a menu
-        to override the choice.
+        Backend is resolved from `draft_pr_backend` config key:
+          "auto"       — CLI if available, else API key
+          "claude_cli" — force Claude Code CLI
+          "llm"        — force API key path
+        Shift-click / right-click shows an override menu.
         """
         path = self._git_path
         if not path:
             return
+        backend = self._cfg.draft_pr_backend
         cli = self._cfg.claude_cli_exe
         has_api = bool(self._cfg.raw.get("commit_message_llm", {}).get("api_key", "").strip()
                        or self._cfg.raw.get("commit_message_llm", {}).get("provider", "") == "ollama")
-        if cli:
-            self._draft_pr_via_cli(path)
-        elif has_api:
-            self._draft_pr_via_api(path)
-        else:
-            messagebox.showinfo(
-                "No AI configured",
-                "Configure a Claude Code CLI path or an API key in Settings to use Draft PR.",
-                parent=self._root)
+        if backend == "claude_cli":
+            if cli:
+                self._draft_pr_via_cli(path)
+            else:
+                messagebox.showinfo(
+                    "No CLI configured",
+                    "draft_pr_backend=claude_cli but no Claude Code CLI path is set.\n"
+                    "Configure it in Settings → Git tools.",
+                    parent=self._root)
+        elif backend == "llm":
+            if has_api:
+                self._draft_pr_via_api(path)
+            else:
+                messagebox.showinfo(
+                    "No API configured",
+                    "draft_pr_backend=llm but no API key is configured.\n"
+                    "Add a key in Settings → AI commit messages.",
+                    parent=self._root)
+        else:  # "auto"
+            if cli:
+                self._draft_pr_via_cli(path)
+            elif has_api:
+                self._draft_pr_via_api(path)
+            else:
+                messagebox.showinfo(
+                    "No AI configured",
+                    "Configure a Claude Code CLI path or an API key in Settings to use Draft PR.",
+                    parent=self._root)
 
     def _show_draft_pr_menu(self, event, btn):
         """Show an override menu for right-click / Shift+click on Draft PR."""
@@ -1052,11 +1161,45 @@ class GitTabController:
 
     def _draft_pr_via_cli(self, path: str):
         from helpers.claude_cli import spawn_claude_cli   # lazy import
-        instruction = (
-            "Review my uncommitted git changes and write a PR description "
-            "to PR_DRAFT.md in the project root."
+        base = _detect_base_branch(path, self._cfg.git_exe)
+        if base is None:
+            messagebox.showerror(
+                "Draft PR — base branch not found",
+                "Could not detect the base branch for this PR.\n\n"
+                "Push to a remote, or set a tracking branch with:\n"
+                "  git branch --set-upstream-to=origin/<base> <branch>",
+                parent=self._root)
+            return
+        # triple-dot `git diff base...HEAD` computes diff(merge-base(base,HEAD), HEAD)
+        # — this isolates only this branch's commits, excluding upstream changes that
+        # landed on base after branching. Do not change to double-dot.
+        gh_available = bool(shutil.which("gh"))
+        gh_base = base.split("/")[-1]   # strip "origin/" prefix; gh expects bare branch name
+        gh_step = (
+            f"Then create the PR on GitHub: push the branch first with "
+            f"`git push -u origin HEAD` if it has no remote tracking, then run "
+            f"`gh pr create --title <one-line-title> --body-file PR_DRAFT.md "
+            f"--base {gh_base}` (replace <one-line-title> with a short descriptive title) "
+            f"and print the resulting PR URL. "
+            f"If the PR is created successfully, delete PR_DRAFT.md from the project root."
+            if gh_available else
+            "Note: gh CLI is not on PATH, so the PR_DRAFT.md file is your deliverable — "
+            "skip any gh commands."
         )
-        ok, err = spawn_claude_cli(self._cfg.claude_cli_exe, path, instruction)
+        instruction = (
+            f"Draft a PR description for this branch against `{base}`. "
+            f"Run `git log {base}..HEAD --oneline` to see the commits, then "
+            f"`git diff {base}...HEAD` to see the full diff (triple-dot gives the "
+            f"merge-base diff, isolating only this branch's changes — not upstream). "
+            f"Write the PR description to PR_DRAFT.md in the current working directory "
+            f"(use a relative path — just PR_DRAFT.md, not an absolute path). "
+            f"Include: a one-line summary, bullet list of key changes, and a testing checklist. "
+            f"{gh_step}"
+        )
+        ok, err = spawn_claude_cli(
+            self._cfg.claude_cli_exe, path, instruction,
+            model=self._cfg.claude_cli_model,
+        )
         if not ok:
             messagebox.showerror("Claude Code CLI error", err, parent=self._root)
 
@@ -1097,27 +1240,49 @@ class GitTabController:
         vsb.pack(side=tk.RIGHT,  fill=tk.Y)
         txt.pack(side=tk.LEFT,   fill=tk.BOTH, expand=True)
 
+        # Title field — pre-filled from generated text; user can edit before creating
+        title_row = tk.Frame(dlg, bg=C["base"], padx=12, pady=(6, 0))
+        title_row.pack(fill=tk.X)
+        tk.Label(title_row, text="PR title:", font=("Segoe UI", 9),
+                 bg=C["base"], fg=C["subtext"]).pack(side=tk.LEFT)
+        title_var = tk.StringVar(value=_extract_pr_title(text))
+        ttk.Entry(title_row, textvariable=title_var, width=60).pack(
+            side=tk.LEFT, padx=(6, 0), fill=tk.X, expand=True)
+
         def _copy():
             dlg.clipboard_clear()
             dlg.clipboard_append(text)
+
+        gh_exe = shutil.which("gh")
 
         btn_row = tk.Frame(dlg, bg=C["base"], padx=12, pady=8)
         btn_row.pack(fill=tk.X)
         ttk.Button(btn_row, text="Copy to clipboard", command=_copy).pack(side=tk.LEFT)
 
-        # Open-PR-on-GitHub button — gated by `gh` availability so users without
-        # the CLI don't see a button that just errors. Phase 5a wires this to
-        # `gh pr create --web --body-file <tmp>` which opens the browser with
-        # the body pre-filled; the user picks title / base / draft state there.
-        gh_exe = shutil.which("gh")
+        # "Create PR" — runs gh pr create directly; body from live text widget content
+        create_btn = ttk.Button(
+            btn_row, text="Create PR on GitHub",
+            command=lambda: self._create_pr_via_gh(
+                gh_exe, path, title_var.get(),
+                txt.get("1.0", tk.END).rstrip(), dlg))
+        create_btn.pack(side=tk.LEFT, padx=(6, 0))
+        if not gh_exe:
+            create_btn.configure(state=tk.DISABLED)
+            _Tooltip(create_btn,
+                "GitHub CLI not on PATH. Install gh (cli.github.com) to enable.")
+        else:
+            _Tooltip(create_btn,
+                "Create the PR on GitHub directly. Edit the title above first.")
+
+        # "Open in Browser" — pre-fills gh's web form; user sets title/draft there
         open_btn = ttk.Button(
-            btn_row, text="🔗  Open PR on GitHub",
+            btn_row, text="Open in Browser",
             command=lambda: self._open_pr_via_gh(gh_exe, path, text, dlg))
         open_btn.pack(side=tk.LEFT, padx=(6, 0))
         if not gh_exe:
             open_btn.configure(state=tk.DISABLED)
             _Tooltip(open_btn,
-                "GitHub CLI not on PATH.  Install gh (cli.github.com) "
+                "GitHub CLI not on PATH. Install gh (cli.github.com) "
                 "to open a pre-filled PR-create page in your browser.")
         else:
             _Tooltip(open_btn,
@@ -1177,3 +1342,81 @@ class GitTabController:
         # NB: tmp_path is left on disk intentionally. gh reads it lazily after
         # the browser opens, so deleting it immediately would race. The OS will
         # clean it up from %TEMP% eventually.
+
+    def _create_pr_via_gh(self, gh_exe: "str | None", path: str, title: str,
+                          body_text: str, dlg) -> None:
+        """Run `gh pr create` directly — no browser, PR is created immediately.
+
+        Runs on a background thread; all UI callbacks are scheduled via dlg.after().
+        """
+        import tempfile, webbrowser
+
+        title = title.strip()
+        if not title:
+            messagebox.showwarning("Create PR", "Enter a PR title first.", parent=dlg)
+            return
+
+        base = _detect_base_branch(path, self._cfg.git_exe)
+        if base is None:
+            messagebox.showerror(
+                "Create PR",
+                "Could not detect base branch.\n"
+                "Push the branch and set a tracking upstream first.",
+                parent=dlg)
+            return
+
+        try:
+            with tempfile.NamedTemporaryFile(
+                    mode="w", encoding="utf-8", suffix=".md",
+                    prefix="pr-body-", delete=False) as f:
+                f.write(body_text)
+                tmp_path = f.name
+        except OSError as e:
+            messagebox.showerror("Create PR", f"Could not write temp file: {e}", parent=dlg)
+            return
+
+        gh_base = base.split("/")[-1]  # strip "origin/" prefix; gh needs bare branch name
+
+        def _run():
+            try:
+                result = subprocess.run(
+                    [gh_exe, "pr", "create",
+                     "--title", title,
+                     "--body-file", tmp_path,
+                     "--base", gh_base],
+                    capture_output=True, text=True, encoding="utf-8",
+                    cwd=path, creationflags=CREATE_NO_WINDOW, timeout=30)
+            except subprocess.TimeoutExpired:
+                dlg.after(0, lambda: messagebox.showerror(
+                    "Create PR", "gh timed out. Check your network / gh auth status.",
+                    parent=dlg))
+                return
+            except OSError as e:
+                dlg.after(0, lambda msg=str(e): messagebox.showerror("Create PR", msg, parent=dlg))
+                return
+
+            if result.returncode != 0:
+                err = (result.stderr or result.stdout or "unknown error").strip()
+                dlg.after(0, lambda: messagebox.showerror(
+                    "Create PR failed",
+                    f"gh pr create exited {result.returncode}:\n\n{err[:600]}",
+                    parent=dlg))
+                return
+
+            url = (result.stdout or "").strip()
+            self._on_log(f"  PR created: {url}", C["green"])
+            try:
+                os.unlink(tmp_path)
+            except OSError:
+                pass
+            dlg.after(0, lambda: _on_success(url))
+
+        def _on_success(url: str):
+            if messagebox.askyesno(
+                    "PR Created",
+                    f"Pull request created:\n{url}\n\nOpen in browser?",
+                    parent=dlg):
+                webbrowser.open(url)
+            dlg.destroy()
+
+        threading.Thread(target=_run, daemon=True).start()

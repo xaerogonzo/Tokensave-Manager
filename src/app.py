@@ -48,6 +48,7 @@ from controllers.git_tab import GitTabController
 from controllers.help_tab import HelpTabController
 from controllers.projects_tab import ProjectsTabController
 from controllers.snippets import SnippetsController
+from controllers.tasks_tab import TasksController
 from controllers.update_poller import UpdatePollerController
 from dialogs.git_commit import GitCommitDialog
 from dialogs.mcp_config import MCPConfigDialog
@@ -71,6 +72,24 @@ from state import ManagerConfig
 from prompts import PROMPT_SNIPPETS
 
 
+def _geometry_on_screen(root: "tk.Tk", geom: str) -> bool:
+    """Return True if `geom` ("WxH+X+Y") places the window at least partly on screen.
+
+    Uses a conservative single-monitor check via winfo_screen* so we don't
+    restore a geometry that's entirely off-screen (e.g. after a monitor was
+    disconnected). Allows small negative offsets to tolerate multi-monitor
+    left/above arrangements.
+    """
+    import re as _re
+    m = _re.match(r"\d+x\d+\+(-?\d+)\+(-?\d+)$", geom)
+    if not m:
+        return False
+    x, y = int(m.group(1)), int(m.group(2))
+    sw = root.winfo_screenwidth()
+    sh = root.winfo_screenheight()
+    return x < sw and y < sh and x > -600 and y > -520
+
+
 class App(tk.Tk):
     def __init__(self):
         super().__init__()
@@ -85,6 +104,9 @@ class App(tk.Tk):
         # (self._cfg.tokensave_exe, self._cfg.git_exe, …) still exist and get re-bound by
         # _on_settings_saved alongside self._cfg.refresh_derived().
         self._cfg = ManagerConfig.load()
+        saved_geom = self._cfg.raw.get("window_geometry", "")
+        if saved_geom and _geometry_on_screen(self, saved_geom):
+            self.geometry(saved_geom)
         self._current_proc = None
         self._stop_requested = False
         # Version probe + update-check background loop.
@@ -108,9 +130,9 @@ class App(tk.Tk):
         self.refresh()
         self.after(AUTO_REFRESH_MS, self._auto_refresh)
         self._tray = None
+        self._last_geometry: str = ""
         self._setup_tray()
         self.protocol("WM_DELETE_WINDOW", self._hide_to_tray)
-        self.bind("<Unmap>", self._on_unmap)
         self.after(300, self._check_config)
 
     # ── Tray ───────────────────────────────────────────────────────────────────
@@ -130,21 +152,18 @@ class App(tk.Tk):
         threading.Thread(target=self._tray.run, daemon=True).start()
 
     def _hide_to_tray(self):
+        self._last_geometry = self.geometry()
+        self._cfg.raw["window_geometry"] = self._last_geometry
+        self._cfg.save()
         self.withdraw()
-        log.debug("Window hidden to tray")
-
-    def _on_unmap(self, event):
-        if event.widget is self:
-            self.after(100, self._maybe_hide)
-
-    def _maybe_hide(self):
-        if self.state() == "iconic":
-            self.withdraw()
+        log.debug("Window hidden to tray (geometry saved: %s)", self._last_geometry)
 
     def _show_from_tray(self, icon=None, item=None):
         self.after(0, self._do_show)
 
     def _do_show(self):
+        if self._last_geometry:
+            self.geometry(self._last_geometry)
         self.deiconify()
         self.lift()
         self.focus_force()
@@ -159,6 +178,10 @@ class App(tk.Tk):
             self._ask_ctrl.cancel_all_proposals()
         except AttributeError:
             pass  # ask_ctrl not constructed yet (very early failure path)
+        try:
+            self._projects.cancel_ai_proposals()
+        except AttributeError:
+            pass
         if self._tray:
             self._tray.stop()
         self.after(0, self.destroy)
@@ -267,6 +290,10 @@ class App(tk.Tk):
             on_project_select=self._on_project_selected,
             on_set_running=self._set_running,
             on_settings=self.cmd_settings,
+            # Deferred resolution — _ask_ctrl is built two lines below us.
+            # The lambda is only invoked when the user clicks Investigate
+            # on a refactor scout finding, long after construction.
+            on_seed_ask=lambda text, path: self._ask_ctrl.seed_question(text, path),
         )
         self._git = GitTabController(
             self.nb, self._cfg,
@@ -278,8 +305,19 @@ class App(tk.Tk):
         self._ask_ctrl = AskTabController(
             self.nb, self._get_ask_project_path, self._cfg)
         self._snippets_ctrl = SnippetsController(
-            self.nb, self._cfg, PROMPT_SNIPPETS)
-        self._help_ctrl = HelpTabController(self.nb, self._cfg)
+            self.nb, self._cfg, PROMPT_SNIPPETS,
+            get_path=self._get_ask_project_path)
+        self._help_ctrl = HelpTabController(
+            self.nb, self._cfg,
+            on_seed_ask=lambda text, path: self._ask_ctrl.seed_question(text, path),
+            on_llm_cfg=lambda: self._cfg.raw.get("commit_message_llm", {}),
+        )
+        from helpers.detection import _root_path
+        self._tasks_ctrl = TasksController(
+            self.nb, self._cfg,
+            get_project_path=lambda: self._projects.get_selected_path(),
+            get_known_paths=lambda: [_root_path(r) for r in self._cfg.search_roots],
+        )
 
         self.nb.bind("<<NotebookTabChanged>>", self._on_tab_changed)
 
@@ -289,26 +327,6 @@ class App(tk.Tk):
         tk.Label(log_header, text="OUTPUT",
                  font=("Segoe UI", 8, "bold"),
                  bg=C["base"], fg=C["overlay0"]).pack(side=tk.LEFT)
-
-        # Daemon status indicator (left side, after OUTPUT label).
-        # Right-click either widget opens the daemon control menu.
-        # Cursor switches to "hand2" on hover so the indicator looks clickable.
-        self._daemon_indicator = tk.Label(
-            log_header, text="●",
-            fg=C["overlay0"], bg=C["base"],
-            font=("Segoe UI", 11), cursor="hand2")
-        self._daemon_indicator.pack(side=tk.LEFT, padx=(10, 2))
-        self._daemon_lbl = tk.Label(
-            log_header, text="daemon …",
-            fg=C["overlay0"], bg=C["base"],
-            font=("Segoe UI", 8), cursor="hand2")
-        self._daemon_lbl.pack(side=tk.LEFT)
-        for w in (self._daemon_indicator, self._daemon_lbl):
-            w.bind("<Button-3>", self._daemon_show_menu)
-            w.bind("<Button-1>", self._daemon_show_menu)  # left-click too — more discoverable
-        # Last known daemon status — menu reads this to decide which items to show.
-        # None until the first poll completes.
-        self._daemon_status: dict | None = None
 
         ttk.Button(log_header, text="View Log",
                    command=self._open_log).pack(side=tk.RIGHT, padx=(0, 6))
@@ -339,132 +357,6 @@ class App(tk.Tk):
         self.log.pack(side=tk.LEFT, fill=tk.X, expand=True)
         lsb.pack(side=tk.RIGHT, fill=tk.Y)
 
-        # Kick off the daemon status polling loop
-        self._daemon_polling = False
-        self._poll_daemon_status()
-
-    # ── Daemon status polling ───────────────────────────────────────────────
-
-    def _poll_daemon_status(self):
-        """Fetch daemon status in a background thread every 5 seconds.
-
-        Guards against pile-up (self._daemon_polling flag) and against the
-        loop dying silently on subprocess errors (finally block reschedules
-        unconditionally so the indicator never permanently freezes).
-        """
-        if self._daemon_polling:
-            return
-        self._daemon_polling = True
-
-        def _worker():
-            try:
-                from helpers.daemon_cost import get_daemon_status   # lazy import
-                status = get_daemon_status(self._cfg.tokensave_exe)
-                self.after(0, lambda s=status: self._apply_daemon_status(s))
-            finally:
-                self._daemon_polling = False
-                self.after(5000, self._poll_daemon_status)
-
-        import threading
-        threading.Thread(target=_worker, daemon=True).start()
-
-    def _apply_daemon_status(self, status: dict):
-        if not self.winfo_exists():
-            return
-        self._daemon_status = status   # menu reads this on right-click
-        if status.get("error"):
-            self._daemon_indicator.configure(fg=C["overlay0"])
-            self._daemon_lbl.configure(text="daemon: n/a")
-            return
-        if status["running"]:
-            pid_str = f"  (PID {status['pid']})" if status["pid"] else ""
-            self._daemon_indicator.configure(fg=C["green"])
-            self._daemon_lbl.configure(text=f"daemon: running{pid_str}")
-        else:
-            self._daemon_indicator.configure(fg=C["overlay0"])
-            self._daemon_lbl.configure(text="daemon: stopped")
-
-    # ── Daemon right-click menu + actions ───────────────────────────────────
-
-    def _daemon_show_menu(self, event):
-        """Pop the daemon control menu. Items vary by current state.
-
-        Reads self._daemon_status (None until first poll completes). The
-        4 daemon actions are inlined as menu commands rather than separate
-        methods — keeps App's method count under the 40 cap and the menu
-        labels already document what each does.
-        """
-        from helpers.daemon_cost import toggle_daemon, toggle_autostart
-        menu = tk.Menu(self, tearoff=0)
-        status = self._daemon_status
-        if status is None:
-            menu.add_command(label="(daemon status not yet polled)", state=tk.DISABLED)
-        elif status.get("error"):
-            menu.add_command(label=f"Error: {status['error'][:60]}", state=tk.DISABLED)
-            menu.add_separator()
-            menu.add_command(label="Check Settings → tokensave path",
-                             command=self.cmd_settings)
-        else:
-            if status["running"]:
-                menu.add_command(label="Stop daemon",
-                                 command=lambda: self._daemon_run_action(
-                                     "Stopping daemon",
-                                     lambda exe: toggle_daemon(exe, False),
-                                     C["overlay0"]))
-            else:
-                menu.add_command(label="Start daemon",
-                                 command=lambda: self._daemon_run_action(
-                                     "Starting daemon",
-                                     lambda exe: toggle_daemon(exe, True),
-                                     C["green"]))
-            menu.add_separator()
-            if status["autostart"]:
-                menu.add_command(label="Disable autostart",
-                                 command=lambda: self._daemon_run_action(
-                                     "Removing autostart",
-                                     lambda exe: toggle_autostart(exe, False),
-                                     C["overlay0"]))
-            else:
-                menu.add_command(label="Install autostart (run on boot)",
-                                 command=lambda: self._daemon_run_action(
-                                     "Installing autostart",
-                                     lambda exe: toggle_autostart(exe, True),
-                                     C["green"]))
-        menu.add_separator()
-        menu.add_command(label="Open Cost Viewer…", command=self._open_cost_viewer)
-        try:
-            menu.tk_popup(event.x_root, event.y_root)
-        finally:
-            menu.grab_release()
-
-    def _daemon_run_action(self, label: str, action_fn, success_color: str):
-        """Run a daemon action in a worker thread; refresh status on completion."""
-        if not self._cfg.tokensave_exe:
-            messagebox.showerror("Daemon action", "tokensave.exe path is not configured "
-                                 "(Settings → tokensave path).", parent=self)
-            return
-        self._daemon_lbl.configure(text=f"{label}…", fg=C["peach"])
-        import threading
-
-        def _worker():
-            ok, msg = action_fn(self._cfg.tokensave_exe)
-            self.after(0, lambda o=ok, m=msg: self._daemon_after_action(label, o, m, success_color))
-
-        threading.Thread(target=_worker, daemon=True).start()
-
-    def _daemon_after_action(self, label: str, ok: bool, msg: str, success_color: str):
-        if not self.winfo_exists():
-            return
-        if ok:
-            self._daemon_lbl.configure(text=f"✓ {label}", fg=success_color)
-        else:
-            messagebox.showerror(f"Daemon: {label} failed",
-                                 msg or "(no output)", parent=self)
-            self._daemon_lbl.configure(text=f"✗ {label} failed", fg=C["red"])
-        # Re-poll so the indicator + label settle to actual current state.
-        # Wait a tick — some operations (start) need a moment to land.
-        self.after(800, self._poll_daemon_status)
-
     # ── Cost viewer ─────────────────────────────────────────────────────────
 
     def _open_cost_viewer(self):
@@ -490,6 +382,9 @@ class App(tk.Tk):
             current_tab_text = self.nb.tab(self.nb.select(), "text").strip()
         except tk.TclError:
             current_tab_text = ""
+        if "Tasks" in current_tab_text:
+            self._tasks_ctrl.on_tab_selected()
+            return
         if "Ask" in current_tab_text:
             self._ask_ctrl.on_tab_selected()
             return
@@ -750,7 +645,8 @@ class App(tk.Tk):
             self._log("  Composing AI commit message…", C["peach"])
             status_out, _ = self._shell_capture(
                 [self._cfg.git_exe, "-C", cwd, "status", "--short"], cwd)
-            ai_msg = _suggest_commit_message(cwd, status_out, self._cfg.raw, self._cfg.git_exe) or "chore: tokensave sync"
+            _suggestion = _suggest_commit_message(cwd, status_out, self._cfg.raw, self._cfg.git_exe)
+            ai_msg = _suggestion.message or "chore: tokensave sync"
             commit_cmd = [self._cfg.git_exe, "-C", cwd, "commit", "-m", ai_msg.split("\n", 1)[0]]
             if "\n\n" in ai_msg:
                 commit_cmd.extend(["-m", ai_msg.split("\n\n", 1)[1]])
@@ -848,6 +744,15 @@ class App(tk.Tk):
     def cmd_upgrade_tokensave(self):
         """Thin wrapper — delegates to UpdatePollerController."""
         self._update_poller.cmd_upgrade()
+
+    def cmd_integration_check(self):
+        """Run the tokensave integration check script and show results.
+
+        Delegates to UpdatePollerController which manages the subprocess
+        and result dialog. Source-only; shows a friendly info dialog when
+        running from the compiled exe (script not shipped in dist/).
+        """
+        self._update_poller.cmd_integration_check()
 
     # ── Commit dialog (shared by Projects context menu, Git tab, and
     #    offer-commit-after-change flow) ──────────────────────────────────────

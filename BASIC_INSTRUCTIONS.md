@@ -64,6 +64,7 @@ Verification gate: *"What docs did I touch?"* — if the answer is "none" and th
 
 - Reading code to answer a question? Use `tokensave_context` first. Don't use Read/Glob/Grep for code research when tokensave is available (see global `~/.claude/CLAUDE.md`).
 - Before deleting "unused" code: grep-verify. Tk-callback false positives are documented in `~/.claude/projects/D--Claude-Co-worker-Token-Save-Manager-Source/memory/tokensave_python_false_positives.md`.
+- **When tokensave releases a new version**: run the integration check BEFORE merging manager changes. Sequence: (1) `tokensave upgrade`, (2) `git pull` this repo, (3) Settings → "🔍 Check integration" or `python scripts/check_tokensave_integration.py`, (4) copy the "🔄 Integration audit" snippet from the Reference tab and run it in a Claude Code CLI session. See `docs/UPGRADE_INTEGRATION.md` for the full workflow.
 
 ### D. Project guard-rails (the high-impact subset)
 
@@ -249,8 +250,11 @@ Token Save Manager Source/
 │       ├── fileops_ctrl.py        File ops (open folder/editor, copy path, remove index)
 │       ├── shadowlinks_ctrl.py    Shadow links dialog + background generation
 │       ├── codegraph_ctrl.py      CodeGraph init / sync / status / remove
-│       └── git_ops_ctrl.py        Git ops from Projects tab (init, log, commit, AI review,
-│                                  gitignore, untrack, P5b pre-commit hook install/remove)
+│       ├── git_ops_ctrl.py        Git ops from Projects tab (init, log, commit, AI review,
+│       │                          gitignore, untrack, P5b pre-commit hook install/remove)
+│       └── ai_tasks_ctrl.py       Long-running AI write tasks (Stage 3 CHANGELOG drafter;
+│                                  future: refactor scout). Per-task per-project lock.
+│                                  Shutdown-safe via cancel_all_proposals() + App._quit_app.
 │
 ├── templates/                     Data files used by the manager (all shipped in dist\templates\)
 │   ├── claude-md-template.md      BASIC_INSTRUCTIONS template written into scaffolded projects
@@ -274,6 +278,7 @@ Token Save Manager Source/
     ├── ARCHITECTURE.md             Manager architecture reference
     ├── ARCHITECTURE_TOKENSAVE.md   tokensave tool internals reference
     ├── AGENT_ARCHITECTURE.md       LocalAgent + tool registry + locked propose-only rules
+    ├── UPGRADE_INTEGRATION.md      Tokensave upgrade workflow (4-step: upgrade → pull → check → audit)
     ├── ROADMAP.md                  Staged plan for local AI features
     ├── MCP_INTEGRATION_GOTCHAS.md  Postmortem field manual — READ before changing the wrapper
     ├── GITHUB_GUIDE.md             Beginner GitHub guide
@@ -325,6 +330,7 @@ Must be updated when the project moves to a new location or machine.
 | `Launch TokenSave Manager.bat` | Reads `python_exe` from `manager-config.json` via PowerShell, launches manager |
 | `docs/ARCHITECTURE.md` | Class structure, UI layout, data flow, threading model, config system |
 | `docs/ARCHITECTURE_TOKENSAVE.md` | How tokensave.exe works internally |
+| `docs/UPGRADE_INTEGRATION.md` | Tokensave upgrade workflow — run after each new tokensave release |
 | `docs/GITHUB_GUIDE.md` | Beginner GitHub guide — shipped in `dist\docs\` |
 | `docs/ROADMAP.md` | Staged plan for local AI features |
 | `CHANGELOG.md` | Feature history |
@@ -386,6 +392,7 @@ Rules are grouped by subsystem. The top **Working Rules** section governs *how* 
 - **`_GIT_ENV_NO_PROMPT`** must be passed as `env=` to `_shell_capture()` for all network git commands (push, pull). It sets `GIT_TERMINAL_PROMPT=0`, preventing an infinite hang when credentials aren't cached. Compatible with Git Credential Manager (GCM authenticates via browser, not stdin).
 - **Windows `.cmd` resolution priority** — `_detect_npm()`, `_detect_codegraph()`, `_detect_claude_cli()` all probe `.cmd` BEFORE the bare name (`shutil.which("name.cmd")` first, then `shutil.which("name")`). This is critical because npm-installed CLIs on Windows are `.cmd` shims, not `.exe` files; `subprocess.run([list, ...])` with a bare `.cmd` raises `FileNotFoundError` unless the full filename including extension is passed.
 - **`cmd.exe` multi-quote parsing**: when both an exe path and an argument contain spaces, `cmd.exe` strips the outermost quotes. The fix used in `helpers/claude_cli.py` is the `""outer""` double-double-quote wrapper passed as a raw string with `CREATE_NEW_CONSOLE`, never as a list. See the helper's docstring before adding similar patterns.
+- **`_shell_quote_win(path)`** (in `helpers/scaffold.py`) wraps a path in double-quotes if it contains spaces, escaping any embedded `"`. Use it for every path embedded in a **cmd-compatible hook command string** (the `"command"` value in `.claude/settings.json` hook JSON). NOT for PowerShell, bare subprocess lists, or contexts with variable expansion. It is the only correct quoting path for hook JSON — do not inline equivalent logic elsewhere.
 
 ### GUI / Tkinter
 
@@ -397,7 +404,10 @@ Rules are grouped by subsystem. The top **Working Rules** section governs *how* 
 - **Treeview iids**: Category/sub-category rows use `iid="cat:<name>"` / `iid="sub:<cat>:<sub>"`. Project rows use `iid="proj:<path>"`. `_selected_path()` and `_on_right_click()` both guard by checking `iid.startswith("proj:")` — never assume the selected row is a project row.
 - **`except as e` deferred-lambda NameError**: Python clears the exception variable at the end of the `except` block, so `except Exception as e: ... after(0, lambda: messagebox.showerror("...", str(e)))` will NameError when the lambda fires. Fix: `err_msg = str(e)` then `lambda m=err_msg:`. Already fixed in `dialogs/settings.py`, `controllers/shadowlinks_ctrl.py` — match this pattern.
 - **Late-binding lambda in loops**: when generating rows in a for loop, capture loop variables as default kwargs: `lambda f=filepath, b=btn: handler(f, b)`. Without `f=filepath`, every callback captures the last loop value.
-- **`ProposalBridge` threading invariants** (Roadmap-2 P1 — applies to ANY future agent write-tool work that wires through `dialogs/proposal.py:ProposalBridge`): (1) `event.wait()` only ever runs on the agent worker thread — NEVER the Tk main thread. (2) Dialog construction and destruction always happen on Tk main via `root.after(0, ...)`. (3) `_resolve()` is idempotent under a `threading.Lock` — first resolution wins; late clicks after timeout, double-callbacks, and external cancellation all reduce to no-ops. (4) Disk I/O happens on the agent worker thread (in `post_accept`), not Tk main, so AV / OneDrive / Defender stalls can't hitch the GUI. (5) Each agent run gets its OWN bridge instance — never share, or an abandoned proposal can starve concurrent runs. (6) `AskTabController` registers active bridges in a Lock-guarded set; `App._quit_app` calls `cancel_all_proposals()` before destroy so worker threads never deadlock on a destroyed Tk event loop.
+- **`ProposalBridge` threading invariants** (Roadmap-2 P1 — applies to ANY future agent write-tool work that wires through `dialogs/proposal.py:ProposalBridge`): (1) `event.wait()` only ever runs on the agent worker thread — NEVER the Tk main thread. (2) Dialog construction and destruction always happen on Tk main via `root.after(0, ...)`. (3) `_resolve()` is idempotent under a `threading.Lock` — first resolution wins; late clicks after timeout, double-callbacks, and external cancellation all reduce to no-ops. (4) Disk I/O happens on the agent worker thread (in `post_accept`), not Tk main, so AV / OneDrive / Defender stalls can't hitch the GUI. (5) Each agent run gets its OWN bridge instance — never share, or an abandoned proposal can starve concurrent runs. (6) `AskTabController` and `AITasksController` each register active bridges in a Lock-guarded set; `App._quit_app` calls `cancel_all_proposals()` on both before destroy so worker threads never deadlock on a destroyed Tk event loop.
+- **`AITasksController` is the home for all long-running AI write tasks** (Roadmap-3). It orchestrates tasks only — shared infra (LLM calls, ProposalBridge lifecycle, error formatting) belongs in `helpers/`. Per-task per-project locking via `_running: set[tuple[path, task_name]]`; right-click menu builders check `is_running()` before rendering AI menu items. New AI write features go here, NOT into existing deterministic controllers like `git_ops_ctrl.py` or `git_tab.py`.
+- **Window geometry save/restore** (Roadmap-4): Before `withdraw()`, save `self.geometry()` to `self._last_geometry` AND persist it to `cfg.raw["window_geometry"]` + `cfg.save()`. In `deiconify()`, apply `self.geometry(self._last_geometry)` first. On startup, read `cfg.raw["window_geometry"]` and call `_geometry_on_screen(root, geom)` before applying — the helper guards against off-screen positions after monitor changes. Minimize to taskbar (`_`) must NOT call `withdraw()`; only the X button (WM_DELETE_WINDOW) should hide to tray.
+- **Right-click menu `…` discipline**: Append `…` to any `Menu.add_command(label=...)` that opens a dialog requiring further user input before executing (e.g. "Git Commit…", "Settings…"). Commands that execute immediately get NO `…` (e.g. "Sync", "Refresh", "Copy path"). This rule applies to ALL context menus across `src/controllers/`.
 
 ### Git Operations
 
@@ -427,6 +437,8 @@ Rules are grouped by subsystem. The top **Working Rules** section governs *how* 
 
 ### Commit / Release
 
+> **Prefer the manager's Git Commit dialog for commits on this project.** It uses Ollama (or another configured local LLM) to draft the commit message at near-zero cost, and the pre-commit AI review hook gives a free quality gate. This is not a hard rule — use `git commit` directly when it's clearly faster or the manager isn't running — but avoid reflexively committing via Claude Code CLI (`git commit` in a bash tool call) when the dialog is available, since that burns Anthropic API tokens for something Ollama handles better. The user can always commit from the manager after you finish making code changes.
+
 - **`_suggest_commit_message(repo_path, status_text)`** is the multi-strategy orchestrator for the Git Commit dialog suggestion. Chain order (highest-quality first): LLM (if enabled) → CHANGELOG.md staged bullets → diff content → file-name patterns. Every non-empty result passes through `_sanitize_commit_message` which enforces 72-char subjects, imperative mood, blocks filename listings, and escalates generic `chore:` to `refactor:` when source files changed. NEVER duplicate any of these helpers.
 - **`_pending_diff(repo_path, *paths)` uses `git diff HEAD`, NOT `git diff --cached`.** The Git Commit dialog generates suggestions BEFORE the user stages files — `--cached` would always return empty. Any new helper needing the pre-commit diff MUST use this function.
 - **`_call_llm_for_commit_message(cfg, repo_path)` MUST silent-fallback on every failure path.** Supported providers: `anthropic`, `openai`, `openai_compatible`. Any exception, timeout, missing key, empty response, or sub-`min_diff_lines` diff returns `None`. NEVER let an LLM error surface in the commit dialog. Result is always passed through `_sanitize_commit_message`.
@@ -444,7 +456,7 @@ Rules are grouped by subsystem. The top **Working Rules** section governs *how* 
 
 ### Scaffolding / Shadow Links / CodeGraph
 
-- **`_scaffold_git_hook(path)`** writes/merges a Claude Code Stop hook into `.claude/settings.json`. Idempotent — checks for an existing hook whose `command` starts with `"git add -A"` before appending, so scaffold + retrofit on the same project never duplicates the entry.
+- **`_scaffold_git_hook(path)`** writes/merges a Claude Code Stop hook into `.claude/settings.json`. Idempotent — the hook command uses the **absolute path** to `auto-commit-helper.py` (quoted via `_shell_quote_win`) so it works correctly on paths with spaces. The idempotency check recognises (a) the current absolute form, (b) the old relative form `python ".claude/auto-commit-helper.py"`, and (c) the legacy bare-git oneliner — all three are upgraded in-place to the current form on re-run.
 - **`DEFAULT_SHADOW_EXT_MAP` supports two key formats.** Dot-prefixed keys (`.zsc`) match by file extension; non-dot keys (`DECORATE`) match by exact filename, case-insensitive. Both use the same shadow filename logic: `original_path + suffix`. `update_gitignore_for_shadows` emits a glob for extension keys (`*.zsc.cpp`) and a literal name for name keys (`DECORATE.cpp`).
 - **Shadow links are NTFS hardlinks** — zero extra disk space, update instantly with the source file, can be deleted without affecting the original. They only work on NTFS volumes. Do not add shadow link generation to any path that may be on FAT32/exFAT.
 - **`CODEGRAPH_EXE` / `cfg.codegraph_exe` parallels `git_exe`** — the single source for the codegraph CLI path. **Empty string when not installed** (not the bare command name) so `if self._cfg.codegraph_exe:` cleanly tests installation. All codegraph subprocess calls must pass `[self._cfg.codegraph_exe, ...]` — never `["codegraph", ...]`.

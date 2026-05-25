@@ -1,7 +1,13 @@
-# Upstream issue draft — `tokensave_redundancy` aggregate tool
+# Upstream issue — `tokensave_redundancy` aggregate tool
+
+> **STATUS: SHIPPED in tokensave v6.0.0 (issue #83).**
+> `tokensave_redundancy` blends AST-shape, CFG, call-sequence, and token-shingle
+> similarity into definite / likely / naming_only buckets. Fingerprints persist in
+> `node_fingerprints` table (schema v10).
+> Manager "🪦 Redundancy hunt" snippet updated to call this tool directly.
 
 **Repo:** https://github.com/aovestdipaperino/tokensave
-**Suggested title:** `Feature: tokensave_redundancy — AST-level functional-duplication detector`
+**Filed at:** https://github.com/aovestdipaperino/tokensave/issues/83
 **Type:** Feature request / new tool
 **Status:** Draft — review and strip any proprietary code before filing.
 

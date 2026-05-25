@@ -19,11 +19,22 @@ import json
 import os
 
 
-# Stop hook injected into .claude/settings.json by _scaffold_git_hook.
-# Runs the smart helper at .claude/auto-commit-helper.py — see _AUTO_COMMIT_HELPER.
-# The helper amends consecutive auto-commits (so a long session is one commit,
-# not seven) and builds a useful message including file count + names.
-_STOP_HOOK_CMD = 'python ".claude/auto-commit-helper.py"'
+def _shell_quote_win(path: str) -> str:
+    """Wrap `path` in double-quotes if it contains spaces, escaping embedded quotes.
+
+    For use ONLY in cmd-compatible hook command strings embedded in
+    .claude/settings.json hook JSON. NOT for PowerShell, bare subprocess
+    lists, or contexts with variable expansion.
+    """
+    if " " not in path:
+        return path
+    return '"' + path.replace('"', '""') + '"'
+
+
+def _make_stop_hook_cmd(helper_path: str) -> str:
+    """Return the Stop hook command string for the given absolute helper script path."""
+    return f"python {_shell_quote_win(helper_path)}"
+
 
 # Legacy command we previously wrote — kept here so the idempotency check still
 # recognises older projects that have the dumb single-line version and so the
@@ -129,10 +140,11 @@ def _scaffold_git_hook(path: str) -> list:
     stop  = hooks.setdefault("Stop", [])
 
     # ── 3. Upgrade legacy hook OR insert fresh hook ────────────────────────
-    # A "managed" hook is any Stop entry whose command is either the new
-    # helper invocation OR the old legacy oneliner. We replace legacy with
-    # the new one in place so old projects get the smart behavior without
-    # accumulating duplicate entries.
+    # A "managed" hook is any Stop entry whose command references
+    # "auto-commit-helper.py" (both old relative and new absolute forms) or
+    # the old bare-git oneliner. We replace all older forms with the current
+    # absolute-path command so re-runs on paths with spaces work correctly.
+    stop_hook_cmd = _make_stop_hook_cmd(helper_path)
     upgraded = False
     inserted = False
     for entry in stop:
@@ -140,12 +152,14 @@ def _scaffold_git_hook(path: str) -> list:
             if e.get("type") != "command":
                 continue
             cmd = e.get("command", "")
-            if cmd == _STOP_HOOK_CMD:
-                # already on the new helper; nothing to do
+            if cmd == stop_hook_cmd:
+                # already current; nothing to do
                 actions.append("Stop hook already on smart helper — skipped")
                 break
-            if cmd == _LEGACY_STOP_HOOK_CMD or cmd.startswith("git add -A"):
-                e["command"] = _STOP_HOOK_CMD
+            if ("auto-commit-helper.py" in cmd
+                    or cmd == _LEGACY_STOP_HOOK_CMD
+                    or cmd.startswith("git add -A")):
+                e["command"] = stop_hook_cmd
                 upgraded = True
                 actions.append(
                     "Upgraded legacy Stop hook to smart helper "
@@ -157,7 +171,7 @@ def _scaffold_git_hook(path: str) -> list:
     else:
         stop.append({
             "matcher": "",
-            "hooks": [{"type": "command", "command": _STOP_HOOK_CMD}],
+            "hooks": [{"type": "command", "command": stop_hook_cmd}],
         })
         inserted = True
         actions.append("Added smart Stop hook to .claude/settings.json")

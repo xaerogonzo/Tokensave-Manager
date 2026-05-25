@@ -1,6 +1,6 @@
 """Smart commit-message generation — multi-strategy orchestrator + sanitizer.
 
-Public entry point: ``_suggest_commit_message(repo_path, status_text, cfg, git_exe)``.
+Public entry point: ``_suggest_commit_message(repo_path, status_text, cfg, git_exe) -> CommitSuggestion``.
 
 The orchestrator tries strategies in order — LLM (opt-in), CHANGELOG bullet
 parsing, diff-content analysis, file-name patterns — and returns the first
@@ -23,12 +23,14 @@ from __future__ import annotations
 
 import os
 import re
+from dataclasses import dataclass
 import subprocess
 import textwrap
 from collections import Counter
 
 from constants import CREATE_NO_WINDOW
 from helpers.llm import _build_llm_prompt, _call_llm
+from helpers.claude_cli import call_claude_cli_print
 
 
 # ── Conventional-commit reverse-lookup + scope vocabulary ────────────────────
@@ -351,6 +353,34 @@ def _pending_diff(repo_path: str, *paths: str, git_exe: str,
     return proc.stdout if proc.returncode == 0 else ""
 
 
+def _parse_diff_bullet(line: str, section: str | None) -> "dict | None":
+    """Parse a `+`-prefixed diff line as a CHANGELOG bullet.
+
+    Returns a bullet dict ``{section, lead_in, description}`` when `line`
+    starts a new bullet under `section`, or None otherwise. Handles the
+    bolded lead-in pattern (**lead** — desc) with a plain-text fallback.
+    """
+    if not section:
+        return None
+    m_bullet = re.match(r"^\s*[-*]\s+(.*)$", line)
+    if not m_bullet:
+        return None
+    text = m_bullet.group(1)
+    m_bold = re.match(
+        r"^\*\*(?P<lead>[^*]+?)\*\*\s*(?:[—\-–:]\s*)?(?P<desc>.+)$",
+        text,
+    )
+    if m_bold:
+        lead = m_bold.group("lead").strip().rstrip(".").strip()
+        desc = m_bold.group("desc").strip()
+    else:
+        first_sent = re.split(r"(?<=[.!?])\s", text, maxsplit=1)[0]
+        lead = (first_sent[:60].rstrip() if len(first_sent) > 60
+                else first_sent).rstrip(".")
+        desc = text[len(first_sent):].strip() or text
+    return {"section": section, "lead_in": lead, "description": desc}
+
+
 def _extract_changelog_additions(repo_path: str, git_exe: str) -> list:
     """Parse the staged CHANGELOG diff into structured bullet records.
 
@@ -378,69 +408,39 @@ def _extract_changelog_additions(repo_path: str, git_exe: str) -> list:
     current_bullet = None
 
     for raw_line in diff.splitlines():
-        # Skip diff metadata
         if raw_line.startswith("---") or raw_line.startswith("+++"):
             continue
         if raw_line.startswith("@@"):
-            # Hunk boundary — section context from a different hunk is no
-            # longer reliable. Reset so we don't misattribute the next bullet.
+            # Hunk boundary — reset section so we don't misattribute next bullet.
             section = None
             current_bullet = None
             continue
 
-        # Classify the line: + (added), - (removed), space (context)
         if raw_line.startswith("+"):
-            line = raw_line[1:]
-            is_added = True
+            line, is_added = raw_line[1:], True
         elif raw_line.startswith(" "):
-            line = raw_line[1:]
-            is_added = False
+            line, is_added = raw_line[1:], False
         elif raw_line.startswith("-"):
-            continue   # ignore removed lines for section/bullet tracking
+            continue
         else:
-            # Should not happen for unified diff output
             continue
 
-        # Section header: ### Added, ### Changed, etc.
-        # Track from BOTH context and added lines so a bullet added under an
-        # existing section header still gets the right section attribution.
+        # Track section headers from both context and added lines.
         m_section = re.match(r"^#{2,4}\s+(\w+)\s*$", line)
         if m_section:
             section = m_section.group(1)
             current_bullet = None
             continue
 
-        # Only PROCESS added lines for bullets — context lines just inform section.
         if not is_added:
             continue
 
-        # New bullet starting with "- "
-        m_bullet = re.match(r"^\s*[-*]\s+(.*)$", line)
-        if m_bullet and section:
-            text = m_bullet.group(1)
-            # Bolded lead-in pattern: handles
-            #   **lead** — desc       (en-dash, em-dash, hyphen, colon)
-            #   **lead.** desc        (period INSIDE the bold; no separator after)
-            #   **lead** desc         (no separator at all)
-            m_bold = re.match(
-                r"^\*\*(?P<lead>[^*]+?)\*\*\s*(?:[—\-–:]\s*)?(?P<desc>.+)$",
-                text,
-            )
-            if m_bold:
-                lead = m_bold.group("lead").strip().rstrip(".").strip()
-                desc = m_bold.group("desc").strip()
-            else:
-                # Fall back to first 60 chars or first sentence as lead
-                first_sent = re.split(r"(?<=[.!?])\s", text, maxsplit=1)[0]
-                lead = (first_sent[:60].rstrip() if len(first_sent) > 60
-                        else first_sent).rstrip(".")
-                desc = text[len(first_sent):].strip() or text
-            current_bullet = {"section": section, "lead_in": lead,
-                              "description": desc}
+        bullet = _parse_diff_bullet(line, section)
+        if bullet is not None:
+            current_bullet = bullet
             bullets.append(current_bullet)
             continue
 
-        # Continuation of a previous bullet (no leading dash)
         if current_bullet and line.strip():
             current_bullet["description"] = (
                 current_bullet["description"] + " " + line.strip()
@@ -587,7 +587,9 @@ def _suggest_from_diff_content(repo_path: str, files: list, git_exe: str) -> tup
     if exts and exts <= doc_exts:
         if len(files) == 1:
             return f"docs: update {basenames[0]}", ""
-        return "docs: update documentation", ""
+        # Name up to 3 files instead of the generic "documentation"
+        stems = [os.path.splitext(b)[0] for b in sorted(set(basenames))[:3]]
+        return f"docs({', '.join(stems)}): update", ""
 
     # CI workflows
     if ci_paths and len(ci_paths) == len(files):
@@ -673,7 +675,8 @@ def _suggest_from_filenames(status_text: str) -> str:
     code_exts = {".py", ".js", ".ts", ".cs", ".cpp", ".c", ".h", ".rs", ".go", ".java"}
 
     if exts <= doc_exts:
-        return "docs: update documentation"
+        stems = [os.path.splitext(b)[0] for b in sorted(set(basenames))[:3]]
+        return f"docs({', '.join(stems)}): update"
     if exts <= code_exts:
         if len(basenames) <= 3:
             return f"chore: update {', '.join(basenames)}"
@@ -683,6 +686,51 @@ def _suggest_from_filenames(status_text: str) -> str:
     if len(basenames) <= 2:
         return f"chore: update {', '.join(basenames)}"
     return f"chore: update {basenames[0]}, {basenames[1]} + {len(basenames) - 2} more"
+
+
+# ── Claude CLI strategy ───────────────────────────────────────────────────────
+
+
+def _strat_claude_cli(repo_path: str, git_exe: str,
+                      claude_cli_exe: str,
+                      claude_cli_model: str = "") -> "tuple[str, str] | None":
+    """Strategy: Claude CLI (claude --print). Returns (subject, body) or None.
+
+    Reuses _build_llm_prompt from helpers.llm so Claude CLI produces the same
+    rich subject+body output Ollama does. Quality differences between backends
+    now reflect the model itself, not asymmetric prompting.
+
+    system_prompt= is intentionally omitted: passing it triggers
+    --append-system-prompt, which bolts our commit instructions onto the END
+    of Claude Code's full built-in "coding assistant" system prompt. The model
+    receives two competing personas and commit quality degrades significantly.
+    Embedding everything in the user message gives the model a single, focused
+    task with no competing framing.
+    """
+    if not claude_cli_exe or not repo_path or not git_exe:
+        return None
+    diff = _pending_diff(repo_path, git_exe=git_exe)
+    if not diff:
+        return None
+    recent = _recent_commit_subjects(repo_path, git_exe, n=5)
+    system, user = _build_llm_prompt(diff, recent, max_diff_chars=24000)
+    # cwd=home: Claude Code loads <cwd>/CLAUDE.md as project context, which
+    # puts smaller models like Haiku into "assistant mode" — they respond
+    # conversationally to the diff instead of generating a commit message.
+    # Pointing cwd at $HOME isolates this call from any project's CLAUDE.md.
+    result = call_claude_cli_print(
+        claude_cli_exe,
+        "Do NOT run bash, git, or any tools. "
+        "The complete staged diff is provided below — generate the commit message from it directly.\n\n"
+        + system + "\n\n" + user,
+        timeout=45,
+        model=claude_cli_model,
+        cwd=os.path.expanduser("~"),
+    )
+    if not result:
+        return None
+    head, _, tail = result.partition("\n\n")
+    return head.strip(), tail.strip()
 
 
 # ── LLM strategy + orchestrator entry point ──────────────────────────────────
@@ -702,9 +750,20 @@ def _call_llm_for_commit_message(cfg: dict, repo_path: str, git_exe: str) -> str
     diff = _pending_diff(repo_path, git_exe=git_exe)
     if not diff:
         return None
-    diff_lines = diff.count("\n")
-    if diff_lines < int(cfg.get("min_diff_lines", 30)):
-        return None
+    # Skip the min_diff_lines gate for local providers (Ollama, localhost
+    # openai_compatible) — there is no per-token cost, so gating on diff
+    # size only prevents useful suggestions. The gate still applies for
+    # cloud APIs (anthropic, openai) to control spend.
+    provider = cfg.get("provider", "")
+    is_local = (
+        provider == "ollama"
+        or (provider == "openai_compatible"
+            and "localhost" in cfg.get("base_url", ""))
+    )
+    if not is_local:
+        diff_lines = diff.count("\n")
+        if diff_lines < int(cfg.get("min_diff_lines", 10)):
+            return None
 
     max_chars = int(cfg.get("max_diff_chars", 24000))
     recent    = _recent_commit_subjects(repo_path, git_exe, n=5)
@@ -760,14 +819,21 @@ def _strat_filenames(status_text: str) -> "tuple[str, str] | None":
     return (result, "") if result else None
 
 
+@dataclass
+class CommitSuggestion:
+    message: str
+    strategy: str  # "llm" | "changelog" | "diff" | "filenames" | "backstop" | "none"
+
+
 def _suggest_commit_message(repo_path: str = "", status_text: str = "",
                             cfg: dict | None = None,
-                            git_exe: str = "") -> str:
+                            git_exe: str = "") -> CommitSuggestion:
     """Generate a conventional-commit-style message for the staged changes.
 
     Multi-strategy orchestrator — tries the highest-quality strategy first
-    and falls through to weaker ones on empty results. Returns "" only if
-    every strategy yields nothing AND there are no staged files at all.
+    and falls through to weaker ones on empty results. Returns a
+    CommitSuggestion with message="" only if every strategy yields nothing
+    AND there are no staged files at all.
 
     `repo_path` is optional for backwards compatibility — if empty, only
     the file-name strategy runs (it doesn't need shell access). `cfg` is
@@ -777,13 +843,27 @@ def _suggest_commit_message(repo_path: str = "", status_text: str = "",
     files, has_source = _parse_commit_status(status_text)
     cfg = cfg or {}
 
-    strategies = [
-        lambda: _strat_llm(repo_path, has_source, cfg, git_exe) if git_exe else None,
-        lambda: _strat_changelog(repo_path, files, git_exe) if git_exe else None,
-        lambda: _strat_diff(repo_path, files, git_exe) if git_exe else None,
-        lambda: _strat_filenames(status_text),
-    ]
-    for strategy in strategies:
+    backend          = (cfg.get("commit_message_backend") or "auto").lower()
+    claude_cli_exe   = cfg.get("claude_cli_exe", "")
+    # raw.get returns None if the JSON key is `null`; coerce defensively.
+    claude_cli_model = cfg.get("claude_cli_model") or ""
+
+    # Build strategy chain from backend setting — no if/elif cascade.
+    _cli   = ("claude_cli", lambda: _strat_claude_cli(repo_path, git_exe, claude_cli_exe, claude_cli_model) if git_exe else None)
+    _llm   = ("llm",        lambda: _strat_llm(repo_path, has_source, cfg, git_exe) if git_exe else None)
+    _cl    = ("changelog",  lambda: _strat_changelog(repo_path, files, git_exe) if git_exe else None)
+    _diff  = ("diff",       lambda: _strat_diff(repo_path, files, git_exe) if git_exe else None)
+    _fnames= ("filenames",  lambda: _strat_filenames(status_text))
+
+    if backend == "llm_first":
+        named_strategies = [_llm, _cli, _cl, _diff, _fnames]
+    elif backend == "claude_cli":
+        named_strategies = [_cli, _cl, _diff, _fnames]
+    elif backend == "llm":
+        named_strategies = [_llm, _cl, _diff, _fnames]
+    else:  # "auto" (default)
+        named_strategies = [_cli, _llm, _cl, _diff, _fnames]
+    for name, strategy in named_strategies:
         try:
             result = strategy()
         except Exception:
@@ -793,13 +873,18 @@ def _suggest_commit_message(repo_path: str = "", status_text: str = "",
         subj, body = _sanitize_commit_message(
             result[0], result[1], has_source_changes=has_source)
         if subj:
-            return subj + (("\n\n" + body) if body else "")
+            return CommitSuggestion(
+                message=subj + (("\n\n" + body) if body else ""),
+                strategy=name,
+            )
 
     # Generic backstop — reached only when every strategy was empty or
     # produced a filename-listing that sanitization rejected.
     if files:
         if has_source:
             scope = _dominant_directory(files)
-            return f"refactor({scope}): update sources" if scope else "refactor: update sources"
-        return "chore: update files"
-    return ""
+            msg = f"refactor({scope}): update sources" if scope else "refactor: update sources"
+        else:
+            msg = "chore: update files"
+        return CommitSuggestion(message=msg, strategy="backstop")
+    return CommitSuggestion(message="", strategy="none")

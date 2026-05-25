@@ -136,6 +136,56 @@ def _iter_json_lines(response):
                 continue
 
 
+def _stream_anthropic_response(resp, on_token) -> str:
+    """Accumulate streamed text from an Anthropic SSE response.
+
+    Parses `content_block_delta` events and calls `on_token` for each chunk.
+    Returns the full accumulated text (may be empty if the stream was empty).
+    """
+    pieces = []
+    for event in _iter_sse_events(resp):
+        try:
+            data = json.loads(event)
+        except json.JSONDecodeError:
+            continue
+        if data.get("type") == "content_block_delta":
+            delta = (data.get("delta") or {}).get("text", "")
+            if delta:
+                pieces.append(delta)
+                try:
+                    on_token(delta)
+                except Exception:
+                    log.exception("on_token callback raised")
+    return "".join(pieces).strip()
+
+
+def _stream_openai_response(resp, on_token) -> str:
+    """Accumulate streamed text from an OpenAI-compatible SSE response.
+
+    Parses `choices[0].delta.content` events and calls `on_token` per chunk.
+    Returns the full accumulated text (may be empty if the stream was empty).
+    """
+    pieces = []
+    for event in _iter_sse_events(resp):
+        if event == "[DONE]":
+            break
+        try:
+            data = json.loads(event)
+        except json.JSONDecodeError:
+            continue
+        choices = data.get("choices") or []
+        if not choices:
+            continue
+        delta = (choices[0].get("delta") or {}).get("content") or ""
+        if delta:
+            pieces.append(delta)
+            try:
+                on_token(delta)
+            except Exception:
+                log.exception("on_token callback raised")
+    return "".join(pieces).strip()
+
+
 def _call_anthropic(api_key: str, model: str, system_prompt: str, user_prompt: str,
                     max_tokens: int, timeout: int, on_token) -> str | None:
     """Anthropic Messages API — streaming and non-streaming. Pure execution layer;
@@ -161,23 +211,7 @@ def _call_anthropic(api_key: str, model: str, system_prompt: str, user_prompt: s
     )
     if on_token is not None:
         with urllib.request.urlopen(req, timeout=timeout) as resp:
-            pieces = []
-            for event in _iter_sse_events(resp):
-                try:
-                    data = json.loads(event)
-                except json.JSONDecodeError:
-                    continue
-                # Anthropic streams content_block_delta events with
-                # {"delta": {"type":"text_delta","text":"..."}}
-                if data.get("type") == "content_block_delta":
-                    delta = (data.get("delta") or {}).get("text", "")
-                    if delta:
-                        pieces.append(delta)
-                        try:
-                            on_token(delta)
-                        except Exception:
-                            log.exception("on_token callback raised")
-        return "".join(pieces).strip() or None
+            return _stream_anthropic_response(resp, on_token) or None
     with urllib.request.urlopen(req, timeout=timeout) as resp:
         data = json.loads(resp.read().decode("utf-8"))
     blocks = data.get("content") or []
@@ -212,26 +246,7 @@ def _call_openai_compat(url: str, api_key: str, model: str,
     )
     if on_token is not None:
         with urllib.request.urlopen(req, timeout=timeout) as resp:
-            pieces = []
-            for event in _iter_sse_events(resp):
-                if event == "[DONE]":
-                    break
-                try:
-                    data = json.loads(event)
-                except json.JSONDecodeError:
-                    continue
-                choices = data.get("choices") or []
-                if not choices:
-                    continue
-                delta_obj = choices[0].get("delta") or {}
-                delta = delta_obj.get("content") or ""
-                if delta:
-                    pieces.append(delta)
-                    try:
-                        on_token(delta)
-                    except Exception:
-                        log.exception("on_token callback raised")
-        return "".join(pieces).strip() or None
+            return _stream_openai_response(resp, on_token) or None
     with urllib.request.urlopen(req, timeout=timeout) as resp:
         data = json.loads(resp.read().decode("utf-8"))
     choices = data.get("choices") or []

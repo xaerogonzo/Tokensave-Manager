@@ -26,7 +26,7 @@ from tkinter import ttk, messagebox
 from typing import TYPE_CHECKING
 
 from constants import C
-from helpers.commit_messages import _suggest_commit_message
+from helpers.commit_messages import CommitSuggestion, _suggest_commit_message
 from helpers.runtime import log
 
 if TYPE_CHECKING:
@@ -321,10 +321,11 @@ class GitCommitDialog(tk.Toplevel):
 
         if not llm_active:
             # Heuristics only — instant, no spinner needed.
-            result = _suggest_commit_message(
+            suggestion = _suggest_commit_message(
                 self._path, status_text, raw, self._cfg.git_exe
-            ) or "chore: update files"
-            self._apply_suggestion(result)
+            )
+            self._apply_suggestion(suggestion.message or "chore: update files")
+            self._show_strategy_badge(suggestion.strategy)
             return
 
         # Async path. Bump token so an in-flight earlier request loses the race.
@@ -348,13 +349,13 @@ class GitCommitDialog(tk.Toplevel):
         def _worker(path=self._path, st=status_text, tok=my_token,
                     raw=raw, git=self._cfg.git_exe):
             try:
-                result = _suggest_commit_message(path, st, raw, git)
+                suggestion = _suggest_commit_message(path, st, raw, git)
             except Exception:
                 log.exception("Suggestion worker failed")
-                result = ""
+                suggestion = CommitSuggestion(message="", strategy="error")
             # Always come back to the main thread to touch widgets.
             try:
-                self.after(0, self._on_suggestion_ready, tok, result)
+                self.after(0, self._on_suggestion_ready, tok, suggestion)
             except RuntimeError:
                 # Dialog was destroyed before result arrived — silent drop.
                 pass
@@ -362,9 +363,9 @@ class GitCommitDialog(tk.Toplevel):
         threading.Thread(target=_worker, daemon=True,
                          name="commit-suggestion-worker").start()
 
-    def _on_suggestion_ready(self, token: int, result: str):
+    def _on_suggestion_ready(self, token: int, result: CommitSuggestion):
         """Main-thread callback: receive the orchestrator's result."""
-        # Clear spinner regardless of outcome.
+        # Clear spinner regardless of outcome (badge re-populated below).
         self._suggest_status_lbl.configure(text="")
         # Stale request (a newer Suggest click already ran) — discard.
         if token != self._suggestion_token:
@@ -372,10 +373,33 @@ class GitCommitDialog(tk.Toplevel):
         # User started editing after we kicked off — respect their input.
         if self._user_has_edited:
             return
-        # Empty result → keep placeholder cleared and offer a generic fallback
-        if not result:
-            result = "chore: update files"
-        self._apply_suggestion(result)
+        msg = result.message or "chore: update files"
+        self._apply_suggestion(msg)
+        self._show_strategy_badge(result.strategy)
+
+    _STRATEGY_BADGES = {
+        "llm":        ("via LLM",        "green"),
+        "claude_cli": ("via Claude CLI", "mauve"),
+        "changelog":  ("via CHANGELOG",  "blue"),
+        "diff":       ("via diff",       "subtext"),
+        "filenames":  ("via filename",   "subtext"),
+        "backstop":   ("via fallback",   "overlay0"),
+        "error":      ("error — using fallback", "red"),
+        "none":       ("",               "subtext"),
+    }
+
+    def _show_strategy_badge(self, strategy: str):
+        """Render which generator strategy produced the suggestion.
+
+        Maps the orchestrator's strategy tag onto a short, palette-coloured
+        label in the existing _suggest_status_lbl. Empty strategy → cleared.
+        """
+        label, colour_key = self._STRATEGY_BADGES.get(
+            strategy, (f"via {strategy}", "subtext"))
+        if not label:
+            self._suggest_status_lbl.configure(text="")
+            return
+        self._suggest_status_lbl.configure(text=label, fg=C.get(colour_key, C["subtext"]))
 
     def _apply_suggestion(self, suggestion: str):
         """Insert `suggestion` into the message field, select first line."""

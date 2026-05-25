@@ -156,7 +156,6 @@ class MCPConfigDialog(tk.Toplevel):
         info = _classify_mcp_entry(path, self._cfg.raw)
         self._config_state[path] = info
 
-        # Section frame
         frame = tk.LabelFrame(
             self._body, text=f"  {label}  ",
             bg=C["base"], fg=C["text"],
@@ -164,7 +163,13 @@ class MCPConfigDialog(tk.Toplevel):
             bd=1, relief=tk.GROOVE)
         frame.pack(fill=tk.X, padx=4, pady=(8, 4), ipady=4)
 
-        # Path + status row
+        self._render_block_header(frame, label, path, info)
+        if info["state"] != "ok":
+            self._render_block_diff(frame, info)
+        self._render_block_actions(frame, label, path, info)
+
+    def _render_block_header(self, frame, label: str, path: str, info: dict):
+        """Path label, optional UWP tag, and status badge."""
         head = tk.Frame(frame, bg=C["base"])
         head.pack(fill=tk.X, padx=8, pady=(4, 2))
         tk.Label(head, text=path, font=("Consolas", 9),
@@ -186,17 +191,13 @@ class MCPConfigDialog(tk.Toplevel):
                      bg=C["base"], fg=tag_colour).pack(side=tk.LEFT)
 
         state = info["state"]
-        if state == "ok":
-            badge_colour = C["green"]
-        elif state in ("direct_serve", "wrong_wrapper"):
-            badge_colour = C["peach"]
-        else:
-            badge_colour = C["red"]
+        badge_colour = (C["green"] if state == "ok"
+                        else C["peach"] if state in ("direct_serve", "wrong_wrapper")
+                        else C["red"])
         tk.Label(head, text=info["label"],
                  font=("Segoe UI", 9, "bold"),
                  bg=C["base"], fg=badge_colour).pack(side=tk.RIGHT)
 
-        # Issue text (always shown for clarity, even on ok)
         issue_text = info["issue"] or "No action needed — already routes through the wrapper."
         tk.Label(frame, text=issue_text,
                  font=("Segoe UI", 9),
@@ -204,48 +205,46 @@ class MCPConfigDialog(tk.Toplevel):
                  justify=tk.LEFT, wraplength=720, anchor=tk.W).pack(
             fill=tk.X, padx=8, pady=(0, 4))
 
-        # Diff (only if there's something to change)
-        if state != "ok":
-            diff_box = tk.Text(
-                frame, height=8, font=("Consolas", 9),
-                bg=C["mantle"], fg=C["text"],
-                relief=tk.FLAT, padx=8, pady=6, wrap=tk.NONE,
-                state=tk.NORMAL)
-            diff_box.tag_configure("old", foreground="#f38ba8")
-            diff_box.tag_configure("new", foreground="#a6e3a1")
-            diff_box.tag_configure("hdr", foreground=C["overlay0"],
-                                    font=("Consolas", 9, "italic"))
+    def _render_block_diff(self, frame, info: dict):
+        """Diff text box showing current vs proposed JSON — only for non-ok states."""
+        diff_box = tk.Text(
+            frame, height=8, font=("Consolas", 9),
+            bg=C["mantle"], fg=C["text"],
+            relief=tk.FLAT, padx=8, pady=6, wrap=tk.NONE,
+            state=tk.NORMAL)
+        diff_box.tag_configure("old", foreground="#f38ba8")
+        diff_box.tag_configure("new", foreground="#a6e3a1")
+        diff_box.tag_configure("hdr", foreground=C["overlay0"],
+                                font=("Consolas", 9, "italic"))
 
-            if info["current"] is None:
-                diff_box.insert(tk.END, "  (no current entry — will be added)\n", "hdr")
-            else:
-                diff_box.insert(tk.END, "  --- current ---\n", "hdr")
-                for line in json.dumps(info["current"], indent=2).splitlines():
-                    diff_box.insert(tk.END, "  - " + line + "\n", "old")
-            diff_box.insert(tk.END, "  +++ proposed +++\n", "hdr")
-            for line in json.dumps(info["proposed"], indent=2).splitlines():
-                diff_box.insert(tk.END, "  + " + line + "\n", "new")
+        if info["current"] is None:
+            diff_box.insert(tk.END, "  (no current entry — will be added)\n", "hdr")
+        else:
+            diff_box.insert(tk.END, "  --- current ---\n", "hdr")
+            for line in json.dumps(info["current"], indent=2).splitlines():
+                diff_box.insert(tk.END, "  - " + line + "\n", "old")
+        diff_box.insert(tk.END, "  +++ proposed +++\n", "hdr")
+        for line in json.dumps(info["proposed"], indent=2).splitlines():
+            diff_box.insert(tk.END, "  + " + line + "\n", "new")
 
-            # Auto-size height to content, capped
-            line_count = int(diff_box.index("end-1c").split(".")[0])
-            diff_box.configure(height=min(max(line_count + 1, 6), 18),
-                               state=tk.DISABLED)
-            diff_box.pack(fill=tk.X, padx=8, pady=(2, 4))
+        line_count = int(diff_box.index("end-1c").split(".")[0])
+        diff_box.configure(height=min(max(line_count + 1, 6), 18),
+                           state=tk.DISABLED)
+        diff_box.pack(fill=tk.X, padx=8, pady=(2, 4))
 
-        # Action row
+    def _render_block_actions(self, frame, label: str, path: str, info: dict):
+        """Apply / Skip / Open buttons and the backup-notice strip."""
         actions = tk.Frame(frame, bg=C["base"])
         actions.pack(fill=tk.X, padx=8, pady=(2, 4))
 
-        if state == "ok":
+        if info["state"] == "ok":
             ttk.Button(actions, text="Open file",
                        command=lambda p=path: self._open_file(p)).pack(side=tk.LEFT)
         else:
-            apply_btn = ttk.Button(
+            ttk.Button(
                 actions, text="Apply this fix",
                 style="Primary.TButton",
-                command=lambda p=path, l=label: self._apply(p, l))
-            apply_btn.pack(side=tk.LEFT)
-
+                command=lambda p=path, l=label: self._apply(p, l)).pack(side=tk.LEFT)
             ttk.Button(actions, text="Skip (don't warn again)",
                        command=lambda p=path: self._skip(p)).pack(
                 side=tk.LEFT, padx=(8, 0))
@@ -253,7 +252,6 @@ class MCPConfigDialog(tk.Toplevel):
                        command=lambda p=path: self._open_file(p)).pack(
                 side=tk.LEFT, padx=(8, 0))
 
-        # Backup-notice strip
         tk.Label(frame,
             text=("  A timestamped backup is written before any change. "
                   "Other mcpServers entries in this file are preserved verbatim."),

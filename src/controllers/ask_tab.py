@@ -113,6 +113,7 @@ class AskTabController:
                  cfg: "ManagerConfig"):
         self._get_project_path = get_project_path
         self._cfg = cfg
+        self._notebook = notebook  # kept so seed_question() can flip to this tab
         self._ask_path: str | None = None
         self._ask_messages: list = []
         self._ask_stop_event: threading.Event | None = None
@@ -124,6 +125,43 @@ class AskTabController:
         self._tab = tk.Frame(notebook, bg=C["base"])
         notebook.add(self._tab, text="  🤖 Ask  ")
         self._build()
+
+    # ── External seeding (refactor scout → Investigate) ──────────────────────
+
+    def seed_question(self, text: str, path: str) -> None:
+        """Inject `text` as a user question and run the agent against `path`.
+
+        Used by the refactor scout's Investigate button. The Ask entry is a
+        single-line widget that can't display a multi-line investigate prompt
+        legibly, so we put the text into the entry (so _ask_send reads it),
+        switch the notebook to the Ask tab, and trigger _ask_send. The full
+        prompt then appears in the chat log as the user message — that's the
+        legible record. Refuses if an agent run is already in flight; the
+        user can wait + retry.
+        """
+        if self._ask_thread and self._ask_thread.is_alive():
+            from tkinter import messagebox
+            messagebox.showinfo(
+                "Ask tab busy",
+                "An agent run is already in progress. Wait for it to finish "
+                "(or click Stop) before launching a new investigation.",
+                parent=self._tab.winfo_toplevel(),
+            )
+            return
+        self._ask_path = path
+        try:
+            self._notebook.select(self._tab)
+        except tk.TclError:
+            pass
+        try:
+            self._ask_entry.delete(0, tk.END)
+            self._ask_entry.insert(0, text)
+        except tk.TclError:
+            return
+        self._ask_refresh_header()
+        # Defer the send by one Tk tick so the notebook has time to switch
+        # tabs first — feels less abrupt and avoids any half-rendered state.
+        self._tab.after(50, self._ask_send)
 
     # ── Phase 1 (Roadmap-2): write-proposal bridge ────────────────────────
 

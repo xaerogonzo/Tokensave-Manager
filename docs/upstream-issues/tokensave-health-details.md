@@ -1,7 +1,13 @@
-# Upstream issue draft — `tokensave_health details=true` sub-score breakdown
+# Upstream issue — `tokensave_health details=true` sub-score breakdown
+
+> **STATUS: FIXED in tokensave v6.0.0 (issue #82).**
+> `tokensave_health(details=true)` now returns per-dimension sub-scores:
+> acyclicity, depth, equality/gini, redundancy, modularity, coverage discipline.
+> Manager prompts.py "📊 Full health audit" and "🔗 Health sub-score breakdown"
+> snippets updated to use `details=true`.
 
 **Repo:** https://github.com/aovestdipaperino/tokensave
-**Suggested title:** `tokensave_health: expose sub-score breakdown (depth / acyclicity / coverage / etc.) via a details=true flag`
+**Filed at:** https://github.com/aovestdipaperino/tokensave/issues/82
 **Type:** Feature request / API enhancement
 **Status:** Draft — review and strip any proprietary code before filing.
 

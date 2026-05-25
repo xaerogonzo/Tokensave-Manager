@@ -3,20 +3,29 @@
 Extracted from App (Round 5 / App decomposition).
 
 Dependency contract:
-  • notebook — ttk.Notebook to add the Help tab to
-  • cfg      — read-only ManagerConfig (.template_dir, read at execution time)
+  • notebook      — ttk.Notebook to add the Help tab to
+  • cfg           — read-only ManagerConfig (.template_dir, read at execution time)
+  • on_seed_ask   — optional Callable[[str, str], None] — seeds a question into the Ask tab
+  • on_llm_cfg    — optional Callable[[], dict]         — returns the current LLM config dict
 
 All help content is static text.  The only cfg usage is in _help_file_locations,
 which reads .template_dir at display time (not at __init__ time) so a
 Settings save propagates without restarting.
+
+Inline "🔍 Explain" streams a 3-5 sentence LLM summary via helpers/llm._call_llm.
+"🤖 Ask" pre-fills a question in the Ask tab and fires the agent.
+"📄 Open docs" opens the relevant markdown file in the system default viewer.
 """
 
 from __future__ import annotations
 
 import os
+import subprocess
+import sys
+import threading
 import tkinter as tk
 from tkinter import ttk
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Callable, Optional
 
 from constants import C, LOG_FILE, _BASE_DIR, _CONFIG_PATH
 
@@ -24,16 +33,53 @@ if TYPE_CHECKING:
     from state import ManagerConfig
 
 
+# ── Module-level helpers ───────────────────────────────────────────────────────
+
+def _open_doc(path: str) -> None:
+    """Open a documentation file in the system default viewer (cross-platform)."""
+    if sys.platform == "win32":
+        os.startfile(path)  # type: ignore[attr-defined]
+    elif sys.platform == "darwin":
+        try:
+            subprocess.run(["open", path], check=True)
+        except Exception:
+            pass
+    else:
+        try:
+            subprocess.run(["xdg-open", path], check=True)
+        except Exception:
+            from tkinter import messagebox
+            messagebox.showwarning(
+                "Cannot open file",
+                f"Could not open the document automatically.\nPath: {path}",
+            )
+
+
 class HelpTabController:
     """Owns the Help tab: topic list + rich-text content pane."""
 
-    def __init__(self, notebook: ttk.Notebook, cfg: "ManagerConfig") -> None:
+    def __init__(
+        self,
+        notebook: "ttk.Notebook",
+        cfg: "ManagerConfig",
+        *,
+        on_seed_ask: Optional[Callable[[str, str], None]] = None,
+        on_llm_cfg: Optional[Callable[[], dict]] = None,
+    ) -> None:
         self._cfg = cfg
+        self._on_seed_ask = on_seed_ask
+        self._on_llm_cfg = on_llm_cfg
+
+        # Streaming explain state — monotonic request ID prevents zombie tokens
+        self._explain_req_id: int = 0
+        self._explain_running: bool = False
+        self._current_explain_text: Optional[str] = None
+
         self._build(notebook)
 
     # ── Construction ──────────────────────────────────────────────────────────
 
-    def _build(self, notebook: ttk.Notebook) -> None:
+    def _build(self, notebook: "ttk.Notebook") -> None:
         tab = tk.Frame(notebook, bg=C["base"])
         notebook.add(tab, text="  Help  ")
 
@@ -55,12 +101,23 @@ class HelpTabController:
         self._help_lb.pack(side=tk.LEFT, fill=tk.Y)
         lb_sb.pack(side=tk.RIGHT, fill=tk.Y)
 
-        # ── Right: content ────────────────────────────────────────────────────
+        # ── Right: footer (pack BOTTOM first so content fills the rest) ───────
         right = tk.Frame(pane, bg=C["base"])
         right.pack(side=tk.LEFT, fill=tk.BOTH, expand=True, padx=(8, 0))
 
+        self._footer = tk.Frame(right, bg=C["base"])
+        self._footer.pack(side=tk.BOTTOM, fill=tk.X, pady=(6, 0))
+
+        self._doc_btn = ttk.Button(self._footer, text="📄 Open docs")
+        self._explain_btn = ttk.Button(
+            self._footer, text="🔍 Explain", command=self._help_explain_clicked
+        )
+        self._ask_btn = ttk.Button(self._footer, text="🤖 Ask")
+        # Buttons are shown/hidden per section by _help_show(); don't pack here
+
+        # ── Right: content ────────────────────────────────────────────────────
         content_wrap = tk.Frame(right, bg=C["base"])
-        content_wrap.pack(fill=tk.BOTH, expand=True)
+        content_wrap.pack(side=tk.TOP, fill=tk.BOTH, expand=True)
 
         hsb = ttk.Scrollbar(content_wrap, orient="vertical")
         self._help_txt = tk.Text(
@@ -87,6 +144,7 @@ class HelpTabController:
         # ── Sections ──────────────────────────────────────────────────────────
         self._help_sections = [
             ("  Switching Projects",  self._help_switching),
+            ("  Window & Tray",       self._help_window_tray),
             ("  Right-click Menu",    self._help_context_menu),
             ("  Scaffold",            self._help_scaffold),
             ("  Retrofit Existing",   self._help_retrofit),
@@ -100,6 +158,11 @@ class HelpTabController:
             ("  Git Tab Buttons",     self._help_git_tab),
             ("  GitHub Setup",        self._help_github_setup),
             ("  CodeGraph",           self._help_codegraph),
+            ("  AI Features",         self._help_ai_features),
+            ("  Pre-commit Hook",     self._help_precommit_hook),
+            ("  Run checks",          self._help_run_checks),
+            ("  Integration check",   self._help_integration_check),
+            ("  Settings reference",  self._help_settings_reference),
             ("  File Locations",      self._help_file_locations),
             ("  About",               self._help_about),
         ]
@@ -114,7 +177,7 @@ class HelpTabController:
 
     # ── Event handling ────────────────────────────────────────────────────────
 
-    def _on_help_select(self, _event=None):
+    def _on_help_select(self, _event=None) -> None:
         sel = self._help_lb.curselection()
         if not sel:
             return
@@ -122,13 +185,195 @@ class HelpTabController:
 
     # ── Rendering helpers ─────────────────────────────────────────────────────
 
-    def _help_show(self, fn):
-        """Clear the content pane, call fn() to fill it, then lock + scroll to top."""
+    def _help_show(
+        self,
+        fn: Callable,
+        *,
+        doc_path: Optional[str] = None,
+        ask_text: Optional[str] = None,
+        explain_text: Optional[str] = None,
+    ) -> None:
+        """Clear the content pane, call fn() to fill it, lock + scroll to top. Wire footer."""
+        # Invalidate any in-flight Explain stream for the previous section
+        self._explain_req_id += 1
+        self._current_explain_text = explain_text
+
+        # Fill content
         self._help_txt.configure(state=tk.NORMAL)
         self._help_txt.delete("1.0", tk.END)
         fn()
+        # Anchor mark so consecutive Explain runs can cleanly replace LLM output
+        self._help_txt.mark_set("baseline_end", "end-1c")
+        self._help_txt.mark_gravity("baseline_end", tk.LEFT)
         self._help_txt.configure(state=tk.DISABLED)
         self._help_txt.yview_moveto(0)
+
+        # ── "📄 Open docs" button ──────────────────────────────────────────────
+        if doc_path and os.path.isfile(doc_path):
+            self._doc_btn.configure(command=lambda p=doc_path: _open_doc(p))
+            self._doc_btn.pack(side=tk.LEFT, padx=(0, 6))
+        else:
+            self._doc_btn.pack_forget()
+
+        # ── "🔍 Explain" button ───────────────────────────────────────────────
+        if explain_text:
+            # Always reset to default label; DISABLED if a stream is still running
+            btn_state = tk.DISABLED if self._explain_running else tk.NORMAL
+            self._explain_btn.configure(text="🔍 Explain", state=btn_state)
+            self._explain_btn.pack(side=tk.LEFT, padx=(0, 6))
+        else:
+            self._explain_btn.pack_forget()
+
+        # ── "🤖 Ask" button ───────────────────────────────────────────────────
+        if ask_text and self._on_seed_ask:
+            self._ask_btn.configure(
+                command=lambda t=ask_text: self._on_seed_ask(t, _BASE_DIR)  # type: ignore[misc]
+            )
+            self._ask_btn.pack(side=tk.LEFT)
+        else:
+            self._ask_btn.pack_forget()
+
+    def _help_explain_clicked(self) -> None:
+        """Handle the Explain button click — runs on the main thread."""
+        explain_text = self._current_explain_text
+        if not explain_text:
+            return
+
+        llm_cfg: dict = self._on_llm_cfg() if self._on_llm_cfg else {}
+
+        if not llm_cfg.get("enabled"):
+            # No LLM configured — show dim hint in the content pane
+            self._help_txt.configure(state=tk.NORMAL)
+            try:
+                self._help_txt.delete("baseline_end", tk.END)
+            except tk.TclError:
+                pass
+            self._help_txt.insert(
+                tk.END,
+                "\n\nConfigure an LLM in Settings → AI / Commit to use inline explanations.",
+                "dim",
+            )
+            self._help_txt.configure(state=tk.DISABLED)
+            return
+
+        # Increment ID to invalidate any previous stream
+        self._explain_req_id += 1
+        my_id = self._explain_req_id
+        # Snapshot context on the main thread (up to 800 chars of static section text)
+        ctx = self._help_txt.get("1.0", "baseline_end")[:800]
+
+        self._explain_running = True
+        self._explain_btn.configure(state=tk.DISABLED)
+
+        t = threading.Thread(
+            target=self._help_explain_worker,
+            args=(my_id, ctx, explain_text, llm_cfg),
+            daemon=True,
+        )
+        t.start()
+
+    def _help_explain_worker(
+        self,
+        req_id: int,
+        ctx: str,
+        explain_text: str,
+        llm_cfg: dict,
+    ) -> None:
+        """Background thread: stream an LLM explanation into the content pane."""
+        from helpers.llm import _call_llm  # lazy import — avoids circular at startup
+
+        system = (
+            "You are a concise help assistant for TokenSave Manager. "
+            "Explain this topic clearly with a practical example. 3-5 sentences."
+        )
+        user = f"Topic: {explain_text}\n\nContext:\n{ctx}"
+
+        stream_state = {"first": True}
+
+        def on_token(tok: str) -> None:
+            is_first = stream_state["first"]
+            stream_state["first"] = False
+
+            def _put(t: str = tok, req: int = req_id, first: bool = is_first) -> None:
+                if self._explain_req_id != req:
+                    return  # zombie token from abandoned stream — discard
+                self._help_txt.configure(state=tk.NORMAL)
+                if first:
+                    try:
+                        self._help_txt.delete("baseline_end", tk.END)
+                    except tk.TclError:
+                        pass
+                    self._help_txt.insert(tk.END, "\n\n", "body")
+                self._help_txt.insert(tk.END, t, "dim")
+                self._help_txt.see(tk.END)
+                self._help_txt.configure(state=tk.DISABLED)
+
+            self._help_txt.after(0, _put)
+
+        try:
+            result = _call_llm(
+                llm_cfg, system, user,
+                max_tokens=300, timeout=30, on_token=on_token,
+            )
+
+            # Non-streaming fallback: provider completed without calling on_token
+            if stream_state["first"]:
+                if result:
+                    def _put_result(r: str = result, req: int = req_id) -> None:
+                        if self._explain_req_id != req:
+                            return
+                        self._help_txt.configure(state=tk.NORMAL)
+                        try:
+                            self._help_txt.delete("baseline_end", tk.END)
+                        except tk.TclError:
+                            pass
+                        self._help_txt.insert(tk.END, "\n\n" + r, "dim")
+                        self._help_txt.see(tk.END)
+                        self._help_txt.configure(state=tk.DISABLED)
+                    self._help_txt.after(0, _put_result)
+                else:
+                    def _put_none(req: int = req_id) -> None:
+                        if self._explain_req_id != req:
+                            return
+                        self._help_txt.configure(state=tk.NORMAL)
+                        try:
+                            self._help_txt.delete("baseline_end", tk.END)
+                        except tk.TclError:
+                            pass
+                        self._help_txt.insert(
+                            tk.END,
+                            "\n\nLLM did not return a response. Check Settings → AI / Commit.",
+                            "dim",
+                        )
+                        self._help_txt.configure(state=tk.DISABLED)
+                    self._help_txt.after(0, _put_none)
+
+        except Exception as e:
+            err = str(e)
+
+            def _show_err(m: str = err, req: int = req_id) -> None:
+                if self._explain_req_id != req:
+                    return  # error from abandoned stream — discard silently
+                self._help_txt.configure(state=tk.NORMAL)
+                try:
+                    self._help_txt.delete("baseline_end", tk.END)
+                except tk.TclError:
+                    pass
+                self._help_txt.insert(tk.END, f"\n\nError: {m}", "warn")
+                self._help_txt.configure(state=tk.DISABLED)
+
+            self._help_txt.after(0, _show_err)
+
+        finally:
+            def _cleanup(req: int = req_id) -> None:
+                self._explain_running = False
+                try:
+                    if self._explain_btn.winfo_ismapped():
+                        self._explain_btn.configure(state=tk.NORMAL)
+                except tk.TclError:
+                    pass
+
+            self._help_txt.after(0, _cleanup)
 
     def _hw(self):
         """Return (h1, h2, p, warn, ok, dim, br, ins) writer helpers for _help_txt."""
@@ -167,6 +412,36 @@ class HelpTabController:
               "click Auto-detect instead of pinning a specific project.")
         self._help_show(_fill)
 
+    def _help_window_tray(self):
+        def _fill():
+            h1, h2, p, warn, ok, dim, br, ins = self._hw()
+            h1("Window & Tray")
+            p("TokenSave Manager runs in the system tray so it can stay alive between "
+              "sessions without cluttering the taskbar.")
+            br()
+            h2("Window controls")
+            ins("  ╳  Close (X button)  ", "body"); ins("Hides the window to the system tray — the app keeps running.\n", "dim")
+            ins("  _  Minimize           ", "body"); ins("Minimizes normally to the taskbar.\n", "dim")
+            ins("  Tray icon → Show      ", "body"); ins("Restores the window to its last position and size.\n", "dim")
+            ins("  Tray icon → Quit      ", "body"); ins("Fully exits the app.\n", "dim")
+            br()
+            p("The window position and size are saved automatically when you hide to tray "
+              "and restored the next time you click Show.")
+            br()
+            h2("Claude CLI model")
+            p("Settings → Claude Code CLI → Model controls which Claude model the manager "
+              "uses for its automated background calls: pre-commit AI review, the Suggest "
+              "button's Claude CLI strategy, and Draft PR via CLI.")
+            br()
+            ins("  Haiku 4.5 (default)  ", "body"); ins("Fast (3–5 s), cheap, sufficient for code review and commit messages.\n", "dim")
+            ins("  Sonnet 4.6           ", "body"); ins("Balanced — slower but catches more nuance in reviews.\n", "dim")
+            ins("  Opus 4.7             ", "body"); ins("Slow (20–40 s on large diffs) but deepest analysis.\n", "dim")
+            ins("  (empty)              ", "body"); ins("Use whatever ~/.claude/settings.json defaults to.\n", "dim")
+            br()
+            warn("This setting does NOT affect interactive 'claude' sessions you launch "
+                 "from the terminal or the Reference tab — those still use your global default.")
+        self._help_show(_fill)
+
     def _help_context_menu(self):
         def _fill():
             h1, h2, p, warn, ok, dim, br, ins = self._hw()
@@ -187,18 +462,28 @@ class HelpTabController:
             ins("  ↺  Sync           ", "body"); ins("Incrementally re-index changed files\n", "dim")
             ins("  📊  Status         ", "body"); ins("Show node/edge/file counts and last sync time in a popup\n", "dim")
             ins("  ⟳  Force Re-sync  ", "body"); ins("Rebuild the entire code graph from scratch\n", "dim")
-            ins("  🔍  Doctor         ", "body"); ins("Check tokensave installation health\n", "dim")
-            ins("  🗑  Remove Index…  ", "body"); ins("Delete .tokensave/ from this folder (project files untouched)\n", "dim")
-            ins("  Auto-detect       ", "body"); ins("Clear the pin — wrapper picks the most-recently-synced project\n", "dim")
+            ins("  🔍  Doctor         ", "body"); ins("Check tokensave installation health for this project\n", "dim")
             br()
 
-            h2("Git")
-            ins("  📜  Git Log        ", "body")
-            ins("Show last 20 commits + working-tree status from the project's own repo.\n", "dim")
-            ins("                    ", "body")
-            ins("Nothing is stored in the manager — purely a read-only view.\n", "dim")
-            ins("                    ", "body")
-            ins("Shows a friendly message if the folder is not a git repo or git is not on PATH.\n", "dim")
+            h2("CodeGraph")
+            ins("  🧠  CodeGraph Init          ", "body"); ins("Build the CodeGraph index for this project\n", "dim")
+            ins("  🧠  CodeGraph Sync          ", "body"); ins("Incrementally update the CodeGraph index\n", "dim")
+            ins("  🧠  CodeGraph Status        ", "body"); ins("Show CodeGraph node and edge counts\n", "dim")
+            ins("  🧠  Remove CodeGraph Index… ", "body"); ins("Delete the CodeGraph index (project files untouched)\n", "dim")
+            br()
+
+            h2("Git & AI")
+            ins("  📜  Git Log                    ", "body"); ins("Show last 20 commits + working-tree status (read-only view)\n", "dim")
+            ins("  📝  Git Commit…                ", "body"); ins("Open the commit dialog with AI-suggested message\n", "dim")
+            ins("  🔍  AI Code Review…            ", "body"); ins("Stream a severity-coloured AI review of your staged diff\n", "dim")
+            ins("  🔧  Git Init                   ", "body"); ins("Initialise a new git repository in the project folder\n", "dim")
+            ins("  📋  Manage .gitignore…         ", "body"); ins("Add, remove, or view .gitignore rules interactively\n", "dim")
+            ins("  🧹  Untrack Ignored Files…     ", "body"); ins("Remove already-tracked files that .gitignore now covers\n", "dim")
+            ins("  🔍  Pre-commit AI Review hook… ", "body"); ins("Install or remove the AI review hook for this project\n", "dim")
+            ins("  📝  Draft CHANGELOG entry…     ", "body"); ins("Use AI to generate a CHANGELOG bullet from recent changes\n", "dim")
+            ins("  🔬  Refactor scout…            ", "body"); ins("AI-powered complexity and duplication analysis\n", "dim")
+            ins("  ✓  Run checks…                ", "body"); ins("Run syntax, pyflakes, Doctor, and optional Claude review\n", "dim")
+            ins("  🔄  Integration check          ", "body"); ins("Run the tokensave integration audit (version + snippets)\n", "dim")
             br()
 
             h2("Navigation")
@@ -207,12 +492,12 @@ class HelpTabController:
             ins("  ⎘  Copy Path       ", "body"); ins("Copy the project folder path to the clipboard\n", "dim")
             br()
 
-            h2("Setup")
-            ins("  ⚙  Retrofit…       ", "body")
-            ins("Open the Retrofit dialog for the selected project without re-navigating\n", "dim")
-            ins("                     ", "body")
-            ins("to the folder manually. Same as the toolbar button but pre-filled.\n", "dim")
-            ins("  🗑  Remove Index…  ", "body"); ins("Delete .tokensave/ from this folder (project files untouched)\n", "dim")
+            h2("Setup & organisation")
+            ins("  ⚙  Retrofit…          ", "body"); ins("Open the Retrofit dialog pre-filled with this project\n", "dim")
+            ins("  🔗  Shadow Links…     ", "body"); ins("Manage symlink mirrors for sharing files between projects\n", "dim")
+            ins("  📁  Assign Category…  ", "body"); ins("Override this project's group label and sub-category\n", "dim")
+            ins("  🗑  Remove Index…     ", "body"); ins("Delete .tokensave/ from this folder (project files untouched)\n", "dim")
+            ins("  Auto-detect           ", "body"); ins("Clear the pin — wrapper picks the most-recently-synced project\n", "dim")
         self._help_show(_fill)
 
     def _help_scaffold(self):
@@ -373,6 +658,9 @@ class HelpTabController:
         self._help_show(_fill)
 
     def _help_git_concepts(self):
+        _doc = os.path.join(_BASE_DIR, "docs", "GITHUB_GUIDE.md")
+        _ask = "Explain git fundamentals — commit, branch, push, pull — for someone who has never used git"
+
         def _fill():
             h1, h2, p, warn, ok, dim, br, ins = self._hw()
             h1("Git: What & Why")
@@ -425,9 +713,12 @@ class HelpTabController:
               "almost always what you want.")
             br()
             ok("Bottom line: commit often, push when you're done for the day.")
-        self._help_show(_fill)
+        self._help_show(_fill, doc_path=_doc, ask_text=_ask, explain_text=_ask)
 
     def _help_git_workflow(self):
+        _doc = os.path.join(_BASE_DIR, "docs", "GITHUB_GUIDE.md")
+        _ask = "Walk me through the daily git workflow in this manager step by step"
+
         def _fill():
             h1, h2, p, warn, ok, dim, br, ins = self._hw()
             h1("Git: Daily Workflow")
@@ -490,7 +781,7 @@ class HelpTabController:
             br()
             h2("Typical day in one line")
             dim("  Pull → Edit → Commit → Edit → Commit → Push")
-        self._help_show(_fill)
+        self._help_show(_fill, doc_path=_doc, ask_text=_ask, explain_text=_ask)
 
     def _help_git_tab(self):
         def _fill():
@@ -546,6 +837,9 @@ class HelpTabController:
         self._help_show(_fill)
 
     def _help_github_setup(self):
+        _doc = os.path.join(_BASE_DIR, "docs", "GITHUB_GUIDE.md")
+        _ask = "How do I connect a project to GitHub and create my first release?"
+
         def _fill():
             h1, h2, p, warn, ok, dim, br, ins = self._hw()
             h1("GitHub Setup")
@@ -590,9 +884,12 @@ class HelpTabController:
             br()
             p("Releases require the GitHub CLI (gh). If it's not installed, "
               "the wizard shows a link to cli.github.com.")
-        self._help_show(_fill)
+        self._help_show(_fill, doc_path=_doc, ask_text=_ask, explain_text=_ask)
 
     def _help_codegraph(self):
+        _doc = os.path.join(_BASE_DIR, "README.md")
+        _ask = "Explain CodeGraph: what it does, how it compares to tokensave, when to use each"
+
         def _fill():
             h1, h2, p, warn, ok, dim, br, ins = self._hw()
             h1("CodeGraph (alternative code-graph tool)")
@@ -628,7 +925,270 @@ class HelpTabController:
               "(init / sync / status / remove). This means tokensave and CodeGraph "
               "can both write their own sections into your global ~/.claude.json "
               "without fighting each other.")
+        self._help_show(_fill, doc_path=_doc, ask_text=_ask, explain_text=_ask)
+
+    # ── New sections ───────────────────────────────────────────────────────────
+
+    def _help_ai_features(self):
+        _doc = os.path.join(_BASE_DIR, "README.md")
+        _ask = "Explain all the AI features in TokenSave Manager — code review, Ask tab, Ollama, smart commit messages, Claude CLI integration"
+
+        def _fill():
+            h1, h2, p, warn, ok, dim, br, ins = self._hw()
+            h1("AI Features")
+            p("TokenSave Manager integrates AI at several points. All AI features are "
+              "optional and fail open — if the AI call fails, the operation continues "
+              "without it.")
+            br()
+
+            h2("🔍 AI Code Review")
+            p("Right-click a project → 🔍 AI Code Review… — streams a severity-coloured "
+              "review of your staged or HEAD diff. Uses the configured LLM or Claude CLI. "
+              "Results appear in a live-updating dialog with icons:")
+            ins("  ✗ critical  ⚠ warning  ℹ info  ✓ pass\n", "body")
+            br()
+
+            h2("Ask Tab (bounded agent)")
+            p("An embedded 8-iteration agent that answers questions about your codebase. "
+              "Type a question, pick a project, click Ask. The agent has six read-only "
+              "tokensave tools (context, search, callers, callees, body, outline) and "
+              "stays bounded to prevent runaway token spend. Results stream line-by-line.")
+            br()
+
+            h2("Ollama Model Manager")
+            p("Settings → Ollama → Manage Models — browse, pull, and delete local Ollama "
+              "models without leaving the manager. Models listed here are available for AI "
+              "commit messages, AI code review, pre-commit hook review, and the inline "
+              "Explain button in this Help tab.")
+            br()
+
+            h2("💡 Smart commit messages")
+            p("The 📝 Commit… dialog uses a multi-strategy chain to suggest a message:")
+            ins("  1. CHANGELOG.md bullets (if you added an entry today)\n", "body")
+            ins("  2. Diff content — added/changed definitions, file types\n", "body")
+            ins("  3. File-name heuristics (legacy fallback)\n", "body")
+            p("When an AI backend is configured, an AI step runs first and the chain "
+              "falls back to heuristics silently on any failure. Click 💡 Suggest to "
+              "regenerate at any time. Configure the backend in Settings → Commit Message.")
+            br()
+
+            h2("Claude CLI integration")
+            p("Settings → Claude Code CLI → Exe path wires in the claude binary. "
+              "The manager uses it for:")
+            ins("  • 💡 Suggest strategy in the commit dialog\n", "body")
+            ins("  • 🔍 AI Code Review streaming\n", "body")
+            ins("  • 📝 Draft CHANGELOG entry\n", "body")
+            ins("  • 🐙 Draft PR description\n", "body")
+            ins("  • ✓ Run checks → Claude review step\n", "body")
+            br()
+
+            h2("📊 Cost tracking")
+            p("The 📊 Cost button (bottom of the main window) shows a running tally of "
+              "API tokens and estimated cost for this session. Covers all LLM calls made "
+              "through the manager's own LLM helper — commit message suggestions, code "
+              "reviews, pre-commit hook, and inline Explain in this Help tab.")
+        self._help_show(_fill, doc_path=_doc, ask_text=_ask, explain_text=_ask)
+
+    def _help_precommit_hook(self):
+        def _fill():
+            h1, h2, p, warn, ok, dim, br, ins = self._hw()
+            h1("Pre-commit AI Review Hook")
+
+            h2("What it does")
+            p("Installs a git pre-commit hook that runs an AI review of your staged diff "
+              "before every commit. If the review finds critical issues it warns you — the "
+              "commit still proceeds (fail-open guarantee). The review runs in the "
+              "background using the configured LLM or Claude CLI backend.")
+            br()
+
+            h2("Installing the hook")
+            p("Right-click any project → 🔍 Pre-commit AI Review hook… → choose Install. "
+              "The dialog shows the exact hook script that will be written. You can also "
+              "choose Remove to uninstall without touching anything else.")
+            br()
+
+            h2("Backends (auto-selected by priority)")
+            ins("  1. auto (default)  ", "body")
+            ins("— tries Claude CLI first, falls back to LLM, then skips if neither\n", "dim")
+            ins("  2. claude_cli      ", "body")
+            ins("— always uses the claude binary (fastest if configured)\n", "dim")
+            ins("  3. llm             ", "body")
+            ins("— always uses the configured LLM provider (Anthropic, OpenAI, LM Studio, Ollama)\n", "dim")
+            br()
+            p("Change the backend in Settings → Pre-commit section.")
+            br()
+
+            h2("Fail-open guarantee")
+            p("If the AI call fails (timeout, network error, unconfigured provider), the "
+              "hook exits 0 and the commit proceeds normally. A warning message is printed "
+              "to the terminal. Your workflow is never blocked by an AI service failure.")
+            br()
+
+            warn("⚠  The hook only fires for projects where it is installed. Right-click "
+                 "each project individually to install. The hook file lives at "
+                 ".git/hooks/pre-commit inside the project folder.")
         self._help_show(_fill)
+
+    def _help_run_checks(self):
+        def _fill():
+            h1, h2, p, warn, ok, dim, br, ins = self._hw()
+            h1("Run Checks")
+
+            h2("Overview")
+            p("Right-click any project → ✓ Run checks… opens a dialog that runs four "
+              "quality checks against the project. All enabled checks run concurrently.")
+            br()
+
+            h2("Four checks")
+            ins("  [✓] Python syntax        ", "body")
+            ins("— python -m compileall src/ -q   (free, instant)\n", "dim")
+            ins("  [✓] pyflakes             ", "body")
+            ins("— detects unused imports, undefined names   (free, ~1 s)\n", "dim")
+            ins("  [✓] Doctor audit         ", "body")
+            ins("— tokensave health check (same as the Doctor button)   (free)\n", "dim")
+            ins("  [ ] Claude Code review   ", "body")
+            ins("— AI review of your PR diff against the base branch   (uses tokens, off by default)\n", "dim")
+            br()
+
+            h2("Reading results")
+            ins("  ✓  ", "ok"); ins("— passed (summary: 0 errors / 0 warnings)\n", "body")
+            ins("  ✗  ", "warn"); ins("— failed (summary: file:line error message)\n", "body")
+            ins("  ⏳  — running…\n", "body")
+            ins("  —   — skipped (check was unchecked)\n", "body")
+            br()
+
+            h2("Large-diff warning")
+            p("If the Claude review is enabled and your diff exceeds ~10 k characters, "
+              "the dialog asks for confirmation before sending it. This prevents accidental "
+              "token spend on huge diffs.")
+            br()
+
+            h2("Claude review scope")
+            p("The Claude review runs against git diff <base>...HEAD (triple-dot, PR scope) "
+              "— the same range GitHub would show in a pull request. The base branch is "
+              "auto-detected from your git history.")
+            br()
+
+            h2("Preferences persist")
+            p("Your checkbox selections are remembered between sessions. Uncheck Claude "
+              "review once and it stays off until you turn it back on.")
+        self._help_show(_fill)
+
+    def _help_integration_check(self):
+        _doc = os.path.join(_BASE_DIR, "docs", "UPGRADE_INTEGRATION.md")
+        _ask = "What steps should I follow when tokensave releases a new version?"
+
+        def _fill():
+            h1, h2, p, warn, ok, dim, br, ins = self._hw()
+            h1("Integration Check")
+
+            h2("Overview")
+            p("When tokensave releases a new version it may add MCP tools, remove "
+              "commands, or change tool schemas. The integration check surfaces those "
+              "gaps quickly without burning tokens on the routine parts.")
+            br()
+
+            h2("4-step workflow (order matters)")
+            ins("  1. tokensave upgrade            ", "body")
+            ins("— update the binary\n", "dim")
+            ins("  2. git pull (this repo)         ", "body")
+            ins("— update CHANGELOG.md and docs/\n", "dim")
+            ins("  3. Settings → 🔍 Check integration  ", "body")
+            ins("(or right-click → 🔄 Integration check)\n", "dim")
+            ins("     ", "body")
+            ins("Free deterministic audit: installed version, upstream issue status,\n", "dim")
+            ins("     ", "body")
+            ins("new tools without snippets, stale snippet references to removed tools.\n", "dim")
+            ins("  4. Reference tab → '🔄 Integration audit' snippet  ", "body")
+            ins("→ paste into Claude Code CLI\n", "dim")
+            ins("     ", "body")
+            ins("LLM-powered analysis of what snippets to add, update, or remove.\n", "dim")
+            br()
+            warn("⚠  Always upgrade tokensave and git pull BEFORE running the check. "
+                 "Running the script before updating local files produces a false-clean report.")
+            br()
+
+            h2("Step 3 report shows")
+            ins("  • Installed version vs. CHANGELOG latest documented version\n", "body")
+            ins("  • Upstream issue files — STATUS: FIXED / SHIPPED / MOOT / OPEN\n", "body")
+            ins("  • New tools (### Added) without snippet coverage in src/prompts.py\n", "body")
+            ins("  • Stale snippets that call tools listed under ### Removed\n", "body")
+            br()
+
+            h2("Step 4 — LLM audit")
+            p("The '🔄 Integration audit' snippet in the Reference tab instructs Claude "
+              "to call tokensave_changelog, cross-reference tool names against snippet "
+              "bodies, and output a structured action list. Run it in a Claude Code CLI "
+              "session opened in this project's directory.")
+            br()
+
+            ok("See 📄 Open docs for the full UPGRADE_INTEGRATION.md guide.")
+        self._help_show(_fill, doc_path=_doc, ask_text=_ask, explain_text=_ask)
+
+    def _help_settings_reference(self):
+        _doc = os.path.join(_BASE_DIR, "README.md")
+        _ask = "Explain each setting in the Settings dialog for TokenSave Manager"
+
+        def _fill():
+            h1, h2, p, warn, ok, dim, br, ins = self._hw()
+            h1("Settings Reference")
+
+            h2("Core paths")
+            ins("  tokensave_exe    ", "code")
+            ins("— path to the tokensave binary (auto-detected at startup)\n", "body")
+            ins("  template_dir     ", "code")
+            ins("— folder containing BASIC_INSTRUCTIONS.md and Nuitka templates\n", "body")
+            ins("  git_exe          ", "code")
+            ins("— path to git.exe (default: git, uses PATH)\n", "body")
+            ins("  editor_cmd       ", "code")
+            ins("— command to open files in your editor (e.g. code, notepad++)\n", "body")
+            br()
+
+            h2("Project discovery")
+            ins("  search_roots     ", "code")
+            ins("— list of root folders to scan for .tokensave/ directories.\n", "body")
+            ins("                   ", "body")
+            ins("  Each entry has a Label (the group header) and a Path.\n", "dim")
+            br()
+
+            h2("AI / Commit messages")
+            ins("  commit_message_backend  ", "code")
+            ins("— auto / llm_first / claude_cli / llm\n", "body")
+            ins("  commit_message_llm      ", "code")
+            ins("— provider config: enabled, provider, model, api_key, base_url\n", "body")
+            ins("                          ", "body")
+            ins("  Providers: anthropic, openai, lm_studio, ollama\n", "dim")
+            br()
+
+            h2("Pre-commit hook")
+            ins("  precommit_backend  ", "code")
+            ins("— auto / claude_cli / llm\n", "body")
+            br()
+
+            h2("Claude CLI")
+            ins("  claude_cli_exe    ", "code")
+            ins("— path to the claude binary (auto-detected or set manually)\n", "body")
+            ins("  claude_cli_model  ", "code")
+            ins("— model for managed calls: haiku-4-5, sonnet-4-6, opus-4-7, or empty\n", "body")
+            ins("                    ", "body")
+            ins("  Leave empty to use your global ~/.claude/settings.json default.\n", "dim")
+            br()
+
+            h2("Update polling")
+            ins("  update_poll_hours  ", "code")
+            ins("— how often to check GitHub for a new tokensave release (default: 1.0)\n", "body")
+            ins("                     ", "body")
+            ins("  Set to 0 to disable polling.\n", "dim")
+            br()
+
+            h2("CodeGraph")
+            ins("  codegraph_enabled   ", "code")
+            ins("— show CodeGraph menu items and CG column in the project list\n", "body")
+            ins("  codegraph_npm_path  ", "code")
+            ins("— path to npm (for running npx @colbymchenry/codegraph)\n", "body")
+        self._help_show(_fill, doc_path=_doc, ask_text=_ask, explain_text=_ask)
+
+    # ── Existing sections (continued) ─────────────────────────────────────────
 
     def _help_file_locations(self):
         def _fill():
@@ -655,21 +1215,27 @@ class HelpTabController:
         self._help_show(_fill)
 
     def _help_about(self):
+        _doc = os.path.join(_BASE_DIR, "README.md")
+        _ask = "Give me a high-level overview of what TokenSave Manager does and all its features"
+
         def _fill():
             h1, h2, p, warn, ok, dim, br, ins = self._hw()
             h1("About")
             ins("TokenSave Manager\n", "body")
             ins("Created by Alexander L Corthell\n\n", "dim")
             h2("What this tool does")
-            p("Manages tokensave MCP project integrations for Claude Desktop. "
+            p("Manages tokensave MCP project integrations for Claude Desktop and Claude Code. "
               "Handles project discovery, index sync, project switching, "
               "scaffolding Claude instruction templates, Nuitka build pipelines, "
-              "git log / status, folder/editor navigation, and clipboard shortcuts.")
+              "full git workflow (commit, branch, merge, push, pull, GitHub releases), "
+              "AI code review, smart commit messages, pre-commit hook, Ask tab agent, "
+              "run checks dialog, CodeGraph lifecycle, and integration monitoring.")
             br()
-            h2("What it doesn't do (yet)")
+            h2("What it doesn't do")
             ins("  • tokensave branch management (branch add/list/gc)\n", "dim")
-            ins("  • Daemon start/stop/status\n", "dim")
-            ins("  • Cost tracking (tokensave cost)\n", "dim")
             ins("  • Cross-platform support (Windows only)\n", "dim")
-            ins("  • Inline git diff / commit details\n", "dim")
-        self._help_show(_fill)
+            br()
+            h2("Version history")
+            p("See CHANGELOG.md in the project root for the full release history. "
+              "The 📄 Open docs button opens the project README.")
+        self._help_show(_fill, doc_path=_doc, ask_text=_ask, explain_text=_ask)

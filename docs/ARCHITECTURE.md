@@ -16,6 +16,11 @@ See `docs/ARCHITECTURE_TOKENSAVE.md` for how tokensave itself works.
 
 ```
 Token Save Manager Source/
+├── .github/
+│   └── workflows/
+│       └── ci.yml                 GitHub Actions CI — syntax + pyflakes on push/PR
+│                                  (free, deterministic only; Doctor + Claude review
+│                                  are local-only and run via ChecksDialog)
 ├── manager-config.json            Machine-specific config (paths, search roots)  — gitignored
 ├── manager-config.example.json    Clean template with placeholder paths — committed
 ├── TOKENSAVE_GUIDE.md             Full tokensave CLI + MCP reference
@@ -28,11 +33,16 @@ Token Save Manager Source/
 │   │                              other concern in a subpackage (no monolith).
 │   ├── app.py                     Entry point — App(tk.Tk) + main(). Constructs the
 │   │                              single ManagerConfig instance and passes it down to
-│   │                              every controller/dialog. ~1,800 lines including
-│   │                              PROMPT_SNIPPETS + Help-tab section bodies.
+│   │                              every controller/dialog. ~1,640 lines after v6
+│   │                              daemon UI removal (~162 lines deleted: daemon
+│   │                              indicator widget, 5-second polling loop, and
+│   │                              5 daemon action methods).
 │   ├── state.py                   ManagerConfig dataclass (runtime-mutable settings;
 │   │                              read-only @property getters; mutated via
 │   │                              raw.update() + save() + refresh_derived()).
+│   │                              claude_cli_model property — defaults to
+│   │                              "claude-haiku-4-5-20251001"; null-safe (JSON null
+│   │                              returns default, not None).
 │   ├── constants.py               Immutable constants: C palette, regex tables,
 │   │                              CREATE_NO_WINDOW, _ANSI, _GIT_ENV_NO_PROMPT,
 │   │                              paths (_BASE_DIR, _CONFIG_PATH, LOG_FILE).
@@ -49,7 +59,7 @@ Token Save Manager Source/
 │   │                              to backend, parses severity, exits 0 (warn) or 1
 │   │                              (block per threshold). Fail-open on every error.
 │   │
-│   ├── helpers/                   19 modules of pure / IO helpers — no UI deps.
+│   ├── helpers/                   20 modules of pure / IO helpers — no UI deps.
 │   │   ├── config.py              _load_config, _save_config, _migrate_config
 │   │   ├── detection.py           _detect_git/_gh/_npm/_codegraph/_claude_cli,
 │   │   │                          _root_path/_label, _version_lt
@@ -74,24 +84,41 @@ Token Save Manager Source/
 │   │   │                          _zip_dist, _release_basename, _fmt_size
 │   │   │                          (Roadmap-2 P2: _patch_changelog removed; canonical
 │   │   │                          implementation now lives in helpers/changelog_patch.py)
-│   │   ├── daemon_cost.py         get_daemon_status, toggle_daemon, toggle_autostart,
-│   │   │                          parse_tokensave_cost
-│   │   │                          (parses `tokensave daemon --status` + `tokensave cost`;
-│   │   │                          P2 fixed `--start` bug and added autostart toggle)
+│   │   ├── daemon_cost.py         parse_tokensave_cost(tokensave_exe, scope) ONLY.
+│   │   │                          All daemon functions removed in tokensave v6.0.0
+│   │   │                          integration (daemon mode dropped upstream).
+│   │   │                          Previously held: get_daemon_status, toggle_daemon,
+│   │   │                          toggle_autostart, _stop_daemon, _kill_pid.
 │   │   ├── pr_draft.py            generate_pr_draft — LLM-backed structured PR description
 │   │   │                          (Summary / Technical / Threat Model / Verification)
-│   │   ├── changelog_patch.py     insert_changelog_release — IDEMPOTENT atomic patcher
-│   │   │                          (replaces existing ## [version] block bounded by next
-│   │   │                          ^## \[ line; falls back to insertion under
+│   │   ├── changelog_patch.py     insert_changelog_release (versioned release patcher);
+│   │   │                          update_unreleased (replaces [Unreleased] body, EOF-safe);
+│   │   │                          read_unreleased (returns current [Unreleased] body for
+│   │   │                          LLM integration). All atomic via .tmp + os.replace.
+│   │   │                          (original insert_changelog_release: replaces ## [version]
+│   │   │                          block bounded by next ^## \[ line; falls back to insertion under
 │   │   │                          ## [Unreleased]). Wired into ReleaseWizard P2.
 │   │   ├── claude_cli.py          spawn_claude_cli — detached cmd.exe via CREATE_NEW_CONSOLE
-│   │   │                          with ""outer"" multi-quote fix + \r\n strip (TTY safety)
-│   │   └── precommit_hook.py      install/remove/detect git pre-commit AI review hook
-│   │                              + the review runner (run_review, parse_severity_summary,
-│   │                              severity_blocks_commit, backend dispatch for
-│   │                              "auto"/"claude_cli"/"llm"). Roadmap-2 P5b.
+│   │   │                          with ""outer"" multi-quote fix + \r\n strip (TTY safety).
+│   │   │                          call_claude_cli_print(model="", cwd=None) — non-interactive
+│   │   │                          --print path; model="" omits --model flag; cwd=~ isolates
+│   │   │                          from project CLAUDE.md (prevents "assistant mode" on small
+│   │   │                          models). Stderr logged on non-zero exit (sys.stderr guard).
+│   │   ├── precommit_hook.py      install/remove/detect git pre-commit AI review hook
+│   │   │                          + the review runner (run_review, parse_severity_summary,
+│   │   │                          severity_blocks_commit, backend dispatch for
+│   │   │                          "auto"/"claude_cli"/"llm"). Roadmap-2 P5b.
+│   │   └── refactor_scout.py      Pure-function SQL analytics against .tokensave/tokensave.db.
+│   │                              Finding @dataclass (stable md5 ID, kind, file, symbol,
+│   │                              line, message, evidence). Four _scout_* query functions:
+│   │                              complexity (CC>10), god_class (>40 methods), god_file
+│   │                              (>1500 lines), dead_code (no incoming call edges, filtered
+│   │                              by conservative entry-point allowlist). run_scout() returns
+│   │                              (findings_by_kind, suppressed_count). Helper functions for
+│   │                              formatting investigate context, writing temp .md briefings
+│   │                              for CLI handoff, and batch briefings. Roadmap-3 P6.
 │   │
-│   ├── dialogs/                   20 tk.Toplevel dialog classes — one per file.
+│   ├── dialogs/                   22 tk.Toplevel dialog classes — one per file.
 │   │   ├── settings.py            SettingsDialog (+ _probe_loaded_model helper)
 │   │   ├── release_wizard.py      ReleaseWizardDialog + _ReleaseCtx (paired)
 │   │   ├── mcp_config.py          MCPConfigDialog
@@ -111,6 +138,20 @@ Token Save Manager Source/
 │   │   ├── assign_category.py     AssignCategoryDialog
 │   │   ├── untrack_ignored.py     UntrackIgnoredDialog
 │   │   ├── cost_viewer.py         CostViewerDialog (2x2 metric grid; bg-threaded fetch)
+│   │   ├── refactor_scout.py      RefactorScoutDialog — scrollable findings panel grouped
+│   │   │                          by kind. Per-card checkboxes + selection toolbar (All/None/
+│   │   │                          per-kind). Three batch footer actions: clipboard briefing,
+│   │   │                          Claude CLI temp-file handoff, Ask-tab seed. Per-card:
+│   │   │                          Investigate (seeds Ask tab) + Ignore (persists md5 ID).
+│   │   │                          _clean_symbol strips tokensave's doubled file-path prefix.
+│   │   │                          MouseWheel binding unregistered on close. Roadmap-3 P6.
+│   │   ├── checks_dialog.py       ChecksDialog — four toggleable pre-merge checks
+│   │   │                          (syntax/pyflakes/doctor/claude). Concurrent
+│   │   │                          ThreadPoolExecutor; large-diff askyesno on main
+│   │   │                          thread; Doctor called via _audit_project_tree
+│   │   │                          directly (pure fn, no subprocess). cfg.raw
+│   │   │                          ["checks_enabled"] persists toggle state.
+│   │   │                          cancel_futures=True on close. Roadmap-3.
 │   │   └── proposal.py            WriteProposal dataclass + ProposalDialog +
 │   │                              ProposalBridge (P1 — race-safe _resolve under Lock,
 │   │                              5-min event.wait timeout, WM_DELETE_WINDOW = reject,
@@ -125,16 +166,29 @@ Token Save Manager Source/
 │       │                          Roadmap-2 P5b added one wrapper)
 │       ├── git_tab.py             GitTabController (push/pull/release/Draft PR/Open PR
 │       │                          on GitHub — ~38 direct methods after Roadmap-2 P4
-│       │                          extracted BranchManagementController)
+│       │                          extracted BranchManagementController).
+│       │                          _extract_pr_title — parses first bullet under
+│       │                          ## Summary of Changes for the title field pre-fill.
+│       │                          _create_pr_via_gh — background-threaded gh pr create
+│       │                          (--title/--body-file/--base; strips origin/ prefix;
+│       │                          deletes temp file on success; shows URL + open prompt).
+│       │                          _open_pr_via_gh — gh pr create --web (browser pre-fill).
 │       ├── branch_mgmt_ctrl.py    BranchManagementController (P4 — new/switch/merge/
 │       │                          delete-branch cluster extracted from GitTabController;
 │       │                          merge orchestration decomposed into _prepare_merge_sources
 │       │                          + _confirm_merge + _merge_worker + _explain_merge_failure)
-│       ├── ask_tab.py             AskTabController (🤖 Ask tab — Stage 2 chat)
+│       ├── ask_tab.py             AskTabController (🤖 Ask tab — Stage 2 chat).
+│       │                          seed_question(text, path) — public method added R3 P6;
+│       │                          switches notebook tab, populates entry, auto-sends after
+│       │                          50ms tick defer. Refuses while agent run is in flight.
 │       ├── snippets.py            SnippetsController (📚 Reference tab)
 │       ├── help_tab.py            HelpTabController (❓ Help tab; extracted from App)
 │       ├── update_poller.py       UpdatePollerController (tokensave version probe +
-│       │                          GitHub release polling; extracted from App)
+│       │                          GitHub release polling; extracted from App).
+│       │                          Also exposes cmd_integration_check() — runs
+│       │                          scripts/check_tokensave_integration.py in a
+│       │                          background thread and shows output in a
+│       │                          scrolledtext Toplevel dialog)
 │       ├── codegraph_ctrl.py      CodeGraphController (init/sync/status/remove)
 │       ├── doctor_ctrl.py         DoctorController (tokensave doctor + purge + P0
 │       │                          monolith audit: file/method/class/complexity caps via
@@ -144,8 +198,32 @@ Token Save Manager Source/
 │       ├── sync_ctrl.py           SyncStatusController (sync, sync_all, force_sync)
 │       ├── fileops_ctrl.py        FileOpsController (open folder/editor, copy path)
 │       ├── shadowlinks_ctrl.py    ShadowLinksController
-│       └── git_ops_ctrl.py        GitOpsController (git log/commit/AI-review/init/
-│                                  manage-gitignore/untrack-ignored from Projects tab)
+│       ├── git_ops_ctrl.py        GitOpsController (git log/commit/AI-review/init/
+│       │                          manage-gitignore/untrack-ignored from Projects tab)
+│       └── ai_tasks_ctrl.py       AITasksController — long-running AI write tasks.
+│                                  Shipped: Stage 3 CHANGELOG drafter (cmd_draft_changelog),
+│                                  Stage 4 Refactor scout (cmd_refactor_scout),
+│                                  Roadmap-3 check runner (cmd_run_checks /
+│                                  TASK_RUN_CHECKS — opens ChecksDialog on main
+│                                  thread; no background thread needed here, the
+│                                  dialog owns its own ThreadPoolExecutor).
+│                                  Per-task per-project lock (_running set).
+│                                  Orchestrates only; all shared infra in helpers/.
+│                                  CLI briefing via temp .md file-handoff pattern
+│                                  (avoids cmd.exe /k newline-as-Enter quirk).
+│
+├── scripts/                       Source-only developer tools (NOT shipped in dist\)
+│   └── check_tokensave_integration.py
+│                                  Free deterministic audit script (~130 lines, pure
+│                                  stdlib). Checks: (1) installed tokensave version via
+│                                  --version, (2) upstream-issues/ STATUS fields,
+│                                  (3) stale snippet references (tools listed in
+│                                  CHANGELOG ### Removed that still appear in
+│                                  src/prompts.py snippet bodies). Exit code always 0.
+│                                  Run AFTER tokensave upgrade + git pull so local files
+│                                  match the new version. Launched by the manager's
+│                                  "🔍 Check integration" button (Settings) or right-click
+│                                  menu; also runnable standalone from a terminal.
 │
 ├── templates/                     Data files used by the manager + shipped in dist\
 │   ├── claude-md-template.md      BASIC_INSTRUCTIONS.md template for other projects
@@ -172,12 +250,19 @@ Token Save Manager Source/
     ├── ARCHITECTURE.md             This file
     ├── ARCHITECTURE_TOKENSAVE.md   tokensave tool internals reference
     ├── AGENT_ARCHITECTURE.md       LocalAgent loop + tool registry + propose-only rules
+    ├── UPGRADE_INTEGRATION.md      Tokensave upgrade workflow — 4-step sequence (upgrade →
+    │                               git pull → 🔍 Check integration → 🔄 audit snippet)
     ├── ROADMAP.md                  Staged plan for local AI features (Stages 0–8)
     ├── MCP_INTEGRATION_GOTCHAS.md  Field manual: UWP path redirection, wrapper stdio bug,
     │                               Connectors UI vs legacy config, live-reload paths
     ├── GITHUB_GUIDE.md             Beginner GitHub guide (concepts, setup, daily workflow)
-    └── upstream-issues/            Drafts of bugs to file against upstream tools
-        └── tokensave-hook-quoting.md   tokensave install --agent claude path-quoting bug
+    └── upstream-issues/            Drafts of bugs filed against upstream tools
+        ├── tokensave-hook-quoting.md       [FIXED v6.0.0 #81] path-quoting bug in install --agent claude
+        ├── tokensave-health-details.md     [FIXED v6.0.0 #82] tokensave_health details=true sub-scores
+        ├── tokensave-redundancy-tool.md    [SHIPPED v6.0.0 #83] tokensave_redundancy AST duplicate detector
+        ├── tokensave-daemon-stop-windows.md    [MOOT v6.0.0] --stop broken on Windows (daemon removed)
+        ├── tokensave-daemon-child-no-window.md [MOOT v6.0.0] Daemon worker cmd-window flash (daemon removed)
+        └── tokensave-daemon-status-autostart.md [MOOT v6.0.0] Daemon autostart state in --status (daemon removed)
 ```
 
 ---
@@ -192,7 +277,7 @@ app.py
   ├── constants.py       — palette, regex, paths
   ├── theme.py           — _Tooltip
   ├── helpers/*          — pure / IO helpers (no UI)
-  ├── dialogs/*          — 18 tk.Toplevel classes
+  ├── dialogs/*          — 22 tk.Toplevel classes
   └── controllers/*      — 4 tab controllers
         └── controllers/* each import the dialogs they instantiate
             (lazy in-handler imports for any cross-dialog cycle risk —

@@ -70,6 +70,40 @@ class ManagerConfig:
         return self.raw.get("search_roots", [])
 
     @property
+    def draft_pr_backend(self) -> str:
+        """Backend for the Draft PR feature: 'auto' | 'claude_cli' | 'llm'.
+
+        'auto' prefers Claude Code CLI if configured, falls back to API key.
+        """
+        return (self.raw.get("draft_pr_backend") or "auto").lower()
+
+    @property
+    def claude_cli_model(self) -> str:
+        """Model passed to manager-spawned `claude --print` calls via --model.
+
+        Empty string means: don't pass --model, let Claude CLI use its own
+        default (from ~/.claude/settings.json — Opus 4.7 for Max subscribers).
+        Defaults to Haiku 4.5 because the manager's automated calls (pre-commit
+        review, commit-message Suggest, Draft PR via CLI) need to be fast.
+        """
+        # Defensive: raw.get(key, default) returns None (not the default) if
+        # the user manually wrote `"claude_cli_model": null` in the JSON, and
+        # tk.StringVar(value=None) coerces to the literal string "None".
+        val = self.raw.get("claude_cli_model")
+        return val if val is not None else "claude-haiku-4-5-20251001"
+
+    @property
+    def commit_message_backend(self) -> str:
+        """Strategy order for commit-message suggestion.
+
+        'auto'      — Claude CLI first → LLM fallback (default)
+        'llm_first' — LLM (Ollama/LM Studio) first → Claude CLI fallback
+        'claude_cli'— Claude CLI only, no LLM fallback
+        'llm'       — LLM only, Claude CLI never fires
+        """
+        return (self.raw.get("commit_message_backend") or "auto").lower()
+
+    @property
     def basic_instructions_template(self) -> str:
         """Absolute path to the BASIC_INSTRUCTIONS.md template (derives from template_dir)."""
         return os.path.join(self.template_dir, "claude-md-template.md")

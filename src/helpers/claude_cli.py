@@ -25,11 +25,14 @@ from __future__ import annotations
 import subprocess
 import sys
 
+from constants import CREATE_NO_WINDOW
+
 
 def spawn_claude_cli(
     claude_exe: str,
     project_path: str,
     instruction: str,
+    model: str = "",
 ) -> tuple[bool, str]:
     """Open a new terminal window running `claude` with *instruction*.
 
@@ -40,6 +43,7 @@ def spawn_claude_cli(
         claude_exe:   Full path to claude or claude.cmd (from cfg.claude_cli_exe).
         project_path: Working directory for the new process.
         instruction:  Single-line imperative prompt for claude.
+        model:        Pinned model ID; empty string uses Claude CLI's default.
 
     Returns:
         (success: bool, error_message: str)
@@ -52,23 +56,87 @@ def spawn_claude_cli(
 
     # Strip newlines — a stray \n inside cmd.exe /k fires Enter prematurely.
     instruction = instruction.replace("\r", " ").replace("\n", " ").strip()
+    model_flag = f' --model "{model}"' if model else ""
 
     try:
         if sys.platform == "win32":
             # ""outer"" wrapper: satisfies cmd.exe's multi-quoted-args quoting rule.
             # Both claude_exe and instruction may contain spaces; passing a list
             # triggers the outermost-quote-strip bug, so we use a raw string here.
-            cmd_str = f'cmd.exe /k ""{claude_exe}" "{instruction}""'
+            cmd_str = f'cmd.exe /k ""{claude_exe}"{model_flag} "{instruction}""'
             subprocess.Popen(
                 cmd_str,
                 cwd=project_path,
                 creationflags=subprocess.CREATE_NEW_CONSOLE,
             )
         else:
-            subprocess.Popen(
-                [claude_exe, instruction],
-                cwd=project_path,
-            )
+            argv = [claude_exe]
+            if model:
+                argv += ["--model", model]
+            argv.append(instruction)
+            subprocess.Popen(argv, cwd=project_path)
         return True, ""
     except Exception as e:
         return False, str(e)
+
+
+def call_claude_cli_print(
+    claude_exe: str,
+    prompt: str,
+    system_prompt: str = "",
+    timeout: int = 45,
+    model: str = "",
+    cwd: "str | None" = None,
+) -> "str | None":
+    """Invoke `claude --print` non-interactively and return stdout text.
+
+    Used by the pre-commit review hook and the commit-message Claude CLI
+    strategy. The prompt is piped via stdin rather than as a positional
+    arg — argv mangles multi-line / backtick-laden content on Windows.
+
+    Args:
+        model: Pinned model ID (e.g. "claude-haiku-4-5-20251001"). Empty
+               string omits --model so Claude CLI uses its own default
+               from ~/.claude/settings.json.
+        cwd:   Working directory for the subprocess. Claude Code loads
+               <cwd>/CLAUDE.md and <cwd>/AGENTS.md as project context, so
+               pass a neutral dir (e.g. expanduser("~")) for tasks where
+               project context would derail the model into assistant mode
+               (commit-message generation). Pass the project path for
+               tasks that DO benefit from project context (code review).
+               None inherits Python's cwd.
+
+    Returns the stripped stdout string, or None on timeout / error / empty.
+    On non-zero exit, the first 400 chars of stderr are printed to
+    sys.stderr so users can diagnose typo'd model IDs or auth issues.
+    """
+    if not claude_exe:
+        return None
+    cmd = [claude_exe, "--print"]
+    if model:
+        cmd += ["--model", model]
+    if system_prompt:
+        cmd += ["--append-system-prompt", system_prompt]
+    try:
+        proc = subprocess.run(
+            cmd,
+            input=prompt,
+            capture_output=True, text=True,
+            encoding="utf-8", errors="replace",
+            timeout=timeout,
+            creationflags=CREATE_NO_WINDOW,
+            cwd=cwd,
+        )
+    except subprocess.TimeoutExpired:
+        return None
+    except OSError:
+        return None
+    if proc.returncode != 0:
+        err = (proc.stderr or "").strip()
+        # sys.stderr can be None under pythonw.exe / windowed Nuitka builds —
+        # guard the print so an unexpected runtime never crashes the worker.
+        if err and sys.stderr is not None:
+            print(f"[claude_cli] claude --print exited {proc.returncode}: {err[:400]}",
+                  file=sys.stderr)
+        return None
+    return (proc.stdout or "").strip() or None

@@ -10,6 +10,16 @@ Status legend:
 
 ---
 
+## Roadmap 6
+
+*(Planning phase — no stages committed yet. Add items here as they are decided.)*
+
+### ✅ Tasks tab — Claude Code session + worktree visibility. Shipped Roadmap-5 (2026-05-25). Details in CHANGELOG.md.
+
+### ✅ Claude CLI commit message fix (`--append-system-prompt` removed). Shipped Roadmap-5 (2026-05-25). Details in CHANGELOG.md.
+
+---
+
 ## Major direction: local AI assistant integration
 
 The manager is growing into a **propose-only AI assistant** for project maintenance. AI suggestions never auto-apply — every change waits for the user to click Apply.
@@ -41,43 +51,15 @@ For agentic / custodial work, you want **non-reasoning instruction-tuned** model
 
 ## Staged AI features
 
-### ✅ Stage 0 — Smart commit message generation
-*Status: shipped*
+### ✅ Stage 0 — Smart commit message generation. Shipped 2026-05-23. Details in CHANGELOG.md.
 
-The 💡 Suggest button in the Git Commit dialog runs a multi-strategy orchestrator: AI call (if enabled) → CHANGELOG bullet parsing → diff content analysis → file-name fallback. All results pass a sanitiser that enforces conventional-commit format. Async with a spinner so the GUI never freezes. See `CHANGELOG.md` for the full feature list.
+### ✅ Stage 1 — AI Code Review panel. Shipped 2026-05-23. Details in CHANGELOG.md.
 
-### ✅ Stage 1 — AI Code Review panel
-*Status: shipped*
+### ✅ Stage 2 — Project Q&A chat with tool calling (Ask tab). Shipped 2026-05-23. Details in CHANGELOG.md.
 
-Right-click any project → **🔍 AI Code Review…** opens a split-pane dialog: top pane shows `git diff HEAD` with green/red colour-coding, bottom pane streams an AI-generated structured review (⚠ High / ⚡ Medium / 💡 Low / ℹ Observations) with severity-coloured section headers. Async with **token-by-token streaming** via byte-aligned SSE parsing — visible progress instead of a long opaque wait. Worker-side token batching (~50 ms / 8 tokens) prevents Tk event-loop saturation on fast local models. Stop / Regenerate / Copy buttons. Section-header colour tags applied in a final pass after streaming ends.
+### ✅ Stage 3 — CHANGELOG drafter. Shipped 2026-05-24. Details in CHANGELOG.md.
 
-Pure read-only: one `_call_llm` call with a locked system prompt. No tools, no file writes, no autonomy concerns. `AICodeReviewDialog._SYSTEM_PROMPT` holds the prompt as a class-level constant — match this pattern for any future one-shot LLM dialog.
-
-### ✅ Stage 2 — Project Q&A chat with tool calling
-*Status: shipped*
-
-New manager tab: **🤖 Ask**. Chat interface where the AI calls read-only tools (`read_file`, `list_directory`, `git_log`, `git_diff`, `tokensave_search`, `tokensave_context`) to answer questions about the active project. Sample questions:
-
-- "What does this project do?"
-- "Where is the commit-message generator?"
-- "Why is `_pending_diff` using `HEAD` instead of `--cached`?"
-- "Show me everything that calls `_classify_commits_for_changelog`."
-
-All tools are read-only — the agent CANNOT write files, run commits, or modify config. The agent loop is bounded (default 8 iterations) and has a cumulative context budget (~40 000 chars across all tool outputs) so repeated 50 KB reads can't saturate small local-model context windows. Lives in `src/agent.py` (`LocalAgent`) and `src/agent_tools.py` (`ToolSpec` registry).
-
-Provider support: Ollama / OpenAI / OpenAI-compatible (LM Studio, vLLM, etc.) all do tool calling natively. Anthropic falls back to a one-shot completion without tools — adding native Anthropic tool-use is a known follow-up.
-
-### 🟡 Stage 3 — CHANGELOG drafter
-*Status: write-tool plumbing shipped (Roadmap-2 Phase 1); CHANGELOG-specific drafter still TBD*
-
-Right-click → **📝 Draft CHANGELOG entry…**. Agent reads commits since the last release tag, classifies them, drafts CHANGELOG bullets. A ProposalDialog presents the old-vs-new diff with **Apply / Reject / Edit then Apply** buttons. First feature with a write tool, but every write goes through the same approval gate.
-
-**Roadmap-2 progress:** the write-tool path is fully shipped. `agent_tools.py:_tool_write_file` builds a `WriteProposal` (with race-safe `original_hash` + symlink-safe path containment + side-effect surfacing for `dirs_to_create`); the agent dispatches it through `LocalAgent.on_write_proposal` → `ProposalBridge` → `ProposalDialog`; on accept, `_atomic_write_file` re-checks the hash and writes via `.tmp` + `os.replace`. The CHANGELOG-specific drafter (commit classifier + bullet renderer + right-click entry) is the remaining work — straightforward now that the write path is proven.
-
-### 🔮 Stage 4 — Refactor scout
-*Status: planned*
-
-Right-click → **🔬 Refactor scout…**. Agent calls tokensave's analytics tools (`tokensave_dead_code`, `tokensave_god_class`, `tokensave_circular`, etc.) and produces a structured report with plain-English explanations per finding. Each finding has Investigate / Ignore actions. Findings marked Ignore persist in `manager-config.json` and won't reappear.
+### ✅ Stage 4 — Refactor scout. Shipped 2026-05-24. Details in CHANGELOG.md.
 
 ### 💭 Stage 5 — Limited autonomous mode
 *Status: considering, revisit after Stages 1-4 ship*
@@ -87,13 +69,13 @@ Adds opt-in autonomous execution for specific tool categories (e.g. "auto-write 
 ---
 
 ### 🟡 Stage 6 — Workflow accelerators
-*Status: PR draft + Open-on-GitHub + pre-commit hook shipped (Roadmap-1/2); release narrative still planned*
+*Status: PR draft + pre-commit hook shipped; release narrative still planned*
 
 Bundles three commit/release workflow features that share the same "AI drafts → user approves → manager applies" pattern:
 
-- **PR description generator** ✅ *(shipped Roadmap-1)* — `Draft PR…` button in the Git tab. Primary click runs the Claude Code CLI if configured (opens a detached terminal — `helpers/claude_cli.py`), otherwise calls the API path (`helpers/pr_draft.py` → in-app dialog with Copy button). Right-click / Shift+click pops a menu to explicitly override. **Roadmap-2 P5a** added an "🔗 Open PR on GitHub" button in the same dialog: writes the body to a temp `.md` and spawns `gh pr create --web --body-file <tmp>` so the GitHub New-PR page opens pre-filled.
-- **Pre-commit AI review hook** ✅ *(shipped Roadmap-2 P5b)* — Right-click → 🔍 Pre-commit AI Review hook…. Installs a git pre-commit hook (POSIX shell script + Python reviewer at `src/precommit_review.py`) that reads `git diff --cached` and runs an AI code review. Three-value backend choice via `precommit_review_backend` in `manager-config.json`: `"auto"` (prefer Claude Code subscription via `claude --print`, fall back to configured LLM), `"claude_cli"` (force CC), `"llm"` (force per-token provider). Three-value severity threshold (`precommit_severity_threshold`: `"none"` warn-only default / `"medium"` / `"high"`) decides whether findings block. Fail-open invariant: every error path exits 0 with a stderr notice. Override always available via `git commit --no-verify`. Stop-hook variant deliberately deferred — see "Pre-commit AI review — Stop-hook variant" entry in the Roadmap-3 backlog.
-- **Release-notes narrative writer** *(planned)* — Extends Release Wizard with an AI-generated summary paragraph above the bullet list ("This release focuses on X and Y…"). Drafts inside the existing wizard textarea so the user can edit before publishing. `helpers/changelog_patch.py:insert_changelog_release` (atomic idempotent `## [Unreleased]` patcher) is now wired into ReleaseWizard's publish path (Roadmap-2 P2), so the narrative just needs to fit into the existing notes string before insertion.
+- **PR description generator** ✅ — Shipped Roadmap-1 / extended Roadmap-5. Details in CHANGELOG.md.
+- **Pre-commit AI review hook** ✅ — Shipped Roadmap-2 P5b. Details in CHANGELOG.md.
+- **Release-notes narrative writer** *(planned)* — Extends Release Wizard with an AI-generated summary paragraph above the bullet list ("This release focuses on X and Y…"). Drafts inside the existing wizard textarea so the user can edit before publishing. `helpers/changelog_patch.py:insert_changelog_release` is already wired into ReleaseWizard's publish path, so the narrative just needs to fit into the existing notes string before insertion.
 
 ### 💭 Stage 7 — Quality assurance suite
 *Status: considering*
@@ -118,30 +100,13 @@ Turns the manager into a project-memory tool:
 
 ## Code-health backlog
 
-Round 4 split the monolith into subpackages (equality 0.16 → 0.57, quality 5,689 → 7,003). Round 5 extracted 9 sub-controllers from `ProjectsTabController` + 2 from `App`. Roadmap-1 added 6 new features + cleared the pyflakes baseline to zero. Roadmap-2 added the Doctor monolith audit (file/method/class/complexity caps surfaced automatically) and shipped Phases 0, 1, 2.
+### ✅ Roadmap-2 — Anti-monolith governance + Phases 0–5b. Shipped 2026-05-24. Details in CHANGELOG.md.
 
-### Roadmap-2 scope — all shipped (2026-05-24)
+### ✅ Roadmap-3 — Code-health sweep (Phases 1–6). Shipped 2026-05-24. Details in CHANGELOG.md.
 
-- ✅ **Phase 0 — Anti-monolith governance + Doctor audit.** `BASIC_INSTRUCTIONS.md` rewritten with rules A–H (caps, doc discipline, tokensave-first, guard-rails, surface-don't-decide, refactor budget, metric hierarchy, governance hygiene). `DoctorController` gained a monolith-audit pass (AST-walks every `*.py`; non-Python line-count check; hybrid layout-method carve-out; top-of-file `# anti-monolith: exempt — <reason>` opt-out). Ask-tab system prompt steers code-health questions to `tokensave_god_class` / `tokensave_complexity` / `tokensave_largest`.
-- ✅ **Phase 1 — `write_file` tool + `ProposalDialog` bridge.** Lifts the read-only-agent invariant. `ToolSpec` gains `proposal_builder` + `post_accept`. Race-safe via SHA-256 hash recheck at write time. Symlink-safe `_under_project` containment. `ProposalBridge` coordinates worker ↔ Tk main with `threading.Event`, lock-guarded `_resolve`, post-timeout expired-state UX (no auto-close), app-shutdown cancellation. Inline test harness covers 4 race-safety paths.
-- ✅ **Phase 2 — `ReleaseWizard` → `changelog_patch` wiring + daemon control UI.** `insert_changelog_release` extended with idempotent-replace + boundary precision (next `^## \[` line stops the replacement). `helpers/release.py:_patch_changelog` deleted (single canonical patcher). Daemon footer indicator gained a right-click menu: Start / Stop / Install autostart / Disable autostart, with async + status-confirm pattern. Fixed pre-existing `toggle_daemon` bug (was passing nonexistent `--start` flag).
-- ✅ **Phase 3 — `ReleaseWizardDialog._build_ui` split per wizard step.** 186-line `_build_ui` → 8-line orchestrator + 8 named section builders (header / version / title / notes / build / artefact / changelog / publish). Pure layout refactor.
-- ✅ **Phase 4 — `BranchManagementController` extracted from `GitTabController`.** 13 methods moved to `src/controllers/branch_mgmt_ctrl.py` via callback injection. `cmd_git_merge` (complexity 14 inline) decomposed into 5 helpers. `GitTabController` 50 → 38 direct methods (under 40 cap).
-- ✅ **Phase 4.5 — Dialog `__init__` split sweep.** Applied Phase 3's per-section split pattern to 6 dialog constructors: `merge_pr.py`, `untrack_ignored.py`, `ai_code_review.py` (`__init__` + `_start_review` behaviour split), `ollama_model_mgr.py`, `github_setup.py`, `gitignore.py`. One commit per dialog. Project audit dropped from 49 violations (start of P2) → 39.
-- ✅ **Phase 5a — "Open PR on GitHub" button.** Added to the PR draft dialog next to Copy. Writes body to temp `.md`, spawns `gh pr create --web --body-file <tmp>` with `cwd=<project>`. `--body-file` (not `--body "..."`) sidesteps Windows command-line length limits and quote escaping. Button greyed + tooltipped when `gh` isn't on PATH.
-- ✅ **Phase 5b — Pre-commit AI review hook (warn-only).** Right-click → 🔍 Pre-commit AI Review hook… installs a git pre-commit hook that runs `git diff --cached` through an AI code review. Three-value backend choice (`precommit_review_backend`: `"auto"` / `"claude_cli"` / `"llm"`). Fail-open invariant on every error path. POSIX shell script with hard-coded `python.exe` + reviewer paths; sentinel marker for install/remove symmetry; refuses to touch a hook the user installed themselves. **Stop-hook variant explicitly deferred** — see the "Pre-commit AI review — Stop-hook variant" entry below for rationale.
+Remaining 🔮 items from the Roadmap-3 Doctor snapshot (promote when touching the affected code):
 
-- 🔮 **W2 — `_render_block` complex branch tangle (dialogs/mcp_config.py:154, 109 lines)**. 11 branches handling different MCP config row states. Refactor into a dispatch table keyed on row classification. Worth doing before extending MCP support to additional editors. Deferred from Roadmap-2 scope; revisit in Roadmap-3.
-
-### Roadmap-3 code-health backlog (post-Roadmap-2 Doctor snapshot)
-
-Doctor's full project audit surfaced 49 violations across 22 files at the start of Roadmap-2. After Phases 3 + 4 + 4.5 close out, ~30 violations will remain — all genuine branching logic that needs per-helper refactoring, NOT template-able sweeps. Treat each cluster as an independent Roadmap-3 work item, not all-at-once.
-
-**Helper complexity (highest value — central to AI feature stack):**
-- 🔮 `helpers/commit_messages.py` — 5 functions over cap (`_suggest_from_diff_content`=21, `_extract_changelog_additions`=18, `_message_from_changelog`=18, `_suggest_from_filenames`=18, `_sanitize_commit_message`=13). Multi-strategy orchestrator chain — natural shape is each `_strat_*` function in its own helper module.
-- 🔮 `helpers/llm.py` — 4 functions over cap (`_call_openai_compat`=20, `_call_llm`=15, `_call_anthropic`=14, `_iter_json_lines`=11). Provider-dispatch + SSE-parsing. Cleanest split is per-provider sub-module (`llm/anthropic.py`, `llm/openai_compat.py`, `llm/sse.py`).
-
-**Helper complexity (lower-stakes — promote when actually touching the affected code):**
+**Helper complexity:**
 - 🔮 `helpers/git.py` `_format_git_status_cell`=16
 - 🔮 `helpers/project_discovery.py` `find_projects`=16
 - 🔮 `helpers/scaffold.py` `_scaffold_git_hook`=14
@@ -149,8 +114,8 @@ Doctor's full project audit surfaced 49 violations across 22 files at the start 
 - 🔮 `helpers/release.py` `_classify_commits_for_changelog`=12, `_suggest_bump_kind`=11
 - 🔮 `helpers/shadow_links.py` `remove_shadow_links`=11
 
-**Controllers / dialogs (behaviour complexity, not layout — Phase 4.5 doesn't cover these):**
-- 🔮 `controllers/projects_tab.py` class 44 methods (over 40 even after Round 5's 9 extractions) + `__init__` 109 lines + `rebuild_tree` complexity 13. Diminishing returns on further extraction; consider grandfathering via `doctor_skip_monolith_paths` if Phase 4 makes it the heaviest controller and no clean further split exists.
+**Controllers / dialogs:**
+- 🔮 `controllers/projects_tab.py` class 44 methods (over 40 even after Round 5's 9 extractions) + `__init__` 109 lines + `rebuild_tree` complexity 13. Diminishing returns on further extraction; consider grandfathering via `doctor_skip_monolith_paths` if no clean further split exists.
 - 🔮 `controllers/snippets.py` `_on_snippet_saved`=11
 - 🔮 `dialogs/mcp_config.py` `_apply`=11
 - 🔮 `dialogs/ollama_model_mgr.py` `_fetch_context_length`=12, `_worker`=12
@@ -158,27 +123,22 @@ Doctor's full project audit surfaced 49 violations across 22 files at the start 
 - 🔮 `dialogs/gitignore.py` `_on_save`=12
 - 🔮 `dialogs/ai_code_review.py` `_render_review`=11
 
-**Agent / app pre-existing (called out in Roadmap-2 plan as do-not-touch within Phase 1):**
+**Agent / app pre-existing (do-not-touch during feature work):**
 - 🔮 `agent.py` `run()`=18, `_rescue_tool_call_from_content`=19/101 lines, `_run_anthropic_oneshot`=20
 - 🔮 `agent_tools.py` `_suggest_paths_for_missing_file`=11, `_read_file`=13, `_runner`=17
 - 🔮 `app.py` `_check_config`=14, `worker`=14
 
 ### 💭 Genuine dead-code cleanup in `src/agent_tools.py` (10-minute pass)
-Three functions look genuinely unused after Phase E (grep-verified, NOT Tk-callback false positives):
+Three functions look genuinely unused (grep-verified, NOT Tk-callback false positives):
 - `_read_file_range` at `agent_tools.py:218` — superseded by inline handling in the `read_file` tool handler. **Verify** no caller remains, then delete.
 - `_suggest_paths_for_missing_file` at `agent_tools.py:249` — docstring claims it's called from `read_file`'s error path; verify the wiring still routes through it.
 - `_slim_tokensave_context` at `agent_tools.py:452` — verify the `tokensave_context` tool handler still calls it.
 
-Plus two genuine unused imports in the same file: `dataclasses.dataclass` (L26) and `typing.Callable` (L27) — leftover from the legacy ToolSpec class.
+### Stage 2 (Ask-tab agent) usability refinements
 
-### 🔮 Stage 2 (Ask-tab agent) usability refinements
+✅ Tool-call deduplication, loop-stall surfacing, `git_log` default — Shipped Roadmap-3 Phase 5. Details in CHANGELOG.md.
 
-Surfaced via Roadmap-2 hands-on testing with `ollama` + `qwen2.5-coder:14b`. The agent works but quality is rough around the edges. Backlogged rather than fixed inline (the agent dispatch is a hot path; refinements deserve their own thought-out commit set).
-
-- **Tool-call deduplication.** Observed: model called `git_log({})` immediately followed by `git_log({"n": 20})` — same result, wasted iteration (default `n` is 20). The dispatcher could keep a per-run cache of `(tool_name, args_hash) → result` and return a cached result with `[cached from earlier in this run]` prefix, OR push back to the model with a "you already ran this — pick a different angle" hint. Low-risk; doesn't change tool semantics.
-- **Final-message streaming.** Currently the assistant's final answer arrives as one chunk at the end of the loop. Streaming the final-turn tokens (per the AGENT_ARCHITECTURE doc note) would make long answers feel responsive instead of opaque. Non-streaming the tool-call turns is correct — they're structured JSON.
-- **Loop-stall surfacing.** When the agent hits the iteration cap OR an unrecoverable HTTP error, the chat just shows a generic "✗  Error" indicator. The detailed reason already lives in `LocalAgent._last_error` — surface it in the chat (with the same one-line summary the `on_error` callback already gets).
-- **Single-source-of-truth for tool defaults in descriptions.** The `git_log` description says "Default 20" but the parameters JSON Schema doesn't set a default, so the model can't reliably pick "the default" without naming `n` explicitly. Either set `"default": 20` in the schema (preferred — lets the model omit `n`) or strip the "Default 20" from the prose so it doesn't mislead.
+- 🔮 **Final-message streaming.** Still planned. Currently the assistant's final answer arrives as one chunk at the end of the loop. Streaming the final-turn tokens would make long answers feel responsive. Non-streaming tool-call turns is correct — they're structured JSON.
 
 ### 💭 Pre-commit AI review — Claude Code Stop-hook variant
 
@@ -187,34 +147,31 @@ When Roadmap-2 Phase 5b shipped the pre-commit AI review hook, we considered thr
 - **Git pre-commit hook** fires at the single moment that matters (a commit is about to land), reviews exactly `git diff --cached` (no ambiguity about what's being reviewed), produces one signal per commit, and can actually block. Works for human changes too, not just Claude-driven ones.
 - **Claude Code Stop hook** fires on EVERY Claude turn — including tiny ones and non-code ones — doesn't naturally know which files Claude touched vs. what was already dirty, can't block git operations anyway, and is the fastest path to "user disables the hook after a week of false positives."
 
-The git hook covers ~95% of the safety value with cleaner semantics. Revisit only if real-world usage uncovers a specific gap the pre-commit hook can't fill — e.g. "I want a heads-up the moment Claude finishes a risky operation, before I even think about staging." Until then, ship the simpler thing.
+The git hook covers ~95% of the safety value with cleaner semantics. Revisit only if real-world usage uncovers a specific gap the pre-commit hook can't fill.
 
-### 🔮 Stage 0 (commit-message generation) quality refinements
+### Stage 0 (commit-message generation) quality refinements
 
-Surfaced via Roadmap-2 hands-on testing — clicking Suggest on a small docs-only diff produced the generic `docs: update documentation`, never invoking the LLM.
+✅ `min_diff_lines` gate lowered (30 → 10), strategy badge UI — Shipped Roadmap-3 Phase 5. Details in CHANGELOG.md.
 
-- **`min_diff_lines` gate is too aggressive for small but meaningful changes.** Default 30 means a focused 5-line bug fix or a 10-line docs improvement falls through to the filename heuristic. Two paths: (a) lower the default to 10, accepting more LLM calls; (b) keep the line gate but add an opt-in path (e.g. shift-click Suggest = "use LLM regardless of size"). (b) is safer.
-- **File-name fallback is too generic for `docs/upstream-issues/`-style paths.** The current heuristic produces "docs: update documentation" when ALL changed files are markdown — but the actual subject (which issue draft was edited) is right there in the filename. A small `_SCOPE_PATTERNS` addition keyed off `docs/upstream-issues/<name>.md` → `docs(upstream): <name>` would catch this class.
-- **No surfacing of WHICH strategy fired.** Tooltip on the Suggest button or one-liner status ("via LLM" / "via CHANGELOG" / "via diff" / "via filename") would let the user know whether the generic message is the best the chain could do or whether the LLM was silently bypassed.
+- 🔮 **File-name fallback is too generic for `docs/upstream-issues/`-style paths.** The current heuristic produces "docs: update documentation" when ALL changed files are markdown — a `_SCOPE_PATTERNS` addition keyed off `docs/upstream-issues/<name>.md` → `docs(upstream): <name>` would catch this class.
 
-### 🔮 Draft PR refinements (surfaced via Roadmap-2 post-ship dogfooding)
+### ✅ Skill awareness / prompting — catalog shipped. Shipped Roadmap-3 Phase 3, 2026-05-24. Details in CHANGELOG.md.
 
-Surfaced when the user clicked Draft PR on the Roadmap-2 branch at PR-creation time. Three independent refinements:
+Remaining design space (not yet committed):
 
-- **CLI instruction prompt is wrong for PR-creation use.** The Roadmap-1 Claude-CLI hand-off sends `"Review my uncommitted git changes and write a PR description to PR_DRAFT.md in the project root."` — but at PR time the working tree is usually clean (you commit, push, then click Draft PR). Claude correctly reports "no uncommitted changes" instead of drafting anything useful. The instruction should be `git log master..HEAD` + `git diff master..HEAD` based (commits between current branch and the upstream / default branch). The base-branch detection logic from `_call_anthropic`'s commit-message path may be reusable. Located in the CLI-path callsite in `src/controllers/git_tab.py` (or wherever the instruction string lives).
+- **Workflow-moment prompts** — Context-aware nudges at specific Git-tab actions (e.g. before clicking Release… → prompt to run `consolidate-memory`). Risk: notification fatigue. Mitigation: per-prompt opt-out in `cfg.raw["skill_prompt_suppressed"]`.
+- **Last-used tracking** — Per skill, per project, write a timestamp to `cfg.raw["skill_last_used"]`. Surface "It's been 30 days since `consolidate-memory` ran" as a passive footer indicator.
+- **Right-click → "Suggest skill for this project"** — Manager scans recent git activity / file changes and proposes 1–3 relevant skills with rationale.
+- **Workflow bundles** — Curate "Pre-PR", "Pre-release", "End-of-roadmap" bundles chaining multiple skills.
 
-- **Draft PR backend preference setting** (analogous to `precommit_review_backend` from P5b). Currently the routing is hard-coded: CLI if `claude_cli_exe` set, else API. A user with both Claude Code AND Ollama configured has no way to say "I want to default to Ollama for PR drafts even though I have Claude CLI installed." Add `draft_pr_backend` in `manager-config.json` with values `"auto"` (current behaviour: prefer CLI), `"claude_cli"`, `"llm"`. Right-click menu still gives per-click override.
-
-- **Phase 5a "Open PR on GitHub" button needs end-to-end verification** in actual use. Untested by the user during Roadmap-2 because (a) left-click defaults to the CLI hand-off when `claude_cli_exe` is set so the dialog never opens, and (b) the API path would burn Anthropic credits which the user wanted to avoid. Verification path: confirm the API route via Ollama (`commit_message_llm` provider) produces text in the dialog, then verify the new button correctly writes a temp file + spawns `gh pr create --web --body-file`. Should "just work" given Phase 5a's design but isn't proven against an Ollama backend yet.
-
-- **Investigate Claude Code hook path-quoting errors.** Roadmap-2 dogfooding surfaced repeated `UserPromptSubmit hook error: Failed with non-blocking status code: /usr/bin/bash: line 1: D:/Claude: No such file or directory` and matching `Stop hook error` messages in the user's Claude Code terminal. Cause: a hook entry somewhere in `~/.claude/settings.json` or project `.claude/settings.json` references an unquoted Windows path containing spaces (`D:\Claude Co worker\...`), so bash splits at the first space and tries to execute `D:/Claude`. Candidates: the Roadmap-1 `_scaffold_git_hook` auto-commit Stop hook, or some manually-added entry. Fix: audit the hook commands and ensure paths-with-spaces are double-quoted. Not blocking but noisy.
+### ✅ Draft PR refinements (Roadmap-3 Phase 2 — all shipped). Shipped 2026-05-24. Details in CHANGELOG.md.
 
 ### 💭 File the two upstream tokensave issues
 Drafts in `docs/upstream-issues/`:
 - `tokensave-health-details.md` — request `tokensave_health details=true` to return the sub-score breakdown in one call
 - `tokensave-redundancy-tool.md` — request `tokensave_redundancy` AST-level functional-duplication detector
 
-Both have "strip any proprietary code before filing" notes per `~/.claude/CLAUDE.md`. The redundancy ask would let `tokensave_health` surface a real Redundancy sub-score (currently impossible — there's no project-wide aggregate primitive).
+Both have "strip any proprietary code before filing" notes per `~/.claude/CLAUDE.md`.
 
 ---
 
@@ -269,26 +226,12 @@ To be explicit about what we're NOT building:
 
 This file is updated whenever a stage ships or its design materially changes.
 
-**Last updated: 2026-05-24** — Roadmap-2 shipped in full (Phases 0, 1, 2, 3, 4, 4.5, 5a, 5b). Highlights:
+**Last updated: 2026-05-25** — Roadmap-5 continued. Additional: Tasks tab (Claude Code session + worktree visibility); Claude CLI commit message quality fix (`--append-system-prompt` removed). Details in CHANGELOG.md.
 
-- **Phase 0 — Anti-monolith governance.** `BASIC_INSTRUCTIONS.md` rewritten with 8 working rules (A–H); Doctor gained an AST-based monolith audit with hybrid layout-method carve-out.
-- **Phase 1 — Stage 3 unlock.** `write_file` agent tool gated through `ProposalDialog` + race-safe `ProposalBridge`. Lifts the read-only-agent invariant; unblocks the CHANGELOG drafter and most of Stage 7.
-- **Phase 2 — Daemon UI + canonical changelog patcher.** Footer indicator right-click menu (Start / Stop / Install autostart); `insert_changelog_release` extended with idempotent replace + boundary precision and wired into ReleaseWizard. Fixed pre-existing `toggle_daemon` `--start` bug.
-- **Phases 3 + 4 + 4.5 — Targeted architectural cleanup.** `ReleaseWizardDialog._build_ui` split per wizard step; `BranchManagementController` extracted from `GitTabController` (50 → 38 methods, under 40 cap); 6 dialog `__init__` constructors split using the same per-section template.
-- **Phase 5a — `gh pr create --web` button** in the PR draft dialog. `--body-file` (not `--body`) sidesteps Windows command-line quoting.
-- **Phase 5b — Pre-commit AI review hook** with three-value backend choice (`"auto"` / `"claude_cli"` / `"llm"`) and three-value severity threshold (`"none"` warn-only default / `"medium"` / `"high"`). Fail-open invariant on every error path. Stop-hook variant deliberately deferred (logged with rationale in the Roadmap-3 backlog).
-- **Doctor monolith audit dropped project violations from 49 → 39** across Phases 3 + 4 + 4.5 + 5b combined, without bundling unrelated cleanup. Remaining 30+ violations logged in the Roadmap-3 code-health backlog by priority.
+✅ **2026-05-25 (earlier)** — Roadmap-5 initial ship. Highlights: Claude CLI model selector; pre-commit hook hang fix (Opus → Haiku); commit-message Claude CLI parity; Draft PR direct GitHub PR creation. Details in CHANGELOG.md.
 
-**Last updated: 2026-05-23** — Stages 0, 1, AND 2 all shipped this cycle. Highlights:
+✅ **2026-05-24** — Roadmap-3 shipped in full (Phases 1–6). Details in CHANGELOG.md.
 
-- **Stage 0** (smart commit messages) shipped earlier; this cycle extended `_call_llm` with optional streaming via an `on_token` callback.
-- **Stage 1** (AI Code Review) shipped with streaming response display, byte-aligned SSE parsing, and worker-side token batching to avoid Tk event-loop saturation.
-- **Stage 2** (🤖 Ask tab) shipped end-to-end. `src/agent.py` (`LocalAgent`) + `src/agent_tools.py` (`ToolSpec` registry with 6 read-only tools). Includes: bounded iteration loop, cumulative context budget, per-tool error wrapping, path-containment validation, tool-call rescue for local models that emit calls as JSON-in-content, Ollama `num_ctx=32768` bump, detailed HTTP error reporting via `_last_error`, `read_file` line-range support, basename-match suggestions on not-found errors.
-- **🦙 Ollama Model Manager** shipped — Settings → "🦙 Manage Ollama Models…" using Ollama's native REST API.
-- **🔄 Upgrade tokensave from the manager** shipped — sync-output regex parser + hourly GitHub releases poller.
-- **🔌 MCP Integration configurator** shipped — UWP-aware path detection, label-aware classification, backup-first writes, refuses to write over running Claude.
-- **Doctor button** enhanced with stale-entry purge offer + cmd.exe spawn fallback for TTY-gated prompts.
-- **`tokensave-wrapper.py`** stdio bug fixed (explicit `sys.stdin/stdout/stderr` to Popen). Live in-session pin reloading via wrapper-side watcher deferred — see `docs/MCP_INTEGRATION_GOTCHAS.md` for the three viable paths forward.
-- **🐙 Merge PR button** added to Git tab — full GitHub PR merge flow without leaving the manager.
+✅ **2026-05-24** — Roadmap-2 shipped in full (Phases 0–5b). Details in CHANGELOG.md.
 
-Next up: Stage 3 (CHANGELOG drafter — first write tool, ProposalDialog gate) when there's lived-with experience with Stages 0–2 to inform the proposal-dialog design.
+✅ **2026-05-23** — Stages 0, 1, and 2 (smart commit messages, AI Code Review, Ask tab) shipped. Ollama Model Manager, Upgrade tokensave, MCP Integration configurator also shipped. Details in CHANGELOG.md.
