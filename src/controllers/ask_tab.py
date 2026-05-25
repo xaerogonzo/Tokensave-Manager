@@ -305,7 +305,20 @@ class AskTabController:
     def on_tab_selected(self):
         """Called by App._on_tab_changed when the Ask tab is focused."""
         path = self._get_project_path()
-        if path:
+        if path and path != self._ask_path:
+            # Project switched — stale conversation context would confuse the
+            # agent (it would reference files from the old project while tools
+            # now target the new one).
+            self._ask_path = path
+            if self._ask_messages:
+                self._ask_messages = []
+                self._ask_set_intro()
+                append_text(
+                    self._ask_log,
+                    f"[ Switched to project: {os.path.basename(path)}"
+                    f" — previous conversation cleared ]\n\n",
+                    "info")
+        elif path:
             self._ask_path = path
         self._ask_refresh_header()
         try:
@@ -442,6 +455,18 @@ class AskTabController:
                 "role": "system",
                 "content": self._ASK_SYSTEM_PROMPT,
             })
+            if self._ask_path:
+                basename = os.path.basename(self._ask_path)
+                self._ask_messages.append({
+                    "role": "system",
+                    "content": (
+                        f"Active project: {basename}\n"
+                        f"Project root: {self._ask_path}\n\n"
+                        "All file paths in tool calls are relative to this "
+                        "root. Start there when the user asks about the "
+                        "project."
+                    ),
+                })
         self._ask_messages.append({"role": "user", "content": text})
 
     def _ask_build_callbacks(self) -> dict:
