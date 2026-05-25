@@ -48,6 +48,7 @@ from controllers.git_tab import GitTabController
 from controllers.help_tab import HelpTabController
 from controllers.projects_tab import ProjectsTabController
 from controllers.snippets import SnippetsController
+from controllers.tasks_tab import TasksController
 from controllers.update_poller import UpdatePollerController
 from dialogs.git_commit import GitCommitDialog
 from dialogs.mcp_config import MCPConfigDialog
@@ -306,7 +307,17 @@ class App(tk.Tk):
         self._snippets_ctrl = SnippetsController(
             self.nb, self._cfg, PROMPT_SNIPPETS,
             get_path=self._get_ask_project_path)
-        self._help_ctrl = HelpTabController(self.nb, self._cfg)
+        self._help_ctrl = HelpTabController(
+            self.nb, self._cfg,
+            on_seed_ask=lambda text, path: self._ask_ctrl.seed_question(text, path),
+            on_llm_cfg=lambda: self._cfg.raw.get("commit_message_llm", {}),
+        )
+        from helpers.detection import _root_path
+        self._tasks_ctrl = TasksController(
+            self.nb, self._cfg,
+            get_project_path=lambda: self._projects.get_selected_path(),
+            get_known_paths=lambda: [_root_path(r) for r in self._cfg.search_roots],
+        )
 
         self.nb.bind("<<NotebookTabChanged>>", self._on_tab_changed)
 
@@ -371,6 +382,9 @@ class App(tk.Tk):
             current_tab_text = self.nb.tab(self.nb.select(), "text").strip()
         except tk.TclError:
             current_tab_text = ""
+        if "Tasks" in current_tab_text:
+            self._tasks_ctrl.on_tab_selected()
+            return
         if "Ask" in current_tab_text:
             self._ask_ctrl.on_tab_selected()
             return

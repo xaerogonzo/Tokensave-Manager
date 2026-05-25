@@ -699,6 +699,13 @@ def _strat_claude_cli(repo_path: str, git_exe: str,
     Reuses _build_llm_prompt from helpers.llm so Claude CLI produces the same
     rich subject+body output Ollama does. Quality differences between backends
     now reflect the model itself, not asymmetric prompting.
+
+    system_prompt= is intentionally omitted: passing it triggers
+    --append-system-prompt, which bolts our commit instructions onto the END
+    of Claude Code's full built-in "coding assistant" system prompt. The model
+    receives two competing personas and commit quality degrades significantly.
+    Embedding everything in the user message gives the model a single, focused
+    task with no competing framing.
     """
     if not claude_cli_exe or not repo_path or not git_exe:
         return None
@@ -712,8 +719,10 @@ def _strat_claude_cli(repo_path: str, git_exe: str,
     # conversationally to the diff instead of generating a commit message.
     # Pointing cwd at $HOME isolates this call from any project's CLAUDE.md.
     result = call_claude_cli_print(
-        claude_cli_exe, user,
-        system_prompt=system,
+        claude_cli_exe,
+        "Do NOT run bash, git, or any tools. "
+        "The complete staged diff is provided below — generate the commit message from it directly.\n\n"
+        + system + "\n\n" + user,
         timeout=45,
         model=claude_cli_model,
         cwd=os.path.expanduser("~"),
