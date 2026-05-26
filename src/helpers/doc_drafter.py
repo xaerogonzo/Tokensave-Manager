@@ -28,8 +28,11 @@ from helpers.release import (
 
 
 # Doc files whose modifications mark a commit as "documented".  Used by
-# "since last doc commit" mode.
-_DOC_PATHSPECS = ["CHANGELOG.md", "README.md", "docs/"]
+# "since last doc commit" mode.  Deliberately narrow: only CHANGELOG.md and
+# README.md count as "doc anchors" so that adding new docs/ files (e.g.
+# AGENT_BACKENDS.md, ARCHITECTURE.md) doesn't accidentally mask unrecorded
+# code commits by moving the anchor forward to HEAD.
+_DOC_PATHSPECS = ["CHANGELOG.md", "README.md"]
 
 # Average commit-subject character length below which we trigger the
 # sparse-commit safety net (extra prompt hint + changed-file path list).
