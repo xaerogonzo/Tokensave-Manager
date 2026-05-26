@@ -761,12 +761,22 @@ def dispatch_llm(llm_cfg, system_prompt, user_prompt,
                     "Settings → Claude Code CLI."
                 )
             model = (llm_cfg.get("model") or "").strip()
+            # cwd=$HOME: Claude Code loads <cwd>/CLAUDE.md as project
+            # context, which puts smaller models (Haiku) into "assistant
+            # mode" — they reply conversationally to the prompt instead of
+            # producing the requested draft. Pointing cwd at $HOME isolates
+            # this call from any project CLAUDE.md. Project context that
+            # actually matters (existing section text, commit list,
+            # tokensave grounding) is already embedded in the prompt by
+            # the caller, so the CLI process does not need to be in the
+            # project directory. Same pattern used in
+            # helpers.commit_messages._strat_claude_cli.
             result = call_claude_cli_print(
                 exe, user_prompt,
                 system_prompt=system_prompt,
                 timeout=timeout,
                 model=model,
-                cwd=cwd,
+                cwd=os.path.expanduser("~"),
             )
             if not result:
                 return None, "Claude CLI returned no output (timeout or auth)."

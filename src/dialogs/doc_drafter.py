@@ -725,6 +725,51 @@ class DocDrafterDialog(tk.Toplevel):
         for state in self._tab_state.values():
             state["stop"].set()
 
+    def _refresh_range_for_active_tab(self):
+        """Re-resolve the commit range using the currently selected tab's
+        ``doc_anchor_paths`` and update the displayed range label.
+
+        Without this, the header label always reflects the global
+        CHANGELOG / README anchor, hiding the fact that each DocType
+        actually has its own per-file anchor (used at Generate time).
+        """
+        try:
+            current_idx = self._notebook.index(self._notebook.select())
+        except (tk.TclError, IndexError):
+            return
+        keys = getattr(self, "_visible_tab_keys", []) or []
+        if current_idx < 0 or current_idx >= len(keys):
+            return
+        key = keys[current_idx]
+        dt = REGISTRY.get(key)
+        if dt is None:
+            return
+
+        label = self._range_var.get()
+        mode = next((m for lbl, m in _RANGE_MODES if lbl == label),
+                    "since_last_doc")
+        custom_ref = self._custom_var.get() if mode == "custom" else ""
+
+        try:
+            rd = dd.resolve_commit_range(
+                self._project_path, mode, custom_ref, self._cfg.git_exe,
+                pathspecs=dt.doc_anchor_paths or None,
+            )
+        except Exception as exc:
+            self._range_data = None
+            self._range_info_var.set(f"Range resolution failed: {exc}")
+            return
+
+        self._range_data = rd
+        n = len(rd.get("commits") or [])
+        if n == 0:
+            self._range_info_var.set(
+                f"{rd['range_label']} — no commits in range")
+        else:
+            self._range_info_var.set(
+                f"{rd['range_label']} — {n} commit(s); "
+                f"sparse={dd.is_sparse(rd['commits'])}")
+
     # ── Notebook + per-tab construction ────────────────────────────────────
 
     def _build_notebook(self):
@@ -732,6 +777,11 @@ class DocDrafterDialog(tk.Toplevel):
         nb_wrap.pack(fill=tk.BOTH, expand=True)
         self._notebook = ttk.Notebook(nb_wrap)
         self._notebook.pack(fill=tk.BOTH, expand=True)
+
+        # Track the order in which tabs are added so <<NotebookTabChanged>>
+        # can map the selected tab index back to a REGISTRY key (REGISTRY
+        # contains keys whose tabs are hidden, e.g. missing target file).
+        self._visible_tab_keys: list = []
 
         for key, dt in REGISTRY.items():
             if dt.target_filename:
@@ -741,6 +791,15 @@ class DocDrafterDialog(tk.Toplevel):
             # file-picker types (target_filename == "") always shown
             generate_label = f"Generate {dt.label}"
             self._build_tab(key, dt.target_filename, generate_label)
+            self._visible_tab_keys.append(key)
+
+        # Per-tab commit-range refresh: each DocType's doc_anchor_paths
+        # produces its own "since last doc commit" SHA, so switching tabs
+        # must re-resolve the range and update the displayed label.
+        self._notebook.bind(
+            "<<NotebookTabChanged>>",
+            lambda _e: self._refresh_range_for_active_tab(),
+        )
 
     def _build_tab(self, key, target_file, generate_label):
         frame = tk.Frame(self._notebook, bg=C["base"], padx=8, pady=8)
@@ -948,24 +1007,68 @@ class DocDrafterDialog(tk.Toplevel):
 
     # ── Generate flow ──────────────────────────────────────────────────────
 
+    def _show_generate_blocker(self, key, msg):
+        """Show an early-exit message in BOTH the small status label and
+        the main text widget so it can't be missed.
+
+        Used for the early-return paths in ``_on_generate`` (no range data,
+        no LLM config, no commits) and for ``_on_generate_error`` failures.
+        Replaces the existing draft text — that's intentional, because none
+        of those paths ever produced a real draft to overwrite.
+        """
+        self._set_status(key, msg, C["red"])
+        try:
+            txt = self._tab_widgets[key]["text"]
+            txt.delete("1.0", tk.END)
+            txt.insert("1.0", f"⚠  {msg}")
+            txt.tag_add("placeholder", "1.0", tk.END)
+            try:
+                txt.edit_modified(False)
+            except tk.TclError:
+                pass
+        except (tk.TclError, KeyError):
+            pass
+
     def _on_generate(self, key):
         """Spawn a background worker that builds the prompt + dispatches LLM."""
+        try:
+            self._on_generate_impl(key)
+        except Exception as exc:
+            # Safety net: any uncaught exception inside the click handler
+            # (e.g. a stale attribute reference like the old self._mode_var
+            # bug) used to vanish into stderr, leaving the dialog looking
+            # like the button was dead. Surface it in the text widget so
+            # the failure is impossible to miss next time.
+            import traceback
+            tb = traceback.format_exc(limit=4)
+            self._show_generate_blocker(
+                key, f"Generate aborted: {type(exc).__name__}: {exc}\n\n{tb}")
+
+    def _on_generate_impl(self, key):
+        """Actual implementation — wrapped by _on_generate's safety net."""
         if not self._range_data:
-            self._set_status(key, "Resolve a commit range first.", C["red"])
+            self._show_generate_blocker(
+                key, "Resolve a commit range first.")
             return
 
         llm_cfg = self._llm_cfg_resolved()
         if not llm_cfg or not llm_cfg.get("provider"):
-            self._set_status(key,
-                "No AI configured — set a provider in Settings → Ask Tab AI.",
-                C["red"])
+            self._show_generate_blocker(
+                key,
+                "No AI configured — set a provider in Settings → Ask Tab AI.")
             return
 
         # Per-tab anchor: recompute the range using this DocType's own
         # doc_anchor_paths so each tab finds commits since ITS file was
         # last updated, not since the shared CHANGELOG/README anchor.
+        # NOTE: self._range_var holds the human-readable LABEL; map back
+        # to the mode token the same way _refresh_range does. There is
+        # no self._mode_var — referencing one (as this method used to)
+        # raised AttributeError on every click, silently aborting Generate.
         dt_for_range = REGISTRY[key]
-        mode       = self._mode_var.get()
+        label = self._range_var.get()
+        mode = next((m for lbl, m in _RANGE_MODES if lbl == label),
+                    "since_last_doc")
         custom_ref = self._custom_var.get() if mode == "custom" else ""
         rd = dd.resolve_commit_range(
             self._project_path, mode, custom_ref, self._cfg.git_exe,
@@ -973,8 +1076,10 @@ class DocDrafterDialog(tk.Toplevel):
         )
 
         if not rd.get("commits"):
-            self._set_status(key, "No commits in range — nothing to draft.",
-                             C["red"])
+            self._show_generate_blocker(
+                key,
+                f"No commits in range for this doc "
+                f"({rd.get('range_label', '?')}) — nothing to draft.")
             return
 
         # Cancel any in-flight generate for THIS tab.
@@ -1275,7 +1380,11 @@ class DocDrafterDialog(tk.Toplevel):
             if not self.winfo_exists():
                 return
             self._tab_widgets[key]["gen_btn"].configure(state=tk.NORMAL)
-            self._set_status(key, f"Error: {msg}", C["red"])
+            # Mirror the error into the text widget so it isn't hidden in
+            # the 8 pt status label next to the Generate button. Earlier
+            # silent-failure reports turned out to be users not noticing
+            # the small label.
+            self._show_generate_blocker(key, f"Error: {msg}")
         except (tk.TclError, RuntimeError):
             return
 
