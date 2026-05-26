@@ -211,131 +211,23 @@ class GitignoreDialog(tk.Toplevel):
         stop_event = self._ai_suggest_stop
 
         def _worker():
-            # ── a) File listing — CodeGraph-first ───────────────────────────
-            db_path = os.path.join(self._path, ".codegraph", "codegraph.db")
-            all_files = []
-            if os.path.isfile(db_path):
-                try:
-                    con = sqlite3.connect(f"file:{db_path}?mode=ro", uri=True)
-                    rows = con.execute("SELECT path FROM files").fetchall()
-                    con.close()
-                    all_files = [r[0] for r in rows]
-                except Exception:
-                    # SQLite unavailable / schema mismatch — fall back to listdir
-                    try:
-                        all_files = os.listdir(self._path)
-                    except Exception:
-                        all_files = []
-            else:
-                try:
-                    all_files = os.listdir(self._path)
-                except Exception:
-                    all_files = []
-
-            exts = sorted({
-                os.path.splitext(f)[1]
-                for f in all_files
-                if os.path.splitext(f)[1]
-            })
-            dirs = sorted({
-                f.replace("\\", "/").split("/")[0]
-                for f in all_files
-                if "/" in f.replace("\\", "/")
-            })
-
+            exts, dirs = self._collect_project_files(self._path)
             if stop_event.is_set():
                 return
-
-            # ── b) Untracked files ───────────────────────────────────────────
-            untracked_str = ""
-            try:
-                proc = subprocess.Popen(
-                    [self._cfg.git_exe, "-C", self._path,
-                     "ls-files", "--others", "--exclude-standard"],
-                    stdout=subprocess.PIPE, stderr=subprocess.PIPE,
-                    creationflags=CREATE_NO_WINDOW,
-                    text=True, encoding="utf-8", errors="replace",
-                )
-                stdout, _ = proc.communicate(timeout=10)
-                if proc.returncode == 0:
-                    untracked_str = stdout.strip()
-            except Exception:
-                pass  # leave untracked_str as ""
-
+            untracked_str = self._collect_untracked_files(
+                self._cfg.git_exe, self._path)
             if stop_event.is_set():
                 return
-
-            # ── c) Build prompts ─────────────────────────────────────────────
-            _SYS = (
-                "You are a .gitignore expert. Analyse the provided project structure "
-                "and suggest gitignore patterns that should be excluded from version control.\n\n"
-                "Rules:\n"
-                "- Output ONLY patterns, one per line. No explanations, no markdown, "
-                "no code blocks, no numbering.\n"
-                "- Each line must be a valid .gitignore glob "
-                "(e.g. __pycache__/, *.log, .env, node_modules/).\n"
-                "- Do NOT suggest any pattern already in the 'Already ignored' list.\n"
-                "- gitignore patterns without an embedded '/' (or with only a trailing '/') "
-                "match at ANY directory depth. If '__pycache__/' is already ignored, do NOT "
-                "suggest 'src/__pycache__/' or any other path-scoped variant — it is already "
-                "covered. Only suggest a path-scoped pattern (e.g. 'src/vendor/') when the "
-                "broader name is NOT already present in the 'Already ignored' list.\n"
-                "- Skip binary/database files handled by tool-specific nested .gitignore "
-                "files (e.g. CodeGraph writes its own .gitignore inside .codegraph/ — "
-                "do not suggest codegraph.db or similar; it is handled already).\n"
-                "- Focus on standard language build artifacts, build directories, "
-                "local environment configs, and package manager artifacts directly "
-                "corresponding to the detected directories/extensions. "
-                "Do not guess at frameworks that are not clearly present.\n"
-                "- Prefer directory patterns (trailing /) over file patterns when "
-                "a whole directory should be excluded."
-            )
-            user_prompt = (
-                f"Project file extensions detected: "
-                f"{', '.join(exts) or '(none detected)'}\n"
-                f"Top-level directories: {', '.join(dirs) or '(none detected)'}\n\n"
-                f"Untracked files (what git currently sees — may be empty):\n"
-                f"{untracked_str or '(none or git unavailable)'}\n\n"
-                "Already ignored patterns (do NOT repeat or rephrase these):\n"
-                + "\n".join(sorted(current_patterns))
-            )
-
-            # ── d) LLM call ──────────────────────────────────────────────────
-            provider = llm_cfg.get("provider", "")
-            result = None
-            error = None
-            try:
-                if provider == "claude_cli":
-                    from helpers.claude_cli import call_claude_cli_print
-                    claude_exe = self._cfg.claude_cli_exe or ""
-                    if not claude_exe:
-                        error = (
-                            "Claude CLI not configured — set path in "
-                            "Settings → Claude Code CLI."
-                        )
-                    else:
-                        model = llm_cfg.get("model") or ""
-                        result = call_claude_cli_print(
-                            claude_exe, user_prompt,
-                            system_prompt=_SYS,
-                            timeout=60,
-                            model=model,
-                            cwd=self._path,
-                        )
-                else:
-                    from helpers.llm import _call_llm
-                    result = _call_llm(llm_cfg, _SYS, user_prompt)
-            except Exception as exc:
-                error = str(exc)
-
+            sys_p, user_p = self._build_gitignore_prompts(
+                exts, dirs, untracked_str, current_patterns)
+            result, error = self._dispatch_gitignore_llm(
+                llm_cfg, self._cfg, sys_p, user_p, self._path)
             if stop_event.is_set():
                 return
-
             if error or not result:
                 err_msg = error or "AI call returned no result."
                 self.after(0, lambda m=err_msg: _on_error(m))
                 return
-
             parsed = _parse_ai_gitignore_patterns(result)
             self.after(0, lambda p=parsed: _on_result(p))
 
@@ -369,6 +261,124 @@ class GitignoreDialog(tk.Toplevel):
                 return
 
         threading.Thread(target=_worker, daemon=True).start()
+
+    # ── _ai_suggest helpers ─────────────────────────────────────────────────
+
+    @staticmethod
+    def _collect_project_files(path: str) -> tuple:
+        """Return (exts, dirs) from CodeGraph DB, falling back to os.listdir."""
+        db_path = os.path.join(path, ".codegraph", "codegraph.db")
+        all_files: list = []
+        if os.path.isfile(db_path):
+            try:
+                con = sqlite3.connect(f"file:{db_path}?mode=ro", uri=True)
+                rows = con.execute("SELECT path FROM files").fetchall()
+                con.close()
+                all_files = [r[0] for r in rows]
+            except Exception:
+                try:
+                    all_files = os.listdir(path)
+                except Exception:
+                    all_files = []
+        else:
+            try:
+                all_files = os.listdir(path)
+            except Exception:
+                all_files = []
+        exts = sorted({os.path.splitext(f)[1] for f in all_files
+                       if os.path.splitext(f)[1]})
+        dirs = sorted({
+            f.replace("\\", "/").split("/")[0]
+            for f in all_files if "/" in f.replace("\\", "/")
+        })
+        return exts, dirs
+
+    @staticmethod
+    def _collect_untracked_files(git_exe: str, path: str) -> str:
+        """Return newline-joined untracked filenames from git ls-files, or ''."""
+        try:
+            proc = subprocess.Popen(
+                [git_exe, "-C", path,
+                 "ls-files", "--others", "--exclude-standard"],
+                stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+                creationflags=CREATE_NO_WINDOW,
+                text=True, encoding="utf-8", errors="replace",
+            )
+            stdout, _ = proc.communicate(timeout=10)
+            if proc.returncode == 0:
+                return stdout.strip()
+        except Exception:
+            pass
+        return ""
+
+    @staticmethod
+    def _build_gitignore_prompts(
+        exts: list, dirs: list, untracked_str: str, current_patterns: frozenset
+    ) -> tuple:
+        """Assemble (system_prompt, user_prompt) for the gitignore AI request."""
+        sys_p = (
+            "You are a .gitignore expert. Analyse the provided project structure "
+            "and suggest gitignore patterns that should be excluded from version control.\n\n"
+            "Rules:\n"
+            "- Output ONLY patterns, one per line. No explanations, no markdown, "
+            "no code blocks, no numbering.\n"
+            "- Each line must be a valid .gitignore glob "
+            "(e.g. __pycache__/, *.log, .env, node_modules/).\n"
+            "- Do NOT suggest any pattern already in the 'Already ignored' list.\n"
+            "- gitignore patterns without an embedded '/' (or with only a trailing '/') "
+            "match at ANY directory depth. If '__pycache__/' is already ignored, do NOT "
+            "suggest 'src/__pycache__/' or any other path-scoped variant — it is already "
+            "covered. Only suggest a path-scoped pattern (e.g. 'src/vendor/') when the "
+            "broader name is NOT already present in the 'Already ignored' list.\n"
+            "- Skip binary/database files handled by tool-specific nested .gitignore "
+            "files (e.g. CodeGraph writes its own .gitignore inside .codegraph/ — "
+            "do not suggest codegraph.db or similar; it is handled already).\n"
+            "- Focus on standard language build artifacts, build directories, "
+            "local environment configs, and package manager artifacts directly "
+            "corresponding to the detected directories/extensions. "
+            "Do not guess at frameworks that are not clearly present.\n"
+            "- Prefer directory patterns (trailing /) over file patterns when "
+            "a whole directory should be excluded."
+        )
+        user_p = (
+            f"Project file extensions detected: "
+            f"{', '.join(exts) or '(none detected)'}\n"
+            f"Top-level directories: {', '.join(dirs) or '(none detected)'}\n\n"
+            f"Untracked files (what git currently sees — may be empty):\n"
+            f"{untracked_str or '(none or git unavailable)'}\n\n"
+            "Already ignored patterns (do NOT repeat or rephrase these):\n"
+            + "\n".join(sorted(current_patterns))
+        )
+        return sys_p, user_p
+
+    @staticmethod
+    def _dispatch_gitignore_llm(
+        llm_cfg: dict, cfg, sys_p: str, user_p: str, path: str
+    ) -> tuple:
+        """Call configured LLM provider; return (result, error) — one is None."""
+        provider = llm_cfg.get("provider", "")
+        try:
+            if provider == "claude_cli":
+                from helpers.claude_cli import call_claude_cli_print
+                claude_exe = cfg.claude_cli_exe or ""
+                if not claude_exe:
+                    return None, (
+                        "Claude CLI not configured — set path in "
+                        "Settings → Claude Code CLI."
+                    )
+                result = call_claude_cli_print(
+                    claude_exe, user_p,
+                    system_prompt=sys_p,
+                    timeout=60,
+                    model=llm_cfg.get("model") or "",
+                    cwd=path,
+                )
+            else:
+                from helpers.llm import _call_llm
+                result = _call_llm(llm_cfg, sys_p, user_p)
+            return result, None
+        except Exception as exc:
+            return None, str(exc)
 
     def _inject_patterns_list(self, patterns):
         """Inject a list of patterns with trailing-slash-normalised dedup.

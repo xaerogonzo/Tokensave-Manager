@@ -286,7 +286,7 @@ class LocalAgent:
         self._tool_cache.clear()
         last_assistant_text: str | None = None
         try:
-            for iteration in range(self.max_iterations):
+            for _iteration in range(self.max_iterations):
                 if stop_event is not None and stop_event.is_set():
                     if on_done:
                         on_done(last_assistant_text)
@@ -294,38 +294,17 @@ class LocalAgent:
 
                 self._enforce_tool_budget(messages)
 
-                if on_stream_delta is not None:
-                    result = self._chat_completion_stream(messages, on_stream_delta)
-                    if result is None:
-                        if on_error:
-                            detail = _sanitize_error(self._last_error) or (
-                                "no detail (check the manager's log file for "
-                                "tokensave-manager.agent warnings)")
-                            on_error(f"LLM request failed.  {detail}")
-                        return
-                    content, tool_calls = result
-                    # Append assistant turn to history (mirrors _parse_response).
-                    assistant_msg: dict = {"role": "assistant", "content": content}
-                    if tool_calls:
-                        assistant_msg["tool_calls"] = tool_calls
-                    messages.append(assistant_msg)
-                    # on_assistant_message is intentionally skipped — content
-                    # was already forwarded token-by-token via on_stream_delta.
-                    if content:
-                        last_assistant_text = content
-                else:
-                    response = self._chat_completion(messages)
-                    if response is None:
-                        if on_error:
-                            detail = _sanitize_error(self._last_error) or (
-                                "no detail (check the manager's log file for "
-                                "tokensave-manager.agent warnings)")
-                            on_error(f"LLM request failed.  {detail}")
-                        return
-                    content, tool_calls = self._parse_response(response, messages)
-                    if content and on_assistant_message:
-                        on_assistant_message(content)
-                        last_assistant_text = content
+                turn = self._run_one_turn(messages, on_stream_delta, on_assistant_message)
+                if turn is None:
+                    if on_error:
+                        detail = _sanitize_error(self._last_error) or (
+                            "no detail (check the manager's log file for "
+                            "tokensave-manager.agent warnings)")
+                        on_error(f"LLM request failed.  {detail}")
+                    return
+                content, tool_calls, last_text = turn
+                if last_text:
+                    last_assistant_text = last_text
 
                 if not tool_calls:
                     if on_done:
@@ -333,8 +312,8 @@ class LocalAgent:
                     return
 
                 self._execute_tool_calls(tool_calls, messages, on_tool_call, on_tool_result)
-
                 # Loop again — model gets to see the tool outputs.
+
             # Iteration cap exhausted.
             if on_error:
                 tail = _sanitize_error(self._last_error)
@@ -348,6 +327,41 @@ class LocalAgent:
             log.exception("LocalAgent.run failed")
             if on_error:
                 on_error(_sanitize_error(f"Agent crashed: {type(e).__name__}: {e}"))
+
+    # ── Turn execution ──────────────────────────────────────────────────
+
+    def _run_one_turn(
+        self,
+        messages: list[dict],
+        on_stream_delta: "Callable[[str], None] | None",
+        on_assistant_message: "Callable[[str], None] | None",
+    ) -> "tuple[str | None, list, str | None] | None":
+        """Execute one LLM round-trip (streaming or non-streaming).
+
+        Returns ``(content, tool_calls, last_text)`` on success, ``None`` on
+        LLM failure (caller should inspect ``self._last_error``).
+        """
+        if on_stream_delta is not None:
+            result = self._chat_completion_stream(messages, on_stream_delta)
+            if result is None:
+                return None
+            content, tool_calls = result
+            # Append assistant turn to history (mirrors _parse_response).
+            assistant_msg: dict = {"role": "assistant", "content": content}
+            if tool_calls:
+                assistant_msg["tool_calls"] = tool_calls
+            messages.append(assistant_msg)
+            # on_assistant_message intentionally skipped — content was already
+            # forwarded token-by-token via on_stream_delta.
+            return content, tool_calls, content or None
+
+        response = self._chat_completion(messages)
+        if response is None:
+            return None
+        content, tool_calls = self._parse_response(response, messages)
+        if content and on_assistant_message:
+            on_assistant_message(content)
+        return content, tool_calls, content or None
 
     # ── Response parsing ────────────────────────────────────────────────
 

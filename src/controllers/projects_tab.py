@@ -65,6 +65,14 @@ class ProjectsTabController:
       • Worker threads call self._on_log(msg, color) — App._log already
         schedules self.after(0, ...) internally, so it is thread-safe.
       • Direct Tkinter widget calls (tree, menu) must be on the main thread only.
+
+    God-class extraction status (51 methods — Roadmap-8 targets):
+      ✅ ScaffoldRetrofitController  (scaffold_ctrl.py)   — extracted Round 5
+      ✅ SyncStatusController        (sync_ctrl.py)        — extracted Round 5
+      ⬜ GitStatusController         — git-column refresh, _parse_git_status_v2,
+                                       _format_git_status_cell, _update_git_status_cell
+      ⬜ AiTasksController           (ai_tasks_ctrl.py)   — verify delegation complete
+      ⬜ CommandBarController        — right-click menu, _on_right_click, cmd_* actions
     """
 
     # ── Class-level constants ─────────────────────────────────────────────────

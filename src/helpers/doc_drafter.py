@@ -117,104 +117,107 @@ def resolve_commit_range(project_path, mode, custom_ref, git_exe):
     with empty ``commits`` and a ``range_label`` describing the issue.
     """
     if mode == "since_last_doc":
-        sha = _last_doc_commit_sha(project_path, git_exe)
-        if not sha:
-            # No prior doc commit at all — fall back to "since beginning"
-            commits = _commits_since(project_path, None, git_exe)
-            return {
-                "range_label":    "All commits (no prior doc commit found)",
-                "range_spec":     "HEAD",
-                "commits":        commits,
-                "boundary_mixed": False,
-                "boundary_note":  None,
-            }
-        # Mixed-commit handling: if the boundary commit touched code as well
-        # as docs, INCLUDE it in the range using ``<sha>^..HEAD`` so its
-        # code changes don't get lost.  Pure-doc boundary just uses ``..``.
-        mixed = _commit_touches_code(project_path, sha, git_exe)
-        if mixed:
-            range_spec = f"{sha}^..HEAD"
-            note = (
-                f"Note: commit {sha[:8]} is a boundary commit with mixed "
-                "content — it already includes its own doc updates.  "
-                "Reference its CODE changes only when drafting; do NOT "
-                "re-describe what its doc diff already said."
-            )
-        else:
-            range_spec = f"{sha}..HEAD"
-            note = None
-        commits = _commits_since(project_path, sha if not mixed
-                                 else f"{sha}^", git_exe)
-        return {
-            "range_label":    f"Since last doc commit ({sha[:8]})",
-            "range_spec":     range_spec,
-            "commits":        commits,
-            "boundary_mixed": mixed,
-            "boundary_note":  note,
-        }
-
+        return _resolve_since_last_doc(project_path, git_exe)
     if mode == "since_last_commit":
-        commits = _commits_since(project_path, "HEAD~1", git_exe)
         return {
             "range_label":    "Since last commit (HEAD~1..HEAD)",
             "range_spec":     "HEAD~1..HEAD",
-            "commits":        commits,
+            "commits":        _commits_since(project_path, "HEAD~1", git_exe),
             "boundary_mixed": False,
             "boundary_note":  None,
         }
-
     if mode == "since_last_tag":
-        tag = _last_release_tag(project_path, git_exe)
-        if not tag:
-            commits = _commits_since(project_path, None, git_exe)
-            return {
-                "range_label":    "All commits (no release tag found)",
-                "range_spec":     "HEAD",
-                "commits":        commits,
-                "boundary_mixed": False,
-                "boundary_note":  None,
-            }
-        commits = _commits_since(project_path, tag, git_exe)
-        return {
-            "range_label":    f"Since last release tag ({tag})",
-            "range_spec":     f"{tag}..HEAD",
-            "commits":        commits,
-            "boundary_mixed": False,
-            "boundary_note":  None,
-        }
-
+        return _resolve_since_last_tag(project_path, git_exe)
     if mode == "custom":
-        ref = (custom_ref or "").strip()
-        if not ref:
-            return {
-                "range_label":    "Custom range (empty)",
-                "range_spec":     "",
-                "commits":        [],
-                "boundary_mixed": False,
-                "boundary_note":  None,
-            }
-        # If the user gave a single ref, treat it as `<ref>..HEAD`.  If
-        # they already wrote `A..B`, pass through.
-        if ".." not in ref:
-            range_spec = f"{ref}..HEAD"
-            commits = _commits_since(project_path, ref, git_exe)
-        else:
-            range_spec = ref
-            # Parse "A..B" — _commits_since only supports ref..HEAD style,
-            # so we shell out directly for arbitrary ranges.
-            commits = _commits_in_range(project_path, range_spec, git_exe)
-        return {
-            "range_label":    f"Custom range ({range_spec})",
-            "range_spec":     range_spec,
-            "commits":        commits,
-            "boundary_mixed": False,
-            "boundary_note":  None,
-        }
-
+        return _resolve_custom(project_path, custom_ref, git_exe)
     return {
         "range_label":    f"Unknown mode: {mode!r}",
         "range_spec":     "",
         "commits":        [],
+        "boundary_mixed": False,
+        "boundary_note":  None,
+    }
+
+
+def _resolve_since_last_doc(project_path, git_exe) -> dict:
+    """Range resolver for mode='since_last_doc'."""
+    sha = _last_doc_commit_sha(project_path, git_exe)
+    if not sha:
+        return {
+            "range_label":    "All commits (no prior doc commit found)",
+            "range_spec":     "HEAD",
+            "commits":        _commits_since(project_path, None, git_exe),
+            "boundary_mixed": False,
+            "boundary_note":  None,
+        }
+    # Mixed-commit handling: if the boundary commit touched code as well
+    # as docs, INCLUDE it in the range using ``<sha>^..HEAD`` so its
+    # code changes don't get lost.  Pure-doc boundary just uses ``..``.
+    mixed = _commit_touches_code(project_path, sha, git_exe)
+    if mixed:
+        range_spec = f"{sha}^..HEAD"
+        note = (
+            f"Note: commit {sha[:8]} is a boundary commit with mixed "
+            "content — it already includes its own doc updates.  "
+            "Reference its CODE changes only when drafting; do NOT "
+            "re-describe what its doc diff already said."
+        )
+    else:
+        range_spec = f"{sha}..HEAD"
+        note = None
+    return {
+        "range_label":    f"Since last doc commit ({sha[:8]})",
+        "range_spec":     range_spec,
+        "commits":        _commits_since(project_path,
+                                         sha if not mixed else f"{sha}^",
+                                         git_exe),
+        "boundary_mixed": mixed,
+        "boundary_note":  note,
+    }
+
+
+def _resolve_since_last_tag(project_path, git_exe) -> dict:
+    """Range resolver for mode='since_last_tag'."""
+    tag = _last_release_tag(project_path, git_exe)
+    if not tag:
+        return {
+            "range_label":    "All commits (no release tag found)",
+            "range_spec":     "HEAD",
+            "commits":        _commits_since(project_path, None, git_exe),
+            "boundary_mixed": False,
+            "boundary_note":  None,
+        }
+    return {
+        "range_label":    f"Since last release tag ({tag})",
+        "range_spec":     f"{tag}..HEAD",
+        "commits":        _commits_since(project_path, tag, git_exe),
+        "boundary_mixed": False,
+        "boundary_note":  None,
+    }
+
+
+def _resolve_custom(project_path, custom_ref, git_exe) -> dict:
+    """Range resolver for mode='custom'."""
+    ref = (custom_ref or "").strip()
+    if not ref:
+        return {
+            "range_label":    "Custom range (empty)",
+            "range_spec":     "",
+            "commits":        [],
+            "boundary_mixed": False,
+            "boundary_note":  None,
+        }
+    # Single ref → treat as <ref>..HEAD; already A..B → pass through.
+    if ".." not in ref:
+        range_spec = f"{ref}..HEAD"
+        commits = _commits_since(project_path, ref, git_exe)
+    else:
+        range_spec = ref
+        commits = _commits_in_range(project_path, range_spec, git_exe)
+    return {
+        "range_label":    f"Custom range ({range_spec})",
+        "range_spec":     range_spec,
+        "commits":        commits,
         "boundary_mixed": False,
         "boundary_note":  None,
     }
