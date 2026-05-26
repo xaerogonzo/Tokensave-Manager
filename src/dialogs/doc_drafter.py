@@ -939,6 +939,7 @@ class DocDrafterDialog(tk.Toplevel):
         boundary    = rd.get("boundary_note")
         range_spec  = rd.get("range_spec", "")
         project     = self._project_path
+        tokensave_exe = self._cfg.tokensave_exe
 
         def _worker():
             # Both tabs get the always-on changed-file context (Phase 1.8).
@@ -955,10 +956,24 @@ class DocDrafterDialog(tk.Toplevel):
                     key, "No target file selected — pick a file first."))
                 return
             existing = dt.read_existing(target_path)
+
+            # Theme B1: tokensave grounding injection.  build_grounding_block
+            # returns "" silently when .tokensave/ is absent or the recipe
+            # is unset — the prompt is always valid with or without it.
+            from helpers.doc_grounding import build_grounding_block
+            grounding = ""
+            if dt.tokensave_recipe:
+                grounding = build_grounding_block(
+                    project, dt.tokensave_recipe,
+                    commit_range=range_spec,
+                    tokensave_exe=tokensave_exe,
+                )
+
             system, user = dt.build_prompt(
                 commits, classified, existing,
                 self._project_name, self._project_desc,
-                changed_files, boundary)
+                changed_files, boundary,
+                grounding_block=grounding)
 
             if stop_event.is_set():
                 return

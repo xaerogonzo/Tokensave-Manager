@@ -193,7 +193,7 @@ REGISTRY["changelog"] = DocType(
     read_existing_from_text=read_unreleased_from_text,
     parse_draft=_changelog_parse_draft,
     filter_draft=changelog_filter_draft,
-    tokensave_recipe=None,
+    tokensave_recipe="commit_range_context",
     gen_params={},
     examples=[],
 )
@@ -211,7 +211,7 @@ REGISTRY["readme"] = DocType(
     read_existing_from_text=read_highlights_from_text,
     parse_draft=_readme_parse_draft,
     filter_draft=readme_filter_draft,
-    tokensave_recipe=None,
+    tokensave_recipe="commit_range_context",
     gen_params={},
     examples=[],
 )
