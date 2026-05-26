@@ -834,7 +834,7 @@ class DocDrafterDialog(tk.Toplevel):
         # NOT packed yet — revealed by _on_apply_result on failure.
 
         # B2: per-tab checkbox to enable agentic tokensave tool use.
-        ts_tools_var = tk.BooleanVar(value=False)
+        ts_tools_var = tk.BooleanVar(value=True)
         ts_tools_chk = ttk.Checkbutton(btn_row, text="🔍 Tokensave tools",
                                         variable=ts_tools_var)
         ts_tools_chk.pack(side=tk.RIGHT, padx=(6, 0))
