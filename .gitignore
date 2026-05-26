@@ -39,9 +39,6 @@ venv/
 Thumbs.db
 .DS_Store
 
-# ── Personal issue-tracking state (user-specific; not shared via git) ──
-docs/tracked-issues.json
-
 # ── Per-edit backups (manager helpers + tool safety nets) ──
 # Pattern matches files like:
 #   src/tokensave-manager.py.backup.1779511978257

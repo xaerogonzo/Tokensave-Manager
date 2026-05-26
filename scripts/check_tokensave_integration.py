@@ -1,7 +1,12 @@
 """Tokensave integration gap checker.
 
 Usage:
-    python scripts/check_tokensave_integration.py [--available VERSION]
+    python scripts/check_tokensave_integration.py [--available VERSION] [--fix]
+
+    --available VERSION  Show an upgrade nudge when VERSION is newer than installed.
+    --fix                Apply pending lifecycle actions (archive resolved issues,
+                         create stubs for new open issues). Without this flag the
+                         script is read-only and only reports what would change.
 
 Reads local files and optionally queries GitHub via `gh` CLI. Exit code always
 0 — this is an advisory report, never a blocking check.
@@ -12,6 +17,28 @@ Run this AFTER:
 
 Running before those steps will produce a false-clean report because the
 script checks the locally installed version against locally present files.
+
+──────────────────────────────────────────────────────────────────────────────
+TEMPLATE: Integration Check Script
+──────────────────────────────────────────────────────────────────────────────
+To adapt for a new upstream dependency:
+
+1. Add an entry to docs/tracked-issues.json:
+       {"repo": "owner/repo", "issues": [NNN, ...]}
+
+2. Copy this script to scripts/check_<tool>_integration.py.
+
+3. Update the stale-snippet detection logic to match the new tool's
+   removal-detection pattern and update the footer "Integration workflow" line.
+
+4. Add a "🔄 Integration audit (after upgrade)" prompt to src/prompts.py
+   following the same 6-step structure (call changelog, check snippet coverage,
+   check stale snippets, upstream issues, manager code, produce action list).
+
+5. Wire it to UpdatePollerController.cmd_integration_check() if the tool
+   belongs to this manager. Otherwise invoke it standalone:
+       python scripts/check_<tool>_integration.py [--available VERSION] [--fix]
+──────────────────────────────────────────────────────────────────────────────
 """
 
 from __future__ import annotations
@@ -100,7 +127,8 @@ def _read_config() -> dict:
 def _load_tracked_issues() -> list[dict]:
     """Load docs/tracked-issues.json → list of {repo, issues} dicts.
 
-    Returns [] on file-not-found (normal — file is optional and gitignored).
+    The file is committed project config (not gitignored). Returns [] on
+    file-not-found (normal on a fresh clone before the file is created).
     Prints a warning and returns [] on JSON syntax error.
     """
     try:
@@ -144,14 +172,16 @@ def _get_changelog_latest_release(lines: list[str]) -> str | None:
 
 # ── GitHub API helpers ─────────────────────────────────────────────────────────
 
-def _fetch_gh_json(gh_exe: str, endpoint: str, body: str | None = None):
-    """Call `gh api <endpoint>` and return the parsed JSON, or None on error.
+def _fetch_gh_json(
+    gh_exe: str, endpoint: str, body: str | None = None
+) -> tuple:
+    """Call `gh api <endpoint>` and return ``(data, None)`` or ``(None, error_str)``.
 
     When ``body`` is provided, it is passed via stdin (``--input -``) to avoid
     OS command-line length limits (critical for GraphQL queries).
 
-    Detects GitHub API error responses ({"message": ..., "errors": [...]}) and
-    returns None so callers don't have to check for error-shaped dicts.
+    Returning a tuple preserves the error message for callers to print as a
+    warning rather than silently discarding transport vs. semantic failures.
     """
     args = [gh_exe, "api", endpoint]
     kwargs: dict = dict(
@@ -163,18 +193,23 @@ def _fetch_gh_json(gh_exe: str, endpoint: str, body: str | None = None):
         kwargs["input"] = body          # stdin, NOT a CLI positional arg
     try:
         r = subprocess.run(args, **kwargs)
-    except Exception:
-        return None
+    except subprocess.TimeoutExpired:
+        return None, "GitHub API call timed out"
+    except Exception as exc:
+        return None, str(exc)
     if r.returncode != 0:
-        return None
+        stderr = (r.stderr or "").strip()[:200]
+        return None, f"gh exited {r.returncode}: {stderr or '(no stderr)'}"
     try:
         data = json.loads(r.stdout)
-    except Exception:
-        return None
-    # Detect GitHub API error response (auth failure, rate limit, etc.)
-    if isinstance(data, dict) and ("message" in data or "errors" in data):
-        return None
-    return data
+    except json.JSONDecodeError as exc:
+        return None, f"JSON parse error: {exc}"
+    # Detect GitHub API semantic error responses (auth failure, rate limit, etc.)
+    if isinstance(data, dict) and "message" in data:
+        return None, f"GitHub API error: {data['message']}"
+    if isinstance(data, dict) and "errors" in data:
+        return None, f"GraphQL errors: {data['errors']}"
+    return data, None
 
 
 def _check_github_issues_graphql(
@@ -201,14 +236,18 @@ def _check_github_issues_graphql(
             for n in chunk
         )
         query = json.dumps({"query": f"{{ {aliases} }}"})
-        data = _fetch_gh_json(gh_exe, "graphql", body=query)
-        if data is None:
-            # Whole chunk failed; mark all as unknown
+        data, err = _fetch_gh_json(gh_exe, "graphql", body=query)
+        if err:
+            # Chunk failed — warn but continue so other chunks still run
+            print(
+                f"  ⚠  GraphQL chunk "
+                f"{chunk_start}–{chunk_start + len(chunk) - 1} failed: {err}"
+            )
             for n in chunk:
                 results.append((n, f"(issue #{n})", "UNKNOWN", ""))
             continue
 
-        gql_data = data.get("data") or {}
+        gql_data = (data or {}).get("data") or {}
         for n in chunk:
             alias_val = gql_data.get(f"i{n}")
             if alias_val is None:
@@ -237,7 +276,7 @@ def _fetch_tokensave_releases(
     Uses a single API call (per_page=10, no --paginate).
     Returns an empty string when no newer releases are found or gh fails.
     """
-    data = _fetch_gh_json(gh_exe, f"repos/{repo}/releases?per_page=10")
+    data, _err = _fetch_gh_json(gh_exe, f"repos/{repo}/releases?per_page=10")
     if not isinstance(data, list):
         return ""
 
@@ -387,30 +426,126 @@ def _check_upstream_issues() -> list[tuple[str, str | None]]:
 # ── CLI arg parsing ────────────────────────────────────────────────────────────
 
 def _parse_args() -> dict:
-    """Parse CLI arguments. Returns dict with keys: available."""
-    result: dict = {"available": None}
+    """Parse CLI arguments. Returns dict with keys: available, fix."""
+    result: dict = {"available": None, "fix": False}
     args = sys.argv[1:]
     i = 0
     while i < len(args):
         if args[i] == "--available" and i + 1 < len(args):
             result["available"] = args[i + 1]
             i += 2
+        elif args[i] == "--fix":
+            result["fix"] = True
+            i += 1
         else:
             i += 1
     return result
+
+
+# ── Upstream-issue lifecycle helpers ───────────────────────────────────────────
+
+# Matches "ISSUE: #NNN" (frontmatter) or "issue #NNN" (embedded in STATUS lines)
+_ISSUE_DOC_RE = re.compile(r"(?:ISSUE:\s*#|issue\s+#)(\d+)", re.IGNORECASE)
+
+
+def _find_issue_doc(number: int) -> "Path | None":
+    """Return the Path of the active .md doc tracking *number*, or None.
+
+    Scans docs/upstream-issues/*.md (not archived/) for either:
+      • A dedicated "ISSUE: #NNN" frontmatter line  (new stubs)
+      • An embedded "issue #NNN" substring anywhere in the file  (legacy docs)
+    """
+    active_dir = _ISSUES
+    if not active_dir.is_dir():
+        return None
+    for md in active_dir.glob("*.md"):
+        try:
+            text = md.read_text(encoding="utf-8", errors="replace")
+        except Exception:
+            continue
+        for m in _ISSUE_DOC_RE.finditer(text):
+            if int(m.group(1)) == number:
+                return md
+    return None
+
+
+def _auto_stub_if_missing(number: int, title: str, url: str) -> bool:
+    """Create a .md stub for *number* if no active doc exists. Returns True if created.
+
+    The stub includes AUTO_GENERATED and ⚠ markers so LLM audits don't treat
+    placeholder TODO content as meaningful authored analysis.
+    Only called when --fix is passed.
+    """
+    if _find_issue_doc(number):
+        return False  # doc already exists
+    from datetime import date as _date
+    stub_name = f"issue-{number}.md"
+    path = _ISSUES / stub_name
+    path.write_text(
+        f"AUTO_GENERATED: true\n"
+        f"ISSUE: #{number}\n"
+        f"# ⚠ AUTO-GENERATED STUB — NO HUMAN ANALYSIS YET\n"
+        f"# Upstream issue #{number} — {title}\n\n"
+        f"> **STATUS: OPEN**\n\n"
+        f"**URL:** {url}\n"
+        f"**Filed:** {_date.today()}\n\n"
+        f"## Impact on Token Save Manager\n"
+        f"TODO: replace this stub with real analysis before using in LLM audits.\n\n"
+        f"## Resolution\n"
+        f"TODO: fill when resolved\n",
+        encoding="utf-8",
+    )
+    return True
+
+
+def _auto_archive_resolved(number: int, title: str) -> "str | None":
+    """Rewrite STATUS line + move .md to archived/ for a confirmed-CLOSED issue.
+
+    Returns a human-readable summary line or None if no doc was found.
+    Only called when --fix is passed.
+    """
+    import shutil as _shutil
+    from datetime import date as _date
+
+    md = _find_issue_doc(number)
+    if md is None:
+        return None
+
+    archived_dir = _ISSUES / "archived"
+    archived_dir.mkdir(exist_ok=True)
+
+    # Rewrite STATUS line — MULTILINE-anchored to avoid matching STATUS mentions
+    # inside code blocks or prose paragraphs. Preserves leading blockquote prefix.
+    text = md.read_text(encoding="utf-8", errors="replace")
+    today = _date.today()
+    new_status = f"STATUS: CLOSED — verified via GitHub API {today}"
+    text = re.sub(
+        r"^([ \t]*>?\s*\*{0,2})(STATUS:\s*[^\n]+)",
+        lambda m: m.group(1) + new_status,
+        text,
+        count=1,
+        flags=re.MULTILINE | re.IGNORECASE,
+    )
+    md.write_text(text, encoding="utf-8")
+
+    dest = archived_dir / md.name
+    _shutil.move(str(md), str(dest))
+    return f"  📦  Archived #{number} ({md.name}) → archived/"
 
 
 # ── Main report ────────────────────────────────────────────────────────────────
 
 def main() -> None:
     cli = _parse_args()
+    fix_mode: bool = cli["fix"]
     cfg = _read_config()
     tokensave_exe = cfg.get("tokensave_exe", "")
 
     # gh is always detected from PATH — it's not stored in manager-config.json
     gh_exe = shutil.which("gh") or ""
 
-    print(f"\n## Tokensave integration check — {date.today()}\n")
+    fix_banner = "  [--fix mode: lifecycle mutations will be applied]\n" if fix_mode else ""
+    print(f"\n## Tokensave integration check — {date.today()}\n{fix_banner}")
 
     # ── Version ──────────────────────────────────────────────────────────────
 
@@ -440,6 +575,9 @@ def main() -> None:
 
     print("\n### GitHub-tracked issues (docs/tracked-issues.json)")
     tracked_entries = _load_tracked_issues()
+    # Accumulate all GitHub results for lifecycle processing below
+    all_gh_results: list[tuple[int, str, str, str]] = []
+
     if not tracked_entries:
         print("  (no tracked-issues.json found — add one to track GitHub issues live)")
     elif not gh_exe:
@@ -453,6 +591,7 @@ def main() -> None:
                 continue
             print(f"  Repo: {repo}")
             issues = _check_github_issues_graphql(repo, issue_numbers, gh_exe)
+            all_gh_results.extend(issues)
             _CLOSED = {"CLOSED"}
             for n, title, state, url in issues:
                 icon = "✓" if state in _CLOSED else "⚠"
@@ -497,6 +636,47 @@ def main() -> None:
                 print(f"  ✓  {fname:<45}  STATUS: {status}")
             else:
                 print(f"  ⚠  {fname:<45}  STATUS: {status}  (not FIXED/SHIPPED/MOOT)")
+
+    # ── Upstream issue lifecycle ──────────────────────────────────────────────
+    # Identify pending lifecycle actions from GitHub results:
+    #   • OPEN issues with no local .md → offer to create a stub
+    #   • CLOSED issues with an active local .md → offer to archive it
+    # Without --fix: only report what would change.
+    # With --fix: apply the changes and report what was done.
+
+    stubs_needed: list[tuple[int, str, str]] = []
+    archive_candidates: list[tuple[int, str, str]] = []
+    for n, title, state, url in all_gh_results:
+        if state == "OPEN" and not _find_issue_doc(n):
+            stubs_needed.append((n, title, url))
+        elif state == "CLOSED" and _find_issue_doc(n):
+            archive_candidates.append((n, title, url))
+
+    if stubs_needed or archive_candidates:
+        if fix_mode:
+            print("\n### Upstream issue lifecycle (--fix applied)")
+        else:
+            print(
+                "\n### Pending lifecycle actions  "
+                "(re-run with --fix to apply)"
+            )
+        for n, t, u in stubs_needed:
+            if fix_mode:
+                if _auto_stub_if_missing(n, t, u):
+                    print(f"  📄  Created docs/upstream-issues/issue-{n}.md stub")
+            else:
+                print(f"  📄  Would create stub for open issue #{n}: {t[:60]}")
+        for n, t, u in archive_candidates:
+            if fix_mode:
+                line = _auto_archive_resolved(n, t)
+                if line:
+                    print(line)
+            else:
+                md = _find_issue_doc(n)
+                fname = md.name if md else "?"
+                print(f"  📦  Would archive #{n} ({fname}) — CLOSED on GitHub")
+        if fix_mode:
+            print("  (commit the lifecycle changes to keep the repo clean)")
 
     # ── Stale snippet check ───────────────────────────────────────────────────
     # Scans CHANGELOG [Unreleased] ### Removed sub-blocks for tokensave_* tool

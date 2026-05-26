@@ -15,7 +15,6 @@ import functools
 import os
 import re
 import secrets
-import shutil
 import subprocess
 import sys
 import threading
@@ -172,11 +171,35 @@ class UpdatePollerController:
             name="tokensave-integration-check",
         ).start()
 
-    def _integration_check_worker(self, script: str) -> None:
+    def _run_integration_fix(self) -> None:
+        """Re-run the integration check with --fix to apply pending lifecycle actions.
+
+        Creates stubs for new open issues and archives resolved issues. The result
+        opens a fresh integration check dialog showing what was changed.
+        """
+        script = os.path.join(_BASE_DIR, "scripts", "check_tokensave_integration.py")
+        if not os.path.isfile(script):
+            messagebox.showinfo(
+                "Source-only tool",
+                "check_tokensave_integration.py is only available when running\n"
+                "TokenSave Manager from source (not from the compiled exe).",
+                parent=self._root,
+            )
+            return
+        threading.Thread(
+            target=self._integration_check_worker,
+            args=(script, True),        # fix_mode=True
+            daemon=True,
+            name="tokensave-integration-fix",
+        ).start()
+
+    def _integration_check_worker(self, script: str, fix_mode: bool = False) -> None:
         """Background worker: run the integration check script and surface output."""
         args = [sys.executable, script]
         if self._available_version:
             args += ["--available", self._available_version]
+        if fix_mode:
+            args += ["--fix"]
         try:
             r = subprocess.run(
                 args,
@@ -265,6 +288,9 @@ class UpdatePollerController:
             command=lambda: self._run_audit_backend("clipboard", dlg, audit_btn),
         )
 
+        ttk.Button(btn_row, text="🔧  Apply Fixes",
+                   command=self._run_integration_fix).pack(side=tk.LEFT, padx=(6, 0))
+
         ttk.Button(btn_row, text="Close", command=dlg.destroy).pack(side=tk.RIGHT)
 
         dlg.grab_set()
@@ -279,46 +305,98 @@ class UpdatePollerController:
         "update, upstream issues to update, and any manager code changes."
     )
 
+    # Direct tool-use prompt for Claude CLI mode — replaces the PROMPT_SNIPPETS
+    # audit body because the model has real tool access (MCP servers, file reads)
+    # and can call tokensave_changelog directly instead of using pre-fetched text.
+    _AUDIT_CLI_STEPS = (
+        "You are a tokensave integration auditor with full tool access.\n"
+        "The pre-fetched integration report above contains live GitHub issue "
+        "statuses from the manager's GraphQL queries.\n\n"
+        "STEP 1 — Call tokensave_changelog. List every new tool, removed tool,\n"
+        "  and CLI/schema change. Extract tool names exactly.\n\n"
+        "STEP 2 — Read src/prompts.py. For each NEW tool from Step 1, check\n"
+        "  snippet coverage. List any new tools with no covering snippet.\n\n"
+        "STEP 3 — For each REMOVED tool from Step 1, check if any snippet body\n"
+        "  still references it. List stale snippet titles.\n\n"
+        "STEP 4 — Read docs/upstream-issues/*.md. For each file lacking\n"
+        "  STATUS: FIXED/SHIPPED/MOOT in first 8 lines, check if the changelog\n"
+        "  change resolves it and propose the correct STATUS line.\n\n"
+        "STEP 5 — Read src/helpers/daemon_cost.py and src/agent_tools.py.\n"
+        "  Flag any function wrapping a tool removed or renamed in Step 1.\n"
+        "  If codegraph MCP tools are available, use them for structural\n"
+        "  cross-references alongside tokensave_context.\n\n"
+        "STEP 6 — Output a structured action list:\n"
+        "  ## Integration report — tokensave v[[new version]]\n"
+        "  ### New snippets needed\n"
+        "  ### Stale snippets to update\n"
+        "  ### Upstream issues to update\n"
+        "  ### Manager code changes\n"
+        "  ### Confirmed no-action"
+    )
+
     def _build_audit_user_prompt(self, mode: str) -> str:
-        """Assemble the full LLM audit prompt from cached report + GitHub context.
+        """Assemble the LLM audit prompt. Strategy differs by backend:
+
+        claude_cli:  inject integration report (GitHub issue statuses) + direct
+                     tool-use instructions. No releases block — CLI can call
+                     tokensave_changelog directly.
+        local_llm:   inject report only (no releases — ReAct loops compound
+                     context, so we keep the initial prompt lean). Append tool
+                     instructions conditionally when tokensave_exe is set.
+        clipboard:   full context (report) + PROMPT_SNIPPETS audit body + MCP note.
 
         Uses a randomised boundary string to prevent injection via GitHub
         release body or issue titles containing markdown/XML characters.
         """
-        from prompts import PROMPT_SNIPPETS  # lazy — avoids circular risk at module level
-        audit_body = next(
-            (b for t, b in PROMPT_SNIPPETS if "Integration audit" in t), ""
-        )
         report = self._last_integration_report or "(no report available)"
         boundary = f"AUDIT-CTX-{secrets.token_hex(8).upper()}"
+        report_block = (
+            f"---{boundary}-REPORT---\n{report}\n---{boundary}-END---"
+        )
 
         if mode == "clipboard":
+            from prompts import PROMPT_SNIPPETS  # lazy — avoids circular risk
+            audit_body = next(
+                (b for t, b in PROMPT_SNIPPETS if "Integration audit" in t), ""
+            )
             return (
-                f"---{boundary}-REPORT---\n"
-                f"{report}\n"
-                f"---{boundary}-END---\n\n"
+                f"{report_block}\n\n"
                 f"{audit_body}\n\n"
-                "(MCP tools are available in this chat — call tokensave_changelog "
-                "directly as instructed in the prompt above.)"
+                "If MCP tools are configured in your session, call "
+                "tokensave_changelog directly as instructed in the prompt above."
             )
 
-        # For CLI / local LLM: pre-fetch GitHub releases and prepend them
-        gh_exe = shutil.which("gh") or ""
-        gh_block = ""
-        if gh_exe and self._current_version:
-            repo = "aovestdipaperino/tokensave"
-            gh_block = self._fetch_releases_for_prompt(repo, gh_exe,
-                                                        self._current_version)
+        if mode == "claude_cli":
+            # CLI has full tool access — use the direct tool-use prompt.
+            # No releases block needed; model calls tokensave_changelog itself.
+            return f"{report_block}\n\n{self._AUDIT_CLI_STEPS}"
 
-        parts = [
-            f"---{boundary}-REPORT---\n{report}\n---{boundary}-END---",
-        ]
-        if gh_block:
-            parts.append(
-                f"---{boundary}-GITHUB---\n{gh_block}\n---{boundary}-END---"
+        # local_llm — lean prompt (no releases) + conditional tool instructions
+        prompt = (
+            f"{report_block}\n\n"
+            "Analyze the integration report above and produce a structured "
+            "audit:\n"
+            "  1. Are there any tracked issues still OPEN that the report shows "
+            "as resolved?\n"
+            "  2. Are there any snippets in src/prompts.py referencing removed "
+            "tools?\n"
+            "  3. Are there any manager helper files that wrap tools now gone?\n\n"
+            "Output:\n"
+            "  ## Integration report\n"
+            "  ### Upstream issues to update\n"
+            "  ### Stale snippets to update\n"
+            "  ### Manager code changes\n"
+            "  ### Confirmed no-action"
+        )
+        if self._cfg.tokensave_exe:
+            prompt += (
+                "\n\nYou have two tools available:\n"
+                "  tokensave_search — find symbols by keyword\n"
+                "  tokensave_context — explore how a symbol is used\n"
+                "Use them to verify prompt coverage and check manager code "
+                "for removed tool references."
             )
-        parts.append(audit_body)
-        return "\n\n".join(parts)
+        return prompt
 
     def _fetch_releases_for_prompt(self, repo: str, gh_exe: str,
                                    installed_version: str) -> str:
@@ -350,8 +428,6 @@ class UpdatePollerController:
             return ""
 
         if not isinstance(data, list):
-            return ""
-        if isinstance(data, dict) and ("message" in data or "errors" in data):
             return ""
 
         installed_tuple = _pv(installed_version)
@@ -389,8 +465,8 @@ class UpdatePollerController:
             messagebox.showinfo(
                 "Copied!",
                 "Paste into a Claude Code chat session.\n"
-                "MCP tools are available there — Claude will call "
-                "tokensave_changelog as instructed in the prompt.",
+                "If MCP tools are configured in your session, Claude will call\n"
+                "tokensave_changelog directly as instructed in the prompt.",
                 parent=parent_dlg,
             )
             return
@@ -431,9 +507,11 @@ class UpdatePollerController:
             result, err = None, None
             try:
                 if mode == "claude_cli":
+                    # 300 s — agentic tool-use loops (file reads + tokensave_changelog)
+                    # take longer than the old 180 s plain-completion ceiling.
                     result = _call_fn(
                         exe, prompt, system_prompt=audit_system,
-                        timeout=180, model=model, cwd=str(_BASE_DIR),
+                        timeout=300, model=model, cwd=str(_BASE_DIR),
                     )
                     if result is None:
                         err = (
@@ -441,14 +519,24 @@ class UpdatePollerController:
                             "Check claude_cli_exe in Settings → Claude Code CLI."
                         )
                 else:
+                    # enable_tokensave_tools routes to _dispatch_agentic (LocalAgent
+                    # loop) which also fixes the Ollama num_ctx overflow by breaking
+                    # the task into smaller turns instead of one huge completion.
                     result, err = _call_fn(
                         llm_cfg_local, audit_system, prompt,
                         self._cfg.claude_cli_exe, str(_BASE_DIR), timeout=180,
+                        enable_tokensave_tools=True,
+                        tokensave_exe=self._cfg.tokensave_exe or "",
                     )
             except Exception as exc:
                 err = str(exc)
             finally:
-                self._root.after(0, loading_dlg.destroy)
+                # winfo_exists guard — user may close the loading modal manually
+                # during the extended 300 s window; guard prevents TclError.
+                self._root.after(
+                    0,
+                    lambda: loading_dlg.destroy() if loading_dlg.winfo_exists() else None,
+                )
                 self._root.after(0, lambda: audit_btn.configure(state=tk.NORMAL))
                 self._root.after(
                     0,

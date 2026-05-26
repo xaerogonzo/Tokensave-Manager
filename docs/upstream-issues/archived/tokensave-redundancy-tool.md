@@ -1,6 +1,6 @@
 # Upstream issue — `tokensave_redundancy` aggregate tool
 
-> **STATUS: SHIPPED in tokensave v6.0.0 (issue #83).**
+> **STATUS: CLOSED — verified via GitHub API 2026-05-26
 > `tokensave_redundancy` blends AST-shape, CFG, call-sequence, and token-shingle
 > similarity into definite / likely / naming_only buckets. Fingerprints persist in
 > `node_fingerprints` table (schema v10).
