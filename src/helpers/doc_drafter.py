@@ -529,7 +529,22 @@ def dispatch_llm(llm_cfg, system_prompt, user_prompt,
             return result, None
 
         from helpers.llm import _call_llm
-        result = _call_llm(llm_cfg, system_prompt, user_prompt)
+        # Adaptive token cap — _call_llm defaults to 1500 which is fine for
+        # commit messages but cramped for grouped CHANGELOG bullets where the
+        # model needs to emit multiple sub-section headers + several bullets
+        # each. Bump for larger prompts; throttle DOWN to 1000 for tiny ranges
+        # so Ollama on constrained hardware doesn't allocate context it won't
+        # use. Truncation guard in _parse_grouped_bullets catches cases where
+        # even 2500 isn't enough.
+        prompt_chars = len(system_prompt or "") + len(user_prompt or "")
+        if prompt_chars < 1500:
+            max_tokens = 1000           # tiny range → speed mode
+        elif prompt_chars < 6000:
+            max_tokens = 2000           # typical
+        else:
+            max_tokens = 2500           # large existing-content context
+        result = _call_llm(llm_cfg, system_prompt, user_prompt,
+                           max_tokens=max_tokens)
         if not result:
             return None, f"{provider or 'LLM'} returned empty result."
         return result, None

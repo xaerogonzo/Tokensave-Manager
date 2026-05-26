@@ -230,6 +230,50 @@ def _normalise_subheader(line):
     return line.strip().rstrip(":").strip()
 
 
+def read_subsection_bullets(readme_path, header_md):
+    """Return existing bullet lines from the ``**header_md**`` sub-section.
+
+    Used by the doc-drafter dialog for Jaccard+overlap dedup against existing
+    content before appending new bullets via
+    ``insert_readme_highlights_subsection``.  ``header_md`` should be the full
+    bold-header line including the ``**`` markers, e.g.
+    ``"**Roadmap-6 — Ask tab + gitignore AI**"``.  Matching tolerates trailing
+    whitespace and a trailing colon (same normalisation the inserter uses).
+
+    Returns ``[]`` if the README is missing, the highlights anchor is missing,
+    or no sub-section matches the header.  Only bullet-shaped lines are
+    returned (lines starting with ``-`` or ``*``).
+    """
+    if not os.path.exists(readme_path):
+        return []
+    try:
+        with open(readme_path, encoding="utf-8-sig") as f:
+            text = f.read()
+    except OSError:
+        return []
+    bounds = _find_block_bounds(text)
+    if bounds is None:
+        return []
+    block_start, block_end = bounds
+    block = text[block_start:block_end]
+
+    target_norm = _normalise_subheader(header_md)
+    matches = list(_SUBHEADER_RE.finditer(block))
+    for i, m in enumerate(matches):
+        if _normalise_subheader(block[m.start():m.end()]) != target_norm:
+            continue
+        sec_start = m.end()
+        sec_end = (matches[i + 1].start()
+                   if i + 1 < len(matches) else len(block))
+        bullets = []
+        for ln in block[sec_start:sec_end].splitlines():
+            stripped = ln.lstrip()
+            if stripped.startswith("- ") or stripped.startswith("* "):
+                bullets.append(stripped)
+        return bullets
+    return []
+
+
 def insert_readme_highlights_subsection(readme_path, header_md, bullets_md):
     """Insert OR replace a single sub-section inside the highlights block.
 

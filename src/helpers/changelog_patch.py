@@ -182,6 +182,58 @@ def _canonicalise_section(raw):
     return (raw or "").strip().title()
 
 
+def read_section_bullets(changelog_path, section):
+    """Return existing bullet lines from ``### {section}`` inside ``[Unreleased]``.
+
+    Used by the doc-drafter dialog for Jaccard+overlap dedup against existing
+    content before appending new bullets via ``insert_unreleased_bullets``.
+
+    Returns ``[]`` if the changelog is missing, the ``[Unreleased]`` anchor is
+    missing, or the requested section doesn't exist.  Section name matching is
+    case-insensitive via the same ``_canonicalise_section`` alias map used by
+    the inserter (``"fixed"`` / ``"FIXED"`` / ``"Fixes"`` all resolve to
+    ``"Fixed"``).
+
+    Only bullet-shaped lines are returned — comments, blank lines, and
+    free-form prose inside the section are silently skipped.  This keeps the
+    dedup signal high (the drafter compares bullet-to-bullet) while
+    tolerating user-authored notes mixed into the section.
+    """
+    if not os.path.exists(changelog_path):
+        return []
+    try:
+        with open(changelog_path, encoding="utf-8-sig") as f:
+            text = f.read()
+    except OSError:
+        return []
+
+    anchor_re = re.compile(r"(?m)^## \[Unreleased\][^\n]*\n")
+    am = anchor_re.search(text)
+    if not am:
+        return []
+    next_version_re = re.compile(r"(?m)^## \[")
+    nm = next_version_re.search(text, am.end())
+    block_end = nm.start() if nm else len(text)
+    block = text[am.end():block_end]
+
+    sub_re = re.compile(r"(?m)^###\s+([^\n]+)\n")
+    canonical = _canonicalise_section(section)
+    subsections = list(sub_re.finditer(block))
+    for i, m in enumerate(subsections):
+        if _canonicalise_section(m.group(1)) != canonical:
+            continue
+        sec_start = m.end()
+        sec_end = (subsections[i + 1].start()
+                   if i + 1 < len(subsections) else len(block))
+        bullets = []
+        for ln in block[sec_start:sec_end].splitlines():
+            stripped = ln.lstrip()
+            if stripped.startswith("- ") or stripped.startswith("* "):
+                bullets.append(stripped)
+        return bullets
+    return []
+
+
 def insert_unreleased_bullets(changelog_path, section, bullets_md):
     """Append bullets to a sub-section of [Unreleased].
 

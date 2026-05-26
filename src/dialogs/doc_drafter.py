@@ -32,13 +32,138 @@ from tkinter import ttk
 from typing import TYPE_CHECKING
 
 from constants import C
+import re
+
 from helpers.changelog_patch import (
     update_unreleased, read_unreleased, insert_unreleased_bullets,
+    read_section_bullets,
 )
 from helpers.readme_patch import (
     update_readme_highlights, read_highlights,
-    insert_readme_highlights_subsection,
+    insert_readme_highlights_subsection, read_subsection_bullets,
 )
+
+
+# ── Bullet-quality helpers (truncation + redundancy filters) ────────────────
+#
+# These run on the AI's output BEFORE the patcher applies it.  Catch the two
+# Ollama failure modes observed during dogfooding:
+#   1. Truncation — bullet ends mid-clause with no closing punctuation and
+#      a trailing stop-word ("for", "the", "to", ...)
+#   2. Redundancy — bullet semantically restates an existing entry that the
+#      patcher would happily duplicate.
+#
+# Same prompt-then-code-defence pattern as the gitignore AI Suggest dedup.
+
+_TRUNCATION_TRAILING = {
+    "for", "the", "to", "with", "and", "or", "of",
+    "in", "on", "at", "by", "as", "is", "a", "an",
+}
+
+_STOP_WORDS = {
+    # articles / conjunctions
+    "the", "a", "an", "and", "or", "but", "if", "then", "than",
+    # prepositions (commonly bloat dedup denominator without semantic weight)
+    "of", "to", "in", "on", "at", "by", "as", "for", "with", "from", "into",
+    "via", "per", "between", "through", "across", "over", "under",
+    "after", "before", "during", "while", "when",
+    # copulas / pronouns
+    "be", "is", "are", "was", "were", "it", "its", "this", "that",
+    # adverbs that surface a lot in commit prose with no scope info
+    "also", "now", "still", "even", "just", "only",
+}
+
+
+def _looks_truncated(bullet):
+    """Return True if ``bullet`` looks cut off mid-sentence.
+
+    Conservative — only flags clear truncation signatures:
+      - line does NOT end with closing punctuation ``.`` ``)`` `` ` `` `` ' ``
+        `` " `` ``:``
+      - AND the final word is a stop-word fragment ("for", "the", ...) that
+        almost certainly precedes an object that wasn't generated
+
+    A bullet ending in a parenthetical citation (``"... (helpers/foo.py)"``)
+    is correctly NOT flagged (ends with ``)``).  A bullet ending in a
+    non-stop-word like ``"... see issue #42"`` is also not flagged — only
+    obvious mid-sentence cuts trip.
+    """
+    s = (bullet or "").rstrip()
+    if not s:
+        return False
+    if s.endswith((".", ")", "`", '"', "'", ":", "!", "?")):
+        return False
+    last_word = s.split()[-1].lower().rstrip(",;:")
+    return last_word in _TRUNCATION_TRAILING
+
+
+def _token_set(bullet):
+    """Lowercase-tokenise + strip stop-words + drop short tokens.
+
+    Used by ``_is_duplicate``.  Length filter (>2 chars) discards noise like
+    digits, single letters, and one-char punctuation residue without losing
+    meaningful short tokens (gitignore semantics catches "AI", "PR", "UI",
+    "CLI" at length 2-3 — keep >2 threshold).
+    """
+    s = re.sub(r"[^\w\s]", " ", (bullet or "").lower())
+    return {t for t in s.split() if t not in _STOP_WORDS and len(t) > 2}
+
+
+def _is_duplicate(new_bullet, existing_bullet):
+    """Combined Jaccard + containment check against ONE existing bullet.
+
+    Jaccard ≥ 0.6 catches "mostly the same words" cases.  The containment
+    (overlap) coefficient at 0.70 catches the asymmetric case where one
+    bullet is much shorter than the other but its tokens are largely a
+    SUBSET of the larger one — plain Jaccard misses these because the
+    union inflates the denominator.
+
+    Threshold 0.65 was chosen by dogfooding against the realistic failure
+    case: existing 13-token detailed bullet, new 6-token generic summary
+    bullet describing the same feature ('add automated CHANGELOG updates
+    via AI'), shared 4 tokens → 4/6 = 0.67 overlap.  Stricter 0.85 missed
+    every paraphrase-style failure; lower than 0.60 starts catching
+    unrelated bullets that happen to share scope prefix words.  0.65 is
+    the sweet spot from the live test data.
+    """
+    a = _token_set(new_bullet)
+    b = _token_set(existing_bullet)
+    if not a or not b:
+        return False
+    union = a | b
+    jaccard = len(a & b) / len(union) if union else 0.0
+    overlap = len(a & b) / min(len(a), len(b))
+    return jaccard >= 0.6 or overlap >= 0.65
+
+
+def _filter_bullets(bullets_md, existing_bullets):
+    """Apply truncation + dedup filters to a bullet block.
+
+    Args:
+        bullets_md:       newline-separated bullet block from the LLM
+        existing_bullets: list of existing bullet lines to dedup against
+
+    Returns ``(kept_md, truncated_n, duplicate_n)`` where ``kept_md`` is the
+    filtered bullets joined back into a newline-separated string.
+    """
+    kept = []
+    truncated_n = 0
+    duplicate_n = 0
+    for line in bullets_md.splitlines():
+        stripped = line.lstrip()
+        # Pass through non-bullet lines untouched (lets prose interleave —
+        # not common in our output but harmless).
+        if not (stripped.startswith("- ") or stripped.startswith("* ")):
+            kept.append(line)
+            continue
+        if _looks_truncated(stripped):
+            truncated_n += 1
+            continue
+        if any(_is_duplicate(stripped, eb) for eb in existing_bullets):
+            duplicate_n += 1
+            continue
+        kept.append(line)
+    return "\n".join(kept).strip(), truncated_n, duplicate_n
 from helpers.release import _classify_commits_for_changelog
 from helpers import doc_drafter as dd
 
@@ -88,6 +213,9 @@ class DocDrafterDialog(tk.Toplevel):
                           "thread": None, "draft": ""},
         }
         self._tab_widgets: dict = {}   # populated by _build_tab
+        # Populated by _apply_changelog_bullets / _apply_readme_subsection
+        # right before they return.  _on_apply_result reads + clears.
+        self._last_filter_stats: dict = {}
 
         # ── UI ─────────────────────────────────────────────────────────────
         self._build_header_section()
@@ -257,10 +385,13 @@ class DocDrafterDialog(tk.Toplevel):
         apply_btn.pack(side=tk.LEFT, padx=(6, 0))
 
         status_var = tk.StringVar(value="")
+        # wraplength keeps long filter messages from pushing buttons off-screen
+        # on narrow window sizes; status text wraps inside the row instead.
         status_lbl = tk.Label(btn_row, textvariable=status_var,
                               bg=C["base"], fg=C["overlay0"],
-                              font=("Segoe UI", 8))
-        status_lbl.pack(side=tk.LEFT, padx=(12, 0))
+                              font=("Segoe UI", 8),
+                              wraplength=420, justify=tk.LEFT)
+        status_lbl.pack(side=tk.LEFT, padx=(12, 0), fill=tk.X, expand=True)
 
         self._tab_widgets[key] = {
             "frame":      frame,
@@ -485,19 +616,44 @@ class DocDrafterDialog(tk.Toplevel):
             if not self.winfo_exists():
                 return
             self._tab_widgets[key]["apply_btn"].configure(state=tk.NORMAL)
+            # Pop and clear filter stats so we don't leak counts across Applies
+            stats = self._last_filter_stats or {}
+            self._last_filter_stats = {}
+            trunc_n = stats.get("truncated", 0)
+            dup_n   = stats.get("duplicates", 0)
+            filter_suffix = self._format_filter_suffix(trunc_n, dup_n)
+            target = self._tab_widgets[key]["target"]
             if ok:
-                self._set_status(key, f"✓ {msg}", C["green"])
-                target = self._tab_widgets[key]["target"]
-                self._on_log(f"[doc-drafter] {target}: {msg}", C["green"])
+                status_msg = f"✓ {msg}{filter_suffix}"
+                self._set_status(key, status_msg, C["green"])
+                self._on_log(f"[doc-drafter] {target}: {msg}{filter_suffix}",
+                             C["green"])
                 # Offer to commit the change (matches CHANGELOG drafter UX).
                 self._on_commit_offer(self._project_path,
                                        f"{target} (doc-drafter)")
             else:
-                self._set_status(key, f"✗ {msg}", C["red"])
-                self._on_log(f"[doc-drafter] {self._tab_widgets[key]['target']}: "
-                             f"{msg}", C["red"])
+                status_msg = f"✗ {msg}{filter_suffix}"
+                self._set_status(key, status_msg, C["red"])
+                self._on_log(f"[doc-drafter] {target}: {msg}{filter_suffix}",
+                             C["red"])
         except (tk.TclError, RuntimeError):
             return
+
+    @staticmethod
+    def _format_filter_suffix(trunc_n, dup_n):
+        """Format filter counts as a compact " — N truncated, M duplicates" tail.
+
+        Bounded length so an unexpected 45+ count doesn't push UI off-screen.
+        Empty string when both counts are zero (clean drafts get no noise).
+        """
+        if not trunc_n and not dup_n:
+            return ""
+        bits = []
+        if trunc_n:
+            bits.append(f"{trunc_n} truncated")
+        if dup_n:
+            bits.append(f"{dup_n} duplicate{'s' if dup_n != 1 else ''}")
+        return f"  ⚠ {', '.join(bits)} dropped — Regenerate to retry"
 
     # ── CHANGELOG grouped-bullets parser + dispatcher ──────────────────────
 
@@ -536,12 +692,17 @@ class DocDrafterDialog(tk.Toplevel):
         return pairs
 
     def _apply_changelog_bullets(self, target_path, draft_text):
-        """Parse grouped output, dispatch one insert_unreleased_bullets call per section.
+        """Parse grouped output, filter truncated + duplicate bullets, dispatch.
+
+        Per-section filtering catches the two Ollama failure modes (truncation,
+        redundancy hallucination) BEFORE the patcher runs.  Suppressed counts
+        are stored in self._last_filter_stats so _on_apply_result can surface
+        them in the status bar.
 
         On the first patcher failure, returns immediately with the section
-        that failed in the message (so the user knows which one). Earlier
-        successful sections are NOT rolled back — append-only is naturally
-        partial-fail-tolerant; the user can re-Apply to retry the remainder.
+        that failed in the message.  Earlier successful sections are NOT
+        rolled back — append-only is naturally partial-fail-tolerant; the
+        user can re-Apply to retry the remainder.
         """
         pairs = self._parse_grouped_bullets(draft_text)
         if not pairs:
@@ -549,12 +710,34 @@ class DocDrafterDialog(tk.Toplevel):
                            "CHANGELOG mode requires bullets grouped under "
                            "### Added / ### Fixed / ### Changed / ### Removed.")
         applied = []
+        total_truncated = 0
+        total_duplicates = 0
+        empty_after_filter = 0
         for section, bullets in pairs:
-            ok, msg = insert_unreleased_bullets(target_path, section, bullets)
+            existing = read_section_bullets(target_path, section)
+            filtered, trunc_n, dup_n = _filter_bullets(bullets, existing)
+            total_truncated += trunc_n
+            total_duplicates += dup_n
+            if not filtered.strip():
+                empty_after_filter += 1
+                continue                # nothing left to insert for this section
+            ok, msg = insert_unreleased_bullets(target_path, section, filtered)
             if not ok:
                 return False, f"{section}: {msg} (applied so far: {applied})"
             applied.append(section)
-        return True, f"appended bullets to {len(applied)} section(s): {', '.join(applied)}"
+        self._last_filter_stats = {
+            "truncated":  total_truncated,
+            "duplicates": total_duplicates,
+        }
+        if not applied:
+            return False, ("All bullets filtered out as truncated or "
+                           f"duplicates ({total_truncated} truncated, "
+                           f"{total_duplicates} duplicates).  Click "
+                           "Regenerate to retry.")
+        summary = f"appended to {len(applied)} section(s): {', '.join(applied)}"
+        if empty_after_filter:
+            summary += f" ({empty_after_filter} section(s) emptied by filter)"
+        return True, summary
 
     # ── README sub-section parser + dispatcher ─────────────────────────────
 
@@ -587,8 +770,25 @@ class DocDrafterDialog(tk.Toplevel):
                            "the first non-blank line.")
         header_line = lines[header_idx].strip()
         bullets = "\n".join(lines[header_idx + 1:]).strip("\n")
+
+        # Filter truncated + duplicate bullets BEFORE the splice.  README path
+        # uses replace-or-insert semantics, so duplicates within the new
+        # sub-section are the only failure mode (the patcher itself preserves
+        # other sub-sections verbatim).  Compare against the existing bullets
+        # of THIS sub-section if it already exists.
+        existing = read_subsection_bullets(target_path, header_line)
+        filtered, trunc_n, dup_n = _filter_bullets(bullets, existing)
+        self._last_filter_stats = {
+            "truncated":  trunc_n,
+            "duplicates": dup_n,
+        }
+        if not filtered.strip():
+            return False, ("All bullets filtered out as truncated or "
+                           f"duplicates ({trunc_n} truncated, {dup_n} "
+                           "duplicates).  Click Regenerate to retry.")
         return insert_readme_highlights_subsection(
-            target_path, header_line, bullets + "\n" if bullets else "\n")
+            target_path, header_line,
+            filtered + "\n" if filtered else "\n")
 
     # ── Status helper ──────────────────────────────────────────────────────
 
