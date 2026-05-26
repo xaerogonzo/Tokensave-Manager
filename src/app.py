@@ -577,6 +577,9 @@ class App(tk.Tk):
                             and self._cfg.raw.get("auto_commit_after_sync")
                             and _is_git_repo(cwd, self._cfg.git_exe)):
                         self._auto_commit_after_sync(cwd)
+                    elif args and args[0] == "upgrade":
+                        # Auto-run integration check immediately after upgrade
+                        self.after(0, self._update_poller.cmd_integration_check)
                 else:
                     self._log(f"Exited with code {proc.returncode}", C["red"])
                     log.warning(f"DONE exit={proc.returncode}  [{elapsed:.1f}s]")

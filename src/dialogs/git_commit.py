@@ -78,6 +78,11 @@ class GitCommitDialog(tk.Toplevel):
         # Async-suggestion infrastructure (see _populate_suggestion docstring).
         self._suggestion_token = 0
         self._user_has_edited  = False
+        # Per-session backend override — starts from the saved config setting
+        # so the dropdown shows the current preference immediately.
+        self._session_backend: str = (
+            (cfg.raw or {}).get("commit_message_backend") or "auto"
+        ).lower()
 
         self._build_header(path)
         self._build_file_list(is_repo)
@@ -231,7 +236,29 @@ class GitCommitDialog(tk.Toplevel):
             bg=C["base"], fg=C["peach"])
         self._suggest_status_lbl.pack(side=tk.LEFT, padx=(12, 0))
         ttk.Button(msg_hdr, text="💡 Suggest",
-                   command=self._fill_suggestion).pack(side=tk.RIGHT)
+                   command=self._fill_suggestion).pack(side=tk.RIGHT, padx=(4, 0))
+
+        # Backend picker — lets users switch without going to Settings
+        _BACKEND_LABELS = {
+            "auto":       "Auto",
+            "claude_cli": "Claude CLI",
+            "llm":        "Local LLM",
+            "llm_first":  "LLM first",
+        }
+        self._backend_btn = ttk.Menubutton(
+            msg_hdr,
+            text=f"{_BACKEND_LABELS.get(self._session_backend, 'Auto')} ▾",
+            width=11,
+        )
+        self._backend_btn.pack(side=tk.RIGHT)
+        _backend_menu = tk.Menu(self._backend_btn, tearoff=False,
+                                bg=C["base"], fg=C["text"])
+        self._backend_btn["menu"] = _backend_menu
+        for _key, _lbl in _BACKEND_LABELS.items():
+            _backend_menu.add_command(
+                label=_lbl,
+                command=lambda k=_key, l=_lbl: self._set_commit_backend(k, l),
+            )
 
         msg_frame = tk.Frame(self, bg=C["mantle"], relief=tk.FLAT, bd=1)
         msg_frame.pack(fill=tk.X, padx=20, pady=(0, 12))
@@ -291,6 +318,11 @@ class GitCommitDialog(tk.Toplevel):
         for var, _f, xy in self._file_vars:
             var.set(xy.strip() != "??")
 
+    def _set_commit_backend(self, key: str, label: str) -> None:
+        """Update the per-session backend override and refresh the button label."""
+        self._session_backend = key
+        self._backend_btn.configure(text=f"{label} ▾")
+
     def _fill_suggestion(self):
         """Replace the commit message field with a fresh suggestion based on
         currently *selected* files only. Resets the user-edited flag so the
@@ -315,9 +347,18 @@ class GitCommitDialog(tk.Toplevel):
 
         `source` is informational ("initial" / "suggest_button") for logging.
         """
-        raw = self._cfg.raw
-        llm_cfg = (raw.get("commit_message_llm") or {}) if isinstance(raw, dict) else {}
-        llm_active = bool(llm_cfg.get("enabled"))
+        # Apply the per-session backend override: build a patched copy of raw
+        # so _suggest_commit_message sees the user's in-dialog selection.
+        raw = dict(self._cfg.raw or {})
+        raw["commit_message_backend"] = self._session_backend
+
+        llm_cfg = raw.get("commit_message_llm") or {}
+        # Any AI-backend override should go async even if LLM is not configured
+        # in settings (e.g. forcing Claude CLI when llm.enabled is False).
+        _AI_BACKENDS = {"auto", "claude_cli", "llm", "llm_first"}
+        llm_active = (
+            bool(llm_cfg.get("enabled")) or self._session_backend in _AI_BACKENDS
+        )
 
         if not llm_active:
             # Heuristics only — instant, no spinner needed.
