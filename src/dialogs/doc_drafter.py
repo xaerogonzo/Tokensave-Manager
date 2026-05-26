@@ -102,7 +102,11 @@ def _is_noop_bullet(bullet):
     Ollama on Windows occasionally emits ``\\r\\n`` line endings inside
     the stream.
     """
-    s = (bullet or "").strip().lstrip("-").strip().strip("()").strip()
+    # ``lstrip("-*")`` covers both dash- and asterisk-prefixed bullets
+    # (Phase 1.8).  Ollama emits ``-`` consistently; Claude CLI commonly
+    # emits ``*``.  Without the ``*`` here, ``* None`` would slip past
+    # the noop regex (which begins with ``^-?``, not ``^[-*]?``).
+    s = (bullet or "").strip().lstrip("-*").strip().strip("()").strip()
     return any(p.match(s) for p in _NOOP_BULLET_PATTERNS)
 
 
@@ -705,18 +709,12 @@ class DocDrafterDialog(tk.Toplevel):
         project     = self._project_path
 
         def _worker():
-            # CHANGELOG always gets the changed-file list — pushes the model
-            # toward per-file granularity instead of single-summary collapse.
-            # README only needs it in sparse-commit mode (model is already
-            # told to mirror existing bullets; extra file context bloats
-            # without changing the output shape).
-            if key == "changelog":
-                changed_files = dd.changed_file_paths(
-                    project, range_spec, self._cfg.git_exe)
-            else:
-                changed_files = (dd.changed_file_paths(
-                    project, range_spec, self._cfg.git_exe)
-                                 if dd.is_sparse(commits) else [])
+            # Both tabs get the always-on changed-file context (Phase 1.8).
+            # Pushes the model toward per-file granularity regardless of
+            # commit-message quality — symmetric for CHANGELOG and README.
+            # The 60-path cap inside changed_file_paths bounds prompt size.
+            changed_files = dd.changed_file_paths(
+                project, range_spec, self._cfg.git_exe)
 
             if key == "changelog":
                 existing = read_unreleased(

@@ -401,7 +401,22 @@ _README_SYSTEM = (
     "🔍 for review, 🔌 for MCP, 🦙 for Ollama, ⚙ for settings, etc.).\n"
     "- If a matching sub-section already exists in the current body, "
     "include ALL of its existing bullets PLUS the new ones — the patcher "
-    "REPLACES the whole sub-section, so omitting a bullet deletes it."
+    "REPLACES the whole sub-section, so omitting a bullet deletes it.\n"
+    "- For the NEW bullets you ADD beyond the existing sub-section "
+    "content, AIM for ONE bullet per distinct shipped feature.  A commit "
+    "range that spans three features likely warrants three new bullets, "
+    "not one summary mega-bullet ('updates — feature A, feature B, "
+    "feature C').  If the commit range spans N distinct features, target "
+    "N new bullets.\n"
+    "- CITE specific file paths and helper/class names in backticks. "
+    "'doc-drafter updates — backend dropdown, noop filtering, dedup' is "
+    "too generic.  'backend override dropdown (`_backend_override_var` "
+    "in `dialogs/doc_drafter.py`)' is the correct level of detail.\n"
+    "- When the commit range spans MULTIPLE distinct features (a UI "
+    "dropdown AND a new filter AND a CI cleanup), produce SEPARATE new "
+    "bullets for each — do NOT collapse them into one comma-separated "
+    "mega-bullet.  Existing bullets stay verbatim; new bullets get the "
+    "per-feature treatment."
 )
 
 
@@ -504,10 +519,31 @@ def build_readme_prompt(commits, classified, existing_highlights,
         parts.append("")
         parts.append(boundary_note)
     parts.append("")
+    # Per-commit subject summary — mirrors the CHANGELOG prompt.  Gives the
+    # model a per-commit view so it produces per-feature new bullets instead
+    # of a single mega-bullet collapsing the whole range.
+    if commits:
+        parts.append("Commits in range (each represents a distinct feature "
+                     "or fix — produce roughly one NEW bullet per commit, "
+                     "do NOT collapse multiple commits into a single "
+                     "comma-separated summary bullet):")
+        for c in commits:
+            sha = (c.get("hash") or "")[:8]
+            subj = (c.get("subject") or "").strip()
+            parts.append(f"  {sha}  {subj}")
+        parts.append("")
     parts.append("Commits classified by conventional-commit prefix:")
     parts.append("")
     parts.append(_render_commit_list(classified) or "(no commits classified)")
     parts.append("")
+    # ALWAYS include the changed-file list (Phase 1.8 — mirrors CHANGELOG).
+    # Knowing exactly which files were touched lets the model produce
+    # per-file granular new bullets even when commit subjects are detailed.
+    if changed_files:
+        parts.append("[Changed files] (repo-root-relative paths):")
+        for p in changed_files:
+            parts.append(f"  {p}")
+        parts.append("")
     parts.append("Current README 'Recent highlights (Unreleased)' block body "
                  "(preserve old sub-sections, only add/update what this "
                  "commit range actually changes):")
@@ -518,14 +554,9 @@ def build_readme_prompt(commits, classified, existing_highlights,
         parts.append("")
         parts.append(
             "The provided commit subjects are unusually concise.  Infer the "
-            "actual change scope from the changed file paths below.  Do NOT "
+            "actual change scope from the changed file paths above.  Do NOT "
             "echo a terse commit subject verbatim — describe what changed."
         )
-        if changed_files:
-            parts.append("")
-            parts.append("[Changed files]")
-            for p in changed_files:
-                parts.append(f"- {p}")
 
     return system, "\n".join(parts)
 
