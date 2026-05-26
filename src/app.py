@@ -33,8 +33,6 @@ import time
 import tkinter as tk
 from tkinter import messagebox, ttk
 
-import pystray
-
 from constants import (
     AUTO_REFRESH_MS,
     C,
@@ -61,9 +59,9 @@ from helpers.project_discovery import find_projects, get_pinned
 from helpers.runtime import (
     _acquire_instance_lock,
     _bring_existing_to_front,
-    _make_tray_icon,
     log,
 )
+from helpers.tray_manager import TrayManager
 from state import ManagerConfig
 
 
@@ -129,51 +127,17 @@ class App(tk.Tk):
         self._build()
         self.refresh()
         self.after(AUTO_REFRESH_MS, self._auto_refresh)
-        self._tray = None
-        self._last_geometry: str = ""
-        self._setup_tray()
-        self.protocol("WM_DELETE_WINDOW", self._hide_to_tray)
+        self._tray_mgr = TrayManager(self, self._cfg, self._on_tray_quit)
+        self._tray_mgr.setup()
+        self.protocol("WM_DELETE_WINDOW", self._tray_mgr.hide)
         self.after(300, self._check_config)
 
     # ── Tray ───────────────────────────────────────────────────────────────────
 
-    def _setup_tray(self):
-        menu = pystray.Menu(
-            pystray.MenuItem("Show", self._show_from_tray, default=True),
-            pystray.Menu.SEPARATOR,
-            pystray.MenuItem("Quit", self._quit_app),
-        )
-        self._tray = pystray.Icon(
-            "TokenSaveManager",
-            _make_tray_icon(),
-            "TokenSave Manager",
-            menu,
-        )
-        threading.Thread(target=self._tray.run, daemon=True).start()
-
-    def _hide_to_tray(self):
-        self._last_geometry = self.geometry()
-        self._cfg.raw["window_geometry"] = self._last_geometry
-        self._cfg.save()
-        self.withdraw()
-        log.debug("Window hidden to tray (geometry saved: %s)", self._last_geometry)
-
-    def _show_from_tray(self, icon=None, item=None):
-        self.after(0, self._do_show)
-
-    def _do_show(self):
-        if self._last_geometry:
-            self.geometry(self._last_geometry)
-        self.deiconify()
-        self.lift()
-        self.focus_force()
-
-    def _quit_app(self, icon=None, item=None):
-        log.info("Quit requested from tray")
-        # Phase 1 (Roadmap-2): release any worker threads waiting on open
-        # ProposalDialogs so they don't deadlock when Tk's mainloop ends.
-        # Hide-to-tray does NOT trigger this — the user can still recover
-        # an open proposal by clicking Show from the tray.
+    def _on_tray_quit(self) -> None:
+        # Release any worker threads waiting on open ProposalDialogs so they
+        # don't deadlock when Tk's mainloop ends. Hide-to-tray does NOT
+        # trigger this — the user can recover an open proposal via Show.
         try:
             self._ask_ctrl.cancel_all_proposals()
         except AttributeError:
@@ -182,9 +146,6 @@ class App(tk.Tk):
             self._projects.cancel_ai_proposals()
         except AttributeError:
             pass
-        if self._tray:
-            self._tray.stop()
-        self.after(0, self.destroy)
 
     # ── Styles ─────────────────────────────────────────────────────────────────
 

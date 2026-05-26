@@ -675,6 +675,9 @@ def _suggest_from_filenames(status_text: str) -> str:
     code_exts = {".py", ".js", ".ts", ".cs", ".cpp", ".c", ".h", ".rs", ".go", ".java"}
 
     if exts <= doc_exts:
+        dir_scope = _dominant_directory(files)
+        if dir_scope:
+            return f"docs({dir_scope}): update"
         stems = [os.path.splitext(b)[0] for b in sorted(set(basenames))[:3]]
         return f"docs({', '.join(stems)}): update"
     if exts <= code_exts:

@@ -25,7 +25,11 @@ import tkinter as tk
 from tkinter import ttk
 from typing import TYPE_CHECKING
 
-from constants import C
+import datetime
+import subprocess
+import sys
+
+from constants import C, LOG_DIR
 from helpers.runtime import log
 from helpers.ui import append_text
 
@@ -40,6 +44,8 @@ class AskTabController:
     holding a reference to the App instance.
     """
 
+    _ASK_LOG_FILE = os.path.join(LOG_DIR, "ask_sessions.md")
+
     _ASK_SYSTEM_PROMPT = (
         "You are a code-aware assistant for the user's current project. "
         "You have access to READ-ONLY tools that let you read files, list "
@@ -51,7 +57,11 @@ class AskTabController:
         "content field. After the tool result is returned to you as a "
         "role:'tool' message, continue your reasoning and either call "
         "another tool or give a final text answer.\n"
-        "- Do NOT guess about file contents or code that you have not read.\n"
+        "- Do NOT guess about THIS project's file contents or code unless you "
+        "have already read it. For general knowledge questions (concepts, "
+        "language syntax, tool documentation, best practices, what 'git "
+        "rebase' does, etc.) answer directly from knowledge — no tool call "
+        "needed.\n"
         "- Cite file:line locations when you reference code.\n\n"
         "Tool-selection guide (CRITICAL — wrong tool choice wastes "
         "iterations):\n"
@@ -83,12 +93,13 @@ class AskTabController:
         "- **git_log / git_diff** for change history and pending work.\n\n"
         "Error handling:\n"
         "- If a tool returns an error message starting with '[tool error]', "
-        "DO NOT report the failure to the user. Instead, read the error "
-        "carefully — it usually contains a concrete suggestion (e.g. "
-        "'a file named X exists at src/X — retry with that path'). "
-        "Apply the suggestion and call the tool again. Only report failure "
-        "to the user as a last resort, after at least 2 retry attempts "
-        "with different approaches.\n"
+        "read it carefully — it sometimes contains a concrete suggestion "
+        "(e.g. 'a file named X exists at src/X — retry with that path'). "
+        "Follow that specific suggestion exactly once. Do NOT blindly retry "
+        "the same call or try minor path/argument tweaks on your own "
+        "(e.g. adding './', changing slashes, guessing alternate filenames). "
+        "If it still fails after one targeted retry, report the error "
+        "directly to the user and continue from what you already know.\n"
         "- If tokensave_search returns no results, that means the query "
         "isn't a symbol name. Switch to read_file (if you have a target "
         "file in mind) or list_directory (to discover one) — don't keep "
@@ -109,6 +120,10 @@ class AskTabController:
         "specific edits in your answer and let them apply them manually."
     )
 
+    # Timeout for claude --print calls in the Ask tab.  Generous (2 min) to
+    # accommodate Opus-class responses and slow local networks.
+    _CLAUDE_CLI_TIMEOUT = 120
+
     def __init__(self, notebook: ttk.Notebook, get_project_path,
                  cfg: "ManagerConfig"):
         self._get_project_path = get_project_path
@@ -118,6 +133,12 @@ class AskTabController:
         self._ask_messages: list = []
         self._ask_stop_event: threading.Event | None = None
         self._ask_thread: threading.Thread | None = None
+        # Streaming support — buffer accumulates token chunks from the worker
+        # thread; a 50 ms flush loop drains it on the Tk main thread so the
+        # widget is toggled NORMAL/DISABLED at most 20× per second instead of
+        # once per token (which would peg the UI on fast models).
+        self._stream_buffer: list[str] = []
+        self._flush_after_id: str | None = None  # Tk after() handle
         # Active proposal bridges for the in-flight agent run. App.cancel_all_proposals
         # iterates this set on root shutdown so worker threads never deadlock.
         self._active_bridges: set = set()
@@ -217,6 +238,11 @@ class AskTabController:
 
         ttk.Button(hdr, text="Clear history",
                    command=self._ask_clear).pack(side=tk.RIGHT)
+        self._session_log_btn = ttk.Button(
+            hdr, text="📄 Session log",
+            command=self._open_session_log,
+            state=tk.DISABLED)
+        self._session_log_btn.pack(side=tk.RIGHT, padx=(0, 6))
 
         # ── Status line (under header) ──────────────────────────────────
         self._ask_status = tk.Label(
@@ -296,10 +322,27 @@ class AskTabController:
 
         self._ask_set_intro()
 
+        # Enable session-log button immediately if a previous log exists
+        if os.path.isfile(self._ASK_LOG_FILE):
+            self._session_log_btn.configure(state=tk.NORMAL)
+
     def on_tab_selected(self):
         """Called by App._on_tab_changed when the Ask tab is focused."""
         path = self._get_project_path()
-        if path:
+        if path and path != self._ask_path:
+            # Project switched — stale conversation context would confuse the
+            # agent (it would reference files from the old project while tools
+            # now target the new one).
+            self._ask_path = path
+            if self._ask_messages:
+                self._ask_messages = []
+                self._ask_set_intro()
+                append_text(
+                    self._ask_log,
+                    f"[ Switched to project: {os.path.basename(path)}"
+                    f" — previous conversation cleared ]\n\n",
+                    "info")
+        elif path:
             self._ask_path = path
         self._ask_refresh_header()
         try:
@@ -310,12 +353,25 @@ class AskTabController:
     def _ask_set_intro(self):
         self._ask_log.configure(state=tk.NORMAL)
         self._ask_log.delete("1.0", tk.END)
-        self._ask_log.insert(tk.END,
-            "Ready. Ask anything about the selected project — I'll use "
-            "read_file, list_directory, git_log, git_diff, and (when "
-            "available) tokensave_search / tokensave_context to find "
-            "answers. I cannot modify files.\n\n",
-            "info")
+        # Show different intro based on configured provider.
+        raw = self._cfg.raw
+        cfg = ((raw.get("ask_tab_llm") or raw.get("commit_message_llm") or {})
+               if isinstance(raw, dict) else {})
+        if cfg.get("provider") == "claude_cli":
+            intro = (
+                "Ready (Claude CLI mode). Ask anything — responses come from "
+                "claude --print.\n"
+                "⚠  No tool access: read_file / tokensave_search are unavailable. "
+                "Great for general questions, explanations, and code advice.\n\n"
+            )
+        else:
+            intro = (
+                "Ready. Ask anything about the selected project — I'll use "
+                "read_file, list_directory, git_log, git_diff, and (when "
+                "available) tokensave_search / tokensave_context to find "
+                "answers. I cannot modify files.\n\n"
+            )
+        self._ask_log.insert(tk.END, intro, "info")
         self._ask_log.configure(state=tk.DISABLED)
 
     def _ask_append(self, text: str, tag: str = "assistant"):
@@ -328,7 +384,8 @@ class AskTabController:
         else:
             self._ask_project_lbl.configure(text="(no project selected)")
         raw = self._cfg.raw
-        cfg = (raw.get("commit_message_llm") or {}) if isinstance(raw, dict) else {}
+        cfg = ((raw.get("ask_tab_llm") or raw.get("commit_message_llm") or {})
+               if isinstance(raw, dict) else {})
         provider = cfg.get("provider") or "?"
         model = cfg.get("model") or "?"
         enabled = bool(cfg.get("enabled"))
@@ -338,7 +395,7 @@ class AskTabController:
                 fg=C["overlay0"])
         else:
             self._ask_model_lbl.configure(
-                text="[AI is disabled — Settings → AI commit messages]",
+                text="[AI is disabled — Settings → Ask Tab AI]",
                 fg=C["red"])
 
     def _ask_clear(self):
@@ -367,6 +424,11 @@ class AskTabController:
         if llm_cfg is None:
             return  # validation already showed the error
 
+        # Claude CLI path: bypass LocalAgent, use call_claude_cli_print directly.
+        if llm_cfg.get("provider") == "claude_cli":
+            self._ask_send_claude_cli(llm_cfg)
+            return
+
         try:
             import agent as _agent_mod
             import agent_tools as _agent_tools_mod
@@ -394,6 +456,79 @@ class AskTabController:
 
     # ── _ask_send helpers ────────────────────────────────────────────────────
 
+    def _ask_send_claude_cli(self, llm_cfg: dict) -> None:
+        """Send via `claude --print` (no tool access; conversation as text context).
+
+        Called from _ask_send when provider == "claude_cli". Bypasses LocalAgent
+        entirely — claude --print is not tool-calling-aware so the agent loop
+        isn't needed. The full conversation history is serialised as plain text
+        context, with the current user message sent cleanly as the final turn.
+        """
+        from helpers.claude_cli import call_claude_cli_print
+
+        claude_exe = self._cfg.claude_cli_exe or ""
+        if not claude_exe:
+            self._ask_append(
+                "Claude CLI is not configured. Set the path in "
+                "Settings → Claude Code CLI.\n\n", "error")
+            return
+
+        text = self._ask_entry.get().strip()
+        self._ask_prepare_ui(text)
+
+        model = llm_cfg.get("model") or ""
+        stop_event = threading.Event()
+        self._ask_stop_event = stop_event
+
+        def _worker():
+            # Build history from _ask_messages[:-1] (prior turns only).
+            # _ask_prepare_ui already appended the current question as the
+            # last entry, so include that as the clean terminal turn below.
+            history_parts: list[str] = []
+            for m in self._ask_messages[:-1]:
+                role = m.get("role", "")
+                content = (m.get("content") or "").strip()
+                if role == "user" and content:
+                    history_parts.append(f"User: {content}")
+                elif role == "assistant" and content:
+                    history_parts.append(f"Assistant: {content}")
+            context_str = "\n\n".join(history_parts)
+            current_query = (self._ask_messages[-1].get("content") or "").strip()
+            if context_str:
+                prompt = (
+                    f"Here is our ongoing conversation context:\n\n"
+                    f"{context_str}\n\n"
+                    f"Now answer this question:\n{current_query}"
+                )
+            else:
+                prompt = current_query
+
+            result = call_claude_cli_print(
+                claude_exe, prompt,
+                system_prompt=self._ASK_SYSTEM_PROMPT,
+                timeout=self._CLAUDE_CLI_TIMEOUT,
+                model=model,
+                cwd=self._ask_path,  # loads project CLAUDE.md as context
+            )
+            if stop_event.is_set():
+                return
+            if result:
+                self._ask_messages.append({"role": "assistant", "content": result})
+                self._tab.after(0, self._ask_finish, result, False, "")
+            else:
+                self._tab.after(0, self._ask_finish, None, True,
+                                "Claude CLI call failed or timed out. "
+                                "Check that the claude executable is configured "
+                                "and authenticated (run 'claude --version' to test).")
+
+        self._ask_thread = threading.Thread(target=_worker, daemon=True)
+        self._ask_send_btn.configure(state=tk.DISABLED)
+        self._ask_stop_btn.configure(state=tk.NORMAL)
+        self._ask_status.configure(
+            text="Asking Claude CLI… (no tool access in this mode)",
+            fg=C["overlay0"])
+        self._ask_thread.start()
+
     def _ask_preflight(self) -> "dict | None":
         """Validate preconditions for sending. Returns llm_cfg dict on success,
         None if any check fails (the appropriate error has already been shown).
@@ -413,10 +548,13 @@ class AskTabController:
             return None
 
         raw = self._cfg.raw
-        llm_cfg = (raw.get("commit_message_llm") or {}) if isinstance(raw, dict) else {}
+        # Ask tab has its own config; fall back to commit_message_llm for
+        # migration (users upgrading from a version that didn't have ask_tab_llm).
+        llm_cfg = ((raw.get("ask_tab_llm") or raw.get("commit_message_llm") or {})
+                   if isinstance(raw, dict) else {})
         if not llm_cfg.get("enabled"):
             self._ask_append(
-                "AI is disabled. Open Settings → AI commit messages and "
+                "AI is disabled. Open Settings → Ask Tab AI and "
                 "tick the enable box, then try again.\n\n", "error")
             return None
         return llm_cfg
@@ -436,6 +574,18 @@ class AskTabController:
                 "role": "system",
                 "content": self._ASK_SYSTEM_PROMPT,
             })
+            if self._ask_path:
+                basename = os.path.basename(self._ask_path)
+                self._ask_messages.append({
+                    "role": "system",
+                    "content": (
+                        f"Active project: {basename}\n"
+                        f"Project root: {self._ask_path}\n\n"
+                        "All file paths in tool calls are relative to this "
+                        "root. Start there when the user asks about the "
+                        "project."
+                    ),
+                })
         self._ask_messages.append({"role": "user", "content": text})
 
     def _ask_build_callbacks(self) -> dict:
@@ -461,16 +611,99 @@ class AskTabController:
         def _on_error(msg):
             self._tab.after(0, self._ask_finish, None, True, msg)
 
+        # Streaming delta — worker thread appends to buffer; Tk flush loop
+        # drains it at 20 fps to avoid toggling widget state per-token.
+        _stream_started = [False]
+
+        def _on_stream_delta(chunk):
+            if not _stream_started[0]:
+                _stream_started[0] = True
+                self._stream_buffer.append("🤖  ")
+            self._stream_buffer.append(chunk)
+
         return {
             "on_tool_call":         _on_tool_call,
             "on_tool_result":       _on_tool_result,
             "on_assistant_message": _on_assistant_message,
             "on_done":              _on_done,
             "on_error":             _on_error,
+            "on_stream_delta":      _on_stream_delta,
+            "_stream_started":      _stream_started,
         }
 
-    def _ask_finish(self, final_text, is_error: bool, error_msg: str) -> None:
+    def _start_stream_flush_loop(self) -> None:
+        """Start the 50 ms flush loop that drains _stream_buffer to the UI."""
+        self._stream_buffer = []
+
+        def _flush():
+            if self._stream_buffer:
+                text = "".join(self._stream_buffer)
+                self._stream_buffer.clear()
+                self._ask_append(text, "assistant")
+            # Reschedule while the worker thread is alive.
+            if self._ask_thread and self._ask_thread.is_alive():
+                self._flush_after_id = self._tab.after(50, _flush)
+            else:
+                self._flush_after_id = None
+
+        self._flush_after_id = self._tab.after(50, _flush)
+
+    def _stop_stream_flush_loop(self) -> None:
+        """Cancel the flush loop and drain any remaining buffer."""
+        if self._flush_after_id is not None:
+            try:
+                self._tab.after_cancel(self._flush_after_id)
+            except Exception:
+                pass
+            self._flush_after_id = None
+        if self._stream_buffer:
+            text = "".join(self._stream_buffer)
+            self._stream_buffer.clear()
+            self._ask_append(text, "assistant")
+
+    def _open_session_log(self) -> None:
+        """Open ask_sessions.md in the system default viewer (cross-platform)."""
+        path = self._ASK_LOG_FILE
+        if not os.path.isfile(path):
+            return
+        try:
+            if sys.platform == "win32":
+                os.startfile(path)  # type: ignore[attr-defined]
+            elif sys.platform == "darwin":
+                subprocess.run(["open", path], check=True)
+            else:
+                subprocess.run(["xdg-open", path], check=True)
+        except Exception as exc:
+            log.warning("Could not open session log: %s", exc)
+
+    def _persist_exchange(self, user_text: str, assistant_text: str) -> None:
+        """Append the completed Q&A pair to logs/ask_sessions.md.
+
+        Called after every successful non-error agent response so the
+        conversation survives app restarts and can be reviewed in any editor.
+        Creates the logs/ directory and the file on first use.
+        """
+        try:
+            os.makedirs(LOG_DIR, exist_ok=True)
+            ts = datetime.datetime.now().strftime("%Y-%m-%d %H:%M")
+            project = (os.path.basename(self._ask_path)
+                       if self._ask_path else "—")
+            with open(self._ASK_LOG_FILE, "a", encoding="utf-8") as f:
+                f.write(f"\n---\n**{ts} | {project}**\n\n")
+                f.write(f"**Q:** {user_text.strip()}\n\n")
+                f.write(f"**A:** {assistant_text.strip()}\n")
+            # Enable the button on first successful write
+            try:
+                self._session_log_btn.configure(state=tk.NORMAL)
+            except tk.TclError:
+                pass
+        except OSError as exc:
+            log.warning("Could not write ask session log: %s", exc)
+
+    def _ask_finish(self, final_text, is_error: bool, error_msg: str,
+                    stream_started: "list[bool] | None" = None) -> None:
         """Main-thread terminal state — called from both _on_done and _on_error."""
+        self._stop_stream_flush_loop()
         if is_error:
             self._ask_append(f"⚠  {error_msg}\n\n", "error")
             self._ask_status.configure(text="✗  Error.", fg=C["red"])
@@ -480,6 +713,18 @@ class AskTabController:
                 fg=C["green"])
         else:
             self._ask_status.configure(text="✓  Done.", fg=C["green"])
+            # Append trailing newlines after streamed content if needed.
+            if stream_started and stream_started[0]:
+                tail = self._ask_log.get("end-3c", "end-1c")
+                if not tail.endswith("\n\n"):
+                    self._ask_append("\n\n", "assistant")
+            # Persist the exchange to disk (survives app restarts)
+            last_user = next(
+                (m["content"] for m in reversed(self._ask_messages)
+                 if m.get("role") == "user"),
+                "")
+            if last_user and final_text:
+                self._persist_exchange(last_user, final_text)
         self._ask_send_btn.configure(state=tk.NORMAL)
         self._ask_stop_btn.configure(state=tk.DISABLED)
         self._ask_stop_event = None
@@ -487,6 +732,22 @@ class AskTabController:
     def _ask_spawn_worker(self, agent_instance, stop_event) -> None:
         """Spawn the daemon thread that runs agent.run() with our callbacks."""
         callbacks = self._ask_build_callbacks()
+        stream_started = callbacks.pop("_stream_started")
+        self._start_stream_flush_loop()
+
+        # Wrap on_done / on_error to pass stream_started into _ask_finish.
+        # (The original callbacks in `callbacks` are intentionally discarded —
+        # the wrapped versions below replace them entirely via reassignment.)
+        def _on_done_wrapped(final_text):
+            self._tab.after(0, self._ask_finish, final_text, False, "",
+                            stream_started)
+
+        def _on_error_wrapped(msg):
+            self._tab.after(0, self._ask_finish, None, True, msg,
+                            stream_started)
+
+        callbacks["on_done"]  = _on_done_wrapped
+        callbacks["on_error"] = _on_error_wrapped
 
         def _worker():
             try:
@@ -496,7 +757,8 @@ class AskTabController:
                 log.exception("Ask worker crashed")
                 try:
                     self._tab.after(0, self._ask_finish, None, True,
-                                    f"{type(e).__name__}: {e}")
+                                    f"{type(e).__name__}: {e}",
+                                    stream_started)
                 except RuntimeError:
                     pass
 

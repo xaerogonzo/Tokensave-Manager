@@ -407,24 +407,23 @@ def _make_tokensave_runner(project_path: str, tokensave_exe: str,
 
         # Map the agent-facing subcommand name to the actual CLI
         # subcommand, and build the argv with the correct flags.
+        # Both are exposed via the `tool` pass-through added in tokensave
+        # v0.x: `tokensave tool search <query>` and
+        # `tokensave tool context [--format json] [--max-nodes N] <query>`.
         if subcommand == "search":
-            # tokensave's CLI calls this `query` (not `search` — that
-            # would clash with `search` in shell scripts maybe?).
-            cli_subcommand = "query"
-            cli_args = [tokensave_exe, "query", query]
-            display_name = "tokensave query"
+            cli_args = [tokensave_exe, "tool", "search", query]
+            display_name = "tokensave tool search"
         elif subcommand == "context":
-            cli_subcommand = "context"
             # Cap nodes lower than tokensave's default 20: subgraph JSON
             # is dense with metadata (IDs, columns, attrs_start_line,
             # etc.) and we slim it further in _slim_tokensave_context
             # below, but a smaller node count keeps both the wire size
             # and the model's reasoning load down.
-            cli_args = [tokensave_exe, "context",
+            cli_args = [tokensave_exe, "tool", "context",
                         "--format", "json",
                         "--max-nodes", "10",
                         query]
-            display_name = "tokensave context"
+            display_name = "tokensave tool context"
         else:
             return f"[tool error] unknown tokensave subcommand: {subcommand}"
 
@@ -457,7 +456,7 @@ def _make_tokensave_runner(project_path: str, tokensave_exe: str,
         # etc. that bloat the wire by ~3-5x without helping the model
         # answer code questions. query output is plain text and passes
         # through unchanged.
-        if cli_subcommand == "context":
+        if subcommand == "context":
             try:
                 parsed = json.loads(out)
                 slimmed = _slim_tokensave_context(parsed)

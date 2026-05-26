@@ -236,6 +236,7 @@ class LocalAgent:
             on_assistant_message: Callable[[str], None] | None = None,
             on_done: Callable[[str | None], None] | None = None,
             on_error: Callable[[str], None] | None = None,
+            on_stream_delta: Callable[[str], None] | None = None,
             stop_event: threading.Event | None = None) -> None:
         """Run the tool-calling loop. Calls callbacks for UI updates.
 
@@ -252,8 +253,9 @@ class LocalAgent:
             Called AFTER a tool runs with the result string. Lets the UI
             log it in a collapsible row.
         on_assistant_message(text)
-            Called whenever the assistant emits a text message (either
-            interleaved between tool calls or as the final answer).
+            Called whenever the assistant emits a non-streamed text message
+            (interleaved between tool calls). NOT called for the streamed
+            final answer when on_stream_delta is provided.
         on_done(final_text)
             Called once at the end of the run. `final_text` is the last
             assistant text, or None if no text was produced (e.g. all the
@@ -261,6 +263,13 @@ class LocalAgent:
         on_error(message)
             Called instead of on_done when an unrecoverable error
             occurred (network failure, malformed response, etc.).
+        on_stream_delta(chunk)
+            If provided, enables streaming mode. Each token chunk from the
+            LLM is forwarded here in real time. `on_assistant_message` is
+            NOT called for turns where streaming was active (to prevent
+            double-printing). Tool-call turns still stream, but only fire
+            on_stream_delta for any content text the model emits alongside
+            the tool_calls (uncommon but possible).
         stop_event
             Optional Event; if set, the loop aborts cleanly at the next
             iteration boundary (between LLM round trips).
@@ -285,20 +294,38 @@ class LocalAgent:
 
                 self._enforce_tool_budget(messages)
 
-                response = self._chat_completion(messages)
-                if response is None:
-                    if on_error:
-                        detail = _sanitize_error(self._last_error) or (
-                            "no detail (check the manager's log file for "
-                            "tokensave-manager.agent warnings)")
-                        on_error(f"LLM request failed.  {detail}")
-                    return
-
-                content, tool_calls = self._parse_response(response, messages)
-
-                if content and on_assistant_message:
-                    on_assistant_message(content)
-                    last_assistant_text = content
+                if on_stream_delta is not None:
+                    result = self._chat_completion_stream(messages, on_stream_delta)
+                    if result is None:
+                        if on_error:
+                            detail = _sanitize_error(self._last_error) or (
+                                "no detail (check the manager's log file for "
+                                "tokensave-manager.agent warnings)")
+                            on_error(f"LLM request failed.  {detail}")
+                        return
+                    content, tool_calls = result
+                    # Append assistant turn to history (mirrors _parse_response).
+                    assistant_msg: dict = {"role": "assistant", "content": content}
+                    if tool_calls:
+                        assistant_msg["tool_calls"] = tool_calls
+                    messages.append(assistant_msg)
+                    # on_assistant_message is intentionally skipped — content
+                    # was already forwarded token-by-token via on_stream_delta.
+                    if content:
+                        last_assistant_text = content
+                else:
+                    response = self._chat_completion(messages)
+                    if response is None:
+                        if on_error:
+                            detail = _sanitize_error(self._last_error) or (
+                                "no detail (check the manager's log file for "
+                                "tokensave-manager.agent warnings)")
+                            on_error(f"LLM request failed.  {detail}")
+                        return
+                    content, tool_calls = self._parse_response(response, messages)
+                    if content and on_assistant_message:
+                        on_assistant_message(content)
+                        last_assistant_text = content
 
                 if not tool_calls:
                     if on_done:
@@ -632,6 +659,150 @@ class LocalAgent:
             total -= (original_len - len(placeholder))
 
     # ── HTTP: OpenAI-compatible chat completion with tools ──────────────
+
+    def _chat_completion_stream(
+            self, messages: list[dict],
+            on_delta: Callable[[str], None] | None,
+    ) -> "tuple[str, list] | None":
+        """Streaming variant of _chat_completion.
+
+        Sends `stream: true` to the provider, reads SSE chunks, calls
+        `on_delta(text)` per content chunk, accumulates tool_call deltas,
+        and returns `(assembled_content, assembled_tool_calls)` — the same
+        logical result as `_parse_response` but assembled from the stream.
+
+        Runs the tool-call rescue heuristic on the assembled content when no
+        structured tool_calls were received (for local models that emit JSON
+        tool calls in the content field).
+
+        Returns None and sets self._last_error on any transport or parse error.
+        """
+        provider = (self.cfg.get("provider") or "anthropic").lower()
+        base_url = (self.cfg.get("base_url") or "").rstrip("/")
+        timeout  = int(self.cfg.get("timeout_seconds", DEFAULT_HTTP_TIMEOUT))
+        if timeout < 60:
+            timeout = DEFAULT_HTTP_TIMEOUT
+        provider, base_url, is_ollama = self._normalize_provider(provider, base_url)
+        url = self._resolve_chat_url(provider, base_url)
+        if url is None:
+            return None
+
+        api_key_env = self.cfg.get("api_key_env") or ""
+        api_key  = os.environ.get(api_key_env, "") if api_key_env else ""
+        model    = self.cfg.get("model") or ""
+
+        payload = self._build_chat_payload(messages, is_ollama, model)
+        payload["stream"] = True
+        payload["stream_options"] = {"include_usage": True}
+
+        headers = {"Content-Type": "application/json"}
+        if api_key:
+            headers["Authorization"] = f"Bearer {api_key}"
+
+        result = self._execute_chat_stream(url, payload, headers, timeout, on_delta)
+        if result is None:
+            return None
+
+        content, tool_calls = result
+        # Rescue heuristic for models that emit tool calls as JSON in content.
+        if content and not tool_calls:
+            rescued = self._rescue_tool_call_from_content(content)
+            if rescued is not None:
+                log.info("rescued tool_call from streamed content: "
+                         f"{rescued.get('function', {}).get('name')}")
+                tool_calls = [rescued]
+        return content, tool_calls
+
+    def _execute_chat_stream(
+            self, url: str, payload: dict,
+            headers: dict, timeout: int,
+            on_delta: Callable[[str], None] | None,
+    ) -> "tuple[str, list] | None":
+        """POST a streaming /v1/chat/completions request and read SSE chunks.
+
+        Returns (assembled_content, assembled_tool_calls) or None on error.
+        Calls on_delta(chunk) for each non-empty content delta received.
+
+        tool_calls are accumulated by index: each chunk may carry a partial
+        `id`, `name`, or `arguments` fragment; this method merges them into
+        complete tool-call dicts in the OpenAI tool_calls[] shape.
+        """
+        req = urllib.request.Request(
+            url, method="POST",
+            data=json.dumps(payload).encode("utf-8"),
+            headers=headers,
+        )
+        content_parts: list[str] = []
+        # tool_calls_acc: index → {"id": str, "name": str, "args": list[str]}
+        tool_calls_acc: dict[int, dict] = {}
+        try:
+            with urllib.request.urlopen(req, timeout=timeout) as resp:
+                for raw_line in resp:
+                    line = raw_line.decode("utf-8", errors="replace").rstrip("\r\n")
+                    if not line.startswith("data: "):
+                        continue
+                    data_str = line[6:]
+                    if data_str.strip() == "[DONE]":
+                        break
+                    try:
+                        chunk = json.loads(data_str)
+                    except json.JSONDecodeError:
+                        continue
+                    delta = ((chunk.get("choices") or [{}])[0].get("delta") or {})
+                    text = delta.get("content") or ""
+                    if text:
+                        content_parts.append(text)
+                        if on_delta:
+                            on_delta(text)
+                    for tc in (delta.get("tool_calls") or []):
+                        idx = tc.get("index") or 0
+                        if idx not in tool_calls_acc:
+                            tool_calls_acc[idx] = {
+                                "id": "", "name": "", "args": []}
+                        fn = tc.get("function") or {}
+                        if tc.get("id"):
+                            tool_calls_acc[idx]["id"] = tc["id"]
+                        if fn.get("name"):
+                            tool_calls_acc[idx]["name"] = fn["name"]
+                        if fn.get("arguments"):
+                            tool_calls_acc[idx]["args"].append(fn["arguments"])
+        except urllib.error.HTTPError as e:
+            try:
+                body = e.read().decode("utf-8", errors="replace")[:600]
+            except OSError:
+                body = "(no body)"
+            self._last_error = (
+                f"HTTP {e.code} from {url}: {e.reason}. "
+                f"Response body: {body}")
+            log.warning("chat stream HTTP %d: %s", e.code, body[:200])
+            return None
+        except (urllib.error.URLError, TimeoutError) as e:
+            reason = getattr(e, "reason", str(e))
+            self._last_error = (
+                f"Network error talking to {url}: {type(e).__name__}: "
+                f"{reason}. Is the LLM server running and reachable?")
+            log.warning("chat stream network failure: %s: %s",
+                        type(e).__name__, reason)
+            return None
+        except (OSError, json.JSONDecodeError) as e:
+            self._last_error = f"Stream read error: {type(e).__name__}: {e}"
+            log.warning("chat stream error: %s", e)
+            return None
+
+        assembled_content = "".join(content_parts)
+        assembled_tool_calls = [
+            {
+                "id": tool_calls_acc[i]["id"],
+                "type": "function",
+                "function": {
+                    "name": tool_calls_acc[i]["name"],
+                    "arguments": "".join(tool_calls_acc[i]["args"]),
+                },
+            }
+            for i in sorted(tool_calls_acc)
+            if tool_calls_acc[i]["name"]
+        ]
+        return assembled_content, assembled_tool_calls
 
     def _chat_completion(self, messages: list[dict]) -> dict | None:
         """POST one /v1/chat/completions request and return parsed JSON or None.

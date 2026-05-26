@@ -325,4 +325,103 @@ PROMPT_SNIPPETS: list[tuple[str, str]] = [
         "reference a tool that [[new tool name]] supersedes? If so,\n"
         "propose the minimal edit to mention the new tool alongside it."
     ),
+
+    # ─────────────────────────── 📝 DOCUMENTATION ─────────────────────────
+    # Doc-update prompts — paste into Claude session to offload markdown
+    # revision work from this conversation. Used in lieu of (or alongside)
+    # the manager's '📝 Doc Updates…' dialog when you want the change drafted
+    # in the active session instead of by the local Ollama / Claude CLI.
+    (
+        "📝  README feature bullet",
+        "Draft ONE README 'Features' section bullet for this change:\n\n"
+        "[[describe the change]]\n\n"
+        "Match the existing README bullet style: verb-first, technical\n"
+        "detail in parens (file paths, helper names, threshold values),\n"
+        "no marketing fluff, no emoji unless the change adds a UI element\n"
+        "with one. Read 3-5 surrounding bullets from README.md first to\n"
+        "anchor the voice. Output the bullet line only — no leading dash,\n"
+        "no surrounding section context."
+    ),
+    (
+        "📝  CHANGELOG [Unreleased] entry",
+        "Draft CHANGELOG.md [Unreleased] entries from these commits:\n\n"
+        "[[paste git log --oneline output]]\n\n"
+        "Use Keep-a-Changelog headings (### Added / ### Changed / ### Fixed\n"
+        "/ ### Removed). Each bullet uses conventional-commit scope prefix\n"
+        "in parens, e.g. '(gitignore-dialog) 🤖 AI Suggest button — one\n"
+        "click AI-powered pattern recommendations'. Output bullets only,\n"
+        "NO '## [Unreleased]' header line. Read the existing [Unreleased]\n"
+        "block first so you don't repeat anything already there."
+    ),
+    (
+        "📝  Architecture doc section update",
+        "Update the section titled '[[section name]]' in [[doc path]] to\n"
+        "reflect this change:\n\n"
+        "[[describe the architectural change]]\n\n"
+        "Read the surrounding two sections first so the voice, depth, and\n"
+        "code-example density match exactly. If the change adds a new\n"
+        "pattern, document the pattern + the file:line that exemplifies it.\n"
+        "If it moves/renames something, update every reference inside the\n"
+        "section. Output the FULL replacement section including its '##' or\n"
+        "'###' header line — nothing outside the section."
+    ),
+    (
+        "📝  Memory file entry",
+        "Draft a Claude memory file entry summarising:\n\n"
+        "[[Roadmap-N work / session topic / lesson learned]]\n\n"
+        "Format: YAML frontmatter then markdown body. Frontmatter keys:\n"
+        "  name: kebab-case-id\n"
+        "  description: \"one-line summary for the MEMORY.md index\"\n"
+        "  metadata:\n"
+        "    node_type: memory\n"
+        "    type: project-knowledge   # or 'project' or 'lesson-learned'\n\n"
+        "Body: ~150-400 words. Focus on what future-me needs to know — file\n"
+        "paths, locked decisions, gotchas, reusable patterns. NOT a play-\n"
+        "by-play of the work, just the durable knowledge worth keeping."
+    ),
+    (
+        "📝  Cross-doc consistency check",
+        "Compare README.md + CHANGELOG.md + docs/ROADMAP.md against the\n"
+        "actual git log for the last [[N]] commits.\n\n"
+        "Find inconsistencies:\n"
+        "  • Feature mentioned in CHANGELOG but missing from README\n"
+        "    Features section\n"
+        "  • ROADMAP item still marked 🟡/🔮 but actually shipped per\n"
+        "    git log\n"
+        "  • README claim about behaviour that no longer matches the code\n"
+        "    (cite file:line via tokensave_search to verify)\n"
+        "  • CHANGELOG attribution drift (scope prefix doesn't match the\n"
+        "    actual directory changed)\n\n"
+        "Output a per-file action list — exact line to change + suggested\n"
+        "replacement text."
+    ),
+    (
+        "📝  Migration / breaking-change note",
+        "Draft a 'Migration notes' section for version [[X.Y.Z]] from\n"
+        "these breaking commits:\n\n"
+        "[[commits or describe the breaking changes]]\n\n"
+        "Format per breaking change:\n"
+        "  ### What broke: [one-line description]\n"
+        "  **Before:** [code/config sample showing the old way]\n"
+        "  **After:**  [code/config sample showing the new way]\n"
+        "  **Why:** [one-sentence rationale]\n\n"
+        "Cite file:line for the exact symbol(s) that changed. Order from\n"
+        "most likely to hit a user → least likely."
+    ),
+    (
+        "📝  PR description from CHANGELOG slice",
+        "Read the current CHANGELOG.md [Unreleased] section. Build a PR\n"
+        "description from its contents:\n\n"
+        "## Summary\n"
+        "  1-3 bullets — the WHY of the change set, not a verbatim copy of\n"
+        "  the changelog bullets. Group related items.\n\n"
+        "## Test plan\n"
+        "  Bulleted markdown checklist of TODOs for verifying the PR. For\n"
+        "  each item that touches AI / network / external services, note\n"
+        "  the manual setup needed.\n\n"
+        "## Migration notes (if any)\n"
+        "  Only include if the [Unreleased] section has breaking changes.\n\n"
+        "Output the markdown body only — no PR-title line, no leading\n"
+        "metadata. Caller pipes this to `gh pr create --body-file -`."
+    ),
 ]

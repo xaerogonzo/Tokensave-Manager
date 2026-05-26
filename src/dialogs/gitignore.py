@@ -23,6 +23,8 @@ user can immediately clean up the "tracked-but-ignored" footgun.
 from __future__ import annotations
 
 import os
+import re
+import sqlite3
 import subprocess
 import threading
 import tkinter as tk
@@ -81,9 +83,11 @@ class GitignoreDialog(tk.Toplevel):
 
         self._normal_font = tkfont.Font(family="Consolas", size=9)
         self._strike_font = tkfont.Font(family="Consolas", size=9, overstrike=1)
+        self._ai_suggest_stop = threading.Event()
 
         self._build_header_section(path)
         self._build_current_entries_section()
+        self._build_ai_suggest_section()
         self._build_template_buttons_section()
         if _is_local_git_repo(path):
             self._build_untracked_panel()
@@ -93,6 +97,13 @@ class GitignoreDialog(tk.Toplevel):
 
         self._update_pending_panel()
         self._centre_on_parent(parent)
+
+        # Wire close button so any in-flight AI call is cancelled immediately
+        orig_destroy = self.destroy
+        def _safe_destroy():
+            self._ai_suggest_stop.set()
+            orig_destroy()
+        self.protocol("WM_DELETE_WINDOW", _safe_destroy)
 
     def _build_header_section(self, path: str):
         """Title + .gitignore path + functional-pattern count."""
@@ -160,6 +171,267 @@ class GitignoreDialog(tk.Toplevel):
             btn.grid(row=row, column=col, padx=(0, 4), pady=(0, 4),
                      sticky=tk.W)
             _Tooltip(btn, self._template_tooltip_text(cat_name))
+
+    def _build_ai_suggest_section(self):
+        """AI-powered pattern suggestion row — sits above the template buttons."""
+        ai_wrap = tk.Frame(self, bg=C["base"])
+        ai_wrap.pack(fill=tk.X, padx=18, pady=(0, 4))
+        self._ai_suggest_btn = ttk.Button(
+            ai_wrap, text="🤖 AI Suggest",
+            command=self._ai_suggest,
+        )
+        self._ai_suggest_btn.pack(side=tk.LEFT)
+        self._ai_status_lbl = tk.Label(
+            ai_wrap, text="",
+            bg=C["base"], fg=C["overlay0"],
+            font=("Segoe UI", 8),
+        )
+        self._ai_status_lbl.pack(side=tk.LEFT, padx=(10, 0))
+
+    def _ai_suggest(self):
+        """Kick off AI-powered gitignore pattern suggestions in a background thread.
+
+        Context gathered: CodeGraph file listing (falls back to os.listdir) +
+        git untracked files + current ignore state. Two LLM paths: claude_cli or
+        _call_llm (Ollama / OpenAI-compatible). All UI mutations via self.after(0,…).
+        """
+        raw = self._cfg.raw if isinstance(self._cfg.raw, dict) else {}
+        llm_cfg = raw.get("ask_tab_llm") or raw.get("commit_message_llm") or {}
+        if not llm_cfg or not llm_cfg.get("provider"):
+            self._ai_status_lbl.configure(
+                text="No AI configured — set a provider in Settings → Ask Tab AI.",
+                fg=C["red"])
+            return
+
+        # Snapshot current pattern state on main thread before the worker starts
+        current_patterns = frozenset(self._current_pattern_state())
+        self._ai_suggest_stop.clear()
+        self._ai_suggest_btn.configure(state=tk.DISABLED)
+        self._ai_status_lbl.configure(text="Scanning project…", fg=C["overlay0"])
+        stop_event = self._ai_suggest_stop
+
+        def _worker():
+            # ── a) File listing — CodeGraph-first ───────────────────────────
+            db_path = os.path.join(self._path, ".codegraph", "codegraph.db")
+            all_files = []
+            if os.path.isfile(db_path):
+                try:
+                    con = sqlite3.connect(f"file:{db_path}?mode=ro", uri=True)
+                    rows = con.execute("SELECT path FROM files").fetchall()
+                    con.close()
+                    all_files = [r[0] for r in rows]
+                except Exception:
+                    # SQLite unavailable / schema mismatch — fall back to listdir
+                    try:
+                        all_files = os.listdir(self._path)
+                    except Exception:
+                        all_files = []
+            else:
+                try:
+                    all_files = os.listdir(self._path)
+                except Exception:
+                    all_files = []
+
+            exts = sorted({
+                os.path.splitext(f)[1]
+                for f in all_files
+                if os.path.splitext(f)[1]
+            })
+            dirs = sorted({
+                f.replace("\\", "/").split("/")[0]
+                for f in all_files
+                if "/" in f.replace("\\", "/")
+            })
+
+            if stop_event.is_set():
+                return
+
+            # ── b) Untracked files ───────────────────────────────────────────
+            untracked_str = ""
+            try:
+                proc = subprocess.Popen(
+                    [self._cfg.git_exe, "-C", self._path,
+                     "ls-files", "--others", "--exclude-standard"],
+                    stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+                    creationflags=CREATE_NO_WINDOW,
+                    text=True, encoding="utf-8", errors="replace",
+                )
+                stdout, _ = proc.communicate(timeout=10)
+                if proc.returncode == 0:
+                    untracked_str = stdout.strip()
+            except Exception:
+                pass  # leave untracked_str as ""
+
+            if stop_event.is_set():
+                return
+
+            # ── c) Build prompts ─────────────────────────────────────────────
+            _SYS = (
+                "You are a .gitignore expert. Analyse the provided project structure "
+                "and suggest gitignore patterns that should be excluded from version control.\n\n"
+                "Rules:\n"
+                "- Output ONLY patterns, one per line. No explanations, no markdown, "
+                "no code blocks, no numbering.\n"
+                "- Each line must be a valid .gitignore glob "
+                "(e.g. __pycache__/, *.log, .env, node_modules/).\n"
+                "- Do NOT suggest any pattern already in the 'Already ignored' list.\n"
+                "- gitignore patterns without an embedded '/' (or with only a trailing '/') "
+                "match at ANY directory depth. If '__pycache__/' is already ignored, do NOT "
+                "suggest 'src/__pycache__/' or any other path-scoped variant — it is already "
+                "covered. Only suggest a path-scoped pattern (e.g. 'src/vendor/') when the "
+                "broader name is NOT already present in the 'Already ignored' list.\n"
+                "- Skip binary/database files handled by tool-specific nested .gitignore "
+                "files (e.g. CodeGraph writes its own .gitignore inside .codegraph/ — "
+                "do not suggest codegraph.db or similar; it is handled already).\n"
+                "- Focus on standard language build artifacts, build directories, "
+                "local environment configs, and package manager artifacts directly "
+                "corresponding to the detected directories/extensions. "
+                "Do not guess at frameworks that are not clearly present.\n"
+                "- Prefer directory patterns (trailing /) over file patterns when "
+                "a whole directory should be excluded."
+            )
+            user_prompt = (
+                f"Project file extensions detected: "
+                f"{', '.join(exts) or '(none detected)'}\n"
+                f"Top-level directories: {', '.join(dirs) or '(none detected)'}\n\n"
+                f"Untracked files (what git currently sees — may be empty):\n"
+                f"{untracked_str or '(none or git unavailable)'}\n\n"
+                "Already ignored patterns (do NOT repeat or rephrase these):\n"
+                + "\n".join(sorted(current_patterns))
+            )
+
+            # ── d) LLM call ──────────────────────────────────────────────────
+            provider = llm_cfg.get("provider", "")
+            result = None
+            error = None
+            try:
+                if provider == "claude_cli":
+                    from helpers.claude_cli import call_claude_cli_print
+                    claude_exe = self._cfg.claude_cli_exe or ""
+                    if not claude_exe:
+                        error = (
+                            "Claude CLI not configured — set path in "
+                            "Settings → Claude Code CLI."
+                        )
+                    else:
+                        model = llm_cfg.get("model") or ""
+                        result = call_claude_cli_print(
+                            claude_exe, user_prompt,
+                            system_prompt=_SYS,
+                            timeout=60,
+                            model=model,
+                            cwd=self._path,
+                        )
+                else:
+                    from helpers.llm import _call_llm
+                    result = _call_llm(llm_cfg, _SYS, user_prompt)
+            except Exception as exc:
+                error = str(exc)
+
+            if stop_event.is_set():
+                return
+
+            if error or not result:
+                err_msg = error or "AI call returned no result."
+                self.after(0, lambda m=err_msg: _on_error(m))
+                return
+
+            parsed = _parse_ai_gitignore_patterns(result)
+            self.after(0, lambda p=parsed: _on_result(p))
+
+        # ── Callbacks — always guarded against destroyed-window TclError ────
+
+        def _on_error(msg):
+            try:
+                if not self.winfo_exists() or stop_event.is_set():
+                    return
+                self._ai_suggest_btn.configure(state=tk.NORMAL)
+                self._ai_status_lbl.configure(text=f"Error: {msg}", fg=C["red"])
+            except (tk.TclError, RuntimeError):
+                return
+
+        def _on_result(patterns):
+            try:
+                if not self.winfo_exists() or stop_event.is_set():
+                    return
+                self._ai_suggest_btn.configure(state=tk.NORMAL)
+                n = self._inject_patterns_list(patterns)
+                if n > 0:
+                    self._ai_status_lbl.configure(
+                        text=f"Added {n} new pattern(s) — review in Pending Changes",
+                        fg=C["green"])
+                    self._update_pending_panel()
+                else:
+                    self._ai_status_lbl.configure(
+                        text="✓ Already up to date — no new patterns needed",
+                        fg=C["overlay0"])
+            except (tk.TclError, RuntimeError):
+                return
+
+        threading.Thread(target=_worker, daemon=True).start()
+
+    def _inject_patterns_list(self, patterns):
+        """Inject a list of patterns with trailing-slash-normalised dedup.
+
+        Two-pass smart merge identical to _inject_template:
+          1. Un-remove any existing entries currently marked for removal that
+             the pattern list wants present (reverts the removal, no duplicate).
+          2. Append genuinely new patterns.
+
+        Comparison is normalised (trailing slash stripped) so '__pycache__/'
+        and '__pycache__' are treated as the same pattern.  Uniqueness is seeded
+        from both the on-disk state AND in-flight pending additions so the AI
+        won't re-suggest what the user just manually added this session.
+
+        Prepends a '# AI suggested patterns' header comment (once) so the
+        pending diff is self-documenting.  Returns the count of new patterns
+        added (excluding the comment line).
+        """
+        def _norm(p):
+            return p.strip().rstrip("/")
+
+        pattern_norm_set = {_norm(p) for p in patterns}
+
+        # Seed from both on-disk state and any in-flight pending additions
+        already_norm = {
+            _norm(p)
+            for p in list(self._current_pattern_state()) + list(self._additions)
+        }
+
+        # First pass: revert pending removals that the pattern list wants kept
+        for idx, raw_line in enumerate(self._original_lines):
+            if idx not in self._removed_indices:
+                continue
+            if _norm(raw_line.strip()) in pattern_norm_set:
+                self._toggle_removal(idx)   # reverts removal + updates panel
+                already_norm.add(_norm(raw_line.strip()))
+
+        # Second pass: collect genuinely new patterns.
+        # Two redundancy checks:
+        #   1. Exact normalised match — already present verbatim.
+        #   2. Path-scoped redundancy — 'src/__pycache__/' is suppressed when
+        #      '__pycache__/' is already ignored, because gitignore patterns
+        #      without an embedded '/' match at any directory depth.
+        def _basename(p):
+            return _norm(p).rsplit("/", 1)[-1]
+
+        new_patterns = []
+        for p in patterns:
+            n = _norm(p)
+            if n in already_norm:
+                continue                        # exact match — already covered
+            if "/" in n and _basename(p) in already_norm:
+                continue                        # broader pattern already covers it
+            new_patterns.append(p)
+            already_norm.add(n)
+
+        if new_patterns:
+            header = "# AI suggested patterns"
+            if header not in self._additions:
+                self._additions.append(header)
+            self._additions.extend(new_patterns)
+
+        return len(new_patterns)
 
     def _build_custom_entry_section(self):
         """Custom-pattern entry + Add / Browse buttons + hint label."""
@@ -620,3 +892,55 @@ class GitignoreDialog(tk.Toplevel):
                     return  # untrack flow handles commit prompt itself
         # Otherwise: trigger the existing commit-after-change prompt
         self._app._offer_commit_after_change(path, ".gitignore")
+
+
+# ── Module-level helpers ───────────────────────────────────────────────────────
+
+def _parse_ai_gitignore_patterns(response):
+    """Parse an LLM response into a clean list of .gitignore patterns.
+
+    Handles:
+    - Markdown code fence stripping (scans for actual fence positions, not
+      index 0/-1, which would miss fences at lines[-2] when the model appends
+      trailing prose or blank lines after the closing fence)
+    - Numbered / lettered list bullets (``1)`` , ``a)``)
+    - Comment lines (``#…``)
+    - Residual fence characters (`` ` ``)
+    - Prose openers ("Here are…", "I suggest…", etc.)
+    - Hard cap of 40 patterns to guard against runaway output
+    """
+    lines = [ln.strip() for ln in response.splitlines() if ln.strip()]
+
+    # Strip markdown code fences by scanning for actual fence positions
+    start_idx = end_idx = None
+    for i, ln in enumerate(lines):
+        if ln.startswith("```"):
+            if start_idx is None:
+                start_idx = i
+            else:
+                end_idx = i
+    if start_idx is not None and end_idx is not None and end_idx > start_idx:
+        lines = lines[start_idx + 1: end_idx]
+    elif start_idx is not None:
+        lines = lines[start_idx + 1:]   # unclosed block — take everything after fence
+
+    _PROSE_OPENERS = (
+        "here ", "here's", "here are",
+        "i suggest", "note:", "the following", "these are",
+    )
+    valid = []
+    for line in lines:
+        if not line:
+            continue
+        if line.startswith("#"):        # AI comment
+            continue
+        if line.startswith("`"):        # residual fence character
+            continue
+        if re.match(r"^\w\)", line):   # numbered/lettered list bullet (1), a), etc.)
+            continue
+        if any(line.lower().startswith(p) for p in _PROSE_OPENERS):
+            continue
+        valid.append(line)
+        if len(valid) >= 40:
+            break
+    return valid

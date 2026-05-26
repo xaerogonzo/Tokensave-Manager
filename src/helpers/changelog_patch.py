@@ -121,6 +121,29 @@ def update_unreleased(
     return True, "unreleased block updated"
 
 
+def read_unreleased_from_text(text: str) -> str:
+    """Return the ## [Unreleased] body extracted from an in-memory CHANGELOG.
+
+    Phase 2.1: pure-string companion to ``read_unreleased``.  Used by the
+    doc-drafter dialog to extract the simulated post-apply body from a
+    ``_compute_insert_unreleased_bullets`` result so the ProposalBridge
+    diff is honest (current body on the left, post-apply body on the
+    right).
+    """
+    if not text:
+        return ""
+    anchor_re = re.compile(r"(?m)^## \[Unreleased\][^\n]*\n")
+    am = anchor_re.search(text)
+    if not am:
+        return ""
+
+    block_start = am.end()
+    next_re = re.compile(r"(?m)^## \[")
+    nm = next_re.search(text, block_start)
+    block_end = nm.start() if nm else len(text)
+    return text[block_start:block_end].strip()
+
+
 def read_unreleased(changelog_path: str) -> str:
     """Return the current content of the ## [Unreleased] block (body only).
 
@@ -134,17 +157,222 @@ def read_unreleased(changelog_path: str) -> str:
             text = f.read()
     except OSError:
         return ""
+    return read_unreleased_from_text(text)
+
+
+# ── Append-only sub-section insertion inside [Unreleased] ────────────────────
+#
+# Used by the Doc Updates dialog INSTEAD of update_unreleased.  Discovered
+# during dogfooding: small local models (qwen2.5-coder:14b) consolidate
+# aggressively when asked to "preserve existing bullets + add new ones",
+# wiping detail.  The fix mirrors the README append-only pattern: drafter
+# generates only NEW bullets grouped by ### header, patcher splices them
+# into the existing sub-sections without touching what's already there.
+
+# Common drift variants → canonical Keep-a-Changelog headers.  All compared
+# lowercased.  If a section heading doesn't match any variant, the patcher
+# falls back to Title Case of the input (won't silently lose it — the user
+# sees the unfamiliar header in the diff).
+_SECTION_ALIASES = {
+    "Added":   {"added", "add", "additions", "new"},
+    "Changed": {"changed", "change", "changes", "modified", "updated"},
+    "Fixed":   {"fixed", "fix", "fixes", "bugfix", "bug fix", "bugfixes"},
+    "Removed": {"removed", "remove", "removals", "deprecated", "deleted"},
+}
+
+
+def _canonicalise_section(raw):
+    """Map a drift variant ('### fixes', '### CHANGED') to canonical title.
+
+    Falls back to ``raw.strip().title()`` when no alias matches so a
+    section the model invented still appears (in the diff) rather than
+    being silently dropped.
+    """
+    s = (raw or "").strip().lower()
+    for canonical, variants in _SECTION_ALIASES.items():
+        if s in variants:
+            return canonical
+    return (raw or "").strip().title()
+
+
+def read_section_bullets(changelog_path, section):
+    """Return existing bullet lines from ``### {section}`` inside ``[Unreleased]``.
+
+    Used by the doc-drafter dialog for Jaccard+overlap dedup against existing
+    content before appending new bullets via ``insert_unreleased_bullets``.
+
+    Returns ``[]`` if the changelog is missing, the ``[Unreleased]`` anchor is
+    missing, or the requested section doesn't exist.  Section name matching is
+    case-insensitive via the same ``_canonicalise_section`` alias map used by
+    the inserter (``"fixed"`` / ``"FIXED"`` / ``"Fixes"`` all resolve to
+    ``"Fixed"``).
+
+    Only bullet-shaped lines are returned — comments, blank lines, and
+    free-form prose inside the section are silently skipped.  This keeps the
+    dedup signal high (the drafter compares bullet-to-bullet) while
+    tolerating user-authored notes mixed into the section.
+    """
+    if not os.path.exists(changelog_path):
+        return []
+    try:
+        with open(changelog_path, encoding="utf-8-sig") as f:
+            text = f.read()
+    except OSError:
+        return []
 
     anchor_re = re.compile(r"(?m)^## \[Unreleased\][^\n]*\n")
     am = anchor_re.search(text)
     if not am:
-        return ""
+        return []
+    next_version_re = re.compile(r"(?m)^## \[")
+    nm = next_version_re.search(text, am.end())
+    block_end = nm.start() if nm else len(text)
+    block = text[am.end():block_end]
+
+    sub_re = re.compile(r"(?m)^###\s+([^\n]+)\n")
+    canonical = _canonicalise_section(section)
+    subsections = list(sub_re.finditer(block))
+    for i, m in enumerate(subsections):
+        if _canonicalise_section(m.group(1)) != canonical:
+            continue
+        sec_start = m.end()
+        sec_end = (subsections[i + 1].start()
+                   if i + 1 < len(subsections) else len(block))
+        bullets = []
+        for ln in block[sec_start:sec_end].splitlines():
+            stripped = ln.lstrip()
+            if stripped.startswith("- ") or stripped.startswith("* "):
+                bullets.append(stripped)
+        return bullets
+    return []
+
+
+def _compute_insert_unreleased_bullets(text, section, bullets_md):
+    """Pure transformation — returns ``(new_text, ok, msg)`` without IO.
+
+    Phase 2.1: extracted from ``insert_unreleased_bullets`` so the
+    doc-drafter dialog can precompute the post-apply file state for an
+    HONEST ProposalBridge diff (the previous diff displayed the full
+    existing [Unreleased] vs the bare new bullets, which looked
+    catastrophically destructive even though the actual apply path
+    appends).
+
+    All transformation logic lives here; the IO wrapper below adds
+    file-read + atomic-write.  Same return convention as the wrapper:
+    ``(updated_full_text, True, action_msg)`` on success or
+    ``(text_unchanged, False, error_msg)`` on failure.  Caller is
+    responsible for IO + error handling.
+    """
+    bullets_clean = (bullets_md or "").strip("\n").strip()
+    if not bullets_clean:
+        return text, False, "no bullets to insert"
+
+    # Locate [Unreleased] block boundaries
+    anchor_re = re.compile(r"(?m)^## \[Unreleased\][^\n]*\n")
+    am = anchor_re.search(text)
+    if not am:
+        return text, False, "Could not locate '## [Unreleased]' anchor"
 
     block_start = am.end()
-    next_re = re.compile(r"(?m)^## \[")
-    nm = next_re.search(text, block_start)
+    next_version_re = re.compile(r"(?m)^## \[")
+    nm = next_version_re.search(text, block_start)
     block_end = nm.start() if nm else len(text)
-    return text[block_start:block_end].strip()
+
+    block = text[block_start:block_end]
+    canonical = _canonicalise_section(section)
+
+    # Find existing ### sub-sections inside the [Unreleased] block.
+    sub_re = re.compile(r"(?m)^###\s+([^\n]+)\n")
+    subsections = []
+    for m in sub_re.finditer(block):
+        header_canonical = _canonicalise_section(m.group(1))
+        subsections.append({
+            "match": m,
+            "canonical": header_canonical,
+        })
+
+    # Compute each sub-section's end = next sub-section's start OR block end.
+    for i, sub in enumerate(subsections):
+        if i + 1 < len(subsections):
+            sub["end"] = subsections[i + 1]["match"].start()
+        else:
+            sub["end"] = len(block)
+
+    # ── Append path: matching sub-section exists ─────────────────────
+    for sub in subsections:
+        if sub["canonical"] != canonical:
+            continue
+        section_start = sub["match"].end()      # after "### Header\n"
+        section_end   = sub["end"]
+        existing_body = block[section_start:section_end].rstrip()
+        new_body = existing_body + "\n" + bullets_clean + "\n"
+        # One blank line separates this sub-section from the next divider
+        if section_end < len(block):
+            new_body = new_body + "\n"
+        new_block = block[:section_start] + new_body + block[section_end:]
+        action = f"appended to {canonical}"
+        break
+    else:
+        # ── Insert path: new sub-section at end of [Unreleased] ──────
+        block_rstripped = block.rstrip()
+        prefix = block_rstripped + ("\n\n" if block_rstripped else "\n")
+        new_subsection = f"### {canonical}\n{bullets_clean}\n"
+        suffix_blank = "\n" if nm is not None else ""
+        new_block = prefix + new_subsection + suffix_blank
+        action = f"inserted new {canonical} sub-section"
+
+    updated = text[:block_start] + new_block + text[block_end:]
+    return updated, True, action
+
+
+def insert_unreleased_bullets(changelog_path, section, bullets_md):
+    """Append bullets to a sub-section of [Unreleased] (IO wrapper).
+
+    Reads the file, delegates the transformation to
+    ``_compute_insert_unreleased_bullets``, then atomically writes the
+    result.  Backward-compatible with the pre-Phase-2.1 monolithic
+    function — same signature, same return contract.
+
+    See ``_compute_insert_unreleased_bullets`` for the behaviour
+    specification (append / insert / whitespace discipline / fresh-
+    CHANGELOG isolation / case-insensitive section matching).
+
+    Args:
+        changelog_path: Absolute path to CHANGELOG.md.
+        section:        Sub-section heading (drift-tolerant — e.g. 'fixed',
+                        'CHANGED', 'Fixes' all map correctly).
+        bullets_md:     Newline-separated bullet lines.
+
+    Returns:
+        ``(success: bool, message: str)``.
+    """
+    if not os.path.exists(changelog_path):
+        return False, "CHANGELOG.md not found"
+    try:
+        with open(changelog_path, encoding="utf-8-sig") as f:
+            text = f.read()
+    except OSError as e:
+        return False, f"Could not read CHANGELOG.md: {e}"
+
+    updated, ok, msg = _compute_insert_unreleased_bullets(
+        text, section, bullets_md)
+    if not ok:
+        return False, msg
+
+    tmp_path = changelog_path + ".tmp"
+    try:
+        with open(tmp_path, "w", encoding="utf-8", newline="\n") as f:
+            f.write(updated)
+        os.replace(tmp_path, changelog_path)
+    except OSError as e:
+        try:
+            if os.path.exists(tmp_path):
+                os.remove(tmp_path)
+        except OSError:
+            pass
+        return False, f"Failed writing changelog: {e}"
+
+    return True, msg
 
 
 def insert_changelog_release(
