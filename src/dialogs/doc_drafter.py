@@ -35,11 +35,11 @@ from constants import C
 import re
 
 from helpers.changelog_patch import (
-    update_unreleased, read_unreleased, insert_unreleased_bullets,
+    read_unreleased, insert_unreleased_bullets,
     read_section_bullets,
 )
 from helpers.readme_patch import (
-    update_readme_highlights, read_highlights,
+    read_highlights,
     insert_readme_highlights_subsection, read_subsection_bullets,
 )
 
@@ -213,18 +213,37 @@ def _sanitise_raw_draft(text):
     return "\n".join(lines)
 
 
-def _filter_bullets(bullets_md, existing_bullets):
+def _filter_bullets(bullets_md, existing_bullets, *,
+                    dedup_against_existing=True):
     """Apply truncation + dedup + noop-placeholder filters to a bullet block.
 
     Args:
-        bullets_md:       newline-separated bullet block from the LLM
-        existing_bullets: list of existing bullet lines to dedup against
+        bullets_md:               newline-separated bullet block from the LLM
+        existing_bullets:         list of existing bullet lines to dedup against
+        dedup_against_existing:   keyword-only.
+
+            **True (CHANGELOG mode, default)** — drop any new bullet that
+            semantically duplicates anything in ``existing_bullets``.  The
+            CHANGELOG drafter prompt asks the model to output ONLY new
+            content under append-only semantics, so any output bullet that
+            mirrors an existing on-disk bullet is unwanted duplication.
+
+            **False (README mode)** — the README drafter prompt asks the
+            model to mirror ALL existing bullets PLUS new ones, because the
+            ``insert_readme_highlights_subsection`` patcher REPLACES the
+            whole sub-section (omitting a mirrored bullet deletes it from
+            the file).  Dropping bullets that match existing would be
+            DESTRUCTIVE.  Instead, dedup is performed against ``kept``
+            (the bullets already accepted from THIS DRAFT) so the model
+            duplicating its OWN new bullets is still caught.  Quality-swap
+            precedence: when a duplicate is detected, the LONGER bullet
+            wins by +8 character slack — prevents a truncated paraphrase
+            earlier in the stream from displacing a polished later version.
 
     Returns ``(kept_md, truncated_n, duplicate_n, noop_n)`` where
     ``kept_md`` is the filtered bullets joined back into a newline-separated
-    string.  Three filter passes: truncation > noop > dedup (order is
-    irrelevant; bullets that fail any one are dropped).  Counters track
-    each rejection class so the status bar can surface a per-class summary.
+    string.  Counters track each rejection class so the status bar can
+    surface a per-class summary.
     """
     kept = []
     truncated_n = 0
@@ -243,10 +262,35 @@ def _filter_bullets(bullets_md, existing_bullets):
         if _is_noop_bullet(stripped):
             noop_n += 1
             continue
-        if any(_is_duplicate(stripped, eb) for eb in existing_bullets):
-            duplicate_n += 1
-            continue
-        kept.append(line)
+        if dedup_against_existing:
+            # CHANGELOG mode — drop if it matches anything on disk.
+            if any(_is_duplicate(stripped, eb) for eb in existing_bullets):
+                duplicate_n += 1
+                continue
+            kept.append(line)
+        else:
+            # README mode — dedup only against bullets we've already kept
+            # FROM THIS SAME DRAFT.  Existing-on-disk bullets are NOT a
+            # target; the model is supposed to mirror them back so the
+            # REPLACE patcher preserves them.  Quality-swap when matched:
+            # longer (more detailed) bullet wins.
+            is_dup = False
+            for idx, kb in enumerate(kept):
+                kb_stripped = kb.lstrip()
+                if not kb_stripped.startswith(("- ", "* ")):
+                    continue
+                if _is_duplicate(stripped, kb_stripped):
+                    is_dup = True
+                    # Swap when the incoming bullet is materially longer
+                    # (~ a phrase more detail).  +8 slack avoids
+                    # thrashing on single-word differences.  Ties favour
+                    # the earlier-kept line for stable diff order.
+                    if len(stripped) > len(kb_stripped) + 8:
+                        kept[idx] = line
+                    duplicate_n += 1
+                    break
+            if not is_dup:
+                kept.append(line)
     return "\n".join(kept).strip(), truncated_n, duplicate_n, noop_n
 from helpers.release import _classify_commits_for_changelog
 from helpers import doc_drafter as dd
@@ -659,8 +703,12 @@ class DocDrafterDialog(tk.Toplevel):
             return sanitised, 0, 0, 0
         header_line, bullets = parsed
         existing = read_subsection_bullets(target_path, header_line)
+        # README mode: the patcher REPLACES the matching sub-section, so the
+        # model is told to mirror existing bullets back. Dropping bullets
+        # that match existing-on-disk would DELETE them from the file.
+        # Filter only catches truncation, noop, and self-duplicates here.
         filtered, total_trunc, total_dup, total_noop = _filter_bullets(
-            bullets, existing)
+            bullets, existing, dedup_against_existing=False)
         if filtered.strip():
             return (f"{header_line}\n{filtered.strip()}",
                     total_trunc, total_dup, total_noop)
@@ -682,9 +730,22 @@ class DocDrafterDialog(tk.Toplevel):
                 self._tab_state[key]["draft"] = filtered_text.strip()
             else:
                 # Visual placeholder ONLY — Apply button is hard-disabled
-                # below so this string never reaches the patchers.
-                txt.insert("1.0",
-                            "(all bullets filtered — click Generate to retry)")
+                # below so this string never reaches the patchers.  README
+                # gets an extra-explicit message because its REPLACE patcher
+                # would delete the existing sub-section if applied with
+                # nothing.  CHANGELOG's append-only patcher is recoverable
+                # (no destructive failure mode).
+                if key == "readme":
+                    placeholder = (
+                        "(all bullets filtered — README's REPLACE patcher "
+                        "would DELETE the existing sub-section if Applied "
+                        "with no bullets.  Apply is disabled.  Click "
+                        "Generate to retry.)"
+                    )
+                else:
+                    placeholder = ("(all bullets filtered — click "
+                                   "Generate to retry)")
+                txt.insert("1.0", placeholder)
                 txt.tag_add("placeholder", "1.0", tk.END)
                 self._tab_state[key]["draft"] = ""
             # Reset the text-widget modified flag so the <<Modified>> binding
@@ -1001,21 +1062,29 @@ class DocDrafterDialog(tk.Toplevel):
                            "the first non-blank line.")
         header_line, bullets = parsed
 
-        # Filter truncated + duplicate bullets BEFORE the splice.  README path
-        # uses replace-or-insert semantics, so duplicates within the new
-        # sub-section are the only failure mode (the patcher itself preserves
-        # other sub-sections verbatim).  Compare against the existing bullets
-        # of THIS sub-section if it already exists.
+        # Filter at Apply-time too (safety net for user-edited content).
+        # README mode: the patcher REPLACES the matching sub-section, so the
+        # model is expected to mirror existing bullets back as part of its
+        # output.  Dropping bullets that match existing-on-disk would DELETE
+        # preserved content — use dedup_against_existing=False so the filter
+        # only catches truncation, noop placeholders, and bullets that
+        # duplicate something already kept FROM THIS DRAFT (self-dedup).
         existing = read_subsection_bullets(target_path, header_line)
-        filtered, trunc_n, dup_n = _filter_bullets(bullets, existing)
+        filtered, trunc_n, dup_n, noop_n = _filter_bullets(
+            bullets, existing, dedup_against_existing=False)
         self._last_filter_stats = {
             "truncated":  trunc_n,
             "duplicates": dup_n,
+            "noop":       noop_n,
         }
         if not filtered.strip():
-            return False, ("All bullets filtered out as truncated or "
-                           f"duplicates ({trunc_n} truncated, {dup_n} "
-                           "duplicates).  Click Regenerate to retry.")
+            # README replace semantics: applying empty bullets would DELETE
+            # the existing sub-section.  Refuse to write.
+            return False, ("All bullets filtered out "
+                           f"({trunc_n} truncated, {dup_n} self-duplicates, "
+                           f"{noop_n} placeholders).  README's REPLACE "
+                           "patcher would DELETE the existing sub-section "
+                           "if applied with no bullets.  Click Regenerate.")
         return insert_readme_highlights_subsection(
             target_path, header_line,
             filtered + "\n" if filtered else "\n")

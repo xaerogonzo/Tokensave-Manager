@@ -22,7 +22,7 @@ import subprocess
 
 from constants import CREATE_NO_WINDOW
 from helpers.release import (
-    _commits_since, _classify_commits_for_changelog, _last_release_tag,
+    _commits_since, _last_release_tag,
 )
 
 

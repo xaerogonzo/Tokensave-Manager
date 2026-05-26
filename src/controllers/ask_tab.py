@@ -736,9 +736,8 @@ class AskTabController:
         self._start_stream_flush_loop()
 
         # Wrap on_done / on_error to pass stream_started into _ask_finish.
-        original_done  = callbacks["on_done"]
-        original_error = callbacks["on_error"]
-
+        # (The original callbacks in `callbacks` are intentionally discarded —
+        # the wrapped versions below replace them entirely via reassignment.)
         def _on_done_wrapped(final_text):
             self._tab.after(0, self._ask_finish, final_text, False, "",
                             stream_started)
