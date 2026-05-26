@@ -46,6 +46,53 @@ One-click AI-powered gitignore pattern recommendations in the `.gitignore` edito
 
 ---
 
+## Roadmap 7
+
+Theme: **Markdown Manager, Tokensave-Grounded Drafts, Audit Lifecycle.** Roadmap-6 hardened the doc-drafter for two files (CHANGELOG, README); Roadmap-7 generalizes it into a registry-driven Markdown Manager covering every doc type the project ships, grounds every draft in tokensave file:line context (so Ollama stops hallucinating symbol names and Claude CLI gets the same evidence Ollama does), and turns `docs/ROADMAP.md` from a write-only document into a managed lifecycle (audit → plan → ship).
+
+### 🔮 Theme A — Markdown Manager via curated DocType registry
+Generalize `DocDrafterDialog` to a registry-driven dialog. New `helpers/doc_types.py` exporting a `DocType` dataclass (key, label, target_filename, system_prompt, build_prompt, compute_apply, read_existing, parse_draft, sanity_checks, tokensave_recipe). Initial entries: existing `changelog` + `readme`, plus `architecture` (`docs/ARCHITECTURE.md`), `roadmap` (`docs/ROADMAP.md`), `memory` (`memory/<picked>.md` with YAML-frontmatter preservation), `docs_generic` (any `docs/*.md` with `## Anchor` patcher), `tokensave_guide` (`TOKENSAVE_GUIDE.md`). Memory + docs_generic get an in-tab file-picker combobox. Each new patcher (`architecture_patch.py`, `roadmap_patch.py`, `memory_patch.py`, `generic_doc_patch.py`) mirrors the Phase 2.1 shape: anchor regex + `_find_block_bounds` + pure `_compute_insert_*` helper + IO wrapper. The first real-world dogfood is using the new `architecture` DocType to update `docs/ARCHITECTURE.md` (intentionally left stale in Roadmap-6).
+**Critical files:** `src/helpers/doc_types.py` *(new)*, `src/helpers/{architecture,roadmap,memory,generic_doc}_patch.py` *(new)*, `src/helpers/doc_drafter.py` (per-mode prompt builders + new `_*_SYSTEM` constants), `src/dialogs/doc_drafter.py` (registry-driven tabs, file-picker UI), `src/controllers/projects_tab.py` (toolbar/right-click entry rename).
+
+### 🔮 Theme B — Tokensave-grounded drafts (inject by default, expose tools as upgrade path)
+**B1 (universal):** new `helpers/doc_grounding.py` with named recipes (`commit_range_context`, `architecture_overview`, `roadmap_evidence`, `module_deep_dive`) that shell out to `tokensave tool context/search` and return a slim markdown block (≤ ~2000 tokens) the drafter splices into every user_prompt. Works identically for Ollama AND Claude CLI print-mode — no protocol change. Silent fallback to grounding-less prompt when `.tokensave/` is missing. **B2 (Ollama only):** `dispatch_llm(enable_tokensave_tools=True)` spins a one-shot LocalAgent loop exposing the existing `_tool_tokensave_search` / `_tool_tokensave_context` mid-drafting; Claude CLI print-mode stays on B1 (limitation documented in Theme D).
+**Critical files:** `src/helpers/doc_grounding.py` *(new)*, `src/helpers/doc_drafter.py` (`dispatch_llm` gains grounding-block + tool-flag params; `build_*_prompt` accepts grounding block), `src/agent_tools.py` (extract tokensave-tool helpers to importable surface), `src/dialogs/doc_drafter.py` (per-tab "🔍 Include tokensave context" checkbox).
+
+### 🔮 Theme C — Ollama quality knobs
+Five small isolated changes to close the local-vs-CLI quality gap without depending on bigger hardware: (1) Ollama `num_ctx` exposure in Settings (defaults 4096 for ask_tab_llm, 8192 for doc_drafter; today's silent prompt-truncation hurts long drafts); (2) per-DocType `gen_params` (`temperature`, `top_p`, `top_k`) — CHANGELOG/README stay 0.3, architecture/memory bump to 0.5; (3) `🔁 Regenerate with feedback` button — when apply rejects, re-prompts with the rejection reason in the system message (one retry, never auto-loop); (4) optional few-shot examples per DocType, injected only on Ollama path; (5) optional Settings-gated warm-up ping (1-token Ollama request) to eliminate the cold-model first-Generate jank.
+**Critical files:** `src/helpers/llm.py` (`num_ctx` + temp/top_p plumbing, warm-up helper), `src/dialogs/settings.py` (new fields), `src/helpers/doc_drafter.py` (`dispatch_llm` honors per-DocType gen_params + few-shot splicing), `src/dialogs/doc_drafter.py` (Regenerate-with-feedback button + state), `src/helpers/doc_types.py` (`gen_params`, `examples`).
+
+### 🔮 Theme D — Backend documentation + optional Claude Agent SDK spike
+Ship `docs/AGENT_BACKENDS.md` *(new)* explaining the three backend tiers (Anthropic API, Claude CLI print-mode, Ollama LocalAgent) and what each does / doesn't support — specifically that print-mode CLI gets B1 grounding-injection but cannot use B2 tool-exposure. Time-boxed spike branch `Roadmap-7-spike-claude-sdk` evaluates minimum-viable Claude Agent SDK integration (multi-turn tool use); promoted to Roadmap-8 only if the spike proves the gap is hurting users.
+**Critical files:** `docs/AGENT_BACKENDS.md` *(new)*.
+
+### 🔮 Theme E — Roadmap / Audit Manager (full lifecycle dialog)
+New `📋 Roadmap…` dialog (`src/dialogs/roadmap_mgr.py`) with three tabs: **Audit** parses `docs/ROADMAP.md` into a Treeview cross-referenced against `git log --grep` + `tokensave_diff_context` (missing evidence after 30 days flags 💤 stale; evidence-found-but-still-🟡 flags 🆙 promotable); double-click opens the item in Theme A's `roadmap` DocType for editing. **Plan** runs the "Start Roadmap N+1" wizard — auto-detects the next number, takes theme/date/CHANGELOG-note inputs, generates the section skeleton, routes through ProposalBridge. **Ship** matches `[Unreleased]` CHANGELOG bullets to active 🟡 entries via Jaccard (≥ 0.5), proposes 🟡→✅ promotions and orphan-bullet candidates, routes through ProposalBridge. All roadmap mutations go through `helpers/roadmap_patch.py` (shared with Theme A's `roadmap` DocType) — no parallel write path.
+**Critical files:** `src/dialogs/roadmap_mgr.py` *(new)*, `src/helpers/roadmap_parser.py`, `roadmap_audit.py` *(new)*, `src/helpers/roadmap_patch.py` *(new, also serves Theme A)*, `src/controllers/projects_tab.py` (toolbar + right-click entry).
+
+### Order of work
+1. Pre-flight (pull master, cut `Roadmap-7`, `tokensave sync`, baseline pyflakes-green).
+2. Update `docs/ARCHITECTURE.md` via the new `architecture` DocType (first real-world dogfood — Roadmap-6 deliberately left this stale).
+3. Theme A foundation (registry + behavior-preserving `changelog`/`readme` migration).
+4. Theme A new patchers (`architecture`, `roadmap`, `memory`, `generic_doc`).
+5. Theme B1 grounding injection (wire to existing DocTypes first, propagate).
+6. Theme C knobs (each independently shippable; sequence by dogfood impact).
+7. Theme B2 agentic tools (opt-in per DocType).
+8. Theme E roadmap manager (Audit → Plan → Ship).
+9. Theme D docs + spike branch.
+10. Roadmap-7 wrap (meta-test: update CHANGELOG/README/ROADMAP themselves using the new manager).
+
+### Cross-cutting invariants (carry forward from Roadmap-6)
+- ProposalBridge gates every Apply path; no direct file writes.
+- New patchers mirror the Phase 2.1 contract: pure `_compute_*` helper + IO wrapper; compute output byte-identical to write-then-read.
+- All existing Phase 1.5–2.1 doc-drafter unit tests pass after every theme lands (registry migration must be behavior-preserving for `changelog`/`readme`).
+- `python -m compileall src/ -q && python -m pyflakes src/` exits 0 after every theme.
+
+### Deferred to Roadmap-8
+Claude Agent SDK migration if Theme D spike proves out; multi-project Roadmap audit; Tier C auto-suggest-after-commit banner (carried over from Roadmap-6); `mcp_config._render_block` CC reduction + `commit_messages.py` / `llm.py` complexity backlog; unified sub-section parser (eliminating drift between `_SUBSECTION_HEADER_RE` / `_SUBHEADER_RE` / `_split_readme_subsection`); hidden subsection-ID anchors (`<!-- subsection-id: ... -->`) for robust patcher matching.
+
+---
+
 ## Major direction: local AI assistant integration
 
 The manager is growing into a **propose-only AI assistant** for project maintenance. AI suggestions never auto-apply — every change waits for the user to click Apply.
