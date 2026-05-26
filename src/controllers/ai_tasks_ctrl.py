@@ -237,8 +237,8 @@ class AITasksController:
         from helpers.changelog_patch import read_unreleased
 
         try:
-            last_tag = _last_release_tag(path)
-            commits  = _commits_since(path, last_tag)
+            last_tag = _last_release_tag(path, self._cfg.git_exe)
+            commits  = _commits_since(path, last_tag, self._cfg.git_exe)
         except Exception as e:
             self._tab.after(0, self._on_log,
                             f"[CHANGELOG] Could not read git history: {e}", "red")
