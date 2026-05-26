@@ -671,6 +671,55 @@ See [CHANGELOG.md](CHANGELOG.md) for the full history.
 **Recent highlights (Unreleased)** — see CHANGELOG.md for the detailed bullets on each:
 
 
+
+**Refactoring**
+- Helper extraction across doc-drafter, agent, gitignore editor, and projects tab to reduce method complexity
+
+(Add this as a new sub-section in the "Recent highlights (Unreleased)" block. The existing sections can remain unchanged.)
+
+**Doc-drafter refinements**
+- 📝 Doc Updates… — refined bullet filtering with noop-removal and quality-based truncation, post-apply state preview for honest diffs, literal template/placeholder detection with mirror-contract safety validation, per-session backend override for flexible model selection, improved README deduplication and draft sanitization
+
+**Roadmap-6 — Ask tab + gitignore AI + doc-drafter**
+- 🤖 Ask tab — separate `ask_tab_llm` config (independent of commit-message model), Claude CLI provider option, SSE streaming for final-turn tokens, session log persistence (`logs/ask_sessions.md`)
+- 🤖 Gitignore AI Suggest — one-click AI-powered pattern recommendations in the .gitignore editor; CodeGraph SQLite used as a zero-cost project file listing when available; path-scoped basename dedup suppresses redundant `src/__pycache__/` style suggestions when the broader pattern is already ignored
+- 📝 Doc Updates… right-click dialog — drafts CHANGELOG `[Unreleased]` bullets AND README "Recent highlights" sub-section content from a commit range via the configured local AI. Per-tab thread isolation, ProposalBridge-gated Apply, mixed-commit boundary handling, sparse-commit safety net. Both CHANGELOG and README use append-only insertion (`insert_unreleased_bullets` / `insert_readme_highlights_subsection`) — drafter generates only new content; patcher splices into the right sub-section while preserving everything else verbatim. Robust against small-model truncation that wiped detail on the original full-block-regeneration design. Architecture + Memory tabs deferred to Roadmap-7
+- 📝 Documentation snippet category in Reference tab — 7 curated copy-paste prompts for README / CHANGELOG / architecture / memory / consistency-check / migration-note / PR description
+- Help tab — comprehensive static reference content with per-section follow-up ask prompts
+- tokensave CLI subcommand fix (`tokensave tool search` / `tokensave tool context` — old `query` / `context` subcommands removed upstream)
+
+**Major: local-AI integration (Stages 0–2 of the roadmap)**
+- 🤖 Ask tab — Stage 2 chat interface with bounded tool-calling agent (`src/agent.py` + `src/agent_tools.py`)
+- 🔍 AI Code Review with token-by-token streaming
+- 🦙 Ollama Model Manager dialog with native REST API integration
+- 🔄 Upgrade tokensave from the manager, with hourly GitHub releases polling
+- Tool-call rescue for local models that emit calls as JSON-in-content
+- read_file with `start_line`/`end_line` for large files + basename-match suggestions on not-found errors
+
+**MCP / wrapper hardening**
+- 🔌 MCP Integration configurator (UWP-aware, label-aware classification — recognises `tokensave install` canonical shape for Claude Code)
+- Wrapper stdio fix: explicit `stdin=sys.stdin, stdout=sys.stdout, stderr=sys.stderr` in Popen (the root cause of the 30-second MCP attach timeout)
+- 🔍 Doctor button with stale-entry purge offer + cmd.exe spawn fallback for TTY-gated prompts
+- Last Synced column now reads max mtime across `.db`/`.db-wal`/`.db-shm` (SQLite WAL-mode aware)
+
+**Git workflow**
+- 🐙 Merge PR button — full GitHub PR merge from the manager (lists PRs via `gh pr list`, three strategies, auto-syncs local after)
+- ⇄ Merge button — merge a branch INTO the current one
+- Remote-aware Delete Branch — prompts to also delete `origin/<branch>`
+- `[project-name]` prefix on all git log lines
+
+**Docs**
+- `docs/AGENT_ARCHITECTURE.md` — agent loop design
+- `docs/ROADMAP.md` — staged plan with status badges
+- `docs/MCP_INTEGRATION_GOTCHAS.md` — postmortem field manual
+- `docs/upstream-issues/tokensave-hook-quoting.md` — draft of an upstream bug we discovered
+
+**Earlier highlights** (these landed before the current cycle):
+- Git tab with full push/pull/commit/branch/diff UI, per-file staging, conventional-commit auto-suggest
+- GitHub Setup wizard, Open PR button, Release Wizard with `gh release create` pipeline
+- Project categories + sub-categories, gitignore editor with template inject + diff preview
+- Ensure .gitignore, Auto-commit after sync, Claude session Stop hook
+
 **Doc-drafter refinements**
 - 📝 Doc Updates… — refined bullet filtering with noop-removal and quality-based truncation, post-apply state preview for honest diffs, literal template/placeholder detection with mirror-contract safety validation, per-session backend override for flexible model selection, improved README deduplication and draft sanitization
 

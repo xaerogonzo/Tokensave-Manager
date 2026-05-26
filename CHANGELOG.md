@@ -28,6 +28,9 @@
 ```
 
 These bullets capture the 8 commits' distinct implementation changes that go beyond what's already documented in the current CHANGELOG entry for the 📝 Doc Updates dialog.
+```
+
+These bullets capture the 8 commits' distinct implementation changes that go beyond what's already documented in the current CHANGELOG entry for the 📝 Doc Updates dialog.
 
 ### Fixed
 - (agent-tools) tokensave CLI subcommands updated: `tokensave query` → `tokensave tool search`, `tokensave context` → `tokensave tool context` (old subcommands removed upstream)
@@ -38,7 +41,10 @@ These bullets capture the 8 commits' distinct implementation changes that go bey
 - (gitignore-dialog) `_inject_patterns_list` now performs TWO redundancy checks: exact normalised match AND path-scoped basename match. Suppresses suggestions like `src/__pycache__/` when `__pycache__/` is already ignored (gitignore semantics: patterns without an embedded `/` match at any depth). System prompt also tells the AI about gitignore recursive matching to reduce the redundant suggestion at the source. (`src/dialogs/gitignore.py`)
 - (commit-messages) multi-doc-file commits now use dominant directory as scope (e.g. `docs(upstream-issues): update`) instead of listing filename stems
 - (mcp-config) extracted `_log_to_app` + `_apply_running_guard` from `_apply`; CC reduced
-
+- (agent.py) refactor: extract helpers to simplify complex methods
+- (projects_tab.py) refactor: extract helpers to simplify complex methods
+- (gitignore.py) refactor: extract helpers to simplify complex methods
+- (doc_drafter.py) refactor: extract helpers to simplify complex methods
 ## [1.1.0] — 2026-05-25
 
 ### Added
