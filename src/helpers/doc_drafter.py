@@ -41,18 +41,18 @@ _SPARSE_AVG_THRESHOLD = 15
 
 # ── Commit-range resolution ──────────────────────────────────────────────────
 
-def _last_doc_commit_sha(project_path, git_exe):
-    """Return the SHA of the most recent commit that touched docs, or None.
+def _last_doc_commit_sha(project_path, git_exe, pathspecs=None):
+    """Return the SHA of the most recent commit that touched the given paths.
 
-    Uses ``git log --diff-filter=AM --name-only -- CHANGELOG.md README.md docs/``
-    to find the newest commit that modified or added any doc file.  If no
-    such commit exists, returns None.
+    ``pathspecs`` overrides the module-level ``_DOC_PATHSPECS`` so each
+    DocType can use its own anchor file(s) instead of the shared fallback.
     """
+    specs = pathspecs if pathspecs else _DOC_PATHSPECS
     try:
         proc = subprocess.run(
             [git_exe, "-C", project_path, "log", "-n", "1",
              "--pretty=format:%H",
-             "--diff-filter=AM", "--", *_DOC_PATHSPECS],
+             "--diff-filter=AM", "--", *specs],
             capture_output=True, text=True, timeout=10,
             encoding="utf-8", errors="replace",
             creationflags=CREATE_NO_WINDOW,
@@ -95,7 +95,7 @@ def _commit_touches_code(project_path, sha, git_exe):
     return False
 
 
-def resolve_commit_range(project_path, mode, custom_ref, git_exe):
+def resolve_commit_range(project_path, mode, custom_ref, git_exe, pathspecs=None):
     """Resolve a commit range from a high-level mode to a concrete spec + commits.
 
     Args:
@@ -120,7 +120,7 @@ def resolve_commit_range(project_path, mode, custom_ref, git_exe):
     with empty ``commits`` and a ``range_label`` describing the issue.
     """
     if mode == "since_last_doc":
-        return _resolve_since_last_doc(project_path, git_exe)
+        return _resolve_since_last_doc(project_path, git_exe, pathspecs)
     if mode == "since_last_commit":
         return {
             "range_label":    "Since last commit (HEAD~1..HEAD)",
@@ -142,9 +142,9 @@ def resolve_commit_range(project_path, mode, custom_ref, git_exe):
     }
 
 
-def _resolve_since_last_doc(project_path, git_exe) -> dict:
+def _resolve_since_last_doc(project_path, git_exe, pathspecs=None) -> dict:
     """Range resolver for mode='since_last_doc'."""
-    sha = _last_doc_commit_sha(project_path, git_exe)
+    sha = _last_doc_commit_sha(project_path, git_exe, pathspecs)
     if not sha:
         return {
             "range_label":    "All commits (no prior doc commit found)",
@@ -1462,15 +1462,38 @@ _CODE_FENCE_RE = re.compile(
     re.DOTALL,
 )
 
+# A line that looks like "real section content": tree chars, headings,
+# list markers, numbered items, or horizontal rules.
+_CONTENT_LINE_RE = re.compile(
+    r"^(?:[│├└─#\-\*>]|\d+\.|\s+[│├└─]|={3,}|-{3,})"
+)
+
+
+def _strip_trailing_prose(text: str) -> str:
+    """Discard trailing prose paragraphs after the last real content line.
+
+    "Real content" means tree-formatted lines, headings, list items, or
+    horizontal rules.  A trailing paragraph like Haiku's '**Change summary:**'
+    blob is dropped.
+    """
+    lines = text.splitlines()
+    last_content = -1
+    for i, ln in enumerate(lines):
+        if _CONTENT_LINE_RE.match(ln):
+            last_content = i
+    if last_content < 0:
+        return text
+    return "\n".join(lines[:last_content + 1])
+
 
 def _strip_preamble_and_fences(text: str) -> str:
-    """Remove prose before the first '## ' heading and unwrap code fences.
+    """Remove prose before the first '## ' heading, unwrap code fences,
+    and strip trailing prose paragraphs after the last content line.
 
-    Models sometimes wrap output in a prose preamble ("Based on my analysis…")
-    and/or surround content with ```markdown fences.  Both obscure the actual
-    section content the patcher needs.  This function:
-      1. Discards everything before the first '## ' heading.
-      2. Replaces every fenced block with its inner content.
+    Models sometimes wrap output in a prose preamble ("Based on my analysis…"),
+    surround content with ```markdown fences, and/or add a trailing summary
+    paragraph.  All three are stripped here so only the bare section content
+    reaches the patcher.
     """
     # 1. Drop prose before the first ## heading.
     m = re.search(r"(?m)^## ", text)
@@ -1479,6 +1502,9 @@ def _strip_preamble_and_fences(text: str) -> str:
 
     # 2. Unwrap code fences — keep only the body inside the backticks.
     text = _CODE_FENCE_RE.sub(lambda mo: mo.group(1), text)
+
+    # 3. Drop trailing prose after the last real content line.
+    text = _strip_trailing_prose(text)
 
     return text
 

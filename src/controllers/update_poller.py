@@ -206,6 +206,7 @@ class UpdatePollerController:
         st.configure(state=tk.DISABLED)
 
         ttk.Button(dlg, text="Close", command=dlg.destroy).pack(pady=(0, 10))
+        dlg.grab_set()
         dlg.focus_set()
 
     # ── Internal workers ──────────────────────────────────────────────────────

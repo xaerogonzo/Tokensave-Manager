@@ -104,6 +104,9 @@ class DocType:
         tokensave_recipe  Recipe key in doc_grounding.py (Theme B); None = skip.
         gen_params      {temperature, top_p, top_k, num_ctx} overrides (Theme C).
         examples        Few-shot (input, output) pairs for Ollama (Theme C).
+        doc_anchor_paths  Paths (relative to project root) whose last-modified
+                        commit defines the "since last doc commit" anchor for
+                        this DocType.  Empty = share the global fallback anchor.
     """
     key:                     str
     label:                   str
@@ -121,6 +124,7 @@ class DocType:
     tokensave_recipe:        Any = None
     gen_params:              dict = field(default_factory=dict)
     examples:                list = field(default_factory=list)
+    doc_anchor_paths:        list = field(default_factory=list)
 
 
 # ── Registry ──────────────────────────────────────────────────────────────────
@@ -224,6 +228,7 @@ REGISTRY["changelog"] = DocType(
     tokensave_recipe="commit_range_context",
     gen_params={},
     examples=[(_CHANGELOG_EXAMPLE_IN, _CHANGELOG_EXAMPLE_OUT)],
+    doc_anchor_paths=["CHANGELOG.md"],
 )
 
 REGISTRY["readme"] = DocType(
@@ -242,6 +247,7 @@ REGISTRY["readme"] = DocType(
     tokensave_recipe="commit_range_context",
     gen_params={},
     examples=[(_README_EXAMPLE_IN, _README_EXAMPLE_OUT)],
+    doc_anchor_paths=["README.md"],
 )
 
 REGISTRY["architecture"] = DocType(
@@ -260,6 +266,7 @@ REGISTRY["architecture"] = DocType(
     tokensave_recipe="architecture_overview",
     gen_params={"temperature": 0.5},
     examples=[],
+    doc_anchor_paths=["docs/ARCHITECTURE.md"],
 )
 
 REGISTRY["roadmap"] = DocType(
@@ -278,6 +285,7 @@ REGISTRY["roadmap"] = DocType(
     tokensave_recipe="roadmap_evidence",
     gen_params={},
     examples=[],
+    doc_anchor_paths=["docs/ROADMAP.md"],
 )
 
 # File-picker DocTypes — target_filename is "" because the target is
@@ -334,4 +342,5 @@ REGISTRY["tokensave_guide"] = DocType(
     tokensave_recipe=None,
     gen_params={},
     examples=[],
+    doc_anchor_paths=["TOKENSAVE_GUIDE.md"],
 )

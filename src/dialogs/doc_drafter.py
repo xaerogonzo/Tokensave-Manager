@@ -953,17 +953,28 @@ class DocDrafterDialog(tk.Toplevel):
         if not self._range_data:
             self._set_status(key, "Resolve a commit range first.", C["red"])
             return
-        rd = self._range_data
-        if not rd.get("commits"):
-            self._set_status(key, "No commits in range — nothing to draft.",
-                             C["red"])
-            return
 
         llm_cfg = self._llm_cfg_resolved()
         if not llm_cfg or not llm_cfg.get("provider"):
             self._set_status(key,
                 "No AI configured — set a provider in Settings → Ask Tab AI.",
                 C["red"])
+            return
+
+        # Per-tab anchor: recompute the range using this DocType's own
+        # doc_anchor_paths so each tab finds commits since ITS file was
+        # last updated, not since the shared CHANGELOG/README anchor.
+        dt_for_range = REGISTRY[key]
+        mode       = self._mode_var.get()
+        custom_ref = self._custom_var.get() if mode == "custom" else ""
+        rd = dd.resolve_commit_range(
+            self._project_path, mode, custom_ref, self._cfg.git_exe,
+            pathspecs=dt_for_range.doc_anchor_paths or None,
+        )
+
+        if not rd.get("commits"):
+            self._set_status(key, "No commits in range — nothing to draft.",
+                             C["red"])
             return
 
         # Cancel any in-flight generate for THIS tab.
