@@ -481,7 +481,6 @@ class ProjectsTabController:
         m.add_command(label="📋  Manage .gitignore…",      command=self.cmd_manage_gitignore)
         m.add_command(label="🧹  Untrack Ignored Files…",  command=self.cmd_untrack_ignored)
         m.add_command(label="🔍  Pre-commit AI Review hook…", command=self.cmd_precommit_hook)
-        m.add_command(label="📝  Draft CHANGELOG entry…", command=self.cmd_draft_changelog)
         m.add_command(label="📝  Doc Updates… (CHANGELOG + README)", command=self.cmd_doc_updates)
         m.add_command(label="📋  Roadmap…",                 command=self.cmd_roadmap_manager)
         m.add_command(label="🔬  Refactor scout…",         command=self.cmd_refactor_scout)
