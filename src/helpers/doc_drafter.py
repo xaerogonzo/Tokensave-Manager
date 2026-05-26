@@ -633,7 +633,8 @@ def build_readme_prompt(commits, classified, existing_highlights,
 # ── LLM dispatch ────────────────────────────────────────────────────────────
 
 def dispatch_llm(llm_cfg, system_prompt, user_prompt,
-                 claude_cli_exe, cwd, timeout=120):
+                 claude_cli_exe, cwd, timeout=120,
+                 gen_params=None, examples=None):
     """Call the configured LLM and return ``(text, error)``.
 
     Routes to ``call_claude_cli_print`` when ``llm_cfg["provider"] ==
@@ -641,10 +642,25 @@ def dispatch_llm(llm_cfg, system_prompt, user_prompt,
     openai_compatible / ollama).  Returns ``(text, None)`` on success or
     ``(None, error_string)`` on failure.
 
+    gen_params: dict of per-DocType overrides merged into llm_cfg
+      (temperature, top_p, top_k, num_ctx).  Values in gen_params win.
+    examples: list of (input_text, output_text) few-shot pairs spliced
+      into user_prompt for ollama / openai_compatible providers.
+
     Pure dispatch — does NOT handle threading, cancellation, or UI.
     Caller wraps in a worker thread + stop_event check.
     """
+    if gen_params:
+        llm_cfg = {**(llm_cfg or {}), **gen_params}
     provider = (llm_cfg or {}).get("provider", "")
+
+    # C4: splice few-shot examples for local providers (ollama / openai_compat)
+    if examples and provider.lower() in ("ollama", "openai_compatible"):
+        ex_parts = []
+        for inp, out in examples[:2]:
+            ex_parts.append(f"Example input:\n{inp}\n\nExpected output:\n{out}")
+        ex_block = "\n\n---\n\n".join(ex_parts)
+        user_prompt = ex_block + "\n\n---\n\n" + user_prompt
 
     try:
         if provider == "claude_cli":

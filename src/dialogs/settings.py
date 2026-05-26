@@ -666,6 +666,31 @@ class SettingsDialog(tk.Toplevel):
             font=("Segoe UI", 8), bg=C["base"], fg=C["overlay0"],
             justify=tk.LEFT).pack(anchor=tk.W, padx=36, pady=(0, 8))
 
+        # num_ctx spinbox
+        num_ctx_row = tk.Frame(body, bg=C["base"])
+        num_ctx_row.pack(anchor=tk.W, padx=20, pady=(0, 4))
+        tk.Label(num_ctx_row, text="Context window (num_ctx):",
+                 font=("Segoe UI", 9), bg=C["base"],
+                 fg=C["subtext"]).pack(side=tk.LEFT)
+        self._var_ollama_num_ctx = tk.IntVar(
+            value=int(raw.get("ollama_num_ctx", 4096)))
+        ttk.Spinbox(num_ctx_row, from_=512, to=131072, increment=512,
+                    textvariable=self._var_ollama_num_ctx,
+                    width=8).pack(side=tk.LEFT, padx=(8, 0))
+        tk.Label(num_ctx_row, text="  tokens  (0 = model default)",
+                 font=("Segoe UI", 8), bg=C["base"],
+                 fg=C["overlay0"]).pack(side=tk.LEFT)
+
+        # warm-up checkbox
+        self._var_ollama_warmup = tk.BooleanVar(
+            value=bool(raw.get("ollama_warmup", False)))
+        tk.Checkbutton(body,
+            text="Warm up Ollama before first Generate (loads model into VRAM early)",
+            variable=self._var_ollama_warmup,
+            bg=C["base"], fg=C["text"], selectcolor=C["surface0"],
+            activebackground=C["base"], activeforeground=C["text"],
+            font=("Segoe UI", 9)).pack(anchor=tk.W, padx=20, pady=(0, 6))
+
     def _build_ai_section(self, body, raw):
         """AI commit messages — provider, model, key env, presets, options."""
         ttk.Separator(body, orient="horizontal").pack(fill=tk.X, padx=20, pady=(8, 8))
@@ -1100,6 +1125,8 @@ class SettingsDialog(tk.Toplevel):
             "api_key_env": self._var_ask_keyenv.get().strip(),
             "base_url":    self._var_ask_base_url.get().strip(),
         }
+        raw["ollama_num_ctx"]   = self._var_ollama_num_ctx.get()
+        raw["ollama_warmup"]    = self._var_ollama_warmup.get()
         raw["git_exe"]        = self._git_exe_var.get().strip()
         raw["codegraph_exe"]  = self._cg_exe_var.get().strip()
         raw["claude_cli_exe"]   = self._claude_cli_var.get().strip()

@@ -221,7 +221,11 @@ def _call_anthropic(api_key: str, model: str, system_prompt: str, user_prompt: s
 
 def _call_openai_compat(url: str, api_key: str, model: str,
                         system_prompt: str, user_prompt: str,
-                        max_tokens: int, timeout: int, on_token) -> str | None:
+                        max_tokens: int, timeout: int, on_token,
+                        temperature: float = 0.3,
+                        top_p: float | None = None,
+                        top_k: int | None = None,
+                        num_ctx: int | None = None) -> str | None:
     """OpenAI Chat Completions — covers openai, openai_compatible, and ollama.
     Caller resolves the endpoint URL before dispatching here."""
     import urllib.request
@@ -232,8 +236,15 @@ def _call_openai_compat(url: str, api_key: str, model: str,
             {"role": "user", "content": user_prompt},
         ],
         "max_tokens": max_tokens,
-        "temperature": 0.3,
+        "temperature": temperature,
     }
+    if top_p is not None:
+        payload["top_p"] = top_p
+    if top_k is not None:
+        payload["top_k"] = top_k
+    if num_ctx is not None:
+        # Ollama extension — silently ignored by non-Ollama OpenAI-compat servers
+        payload["num_ctx"] = num_ctx
     if on_token is not None:
         payload["stream"] = True
     headers = {"Content-Type": "application/json"}
@@ -327,10 +338,47 @@ def _call_llm(cfg: dict, system_prompt: str, user_prompt: str,
                 if not base_url:
                     return None
                 url = base_url + "/v1/chat/completions"
+            _temp = cfg.get("temperature")
+            temperature = float(_temp) if _temp is not None else 0.3
+            _top_p = cfg.get("top_p")
+            top_p = float(_top_p) if _top_p is not None else None
+            _top_k = cfg.get("top_k")
+            top_k = int(_top_k) if _top_k is not None else None
+            _num_ctx = cfg.get("num_ctx")
+            num_ctx = int(_num_ctx) if _num_ctx is not None else None
             return _call_openai_compat(url, api_key, model, system_prompt, user_prompt,
-                                       max_tokens, timeout, on_token)
+                                       max_tokens, timeout, on_token,
+                                       temperature=temperature, top_p=top_p,
+                                       top_k=top_k, num_ctx=num_ctx)
     except (urllib.error.URLError, urllib.error.HTTPError,
             TimeoutError, json.JSONDecodeError, KeyError, OSError):
         return None
 
     return None
+
+
+def warmup_ollama(base_url: str, model: str = "", timeout: int = 10) -> bool:
+    """Send a 1-token completion to warm up the Ollama model.
+
+    Fires before the first Generate click when "Warm up Ollama" is enabled in
+    Settings.  Returns True if the server responded, False on any error (the
+    caller always continues — warmup is best-effort).
+    """
+    import urllib.request
+    import urllib.error
+    url = (base_url or "http://localhost:11434").rstrip("/") + "/v1/chat/completions"
+    payload = {
+        "model": model or "qwen2.5-coder:14b",
+        "messages": [{"role": "user", "content": "hi"}],
+        "max_tokens": 1,
+    }
+    try:
+        req = urllib.request.Request(
+            url, method="POST",
+            data=json.dumps(payload).encode("utf-8"),
+            headers={"Content-Type": "application/json"},
+        )
+        with urllib.request.urlopen(req, timeout=timeout):
+            return True
+    except Exception:
+        return False

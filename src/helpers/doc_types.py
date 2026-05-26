@@ -180,6 +180,34 @@ def _readme_build_prompt(commits, classified, existing, name, desc,
 
 # ── Initial registry entries ──────────────────────────────────────────────────
 
+_CHANGELOG_EXAMPLE_IN = (
+    "Project: MyApp\n"
+    "Recent commits:\n"
+    "  abc123 add dark-mode toggle to settings\n"
+    "  def456 fix crash when project list is empty\n"
+    "  ghi789 remove legacy daemon polling code"
+)
+_CHANGELOG_EXAMPLE_OUT = (
+    "### Added\n"
+    "- Dark-mode toggle in Settings (`_var_dark_mode` in `dialogs/settings.py`)\n\n"
+    "### Fixed\n"
+    "- Crash when project list is empty (`ProjectsTabController._refresh`)\n\n"
+    "### Removed\n"
+    "- Legacy daemon polling code and 5-second polling loop"
+)
+
+_README_EXAMPLE_IN = (
+    "Project: MyApp\n"
+    "Recent commits:\n"
+    "  abc123 add dark-mode toggle to settings\n"
+    "  def456 fix crash when project list is empty"
+)
+_README_EXAMPLE_OUT = (
+    "**Roadmap-7 — Dark mode + stability**\n"
+    "- ⚙ Dark-mode toggle in Settings dialog (`_var_dark_mode`)\n"
+    "- 🐛 Fix crash on empty project list (`ProjectsTabController._refresh`)"
+)
+
 REGISTRY["changelog"] = DocType(
     key="changelog",
     label="CHANGELOG.md",
@@ -195,7 +223,7 @@ REGISTRY["changelog"] = DocType(
     filter_draft=changelog_filter_draft,
     tokensave_recipe="commit_range_context",
     gen_params={},
-    examples=[],
+    examples=[(_CHANGELOG_EXAMPLE_IN, _CHANGELOG_EXAMPLE_OUT)],
 )
 
 REGISTRY["readme"] = DocType(
@@ -213,7 +241,7 @@ REGISTRY["readme"] = DocType(
     filter_draft=readme_filter_draft,
     tokensave_recipe="commit_range_context",
     gen_params={},
-    examples=[],
+    examples=[(_README_EXAMPLE_IN, _README_EXAMPLE_OUT)],
 )
 
 REGISTRY["architecture"] = DocType(

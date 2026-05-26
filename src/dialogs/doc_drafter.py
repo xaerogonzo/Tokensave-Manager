@@ -523,7 +523,8 @@ class DocDrafterDialog(tk.Toplevel):
         self._project_name = os.path.basename(project_path)
         self._project_desc = self._read_project_description()
         self._tab_state = {
-            key: {"stop": threading.Event(), "thread": None, "draft": ""}
+            key: {"stop": threading.Event(), "thread": None, "draft": "",
+                  "last_rejection": ""}
             for key in REGISTRY
         }
         self._tab_widgets: dict = {}   # populated by _build_tab
@@ -534,10 +535,14 @@ class DocDrafterDialog(tk.Toplevel):
         # _backend_summary() reflects it in the header label.
         self._backend_override_var = tk.StringVar(value=_BACKEND_DEFAULT)
 
+        # C5: warm-up flag — ensure we only fire once per dialog session.
+        self._warmup_done = False
+
         # ── UI ─────────────────────────────────────────────────────────────
         self._build_header_section()
         self._build_notebook()
         self._build_footer_section()
+        self._maybe_warmup_ollama()
 
         # Resolve initial range so tabs can Generate immediately.
         self._refresh_range()
@@ -823,6 +828,11 @@ class DocDrafterDialog(tk.Toplevel):
                                command=lambda k=key: self._on_apply(k))
         apply_btn.pack(side=tk.LEFT, padx=(6, 0))
 
+        # C3: retry-with-feedback button — hidden until apply is rejected.
+        feedback_btn = ttk.Button(btn_row, text="🔁 Regenerate with feedback",
+                                  command=lambda k=key: self._on_regenerate_with_feedback(k))
+        # NOT packed yet — revealed by _on_apply_result on failure.
+
         status_var = tk.StringVar(value="")
         # wraplength keeps long filter messages from pushing buttons off-screen
         # on narrow window sizes; status text wraps inside the row instead.
@@ -833,14 +843,16 @@ class DocDrafterDialog(tk.Toplevel):
         status_lbl.pack(side=tk.LEFT, padx=(12, 0), fill=tk.X, expand=True)
 
         self._tab_widgets[key] = {
-            "frame":      frame,
-            "text":       txt,
-            "gen_btn":    gen_btn,
-            "apply_btn":  apply_btn,
-            "status_var": status_var,
-            "status_lbl": status_lbl,
-            "target":     target_file,
-            "target_var": target_var,   # None for fixed-target DocTypes
+            "frame":        frame,
+            "text":         txt,
+            "gen_btn":      gen_btn,
+            "apply_btn":    apply_btn,
+            "feedback_btn": feedback_btn,
+            "btn_row":      btn_row,
+            "status_var":   status_var,
+            "status_lbl":   status_lbl,
+            "target":       target_file,
+            "target_var":   target_var,   # None for fixed-target DocTypes
         }
 
     # ── File-picker helpers ────────────────────────────────────────────────
@@ -870,6 +882,28 @@ class DocDrafterDialog(tk.Toplevel):
             if rel:
                 return os.path.join(self._project_path, rel)
         return None
+
+    def _maybe_warmup_ollama(self):
+        """C5: Fire a warm-up ping once per session if the setting is on."""
+        if self._warmup_done:
+            return
+        raw = self._cfg.raw if isinstance(self._cfg.raw, dict) else {}
+        if not raw.get("ollama_warmup", False):
+            return
+        llm_cfg = self._llm_cfg_resolved()
+        provider = (llm_cfg or {}).get("provider", "").lower()
+        if provider not in ("ollama", "openai_compatible"):
+            return
+        base_url = (llm_cfg or {}).get("base_url", "") or "http://localhost:11434"
+        model = (llm_cfg or {}).get("model", "")
+        self._warmup_done = True
+
+        def _ping():
+            from helpers.llm import warmup_ollama
+            warmup_ollama(base_url, model, timeout=10)
+
+        threading.Thread(target=_ping, daemon=True,
+                         name="doc-drafter-warmup").start()
 
     def _build_footer_section(self):
         ftr = tk.Frame(self, bg=C["base"], padx=18, pady=10)
@@ -941,6 +975,16 @@ class DocDrafterDialog(tk.Toplevel):
         project     = self._project_path
         tokensave_exe = self._cfg.tokensave_exe
 
+        # C3: capture any pending feedback from a failed apply, then clear it
+        # so that a second generate is back to normal (one-shot injection).
+        last_rejection = self._tab_state[key].get("last_rejection", "")
+        self._tab_state[key]["last_rejection"] = ""
+        # Hide the feedback button since a new generate is starting.
+        try:
+            self._tab_widgets[key]["feedback_btn"].pack_forget()
+        except (tk.TclError, KeyError):
+            pass
+
         def _worker():
             # Both tabs get the always-on changed-file context (Phase 1.8).
             # Pushes the model toward per-file granularity regardless of
@@ -975,6 +1019,20 @@ class DocDrafterDialog(tk.Toplevel):
                 changed_files, boundary,
                 grounding_block=grounding)
 
+            # C3: append rejection feedback as a note in the user prompt
+            # (one-shot — last_rejection was cleared before the worker started).
+            if last_rejection:
+                user = (user + "\n\n---\nNote: your previous draft was rejected "
+                        f"for this reason — please address it:\n{last_rejection}")
+
+            # C1: merge global num_ctx setting into per-call gen_params so
+            # dispatch_llm can pass it to _call_llm / _call_openai_compat.
+            raw_cfg = self._cfg.raw if isinstance(self._cfg.raw, dict) else {}
+            global_num_ctx = raw_cfg.get("ollama_num_ctx", 0)
+            gen_params = dict(dt.gen_params)
+            if global_num_ctx and "num_ctx" not in gen_params:
+                gen_params["num_ctx"] = global_num_ctx
+
             if stop_event.is_set():
                 return
 
@@ -982,6 +1040,8 @@ class DocDrafterDialog(tk.Toplevel):
                 llm_cfg, system, user,
                 claude_cli_exe=self._cfg.claude_cli_exe,
                 cwd=project, timeout=120,
+                gen_params=gen_params or None,
+                examples=dt.examples or None,
             )
 
             if stop_event.is_set():
@@ -1312,13 +1372,36 @@ class DocDrafterDialog(tk.Toplevel):
                 # Offer to commit the change (matches CHANGELOG drafter UX).
                 self._on_commit_offer(self._project_path,
                                        f"{target} (doc-drafter)")
+                # C3: clear rejection state on success.
+                self._tab_state[key]["last_rejection"] = ""
+                try:
+                    self._tab_widgets[key]["feedback_btn"].pack_forget()
+                except (tk.TclError, KeyError):
+                    pass
             else:
                 status_msg = f"✗ {msg}{filter_suffix}"
                 self._set_status(key, status_msg, C["red"])
                 self._on_log(f"[doc-drafter] {target}: {msg}{filter_suffix}",
                              C["red"])
+                # C3: store rejection reason and reveal the retry button.
+                short_reason = msg[:300] if msg else "apply rejected"
+                self._tab_state[key]["last_rejection"] = short_reason
+                try:
+                    btn_row = self._tab_widgets[key]["btn_row"]
+                    fb_btn  = self._tab_widgets[key]["feedback_btn"]
+                    fb_btn.pack(in_=btn_row, side=tk.LEFT, padx=(6, 0))
+                except (tk.TclError, KeyError):
+                    pass
         except (tk.TclError, RuntimeError):
             return
+
+    def _on_regenerate_with_feedback(self, key):
+        """C3: Re-run Generate with the last rejection reason injected once."""
+        try:
+            self._tab_widgets[key]["feedback_btn"].pack_forget()
+        except (tk.TclError, KeyError):
+            pass
+        self._on_generate(key)
 
     @staticmethod
     def _format_filter_suffix(trunc_n, dup_n, noop_n=0):
