@@ -670,6 +670,10 @@ See [CHANGELOG.md](CHANGELOG.md) for the full history.
 
 **Recent highlights (Unreleased)** — see CHANGELOG.md for the detailed bullets on each:
 
+
+**Doc-drafter refinements**
+- 📝 Doc Updates… — refined bullet filtering with noop-removal and quality-based truncation, post-apply state preview for honest diffs, literal template/placeholder detection with mirror-contract safety validation, per-session backend override for flexible model selection, improved README deduplication and draft sanitization
+
 **Roadmap-6 — Ask tab + gitignore AI + doc-drafter**
 - 🤖 Ask tab — separate `ask_tab_llm` config (independent of commit-message model), Claude CLI provider option, SSE streaming for final-turn tokens, session log persistence (`logs/ask_sessions.md`)
 - 🤖 Gitignore AI Suggest — one-click AI-powered pattern recommendations in the .gitignore editor; CodeGraph SQLite used as a zero-cost project file listing when available; path-scoped basename dedup suppresses redundant `src/__pycache__/` style suggestions when the broader pattern is already ignored

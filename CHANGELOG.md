@@ -18,6 +18,16 @@
 - (ask-tab) project context injection — active project name + root path injected as second system message on fresh conversations
 - (ask-tab) auto-clear on project switch — conversation history cleared when a different project is selected
 - (help-tab) comprehensive static content overhaul — Merge vs Rebase, .gitignore, Code Graph preamble, per-feature LLM table, Ask tool list, pre-commit bypass docs; ask seeds changed to specific follow-up questions
+- (doc-drafter) `_simulate_changelog_body` + `_simulate_readme_body` — Phase 2.1 preview methods that show the post-apply file state without writing; ProposalBridge diff now compares current content vs. what-will-exist-after-patch for honest review before Apply. Simulation bypasses truncation/dedup/noop filters to show the upper bound of bullets that *may* be added (actual apply will strip these, visible to user in ProposalBridge for manual trimming).
+- (doc-drafter) `_LITERAL_PLACEHOLDER_RE` — literal template placeholder detection; catches `Roadmap-<N>`, `TODO`, `TBD`, `PLACEHOLDER`, `PENDING`, `<sub-section ...>` (case-insensitive) to flag unresolved document templates in LLM output before draft display.
+- (doc-drafter) `_mirror_contract_check` + `_compute_mirror_warning` — README mirror-mode safety checks; validates that the drafted highlights preserve at least 75% of existing bullets (since the README patcher REPLACES the entire block, omitting a mirrored bullet deletes it). Computes preservation score and warns user when contract violated.
+- (doc-drafter) `_is_noop_bullet` — filters literal placeholder bullets; drops `- None`, `- N/A`, `- Nothing`, `- TBD`, `- no changes`, `- (none)` (conservative: `^...$` anchoring preserves bullets like `- None of the patches handle case X`). Handles both dash and asterisk prefix and Windows CRLF line endings from Ollama streams.
+- (doc-drafter) `_filter_bullets` — unified bullet QA gate: applies truncation + dedup + noop-placeholder filters in one pass. CHANGELOG mode (default) dedups against on-disk bullets; README mode dedups only against kept draft bullets to preserve user's mirrored content, with quality-swap precedence (longer bullet wins by +8 character slack). Returns counters per rejection class for status-bar summary.
+- (doc-drafter) `_sanitise_raw_draft` — sanitizes raw LLM output before display; strips leading/trailing whitespace, normalizes line endings, removes trailing blank lines, collapses multiple blank lines within sections.
+- (doc-drafter) `_on_backend_override_changed` — per-session backend override dropdown in dialog header; lets user switch between configured LLM backends (Ollama / Claude CLI / Anthropic / OpenAI-compatible) for the active draft without restarting the dialog.
+```
+
+These bullets capture the 8 commits' distinct implementation changes that go beyond what's already documented in the current CHANGELOG entry for the 📝 Doc Updates dialog.
 
 ### Fixed
 - (agent-tools) tokensave CLI subcommands updated: `tokensave query` → `tokensave tool search`, `tokensave context` → `tokensave tool context` (old subcommands removed upstream)
