@@ -88,6 +88,38 @@ _NOOP_BULLET_PATTERNS = [
 ]
 
 
+# Phase 2.0 — literal template placeholder detector for README sub-section
+# headers.  Catches the leakage where a small model copies the prompt's
+# template literally instead of substituting real values.
+#
+# What MATCHES (rejected at apply-time with the candidate list in the error):
+#   - `Roadmap-<single ASCII letter>` where the letter is NOT followed by
+#     another letter or digit (so `Roadmap-N`, `Roadmap-X`, `Roadmap-Y`,
+#     `Roadmap-Z` match but `Roadmap-Native` and `Roadmap-N-API` do not)
+#   - `Roadmap-<angle-bracket placeholder>` (e.g. `Roadmap-<num>`)
+#   - Common placeholder words after `Roadmap-`: TODO, TBD, PLACEHOLDER,
+#     PENDING, NUM, NUMBER (case-insensitive)
+#   - The bare template marker `<sub-section header>` (from prompt example)
+#
+# What does NOT match:
+#   - Real numeric roadmaps: `Roadmap-6`, `Roadmap-77`, `Roadmap-123`
+#   - Multi-letter suffixes that may be legitimate: `Roadmap-Native`,
+#     `Roadmap-N-API-binding`, `Roadmap-Foo`
+#   - Non-Roadmap headers entirely
+#
+# Intentionally conservative — only flags patterns that NEVER appear in
+# legitimate human-written headers.  Avoids the regex whack-a-mole that
+# would come from trying to catch every shape a model could invent.
+_LITERAL_PLACEHOLDER_RE = re.compile(
+    r"\bRoadmap[-\s](?:"
+    r"[A-Za-z](?![A-Za-z0-9])"
+    r"|<[^>]+>"
+    r"|TODO\b|TBD\b|PLACEHOLDER\b|PENDING\b|NUM\b|NUMBER\b"
+    r")|<sub-section[^>]*>",
+    re.IGNORECASE,
+)
+
+
 def _is_noop_bullet(bullet):
     """True if the bullet is a literal placeholder with no content.
 
@@ -977,6 +1009,14 @@ class DocDrafterDialog(tk.Toplevel):
             if parsed is None:
                 return None
             header_line, bullets = parsed
+            # Phase 2.0 — surface literal-placeholder header errors at
+            # generate-time so the user sees the warning BEFORE clicking
+            # Apply.  Apply-time check will reject identically; this is
+            # the proactive UI hint.
+            if _LITERAL_PLACEHOLDER_RE.search(header_line):
+                return (f"⚠ HEADER ERROR: contains template placeholder "
+                        f"({header_line!r}).  Apply will be rejected.  "
+                        f"Regenerate or edit the header.")
             existing = read_subsection_bullets(target_path, header_line)
             if not existing:
                 return None             # genuinely new sub-section
@@ -1391,6 +1431,23 @@ class DocDrafterDialog(tk.Toplevel):
                            "README mode requires a sub-section header as "
                            "the first non-blank line.")
         header_line, bullets = parsed
+
+        # Phase 2.0 — hard-reject literal template placeholders the model
+        # copied from the prompt example (`Roadmap-N`, `Roadmap-<num>`,
+        # `Roadmap-TODO`, etc.).  These never appear in legitimate
+        # headers; surface the candidate-header list in the error so the
+        # user can pick the right one to edit in.
+        if _LITERAL_PLACEHOLDER_RE.search(header_line):
+            candidates = dd._extract_subsection_headers(
+                read_highlights(target_path))
+            candidates_msg = "\n  ".join("• " + h for h in candidates[:5])
+            return False, (
+                f"Header contains a literal template placeholder: "
+                f"{header_line!r}.  Edit the draft to use a real header, "
+                f"or click Regenerate.  Existing candidates to REUSE if "
+                f"your bullets belong:\n  "
+                f"{candidates_msg if candidates else '(none — your sub-section is brand new; use a concrete number like Roadmap-6 or Roadmap-7)'}"
+            )
 
         # Filter at Apply-time too (safety net for user-edited content).
         # README mode: the patcher REPLACES the matching sub-section, so the

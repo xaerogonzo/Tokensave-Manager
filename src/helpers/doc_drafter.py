@@ -18,6 +18,7 @@ Pure-function module — no Tkinter.  Safe to call from any thread.
 from __future__ import annotations
 
 import os
+import re
 import subprocess
 
 from constants import CREATE_NO_WINDOW
@@ -399,9 +400,15 @@ _README_SYSTEM = (
     "- Output exactly ONE sub-section.  No surrounding anchor line, no "
     "`---` separator, no other sub-sections, no prose preamble, no "
     "explanations, no markdown code fences.\n"
-    "- The first line MUST be the bold header in the form "
-    "`**Roadmap-N — short topic**` (or, if not roadmap-scoped, "
-    "`**Feature area — short topic**`).\n"
+    "- The first line MUST be the bold header.  Inspect the 'Candidate "
+    "sub-section headers' list in the user prompt below.  If any "
+    "candidate thematically matches your new bullets (e.g. continuing "
+    "an ongoing roadmap effort), output that candidate VERBATIM — "
+    "copy it character-for-character including emoji and dash style.  "
+    "When no candidate fits, create a NEW header using a CONCRETE "
+    "roadmap number from context (e.g. `**Roadmap-6 — short topic**` "
+    "or `**Roadmap-7 — short topic**`), or `**Feature area — short "
+    "topic**` for non-roadmap work.\n"
     "- Bullets are verb-first, technical detail in parens (file paths, "
     "helper names, threshold values).  No marketing fluff.  Match the "
     "voice of bullets in the 'Current highlights body' below.\n"
@@ -423,6 +430,43 @@ _README_SYSTEM = (
     "mega-bullet.  Existing bullets stay verbatim; new bullets get the "
     "per-feature treatment."
 )
+
+
+# Phase 2.0 — sub-section header detection for the prompt's candidate-list
+# block.  Whitespace tolerance before the optional colon catches manually-
+# edited `**Header** :` forms.  Indented `  **Header**  ` also matches.
+# Mid-line bold inside a paragraph does NOT match (entire line must be
+# the bold span — anchored with `^\s*` and `\s*:?\s*$`).
+#
+# Used ONLY for prompt enumeration.  The apply-time matching stays with
+# `_normalise_subheader` in `helpers/readme_patch.py` — that's the single
+# source of truth for "does this header match an existing sub-section".
+_SUBSECTION_HEADER_RE = re.compile(
+    r"^\s*(\*\*[^\n*][^\n]*\*\*)\s*:?\s*$"
+)
+
+
+def _extract_subsection_headers(highlights_body):
+    """Return list of bold-header lines from a highlights body, verbatim.
+
+    Used by `build_readme_prompt` to give the model an explicit menu of
+    headers it can reuse character-for-character — small models follow
+    enumerated candidate lists far better than they follow "look at the
+    body and infer" instructions.
+
+    Returns the headers with their ``**`` markers intact.  ATX
+    ``### Header`` style is NOT supported (project convention is bold
+    sub-headers); if a future project mixes formats, that's a Roadmap-7
+    cross-format support item.
+    """
+    if not highlights_body:
+        return []
+    headers = []
+    for line in highlights_body.splitlines():
+        m = _SUBSECTION_HEADER_RE.match(line)
+        if m:
+            headers.append(m.group(1))
+    return headers
 
 
 def _render_commit_list(classified):
@@ -548,6 +592,23 @@ def build_readme_prompt(commits, classified, existing_highlights,
         parts.append("[Changed files] (repo-root-relative paths):")
         for p in changed_files:
             parts.append(f"  {p}")
+        parts.append("")
+    # Phase 2.0 — explicit candidate-header menu.  Small models follow
+    # enumerated lists FAR better than they follow "look at the body and
+    # infer the right header" instructions.  Reduces frequency of the
+    # `Roadmap-N` literal-placeholder hallucination by giving the model a
+    # concrete set of headers to choose from.  Hint only — the apply path
+    # does NOT consult this list; `_normalise_subheader` in readme_patch.py
+    # remains the single source of truth for header matching.
+    existing_headers = _extract_subsection_headers(existing_highlights)
+    if existing_headers:
+        parts.append("Candidate sub-section headers from current highlights "
+                     "body (REUSE one character-for-character if your bullets "
+                     "thematically belong; otherwise create a new header "
+                     "with a concrete roadmap number like Roadmap-6 or "
+                     "Roadmap-7):")
+        for h in existing_headers:
+            parts.append(f"  {h}")
         parts.append("")
     parts.append("Current README 'Recent highlights (Unreleased)' block body "
                  "(preserve old sub-sections, only add/update what this "
