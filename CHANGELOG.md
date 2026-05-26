@@ -25,30 +25,11 @@
 - (doc-drafter) `_filter_bullets` — unified bullet QA gate: applies truncation + dedup + noop-placeholder filters in one pass. CHANGELOG mode (default) dedups against on-disk bullets; README mode dedups only against kept draft bullets to preserve user's mirrored content, with quality-swap precedence (longer bullet wins by +8 character slack). Returns counters per rejection class for status-bar summary.
 - (doc-drafter) `_sanitise_raw_draft` — sanitizes raw LLM output before display; strips leading/trailing whitespace, normalizes line endings, removes trailing blank lines, collapses multiple blank lines within sections.
 - (doc-drafter) `_on_backend_override_changed` — per-session backend override dropdown in dialog header; lets user switch between configured LLM backends (Ollama / Claude CLI / Anthropic / OpenAI-compatible) for the active draft without restarting the dialog.
-```
-
-These bullets capture the 8 commits' distinct implementation changes that go beyond what's already documented in the current CHANGELOG entry for the 📝 Doc Updates dialog.
-```
-
-These bullets capture the 8 commits' distinct implementation changes that go beyond what's already documented in the current CHANGELOG entry for the 📝 Doc Updates dialog.
-```
-
-These bullets capture the 8 commits' distinct implementation changes that go beyond what's already documented in the current CHANGELOG entry for the 📝 Doc Updates dialog.
-```
-
-These bullets capture the 8 commits' distinct implementation changes that go beyond what's already documented in the current CHANGELOG entry for the 📝 Doc Updates dialog.
-- (projects-tab) add roadmap manager dialog command (`RoadmapMgrDialog` in `src/dialogs/roadmap_mgr.py`)
-- (doc-drafter) enable agentic tokensave tool integration (`_enable_agentic_tokensave_tool` in `src/helpers/doc_drafter.py`)
-- (doc-drafter) add feedback-driven regeneration and warm-up support (`_feedback_driven_regeneration` in `src/helpers/doc_drafter.py`)
-- (doc-drafter) integrate tokensave grounding injection (`_integrate_grounding_injection` in `src/helpers/doc_drafter.py`)
 
 ### Fixed
 - (agent-tools) tokensave CLI subcommands updated: `tokensave query` → `tokensave tool search`, `tokensave context` → `tokensave tool context` (old subcommands removed upstream)
 - (agent-tools) NameError `cli_subcommand` — stale variable reference after previous refactor; fixed to use `subcommand` parameter
 - (doc-drafter) set default value of ts_tools_var to True (`ts_tools_var` in `src/dialogs/doc_drafter.py`)
-- (projects-tab) remove draft CHANGELOG entry command (`_remove_draft_changelog_entry` in `src/controllers/projects_tab.py`)
-- (ai-tasks) pass git executable to version functions (`_get_git_version` in `src/controllers/ai_tasks_ctrl.py`)
-- (doc-drafter) narrow doc pathspec to prevent masking code commits (`_narrow_doc_pathspec` in `src/helpers/doc_drafter.py`)
 
 ### Changed
 - (doc-drafter) `_CHANGELOG_SYSTEM` prompt rewritten — model now outputs ONLY NEW bullets grouped by `### Section` header instead of regenerating the whole `[Unreleased]` block. Old prompt asked qwen2.5-coder:14b to "preserve + consolidate" 200+ lines, which it handled by aggressively summarising 11 detailed Added bullets into one generic "automated CHANGELOG updates via AI" line (live dogfooding caught this before any Apply). New prompt is append-only by design; existing content stays verbatim, patcher splices new bullets into the right sub-sections. `build_changelog_prompt` user prompt rephrased: existing `[Unreleased]` now framed as DO-NOT-REPEAT context. (`src/helpers/doc_drafter.py`)
@@ -59,7 +40,7 @@ These bullets capture the 8 commits' distinct implementation changes that go bey
 - (projects_tab.py) refactor: extract helpers to simplify complex methods
 - (gitignore.py) refactor: extract helpers to simplify complex methods
 - (doc_drafter.py) refactor: extract helpers to simplify complex methods
-- (doc-drafter) consolidate to DocType registry pattern (`DocTypeRegistry` in `src/helpers/doc_types.py`)
+
 ## [1.1.0] — 2026-05-25
 
 ### Added

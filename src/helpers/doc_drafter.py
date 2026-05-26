@@ -39,6 +39,78 @@ _DOC_PATHSPECS = ["CHANGELOG.md", "README.md"]
 _SPARSE_AVG_THRESHOLD = 15
 
 
+# ── Prompt-output STOP marker + shared rules ─────────────────────────────────
+#
+# Every system prompt asks the model to emit `<<<END_OF_DRAFT>>>` as its final
+# line. The post-processor truncates the draft at that marker so trailing
+# prose ("These bullets capture...", "In summary..."), echo-loops, and
+# rambling explanations are stripped before the filter runs. The marker is
+# intentionally a triple-bracketed multi-word token so that legitimate
+# documentation referencing `[end]` in prose or code samples cannot
+# false-positive trigger truncation.
+
+# Case-insensitive + multiline. Tolerates surrounding markdown decoration
+# (heading hash, bold, blockquote prefix). Whole-line match — the marker must
+# be alone on its line (possibly with decoration) to count.
+_END_MARKER_RE = re.compile(
+    r"(?im)^[\s>#*_`]*<<<\s*end[_\s]of[_\s]draft\s*>>>[\s.>#*_`]*$"
+)
+
+
+def _strip_end_marker(text: str) -> str:
+    """Truncate ``text`` at the first ``<<<END_OF_DRAFT>>>`` marker.
+
+    Also drops a dangling unclosed code fence if the truncation lands inside
+    an open ``` block — appending a closing fence at root indentation would
+    risk corrupting nested-block layouts (a blockquote-internal fence
+    appended without ``> `` prefix would render as a separate sibling block).
+    Dropping the half-open fence is the conservative choice.
+    """
+    if not text:
+        return text
+    m = _END_MARKER_RE.search(text)
+    if not m:
+        return text
+    truncated = text[:m.start()].rstrip()
+    if truncated.count("```") % 2 == 1:
+        # Odd fence count → there's an open fence we can't close cleanly.
+        # Cut everything from the unclosed fence onward.
+        last_fence = truncated.rfind("```")
+        if last_fence >= 0:
+            line_start = truncated.rfind("\n", 0, last_fence)
+            truncated = truncated[:line_start].rstrip() if line_start >= 0 else ""
+    return truncated
+
+
+# Shared rule blocks appended to every _*_SYSTEM constant. Centralising them
+# here keeps the six prompts in lockstep — a single edit to either rule
+# propagates to all drafters.
+_STOP_MARKER_RULE = (
+    "\n\nTermination (MANDATORY):\n"
+    "- After the LAST line of valid output, write a line containing only "
+    "`<<<END_OF_DRAFT>>>` and stop. Do NOT write any prose, note, summary, "
+    "explanation, or further markdown after the marker. The post-processor "
+    "strips the marker AND everything after it; anything you put past the "
+    "marker will be silently discarded."
+)
+
+_ANTI_FABRICATION_RULE = (
+    "\n\nGrounding (MANDATORY):\n"
+    "- NEVER invent details that are not visible in the commit subjects, "
+    "classified changes, or changed-file paths in the user prompt below. "
+    "If a commit subject says only \"feat(llm): tighten prompt\", do NOT "
+    "write \"Idempotent; safe to run on CI/release pipelines\" or other "
+    "padding that is not in the diff. A generic-but-accurate bullet "
+    "((llm) tighten commit-message prompt) is better than a detailed-"
+    "but-fabricated one.\n"
+    "- NEVER invent symbol names. Function, class, and module names you "
+    "cite in backticks MUST appear in the changed-file paths or be "
+    "derivable from them. Do NOT make up plausible-sounding names like "
+    "`DocTypeRegistry`, `_enable_agentic_tokensave_tool`, or "
+    "`_feedback_driven_regeneration` to fill space."
+)
+
+
 # ── Commit-range resolution ──────────────────────────────────────────────────
 
 def _last_doc_commit_sha(project_path, git_exe, pathspecs=None):
@@ -379,7 +451,7 @@ _CHANGELOG_SYSTEM = (
     "- When the commit range spans MULTIPLE distinct features (e.g. a "
     "truncation fix AND a redundancy filter AND a CI cleanup), produce "
     "separate bullets for each feature — do NOT collapse them into one."
-)
+) + _ANTI_FABRICATION_RULE + _STOP_MARKER_RULE
 
 _README_SYSTEM = (
     "You are a README.md maintainer.  Draft ONE bold sub-section for the "
@@ -435,7 +507,7 @@ _README_SYSTEM = (
     "bullets for each — do NOT collapse them into one comma-separated "
     "mega-bullet.  Existing bullets stay verbatim; new bullets get the "
     "per-feature treatment."
-)
+) + _ANTI_FABRICATION_RULE + _STOP_MARKER_RULE
 
 
 # Phase 2.0 — sub-section header detection for the prompt's candidate-list
@@ -488,15 +560,67 @@ def _render_commit_list(classified):
     return "\n".join(lines).strip()
 
 
+# Scope-prefix pattern for CHANGELOG-style bullets, e.g.
+# "- (doc-drafter) ..." → captures "doc-drafter". {1,30} bounds the scope to
+# a reasonable identifier length; the longest scope in this project is
+# `gitignore-dialog` (16 chars).
+_SCOPE_PREFIX_RE = re.compile(r"^\s*[-*]\s+\(([^)]{1,30})\)")
+
+
+def _extract_scope_prefixes(bullets, limit=12):
+    """Pull unique `(scope-name)` prefixes from a list of bullets.
+
+    Returning prefixes (not full bullets) lets the model see what scope
+    vocabulary the project uses without anchoring on the specific symbols
+    or wording inside the bullets themselves. Local 14B-class models tend
+    to copy semantic content from any sample bullets shown — leaking the
+    bullets themselves causes context contamination that an explicit
+    "do not echo" instruction cannot reliably prevent.
+    """
+    seen = []
+    for b in bullets:
+        m = _SCOPE_PREFIX_RE.match(b)
+        if m and m.group(1) not in seen:
+            seen.append(m.group(1))
+            if len(seen) >= limit:
+                break
+    return seen
+
+
+def _summarise_existing_headings(existing_text, max_levels=3):
+    """Return an indented list of headings present in `existing_text`, up to
+    `max_levels` deep. Used by build_architecture_prompt /
+    build_roadmap_prompt / build_generic_doc_prompt to give the model
+    section-structure context without dumping the full file body.
+
+    Level-1 (`# `) is skipped (document title); level-(max_levels+1) and
+    deeper are skipped (over-detailed for the navigation purpose).
+    """
+    lines = []
+    for ln in (existing_text or "").splitlines():
+        stripped = ln.strip()
+        if not stripped.startswith("#"):
+            continue
+        n = len(stripped) - len(stripped.lstrip("#"))
+        if 2 <= n <= max_levels:
+            indent = "  " * (n - 2)
+            lines.append(f"  {indent}- {stripped}")
+    if not lines:
+        return "  (no existing sections)"
+    return "\n".join(lines)
+
+
 def build_changelog_prompt(commits, classified, existing_unreleased,
                            project_name, project_desc,
                            changed_files, boundary_note):
     """Return (system_prompt, user_prompt) for the CHANGELOG tab.
 
-    ``existing_unreleased`` is the current body of the [Unreleased] block
-    (output of ``helpers.changelog_patch.read_unreleased``).  Empty string
-    is fine.
+    Existing [Unreleased] content is summarised as section name + bullet
+    count + scope-prefix vocabulary, NOT dumped verbatim. The patcher
+    handles dedup against on-disk content; the model only needs to know
+    which section headers exist and what scope-prefix style to match.
     """
+    from helpers.changelog_patch import read_section_bullets_from_text
     system = _CHANGELOG_SYSTEM
     parts = [
         f"Project: {project_name}",
@@ -507,9 +631,6 @@ def build_changelog_prompt(commits, classified, existing_unreleased,
         parts.append("")
         parts.append(boundary_note)
     parts.append("")
-    # Per-commit subject summary — gives the model a quick view of how
-    # MANY commits there are and what each one was about, pushing it
-    # toward per-commit granularity in the output bullets.
     if commits:
         parts.append("Commits in range (use these to infer per-change "
                      "granularity — produce roughly one bullet per "
@@ -523,21 +644,43 @@ def build_changelog_prompt(commits, classified, existing_unreleased,
     parts.append("")
     parts.append(_render_commit_list(classified) or "(no commits classified)")
     parts.append("")
-    # ALWAYS include the changed-file list for CHANGELOG mode (not just
-    # in sparse-commit mode like README).  Knowing exactly which files
-    # were touched lets the model produce per-file granular bullets even
-    # when commit subjects are detailed.
     if changed_files:
         parts.append("[Changed files] (repo-root-relative paths):")
         for p in changed_files:
             parts.append(f"  {p}")
         parts.append("")
-    parts.append("Current [Unreleased] content (DO NOT repeat, restate, or "
-                 "consolidate any of these — the patcher keeps them VERBATIM; "
-                 "your job is only to ADD new bullets for the commit range "
-                 "above):")
-    parts.append("")
-    parts.append(existing_unreleased or "(currently empty)")
+
+    # U2-CHANGELOG: section-summary + scope-prefix vocab, NOT a verbatim
+    # dump of the existing [Unreleased] body. Dumping the full body would
+    # invite the model to use it as a template and re-emit existing bullets.
+    summary_lines = []
+    all_existing_bullets = []
+    for sec in ("Added", "Changed", "Fixed", "Removed"):
+        ebs = read_section_bullets_from_text(existing_unreleased or "", sec)
+        if not ebs:
+            continue
+        summary_lines.append(
+            f"  ### {sec}: {len(ebs)} existing bullet(s) "
+            "(patcher preserves verbatim — do NOT echo)"
+        )
+        all_existing_bullets.extend(ebs)
+
+    if summary_lines:
+        parts.append("Existing [Unreleased] sections (patcher will preserve "
+                     "verbatim; your job is ONLY to add NEW bullets for the "
+                     "commits above — do NOT repeat or paraphrase any "
+                     "existing content):")
+        parts.extend(summary_lines)
+        scopes = _extract_scope_prefixes(all_existing_bullets)
+        if scopes:
+            parts.append("")
+            parts.append("Scope prefixes used in this project — match this "
+                         "vocabulary for your NEW bullets (pick the existing "
+                         "one when applicable; only invent a new scope if "
+                         "none fits):")
+            parts.append("  " + ", ".join(f"({s})" for s in scopes))
+    else:
+        parts.append("[Unreleased] is currently empty — add the first bullets.")
 
     if is_sparse(commits):
         parts.append("")
@@ -616,11 +759,28 @@ def build_readme_prompt(commits, classified, existing_highlights,
         for h in existing_headers:
             parts.append(f"  {h}")
         parts.append("")
-    parts.append("Current README 'Recent highlights (Unreleased)' block body "
-                 "(preserve old sub-sections, only add/update what this "
-                 "commit range actually changes):")
-    parts.append("")
-    parts.append(existing_highlights or "(currently empty)")
+    # F2b: explicit MIRROR-CONTRACT framing instead of generic "current body"
+    # dump. README's patcher REPLACES the entire matched sub-section, so
+    # omitting a bullet DELETES it from the file — the existing-bullet echo
+    # is structurally required, not optional. Spelling out the contract
+    # explicitly raises compliance vs. asking the model to reverse-engineer
+    # the requirement from a free-form body dump.
+    if existing_highlights and existing_highlights.strip():
+        parts.append("MIRROR-CONTRACT — when you pick a candidate sub-section "
+                     "header above to extend, your output for that header MUST "
+                     "start with the EXACT existing bullets shown below for "
+                     "that sub-section, character-for-character VERBATIM and "
+                     "IN THE SAME ORDER. Then add your NEW bullets BELOW the "
+                     "existing ones. A code-side mirror-contract check "
+                     "REJECTS any draft that drops more than 25% of the "
+                     "existing bullets in the matched sub-section. The full "
+                     "current highlights body is below; copy your matched "
+                     "sub-section's bullets exactly:")
+        parts.append("")
+        parts.append(existing_highlights)
+    else:
+        parts.append("(Highlights block is currently empty — create the first "
+                     "sub-section.)")
 
     if is_sparse(commits):
         parts.append("")
@@ -783,20 +943,19 @@ def dispatch_llm(llm_cfg, system_prompt, user_prompt,
             return result, None
 
         from helpers.llm import _call_llm
-        # Adaptive token cap — _call_llm defaults to 1500 which is fine for
-        # commit messages but cramped for grouped CHANGELOG bullets where the
-        # model needs to emit multiple sub-section headers + several bullets
-        # each. Bump for larger prompts; throttle DOWN to 1000 for tiny ranges
-        # so Ollama on constrained hardware doesn't allocate context it won't
-        # use. Truncation guard in _parse_grouped_bullets catches cases where
-        # even 2500 isn't enough.
+        # Adaptive token cap. After Roadmap-7 prompt hardening (U2 swapped
+        # full existing-content dumps for header summaries / scope-prefix
+        # vocab), typical prompts dropped below the previous "large" branch,
+        # so the per-branch ceilings are tightened. The STOP marker added in
+        # U1 also gives the model a positive termination signal, reducing
+        # the need for headroom against ramble.
         prompt_chars = len(system_prompt or "") + len(user_prompt or "")
         if prompt_chars < 1500:
-            max_tokens = 1000           # tiny range → speed mode
-        elif prompt_chars < 6000:
-            max_tokens = 2000           # typical
+            max_tokens = 1000          # tiny range → speed mode
+        elif prompt_chars < 4000:
+            max_tokens = 1500          # was 2000 — typical post-U2
         else:
-            max_tokens = 2500           # large existing-content context
+            max_tokens = 2000          # was 2500 — large-context ceiling
         result = _call_llm(llm_cfg, system_prompt, user_prompt,
                            max_tokens=max_tokens)
         if not result:
@@ -887,15 +1046,47 @@ def _token_set(bullet):
     return {t for t in s.split() if t not in _STOP_WORDS and len(t) > 2}
 
 
-def _is_duplicate(new_bullet, existing_bullet):
-    a = _token_set(new_bullet)
-    b = _token_set(existing_bullet)
+def _is_duplicate_from_sets(a, b):
+    """Cheap Jaccard/overlap duplicate check on pre-computed token sets.
+
+    Callers that already have ``_token_set`` results in hand should use this
+    to avoid rebuilding the token set on every comparison. ``_is_duplicate``
+    below is a thin wrapper for the convenience case.
+    """
     if not a or not b:
         return False
     union = a | b
     jaccard = len(a & b) / len(union) if union else 0.0
     overlap = len(a & b) / min(len(a), len(b))
     return jaccard >= 0.6 or overlap >= 0.65
+
+
+def _is_duplicate(new_bullet, existing_bullet):
+    return _is_duplicate_from_sets(
+        _token_set(new_bullet), _token_set(existing_bullet)
+    )
+
+
+# Bullet-shape patterns used by parse_grouped_bullets / _filter_bullets to
+# distinguish legitimate bullets and their indented continuations from
+# prose paragraphs, footer text, and code-fence detritus the model can emit
+# between bullet groups.
+_BULLET_LINE_RE = re.compile(r"^\s*[-*]\s+\S")
+_INDENTED_CONTINUATION_RE = re.compile(r"^\s{2,}\S")
+
+
+def _normalise_bullet(line):
+    """Lowercased, marker-stripped, whitespace-collapsed comparison key.
+
+    Used as the set-membership token for O(1) exact-dedup. Two bullets that
+    differ only in marker style ("- foo" vs "* foo"), spacing, or casing
+    collapse to the same key. Paraphrased near-duplicates still need the
+    fuzzy `_is_duplicate_from_sets` fallback — this is the cheap first pass.
+    """
+    return re.sub(
+        r"\s+", " ",
+        re.sub(r"^\s*[-*]\s+", "", line or "").strip().lower(),
+    )
 
 
 def _sanitise_raw_draft(text):
@@ -967,14 +1158,37 @@ def _mirror_contract_check(draft_bullets, existing_bullets,
 
 def _filter_bullets(bullets_md, existing_bullets, *,
                     dedup_against_existing=True):
+    """Apply truncation / noop / dedup filters to a bullet body.
+
+    Drops non-bullet lines entirely (prose paragraphs the model added between
+    bullets, footer commentary, code-fence detritus). Blank lines are kept as
+    group separators only; everything else that isn't a ``- `` / ``* ``
+    prefixed bullet is silently discarded.
+
+    Performance: pre-computes the exact-normalised-key set AND the token-set
+    list for existing bullets ONCE outside the per-bullet loop, so the
+    Jaccard fuzzy fallback no longer rebuilds the token set on every
+    comparison. The O(1) exact check handles verbatim copies; the fuzzy
+    check only runs when exact-match fails.
+    """
     kept = []
-    truncated_n = 0
-    duplicate_n = 0
-    noop_n = 0
+    seen_norm = set()
+    truncated_n = duplicate_n = noop_n = 0
+
+    # Pre-compute existing-bullet comparison data.
+    existing_norm = set()
+    existing_token_sets = []
+    if dedup_against_existing:
+        for eb in existing_bullets:
+            existing_norm.add(_normalise_bullet(eb))
+            existing_token_sets.append(_token_set(eb))
+
     for line in bullets_md.splitlines():
         stripped = line.lstrip()
         if not (stripped.startswith("- ") or stripped.startswith("* ")):
-            kept.append(line)
+            # Non-bullet line — keep ONLY blank separators; drop prose.
+            if not stripped:
+                kept.append(line)
             continue
         if _looks_truncated(stripped):
             truncated_n += 1
@@ -982,18 +1196,39 @@ def _filter_bullets(bullets_md, existing_bullets, *,
         if _is_noop_bullet(stripped):
             noop_n += 1
             continue
+
+        norm = _normalise_bullet(stripped)
+
+        # In-draft exact dedup (O(1)). Catches echo-loop bullets within the
+        # same section or merged-from-multiple-occurrences body.
+        if norm in seen_norm:
+            duplicate_n += 1
+            continue
+
         if dedup_against_existing:
-            if any(_is_duplicate(stripped, eb) for eb in existing_bullets):
+            # Exact-match check first (O(1) set lookup).
+            if norm in existing_norm:
+                duplicate_n += 1
+                continue
+            # Fuzzy fallback for paraphrased near-duplicates, reusing the
+            # pre-computed token sets.
+            new_tokens = _token_set(stripped)
+            if any(_is_duplicate_from_sets(new_tokens, eb_tokens)
+                   for eb_tokens in existing_token_sets):
                 duplicate_n += 1
                 continue
             kept.append(line)
         else:
+            # README path — also fuzzy-dedup against in-draft kept bullets to
+            # collapse the "model emitted the same bullet twice" case, with
+            # the existing quality-swap precedence (longer bullet wins).
             is_dup = False
+            new_tokens = _token_set(stripped)
             for idx, kb in enumerate(kept):
                 kb_stripped = kb.lstrip()
                 if not kb_stripped.startswith(("- ", "* ")):
                     continue
-                if _is_duplicate(stripped, kb_stripped):
+                if _is_duplicate_from_sets(new_tokens, _token_set(kb_stripped)):
                     is_dup = True
                     if len(stripped) > len(kb_stripped) + 8:
                         kept[idx] = line
@@ -1001,26 +1236,65 @@ def _filter_bullets(bullets_md, existing_bullets, *,
                     break
             if not is_dup:
                 kept.append(line)
+
+        seen_norm.add(norm)
     return "\n".join(kept).strip(), truncated_n, duplicate_n, noop_n
 
 
 def parse_grouped_bullets(draft_text):
-    """Parse '### Header / - bullet ...' grouped output into (header, body) pairs."""
+    """Parse '### Header / - bullet ...' grouped output into (header, body) pairs.
+
+    Bullets-only collection: lines under a ``### Section`` header are kept
+    only if they are bullet lines, indented continuations of a preceding
+    bullet, or blank separators between bullets. Prose paragraphs, code
+    fences, footer commentary ("These bullets capture..."), and indented
+    paragraphs not following a bullet are silently dropped — they were the
+    primary vector for echo-loop and prose-pollution failures.
+
+    ``last_was_bullet_like`` state-gates BOTH continuations and blank lines:
+
+      - A blank line is kept only if the previous kept line was a bullet
+        (preserves the visual gap between bullet groups).
+      - An indented continuation is kept only if the previous kept line
+        was a bullet or another continuation (prevents a model-written
+        indented paragraph from leaking through as if it were continuation).
+    """
     pairs = []
     current_section = None
     current_lines = []
+    last_was_bullet_like = False
     for ln in draft_text.splitlines():
         stripped = ln.strip()
         if stripped.startswith("### "):
             if current_section is not None:
+                while current_lines and not current_lines[-1].strip():
+                    current_lines.pop()
                 body = "\n".join(current_lines).strip()
                 if body:
                     pairs.append((current_section, body))
             current_section = stripped[4:].strip()
             current_lines = []
+            last_was_bullet_like = False
         elif current_section is not None:
-            current_lines.append(ln)
+            is_bullet = bool(_BULLET_LINE_RE.match(ln))
+            is_blank  = (not stripped)
+            is_cont   = (bool(_INDENTED_CONTINUATION_RE.match(ln))
+                         and last_was_bullet_like)
+            if is_bullet:
+                current_lines.append(ln)
+                last_was_bullet_like = True
+            elif is_cont:
+                current_lines.append(ln)
+                # last_was_bullet_like stays True — bullet group continues
+            elif is_blank and last_was_bullet_like:
+                current_lines.append(ln)
+                last_was_bullet_like = False
+            # Everything else is silently dropped (prose, unindented prose,
+            # code fences, footer markers, indented paragraphs that don't
+            # follow a bullet).
     if current_section is not None:
+        while current_lines and not current_lines[-1].strip():
+            current_lines.pop()
         body = "\n".join(current_lines).strip()
         if body:
             pairs.append((current_section, body))
@@ -1055,13 +1329,35 @@ def split_readme_subsection(draft_text):
 # helpers/doc_types.py without circular imports.
 
 def changelog_filter_draft(raw_text, target_path):
-    """Filter changelog draft. Returns (filtered_text, trunc_n, dup_n, noop_n)."""
+    """Filter changelog draft. Returns (filtered_text, trunc_n, dup_n, noop_n).
+
+    Pipeline:
+      1. Strip <<<END_OF_DRAFT>>> marker and anything past it.
+      2. Sanitise (whitespace, leading fences) via _sanitise_raw_draft.
+      3. Parse `### Section / - bullet` groups (bullets-only — prose dropped).
+      4. Merge same-section pairs so a model that emits "### Added" twice
+         has both batches consolidated before dedup.
+      5. Per section: dedup against on-disk bullets + filter noops/truncation.
+    """
     from helpers.changelog_patch import read_section_bullets
-    sanitised = _sanitise_raw_draft(raw_text or "")
-    total_trunc = total_dup = total_noop = 0
+    text = _strip_end_marker(raw_text or "")
+    sanitised = _sanitise_raw_draft(text)
     pairs = parse_grouped_bullets(sanitised)
-    kept_pairs = []
+
+    # F1b: merge same-section pairs before filtering.
+    merged: "dict[str, list[str]]" = {}
+    order: "list[str]" = []
     for section, bullets in pairs:
+        key = section.strip()
+        if key not in merged:
+            merged[key] = []
+            order.append(key)
+        merged[key].append(bullets)
+    merged_pairs = [(sec, "\n".join(merged[sec])) for sec in order]
+
+    kept_pairs = []
+    total_trunc = total_dup = total_noop = 0
+    for section, bullets in merged_pairs:
         existing = read_section_bullets(target_path, section)
         filtered, t_n, d_n, n_n = _filter_bullets(bullets, existing)
         total_trunc += t_n
@@ -1076,7 +1372,8 @@ def changelog_filter_draft(raw_text, target_path):
 def readme_filter_draft(raw_text, target_path):
     """Filter readme draft. Returns (filtered_text, trunc_n, dup_n, noop_n)."""
     from helpers.readme_patch import read_subsection_bullets
-    sanitised = _sanitise_raw_draft(raw_text or "")
+    text = _strip_end_marker(raw_text or "")
+    sanitised = _sanitise_raw_draft(text)
     parsed = split_readme_subsection(sanitised)
     if parsed is None:
         return sanitised, 0, 0, 0
@@ -1232,7 +1529,7 @@ _ARCHITECTURE_SYSTEM = (
     "``read_unreleased``, ``_compute_insert_*``.\n"
     "- Do NOT invent details not supported by the commits or existing text.\n"
     "- Do NOT ask for permission or confirmation.  Just output the section."
-)
+) + _ANTI_FABRICATION_RULE + _STOP_MARKER_RULE
 
 _ROADMAP_SYSTEM = (
     "You are a roadmap document maintainer.\n\n"
@@ -1255,7 +1552,7 @@ _ROADMAP_SYSTEM = (
     "- Body text per entry: 1–3 short sentences.  Technical, not marketing.\n"
     "- Only describe work evidenced by the provided commits.\n"
     "- Do NOT ask for permission or confirmation.  Just output the section."
-)
+) + _ANTI_FABRICATION_RULE + _STOP_MARKER_RULE
 
 _MEMORY_SYSTEM = (
     "You are a persistent-memory file author.\n\n"
@@ -1270,7 +1567,7 @@ _MEMORY_SYSTEM = (
     "- Be specific and actionable.  'Always use X when Y' beats 'Consider X'.\n"
     "- No filler, no hedging.\n"
     "- Do NOT ask for permission or confirmation.  Just output the content."
-)
+) + _ANTI_FABRICATION_RULE + _STOP_MARKER_RULE
 
 _GENERIC_DOC_SYSTEM = (
     "You are a markdown documentation maintainer.\n\n"
@@ -1287,7 +1584,7 @@ _GENERIC_DOC_SYSTEM = (
     "Only ADD or UPDATE what the commits actually change.\n"
     "- Match the voice and style of the existing document.\n"
     "- Do NOT ask for permission or confirmation.  Just output the section."
-)
+) + _ANTI_FABRICATION_RULE + _STOP_MARKER_RULE
 
 
 # ── Phase 2 build_prompt functions ───────────────────────────────────────────
@@ -1330,11 +1627,11 @@ def build_architecture_prompt(commits, classified, existing_full,
         parts.append(grounding_block)
     parts.append("")
     parts.append(
-        "Current ARCHITECTURE.md (update the section most affected by "
-        "these commits; output exactly that section with ## heading):"
+        "Existing ARCHITECTURE.md sections (pick the one most affected by "
+        "the commits above; patcher will splice or replace just that "
+        "section — do NOT echo other sections, do NOT duplicate a heading):"
     )
-    parts.append("")
-    parts.append(existing_full or "(currently empty)")
+    parts.append(_summarise_existing_headings(existing_full, max_levels=3))
     return system, "\n".join(parts)
 
 
@@ -1357,11 +1654,11 @@ def build_roadmap_prompt(commits, classified, existing_full,
         parts.append(grounding_block)
     parts.append("")
     parts.append(
-        "Current ROADMAP.md (identify the active roadmap number from "
-        "context; output the updated ## Roadmap N section):"
+        "Existing ROADMAP.md sections (identify the active roadmap number "
+        "from the headings below; output ONE updated ## Roadmap N section "
+        "— patcher splices/replaces just that one):"
     )
-    parts.append("")
-    parts.append(existing_full or "(currently empty)")
+    parts.append(_summarise_existing_headings(existing_full, max_levels=3))
     return system, "\n".join(parts)
 
 
@@ -1383,9 +1680,22 @@ def build_memory_prompt(commits, classified, existing_body,
         parts.append("")
         parts.append(grounding_block)
     parts.append("")
-    parts.append("Current memory body (update or extend based on commits):")
+    # U2-MEMORY: soft 4000-char ceiling. Preserves continuity for typical
+    # memory files (they're meant to be continuous context) while bounding
+    # worst-case prompt size for files that grow over time.
+    _MAX_MEMORY_CHARS = 4000
+    body_for_prompt = existing_body or ""
+    if len(body_for_prompt) > _MAX_MEMORY_CHARS:
+        body_for_prompt = (
+            body_for_prompt[:_MAX_MEMORY_CHARS]
+            + "\n\n[... rest of memory file omitted to bound prompt size; "
+            "patcher operates on the full file at apply time ...]"
+        )
+    parts.append("Current memory body (extend or refine based on the commits "
+                 "— patcher will splice your output into the full file at "
+                 "apply time):")
     parts.append("")
-    parts.append(existing_body or "(currently empty)")
+    parts.append(body_for_prompt or "(currently empty)")
     return system, "\n".join(parts)
 
 
@@ -1413,11 +1723,11 @@ def build_generic_doc_prompt(commits, classified, existing_full,
         parts.append(grounding_block)
     parts.append("")
     parts.append(
-        "Current document (update the section most affected by these "
-        "commits; output exactly that section with ## heading):"
+        "Existing document headings (pick the section most affected by the "
+        "commits above; patcher will splice or replace just that section — "
+        "do NOT echo other sections, do NOT duplicate a heading):"
     )
-    parts.append("")
-    parts.append(existing_full or "(currently empty)")
+    parts.append(_summarise_existing_headings(existing_full, max_levels=3))
     return system, "\n".join(parts)
 
 
@@ -1426,8 +1736,17 @@ def build_generic_doc_prompt(commits, classified, existing_full,
 # Each returns a tuple that gets splatted: compute_apply(full_text, *parse_draft(draft))
 # Return (None, ...) on failure so _simulate_body can detect it.
 
-_SECTION_HEADING_RE = re.compile(r"(?m)^## ([^\n]+)\n(.*)", re.DOTALL)
-_ROADMAP_HEADING_RE = re.compile(r"(?m)^## Roadmap (\d+)([^\n]*)\n(.*)", re.DOTALL)
+# Non-greedy with a forward look-ahead — captures one ## section body up to
+# the next ## heading (or EOF). Prevents a model that emits two ## sections
+# from having the second leak into the first's body and ends up applied.
+# Named groups so the callers don't depend on positional indices that vary
+# between the architecture and roadmap variants.
+_SECTION_HEADING_RE = re.compile(
+    r"(?ms)^## (?P<title>[^\n]+)\n(?P<body>.*?)(?=^## |\Z)"
+)
+_ROADMAP_HEADING_RE = re.compile(
+    r"(?ms)^## Roadmap (?P<n>\d+)(?P<theme>[^\n]*)\n(?P<body>.*?)(?=^## |\Z)"
+)
 
 
 def architecture_parse_draft(draft_text):
@@ -1435,7 +1754,7 @@ def architecture_parse_draft(draft_text):
     m = _SECTION_HEADING_RE.search((draft_text or "").strip())
     if not m:
         return (None, "")
-    return (m.group(1).strip(), m.group(2).strip())
+    return (m["title"].strip(), m["body"].strip())
 
 
 def roadmap_parse_draft(draft_text):
@@ -1443,10 +1762,10 @@ def roadmap_parse_draft(draft_text):
     m = _ROADMAP_HEADING_RE.search((draft_text or "").strip())
     if not m:
         return (None, "", "")
-    n = int(m.group(1))
-    theme_rest = m.group(2).strip().lstrip("—").strip()
+    n = int(m["n"])
+    theme_rest = m["theme"].strip().lstrip("—").strip()
     theme = theme_rest or f"Roadmap {n}"
-    return (n, theme, m.group(3).strip())
+    return (n, theme, m["body"].strip())
 
 
 def memory_parse_draft(draft_text):
@@ -1462,7 +1781,7 @@ def generic_parse_draft(draft_text):
     m = _SECTION_HEADING_RE.search((draft_text or "").strip())
     if not m:
         return (None, "")
-    return (m.group(1).strip(), m.group(2).strip())
+    return (m["title"].strip(), m["body"].strip())
 
 
 # ── Phase 2 filter_draft functions ────────────────────────────────────────────
@@ -1476,6 +1795,56 @@ _CODE_FENCE_RE = re.compile(
 # list markers, numbered items, or horizontal rules.
 _CONTENT_LINE_RE = re.compile(
     r"^(?:[│├└─#\-\*>]|\d+\.|\s+[│├└─]|={3,}|-{3,})"
+)
+
+
+# Horizontal-rule line — only `-`, `*`, `_`, or `=` separated by whitespace.
+# Matched FIRST so an HR can't be mistaken for a bullet via _SUBSTANTIVE.
+_HORIZONTAL_RULE_RE = re.compile(r"^\s*([-*_=])\s*(?:\1\s*){2,}$")
+
+
+# Tighter than _CONTENT_LINE_RE — excludes decorative artifacts (horizontal
+# rules, bare blank lines) that would let model padding masquerade as real
+# content. Used only by the footer-marker look-ahead so "* * *" after a
+# footer doesn't disguise the footer as legitimate prose.
+_SUBSTANTIVE_CONTENT_RE = re.compile(
+    r"^(?:"
+    r"\s*[-*]\s+\S"            # bullet
+    r"|\s*\d+\.\s+\S"          # numbered list
+    r"|#{1,6}\s+\S"            # heading
+    r"|\s+[│├└─]"              # tree-formatted listing
+    r")"
+)
+
+
+def _is_substantive(line):
+    """Return True if `line` is a real bullet / heading / list / tree row.
+
+    Explicitly rejects horizontal rules (`* * *`, `---`, `___`, `===`) which
+    `_SUBSTANTIVE_CONTENT_RE` would otherwise misclassify as bullets, since
+    the bullet pattern `\\s*[-*]\\s+\\S` would match `* * *` (asterisk +
+    space + asterisk). The HR exclusion is what makes the footer-marker
+    look-ahead robust to model-emitted decoration after wrap-up prose.
+    """
+    if _HORIZONTAL_RULE_RE.match(line):
+        return False
+    return bool(_SUBSTANTIVE_CONTENT_RE.match(line))
+
+
+# Echo-loop / wrap-up phrasings the failing Ollama draft showed. Narrow on
+# purpose — generic "Note:" / "Summary:" patterns occur in legitimate
+# technical prose and must NOT trigger. These specific strings are almost
+# exclusively meta-commentary the model adds AFTER what it thinks is its
+# real output.
+_FOOTER_MARKER_RE = re.compile(
+    r"(?im)^\s*(?:"
+    r"these\s+(?:bullets|changes|entries|updates)\s+(?:capture|describe|reflect|summari[sz]e)"
+    r"|here(?:'s|\s+is)\s+(?:a|the)\s+(?:summary|breakdown|overview)\s+of"
+    r"|in\s+summary\s*,"
+    r"|to\s+summari[sz]e\s*[:,]"
+    r"|let\s+me\s+know\s+if"
+    r"|please\s+let\s+me\s+know"
+    r")"
 )
 
 
@@ -1513,16 +1882,33 @@ def _strip_preamble_and_fences(text: str) -> str:
     # 2. Unwrap code fences — keep only the body inside the backticks.
     text = _CODE_FENCE_RE.sub(lambda mo: mo.group(1), text)
 
-    # 3. Drop trailing prose after the last real content line.
+    # 3. Footer-marker chop. Only fires if NO substantive content (real
+    # bullets, headings, numbered list, tree-formatted listing) follows the
+    # marker — decorative HRs, blank lines, or stray punctuation don't count
+    # as "real content" and won't shield the footer. This avoids false-
+    # positives on legitimate sentences mid-document that happen to start
+    # with "These changes describe…" but are followed by real content.
+    fm = _FOOTER_MARKER_RE.search(text)
+    if fm:
+        tail = text[fm.end():]
+        has_real_content_after = any(
+            _is_substantive(ln) for ln in tail.splitlines()
+        )
+        if not has_real_content_after:
+            text = text[:fm.start()].rstrip()
+
+    # 4. Drop trailing prose after the last real content line.
     text = _strip_trailing_prose(text)
 
     return text
 
 
 def _filter_freeform(raw_text):
-    """Lightweight filter for non-bullet drafts: strip preamble, fences, placeholders."""
+    """Lightweight filter for non-bullet drafts: strip preamble, fences,
+    placeholders, and the <<<END_OF_DRAFT>>> marker."""
+    text = _strip_end_marker(raw_text or "")
     sanitised = _sanitise_raw_draft(
-        _strip_preamble_and_fences(raw_text or "")
+        _strip_preamble_and_fences(text)
     )
     lines = sanitised.splitlines()
     noop_n = 0
