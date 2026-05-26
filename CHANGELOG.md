@@ -4,6 +4,10 @@
 ## [Unreleased]
 
 ### Added
+- (doc-drafter) 📝 Doc Updates… right-click dialog — drafts CHANGELOG.md [Unreleased] bullets AND README.md 'Recent highlights' sub-section content from a commit range via the configured local AI (Ollama / Claude CLI / Anthropic / OpenAI-compatible). Per-tab thread isolation, WM_DELETE_WINDOW cancels all tabs, Apply routes through ProposalBridge for old-vs-new diff review before any write. Mixed-commit edge case handled (commit touching both code AND docs gets included with an explicit boundary note in the prompt). Sparse-commit safety net (avg subject < 15 chars) appends changed-file paths to the prompt for better structural signal to small models. (`src/dialogs/doc_drafter.py`, `src/helpers/doc_drafter.py`)
+- (doc-drafter) `insert_readme_highlights_subsection` — append-only README sub-section splicer. Robust against small-model truncation: drafter generates only ONE sub-section, patcher inserts or replaces in place, all other sub-sections preserved verbatim. Required because qwen2.5-coder:14b dropped 5 of 6 sub-sections on full-block regeneration. (`src/helpers/readme_patch.py`)
+- (doc-drafter) `update_readme_highlights` + `read_highlights` + `_find_block_bounds` — README 'Recent highlights' patcher with STRUCTURAL boundary detection (header / horizontal rule / table / code fence aware), NOT a hard line count. Refuses to write if no boundary found rather than truncate to EOF. (`src/helpers/readme_patch.py`)
+- (prompts) 📝 Documentation snippet category in Reference tab with 7 curated copy-paste prompts: README feature bullet, CHANGELOG [Unreleased] entry, architecture doc section update, memory file entry, cross-doc consistency check, migration note, PR description from CHANGELOG slice. (`src/prompts.py`)
 - (gitignore-dialog) 🤖 AI Suggest button — one-click AI-powered gitignore pattern recommendations; CodeGraph SQLite used as zero-cost file listing when available; falls back to os.listdir; reuses ask_tab_llm → commit_message_llm config chain; all suggestions pending until user clicks Save
 - (ask-tab) separate `ask_tab_llm` config key independent of commit-message model; Settings → Ask Tab AI section with reactive field disable for claude_cli provider
 - (ask-tab) Claude CLI provider path (`claude --print`, no tool access, history as text context); intro text warns when tools unavailable
@@ -18,6 +22,7 @@
 - (agent-tools) NameError `cli_subcommand` — stale variable reference after previous refactor; fixed to use `subcommand` parameter
 
 ### Changed
+- (gitignore-dialog) `_inject_patterns_list` now performs TWO redundancy checks: exact normalised match AND path-scoped basename match. Suppresses suggestions like `src/__pycache__/` when `__pycache__/` is already ignored (gitignore semantics: patterns without an embedded `/` match at any depth). System prompt also tells the AI about gitignore recursive matching to reduce the redundant suggestion at the source. (`src/dialogs/gitignore.py`)
 - (commit-messages) multi-doc-file commits now use dominant directory as scope (e.g. `docs(upstream-issues): update`) instead of listing filename stems
 - (mcp-config) extracted `_log_to_app` + `_apply_running_guard` from `_apply`; CC reduced
 

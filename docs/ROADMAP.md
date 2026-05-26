@@ -22,14 +22,27 @@ Status legend:
 - Reduced `_do_draft_changelog` CC 12 → ≤4 (`src/controllers/ai_tasks_ctrl.py`)
 - Filed upstream tokensave bugs: path-normalization (#87), health details (#82), redundancy tool (#83), install path-with-spaces (#81)
 
-### 🟡 Commit-message scope heuristic fix
+### ✅ Commit-message scope heuristic fix (2026-05-25)
 Multi-doc-file commits now use the dominant directory as scope (e.g. `docs(upstream-issues): update`) instead of listing filename stems. (`src/helpers/commit_messages.py`)
 
-### 🟡 `mcp_config._apply` CC reduction
+### ✅ `mcp_config._apply` CC reduction (2026-05-25)
 Extracted `_log_to_app` + `_apply_running_guard` from `_apply`; CC dropped ~11 → ~4. (`src/dialogs/mcp_config.py`)
 
-### 🟡 Ask tab — final-message streaming
+### ✅ Ask tab — final-message streaming (2026-05-25)
 Agent loop now streams the final-turn tokens to the UI in real time via a buffered 50 ms flush loop (prevents Tkinter widget-toggle jitter). Tool-call turns use non-streaming as before. (`src/agent.py`, `src/controllers/ask_tab.py`)
+
+### ✅ Ask tab overhaul (2026-05-25)
+Separate `ask_tab_llm` config independent of commit-message model; Claude CLI provider path; project context injection on fresh conversations; auto-clear on project switch; session log persistence (`logs/ask_sessions.md`); tokensave CLI subcommand fix (`tokensave tool search` / `tokensave tool context` after upstream removal); help tab comprehensive static content rewrite. (`src/controllers/ask_tab.py`, `src/dialogs/settings.py`, `src/agent_tools.py`, `src/controllers/help_tab.py`)
+
+### ✅ Gitignore AI Suggest (2026-05-25)
+One-click AI-powered gitignore pattern recommendations in the `.gitignore` editor. CodeGraph SQLite (`.codegraph/codegraph.db`) used as zero-cost project file listing when available; falls back to `os.listdir`. Reuses `ask_tab_llm → commit_message_llm` config chain. Two redundancy checks (exact match + path-scoped basename match) prevent suggestions like `src/__pycache__/` when `__pycache__/` is already ignored. (`src/dialogs/gitignore.py`, `src/helpers/readme_patch.py`)
+
+### ✅ Doc Update Automation — Tier A + B subset (2026-05-25)
+**Tier A:** `📝 Documentation` snippet category in Reference tab with 7 curated copy-paste prompts (README feature bullet, CHANGELOG entry, architecture section, memory file entry, consistency check, migration note, PR from CHANGELOG). (`src/prompts.py`)
+
+**Tier B subset:** New `📝 Doc Updates…` right-click dialog drafts CHANGELOG.md `[Unreleased]` bullets AND README.md "Recent highlights" sub-section content from a commit range. Per-tab thread isolation (`_tab_state[key]["stop"]`), WM_DELETE_WINDOW cancels ALL tabs, Apply routes through ProposalBridge for old-vs-new diff review. Mixed-commit edge case (commit touching both code AND docs) included with explicit boundary note. Sparse-commit safety net (avg subject length < 15 chars) appends changed-file paths to the prompt. README path uses append-only sub-section insertion (`insert_readme_highlights_subsection`) instead of full-block regeneration — preserves all existing sub-sections even with small local models. (`src/dialogs/doc_drafter.py`, `src/helpers/doc_drafter.py`, `src/helpers/readme_patch.py`, `src/controllers/projects_tab.py`)
+
+**Deferred to Roadmap-7:** Architecture tab (`docs/*.md` picker + CLAUDE.md blueprint injection), Memory tab (frontmatter + path-encoding via `claude_tasks.py`), Tier C auto-suggest-after-commit banner.
 
 ---
 

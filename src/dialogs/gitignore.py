@@ -275,6 +275,11 @@ class GitignoreDialog(tk.Toplevel):
                 "- Each line must be a valid .gitignore glob "
                 "(e.g. __pycache__/, *.log, .env, node_modules/).\n"
                 "- Do NOT suggest any pattern already in the 'Already ignored' list.\n"
+                "- gitignore patterns without an embedded '/' (or with only a trailing '/') "
+                "match at ANY directory depth. If '__pycache__/' is already ignored, do NOT "
+                "suggest 'src/__pycache__/' or any other path-scoped variant — it is already "
+                "covered. Only suggest a path-scoped pattern (e.g. 'src/vendor/') when the "
+                "broader name is NOT already present in the 'Already ignored' list.\n"
                 "- Skip binary/database files handled by tool-specific nested .gitignore "
                 "files (e.g. CodeGraph writes its own .gitignore inside .codegraph/ — "
                 "do not suggest codegraph.db or similar; it is handled already).\n"
@@ -401,12 +406,24 @@ class GitignoreDialog(tk.Toplevel):
                 self._toggle_removal(idx)   # reverts removal + updates panel
                 already_norm.add(_norm(raw_line.strip()))
 
-        # Second pass: collect genuinely new patterns
+        # Second pass: collect genuinely new patterns.
+        # Two redundancy checks:
+        #   1. Exact normalised match — already present verbatim.
+        #   2. Path-scoped redundancy — 'src/__pycache__/' is suppressed when
+        #      '__pycache__/' is already ignored, because gitignore patterns
+        #      without an embedded '/' match at any directory depth.
+        def _basename(p):
+            return _norm(p).rsplit("/", 1)[-1]
+
         new_patterns = []
         for p in patterns:
-            if _norm(p) not in already_norm:
-                new_patterns.append(p)
-                already_norm.add(_norm(p))
+            n = _norm(p)
+            if n in already_norm:
+                continue                        # exact match — already covered
+            if "/" in n and _basename(p) in already_norm:
+                continue                        # broader pattern already covers it
+            new_patterns.append(p)
+            already_norm.add(n)
 
         if new_patterns:
             header = "# AI suggested patterns"

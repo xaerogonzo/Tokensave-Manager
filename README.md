@@ -670,9 +670,11 @@ See [CHANGELOG.md](CHANGELOG.md) for the full history.
 
 **Recent highlights (Unreleased)** — see CHANGELOG.md for the detailed bullets on each:
 
-**Roadmap-6 — Ask tab + gitignore AI**
+**Roadmap-6 — Ask tab + gitignore AI + doc-drafter**
 - 🤖 Ask tab — separate `ask_tab_llm` config (independent of commit-message model), Claude CLI provider option, SSE streaming for final-turn tokens, session log persistence (`logs/ask_sessions.md`)
-- 🤖 Gitignore AI Suggest — one-click AI-powered pattern recommendations in the .gitignore editor; CodeGraph SQLite used as a zero-cost project file listing when available
+- 🤖 Gitignore AI Suggest — one-click AI-powered pattern recommendations in the .gitignore editor; CodeGraph SQLite used as a zero-cost project file listing when available; path-scoped basename dedup suppresses redundant `src/__pycache__/` style suggestions when the broader pattern is already ignored
+- 📝 Doc Updates… right-click dialog — drafts CHANGELOG `[Unreleased]` bullets AND README "Recent highlights" sub-section content from a commit range via the configured local AI. Per-tab thread isolation, ProposalBridge-gated Apply, mixed-commit boundary handling, sparse-commit safety net, append-only README sub-section insertion (preserves existing sub-sections even on small local models). Architecture + Memory tabs deferred to Roadmap-7
+- 📝 Documentation snippet category in Reference tab — 7 curated copy-paste prompts for README / CHANGELOG / architecture / memory / consistency-check / migration-note / PR description
 - Help tab — comprehensive static reference content with per-section follow-up ask prompts
 - tokensave CLI subcommand fix (`tokensave tool search` / `tokensave tool context` — old `query` / `context` subcommands removed upstream)
 
