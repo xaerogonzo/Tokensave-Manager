@@ -113,21 +113,63 @@ def _is_noop_bullet(bullet):
 def _looks_truncated(bullet):
     """Return True if ``bullet`` looks cut off mid-sentence.
 
-    Conservative — only flags clear truncation signatures:
-      - line does NOT end with closing punctuation ``.`` ``)`` `` ` `` `` ' ``
-        `` " `` ``:``
-      - AND the final word is a stop-word fragment ("for", "the", ...) that
-        almost certainly precedes an object that wasn't generated
+    Phase 1.9 rewrite: strips trailing metadata BEFORE the punctuation
+    check, otherwise a bullet like ``"...and (`path`)."`` would
+    early-return False on the trailing period and never expose the
+    truncated ``and``.
 
-    A bullet ending in a parenthetical citation (``"... (helpers/foo.py)"``)
-    is correctly NOT flagged (ends with ``)``).  A bullet ending in a
-    non-stop-word like ``"... see issue #42"`` is also not flagged — only
-    obvious mid-sentence cuts trip.
+    Strips up to 3 layers of trailing citation patterns in a loop:
+      1. Parenthetical: ``"...prose (`path`)"`` (with optional ``.``)
+      2. Markdown link:  ``"...prose [text](url)"`` (with optional ``.``)
+      3. Inline code:    ``"...prose `path`"`` (with optional ``.``)
+
+    Each pattern's anchor permits OPTIONAL trailing punctuation
+    (``[:!?.]?$``) so common Claude CLI output ``"...and (path)."``
+    matches on pass 1 of the loop, not bypassed.  Once metadata is
+    peeled, the punctuation + stop-word check runs on the actual prose
+    tail.
+
+    Known limitation: nested parens like ``(as verified in foo())``
+    aren't stripped (regex stops at inner ``)``).  False negative only —
+    never causes a write-side data loss.
+
+    Conservative on positives:
+      - bullets ending in non-stop-word ("... fix bug") → not flagged
+      - bullets ending in proper punctuation → not flagged
+      - bullets where stripped-prose ends in stop-word → FLAGGED
     """
     s = (bullet or "").rstrip()
     if not s:
         return False
-    if s.endswith((".", ")", "`", '"', "'", ":", "!", "?")):
+
+    # Strip up to 3 layers of trailing metadata.  Each pattern permits
+    # OPTIONAL trailing punctuation so "...path)." matches the paren
+    # citation, not just "...path)".  Loop terminates when nothing
+    # strips on a given pass.
+    for _ in range(3):
+        before = s
+        # 1. Parenthetical citation
+        m = re.search(r"\s+\([^()]*\)\s*[:!?.]?\s*$", s)
+        if m:
+            s = s[:m.start()].rstrip()
+            continue
+        # 2. Markdown link
+        m = re.search(r"\s+\[[^\]]*\]\([^)]*\)\s*[:!?.]?\s*$", s)
+        if m:
+            s = s[:m.start()].rstrip()
+            continue
+        # 3. Inline code backtick
+        m = re.search(r"\s+`[^`]*`\s*[:!?.]?\s*$", s)
+        if m:
+            s = s[:m.start()].rstrip()
+            continue
+        if s == before:
+            break
+
+    if not s:
+        return False
+    # NOW the punctuation check is safe — citations have been peeled.
+    if s.endswith((".", ":", "!", "?", ")", "`", '"', "'")):
         return False
     last_word = s.split()[-1].lower().rstrip(",;:")
     return last_word in _TRUNCATION_TRAILING
@@ -215,6 +257,114 @@ def _sanitise_raw_draft(text):
             continue
         break
     return "\n".join(lines)
+
+
+# ── Mirror-contract safety net (Phase 1.9) ──────────────────────────────────
+#
+# README's `insert_readme_highlights_subsection` patcher uses REPLACE
+# semantics: when a matching sub-section already exists, the patcher
+# OVERWRITES it with the draft.  The model is told to mirror existing
+# bullets back as part of the output (Phase 1.6 design), but small
+# models occasionally break that contract — most dramatically when
+# Phase 1.8's granularity rules pushed qwen-14b so hard toward NEW
+# bullets that it dropped all existing ones.
+#
+# Phase 1.9 adds the LOAD-BEARING enforcement: before any README write,
+# verify the draft preserves enough existing bullets.  Prompt rules are
+# advisory; this gate is hard.
+
+# Floor for "this pair counts as preserved" after pre-scoring.  Looser
+# than the Phase 1.6 dedup threshold (0.65) because preservation needs
+# HIGH RECALL (catch rephrased mirrors) rather than HIGH PRECISION.
+# The min-intersection-size floor inside _preserve_score (≥ 2 shared
+# tokens) prevents single-word false matches that 0.40 alone would let
+# through.
+_PRESERVATION_THRESHOLD = 0.40
+
+
+def _preserve_score(a_set, b_set):
+    """Return preservation similarity (0..1) for two pre-tokenised bullets.
+
+    Combines Jaccard and overlap with a MIN-INTERSECTION-SIZE floor:
+    two bullets need to share ≥ 2 non-stop-word tokens before either
+    metric counts.  Without this, a 2-token existing bullet like
+    ``{"script", "cleanup"}`` would be falsely "preserved" by any long
+    draft that happens to contain "script" (overlap = 1/2 = 0.50 trips
+    any reasonable threshold despite zero semantic relation).
+
+    Returns 0.0 when the floor isn't met; otherwise ``max(jaccard,
+    overlap)``.  The score is used for highest-score-first matching in
+    `_mirror_contract_check` — the threshold is applied AFTER bipartite
+    assignment so no greedy ordering cascade can mask drift.
+    """
+    if not a_set or not b_set:
+        return 0.0
+    intersection = a_set & b_set
+    if len(intersection) < 2:
+        return 0.0                  # single-token overlap is noise
+    union = a_set | b_set
+    jaccard = len(intersection) / len(union)
+    overlap = len(intersection) / min(len(a_set), len(b_set))
+    return max(jaccard, overlap)
+
+
+def _mirror_contract_check(draft_bullets, existing_bullets,
+                           min_preservation=0.75):
+    """Verify a README draft preserves enough existing sub-section bullets.
+
+    Returns ``(ok, kept_count, missing_count, missing_examples)``.
+
+    Algorithm:
+      1. Pre-tokenise both lists ONCE (no per-comparison retokenisation).
+      2. Score all (existing, draft) pairs via `_preserve_score`.  Keep
+         only pairs scoring ≥ _PRESERVATION_THRESHOLD.
+      3. Sort kept pairs by descending score.
+      4. **Highest-score-first greedy bipartite**: walk sorted pairs;
+         each existing claims at MOST ONE draft; each draft serves at
+         MOST ONE existing.  Prevents a short existing bullet from
+         falsely claiming a long unrelated draft on a single shared
+         word.
+      5. **Quantization tolerance**: reject only when ``ratio <
+         min_preservation AND missing > 1``.  Single-drop is always
+         tolerated regardless of ratio (legitimate small-list pruning).
+
+    On empty ``existing_bullets`` (genuinely new sub-section) returns
+    ``(True, 0, 0, [])`` — there is no contract to enforce.
+    """
+    if not existing_bullets:
+        return True, 0, 0, []       # genuinely new sub-section
+
+    existing_compiled = [(eb, _token_set(eb)) for eb in existing_bullets]
+    draft_compiled   = [(db, _token_set(db)) for db in draft_bullets]
+
+    triples = []                    # (score, existing_idx, draft_idx)
+    for ei, (_, a) in enumerate(existing_compiled):
+        for di, (_, b) in enumerate(draft_compiled):
+            s = _preserve_score(a, b)
+            if s >= _PRESERVATION_THRESHOLD:
+                triples.append((s, ei, di))
+
+    triples.sort(key=lambda t: -t[0])
+    claimed_e, claimed_d = set(), set()
+    for _score, ei, di in triples:
+        if ei in claimed_e or di in claimed_d:
+            continue
+        claimed_e.add(ei)
+        claimed_d.add(di)
+
+    matched = len(claimed_e)
+    missing_list = [eb for ei, (eb, _) in enumerate(existing_compiled)
+                    if ei not in claimed_e]
+    missing = len(missing_list)
+    ratio = matched / len(existing_bullets)
+
+    if ratio < min_preservation and missing > 1:
+        missing_examples = [
+            (eb[:80] + "…" if len(eb) > 80 else eb)
+            for eb in missing_list
+        ][:3]
+        return False, matched, missing, missing_examples
+    return True, matched, missing, []
 
 
 def _filter_bullets(bullets_md, existing_bullets, *,
@@ -809,6 +959,39 @@ class DocDrafterDialog(tk.Toplevel):
                     total_trunc, total_dup, total_noop)
         return "", total_trunc, total_dup, total_noop
 
+    def _compute_mirror_warning(self, key, draft_text):
+        """Return a short status-bar warning string if README mirror-contract
+        would fail on this draft, else None.
+
+        Reusable from `_on_generate_done` (post-generate display) AND
+        `_on_text_modified` (debounced re-check after manual edits).  No
+        side effects — pure check.  CHANGELOG always returns None (no
+        mirror contract to enforce on append-only patcher).
+        """
+        if key != "readme" or not draft_text or not draft_text.strip():
+            return None
+        try:
+            target_path = os.path.join(self._project_path,
+                                        self._tab_widgets[key]["target"])
+            parsed = self._split_readme_subsection(draft_text)
+            if parsed is None:
+                return None
+            header_line, bullets = parsed
+            existing = read_subsection_bullets(target_path, header_line)
+            if not existing:
+                return None             # genuinely new sub-section
+            draft_bullets = [ln.lstrip() for ln in bullets.splitlines()
+                              if ln.lstrip().startswith(("- ", "* "))]
+            ok, kept, missing, _examples = _mirror_contract_check(
+                draft_bullets, existing)
+            if ok:
+                return None
+            return (f"⚠ DESTRUCTIVE: only {kept}/{kept + missing} existing "
+                    f"bullets preserved.  Apply would DELETE {missing} "
+                    f"from README.  Regenerate or edit draft to add back.")
+        except (tk.TclError, RuntimeError, OSError):
+            return None
+
     def _on_generate_done(self, key, raw_text):
         try:
             if not self.winfo_exists():
@@ -858,8 +1041,17 @@ class DocDrafterDialog(tk.Toplevel):
                 state=tk.NORMAL if has_content else tk.DISABLED)
             suffix = self._format_filter_suffix(t_n, d_n, n_n)
             if has_content:
+                # Phase 1.9: compute mirror-contract warning for README.
+                # If the draft would destroy existing bullets, surface the
+                # warning in the status bar so user sees BEFORE clicking Apply
+                # (Apply is also gated by the apply-time check, but a
+                # generate-time warning lets the user Regenerate proactively).
+                mirror_warn = self._compute_mirror_warning(key, filtered_text)
                 base = "Draft ready — review and Apply."
-                self._set_status(key, base + suffix, C["green"])
+                if mirror_warn:
+                    self._set_status(key, base + "  " + mirror_warn, C["red"])
+                else:
+                    self._set_status(key, base + suffix, C["green"])
             else:
                 self._set_status(
                     key,
@@ -891,6 +1083,49 @@ class DocDrafterDialog(tk.Toplevel):
             if current and not is_placeholder:
                 w["apply_btn"].configure(state=tk.NORMAL)
             txt.edit_modified(False)
+            # Phase 1.9: debounced README mirror-warning re-check.  If the
+            # user manually adds the missing bullets back, the status bar
+            # warning from _on_generate_done is stale — refresh after a
+            # 300 ms typing pause so each keystroke doesn't recompute.
+            if key == "readme":
+                if getattr(self, "_readme_check_after_id", None):
+                    try:
+                        self.after_cancel(self._readme_check_after_id)
+                    except tk.TclError:
+                        pass
+                self._readme_check_after_id = self.after(
+                    300, lambda: self._refresh_readme_warning())
+        except (tk.TclError, RuntimeError):
+            return
+
+    def _refresh_readme_warning(self):
+        """Debounced post-edit re-check of the README mirror-contract warning.
+
+        Reads the current README text widget, recomputes the warning, and
+        updates the status bar.  Keeps the UI honest about whether the
+        current widget content (after manual edits) is still destructive.
+        Called via 300 ms ``after()`` from `_on_text_modified` to avoid
+        per-keystroke recomputation.
+        """
+        try:
+            self._readme_check_after_id = None
+            if not self.winfo_exists():
+                return
+            w = self._tab_widgets.get("readme")
+            if not w:
+                return
+            current = w["text"].get("1.0", "end-1c").strip()
+            if not current or current.startswith(("(all bullets filtered",
+                                                    "(no draft yet")):
+                return
+            mirror_warn = self._compute_mirror_warning("readme", current)
+            if mirror_warn:
+                self._set_status("readme",
+                                  "Draft edited.  " + mirror_warn, C["red"])
+            else:
+                self._set_status("readme",
+                                  "Draft edited — review and Apply.",
+                                  C["green"])
         except (tk.TclError, RuntimeError):
             return
 
@@ -1180,6 +1415,31 @@ class DocDrafterDialog(tk.Toplevel):
                            f"{noop_n} placeholders).  README's REPLACE "
                            "patcher would DELETE the existing sub-section "
                            "if applied with no bullets.  Click Regenerate.")
+
+        # Mirror-contract safety net (Phase 1.9 — LOAD-BEARING).
+        # README's REPLACE semantics mean any existing bullet the model fails
+        # to mirror back gets DELETED from the file when Apply lands.  The
+        # filter above only catches truncation / noop / self-dups; it does
+        # NOT catch "model dropped half the existing bullets".  Mirror check
+        # hard-rejects when < 75% preserved (with single-drop tolerance for
+        # legitimate small-list pruning).
+        draft_bullets = [ln.lstrip() for ln in filtered.splitlines()
+                          if ln.lstrip().startswith(("- ", "* "))]
+        ok, kept, missing, examples = _mirror_contract_check(
+            draft_bullets, existing)
+        if not ok:
+            bullet_list = "\n  ".join("• " + ex for ex in examples)
+            extra = (f" (showing {len(examples)} of {missing})"
+                     if missing > len(examples) else "")
+            return False, (
+                f"Mirror-contract safety abort: draft preserves only "
+                f"{kept}/{kept + missing} existing bullets "
+                f"({int(100 * kept / max(1, kept + missing))}%).  "
+                f"README's REPLACE patcher would DELETE {missing} "
+                f"preserved bullet(s){extra}:\n  {bullet_list}\n\n"
+                f"Click Regenerate to retry, or manually edit the draft "
+                f"to add the missing bullets back before Apply."
+            )
         return insert_readme_highlights_subsection(
             target_path, header_line,
             filtered + "\n" if filtered else "\n")
