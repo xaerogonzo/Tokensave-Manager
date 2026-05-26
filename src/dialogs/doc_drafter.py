@@ -308,6 +308,15 @@ _RANGE_MODES = [
     ("Custom range…",            "custom"),
 ]
 
+# Per-session backend override values for the dialog header dropdown.
+# Picked per-draft, never persisted to Settings.  The override applies only
+# to the NEXT Generate click (_llm_cfg_resolved snapshots at Generate time;
+# mid-flight workers continue with their captured config).
+_BACKEND_DEFAULT     = "Default (ask_tab_llm)"
+_BACKEND_OLLAMA      = "Force Ollama"
+_BACKEND_CLAUDE_CLI  = "Force Claude CLI"
+_BACKEND_OPTIONS     = [_BACKEND_DEFAULT, _BACKEND_OLLAMA, _BACKEND_CLAUDE_CLI]
+
 
 class DocDrafterDialog(tk.Toplevel):
     """Tabbed doc-update drafter (CHANGELOG + README)."""
@@ -344,6 +353,12 @@ class DocDrafterDialog(tk.Toplevel):
         # Populated by _apply_changelog_bullets / _apply_readme_subsection
         # right before they return.  _on_apply_result reads + clears.
         self._last_filter_stats: dict = {}
+        # Per-session backend override (Phase 1.7).  Picked from a dropdown
+        # in the header; never persisted to Settings.  Defaults to the
+        # "Default" label which falls through to the configured provider.
+        # _llm_cfg_resolved() reads this var on every Generate click;
+        # _backend_summary() reflects it in the header label.
+        self._backend_override_var = tk.StringVar(value=_BACKEND_DEFAULT)
 
         # ── UI ─────────────────────────────────────────────────────────────
         self._build_header_section()
@@ -400,23 +415,97 @@ class DocDrafterDialog(tk.Toplevel):
                  bg=C["base"], fg=C["overlay0"],
                  font=("Consolas", 8)).pack(anchor=tk.W, pady=(2, 0))
 
-        # Backend label
+        # Backend row: dropdown override + summary label.
+        # The dropdown is a per-session override (not persisted to Settings).
+        # The label reflects whatever _llm_cfg_resolved() will return on the
+        # next Generate click; visual style changes when the override is
+        # active so the user can't miss they're on a transient setting.
+        backend_row = tk.Frame(hdr, bg=C["base"])
+        backend_row.pack(fill=tk.X, pady=(2, 0))
+        tk.Label(backend_row, text="Backend override:", bg=C["base"],
+                 fg=C["text"],
+                 font=("Segoe UI", 9)).pack(side=tk.LEFT, padx=(0, 6))
+        self._backend_override_cb = ttk.Combobox(
+            backend_row, textvariable=self._backend_override_var,
+            values=_BACKEND_OPTIONS,
+            state="readonly", width=24,
+        )
+        self._backend_override_cb.pack(side=tk.LEFT)
+        self._backend_override_cb.bind(
+            "<<ComboboxSelected>>",
+            lambda _e: self._on_backend_override_changed())
+
         self._backend_var = tk.StringVar(value=self._backend_summary())
-        tk.Label(hdr, textvariable=self._backend_var,
-                 bg=C["base"], fg=C["overlay0"],
-                 font=("Segoe UI", 8)).pack(anchor=tk.W, pady=(2, 0))
+        self._backend_lbl = tk.Label(hdr, textvariable=self._backend_var,
+                                       bg=C["base"], fg=C["overlay0"],
+                                       font=("Segoe UI", 8))
+        self._backend_lbl.pack(anchor=tk.W, pady=(2, 0))
+
+    def _on_backend_override_changed(self):
+        """Dropdown handler — refresh the summary label + visual style.
+
+        Does NOT touch any in-flight worker.  Workers snapshot their config
+        at Generate-click time via _llm_cfg_resolved(); changing the
+        dropdown while a worker is running only affects the NEXT click.
+        """
+        try:
+            self._backend_var.set(self._backend_summary())
+            override = self._backend_override_var.get()
+            if override == _BACKEND_DEFAULT:
+                # Restore the dim grey for the default config-driven backend.
+                self._backend_lbl.configure(fg=C["overlay0"])
+            else:
+                # Peach accent makes it obvious we're on a transient override.
+                self._backend_lbl.configure(fg=C["peach"])
+        except tk.TclError:
+            pass
 
     def _backend_summary(self):
         cfg = self._llm_cfg_resolved()
         prov = cfg.get("provider", "(none configured)")
         model = cfg.get("model") or "(default)"
+        override = self._backend_override_var.get()
+        if override != _BACKEND_DEFAULT:
+            return f"⚡ OVERRIDE → {prov} / {model}"
         which = "ask_tab_llm" if (self._cfg.raw or {}).get("ask_tab_llm") \
                 else "commit_message_llm"
         return f"Backend: {which} → {prov} / {model}"
 
     def _llm_cfg_resolved(self):
+        """Resolve which LLM config dict to use for the next Generate click.
+
+        Honours the per-session backend override dropdown.  When the
+        override is active, builds a synthetic config by WHITELISTING only
+        the fields the target provider's dispatcher reads — avoids leaking
+        an Anthropic api_key_env into a forced Ollama call, etc.
+        """
         raw = self._cfg.raw if isinstance(self._cfg.raw, dict) else {}
-        return raw.get("ask_tab_llm") or raw.get("commit_message_llm") or {}
+        base = raw.get("ask_tab_llm") or raw.get("commit_message_llm") or {}
+        override = self._backend_override_var.get()
+        if override == _BACKEND_OLLAMA:
+            # _call_llm openai_compatible path reads: provider, model,
+            # base_url, enabled, timeout_seconds.  Only INHERIT the base
+            # config's base_url if base was already an Ollama-compatible
+            # provider — otherwise an Anthropic / OpenAI base_url would
+            # silently get used for a forced Ollama call and fail.
+            base_provider = (base.get("provider") or "").lower()
+            base_url_safe = base.get("base_url") if base_provider in (
+                "ollama", "openai_compatible") else None
+            return {
+                "enabled":  True,
+                "provider": "ollama",
+                "model":    base.get("model") or "qwen2.5-coder:14b",
+                "base_url": base_url_safe or "http://localhost:11434",
+            }
+        if override == _BACKEND_CLAUDE_CLI:
+            # dispatch_llm claude_cli path reads provider + model from the
+            # config; exe path / cwd / timeout come from explicit args.
+            return {
+                "enabled":  True,
+                "provider": "claude_cli",
+                "model":    self._cfg.claude_cli_model or "",
+            }
+        return base
 
     def _refresh_range(self):
         """Resolve the selected range mode + update range_info + clear drafts.
@@ -616,10 +705,18 @@ class DocDrafterDialog(tk.Toplevel):
         project     = self._project_path
 
         def _worker():
-            # Sparse-mode context-extras (only fetched if needed).
-            changed_files = (dd.changed_file_paths(project, range_spec,
-                                                    self._cfg.git_exe)
-                             if dd.is_sparse(commits) else [])
+            # CHANGELOG always gets the changed-file list — pushes the model
+            # toward per-file granularity instead of single-summary collapse.
+            # README only needs it in sparse-commit mode (model is already
+            # told to mirror existing bullets; extra file context bloats
+            # without changing the output shape).
+            if key == "changelog":
+                changed_files = dd.changed_file_paths(
+                    project, range_spec, self._cfg.git_exe)
+            else:
+                changed_files = (dd.changed_file_paths(
+                    project, range_spec, self._cfg.git_exe)
+                                 if dd.is_sparse(commits) else [])
 
             if key == "changelog":
                 existing = read_unreleased(

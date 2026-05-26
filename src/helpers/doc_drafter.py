@@ -358,7 +358,20 @@ _CHANGELOG_SYSTEM = (
     "the current [Unreleased] content, output nothing.\n"
     "- Each bullet uses conventional-commit scope prefix in parens, e.g. "
     "'(gitignore-dialog) 🤖 AI Suggest button — one-click pattern recs'.\n"
-    "- Cite file paths and helper names in backticks.  No marketing fluff."
+    "- Cite file paths and helper names in backticks.  No marketing fluff.\n"
+    "- AIM for ONE bullet per distinct code change.  A commit that touches "
+    "three subsystems likely warrants three bullets, not one summary.  If "
+    "the commit range spans N commits, target 3-8 bullets per ### section "
+    "unless the changes are genuinely trivial.  HIDING multiple shipped "
+    "changes behind one generic bullet ('add filtering and sanitisation') "
+    "is a documentation failure.\n"
+    "- CITE specific file paths and helper/class names in backticks. "
+    "'add bullet-quality filters for truncation' is too generic. "
+    "'`_looks_truncated` stop-word heuristic in `dialogs/doc_drafter.py`' "
+    "is the correct level of detail.\n"
+    "- When the commit range spans MULTIPLE distinct features (e.g. a "
+    "truncation fix AND a redundancy filter AND a CI cleanup), produce "
+    "separate bullets for each feature — do NOT collapse them into one."
 )
 
 _README_SYSTEM = (
@@ -424,10 +437,31 @@ def build_changelog_prompt(commits, classified, existing_unreleased,
         parts.append("")
         parts.append(boundary_note)
     parts.append("")
+    # Per-commit subject summary — gives the model a quick view of how
+    # MANY commits there are and what each one was about, pushing it
+    # toward per-commit granularity in the output bullets.
+    if commits:
+        parts.append("Commits in range (use these to infer per-change "
+                     "granularity — produce roughly one bullet per "
+                     "distinct change, not one summary per topic):")
+        for c in commits:
+            sha = (c.get("hash") or "")[:8]
+            subj = (c.get("subject") or "").strip()
+            parts.append(f"  {sha}  {subj}")
+        parts.append("")
     parts.append("Commits classified by conventional-commit prefix:")
     parts.append("")
     parts.append(_render_commit_list(classified) or "(no commits classified)")
     parts.append("")
+    # ALWAYS include the changed-file list for CHANGELOG mode (not just
+    # in sparse-commit mode like README).  Knowing exactly which files
+    # were touched lets the model produce per-file granular bullets even
+    # when commit subjects are detailed.
+    if changed_files:
+        parts.append("[Changed files] (repo-root-relative paths):")
+        for p in changed_files:
+            parts.append(f"  {p}")
+        parts.append("")
     parts.append("Current [Unreleased] content (DO NOT repeat, restate, or "
                  "consolidate any of these — the patcher keeps them VERBATIM; "
                  "your job is only to ADD new bullets for the commit range "
