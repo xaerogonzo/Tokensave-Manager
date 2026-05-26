@@ -32,7 +32,9 @@ from tkinter import ttk
 from typing import TYPE_CHECKING
 
 from constants import C
-from helpers.changelog_patch import update_unreleased, read_unreleased
+from helpers.changelog_patch import (
+    update_unreleased, read_unreleased, insert_unreleased_bullets,
+)
 from helpers.readme_patch import (
     update_readme_highlights, read_highlights,
     insert_readme_highlights_subsection,
@@ -462,14 +464,14 @@ class DocDrafterDialog(tk.Toplevel):
                 return
 
             # Apply the final (possibly user-edited in the proposal dialog)
-            # content via the appropriate patcher.
+            # content via the appropriate patcher.  Both paths use
+            # append-only insertion to avoid the small-model "drop existing
+            # content" failure mode discovered during dogfooding — see
+            # memory/doc_drafter.md for the locked design rationale.
             if key == "changelog":
-                ok, msg = update_unreleased(target_path, final_content)
+                ok, msg = self._apply_changelog_bullets(target_path,
+                                                         final_content)
             else:
-                # README uses append-only sub-section insertion to avoid
-                # the small-model "drop existing sub-sections" failure mode.
-                # Parse the first bold-header line as the sub-section name
-                # and the rest as bullets.
                 ok, msg = self._apply_readme_subsection(target_path,
                                                         final_content)
             self.after(0, lambda o=ok, m=msg:
@@ -496,6 +498,63 @@ class DocDrafterDialog(tk.Toplevel):
                              f"{msg}", C["red"])
         except (tk.TclError, RuntimeError):
             return
+
+    # ── CHANGELOG grouped-bullets parser + dispatcher ──────────────────────
+
+    @staticmethod
+    def _parse_grouped_bullets(draft_text):
+        """Parse '### Header / - bullet ...' grouped output into (header, body) pairs.
+
+        Walks lines; whenever it sees ``^### `` it starts a new section.
+        Bullets are everything between two ``^### `` markers (or to EOF).
+        Empty sections (header with no bullets) are dropped — keeps the
+        output free of stray ``### Added`` headers with nothing under them.
+
+        Returns ``[(section_heading_raw, bullets_text), ...]``.  The
+        downstream patcher canonicalises section names, so raw headers
+        like ``"fixed"`` / ``"FIXED"`` / ``"Fixes"`` all collapse correctly.
+        """
+        pairs = []
+        current_section = None
+        current_lines = []
+        for ln in draft_text.splitlines():
+            stripped = ln.strip()
+            if stripped.startswith("### "):
+                if current_section is not None:
+                    body = "\n".join(current_lines).strip()
+                    if body:
+                        pairs.append((current_section, body))
+                current_section = stripped[4:].strip()
+                current_lines = []
+            elif current_section is not None:
+                current_lines.append(ln)
+        # Flush the final section.
+        if current_section is not None:
+            body = "\n".join(current_lines).strip()
+            if body:
+                pairs.append((current_section, body))
+        return pairs
+
+    def _apply_changelog_bullets(self, target_path, draft_text):
+        """Parse grouped output, dispatch one insert_unreleased_bullets call per section.
+
+        On the first patcher failure, returns immediately with the section
+        that failed in the message (so the user knows which one). Earlier
+        successful sections are NOT rolled back — append-only is naturally
+        partial-fail-tolerant; the user can re-Apply to retry the remainder.
+        """
+        pairs = self._parse_grouped_bullets(draft_text)
+        if not pairs:
+            return False, ("Draft is missing '### Section' headers — "
+                           "CHANGELOG mode requires bullets grouped under "
+                           "### Added / ### Fixed / ### Changed / ### Removed.")
+        applied = []
+        for section, bullets in pairs:
+            ok, msg = insert_unreleased_bullets(target_path, section, bullets)
+            if not ok:
+                return False, f"{section}: {msg} (applied so far: {applied})"
+            applied.append(section)
+        return True, f"appended bullets to {len(applied)} section(s): {', '.join(applied)}"
 
     # ── README sub-section parser + dispatcher ─────────────────────────────
 

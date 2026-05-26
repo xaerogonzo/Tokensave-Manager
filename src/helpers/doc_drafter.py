@@ -328,23 +328,32 @@ def is_sparse(commits, threshold=_SPARSE_AVG_THRESHOLD):
 # ── Prompt builders ─────────────────────────────────────────────────────────
 
 _CHANGELOG_SYSTEM = (
-    "You are a CHANGELOG.md maintainer.  Draft Keep-a-Changelog "
-    "[Unreleased] entries (Added / Changed / Fixed / Removed) from the "
-    "provided commit list.\n\n"
+    "You are a CHANGELOG.md maintainer.  Draft NEW Keep-a-Changelog "
+    "bullets for the provided commit range.  The patcher will APPEND "
+    "these bullets to the existing [Unreleased] sub-sections — your "
+    "output ADDS to what's already there; it does NOT replace it.\n\n"
+    "Output format (exactly this — nothing else):\n\n"
+    "### Added\n"
+    "- bullet 1\n"
+    "- bullet 2\n\n"
+    "### Fixed\n"
+    "- bullet 3\n\n"
+    "### Changed\n"
+    "- bullet 4\n\n"
     "Rules:\n"
-    "- Output bullets ONLY — no '## [Unreleased]' header line, no "
-    "explanations, no markdown code fences.\n"
-    "- Use ### Added / ### Changed / ### Fixed / ### Removed section "
-    "headers as needed; omit empty sections.\n"
+    "- Output ONLY ### Added / ### Changed / ### Fixed / ### Removed "
+    "headers followed by bullets.  Omit any section with no new bullets.\n"
+    "- No '## [Unreleased]' line, no prose preamble, no markdown code "
+    "fences, no trailing explanation.\n"
+    "- Output ONLY bullets describing the provided commit range.  Do NOT "
+    "echo, summarise, restate, or re-describe bullets already in the "
+    "'Current [Unreleased] content' below — the patcher keeps all of "
+    "those VERBATIM.  Repeating them creates duplicates.\n"
+    "- If the provided commits don't introduce anything not already in "
+    "the current [Unreleased] content, output nothing.\n"
     "- Each bullet uses conventional-commit scope prefix in parens, e.g. "
-    "'(gitignore-dialog) AI Suggest button — one-click pattern recs'.\n"
-    "- Preserve any user-authored content from the existing [Unreleased] "
-    "block — re-render the WHOLE block consolidating old + new bullets.  "
-    "Do not duplicate bullets that describe the same change.\n"
-    "- If two commits describe the same change at different abstraction "
-    "levels, merge into one bullet.\n"
-    "- Keep bullets factual: cite file paths and helper names in backticks.  "
-    "No marketing fluff."
+    "'(gitignore-dialog) 🤖 AI Suggest button — one-click pattern recs'.\n"
+    "- Cite file paths and helper names in backticks.  No marketing fluff."
 )
 
 _README_SYSTEM = (
@@ -414,8 +423,10 @@ def build_changelog_prompt(commits, classified, existing_unreleased,
     parts.append("")
     parts.append(_render_commit_list(classified) or "(no commits classified)")
     parts.append("")
-    parts.append("Current CHANGELOG.md [Unreleased] block body (preserve / "
-                 "consolidate — re-render the whole thing):")
+    parts.append("Current [Unreleased] content (DO NOT repeat, restate, or "
+                 "consolidate any of these — the patcher keeps them VERBATIM; "
+                 "your job is only to ADD new bullets for the commit range "
+                 "above):")
     parts.append("")
     parts.append(existing_unreleased or "(currently empty)")
 
