@@ -833,6 +833,12 @@ class DocDrafterDialog(tk.Toplevel):
                                   command=lambda k=key: self._on_regenerate_with_feedback(k))
         # NOT packed yet — revealed by _on_apply_result on failure.
 
+        # B2: per-tab checkbox to enable agentic tokensave tool use.
+        ts_tools_var = tk.BooleanVar(value=False)
+        ts_tools_chk = ttk.Checkbutton(btn_row, text="🔍 Tokensave tools",
+                                        variable=ts_tools_var)
+        ts_tools_chk.pack(side=tk.RIGHT, padx=(6, 0))
+
         status_var = tk.StringVar(value="")
         # wraplength keeps long filter messages from pushing buttons off-screen
         # on narrow window sizes; status text wraps inside the row instead.
@@ -843,16 +849,17 @@ class DocDrafterDialog(tk.Toplevel):
         status_lbl.pack(side=tk.LEFT, padx=(12, 0), fill=tk.X, expand=True)
 
         self._tab_widgets[key] = {
-            "frame":        frame,
-            "text":         txt,
-            "gen_btn":      gen_btn,
-            "apply_btn":    apply_btn,
-            "feedback_btn": feedback_btn,
-            "btn_row":      btn_row,
-            "status_var":   status_var,
-            "status_lbl":   status_lbl,
-            "target":       target_file,
-            "target_var":   target_var,   # None for fixed-target DocTypes
+            "frame":          frame,
+            "text":           txt,
+            "gen_btn":        gen_btn,
+            "apply_btn":      apply_btn,
+            "feedback_btn":   feedback_btn,
+            "ts_tools_var":   ts_tools_var,
+            "btn_row":        btn_row,
+            "status_var":     status_var,
+            "status_lbl":     status_lbl,
+            "target":         target_file,
+            "target_var":     target_var,   # None for fixed-target DocTypes
         }
 
     # ── File-picker helpers ────────────────────────────────────────────────
@@ -1036,12 +1043,22 @@ class DocDrafterDialog(tk.Toplevel):
             if stop_event.is_set():
                 return
 
+            # B2: read per-tab tokensave-tools checkbox.
+            use_ts_tools = bool(
+                self._tab_widgets.get(key, {}).get("ts_tools_var",
+                    tk.BooleanVar()).get()
+            )
+            ts_exe = getattr(self._cfg, "tokensave_exe", "") or ""
+
             text, err = dd.dispatch_llm(
                 llm_cfg, system, user,
                 claude_cli_exe=self._cfg.claude_cli_exe,
                 cwd=project, timeout=120,
                 gen_params=gen_params or None,
                 examples=dt.examples or None,
+                enable_tokensave_tools=use_ts_tools,
+                tokensave_exe=ts_exe,
+                stop_event=stop_event,
             )
 
             if stop_event.is_set():

@@ -632,9 +632,79 @@ def build_readme_prompt(commits, classified, existing_highlights,
 
 # ── LLM dispatch ────────────────────────────────────────────────────────────
 
+def _dispatch_agentic(llm_cfg, system_prompt, user_prompt,
+                      project_path, tokensave_exe, timeout, stop_event):
+    """Run a one-shot LocalAgent loop with tokensave tools and return (text, error).
+
+    Used by dispatch_llm when enable_tokensave_tools=True and provider is
+    ollama/openai_compatible.  The agent may call tokensave_search and
+    tokensave_context before producing its final answer, which becomes the
+    draft text returned to the dialog.
+    """
+    import threading
+
+    try:
+        from agent import LocalAgent
+        from agent_tools import (
+            make_tokensave_search_tool,
+            make_tokensave_context_tool,
+        )
+    except ImportError:
+        return None, "Agentic mode unavailable: agent module not found."
+
+    tools = {}
+    if tokensave_exe and project_path:
+        ts_search = make_tokensave_search_tool(project_path, tokensave_exe)
+        ts_ctx = make_tokensave_context_tool(project_path, tokensave_exe)
+        tools[ts_search.name] = ts_search
+        tools[ts_ctx.name] = ts_ctx
+
+    messages = [
+        {"role": "system", "content": system_prompt},
+        {"role": "user",   "content": user_prompt},
+    ]
+
+    result_holder: list[str | None] = [None]
+    error_holder:  list[str | None] = [None]
+    done_event = threading.Event()
+
+    def _on_done(text):
+        result_holder[0] = text
+        done_event.set()
+
+    def _on_error(msg):
+        error_holder[0] = msg
+        done_event.set()
+
+    agent = LocalAgent(cfg=llm_cfg, project_path=project_path, tools=tools,
+                       max_iterations=6)
+    agent_thread = threading.Thread(
+        target=agent.run,
+        kwargs=dict(
+            messages=messages,
+            on_done=_on_done,
+            on_error=_on_error,
+            stop_event=stop_event,
+        ),
+        daemon=True,
+    )
+    agent_thread.start()
+    done_event.wait(timeout=timeout)
+    if not done_event.is_set():
+        return None, "Agentic call timed out."
+    if error_holder[0]:
+        return None, error_holder[0]
+    text = result_holder[0]
+    if not text:
+        return None, "Agentic call returned no output."
+    return text, None
+
+
 def dispatch_llm(llm_cfg, system_prompt, user_prompt,
                  claude_cli_exe, cwd, timeout=120,
-                 gen_params=None, examples=None):
+                 gen_params=None, examples=None,
+                 enable_tokensave_tools=False, tokensave_exe="",
+                 stop_event=None):
     """Call the configured LLM and return ``(text, error)``.
 
     Routes to ``call_claude_cli_print`` when ``llm_cfg["provider"] ==
@@ -646,6 +716,12 @@ def dispatch_llm(llm_cfg, system_prompt, user_prompt,
       (temperature, top_p, top_k, num_ctx).  Values in gen_params win.
     examples: list of (input_text, output_text) few-shot pairs spliced
       into user_prompt for ollama / openai_compatible providers.
+    enable_tokensave_tools: when True and provider is ollama/openai_compatible,
+      use a one-shot LocalAgent loop with tokensave_search + tokensave_context
+      tools instead of a plain completion (Theme B2).  Claude CLI stays on the
+      B1-injection path (documented asymmetry).
+    tokensave_exe: path to tokensave binary; required when enable_tokensave_tools=True.
+    stop_event: threading.Event for cooperative cancellation in agentic path.
 
     Pure dispatch — does NOT handle threading, cancellation, or UI.
     Caller wraps in a worker thread + stop_event check.
@@ -661,6 +737,16 @@ def dispatch_llm(llm_cfg, system_prompt, user_prompt,
             ex_parts.append(f"Example input:\n{inp}\n\nExpected output:\n{out}")
         ex_block = "\n\n---\n\n".join(ex_parts)
         user_prompt = ex_block + "\n\n---\n\n" + user_prompt
+
+    # Theme B2: agentic path for local providers when tokensave tools requested.
+    if enable_tokensave_tools and provider.lower() in ("ollama", "openai_compatible"):
+        return _dispatch_agentic(
+            llm_cfg, system_prompt, user_prompt,
+            project_path=cwd or "",
+            tokensave_exe=tokensave_exe or "",
+            timeout=timeout,
+            stop_event=stop_event,
+        )
 
     try:
         if provider == "claude_cli":
