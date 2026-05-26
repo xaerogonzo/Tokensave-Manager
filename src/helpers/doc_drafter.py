@@ -689,3 +689,777 @@ def dispatch_llm(llm_cfg, system_prompt, user_prompt,
         return result, None
     except Exception as exc:
         return None, f"{provider or 'LLM'} call failed: {exc}"
+
+
+# ── Bullet-quality filter helpers (moved from dialogs/doc_drafter.py) ────────
+#
+# These run on the AI's output BEFORE the patcher applies it.  Catch the two
+# Ollama failure modes: truncation (bullet ends mid-clause) and redundancy
+# (bullet restates an existing entry).  Moved to helpers so DocType callables
+# can reference them without circular imports.
+
+_TRUNCATION_TRAILING = {
+    "for", "the", "to", "with", "and", "or", "of",
+    "in", "on", "at", "by", "as", "is", "a", "an",
+}
+
+_STOP_WORDS = {
+    "the", "a", "an", "and", "or", "but", "if", "then", "than",
+    "of", "to", "in", "on", "at", "by", "as", "for", "with", "from", "into",
+    "via", "per", "between", "through", "across", "over", "under",
+    "after", "before", "during", "while", "when",
+    "be", "is", "are", "was", "were", "it", "its", "this", "that",
+    "also", "now", "still", "even", "just", "only",
+}
+
+_NOOP_BULLET_PATTERNS = [
+    re.compile(
+        r"^-?\s*(none|n/?a|nothing|tbd|no\s+changes?"
+        r"|nothing\s+to\s+(add|report|note|do)"
+        r"|n\.?a\.?|empty|placeholder)\s*\.?$",
+        re.IGNORECASE,
+    ),
+]
+
+# Phase 2.0 — literal template placeholder detector.
+_LITERAL_PLACEHOLDER_RE = re.compile(
+    r"\bRoadmap[-\s](?:"
+    r"[A-Za-z](?![A-Za-z0-9])"
+    r"|<[^>]+>"
+    r"|TODO\b|TBD\b|PLACEHOLDER\b|PENDING\b|NUM\b|NUMBER\b"
+    r")|<sub-section[^>]*>",
+    re.IGNORECASE,
+)
+
+_PRESERVATION_THRESHOLD = 0.40
+
+
+def _is_noop_bullet(bullet):
+    s = (bullet or "").strip().lstrip("-*").strip().strip("()").strip()
+    return any(p.match(s) for p in _NOOP_BULLET_PATTERNS)
+
+
+def _looks_truncated(bullet):
+    s = (bullet or "").rstrip()
+    if not s:
+        return False
+    for _ in range(3):
+        before = s
+        m = re.search(r"\s+\([^()]*\)\s*[:!?.]?\s*$", s)
+        if m:
+            s = s[:m.start()].rstrip()
+            continue
+        m = re.search(r"\s+\[[^\]]*\]\([^)]*\)\s*[:!?.]?\s*$", s)
+        if m:
+            s = s[:m.start()].rstrip()
+            continue
+        m = re.search(r"\s+`[^`]*`\s*[:!?.]?\s*$", s)
+        if m:
+            s = s[:m.start()].rstrip()
+            continue
+        if s == before:
+            break
+    if not s:
+        return False
+    if s.endswith((".", ":", "!", "?", ")", "`", '"', "'")):
+        return False
+    last_word = s.split()[-1].lower().rstrip(",;:")
+    return last_word in _TRUNCATION_TRAILING
+
+
+def _token_set(bullet):
+    s = re.sub(r"[^\w\s]", " ", (bullet or "").lower())
+    return {t for t in s.split() if t not in _STOP_WORDS and len(t) > 2}
+
+
+def _is_duplicate(new_bullet, existing_bullet):
+    a = _token_set(new_bullet)
+    b = _token_set(existing_bullet)
+    if not a or not b:
+        return False
+    union = a | b
+    jaccard = len(a & b) / len(union) if union else 0.0
+    overlap = len(a & b) / min(len(a), len(b))
+    return jaccard >= 0.6 or overlap >= 0.65
+
+
+def _sanitise_raw_draft(text):
+    lines = text.splitlines()
+    while lines:
+        last = lines[-1].strip()
+        if (not last
+                or last.startswith("```")
+                or last.startswith("<!--")
+                or last in {"---", "***", "___"}
+                or last.lower().startswith(("*generated", "_generated",
+                                            "*draft", "*ai-generated"))):
+            lines.pop()
+            continue
+        break
+    while lines:
+        first = lines[0].strip()
+        if not first or first.startswith("```"):
+            lines.pop(0)
+            continue
+        break
+    return "\n".join(lines)
+
+
+def _preserve_score(a_set, b_set):
+    if not a_set or not b_set:
+        return 0.0
+    intersection = a_set & b_set
+    if len(intersection) < 2:
+        return 0.0
+    union = a_set | b_set
+    jaccard = len(intersection) / len(union)
+    overlap = len(intersection) / min(len(a_set), len(b_set))
+    return max(jaccard, overlap)
+
+
+def _mirror_contract_check(draft_bullets, existing_bullets,
+                            min_preservation=0.75):
+    if not existing_bullets:
+        return True, 0, 0, []
+    existing_compiled = [(eb, _token_set(eb)) for eb in existing_bullets]
+    draft_compiled   = [(db, _token_set(db)) for db in draft_bullets]
+    triples = []
+    for ei, (_, a) in enumerate(existing_compiled):
+        for di, (_, b) in enumerate(draft_compiled):
+            s = _preserve_score(a, b)
+            if s >= _PRESERVATION_THRESHOLD:
+                triples.append((s, ei, di))
+    triples.sort(key=lambda t: -t[0])
+    claimed_e, claimed_d = set(), set()
+    for _score, ei, di in triples:
+        if ei in claimed_e or di in claimed_d:
+            continue
+        claimed_e.add(ei)
+        claimed_d.add(di)
+    matched = len(claimed_e)
+    missing_list = [eb for ei, (eb, _) in enumerate(existing_compiled)
+                    if ei not in claimed_e]
+    missing = len(missing_list)
+    ratio = matched / len(existing_bullets)
+    if ratio < min_preservation and missing > 1:
+        missing_examples = [
+            (eb[:80] + "…" if len(eb) > 80 else eb)
+            for eb in missing_list
+        ][:3]
+        return False, matched, missing, missing_examples
+    return True, matched, missing, []
+
+
+def _filter_bullets(bullets_md, existing_bullets, *,
+                    dedup_against_existing=True):
+    kept = []
+    truncated_n = 0
+    duplicate_n = 0
+    noop_n = 0
+    for line in bullets_md.splitlines():
+        stripped = line.lstrip()
+        if not (stripped.startswith("- ") or stripped.startswith("* ")):
+            kept.append(line)
+            continue
+        if _looks_truncated(stripped):
+            truncated_n += 1
+            continue
+        if _is_noop_bullet(stripped):
+            noop_n += 1
+            continue
+        if dedup_against_existing:
+            if any(_is_duplicate(stripped, eb) for eb in existing_bullets):
+                duplicate_n += 1
+                continue
+            kept.append(line)
+        else:
+            is_dup = False
+            for idx, kb in enumerate(kept):
+                kb_stripped = kb.lstrip()
+                if not kb_stripped.startswith(("- ", "* ")):
+                    continue
+                if _is_duplicate(stripped, kb_stripped):
+                    is_dup = True
+                    if len(stripped) > len(kb_stripped) + 8:
+                        kept[idx] = line
+                    duplicate_n += 1
+                    break
+            if not is_dup:
+                kept.append(line)
+    return "\n".join(kept).strip(), truncated_n, duplicate_n, noop_n
+
+
+def parse_grouped_bullets(draft_text):
+    """Parse '### Header / - bullet ...' grouped output into (header, body) pairs."""
+    pairs = []
+    current_section = None
+    current_lines = []
+    for ln in draft_text.splitlines():
+        stripped = ln.strip()
+        if stripped.startswith("### "):
+            if current_section is not None:
+                body = "\n".join(current_lines).strip()
+                if body:
+                    pairs.append((current_section, body))
+            current_section = stripped[4:].strip()
+            current_lines = []
+        elif current_section is not None:
+            current_lines.append(ln)
+    if current_section is not None:
+        body = "\n".join(current_lines).strip()
+        if body:
+            pairs.append((current_section, body))
+    return pairs
+
+
+def split_readme_subsection(draft_text):
+    """Extract first ``**Header**`` line + remaining bullets. Returns (header, bullets) or None."""
+    lines = draft_text.splitlines()
+    header_idx = None
+    for i, ln in enumerate(lines):
+        stripped = ln.strip()
+        if (stripped.startswith("**") and stripped.endswith("**")
+                and len(stripped) > 4):
+            header_idx = i
+            break
+        if (stripped.startswith("**") and "**" in stripped[2:]
+                and stripped.endswith(":")):
+            header_idx = i
+            break
+    if header_idx is None:
+        return None
+    header_line = lines[header_idx].strip()
+    bullets = "\n".join(lines[header_idx + 1:]).strip("\n")
+    return header_line, bullets
+
+
+# ── DocType callable implementations ─────────────────────────────────────────
+#
+# These are the io_apply / compute_apply / filter_draft callables stored in
+# the DocType registry.  Defined here (helpers) so they can be imported by
+# helpers/doc_types.py without circular imports.
+
+def changelog_filter_draft(raw_text, target_path):
+    """Filter changelog draft. Returns (filtered_text, trunc_n, dup_n, noop_n)."""
+    from helpers.changelog_patch import read_section_bullets
+    sanitised = _sanitise_raw_draft(raw_text or "")
+    total_trunc = total_dup = total_noop = 0
+    pairs = parse_grouped_bullets(sanitised)
+    kept_pairs = []
+    for section, bullets in pairs:
+        existing = read_section_bullets(target_path, section)
+        filtered, t_n, d_n, n_n = _filter_bullets(bullets, existing)
+        total_trunc += t_n
+        total_dup += d_n
+        total_noop += n_n
+        if filtered.strip():
+            kept_pairs.append((section, filtered.strip()))
+    chunks = [f"### {sec}\n{body}" for sec, body in kept_pairs]
+    return "\n\n".join(chunks), total_trunc, total_dup, total_noop
+
+
+def readme_filter_draft(raw_text, target_path):
+    """Filter readme draft. Returns (filtered_text, trunc_n, dup_n, noop_n)."""
+    from helpers.readme_patch import read_subsection_bullets
+    sanitised = _sanitise_raw_draft(raw_text or "")
+    parsed = split_readme_subsection(sanitised)
+    if parsed is None:
+        return sanitised, 0, 0, 0
+    header_line, bullets = parsed
+    existing = read_subsection_bullets(target_path, header_line)
+    filtered, t_n, d_n, n_n = _filter_bullets(
+        bullets, existing, dedup_against_existing=False)
+    if filtered.strip():
+        return (f"{header_line}\n{filtered.strip()}", t_n, d_n, n_n)
+    return "", t_n, d_n, n_n
+
+
+def changelog_compute_apply(full_text, pairs_list):
+    """PURE: apply grouped bullet pairs to full file text. Returns (new_text, ok, msg)."""
+    from helpers.changelog_patch import _compute_insert_unreleased_bullets
+    if not pairs_list:
+        return full_text, False, "No bullet pairs to apply."
+    simulated = full_text
+    for section, bullets in pairs_list:
+        simulated, ok, msg = _compute_insert_unreleased_bullets(
+            simulated, section, bullets)
+        if not ok:
+            return full_text, False, f"{section}: {msg}"
+    return simulated, True, "ok"
+
+
+def readme_compute_apply(full_text, header_line, bullets):
+    """PURE: splice readme sub-section into full file text. Returns (new_text, ok, msg)."""
+    from helpers.readme_patch import _compute_insert_readme_highlights_subsection
+    return _compute_insert_readme_highlights_subsection(
+        full_text, header_line, bullets)
+
+
+def changelog_io_apply(target_path, draft_text):
+    """Apply changelog draft. Returns (ok, msg, stats_dict)."""
+    from helpers.changelog_patch import read_section_bullets, insert_unreleased_bullets
+    pairs = parse_grouped_bullets(draft_text)
+    if not pairs:
+        return False, (
+            "Draft is missing '### Section' headers — CHANGELOG mode requires "
+            "bullets grouped under ### Added / ### Fixed / ### Changed / "
+            "### Removed."
+        ), {}
+    applied = []
+    total_truncated = total_duplicates = total_noop = 0
+    empty_after_filter = 0
+    for section, bullets in pairs:
+        existing = read_section_bullets(target_path, section)
+        filtered, trunc_n, dup_n, noop_n = _filter_bullets(bullets, existing)
+        total_truncated += trunc_n
+        total_duplicates += dup_n
+        total_noop += noop_n
+        if not filtered.strip():
+            empty_after_filter += 1
+            continue
+        ok, msg = insert_unreleased_bullets(target_path, section, filtered)
+        if not ok:
+            stats = {"truncated": total_truncated,
+                     "duplicates": total_duplicates, "noop": total_noop}
+            return False, f"{section}: {msg} (applied so far: {applied})", stats
+        applied.append(section)
+    stats = {"truncated": total_truncated,
+             "duplicates": total_duplicates, "noop": total_noop}
+    if not applied:
+        return False, (
+            f"All bullets filtered out ({total_truncated} truncated, "
+            f"{total_duplicates} duplicates, {total_noop} placeholders).  "
+            "Click Regenerate to retry."
+        ), stats
+    summary = f"appended to {len(applied)} section(s): {', '.join(applied)}"
+    if empty_after_filter:
+        summary += f" ({empty_after_filter} section(s) emptied by filter)"
+    return True, summary, stats
+
+
+def readme_io_apply(target_path, draft_text):
+    """Apply readme sub-section draft. Returns (ok, msg, stats_dict)."""
+    from helpers.readme_patch import (
+        read_subsection_bullets, insert_readme_highlights_subsection,
+        read_highlights,
+    )
+    parsed = split_readme_subsection(draft_text)
+    if parsed is None:
+        return False, (
+            "Draft is missing a `**Bold header**` line — README mode requires "
+            "a sub-section header as the first non-blank line."
+        ), {}
+    header_line, bullets = parsed
+    if _LITERAL_PLACEHOLDER_RE.search(header_line):
+        candidates = _extract_subsection_headers(read_highlights(target_path))
+        candidates_msg = "\n  ".join("• " + h for h in candidates[:5])
+        return False, (
+            f"Header contains a literal template placeholder: "
+            f"{header_line!r}.  Edit the draft to use a real header, "
+            f"or click Regenerate.  Existing candidates to REUSE if "
+            f"your bullets belong:\n  "
+            f"{candidates_msg if candidates else '(none — your sub-section is brand new; use a concrete number like Roadmap-6 or Roadmap-7)'}"
+        ), {}
+    existing = read_subsection_bullets(target_path, header_line)
+    filtered, trunc_n, dup_n, noop_n = _filter_bullets(
+        bullets, existing, dedup_against_existing=False)
+    stats = {"truncated": trunc_n, "duplicates": dup_n, "noop": noop_n}
+    if not filtered.strip():
+        return False, (
+            f"All bullets filtered out ({trunc_n} truncated, {dup_n} "
+            f"self-duplicates, {noop_n} placeholders).  README's REPLACE "
+            "patcher would DELETE the existing sub-section if applied with "
+            "no bullets.  Click Regenerate."
+        ), stats
+    draft_bullets = [ln.lstrip() for ln in filtered.splitlines()
+                     if ln.lstrip().startswith(("- ", "* "))]
+    ok, kept, missing, examples = _mirror_contract_check(
+        draft_bullets, existing)
+    if not ok:
+        bullet_list = "\n  ".join("• " + ex for ex in examples)
+        extra = (f" (showing {len(examples)} of {missing})"
+                 if missing > len(examples) else "")
+        return False, (
+            f"Mirror-contract safety abort: draft preserves only "
+            f"{kept}/{kept + missing} existing bullets "
+            f"({int(100 * kept / max(1, kept + missing))}%).  "
+            f"README's REPLACE patcher would DELETE {missing} "
+            f"preserved bullet(s){extra}:\n  {bullet_list}\n\n"
+            f"Click Regenerate to retry, or manually edit the draft "
+            f"to add the missing bullets back before Apply."
+        ), stats
+    ok2, msg2 = insert_readme_highlights_subsection(
+        target_path, header_line,
+        filtered + "\n" if filtered else "\n")
+    return ok2, msg2, stats
+
+
+# ── Phase 2 DocType system prompts ────────────────────────────────────────────
+
+_ARCHITECTURE_SYSTEM = (
+    "You are an architecture documentation maintainer.  Update ONE named "
+    "section in the project's ARCHITECTURE.md based on the provided commits.\n\n"
+    "Output format (exactly this — nothing else):\n"
+    "  ## Section Name\n"
+    "  <updated section body>\n\n"
+    "Rules:\n"
+    "- Output exactly ONE section, starting with a ``## `` heading on its "
+    "own line.  No prose preamble, no code fences around the output.\n"
+    "- Preserve all factual content in the existing section that is still "
+    "accurate.  Only ADD or UPDATE what the commits actually change.\n"
+    "- Use the same style as the existing document: tree-formatted file "
+    "listings, one-liner descriptions per module, Key exports annotations.\n"
+    "- New helpers get an entry under ``helpers/`` sorted alphabetically. "
+    "New dialogs get an entry under ``dialogs/`` sorted alphabetically.\n"
+    "- Cite exported symbol names in backtick format, e.g. "
+    "``read_unreleased``, ``_compute_insert_*``.\n"
+    "- Do NOT invent details not supported by the commits or existing text."
+)
+
+_ROADMAP_SYSTEM = (
+    "You are a roadmap document maintainer.  Draft content for a roadmap "
+    "section entry based on the provided commits.\n\n"
+    "Output format (exactly this — nothing else):\n"
+    "  ## Roadmap N — Theme Title\n"
+    "  ### ✅ Item title\n"
+    "  Description.\n"
+    "  ### 🟡 Another item\n"
+    "  Description.\n\n"
+    "Status emoji meanings: ✅ shipped  🟡 in-progress  🔮 planned  "
+    "💭 idea  💤 stale.\n\n"
+    "Rules:\n"
+    "- The first line MUST be ``## Roadmap N — Theme``.  Use the roadmap "
+    "number from the user prompt.\n"
+    "- Each entry starts with ``### <emoji> <title>``.\n"
+    "- Body text per entry: 1–3 short sentences.  Technical, not marketing.\n"
+    "- Only describe work evidenced by the provided commits.\n"
+    "- No prose preamble, no code fences around the output."
+)
+
+_MEMORY_SYSTEM = (
+    "You are a persistent-memory file author.  Write the body of a memory "
+    "file based on the provided commits and context.\n\n"
+    "Rules:\n"
+    "- Output only the body text — no YAML frontmatter, no markdown "
+    "code fences around the output.\n"
+    "- Use the memory file format: lead with the key fact, then a "
+    "**Why:** line (reason / motivation), then a **How to apply:** line "
+    "(when this guidance kicks in).  Link related memories with "
+    "``[[slug-name]]``.\n"
+    "- Be specific and actionable.  'Always use X when Y' beats 'Consider X'.\n"
+    "- No filler, no hedging, no preamble."
+)
+
+_GENERIC_DOC_SYSTEM = (
+    "You are a markdown documentation maintainer.  Update ONE named section "
+    "in the target document based on the provided commits.\n\n"
+    "Output format (exactly this — nothing else):\n"
+    "  ## Section Name\n"
+    "  <updated section body>\n\n"
+    "Rules:\n"
+    "- Output exactly ONE section, starting with a ``## `` heading.\n"
+    "- Preserve all still-accurate content from the existing section.  "
+    "Only ADD or UPDATE what the commits actually change.\n"
+    "- Match the voice and style of the existing document.\n"
+    "- No prose preamble, no code fences around the output."
+)
+
+
+# ── Phase 2 build_prompt functions ───────────────────────────────────────────
+
+def _render_commit_summary(commits, classified):
+    """Shared commit block used by all Phase 2 prompt builders."""
+    parts = []
+    if commits:
+        parts.append("Recent commits:")
+        for c in commits[:40]:
+            parts.append(f"  {c}")
+    if classified:
+        parts.append("")
+        parts.append("Classified changes:")
+        parts.append(_render_commit_list(classified))
+    return "\n".join(parts)
+
+
+def build_architecture_prompt(commits, classified, existing_full,
+                               project_name, project_desc,
+                               changed_files, boundary_note,
+                               grounding_block=""):
+    """Return (system, user) for the architecture tab."""
+    system = _ARCHITECTURE_SYSTEM
+    parts = [f"Project: {project_name}"]
+    if project_desc:
+        parts.append(f"Description: {project_desc}")
+    if boundary_note:
+        parts.append("")
+        parts.append(boundary_note)
+    parts.append("")
+    parts.append(_render_commit_summary(commits, classified))
+    if changed_files:
+        parts.append("")
+        parts.append("Changed files:")
+        for f in changed_files[:60]:
+            parts.append(f"  {f}")
+    if grounding_block:
+        parts.append("")
+        parts.append(grounding_block)
+    parts.append("")
+    parts.append(
+        "Current ARCHITECTURE.md (update the section most affected by "
+        "these commits; output exactly that section with ## heading):"
+    )
+    parts.append("")
+    parts.append(existing_full or "(currently empty)")
+    return system, "\n".join(parts)
+
+
+def build_roadmap_prompt(commits, classified, existing_full,
+                          project_name, project_desc,
+                          changed_files, boundary_note,
+                          grounding_block=""):
+    """Return (system, user) for the roadmap tab."""
+    system = _ROADMAP_SYSTEM
+    parts = [f"Project: {project_name}"]
+    if project_desc:
+        parts.append(f"Description: {project_desc}")
+    if boundary_note:
+        parts.append("")
+        parts.append(boundary_note)
+    parts.append("")
+    parts.append(_render_commit_summary(commits, classified))
+    if grounding_block:
+        parts.append("")
+        parts.append(grounding_block)
+    parts.append("")
+    parts.append(
+        "Current ROADMAP.md (identify the active roadmap number from "
+        "context; output the updated ## Roadmap N section):"
+    )
+    parts.append("")
+    parts.append(existing_full or "(currently empty)")
+    return system, "\n".join(parts)
+
+
+def build_memory_prompt(commits, classified, existing_body,
+                         project_name, project_desc,
+                         changed_files, boundary_note,
+                         grounding_block=""):
+    """Return (system, user) for the memory tab."""
+    system = _MEMORY_SYSTEM
+    parts = [f"Project: {project_name}"]
+    if project_desc:
+        parts.append(f"Description: {project_desc}")
+    if boundary_note:
+        parts.append("")
+        parts.append(boundary_note)
+    parts.append("")
+    parts.append(_render_commit_summary(commits, classified))
+    if grounding_block:
+        parts.append("")
+        parts.append(grounding_block)
+    parts.append("")
+    parts.append("Current memory body (update or extend based on commits):")
+    parts.append("")
+    parts.append(existing_body or "(currently empty)")
+    return system, "\n".join(parts)
+
+
+def build_generic_doc_prompt(commits, classified, existing_full,
+                              project_name, project_desc,
+                              changed_files, boundary_note,
+                              grounding_block=""):
+    """Return (system, user) for the docs_generic / tokensave_guide tab."""
+    system = _GENERIC_DOC_SYSTEM
+    parts = [f"Project: {project_name}"]
+    if project_desc:
+        parts.append(f"Description: {project_desc}")
+    if boundary_note:
+        parts.append("")
+        parts.append(boundary_note)
+    parts.append("")
+    parts.append(_render_commit_summary(commits, classified))
+    if changed_files:
+        parts.append("")
+        parts.append("Changed files:")
+        for f in changed_files[:60]:
+            parts.append(f"  {f}")
+    if grounding_block:
+        parts.append("")
+        parts.append(grounding_block)
+    parts.append("")
+    parts.append(
+        "Current document (update the section most affected by these "
+        "commits; output exactly that section with ## heading):"
+    )
+    parts.append("")
+    parts.append(existing_full or "(currently empty)")
+    return system, "\n".join(parts)
+
+
+# ── Phase 2 parse_draft functions ────────────────────────────────────────────
+#
+# Each returns a tuple that gets splatted: compute_apply(full_text, *parse_draft(draft))
+# Return (None, ...) on failure so _simulate_body can detect it.
+
+_SECTION_HEADING_RE = re.compile(r"(?m)^## ([^\n]+)\n(.*)", re.DOTALL)
+_ROADMAP_HEADING_RE = re.compile(r"(?m)^## Roadmap (\d+)([^\n]*)\n(.*)", re.DOTALL)
+
+
+def architecture_parse_draft(draft_text):
+    """Extract (section_header, content) from draft. Returns (None, '') on failure."""
+    m = _SECTION_HEADING_RE.search((draft_text or "").strip())
+    if not m:
+        return (None, "")
+    return (m.group(1).strip(), m.group(2).strip())
+
+
+def roadmap_parse_draft(draft_text):
+    """Extract (roadmap_n, theme_title, content) from draft. Returns (None, '', '') on failure."""
+    m = _ROADMAP_HEADING_RE.search((draft_text or "").strip())
+    if not m:
+        return (None, "", "")
+    n = int(m.group(1))
+    theme_rest = m.group(2).strip().lstrip("—").strip()
+    theme = theme_rest or f"Roadmap {n}"
+    return (n, theme, m.group(3).strip())
+
+
+def memory_parse_draft(draft_text):
+    """Return (body_text,) — the entire draft is the memory body."""
+    body = (draft_text or "").strip()
+    if not body:
+        return (None,)
+    return (body,)
+
+
+def generic_parse_draft(draft_text):
+    """Extract (section_header, content) from draft. Returns (None, '') on failure."""
+    m = _SECTION_HEADING_RE.search((draft_text or "").strip())
+    if not m:
+        return (None, "")
+    return (m.group(1).strip(), m.group(2).strip())
+
+
+# ── Phase 2 filter_draft functions ────────────────────────────────────────────
+
+def _filter_freeform(raw_text):
+    """Lightweight filter for non-bullet drafts: strip placeholders only."""
+    sanitised = _sanitise_raw_draft(raw_text or "")
+    lines = sanitised.splitlines()
+    noop_n = 0
+    kept = []
+    for ln in lines:
+        stripped = ln.strip()
+        if _LITERAL_PLACEHOLDER_RE.search(stripped):
+            noop_n += 1
+            continue
+        kept.append(ln)
+    return "\n".join(kept), 0, 0, noop_n
+
+
+def architecture_filter_draft(raw_text, target_path):
+    """Filter architecture draft. Returns (text, trunc_n, dup_n, noop_n)."""
+    return _filter_freeform(raw_text)
+
+
+def roadmap_filter_draft(raw_text, target_path):
+    """Filter roadmap draft. Returns (text, trunc_n, dup_n, noop_n)."""
+    return _filter_freeform(raw_text)
+
+
+def memory_filter_draft(raw_text, target_path):
+    """Filter memory draft. Returns (text, trunc_n, dup_n, noop_n)."""
+    return _filter_freeform(raw_text)
+
+
+def generic_filter_draft(raw_text, target_path):
+    """Filter generic doc draft. Returns (text, trunc_n, dup_n, noop_n)."""
+    return _filter_freeform(raw_text)
+
+
+# ── Phase 2 compute_apply (PURE) functions ────────────────────────────────────
+
+def architecture_compute_apply(full_text, section_header, content):
+    """PURE: apply architecture section to full file. Returns (new_text, ok, msg)."""
+    from helpers.architecture_patch import _compute_insert_architecture_section
+    if section_header is None:
+        return full_text, False, "Could not parse section header from draft."
+    return _compute_insert_architecture_section(full_text, section_header, content)
+
+
+def roadmap_compute_apply(full_text, roadmap_n, theme_title, content):
+    """PURE: apply roadmap section to full file. Returns (new_text, ok, msg)."""
+    from helpers.roadmap_patch import _compute_insert_roadmap_section
+    if roadmap_n is None:
+        return full_text, False, "Could not parse roadmap number from draft."
+    return _compute_insert_roadmap_section(full_text, roadmap_n, theme_title, content)
+
+
+def memory_compute_apply(full_text, new_body):
+    """PURE: replace memory body. Returns (new_text, ok, msg)."""
+    from helpers.memory_patch import _compute_insert_memory_body
+    if new_body is None:
+        return full_text, False, "Draft body is empty."
+    return _compute_insert_memory_body(full_text, new_body)
+
+
+def generic_compute_apply(full_text, section_header, content):
+    """PURE: apply generic section to full file. Returns (new_text, ok, msg)."""
+    from helpers.generic_doc_patch import _compute_insert_generic_section
+    if section_header is None:
+        return full_text, False, "Could not parse section header from draft."
+    return _compute_insert_generic_section(full_text, section_header, content)
+
+
+# ── Phase 2 io_apply functions ────────────────────────────────────────────────
+
+def architecture_io_apply(target_path, draft_text):
+    """Apply architecture draft. Returns (ok, msg, stats_dict)."""
+    from helpers.architecture_patch import insert_architecture_section
+    parsed = architecture_parse_draft(draft_text)
+    section_header, content = parsed
+    if section_header is None:
+        return False, (
+            "Draft is missing a ``## Section Name`` heading — architecture "
+            "mode requires the output to start with a level-2 heading."
+        ), {}
+    ok, msg = insert_architecture_section(target_path, section_header, content)
+    return ok, msg, {}
+
+
+def roadmap_io_apply(target_path, draft_text):
+    """Apply roadmap draft. Returns (ok, msg, stats_dict)."""
+    from helpers.roadmap_patch import insert_roadmap_section
+    parsed = roadmap_parse_draft(draft_text)
+    roadmap_n, theme_title, content = parsed
+    if roadmap_n is None:
+        return False, (
+            "Draft is missing a ``## Roadmap N`` heading — roadmap mode "
+            "requires the output to start with '## Roadmap <number>'."
+        ), {}
+    ok, msg = insert_roadmap_section(target_path, roadmap_n, theme_title, content)
+    return ok, msg, {}
+
+
+def memory_io_apply(target_path, draft_text):
+    """Apply memory draft. Returns (ok, msg, stats_dict)."""
+    from helpers.memory_patch import insert_memory_body
+    body = (draft_text or "").strip()
+    if not body:
+        return False, "Draft is empty.", {}
+    ok, msg = insert_memory_body(target_path, body)
+    return ok, msg, {}
+
+
+def generic_io_apply(target_path, draft_text):
+    """Apply generic doc draft. Returns (ok, msg, stats_dict)."""
+    from helpers.generic_doc_patch import insert_generic_section
+    parsed = generic_parse_draft(draft_text)
+    section_header, content = parsed
+    if section_header is None:
+        return False, (
+            "Draft is missing a ``## Section Name`` heading — generic doc "
+            "mode requires the output to start with a level-2 heading."
+        ), {}
+    ok, msg = insert_generic_section(target_path, section_header, content)
+    return ok, msg, {}

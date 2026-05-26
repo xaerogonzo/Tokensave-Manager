@@ -59,7 +59,7 @@ Token Save Manager Source/
 │   │                              to backend, parses severity, exits 0 (warn) or 1
 │   │                              (block per threshold). Fail-open on every error.
 │   │
-│   ├── helpers/                   20 modules of pure / IO helpers — no UI deps.
+│   ├── helpers/                   23 modules of pure / IO helpers — no UI deps.
 │   │   ├── config.py              _load_config, _save_config, _migrate_config
 │   │   ├── detection.py           _detect_git/_gh/_npm/_codegraph/_claude_cli,
 │   │   │                          _root_path/_label, _version_lt
@@ -93,11 +93,12 @@ Token Save Manager Source/
 │   │   │                          (Summary / Technical / Threat Model / Verification)
 │   │   ├── changelog_patch.py     insert_changelog_release (versioned release patcher);
 │   │   │                          update_unreleased (replaces [Unreleased] body, EOF-safe);
-│   │   │                          read_unreleased (returns current [Unreleased] body for
-│   │   │                          LLM integration). All atomic via .tmp + os.replace.
-│   │   │                          (original insert_changelog_release: replaces ## [version]
-│   │   │                          block bounded by next ^## \[ line; falls back to insertion under
-│   │   │                          ## [Unreleased]). Wired into ReleaseWizard P2.
+│   │   │                          read_unreleased / read_unreleased_from_text (returns
+│   │   │                          current [Unreleased] body for LLM integration);
+│   │   │                          _compute_insert_unreleased_bullets(text, bullets) PURE
+│   │   │                          → (new_text, ok, msg) — Phase 2.1 mirror-contract helper;
+│   │   │                          read_section_bullets. All atomic via .tmp + os.replace.
+│   │   │                          Wired into ReleaseWizard P2 + DocDrafterDialog.
 │   │   ├── claude_cli.py          spawn_claude_cli — detached cmd.exe via CREATE_NEW_CONSOLE
 │   │   │                          with ""outer"" multi-quote fix + \r\n strip (TTY safety).
 │   │   │                          call_claude_cli_print(model="", cwd=None) — non-interactive
@@ -108,17 +109,30 @@ Token Save Manager Source/
 │   │   │                          + the review runner (run_review, parse_severity_summary,
 │   │   │                          severity_blocks_commit, backend dispatch for
 │   │   │                          "auto"/"claude_cli"/"llm"). Roadmap-2 P5b.
-│   │   └── refactor_scout.py      Pure-function SQL analytics against .tokensave/tokensave.db.
-│   │                              Finding @dataclass (stable md5 ID, kind, file, symbol,
-│   │                              line, message, evidence). Four _scout_* query functions:
-│   │                              complexity (CC>10), god_class (>40 methods), god_file
-│   │                              (>1500 lines), dead_code (no incoming call edges, filtered
-│   │                              by conservative entry-point allowlist). run_scout() returns
-│   │                              (findings_by_kind, suppressed_count). Helper functions for
-│   │                              formatting investigate context, writing temp .md briefings
-│   │                              for CLI handoff, and batch briefings. Roadmap-3 P6.
+│   │   ├── refactor_scout.py      Pure-function SQL analytics against .tokensave/tokensave.db.
+│   │   │                          Finding @dataclass (stable md5 ID, kind, file, symbol,
+│   │   │                          line, message, evidence). Four _scout_* query functions:
+│   │   │                          complexity (CC>10), god_class (>40 methods), god_file
+│   │   │                          (>1500 lines), dead_code (no incoming call edges, filtered
+│   │   │                          by conservative entry-point allowlist). run_scout() returns
+│   │   │                          (findings_by_kind, suppressed_count). Roadmap-3 P6.
+│   │   ├── tray_manager.py        TrayManager — 5 cohesive tray methods extracted from
+│   │   │                          App (Roadmap-6 W5). Owns pystray setup, hide/show, icon,
+│   │   │                          quit callback. App.__init__ holds a single instance.
+│   │   ├── doc_drafter.py         LLM-backed documentation draft helpers. Key exports:
+│   │   │                          build_changelog_prompt, build_readme_prompt,
+│   │   │                          dispatch_llm (routes claude_cli vs _call_llm),
+│   │   │                          resolve_commit_range (4 modes: since_last_doc /
+│   │   │                          since_last_commit / since_last_tag / custom),
+│   │   │                          changed_file_paths. Roadmap-6 Tier B.
+│   │   └── readme_patch.py        README highlights sub-section splicer (append-only,
+│   │                              Roadmap-6 Phase 2.1 shape). Key exports:
+│   │                              read_highlights(path), read_highlights_from_text(text),
+│   │                              _compute_insert_readme_highlights_subsection(text, header, bullets)
+│   │                              → (new_text, ok, msg) PURE; insert_readme_highlights_subsection
+│   │                              → IO wrapper; _find_block_bounds + _BOUNDARY_RE anchor detection.
 │   │
-│   ├── dialogs/                   22 tk.Toplevel dialog classes — one per file.
+│   ├── dialogs/                   23 tk.Toplevel dialog classes — one per file.
 │   │   ├── settings.py            SettingsDialog (+ _probe_loaded_model helper)
 │   │   ├── release_wizard.py      ReleaseWizardDialog + _ReleaseCtx (paired)
 │   │   ├── mcp_config.py          MCPConfigDialog
@@ -152,18 +166,28 @@ Token Save Manager Source/
 │   │   │                          directly (pure fn, no subprocess). cfg.raw
 │   │   │                          ["checks_enabled"] persists toggle state.
 │   │   │                          cancel_futures=True on close. Roadmap-3.
-│   │   └── proposal.py            WriteProposal dataclass + ProposalDialog +
-│   │                              ProposalBridge (P1 — race-safe _resolve under Lock,
-│   │                              5-min event.wait timeout, WM_DELETE_WINDOW = reject,
-│   │                              post-timeout expired-state UX, automated test harness
-│   │                              in __main__ covering 4 race-safety paths)
+│   │   ├── proposal.py            WriteProposal dataclass + ProposalDialog +
+│   │   │                          ProposalBridge (P1 — race-safe _resolve under Lock,
+│   │   │                          5-min event.wait timeout, WM_DELETE_WINDOW = reject,
+│   │   │                          post-timeout expired-state UX, automated test harness
+│   │   │                          in __main__ covering 4 race-safety paths)
+│   │   └── doc_drafter.py         DocDrafterDialog — 📝 Doc Updates… CHANGELOG + README
+│   │                              tabs (Roadmap-6). Per-tab thread isolation via
+│   │                              _tab_state[key]["stop"]. Phase 1.5–2.1 hardening:
+│   │                              bullet-quality filter, mirror-contract (_preserve_score,
+│   │                              bipartite matching, 40% floor), _LITERAL_PLACEHOLDER_RE
+│   │                              literal-placeholder rejection, backend dropdown (Default /
+│   │                              Force Ollama / Force Claude CLI), ProposalBridge honest-diff
+│   │                              via _simulate_changelog_body / _simulate_readme_body (pure
+│   │                              _compute_* helpers). ALL applies route through ProposalBridge.
 │   │
 │   └── controllers/               Tab controllers + Round-5 sub-controllers extracted
 │       │                          from the original god classes. Each takes cfg via
 │       │                          callback injection (never a parent reference).
 │       ├── projects_tab.py        ProjectsTabController (thin orchestrator after Round 5
-│       │                          extracted 9 sub-controllers — ~45 direct methods after
-│       │                          Roadmap-2 P5b added one wrapper)
+│       │                          extracted 9 sub-controllers — ~51 direct methods).
+│       │                          Right-click context menu includes 📝 Doc Updates… →
+│       │                          opens DocDrafterDialog (Roadmap-6 Tier B).
 │       ├── git_tab.py             GitTabController (push/pull/release/Draft PR/Open PR
 │       │                          on GitHub — ~38 direct methods after Roadmap-2 P4
 │       │                          extracted BranchManagementController).
@@ -625,6 +649,7 @@ Editable through the Settings dialog without touching JSON directly.
 | `commit_message_llm` | Dict. AI-commit-message + general LLM settings. Keys: `enabled` (bool), `provider` (str — `anthropic`/`openai`/`openai_compatible`/`ollama`), `model` (str), `api_key_env` (str — env var name), `base_url` (str — for OpenAI-compatible local servers), `min_diff_lines` (int — default 30), `max_diff_chars` (int — default 24000), `timeout_seconds` (int — default 90), `use_for_sync_autocommit` (bool), `num_ctx` (int — Ollama context window, default 32768, only Ollama). The agent in `src/agent.py` reads this whole dict. |
 | `mcp_skip_warnings` | List of absolute file paths. Each path corresponds to an MCP config file (`claude_desktop_config.json` or `.claude.json`) the user has chosen NOT to be warned about further. `_check_config` honours this list to keep the startup banner silent for explicitly-dismissed configs. Managed via `MCPConfigDialog`'s Skip button. |
 | `tokensave_update_poll_hours` | Float, default 1.0 (min 0.25). How often the daemon background poller hits the GitHub releases API to check for tokensave updates. Tunable to balance freshness against GitHub API rate limits (60/hr unauthenticated). |
+| `ask_tab_llm` | Dict. Ask tab AI backend settings (Roadmap-6). Same shape as `commit_message_llm` (provider, model, api_key_env, base_url, etc.) plus `claude_cli` as a valid provider. Falls back to `commit_message_llm` when key absent (migration path). Configured via Settings → "Ask Tab AI" section. When provider is `claude_cli`, api_key_env + base_url fields are disabled. |
 
 ### Nuitka onefile path resolution
 

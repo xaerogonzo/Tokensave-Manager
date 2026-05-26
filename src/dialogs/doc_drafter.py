@@ -34,15 +34,6 @@ from typing import TYPE_CHECKING
 from constants import C
 import re
 
-from helpers.changelog_patch import (
-    read_unreleased, read_unreleased_from_text, insert_unreleased_bullets,
-    read_section_bullets, _compute_insert_unreleased_bullets,
-)
-from helpers.readme_patch import (
-    read_highlights, read_highlights_from_text,
-    insert_readme_highlights_subsection, read_subsection_bullets,
-    _compute_insert_readme_highlights_subsection,
-)
 
 
 # ── Bullet-quality helpers (truncation + redundancy filters) ────────────────
@@ -481,6 +472,7 @@ def _filter_bullets(bullets_md, existing_bullets, *,
     return "\n".join(kept).strip(), truncated_n, duplicate_n, noop_n
 from helpers.release import _classify_commits_for_changelog
 from helpers import doc_drafter as dd
+from helpers.doc_types import REGISTRY
 
 if TYPE_CHECKING:
     from typing import Callable
@@ -531,15 +523,10 @@ class DocDrafterDialog(tk.Toplevel):
         self._project_name = os.path.basename(project_path)
         self._project_desc = self._read_project_description()
         self._tab_state = {
-            "changelog": {"stop": threading.Event(),
-                          "thread": None, "draft": ""},
-            "readme":    {"stop": threading.Event(),
-                          "thread": None, "draft": ""},
+            key: {"stop": threading.Event(), "thread": None, "draft": ""}
+            for key in REGISTRY
         }
         self._tab_widgets: dict = {}   # populated by _build_tab
-        # Populated by _apply_changelog_bullets / _apply_readme_subsection
-        # right before they return.  _on_apply_result reads + clears.
-        self._last_filter_stats: dict = {}
         # Per-session backend override (Phase 1.7).  Picked from a dropdown
         # in the header; never persisted to Settings.  Defaults to the
         # "Default" label which falls through to the configured provider.
@@ -741,19 +728,52 @@ class DocDrafterDialog(tk.Toplevel):
         self._notebook = ttk.Notebook(nb_wrap)
         self._notebook.pack(fill=tk.BOTH, expand=True)
 
-        self._build_tab("changelog", "CHANGELOG.md", "Generate CHANGELOG")
-        self._build_tab("readme",    "README.md",    "Generate README")
+        for key, dt in REGISTRY.items():
+            if dt.target_filename:
+                target = os.path.join(self._project_path, dt.target_filename)
+                if not (os.path.exists(target) or dt.auto_create):
+                    continue
+            # file-picker types (target_filename == "") always shown
+            generate_label = f"Generate {dt.label}"
+            self._build_tab(key, dt.target_filename, generate_label)
 
     def _build_tab(self, key, target_file, generate_label):
         frame = tk.Frame(self._notebook, bg=C["base"], padx=8, pady=8)
         self._notebook.add(frame, text=f"  {key.upper()}  ")
 
-        # Target file label
-        target_path = os.path.join(self._project_path, target_file)
-        tk.Label(frame,
-                 text=f"Target: {target_file}    ({target_path})",
-                 bg=C["base"], fg=C["overlay0"],
-                 font=("Consolas", 8)).pack(anchor=tk.W, pady=(0, 4))
+        is_file_picker = (target_file == "")
+        target_var = None
+
+        if is_file_picker:
+            # File-picker row: combobox + refresh button
+            picker_row = tk.Frame(frame, bg=C["base"])
+            picker_row.pack(fill=tk.X, pady=(0, 4))
+            tk.Label(picker_row, text="Target file:",
+                     bg=C["base"], fg=C["overlay0"],
+                     font=("Consolas", 8)).pack(side=tk.LEFT)
+            target_var = tk.StringVar()
+            file_list = self._list_picker_files(key)
+            cb = ttk.Combobox(picker_row, textvariable=target_var,
+                              values=file_list, width=40, state="normal")
+            if file_list:
+                target_var.set(file_list[0])
+            cb.pack(side=tk.LEFT, padx=(6, 0))
+
+            def _refresh_picker(k=key, c=cb, v=target_var):
+                new_list = self._list_picker_files(k)
+                c["values"] = new_list
+                if new_list and not v.get():
+                    v.set(new_list[0])
+
+            ttk.Button(picker_row, text="↻",
+                       command=_refresh_picker).pack(side=tk.LEFT, padx=(4, 0))
+        else:
+            # Static target label
+            target_path = os.path.join(self._project_path, target_file)
+            tk.Label(frame,
+                     text=f"Target: {target_file}    ({target_path})",
+                     bg=C["base"], fg=C["overlay0"],
+                     font=("Consolas", 8)).pack(anchor=tk.W, pady=(0, 4))
 
         # Editable text area for the draft
         txt_wrap = tk.Frame(frame, bg=C["mantle"])
@@ -820,7 +840,36 @@ class DocDrafterDialog(tk.Toplevel):
             "status_var": status_var,
             "status_lbl": status_lbl,
             "target":     target_file,
+            "target_var": target_var,   # None for fixed-target DocTypes
         }
+
+    # ── File-picker helpers ────────────────────────────────────────────────
+
+    _PICKER_GLOBS = {
+        "memory":      "memory/*.md",
+        "docs_generic": "docs/*.md",
+    }
+
+    def _list_picker_files(self, key):
+        """Return relative paths for the file-picker combobox of ``key``."""
+        import glob
+        pattern = self._PICKER_GLOBS.get(key, "*.md")
+        full_pattern = os.path.join(self._project_path, pattern)
+        paths = sorted(glob.glob(full_pattern))
+        return [os.path.relpath(p, self._project_path).replace("\\", "/")
+                for p in paths]
+
+    def _resolve_target_path(self, key):
+        """Return the absolute target path for ``key``, or None if unresolvable."""
+        dt = REGISTRY[key]
+        if dt.target_filename:
+            return os.path.join(self._project_path, dt.target_filename)
+        var = (self._tab_widgets.get(key) or {}).get("target_var")
+        if var:
+            rel = var.get().strip()
+            if rel:
+                return os.path.join(self._project_path, rel)
+        return None
 
     def _build_footer_section(self):
         ftr = tk.Frame(self, bg=C["base"], padx=18, pady=10)
@@ -899,20 +948,17 @@ class DocDrafterDialog(tk.Toplevel):
             changed_files = dd.changed_file_paths(
                 project, range_spec, self._cfg.git_exe)
 
-            if key == "changelog":
-                existing = read_unreleased(
-                    os.path.join(project, "CHANGELOG.md"))
-                system, user = dd.build_changelog_prompt(
-                    commits, classified, existing,
-                    self._project_name, self._project_desc,
-                    changed_files, boundary)
-            else:  # readme
-                existing = read_highlights(
-                    os.path.join(project, "README.md"))
-                system, user = dd.build_readme_prompt(
-                    commits, classified, existing,
-                    self._project_name, self._project_desc,
-                    changed_files, boundary)
+            dt = REGISTRY[key]
+            target_path = self._resolve_target_path(key)
+            if not target_path:
+                self.after(0, lambda: self._on_generate_error(
+                    key, "No target file selected — pick a file first."))
+                return
+            existing = dt.read_existing(target_path)
+            system, user = dt.build_prompt(
+                commits, classified, existing,
+                self._project_name, self._project_desc,
+                changed_files, boundary)
 
             if stop_event.is_set():
                 return
@@ -940,87 +986,38 @@ class DocDrafterDialog(tk.Toplevel):
     def _filter_draft_text(self, key, raw_text):
         """Filter raw LLM output at generate time.
 
-        Pipeline: sanitise (strip head/tail artefacts) → parse per-tab format
-        → per-section filter (truncation + dedup + noop) → reassemble into
-        clean markdown.  Returns ``(filtered_text, trunc_n, dup_n, noop_n)``.
-
-        For empty results the caller (``_on_generate_done``) is responsible
-        for displaying a placeholder phrase AND disabling the Apply button —
-        the placeholder must never reach the patcher.
-
-        Reassembly is whitespace-clean: ``\\n\\n`` separates sections, no
-        accumulated blank-line padding when sections drop out.  Verified
-        by the multi-section reassembly verification case.
+        Delegates to the DocType's filter_draft callable.
+        Returns ``(filtered_text, trunc_n, dup_n, noop_n)``.
         """
-        target_path = os.path.join(self._project_path,
-                                    self._tab_widgets[key]["target"])
-        sanitised = _sanitise_raw_draft(raw_text or "")
-        total_trunc = total_dup = total_noop = 0
-
-        if key == "changelog":
-            # CHANGELOG: grouped "### Section / - bullet" output
-            pairs = self._parse_grouped_bullets(sanitised)
-            kept_pairs = []
-            for section, bullets in pairs:
-                existing = read_section_bullets(target_path, section)
-                filtered, t_n, d_n, n_n = _filter_bullets(bullets, existing)
-                total_trunc += t_n
-                total_dup += d_n
-                total_noop += n_n
-                if filtered.strip():
-                    kept_pairs.append((section, filtered.strip()))
-            # Compact reassembly: no leading blanks, single blank between sections
-            chunks = [f"### {sec}\n{body}" for sec, body in kept_pairs]
-            return "\n\n".join(chunks), total_trunc, total_dup, total_noop
-
-        # README: single sub-section with **Header** + bullets
-        parsed = self._split_readme_subsection(sanitised)
-        if parsed is None:
-            # Can't parse — pass raw through and let the apply path surface
-            # the "missing **Bold header**" error message.  No filter stats.
-            return sanitised, 0, 0, 0
-        header_line, bullets = parsed
-        existing = read_subsection_bullets(target_path, header_line)
-        # README mode: the patcher REPLACES the matching sub-section, so the
-        # model is told to mirror existing bullets back. Dropping bullets
-        # that match existing-on-disk would DELETE them from the file.
-        # Filter only catches truncation, noop, and self-duplicates here.
-        filtered, total_trunc, total_dup, total_noop = _filter_bullets(
-            bullets, existing, dedup_against_existing=False)
-        if filtered.strip():
-            return (f"{header_line}\n{filtered.strip()}",
-                    total_trunc, total_dup, total_noop)
-        return "", total_trunc, total_dup, total_noop
+        dt = REGISTRY[key]
+        target_path = self._resolve_target_path(key) or ""
+        return dt.filter_draft(raw_text, target_path)
 
     def _compute_mirror_warning(self, key, draft_text):
-        """Return a short status-bar warning string if README mirror-contract
-        would fail on this draft, else None.
-
-        Reusable from `_on_generate_done` (post-generate display) AND
-        `_on_text_modified` (debounced re-check after manual edits).  No
-        side effects — pure check.  CHANGELOG always returns None (no
-        mirror contract to enforce on append-only patcher).
+        """Return a status-bar warning string if README mirror-contract would
+        fail on this draft, else None.  CHANGELOG always returns None.
         """
         if key != "readme" or not draft_text or not draft_text.strip():
             return None
         try:
+            from helpers.doc_drafter import (
+                split_readme_subsection, _LITERAL_PLACEHOLDER_RE,
+                _mirror_contract_check,
+            )
+            from helpers.readme_patch import read_subsection_bullets
             target_path = os.path.join(self._project_path,
                                         self._tab_widgets[key]["target"])
-            parsed = self._split_readme_subsection(draft_text)
+            parsed = split_readme_subsection(draft_text)
             if parsed is None:
                 return None
             header_line, bullets = parsed
-            # Phase 2.0 — surface literal-placeholder header errors at
-            # generate-time so the user sees the warning BEFORE clicking
-            # Apply.  Apply-time check will reject identically; this is
-            # the proactive UI hint.
             if _LITERAL_PLACEHOLDER_RE.search(header_line):
                 return (f"⚠ HEADER ERROR: contains template placeholder "
                         f"({header_line!r}).  Apply will be rejected.  "
                         f"Regenerate or edit the header.")
             existing = read_subsection_bullets(target_path, header_line)
             if not existing:
-                return None             # genuinely new sub-section
+                return None
             draft_bullets = [ln.lstrip() for ln in bullets.splitlines()
                               if ln.lstrip().startswith(("- ", "* "))]
             ok, kept, missing, _examples = _mirror_contract_check(
@@ -1200,8 +1197,11 @@ class DocDrafterDialog(tk.Toplevel):
                              C["red"])
             return
 
-        target_file = self._tab_widgets[key]["target"]
-        target_path = os.path.join(self._project_path, target_file)
+        target_path = self._resolve_target_path(key)
+        if not target_path:
+            self._set_status(key, "No target file selected — pick a file first.",
+                             C["red"])
+            return
 
         # Build the WriteProposal (old vs new).  Phase 2.1: the proposed
         # content is the SIMULATED post-apply body (current body + this
@@ -1216,25 +1216,30 @@ class DocDrafterDialog(tk.Toplevel):
         # mirror-contract (README) handles the re-parse — adding existing
         # bullets twice is dropped by dedup, dropping mirrored bullets is
         # blocked by the 40 % preservation floor.
-        if key == "changelog":
-            existing = read_unreleased(target_path)
-            simulated_body = self._simulate_changelog_body(target_path, text)
-            rationale = (
+        dt = REGISTRY[key]
+        existing = dt.read_existing(target_path)
+        simulated_body = self._simulate_body(dt, target_path, text)
+        _RATIONALE = {
+            "changelog": (
                 "Append-only CHANGELOG apply.  Diff shows current "
                 "[Unreleased] body (left) vs simulated post-apply body "
                 "(right).  Bullets appended into matching ### sub-sections; "
                 "new ### sub-sections appended at the end of [Unreleased]."
-            )
-        else:
-            existing = read_highlights(target_path)
-            simulated_body = self._simulate_readme_body(target_path, text)
-            rationale = (
+            ),
+            "readme": (
                 "README highlights apply.  Diff shows current 'Recent "
                 "highlights' body (left) vs simulated post-apply body "
                 "(right).  Matching `**Header**` sub-section is REPLACED "
                 "(mirror-contract enforces ≥40 % bullet preservation); "
                 "non-matching headers create a new sub-section at the top."
-            )
+            ),
+        }
+        rationale = _RATIONALE.get(
+            key,
+            f"{dt.label} apply.  Diff shows current content (left) vs "
+            "simulated post-apply content (right).  The named ## section "
+            "is replaced; other sections are untouched."
+        )
         # Fallback: if simulation failed (parse error / missing anchor),
         # fall back to the raw draft so the user can still see / edit it.
         proposed_for_dialog = simulated_body if simulated_body else text
@@ -1262,33 +1267,28 @@ class DocDrafterDialog(tk.Toplevel):
             # Apply the final (possibly user-edited in the proposal dialog)
             # content via the appropriate patcher.  Both paths use
             # append-only insertion to avoid the small-model "drop existing
-            # content" failure mode discovered during dogfooding — see
-            # memory/doc_drafter.md for the locked design rationale.
-            if key == "changelog":
-                ok, msg = self._apply_changelog_bullets(target_path,
-                                                         final_content)
-            else:
-                ok, msg = self._apply_readme_subsection(target_path,
-                                                        final_content)
-            self.after(0, lambda o=ok, m=msg:
-                       self._on_apply_result(key, o, m))
+            # content" failure mode discovered during dogfooding.
+            dt = REGISTRY[key]
+            ok, msg, stats = dt.io_apply(target_path, final_content)
+            self.after(0, lambda o=ok, m=msg, s=stats:
+                       self._on_apply_result(key, o, m, s))
 
         threading.Thread(target=_worker, daemon=True,
                          name=f"doc-drafter-apply:{key}").start()
 
-    def _on_apply_result(self, key, ok, msg):
+    def _on_apply_result(self, key, ok, msg, stats=None):
         try:
             if not self.winfo_exists():
                 return
             self._tab_widgets[key]["apply_btn"].configure(state=tk.NORMAL)
-            # Pop and clear filter stats so we don't leak counts across Applies
-            stats = self._last_filter_stats or {}
-            self._last_filter_stats = {}
+            stats = stats or {}
             trunc_n = stats.get("truncated", 0)
             dup_n   = stats.get("duplicates", 0)
             noop_n  = stats.get("noop", 0)
             filter_suffix = self._format_filter_suffix(trunc_n, dup_n, noop_n)
-            target = self._tab_widgets[key]["target"]
+            target_path = self._resolve_target_path(key)
+            target = (os.path.relpath(target_path, self._project_path)
+                      if target_path else self._tab_widgets[key]["target"])
             if ok:
                 status_msg = f"✓ {msg}{filter_suffix}"
                 self._set_status(key, status_msg, C["green"])
@@ -1325,264 +1325,46 @@ class DocDrafterDialog(tk.Toplevel):
             bits.append(f"{noop_n} placeholder{'s' if noop_n != 1 else ''}")
         return f"  ⚠ {', '.join(bits)} dropped — Regenerate to retry"
 
-    # ── CHANGELOG grouped-bullets parser + dispatcher ──────────────────────
+    # ── CHANGELOG grouped-bullets parser (delegates to helpers) ──────────────
 
     @staticmethod
     def _parse_grouped_bullets(draft_text):
-        """Parse '### Header / - bullet ...' grouped output into (header, body) pairs.
+        """Delegate to helpers.doc_drafter.parse_grouped_bullets."""
+        from helpers.doc_drafter import parse_grouped_bullets
+        return parse_grouped_bullets(draft_text)
 
-        Walks lines; whenever it sees ``^### `` it starts a new section.
-        Bullets are everything between two ``^### `` markers (or to EOF).
-        Empty sections (header with no bullets) are dropped — keeps the
-        output free of stray ``### Added`` headers with nothing under them.
+    def _simulate_body(self, dt, target_path, draft_text):
+        """Return the simulated post-apply section body for the ProposalBridge diff.
 
-        Returns ``[(section_heading_raw, bullets_text), ...]``.  The
-        downstream patcher canonicalises section names, so raw headers
-        like ``"fixed"`` / ``"FIXED"`` / ``"Fixes"`` all collapse correctly.
-        """
-        pairs = []
-        current_section = None
-        current_lines = []
-        for ln in draft_text.splitlines():
-            stripped = ln.strip()
-            if stripped.startswith("### "):
-                if current_section is not None:
-                    body = "\n".join(current_lines).strip()
-                    if body:
-                        pairs.append((current_section, body))
-                current_section = stripped[4:].strip()
-                current_lines = []
-            elif current_section is not None:
-                current_lines.append(ln)
-        # Flush the final section.
-        if current_section is not None:
-            body = "\n".join(current_lines).strip()
-            if body:
-                pairs.append((current_section, body))
-        return pairs
+        Phase 2.1: populates ProposalBridge with an honest diff (current section
+        body vs body that will exist after the patcher runs).  Uses compute_apply
+        on the full file text without writing, then extracts the relevant section
+        via read_existing_from_text.
 
-    def _simulate_changelog_body(self, target_path, draft_text):
-        """Return the simulated post-apply [Unreleased] body, or None on failure.
-
-        Phase 2.1: lets ``_on_apply`` populate the ProposalBridge with an
-        HONEST diff (current [Unreleased] body vs the body that will exist
-        after the patcher runs).  Drives ``_compute_insert_unreleased_bullets``
-        on the full file text without writing, then extracts the
-        [Unreleased] slice via ``read_unreleased_from_text``.
-
-        Simulation does NOT apply the truncation/dedup/noop filter the
-        live apply uses — the proposed body shows the upper bound of
-        bullets that may be added.  The actual apply will drop dupes and
-        noop placeholders via ``_filter_bullets``; the diff overstates by
-        at most a handful of lines, which the user can see clearly in the
-        ProposalBridge edit pane and trim if they want.
+        Simulation does NOT apply the truncation/dedup/noop filter — the
+        proposed body shows the upper bound.  The actual apply will drop dupes
+        and noop placeholders.
         """
         try:
             with open(target_path, encoding="utf-8-sig") as f:
                 full_text = f.read()
         except OSError:
             return None
-        pairs = self._parse_grouped_bullets(draft_text)
-        if not pairs:
+        parsed = dt.parse_draft(draft_text)
+        if not parsed or parsed[0] is None:
             return None
-        simulated = full_text
-        for section, bullets in pairs:
-            simulated, ok, _msg = _compute_insert_unreleased_bullets(
-                simulated, section, bullets)
-            if not ok:
-                return None
-        return read_unreleased_from_text(simulated)
-
-    def _simulate_readme_body(self, target_path, draft_text):
-        """Return the simulated post-apply highlights body, or None on failure.
-
-        Phase 2.1 companion to ``_simulate_changelog_body`` for the README
-        path.  Parses the first ``**Header**`` sub-section from the draft,
-        feeds the full file text through
-        ``_compute_insert_readme_highlights_subsection``, and extracts the
-        post-state highlights block via ``read_highlights_from_text``.
-        """
-        try:
-            with open(target_path, encoding="utf-8-sig") as f:
-                full_text = f.read()
-        except OSError:
-            return None
-        parsed = self._split_readme_subsection(draft_text)
-        if parsed is None:
-            return None
-        header_line, bullets = parsed
-        simulated, ok, _msg = _compute_insert_readme_highlights_subsection(
-            full_text, header_line, bullets)
+        simulated, ok, _msg = dt.compute_apply(full_text, *parsed)
         if not ok:
             return None
-        return read_highlights_from_text(simulated)
+        return dt.read_existing_from_text(simulated)
 
-    def _apply_changelog_bullets(self, target_path, draft_text):
-        """Parse grouped output, filter truncated + duplicate bullets, dispatch.
-
-        Per-section filtering catches the two Ollama failure modes (truncation,
-        redundancy hallucination) BEFORE the patcher runs.  Suppressed counts
-        are stored in self._last_filter_stats so _on_apply_result can surface
-        them in the status bar.
-
-        On the first patcher failure, returns immediately with the section
-        that failed in the message.  Earlier successful sections are NOT
-        rolled back — append-only is naturally partial-fail-tolerant; the
-        user can re-Apply to retry the remainder.
-        """
-        pairs = self._parse_grouped_bullets(draft_text)
-        if not pairs:
-            return False, ("Draft is missing '### Section' headers — "
-                           "CHANGELOG mode requires bullets grouped under "
-                           "### Added / ### Fixed / ### Changed / ### Removed.")
-        applied = []
-        total_truncated = 0
-        total_duplicates = 0
-        total_noop = 0
-        empty_after_filter = 0
-        for section, bullets in pairs:
-            existing = read_section_bullets(target_path, section)
-            filtered, trunc_n, dup_n, noop_n = _filter_bullets(bullets, existing)
-            total_truncated += trunc_n
-            total_duplicates += dup_n
-            total_noop += noop_n
-            if not filtered.strip():
-                empty_after_filter += 1
-                continue                # nothing left to insert for this section
-            ok, msg = insert_unreleased_bullets(target_path, section, filtered)
-            if not ok:
-                return False, f"{section}: {msg} (applied so far: {applied})"
-            applied.append(section)
-        self._last_filter_stats = {
-            "truncated":  total_truncated,
-            "duplicates": total_duplicates,
-            "noop":       total_noop,
-        }
-        if not applied:
-            return False, ("All bullets filtered out "
-                           f"({total_truncated} truncated, "
-                           f"{total_duplicates} duplicates, "
-                           f"{total_noop} placeholders).  Click "
-                           "Regenerate to retry.")
-        summary = f"appended to {len(applied)} section(s): {', '.join(applied)}"
-        if empty_after_filter:
-            summary += f" ({empty_after_filter} section(s) emptied by filter)"
-        return True, summary
-
-    # ── README sub-section parser + dispatcher ─────────────────────────────
+    # ── README sub-section parser (delegates to helpers) ─────────────────────
 
     @staticmethod
     def _split_readme_subsection(draft_text):
-        """Extract first ``**Header**`` line + remaining bullets from a draft.
-
-        Returns ``(header_line, bullets_md)`` on success, or ``None`` if no
-        bold-header line was found.  Shared by both the apply path and the
-        filter-at-generate path so they parse the same way.
-        """
-        lines = draft_text.splitlines()
-        header_idx = None
-        for i, ln in enumerate(lines):
-            stripped = ln.strip()
-            if (stripped.startswith("**") and stripped.endswith("**")
-                    and len(stripped) > 4):
-                header_idx = i
-                break
-            # Also accept "**Header**:" form
-            if (stripped.startswith("**") and "**" in stripped[2:]
-                    and stripped.endswith(":")):
-                header_idx = i
-                break
-        if header_idx is None:
-            return None
-        header_line = lines[header_idx].strip()
-        bullets = "\n".join(lines[header_idx + 1:]).strip("\n")
-        return header_line, bullets
-
-    def _apply_readme_subsection(self, target_path, draft_text):
-        """Parse the first ``**Header**`` line as the sub-section header and
-        dispatch to insert_readme_highlights_subsection.
-
-        Robust to:
-          - blank lines before the header
-          - prose preamble before the header (silently skipped)
-          - trailing whitespace
-        Falls back to a clear error if no header line is found in the draft.
-        """
-        parsed = self._split_readme_subsection(draft_text)
-        if parsed is None:
-            return False, ("Draft is missing a `**Bold header**` line — "
-                           "README mode requires a sub-section header as "
-                           "the first non-blank line.")
-        header_line, bullets = parsed
-
-        # Phase 2.0 — hard-reject literal template placeholders the model
-        # copied from the prompt example (`Roadmap-N`, `Roadmap-<num>`,
-        # `Roadmap-TODO`, etc.).  These never appear in legitimate
-        # headers; surface the candidate-header list in the error so the
-        # user can pick the right one to edit in.
-        if _LITERAL_PLACEHOLDER_RE.search(header_line):
-            candidates = dd._extract_subsection_headers(
-                read_highlights(target_path))
-            candidates_msg = "\n  ".join("• " + h for h in candidates[:5])
-            return False, (
-                f"Header contains a literal template placeholder: "
-                f"{header_line!r}.  Edit the draft to use a real header, "
-                f"or click Regenerate.  Existing candidates to REUSE if "
-                f"your bullets belong:\n  "
-                f"{candidates_msg if candidates else '(none — your sub-section is brand new; use a concrete number like Roadmap-6 or Roadmap-7)'}"
-            )
-
-        # Filter at Apply-time too (safety net for user-edited content).
-        # README mode: the patcher REPLACES the matching sub-section, so the
-        # model is expected to mirror existing bullets back as part of its
-        # output.  Dropping bullets that match existing-on-disk would DELETE
-        # preserved content — use dedup_against_existing=False so the filter
-        # only catches truncation, noop placeholders, and bullets that
-        # duplicate something already kept FROM THIS DRAFT (self-dedup).
-        existing = read_subsection_bullets(target_path, header_line)
-        filtered, trunc_n, dup_n, noop_n = _filter_bullets(
-            bullets, existing, dedup_against_existing=False)
-        self._last_filter_stats = {
-            "truncated":  trunc_n,
-            "duplicates": dup_n,
-            "noop":       noop_n,
-        }
-        if not filtered.strip():
-            # README replace semantics: applying empty bullets would DELETE
-            # the existing sub-section.  Refuse to write.
-            return False, ("All bullets filtered out "
-                           f"({trunc_n} truncated, {dup_n} self-duplicates, "
-                           f"{noop_n} placeholders).  README's REPLACE "
-                           "patcher would DELETE the existing sub-section "
-                           "if applied with no bullets.  Click Regenerate.")
-
-        # Mirror-contract safety net (Phase 1.9 — LOAD-BEARING).
-        # README's REPLACE semantics mean any existing bullet the model fails
-        # to mirror back gets DELETED from the file when Apply lands.  The
-        # filter above only catches truncation / noop / self-dups; it does
-        # NOT catch "model dropped half the existing bullets".  Mirror check
-        # hard-rejects when < 75% preserved (with single-drop tolerance for
-        # legitimate small-list pruning).
-        draft_bullets = [ln.lstrip() for ln in filtered.splitlines()
-                          if ln.lstrip().startswith(("- ", "* "))]
-        ok, kept, missing, examples = _mirror_contract_check(
-            draft_bullets, existing)
-        if not ok:
-            bullet_list = "\n  ".join("• " + ex for ex in examples)
-            extra = (f" (showing {len(examples)} of {missing})"
-                     if missing > len(examples) else "")
-            return False, (
-                f"Mirror-contract safety abort: draft preserves only "
-                f"{kept}/{kept + missing} existing bullets "
-                f"({int(100 * kept / max(1, kept + missing))}%).  "
-                f"README's REPLACE patcher would DELETE {missing} "
-                f"preserved bullet(s){extra}:\n  {bullet_list}\n\n"
-                f"Click Regenerate to retry, or manually edit the draft "
-                f"to add the missing bullets back before Apply."
-            )
-        return insert_readme_highlights_subsection(
-            target_path, header_line,
-            filtered + "\n" if filtered else "\n")
+        """Delegate to helpers.doc_drafter.split_readme_subsection."""
+        from helpers.doc_drafter import split_readme_subsection
+        return split_readme_subsection(draft_text)
 
     # ── Status helper ──────────────────────────────────────────────────────
 
