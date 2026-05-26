@@ -1457,9 +1457,37 @@ def generic_parse_draft(draft_text):
 
 # ── Phase 2 filter_draft functions ────────────────────────────────────────────
 
+_CODE_FENCE_RE = re.compile(
+    r"(?m)^[ \t]*```[^\n]*\n(.*?)^[ \t]*```[ \t]*$",
+    re.DOTALL,
+)
+
+
+def _strip_preamble_and_fences(text: str) -> str:
+    """Remove prose before the first '## ' heading and unwrap code fences.
+
+    Models sometimes wrap output in a prose preamble ("Based on my analysis…")
+    and/or surround content with ```markdown fences.  Both obscure the actual
+    section content the patcher needs.  This function:
+      1. Discards everything before the first '## ' heading.
+      2. Replaces every fenced block with its inner content.
+    """
+    # 1. Drop prose before the first ## heading.
+    m = re.search(r"(?m)^## ", text)
+    if m:
+        text = text[m.start():]
+
+    # 2. Unwrap code fences — keep only the body inside the backticks.
+    text = _CODE_FENCE_RE.sub(lambda mo: mo.group(1), text)
+
+    return text
+
+
 def _filter_freeform(raw_text):
-    """Lightweight filter for non-bullet drafts: strip placeholders only."""
-    sanitised = _sanitise_raw_draft(raw_text or "")
+    """Lightweight filter for non-bullet drafts: strip preamble, fences, placeholders."""
+    sanitised = _sanitise_raw_draft(
+        _strip_preamble_and_fences(raw_text or "")
+    )
     lines = sanitised.splitlines()
     noop_n = 0
     kept = []
