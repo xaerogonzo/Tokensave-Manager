@@ -35,12 +35,13 @@ from constants import C
 import re
 
 from helpers.changelog_patch import (
-    read_unreleased, insert_unreleased_bullets,
-    read_section_bullets,
+    read_unreleased, read_unreleased_from_text, insert_unreleased_bullets,
+    read_section_bullets, _compute_insert_unreleased_bullets,
 )
 from helpers.readme_patch import (
-    read_highlights,
+    read_highlights, read_highlights_from_text,
     insert_readme_highlights_subsection, read_subsection_bullets,
+    _compute_insert_readme_highlights_subsection,
 )
 
 
@@ -1202,15 +1203,41 @@ class DocDrafterDialog(tk.Toplevel):
         target_file = self._tab_widgets[key]["target"]
         target_path = os.path.join(self._project_path, target_file)
 
-        # Build the WriteProposal (old vs new).
+        # Build the WriteProposal (old vs new).  Phase 2.1: the proposed
+        # content is the SIMULATED post-apply body (current body + this
+        # draft fed through the same compute helpers the apply path uses).
+        # This makes the diff honest — pre-2.1 the right pane showed only
+        # the new bullets, which looked like an obliterating REPLACE even
+        # though both patcher paths are append/insert.  See the user
+        # screenshot in roadmap6_results.md (Phase 2.1 originator bug).
+        #
+        # Edit semantics survive: if the user trims/edits the proposed
+        # body and accepts, the apply path's dedup filter (CHANGELOG) /
+        # mirror-contract (README) handles the re-parse — adding existing
+        # bullets twice is dropped by dedup, dropping mirrored bullets is
+        # blocked by the 40 % preservation floor.
         if key == "changelog":
             existing = read_unreleased(target_path)
-            rationale = ("Draft [Unreleased] CHANGELOG bullets generated "
-                         "from the selected commit range.")
+            simulated_body = self._simulate_changelog_body(target_path, text)
+            rationale = (
+                "Append-only CHANGELOG apply.  Diff shows current "
+                "[Unreleased] body (left) vs simulated post-apply body "
+                "(right).  Bullets appended into matching ### sub-sections; "
+                "new ### sub-sections appended at the end of [Unreleased]."
+            )
         else:
             existing = read_highlights(target_path)
-            rationale = ("Draft README 'Recent highlights (Unreleased)' "
-                         "body generated from the selected commit range.")
+            simulated_body = self._simulate_readme_body(target_path, text)
+            rationale = (
+                "README highlights apply.  Diff shows current 'Recent "
+                "highlights' body (left) vs simulated post-apply body "
+                "(right).  Matching `**Header**` sub-section is REPLACED "
+                "(mirror-contract enforces ≥40 % bullet preservation); "
+                "non-matching headers create a new sub-section at the top."
+            )
+        # Fallback: if simulation failed (parse error / missing anchor),
+        # fall back to the raw draft so the user can still see / edit it.
+        proposed_for_dialog = simulated_body if simulated_body else text
 
         self._set_status(key, "Opening proposal…", C["overlay0"])
         self._tab_widgets[key]["apply_btn"].configure(state=tk.DISABLED)
@@ -1222,7 +1249,7 @@ class DocDrafterDialog(tk.Toplevel):
             proposal = WriteProposal(
                 filepath=target_path,
                 original_content=existing or "(empty)",
-                proposed_content=text,
+                proposed_content=proposed_for_dialog,
                 rationale=rationale,
             )
             bridge = ProposalBridge(self._app, proposal, timeout_s=300.0)
@@ -1333,6 +1360,62 @@ class DocDrafterDialog(tk.Toplevel):
             if body:
                 pairs.append((current_section, body))
         return pairs
+
+    def _simulate_changelog_body(self, target_path, draft_text):
+        """Return the simulated post-apply [Unreleased] body, or None on failure.
+
+        Phase 2.1: lets ``_on_apply`` populate the ProposalBridge with an
+        HONEST diff (current [Unreleased] body vs the body that will exist
+        after the patcher runs).  Drives ``_compute_insert_unreleased_bullets``
+        on the full file text without writing, then extracts the
+        [Unreleased] slice via ``read_unreleased_from_text``.
+
+        Simulation does NOT apply the truncation/dedup/noop filter the
+        live apply uses — the proposed body shows the upper bound of
+        bullets that may be added.  The actual apply will drop dupes and
+        noop placeholders via ``_filter_bullets``; the diff overstates by
+        at most a handful of lines, which the user can see clearly in the
+        ProposalBridge edit pane and trim if they want.
+        """
+        try:
+            with open(target_path, encoding="utf-8-sig") as f:
+                full_text = f.read()
+        except OSError:
+            return None
+        pairs = self._parse_grouped_bullets(draft_text)
+        if not pairs:
+            return None
+        simulated = full_text
+        for section, bullets in pairs:
+            simulated, ok, _msg = _compute_insert_unreleased_bullets(
+                simulated, section, bullets)
+            if not ok:
+                return None
+        return read_unreleased_from_text(simulated)
+
+    def _simulate_readme_body(self, target_path, draft_text):
+        """Return the simulated post-apply highlights body, or None on failure.
+
+        Phase 2.1 companion to ``_simulate_changelog_body`` for the README
+        path.  Parses the first ``**Header**`` sub-section from the draft,
+        feeds the full file text through
+        ``_compute_insert_readme_highlights_subsection``, and extracts the
+        post-state highlights block via ``read_highlights_from_text``.
+        """
+        try:
+            with open(target_path, encoding="utf-8-sig") as f:
+                full_text = f.read()
+        except OSError:
+            return None
+        parsed = self._split_readme_subsection(draft_text)
+        if parsed is None:
+            return None
+        header_line, bullets = parsed
+        simulated, ok, _msg = _compute_insert_readme_highlights_subsection(
+            full_text, header_line, bullets)
+        if not ok:
+            return None
+        return read_highlights_from_text(simulated)
 
     def _apply_changelog_bullets(self, target_path, draft_text):
         """Parse grouped output, filter truncated + duplicate bullets, dispatch.

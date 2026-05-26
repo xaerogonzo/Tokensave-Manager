@@ -176,6 +176,24 @@ def update_readme_highlights(readme_path, notes_md):
     return True, "highlights block updated"
 
 
+def read_highlights_from_text(text):
+    """Return the 'Recent highlights' body extracted from an in-memory README.
+
+    Phase 2.1: pure-string companion to ``read_highlights``.  Used by the
+    doc-drafter dialog to extract the simulated post-apply highlights
+    body from a ``_compute_insert_readme_highlights_subsection`` result
+    so the ProposalBridge diff is honest (current body on the left,
+    post-apply body on the right).
+    """
+    if not text:
+        return ""
+    bounds = _find_block_bounds(text)
+    if bounds is None:
+        return ""
+    block_start, block_end = bounds
+    return text[block_start:block_end].strip()
+
+
 def read_highlights(readme_path):
     """Return the current content of the 'Recent highlights' block (body only).
 
@@ -191,11 +209,7 @@ def read_highlights(readme_path):
             text = f.read()
     except OSError:
         return ""
-    bounds = _find_block_bounds(text)
-    if bounds is None:
-        return ""
-    block_start, block_end = bounds
-    return text[block_start:block_end].strip()
+    return read_highlights_from_text(text)
 
 
 # ── Append-only sub-section insertion ────────────────────────────────────────
@@ -274,44 +288,20 @@ def read_subsection_bullets(readme_path, header_md):
     return []
 
 
-def insert_readme_highlights_subsection(readme_path, header_md, bullets_md):
-    """Insert OR replace a single sub-section inside the highlights block.
+def _compute_insert_readme_highlights_subsection(text, header_md, bullets_md):
+    """Pure transformation — returns ``(new_text, ok, msg)`` without IO.
 
-    Behaviour:
-      - If a sub-section whose header normalises to ``header_md`` already
-        exists, REPLACE its bullets (header line stays).
-      - Otherwise INSERT a new sub-section at the TOP of the highlights
-        block, right below the anchor line, so newest work appears first.
-
-    Atomic + idempotent.  Aborts safely (no write) if the highlights
-    block bounds can't be located — same boundary safety as
-    ``update_readme_highlights``.
-
-    Args:
-        readme_path: Absolute path to README.md.
-        header_md:   Full bold-header line including the ``**`` markers,
-                     e.g. ``"**Roadmap-6 — Ask tab + gitignore AI**"``.
-                     Newlines stripped automatically.
-        bullets_md:  Bullets ONLY, no leading header line.  Should end
-                     with a trailing newline.
-
-    Returns:
-        ``(success: bool, message: str)``.  Message indicates "replaced"
-        vs "inserted" on success.
+    Phase 2.1: extracted from ``insert_readme_highlights_subsection`` so
+    the doc-drafter dialog can precompute the post-apply file state for
+    an HONEST ProposalBridge diff.  All transformation logic lives here;
+    the IO wrapper below adds file-read + atomic-write.
     """
-    if not os.path.exists(readme_path):
-        return False, "README.md not found"
-    try:
-        with open(readme_path, encoding="utf-8-sig") as f:
-            text = f.read()
-    except OSError as e:
-        return False, f"Could not read README.md: {e}"
-
     bounds = _find_block_bounds(text)
     if bounds is None:
         if not _ANCHOR_RE.search(text):
-            return False, "Could not locate '**Recent highlights' anchor in README.md"
-        return False, (
+            return text, False, (
+                "Could not locate '**Recent highlights' anchor in README.md")
+        return text, False, (
             "Ambiguous terminal boundary — refusing to write.  Verify the "
             "highlights section is followed by a structural break (header, "
             "horizontal rule, table, or fenced code block)."
@@ -327,29 +317,60 @@ def insert_readme_highlights_subsection(readme_path, header_md, bullets_md):
         existing_line = block_text[m.start():m.end()]
         if _normalise_subheader(existing_line) != target_norm:
             continue
-        # Found it.  End of this sub-section = next sub-header OR block end.
         nm = _SUBHEADER_RE.search(block_text, m.end())
         sub_end = nm.start() if nm else len(block_text)
-        # Replace from this sub-section's header through (exclusive) the
-        # next sub-section's header.
         new_block = (block_text[:m.start()]
                      + new_subsection
                      + ("\n" if not block_text[sub_end - 1:sub_end] == "\n"
                         else "")
                      + block_text[sub_end:])
         updated = text[:block_start] + new_block + text[block_end:]
-        action = "replaced"
-        break
-    else:
-        # ── Insert path: no matching sub-section → insert at top ────────
-        # Right after the leading whitespace inside the block, so the new
-        # sub-section appears as the FIRST one under the anchor.
-        leading_ws_len = len(block_text) - len(block_text.lstrip("\n"))
-        new_block = (block_text[:leading_ws_len]
-                     + "\n" + new_subsection + "\n"
-                     + block_text[leading_ws_len:])
-        updated = text[:block_start] + new_block + text[block_end:]
-        action = "inserted"
+        return updated, True, "highlights sub-section replaced"
+    # ── Insert path: no matching sub-section → insert at top ────────
+    leading_ws_len = len(block_text) - len(block_text.lstrip("\n"))
+    new_block = (block_text[:leading_ws_len]
+                 + "\n" + new_subsection + "\n"
+                 + block_text[leading_ws_len:])
+    updated = text[:block_start] + new_block + text[block_end:]
+    return updated, True, "highlights sub-section inserted"
+
+
+def insert_readme_highlights_subsection(readme_path, header_md, bullets_md):
+    """Insert OR replace a single sub-section inside the highlights block.
+
+    IO wrapper around ``_compute_insert_readme_highlights_subsection``:
+    reads the file, delegates the transformation, atomically writes.
+    Backward-compatible with the pre-Phase-2.1 monolithic version.
+
+    Behaviour (per the compute helper):
+      - If a sub-section whose header normalises to ``header_md`` already
+        exists, REPLACE its bullets (header line stays).
+      - Otherwise INSERT a new sub-section at the TOP of the highlights
+        block, right below the anchor line, so newest work appears first.
+
+    Atomic + idempotent.  Aborts safely (no write) if the highlights
+    block bounds can't be located.
+
+    Args:
+        readme_path: Absolute path to README.md.
+        header_md:   Full bold-header line including the ``**`` markers.
+        bullets_md:  Bullets ONLY, no leading header line.
+
+    Returns:
+        ``(success: bool, message: str)``.
+    """
+    if not os.path.exists(readme_path):
+        return False, "README.md not found"
+    try:
+        with open(readme_path, encoding="utf-8-sig") as f:
+            text = f.read()
+    except OSError as e:
+        return False, f"Could not read README.md: {e}"
+
+    updated, ok, msg = _compute_insert_readme_highlights_subsection(
+        text, header_md, bullets_md)
+    if not ok:
+        return False, msg
 
     tmp_path = readme_path + ".tmp"
     try:
@@ -364,4 +385,4 @@ def insert_readme_highlights_subsection(readme_path, header_md, bullets_md):
             pass
         return False, f"Failed writing README.md: {e}"
 
-    return True, f"highlights sub-section {action}"
+    return True, msg

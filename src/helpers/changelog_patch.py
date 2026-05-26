@@ -121,6 +121,29 @@ def update_unreleased(
     return True, "unreleased block updated"
 
 
+def read_unreleased_from_text(text: str) -> str:
+    """Return the ## [Unreleased] body extracted from an in-memory CHANGELOG.
+
+    Phase 2.1: pure-string companion to ``read_unreleased``.  Used by the
+    doc-drafter dialog to extract the simulated post-apply body from a
+    ``_compute_insert_unreleased_bullets`` result so the ProposalBridge
+    diff is honest (current body on the left, post-apply body on the
+    right).
+    """
+    if not text:
+        return ""
+    anchor_re = re.compile(r"(?m)^## \[Unreleased\][^\n]*\n")
+    am = anchor_re.search(text)
+    if not am:
+        return ""
+
+    block_start = am.end()
+    next_re = re.compile(r"(?m)^## \[")
+    nm = next_re.search(text, block_start)
+    block_end = nm.start() if nm else len(text)
+    return text[block_start:block_end].strip()
+
+
 def read_unreleased(changelog_path: str) -> str:
     """Return the current content of the ## [Unreleased] block (body only).
 
@@ -134,17 +157,7 @@ def read_unreleased(changelog_path: str) -> str:
             text = f.read()
     except OSError:
         return ""
-
-    anchor_re = re.compile(r"(?m)^## \[Unreleased\][^\n]*\n")
-    am = anchor_re.search(text)
-    if not am:
-        return ""
-
-    block_start = am.end()
-    next_re = re.compile(r"(?m)^## \[")
-    nm = next_re.search(text, block_start)
-    block_end = nm.start() if nm else len(text)
-    return text[block_start:block_end].strip()
+    return read_unreleased_from_text(text)
 
 
 # ── Append-only sub-section insertion inside [Unreleased] ────────────────────
@@ -234,58 +247,31 @@ def read_section_bullets(changelog_path, section):
     return []
 
 
-def insert_unreleased_bullets(changelog_path, section, bullets_md):
-    """Append bullets to a sub-section of [Unreleased].
+def _compute_insert_unreleased_bullets(text, section, bullets_md):
+    """Pure transformation — returns ``(new_text, ok, msg)`` without IO.
 
-    Locates ``## [Unreleased]``, then locates ``### {section}`` between the
-    anchor and the next ``^## \\[`` line (next versioned section or EOF).
+    Phase 2.1: extracted from ``insert_unreleased_bullets`` so the
+    doc-drafter dialog can precompute the post-apply file state for an
+    HONEST ProposalBridge diff (the previous diff displayed the full
+    existing [Unreleased] vs the bare new bullets, which looked
+    catastrophically destructive even though the actual apply path
+    appends).
 
-    Behaviour:
-      - **Existing sub-section** (case-insensitive match): bullets are
-        appended at the END of that section, just before the next ``### ``
-        line or the [Unreleased] block boundary.  Existing bullets stay
-        verbatim.
-      - **Missing sub-section**: a new ``### {Canonical}`` block is
-        appended at the END of the [Unreleased] block, before the boundary.
-      - **Empty [Unreleased]** (no ``### `` sub-headers yet — fresh
-        CHANGELOG): the new sub-section is placed directly between the
-        anchor and the next ``## [`` line / EOF.
-
-    Whitespace discipline (prevents accumulator padding on repeated
-    Apply runs):
-      - ``bullets_md`` is stripped of leading/trailing blank lines on
-        entry.
-      - Existing section content is right-stripped before append.
-      - Final layout: exactly one blank line before any sub-section
-        header, exactly one blank line between the new bullets and the
-        next ``### `` / ``## [``.
-
-    Atomic ``.tmp`` write + ``os.replace``.  Refuses to write if the
-    ``## [Unreleased]`` anchor is missing.
-
-    Args:
-        changelog_path: Absolute path to CHANGELOG.md.
-        section:        Sub-section heading (drift-tolerant — e.g. 'fixed',
-                        'CHANGED', 'Fixes' all map correctly).
-        bullets_md:     Newline-separated bullet lines (e.g. ``"- foo\\n- bar\\n"``).
-
-    Returns:
-        ``(success: bool, message: str)``.  Message is ``"appended to <section>"``
-        or ``"inserted new <section> sub-section"`` on success.
+    All transformation logic lives here; the IO wrapper below adds
+    file-read + atomic-write.  Same return convention as the wrapper:
+    ``(updated_full_text, True, action_msg)`` on success or
+    ``(text_unchanged, False, error_msg)`` on failure.  Caller is
+    responsible for IO + error handling.
     """
-    if not os.path.exists(changelog_path):
-        return False, "CHANGELOG.md not found"
-    try:
-        with open(changelog_path, encoding="utf-8-sig") as f:
-            text = f.read()
-    except OSError as e:
-        return False, f"Could not read CHANGELOG.md: {e}"
+    bullets_clean = (bullets_md or "").strip("\n").strip()
+    if not bullets_clean:
+        return text, False, "no bullets to insert"
 
     # Locate [Unreleased] block boundaries
     anchor_re = re.compile(r"(?m)^## \[Unreleased\][^\n]*\n")
     am = anchor_re.search(text)
     if not am:
-        return False, "Could not locate '## [Unreleased]' anchor"
+        return text, False, "Could not locate '## [Unreleased]' anchor"
 
     block_start = am.end()
     next_version_re = re.compile(r"(?m)^## \[")
@@ -294,12 +280,8 @@ def insert_unreleased_bullets(changelog_path, section, bullets_md):
 
     block = text[block_start:block_end]
     canonical = _canonicalise_section(section)
-    bullets_clean = bullets_md.strip("\n").strip()
-    if not bullets_clean:
-        return False, "no bullets to insert"
 
     # Find existing ### sub-sections inside the [Unreleased] block.
-    # Each match: (start, header_canonical, end-of-this-section).
     sub_re = re.compile(r"(?m)^###\s+([^\n]+)\n")
     subsections = []
     for m in sub_re.finditer(block):
@@ -316,7 +298,7 @@ def insert_unreleased_bullets(changelog_path, section, bullets_md):
         else:
             sub["end"] = len(block)
 
-    # ── Replace / append path: matching sub-section exists ─────────────
+    # ── Append path: matching sub-section exists ─────────────────────
     for sub in subsections:
         if sub["canonical"] != canonical:
             continue
@@ -325,25 +307,57 @@ def insert_unreleased_bullets(changelog_path, section, bullets_md):
         existing_body = block[section_start:section_end].rstrip()
         new_body = existing_body + "\n" + bullets_clean + "\n"
         # One blank line separates this sub-section from the next divider
-        # (next ### or next ## [) — but only if there IS a divider after.
         if section_end < len(block):
             new_body = new_body + "\n"
         new_block = block[:section_start] + new_body + block[section_end:]
         action = f"appended to {canonical}"
         break
     else:
-        # ── Insert path: new sub-section appended to end of [Unreleased] ──
+        # ── Insert path: new sub-section at end of [Unreleased] ──────
         block_rstripped = block.rstrip()
-        # Ensure exactly one blank line before our new sub-section.
         prefix = block_rstripped + ("\n\n" if block_rstripped else "\n")
         new_subsection = f"### {canonical}\n{bullets_clean}\n"
-        # One blank line trailing if there's anything after the [Unreleased]
-        # block (next ## [).  At EOF, omit to avoid trailing blank.
         suffix_blank = "\n" if nm is not None else ""
         new_block = prefix + new_subsection + suffix_blank
         action = f"inserted new {canonical} sub-section"
 
     updated = text[:block_start] + new_block + text[block_end:]
+    return updated, True, action
+
+
+def insert_unreleased_bullets(changelog_path, section, bullets_md):
+    """Append bullets to a sub-section of [Unreleased] (IO wrapper).
+
+    Reads the file, delegates the transformation to
+    ``_compute_insert_unreleased_bullets``, then atomically writes the
+    result.  Backward-compatible with the pre-Phase-2.1 monolithic
+    function — same signature, same return contract.
+
+    See ``_compute_insert_unreleased_bullets`` for the behaviour
+    specification (append / insert / whitespace discipline / fresh-
+    CHANGELOG isolation / case-insensitive section matching).
+
+    Args:
+        changelog_path: Absolute path to CHANGELOG.md.
+        section:        Sub-section heading (drift-tolerant — e.g. 'fixed',
+                        'CHANGED', 'Fixes' all map correctly).
+        bullets_md:     Newline-separated bullet lines.
+
+    Returns:
+        ``(success: bool, message: str)``.
+    """
+    if not os.path.exists(changelog_path):
+        return False, "CHANGELOG.md not found"
+    try:
+        with open(changelog_path, encoding="utf-8-sig") as f:
+            text = f.read()
+    except OSError as e:
+        return False, f"Could not read CHANGELOG.md: {e}"
+
+    updated, ok, msg = _compute_insert_unreleased_bullets(
+        text, section, bullets_md)
+    if not ok:
+        return False, msg
 
     tmp_path = changelog_path + ".tmp"
     try:
@@ -358,7 +372,7 @@ def insert_unreleased_bullets(changelog_path, section, bullets_md):
             pass
         return False, f"Failed writing changelog: {e}"
 
-    return True, action
+    return True, msg
 
 
 def insert_changelog_release(
