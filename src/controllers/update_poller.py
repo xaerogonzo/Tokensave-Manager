@@ -495,9 +495,11 @@ class UpdatePollerController:
         loading_dlg.geometry("420x90")
         loading_dlg.resizable(False, False)
         loading_dlg.grab_set()
+        wait_msg = (
+            "Please wait — calling LLM (CLI: up to 5 min, Local: up to 6 min)…"
+        )
         tk.Label(
-            loading_dlg,
-            text="Please wait — calling LLM (may take up to 3 min)…",
+            loading_dlg, text=wait_msg,
             bg=C["base"], fg=C["text"], font=("Segoe UI", 10),
         ).pack(expand=True)
 
@@ -522,9 +524,11 @@ class UpdatePollerController:
                     # enable_tokensave_tools routes to _dispatch_agentic (LocalAgent
                     # loop) which also fixes the Ollama num_ctx overflow by breaking
                     # the task into smaller turns instead of one huge completion.
+                    # 360 s — LocalAgent with max_iterations=6 on Ollama hardware
+                    # can take 30–60 s per turn; 180 s was consistently too tight.
                     result, err = _call_fn(
                         llm_cfg_local, audit_system, prompt,
-                        self._cfg.claude_cli_exe, str(_BASE_DIR), timeout=180,
+                        self._cfg.claude_cli_exe, str(_BASE_DIR), timeout=360,
                         enable_tokensave_tools=True,
                         tokensave_exe=self._cfg.tokensave_exe or "",
                     )

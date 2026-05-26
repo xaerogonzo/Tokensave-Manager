@@ -126,6 +126,37 @@ _FILENAME_LISTING_RE = re.compile(
 )
 
 
+# Matches a conventional-commit prefix that contains a scope, e.g.
+# "feat(src/controllers/update_poller.py): " — used to detect and clean
+# path-based scopes that local LLMs copy verbatim from diff headers.
+_SCOPE_CLEAN_RE = re.compile(r"^(\w+)\(([^)]+)\)(!?:\s*)$")
+
+
+def _clean_prefix_scope(prefix: str) -> str:
+    """If the scope looks like a file path (contains / or .), reduce it to the
+    last path component without extension, capped at 20 chars.
+
+    Examples:
+      feat(src/controllers/update_poller.py):  →  feat(update_poller):
+      fix(helpers/llm.py):                     →  fix(llm):
+      chore(scripts):                          →  chore(scripts):   (unchanged)
+      ""                                       →  ""                (unchanged)
+    """
+    if not prefix:
+        return prefix
+    sm = _SCOPE_CLEAN_RE.match(prefix)
+    if not sm:
+        return prefix
+    verb, scope, tail = sm.group(1), sm.group(2), sm.group(3)
+    if "/" not in scope and "." not in scope:
+        return prefix           # already a short clean scope — leave it
+    last = scope.rsplit("/", 1)[-1]    # get the filename component
+    last = last.rsplit(".", 1)[0]      # strip extension
+    last = last.replace(".", "_")      # any remaining dots → underscore
+    last = last[:20]                   # cap at 20 chars
+    return f"{verb}({last}){tail}"
+
+
 # ── Pure sanitizer functions ─────────────────────────────────────────────────
 
 def _strip_md(s: str) -> str:
@@ -225,9 +256,13 @@ def _sanitize_commit_message(subject: str, body: str = "",
     m = re.match(r"^(?:(\w+(?:\([^)]+\))?!?:\s+))?(\w+)(.*)$", subject)
     if m:
         prefix, first, rest = m.group(1) or "", m.group(2), m.group(3)
+        prefix = _clean_prefix_scope(prefix)     # reduce path-based scopes
         canonical = _IMPERATIVE_REWRITES.get(first.lower())
         if canonical:
-            subject = f"{prefix}{canonical}{rest}"
+            first = canonical
+        cleaned = f"{prefix}{first}{rest}"
+        if cleaned != subject:
+            subject = cleaned
 
     if _FILENAME_LISTING_RE.search(subject):
         return "", ""
@@ -769,6 +804,16 @@ def _call_llm_for_commit_message(cfg: dict, repo_path: str, git_exe: str) -> str
             return None
 
     max_chars = int(cfg.get("max_diff_chars", 24000))
+    if is_local:
+        # Local models have small default context windows (2k–4k tokens).
+        # Cap diff to ~1500 tokens so system + header + diff fit in num_ctx=8192
+        # with headroom for generation. User can override max_diff_chars lower.
+        max_chars = min(max_chars, 6000)
+        # Inject num_ctx=8192 if the user hasn't explicitly configured it.
+        # _call_llm passes this to Ollama/openai_compatible via payload["num_ctx"].
+        if not cfg.get("num_ctx"):
+            cfg = {**cfg, "num_ctx": 8192}   # shadow; caller's dict is unchanged
+
     recent    = _recent_commit_subjects(repo_path, git_exe, n=5)
     system, user = _build_llm_prompt(diff, recent, max_chars)
     return _call_llm(cfg, system, user, max_tokens=1500)
