@@ -483,6 +483,7 @@ class ProjectsTabController:
         m.add_command(label="🔍  Pre-commit AI Review hook…", command=self.cmd_precommit_hook)
         m.add_command(label="📝  Draft CHANGELOG entry…", command=self.cmd_draft_changelog)
         m.add_command(label="📝  Doc Updates… (CHANGELOG + README)", command=self.cmd_doc_updates)
+        m.add_command(label="📋  Roadmap…",                 command=self.cmd_roadmap_manager)
         m.add_command(label="🔬  Refactor scout…",         command=self.cmd_refactor_scout)
         m.add_command(label="✓  Run checks…",              command=self.cmd_run_checks)
         m.add_command(label="🔄  Integration check",        command=self.cmd_integration_check)
@@ -695,6 +696,14 @@ class ProjectsTabController:
             on_log=self._on_log,
             on_commit_offer=self._offer_commit_after_change,
         )
+
+    def cmd_roadmap_manager(self) -> None:
+        """Right-click → 📋 Roadmap… — open the Roadmap Manager dialog."""
+        path = self._selected_path()
+        if not path:
+            return
+        from dialogs.roadmap_mgr import RoadmapManagerDialog
+        RoadmapManagerDialog(self._root, path, self._cfg)
 
     def cmd_refactor_scout(self) -> None:
         if path := self._selected_path():
