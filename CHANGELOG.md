@@ -3,6 +3,15 @@
 
 ## [Unreleased]
 
+### Fixed — v4.11
+- (checks-dialog) **Run Checks button was missing on first open.** `C["sapphire"]` key doesn't exist in the Catppuccin Mocha palette; the `KeyError` during button construction left only checkboxes visible. Fixed `activebackground` to `C["lavender"]`.
+- (checks-dialog) **Result rows never rendered (checks appeared to hang).** A second palette `KeyError` — `C["subtext1"]` — crashed `_build_ui` halfway through the result rows, leaving `self._result_rows` empty. Clicking "Run checks" triggered callbacks that silently failed to update non-existent widgets. Fixed to `C["subtext"]`.
+
+### Added — v4.11 (CI integration + pre-push hook, 2026-05-27)
+- (checks-dialog) **"📋 Generate GitHub Actions" button** in the Run Checks dialog footer. Writes `.github/workflows/quality-checks.yml` from the currently-enabled checks. Coexists with any existing `ci.yml`. Doctor and Claude steps are local-only and are omitted from the generated YAML (documented in a comment in the file). (`src/helpers/ci_workflow.py`)
+- (checks-dialog) **"🔗 Install pre-push hook" toggle button** in the Run Checks dialog footer. One click installs `.git/hooks/pre-push`; clicking again removes it. The hook runs syntax + pyflakes + doctor before every `git push` and exits 1 to block on failure. Claude check always skipped (too slow for automatic push gating). Fail-open on any infrastructure error. (`src/helpers/prepush_hook.py`, `src/prepush_runner.py`)
+- (helpers) New `helpers/quality_checks.py` — `run_syntax_check` and `run_pyflakes_check` extracted from `checks_dialog.py` into a Tk-free module. Shared between the interactive dialog and the headless pre-push runner without pulling Tkinter into a subprocess context.
+
 ### Added — v4.10 (dialog UX + scrub-history completeness, 2026-05-27)
 - (dialogs) **Minimize / Maximize / Close buttons restored on every sub-window.** `self.transient(parent)` removed from all 26 `tk.Toplevel` dialogs — that Tkinter call causes Windows to strip the minimize and maximize buttons from child windows. Dialogs remain modal via `grab_set()`; the behaviour change is purely cosmetic/decorative. (`src/dialogs/*.py`)
 - (dialogs) **Mouse-wheel scrolling wired to every Canvas-based dialog.** New `bind_mousewheel(canvas)` utility in `src/theme.py` activates `bind_all("<MouseWheel>")` on hover and releases on leave — safe when multiple scrollable regions are on screen simultaneously. Applied to: Settings, Gitignore, Git Commit, Cost Viewer, MCP Config, GitHub Setup, Release Wizard, Refactor Scout, Roadmap Manager, Untrack Ignored.

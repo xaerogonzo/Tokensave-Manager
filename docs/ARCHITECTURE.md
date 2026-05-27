@@ -108,10 +108,22 @@ Token Save Manager Source/
 │   │   │                          --print path; model="" omits --model flag; cwd=~ isolates
 │   │   │                          from project CLAUDE.md (prevents "assistant mode" on small
 │   │   │                          models). Stderr logged on non-zero exit (sys.stderr guard).
+│   │   ├── ci_workflow.py         generate_github_workflow — writes
+│   │   │                          .github/workflows/quality-checks.yml from the
+│   │   │                          dialog's checks_enabled dict. Omits doctor/Claude
+│   │   │                          steps (CI-incompatible). Idempotent re-generate.
 │   │   ├── precommit_hook.py      install/remove/detect git pre-commit AI review hook
 │   │   │                          + the review runner (run_review, parse_severity_summary,
 │   │   │                          severity_blocks_commit, backend dispatch for
 │   │   │                          "auto"/"claude_cli"/"llm"). Roadmap-2 P5b.
+│   │   ├── prepush_hook.py        install/remove/detect git pre-push quality-check
+│   │   │                          hook. Mirrors precommit_hook.py shape. Hook script
+│   │   │                          passes project_path as argv[1] to prepush_runner.py.
+│   │   │                          _HOOK_MARKER distinct from pre-commit marker.
+│   │   ├── quality_checks.py      run_syntax_check / run_pyflakes_check — pure
+│   │   │                          subprocess helpers with no Tk dependency. Shared
+│   │   │                          between checks_dialog.py (UI) and prepush_runner.py
+│   │   │                          (headless hook context).
 │   │   ├── refactor_scout.py      Pure-function SQL analytics against .tokensave/tokensave.db.
 │   │   │                          Finding @dataclass (stable md5 ID, kind, file, symbol,
 │   │   │                          line, message, evidence). Four _scout_* query functions:
