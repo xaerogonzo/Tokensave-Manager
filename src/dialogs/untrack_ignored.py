@@ -80,12 +80,10 @@ class UntrackIgnoredDialog(tk.Toplevel):
         tk.Label(expl,
                  text=(
                    f"The following files are {reason}.\n\n"
-                   "Untracking removes them from git's index (i.e. git stops "
-                   "treating them as part of the project) but leaves the "
-                   "files on your disk. Future modifications won't appear "
-                   "in git status — which is what your .gitignore intends.\n\n"
-                   "This is the standard fix for the 'I added a path to "
-                   ".gitignore but git keeps showing it as modified' problem."
+                   "👉  Click 'Untrack Selected' — this is almost always the right answer.\n\n"
+                   "Your files stay on disk exactly as they are. Git just stops "
+                   "watching them for changes, which is what .gitignore intends. "
+                   "They will no longer appear in git status or be included in commits."
                  ),
                  bg=C["base"], fg=C["text"], font=("Segoe UI", 9),
                  justify=tk.LEFT, anchor=tk.W,
