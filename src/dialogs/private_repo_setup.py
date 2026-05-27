@@ -132,7 +132,7 @@ class PrivateRepoSetupDialog(tk.Toplevel):
                      padx=10, pady=10).pack(anchor=tk.W)
         else:
             for fname in files:
-                self._add_file_row(fname)
+                self._add_file_row(fname, checked=False)
 
         # Quick-select + Add row
         sel_row = tk.Frame(self, bg=C["base"])
