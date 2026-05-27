@@ -83,54 +83,175 @@ See `memory/roadmap_backlog.md` for the authoritative deferred-items registry. H
 
 ## Roadmap 8
 
-Theme: **Multi-remote workflow, UX polish for novices, agent-architecture deepening.** Roadmap-7 made every doc-drafting / AI-assist surface grounded and reliable; Roadmap-8 builds on that foundation with the workflow features that Roadmap-7 testing surfaced as the next-most-valuable wins.
+**Direction**: Roadmap-7 made every doc-drafting / AI-assist surface
+grounded and reliable, then v4.12 + v4.13 locked in a regression-proof
+test gate and a novice-friendly Test Manager. Roadmap-8 is about
+**closing the loop between local work and the GitHub experience**: PR
+checklist polish, CI status surfacing, the long-deferred Roadmap
+Manager dialog, and the broader UX audit that turns the manager from
+"works for power users" into "works for a complete novice".
 
-### 🔮 Multi-remote support — GitLab + Codeberg + selectable push targets
-Generalise the GitHub-specific `GitHubSetupDialog` into a provider-agnostic `RemoteSetupDialog(provider=…)` covering GitHub (gh CLI), GitLab (glab CLI), and Codeberg (web-token or Forgejo CLI). Add a `RemotesManagerDialog` listing all configured remotes with checkboxes for selective push (`git push <name> <branch>` per selected). Settings adds per-provider exe path fields. **Pickup hint**: `src/dialogs/github_setup.py` is the starting template; `src/controllers/git_tab.py:cmd_git_set_remote` is the per-remote setup wiring; `git push` callsites need to iterate selected remotes.
-**Critical files:** `src/dialogs/remote_setup.py` *(new)*, `src/dialogs/remotes_manager.py` *(new)*, `src/controllers/git_tab.py`, `src/dialogs/settings.py`.
+The headline ~45 items are organised into eight themes (A–H) with three
+priority tiers. **Pick 2-3 themes from the 🎯 Recommended tier for the
+actual Roadmap-8 round.** The 💡 Stretch and 🌙 Long-tail tiers are
+candidates for Roadmap-9+ or fill-in-between rounds. The authoritative
+per-item registry remains `memory/roadmap_backlog.md`.
 
-### 🔮 Theme E completion — Roadmap Manager full lifecycle dialog
-The shipped v4.3 subset (Projects-tab freshness glyph + autosync) is the lightweight slice. The full `📋 Roadmap…` dialog with Audit / Plan / Ship tabs is still planned. **Pickup hint**: `helpers/roadmap_parser.py` + `helpers/roadmap_patch.py` already exist and are dogfood-validated; the dialog needs the three-tab UI and the Jaccard-matching ship logic from the Roadmap-7 plan.
+---
+
+### 🎯 Recommended for Roadmap-8 (pick 2-3)
+
+#### Theme A — Test Manager polish + v4.13 follow-ups
+The Test Manager shipped in v4.13 but six specific gaps surfaced in the
+ship session. All are small, all reinforce the "novice-friendly" goal.
+
+- 🔮 **Step-0 sum-bug fix**: Sync PR Checklist over-counts when "Run
+  All" duplicated totals across every row (e.g. 5648/5648 instead of
+  353/353). Add a `summary: {passed, total, ran_at}` block to
+  `.tokensave-manager/last_test_run.json`. See backlog `[v4.13 chat]`.
+- 🔮 **CI status indicator inside the manager**: poll `gh run list
+  --branch master --limit 1 --json conclusion` and render a 🟢/🔴/🟡
+  badge in the Test Manager status bar so users don't have to alt-tab
+  to GitHub. See backlog `[v4.13 chat]`.
+- 🔮 **"Refresh PR body from Draft" button**: companion to Sync
+  Checklist; rewrites the WHOLE body via `gh pr edit --body-file`
+  with a confirm-diff step.
+- 🔮 **Auto-fill merge commit body from CHANGELOG `[Unreleased]`**:
+  `gh pr merge --subject ... --body ...` populated by the manager
+  instead of GitHub's default title-only body.
+- 🔮 **"Manager source changed — restart required" hint**: background
+  mtime check on `src/*.py` against startup snapshot; non-modal banner
+  on detect so users don't get stuck on stale module state (the v4.13
+  ship session footgun).
+- 🔮 **pytest-cov line-level coverage for Tab 2**: replace filename
+  heuristic with real coverage data so "✓ tested" actually means tested.
+**Critical files:** `src/helpers/test_discovery.py`, `src/helpers/pr_checklist.py`,
+`src/dialogs/test_manager.py`, `src/helpers/pr_draft.py`.
+
+#### Theme B — Roadmap Manager full lifecycle dialog (Theme E completion)
+Long-deferred from Roadmap-7. The shipped v4.3 subset (Projects-tab
+freshness glyph + autosync) is the lightweight slice; the full
+`📋 Roadmap…` dialog with **Audit / Plan / Ship** tabs is still planned.
+- **Audit**: parse ROADMAP.md, cross-reference against git history,
+  surface stale entries promotable to ✅.
+- **Plan**: insert a new "Roadmap N" skeleton through ProposalBridge.
+- **Ship**: map `[Unreleased]` CHANGELOG bullets to active 🟡 entries
+  via Jaccard similarity, batch-promote to ✅.
+**Pickup hint:** `helpers/roadmap_parser.py` + `helpers/roadmap_patch.py`
+already exist and are dogfood-validated. The dialog itself is the new work.
 **Critical files:** `src/dialogs/roadmap_mgr.py` *(new)*, `helpers/roadmap_audit.py` *(new)*.
 
-### 🔮 Full menu / dialog visual rework — novice-friendly layout pass
-Beyond the v4.5 spot-fixes (gitignore Save-button anchoring + scrub-history's 9-layer dialog), the broader menu system needs a coherent design pass. Live use of the Git Commit dialog and doc-drafter notebook surfaced overflowing checkbox lists, dense right-click menus, and competing controls in single rows. **Pickup hint**: see `memory/roadmap_backlog.md` "[v4.6] Full menu / dialog visual rework" for the area-by-area breakdown + approach. Should land BEFORE multi-remote so the new `RemoteSetupDialog` follows the standardised layout from day one. Major rework — touches 15+ dialogs. Surfaces benefiting most: `dialogs/git_commit.py`, `dialogs/doc_drafter.py`, `dialogs/settings.py`, Projects tab right-click menu.
+#### Theme C — Novice UX polish (small + audit)
+v4.3 audited only AI/grounding surfaces. Roadmap-8 finishes the job.
+- 🔮 **Ship-now batch (6 items from v4.3 audit)**: see
+  `memory/novice_gotchas_ai.md`. Settings AI section scope labels,
+  `num_ctx` guidance, doc-drafter "you can edit" hint, CLAUDE.md
+  load indicator, gitignore AI source log, rename "grounding" →
+  "Attach code context." 2-5 lines each.
+- 🔮 **Full-UX audit across non-AI tabs** (Projects, Git, Doctor,
+  Tasks): output → `memory/novice_gotchas_full.md` + triage list.
+- 🔮 **Full menu / dialog visual rework**: overflowing checkbox lists,
+  dense right-click menus, competing controls in single rows. Major
+  rework; should land BEFORE multi-remote so new dialogs follow the
+  standardised layout from day one.
+**Critical files:** `src/dialogs/git_commit.py`, `src/dialogs/doc_drafter.py`,
+`src/dialogs/settings.py`, Projects tab right-click menu.
 
-### 🔮 Novice-gotcha UI polish — ship-now batch (six items from the v4.3 audit)
-From `memory/novice_gotchas_ai.md`: (1) scope labels under each Settings AI section, (2) `num_ctx` label + guidance text, (3) "(you can edit before clicking Apply)" hint on the doc-drafter placeholder, (4) CLAUDE.md load indicator in the Ask tab status bar, (5) gitignore AI data-source log line, (6) rename "grounding" toggle to "Attach code context to AI requests". Each is a 2-5 line change.
+---
 
-### 🔮 Full-UX novice-gotcha audit across all tabs
-v4.3 scoped the audit to AI/grounding surfaces. The non-AI tabs (Projects, Git, Doctor, Tasks) need the same first-time-user audit pass. Output is a `memory/novice_gotchas_full.md` companion to the existing AI-only file, plus actionable triage.
+### 💡 Stretch goals for Roadmap-8 (or slip to Roadmap-9)
 
-### 🔮 Claude Agent SDK migration spike (if a user-visible gap appears)
-Deferred from Roadmap-7 Theme D because no observed user gap motivated it. Revisit only if real usage shows print-mode CLI users hit a quality ceiling that the Agent SDK's multi-turn tool use would solve.
+#### Theme D — Multi-remote workflow
+Generalise the GitHub-specific `GitHubSetupDialog` into a
+provider-agnostic `RemoteSetupDialog(provider=…)` covering GitHub
+(gh CLI), GitLab (glab CLI), and Codeberg (web-token or Forgejo CLI).
+Add `RemotesManagerDialog` with checkboxes for selective `git push`.
+**Recommend deferring until AFTER Theme C visual rework** so the new
+dialog follows the standardised layout.
+**Critical files:** `src/dialogs/remote_setup.py` *(new)*,
+`src/dialogs/remotes_manager.py` *(new)*, `src/controllers/git_tab.py`,
+`src/dialogs/settings.py`.
 
-### 🔮 Doc-drafter quality model deepening
-From the v4.4 cascade backlog: weighted suspicion model for truncation (replaces the hard-boolean rules), LocalAgent scratchpad budget cap, `BackendCapabilities` dataclass (replaces `backend_hint: bool` plumbing), edit-aware banner invalidation (only clears when rejected titles are actually edited away), multi-section ProposalBridge tabbed diff, LLM-based pre-flight section selector (deferred from v3 Theme D).
+#### Theme E — Tool Manager extensions
+Carry-overs from v4.7 + v4.8. None are urgent; each adds polish to
+the existing Tool Manager dialog.
+- 🔮 Multi-agent MCP status rows (Cursor / Codex / opencode detect)
+- 🔮 Tokensave alternative install paths (Scoop / Cargo)
+- 🔮 Tokensave channel management (stable / beta switching)
+- 🔮 Codegraph auto-update notifier (mirror tokensave's update poller)
+- 🔮 Codegraph filesystem-watcher daemon (tokensave parity)
+- 🔮 "Uninstall + sweep all `.codegraph/` indexes" mode
+- 🔮 Interactive `npx @colbymchenry/codegraph` spawn-console path
 
-### 🔮 Codegraph filesystem-watcher daemon (true tokensave parity)
-Currently `codegraph sync` only runs on user-trigger (Projects-tab button) or via the v4.3 autosync on project-select. Tokensave has a watchdog daemon that auto-syncs on file save. Codegraph upstream could add the same; meanwhile the manager could ship a thin local watchdog wrapper.
+#### Theme F — Code health carry-over
+Long-deferred refactors that don't have a forcing function. Address
+opportunistically when touching the relevant code.
+- 🔮 `mcp_config._render_block` CC reduction
+- 🔮 `commit_messages.py` / `llm.py` complexity sweep
+- 🔮 Unified sub-section parser, hidden subsection-ID anchors
+- 🔮 Doctor audit — per-directory severity tiers (looser caps for `scripts/`)
+- 🔮 Doctor audit CI integration (extract `_audit_project_tree` from Tk context)
+- 🔮 `ai_tasks_ctrl.py` CHANGELOG drafter consolidation
+- 🔮 `update_poller.py` codegraph health ingestion
+- 🔮 Full dialog test coverage — remaining 11 dialogs (v4.12 covered 4)
+- 🔮 `pytest-cov` minimum-threshold gate
+- 🔮 Workflow-call refactor for the three near-identical CI test jobs
+- 🔮 Split `tests/smoke_test.py` into per-module files (Phase 1b)
+- 🔮 GUI git-client stderr fallback for the pre-COMMIT hook (G-K parity)
 
-### 🔮 Carry-over: code-health backlog
-`mcp_config._render_block` CC reduction, `commit_messages.py` / `llm.py` complexity, unified sub-section parser, hidden subsection-ID anchors. All still in `memory/roadmap_backlog.md`.
+---
 
-### 🔮 CodeGraph MCP picker — multi-agent status detection rows (carry-over from v4.7)
-The v4.7 picker can WIRE all 4 codegraph-supported agents (claude, cursor, codex, opencode) but the Settings status row only verifies Claude Code wiring. Each additional agent needs its own per-agent status check because each writes a different config format (JSON / TOML / JSONC at different paths). **Pickup hint**: extend `helpers/mcp.py:_claude_code_mcp_has_codegraph` shape with sibling helpers for the other three formats.
+### 🌙 Long-tail (Roadmap-9+ or post-ship feedback)
 
-### 🔮 Interactive `npx @colbymchenry/codegraph` spawn-console path (carry-over from v4.7)
-User picked the in-app picker over the spawned-console interactive installer. Could be added as a fourth Settings button if the auto + picker paths prove insufficient for power users.
+#### Theme G — Doc-drafter quality model deepening
+From the v4.4 cascade backlog:
+- 🔮 Weighted suspicion model for truncation (replaces hard-boolean rules)
+- 🔮 LocalAgent scratchpad budget cap per iteration
+- 🔮 `BackendCapabilities` dataclass (replaces `backend_hint: bool`)
+- 🔮 Edit-aware banner invalidation (only clears when rejected titles
+  are actually edited away)
+- 🔮 Multi-section ProposalBridge tabbed diff
+- 🔮 LLM-based pre-flight section selector (deferred from v3 Theme D)
+- 🔮 Parallel grounding-block construction via `concurrent.futures`
+- 🔮 Per-recipe body-cap tuning per backend
+- 🔮 Per-feature grounding checkboxes / dropdown menu reorganization
 
-### 🔮 Tokensave alternative install paths — Scoop / Cargo (carry-over from v4.8)
-v4.8 ships the GitHub-releases-download path only. Scoop (`scoop install tokensave`) and Cargo (`cargo install tokensave`) are deferred. Should detect whether Scoop is installed and offer it as a second option in Tool Manager; Cargo requires the Rust toolchain so it's lower priority.
+#### Theme H — Agent architecture / external IDE integration
+- 🔮 Claude Agent SDK migration spike (revisit ONLY if real usage shows
+  print-mode CLI users hit a quality ceiling)
+- 🔮 Visual Studio integration via companion REST API + VSIX (large,
+  needs C# toolchain — defer unless explicit demand)
+- 🔮 GitHub-issues mirror for backlog items (1-way push from
+  `memory/roadmap_backlog.md`)
+- 🔮 "🤖 Use Claude to fill in tests" button on Test Manager Tab 4
+  (LLM token cost concern; needs design)
+- 🔮 Continuous PR-checklist sync (file-watcher; race-condition risk)
+- 🔮 Per-test (not per-file) granularity in Test Manager Tab 1
+- 🔮 Mtime-based stale-test detection (Tab 3 third signal)
+- 🔮 PowerShell one-liner bootstrap installer for tokensave
+- 🔮 CodeGraph project-local MCP wiring (`--location=local`)
+- 🔮 Persistent "auto-reindex next time" preference for codegraph
+- 🔮 Settings UI for `memory_paths` / per-key path config fields
 
-### 🔮 Tokensave channel management (carry-over from v4.8)
-Surface `tokensave channel beta` / `tokensave channel stable` switching in Tool Manager. UI: a single dropdown labelled "Channel" beside the tokensave row.
+---
 
-### 🔮 Codegraph auto-update notifier (carry-over from v4.8)
-Mirror the existing tokensave update poller (`controllers/update_poller.py`) for codegraph via the npm registry. When a newer version is available, surface a "🔄 Update codegraph to vX.Y.Z" promotional button in the Tool Manager.
+### 📝 Roadmap-8 step-0 (suggested cleanup PR)
 
-### 🔮 "Uninstall + sweep all .codegraph/ indexes" mode (carry-over from v4.8)
-Add an optional checkbox to the Tool Manager's codegraph uninstall confirmation: "Also delete .codegraph/ index directories across all known projects". Useful when migrating off codegraph entirely.
+Before Theme A/B/C work, ship a small bounded warm-up PR addressing
+specific debt — sets the tone for Roadmap-8 as "incremental quality +
+features mixed together" rather than "cleanup phase + feature phase":
+
+1. **Sync PR sum-bug fix** (Theme A first item; ~30 min)
+2. **Add tests for ONE high-touch untested file** — likely
+   `helpers/commit_messages.py` or `controllers/git_tab.py` since both
+   are touched by most rounds. Use Test Manager Tab 4 → "Subprocess-bound"
+   template. ~1 hour.
+3. **Optionally split ONE high-CC function** — only if you find
+   yourself getting lost in `agent.py:run()` (CC=17) or similar.
+   Skip if not blocking.
+
+Single PR, three concrete wins. Then move to whichever Theme letter
+you've picked.
 
 ---
 
@@ -340,7 +461,7 @@ To be explicit about what we're NOT building:
 
 This file is updated whenever a stage ships or its design materially changes.
 
-**Last updated: 2026-05-27** — Roadmap-7 shipped via the cascade plan (rounds v3 → v4.10). Themes A–E all ✅. Highlights:
+**Last updated: 2026-05-27** — Roadmap-7 shipped via the cascade plan (rounds v3 → v4.13, 13 rounds on the `Roadmap-7` branch). Themes A–E all ✅. Highlights:
 - v3–v4 doc-drafter hardening + multi-section + alignment-aware generic short-circuit
 - v4.1 codegraph parallel grounding + tiered alignment scoring
 - v4.2 grounding everywhere (commit/PR/review/Ask/doc-drafter) + master toggle
@@ -352,6 +473,9 @@ This file is updated whenever a stage ships or its design materially changes.
 - v4.8 Tool Manager dialog — unified install/update/uninstall lifecycle for tokensave + codegraph with Gemini-fix hardening (G-A through G-G)
 - v4.9 Smoke Tests dialog (Help tab → 🧪 Run Smoke Tests, streams colour-coded output)
 - v4.10 UX hardening — full window chrome on all 26 sub-dialogs; `bind_mousewheel` utility wired to every Canvas-using dialog; Scrub History scrollable/collapsible file picker; auto-restore of `origin` remote after filter-repo history scrub; `skip_stale_check` parameter ends the untrack→commit→recheck infinite loop
+- v4.11 CI integration — Generate GitHub Actions button + pre-push hook toggle in Run Checks dialog; new `helpers/quality_checks.py` Tk-free runner; pre-push hook only blocks on deterministic checks (syntax + pyflakes), doctor stays local
+- v4.12 pytest suite + CI gating + lazy path constants — 290 tests, conftest.py with V-A through V-M fixtures (tk_root session-scoped, wait_for event-loop-driving, patch_after AfterHarness, fake_home, mock_config), three-tier CI (`test-warn` / `test-gate` / `test-postmerge`), G-L pre-flight test catches future module-level `expanduser` regressions
+- v4.13 Test Manager + PR checklist sync — 4-tab dialog (Run+View / Coverage Gaps / Stale Tests / Scaffold) replaces the smoke-test button; new `helpers/test_discovery.py` + `helpers/test_scaffold.py` + `helpers/pr_checklist.py`; V-A stdin-piped `gh api ... --input -` for safe PR body edits; V-B `.tokensave-manager/` cache namespace; 63 new tests (353 total); deferred items grouped into 8 themed Roadmap-8 buckets above
 
 Cascade plan: `~/.claude/plans/write-a-comprehensive-plan-elegant-cascade.md`. Roadmap-8 section opened above.
 
