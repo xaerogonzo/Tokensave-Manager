@@ -43,7 +43,6 @@ class SnippetEditDialog(tk.Toplevel):
         self.configure(bg=C["base"])
         self.resizable(False, False)
         self.grab_set()
-        self.transient(parent)
         self._callback = callback
         self._edit_meta = edit_meta
         self._read_only_title = read_only_title

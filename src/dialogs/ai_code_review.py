@@ -27,7 +27,7 @@ from tkinter import ttk
 from typing import TYPE_CHECKING
 
 from constants import C
-from helpers.commit_messages import _pending_diff
+from helpers.commit_messages import _pending_diff, _files_from_diff
 from helpers.llm import _call_llm
 from helpers.runtime import log
 from helpers.ui import append_text
@@ -78,7 +78,6 @@ class AICodeReviewDialog(tk.Toplevel):
         self.minsize(700, 500)
         self.geometry("900x720")
         self.grab_set()
-        self.transient(parent)
 
         self._path = path
         self._llm_cfg = llm_cfg
@@ -261,10 +260,54 @@ class AICodeReviewDialog(tk.Toplevel):
         self._stop_btn.configure(state=tk.NORMAL)
 
         max_chars = int(self._llm_cfg.get("max_diff_chars", 24000))
+
+        # v4.2: tokensave+codegraph grounding (module_deep_dive recipe —
+        # surfaces caller/callee relationships for the changed symbols,
+        # so the reviewer can reason about impact instead of just hunks).
+        grounding = ""
+        if self._cfg.enable_llm_grounding:
+            try:
+                from helpers.doc_grounding import (
+                    build_grounding_block,
+                    build_codegraph_block,
+                    build_combined_grounding,
+                )
+                changed_files = _files_from_diff(diff)
+                try:
+                    ts_block = build_grounding_block(
+                        self._path, "module_deep_dive",
+                        tokensave_exe=self._cfg.tokensave_exe,
+                    )
+                except Exception:
+                    ts_block = ""
+                try:
+                    # v4.3: ensure fresh before grounding call.
+                    if self._cfg.codegraph_exe:
+                        try:
+                            from helpers.codegraph_freshness import ensure_fresh
+                            ensure_fresh(self._path, self._cfg.codegraph_exe)
+                        except Exception:
+                            pass
+                    cg_block = build_codegraph_block(
+                        self._path, "module_deep_dive",
+                        changed_files=changed_files,
+                        codegraph_exe=self._cfg.codegraph_exe or "",
+                    )
+                except Exception:
+                    cg_block = ""
+                grounding = build_combined_grounding(ts_block, cg_block)
+            except Exception:
+                grounding = ""
+
+        grounding_section = (
+            f"## Repository context (auto-attached)\n\n{grounding}\n\n"
+            if grounding else ""
+        )
         user_prompt = (
             f"Review the following git diff. Project: "
             f"{os.path.basename(self._path)}.\n\n"
-            f"```diff\n{diff[:max_chars]}\n```"
+            + grounding_section
+            + f"```diff\n{diff[:max_chars]}\n```"
             + ("\n\n[diff truncated for length]" if len(diff) > max_chars else "")
         )
         self._spawn_review_worker(token, user_prompt)

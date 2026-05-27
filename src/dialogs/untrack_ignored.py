@@ -22,6 +22,7 @@ import tkinter as tk
 from tkinter import ttk, messagebox
 
 from constants import C
+from theme import bind_mousewheel
 
 
 class UntrackIgnoredDialog(tk.Toplevel):
@@ -56,7 +57,6 @@ class UntrackIgnoredDialog(tk.Toplevel):
         self.resizable(True, True)
         self.minsize(540, 380)
         self.grab_set()
-        self.transient(parent)
 
         self._build_header_section(name)
         self._build_explanation_section(reason)
@@ -80,12 +80,10 @@ class UntrackIgnoredDialog(tk.Toplevel):
         tk.Label(expl,
                  text=(
                    f"The following files are {reason}.\n\n"
-                   "Untracking removes them from git's index (i.e. git stops "
-                   "treating them as part of the project) but leaves the "
-                   "files on your disk. Future modifications won't appear "
-                   "in git status — which is what your .gitignore intends.\n\n"
-                   "This is the standard fix for the 'I added a path to "
-                   ".gitignore but git keeps showing it as modified' problem."
+                   "👉  Click 'Untrack Selected' — this is almost always the right answer.\n\n"
+                   "Your files stay on disk exactly as they are. Git just stops "
+                   "watching them for changes, which is what .gitignore intends. "
+                   "They will no longer appear in git status or be included in commits."
                  ),
                  bg=C["base"], fg=C["text"], font=("Segoe UI", 9),
                  justify=tk.LEFT, anchor=tk.W,
@@ -100,6 +98,7 @@ class UntrackIgnoredDialog(tk.Toplevel):
         list_outer.pack(fill=tk.BOTH, expand=True, padx=18, pady=(0, 8))
         self._canvas = tk.Canvas(list_outer, bg=C["mantle"],
                                  highlightthickness=0, height=180)
+        bind_mousewheel(self._canvas)
         _vsb = ttk.Scrollbar(list_outer, orient="vertical",
                               command=self._canvas.yview)
         self._canvas.configure(yscrollcommand=_vsb.set)

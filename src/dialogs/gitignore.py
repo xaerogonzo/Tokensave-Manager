@@ -33,7 +33,7 @@ from tkinter import font as tkfont
 from typing import TYPE_CHECKING
 
 from constants import C, CREATE_NO_WINDOW
-from theme import _Tooltip
+from theme import _Tooltip, bind_mousewheel
 from helpers.gitignore import (
     _read_gitignore_lines, _write_gitignore_lines, _GITIGNORE_TEMPLATES,
 )
@@ -73,7 +73,6 @@ class GitignoreDialog(tk.Toplevel):
         self.resizable(True, True)
         self.minsize(560, 520)
         self.grab_set()
-        self.transient(parent)
 
         # ── State ──────────────────────────────────────────────────────────
         self._original_lines: list  = _read_gitignore_lines(path)
@@ -86,6 +85,14 @@ class GitignoreDialog(tk.Toplevel):
         self._ai_suggest_stop = threading.Event()
 
         self._build_header_section(path)
+        # Build Save/Cancel bar BEFORE the scrollable/expandable sections so
+        # pack(side=BOTTOM) anchors it to the window floor regardless of how
+        # much content sits above it.  (Packing it last caused it to be pushed
+        # off-screen whenever the combined sections exceeded the dialog height.)
+        self._build_save_buttons_section()
+        # v4.5: novice-friendly privacy semantics banner — first thing the
+        # user reads under the header.
+        self._build_privacy_banner_section()
         self._build_current_entries_section()
         self._build_ai_suggest_section()
         self._build_template_buttons_section()
@@ -93,7 +100,6 @@ class GitignoreDialog(tk.Toplevel):
             self._build_untracked_panel()
         self._build_custom_entry_section()
         self._build_pending_changes_section()
-        self._build_save_buttons_section()
 
         self._update_pending_panel()
         self._centre_on_parent(parent)
@@ -136,6 +142,7 @@ class GitignoreDialog(tk.Toplevel):
 
         self._cur_canvas = tk.Canvas(cur_wrap, bg=C["mantle"],
                                      highlightthickness=0, height=180)
+        bind_mousewheel(self._cur_canvas)
         cur_vsb = ttk.Scrollbar(cur_wrap, orient="vertical",
                                 command=self._cur_canvas.yview)
         self._cur_canvas.configure(yscrollcommand=cur_vsb.set)
@@ -211,131 +218,23 @@ class GitignoreDialog(tk.Toplevel):
         stop_event = self._ai_suggest_stop
 
         def _worker():
-            # ── a) File listing — CodeGraph-first ───────────────────────────
-            db_path = os.path.join(self._path, ".codegraph", "codegraph.db")
-            all_files = []
-            if os.path.isfile(db_path):
-                try:
-                    con = sqlite3.connect(f"file:{db_path}?mode=ro", uri=True)
-                    rows = con.execute("SELECT path FROM files").fetchall()
-                    con.close()
-                    all_files = [r[0] for r in rows]
-                except Exception:
-                    # SQLite unavailable / schema mismatch — fall back to listdir
-                    try:
-                        all_files = os.listdir(self._path)
-                    except Exception:
-                        all_files = []
-            else:
-                try:
-                    all_files = os.listdir(self._path)
-                except Exception:
-                    all_files = []
-
-            exts = sorted({
-                os.path.splitext(f)[1]
-                for f in all_files
-                if os.path.splitext(f)[1]
-            })
-            dirs = sorted({
-                f.replace("\\", "/").split("/")[0]
-                for f in all_files
-                if "/" in f.replace("\\", "/")
-            })
-
+            exts, dirs = self._collect_project_files(self._path)
             if stop_event.is_set():
                 return
-
-            # ── b) Untracked files ───────────────────────────────────────────
-            untracked_str = ""
-            try:
-                proc = subprocess.Popen(
-                    [self._cfg.git_exe, "-C", self._path,
-                     "ls-files", "--others", "--exclude-standard"],
-                    stdout=subprocess.PIPE, stderr=subprocess.PIPE,
-                    creationflags=CREATE_NO_WINDOW,
-                    text=True, encoding="utf-8", errors="replace",
-                )
-                stdout, _ = proc.communicate(timeout=10)
-                if proc.returncode == 0:
-                    untracked_str = stdout.strip()
-            except Exception:
-                pass  # leave untracked_str as ""
-
+            untracked_str = self._collect_untracked_files(
+                self._cfg.git_exe, self._path)
             if stop_event.is_set():
                 return
-
-            # ── c) Build prompts ─────────────────────────────────────────────
-            _SYS = (
-                "You are a .gitignore expert. Analyse the provided project structure "
-                "and suggest gitignore patterns that should be excluded from version control.\n\n"
-                "Rules:\n"
-                "- Output ONLY patterns, one per line. No explanations, no markdown, "
-                "no code blocks, no numbering.\n"
-                "- Each line must be a valid .gitignore glob "
-                "(e.g. __pycache__/, *.log, .env, node_modules/).\n"
-                "- Do NOT suggest any pattern already in the 'Already ignored' list.\n"
-                "- gitignore patterns without an embedded '/' (or with only a trailing '/') "
-                "match at ANY directory depth. If '__pycache__/' is already ignored, do NOT "
-                "suggest 'src/__pycache__/' or any other path-scoped variant — it is already "
-                "covered. Only suggest a path-scoped pattern (e.g. 'src/vendor/') when the "
-                "broader name is NOT already present in the 'Already ignored' list.\n"
-                "- Skip binary/database files handled by tool-specific nested .gitignore "
-                "files (e.g. CodeGraph writes its own .gitignore inside .codegraph/ — "
-                "do not suggest codegraph.db or similar; it is handled already).\n"
-                "- Focus on standard language build artifacts, build directories, "
-                "local environment configs, and package manager artifacts directly "
-                "corresponding to the detected directories/extensions. "
-                "Do not guess at frameworks that are not clearly present.\n"
-                "- Prefer directory patterns (trailing /) over file patterns when "
-                "a whole directory should be excluded."
-            )
-            user_prompt = (
-                f"Project file extensions detected: "
-                f"{', '.join(exts) or '(none detected)'}\n"
-                f"Top-level directories: {', '.join(dirs) or '(none detected)'}\n\n"
-                f"Untracked files (what git currently sees — may be empty):\n"
-                f"{untracked_str or '(none or git unavailable)'}\n\n"
-                "Already ignored patterns (do NOT repeat or rephrase these):\n"
-                + "\n".join(sorted(current_patterns))
-            )
-
-            # ── d) LLM call ──────────────────────────────────────────────────
-            provider = llm_cfg.get("provider", "")
-            result = None
-            error = None
-            try:
-                if provider == "claude_cli":
-                    from helpers.claude_cli import call_claude_cli_print
-                    claude_exe = self._cfg.claude_cli_exe or ""
-                    if not claude_exe:
-                        error = (
-                            "Claude CLI not configured — set path in "
-                            "Settings → Claude Code CLI."
-                        )
-                    else:
-                        model = llm_cfg.get("model") or ""
-                        result = call_claude_cli_print(
-                            claude_exe, user_prompt,
-                            system_prompt=_SYS,
-                            timeout=60,
-                            model=model,
-                            cwd=self._path,
-                        )
-                else:
-                    from helpers.llm import _call_llm
-                    result = _call_llm(llm_cfg, _SYS, user_prompt)
-            except Exception as exc:
-                error = str(exc)
-
+            sys_p, user_p = self._build_gitignore_prompts(
+                exts, dirs, untracked_str, current_patterns)
+            result, error = self._dispatch_gitignore_llm(
+                llm_cfg, self._cfg, sys_p, user_p, self._path)
             if stop_event.is_set():
                 return
-
             if error or not result:
                 err_msg = error or "AI call returned no result."
                 self.after(0, lambda m=err_msg: _on_error(m))
                 return
-
             parsed = _parse_ai_gitignore_patterns(result)
             self.after(0, lambda p=parsed: _on_result(p))
 
@@ -369,6 +268,124 @@ class GitignoreDialog(tk.Toplevel):
                 return
 
         threading.Thread(target=_worker, daemon=True).start()
+
+    # ── _ai_suggest helpers ─────────────────────────────────────────────────
+
+    @staticmethod
+    def _collect_project_files(path: str) -> tuple:
+        """Return (exts, dirs) from CodeGraph DB, falling back to os.listdir."""
+        db_path = os.path.join(path, ".codegraph", "codegraph.db")
+        all_files: list = []
+        if os.path.isfile(db_path):
+            try:
+                con = sqlite3.connect(f"file:{db_path}?mode=ro", uri=True)
+                rows = con.execute("SELECT path FROM files").fetchall()
+                con.close()
+                all_files = [r[0] for r in rows]
+            except Exception:
+                try:
+                    all_files = os.listdir(path)
+                except Exception:
+                    all_files = []
+        else:
+            try:
+                all_files = os.listdir(path)
+            except Exception:
+                all_files = []
+        exts = sorted({os.path.splitext(f)[1] for f in all_files
+                       if os.path.splitext(f)[1]})
+        dirs = sorted({
+            f.replace("\\", "/").split("/")[0]
+            for f in all_files if "/" in f.replace("\\", "/")
+        })
+        return exts, dirs
+
+    @staticmethod
+    def _collect_untracked_files(git_exe: str, path: str) -> str:
+        """Return newline-joined untracked filenames from git ls-files, or ''."""
+        try:
+            proc = subprocess.Popen(
+                [git_exe, "-C", path,
+                 "ls-files", "--others", "--exclude-standard"],
+                stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+                creationflags=CREATE_NO_WINDOW,
+                text=True, encoding="utf-8", errors="replace",
+            )
+            stdout, _ = proc.communicate(timeout=10)
+            if proc.returncode == 0:
+                return stdout.strip()
+        except Exception:
+            pass
+        return ""
+
+    @staticmethod
+    def _build_gitignore_prompts(
+        exts: list, dirs: list, untracked_str: str, current_patterns: frozenset
+    ) -> tuple:
+        """Assemble (system_prompt, user_prompt) for the gitignore AI request."""
+        sys_p = (
+            "You are a .gitignore expert. Analyse the provided project structure "
+            "and suggest gitignore patterns that should be excluded from version control.\n\n"
+            "Rules:\n"
+            "- Output ONLY patterns, one per line. No explanations, no markdown, "
+            "no code blocks, no numbering.\n"
+            "- Each line must be a valid .gitignore glob "
+            "(e.g. __pycache__/, *.log, .env, node_modules/).\n"
+            "- Do NOT suggest any pattern already in the 'Already ignored' list.\n"
+            "- gitignore patterns without an embedded '/' (or with only a trailing '/') "
+            "match at ANY directory depth. If '__pycache__/' is already ignored, do NOT "
+            "suggest 'src/__pycache__/' or any other path-scoped variant — it is already "
+            "covered. Only suggest a path-scoped pattern (e.g. 'src/vendor/') when the "
+            "broader name is NOT already present in the 'Already ignored' list.\n"
+            "- Skip binary/database files handled by tool-specific nested .gitignore "
+            "files (e.g. CodeGraph writes its own .gitignore inside .codegraph/ — "
+            "do not suggest codegraph.db or similar; it is handled already).\n"
+            "- Focus on standard language build artifacts, build directories, "
+            "local environment configs, and package manager artifacts directly "
+            "corresponding to the detected directories/extensions. "
+            "Do not guess at frameworks that are not clearly present.\n"
+            "- Prefer directory patterns (trailing /) over file patterns when "
+            "a whole directory should be excluded."
+        )
+        user_p = (
+            f"Project file extensions detected: "
+            f"{', '.join(exts) or '(none detected)'}\n"
+            f"Top-level directories: {', '.join(dirs) or '(none detected)'}\n\n"
+            f"Untracked files (what git currently sees — may be empty):\n"
+            f"{untracked_str or '(none or git unavailable)'}\n\n"
+            "Already ignored patterns (do NOT repeat or rephrase these):\n"
+            + "\n".join(sorted(current_patterns))
+        )
+        return sys_p, user_p
+
+    @staticmethod
+    def _dispatch_gitignore_llm(
+        llm_cfg: dict, cfg, sys_p: str, user_p: str, path: str
+    ) -> tuple:
+        """Call configured LLM provider; return (result, error) — one is None."""
+        provider = llm_cfg.get("provider", "")
+        try:
+            if provider == "claude_cli":
+                from helpers.claude_cli import call_claude_cli_print
+                claude_exe = cfg.claude_cli_exe or ""
+                if not claude_exe:
+                    return None, (
+                        "Claude CLI not configured — set path in "
+                        "Settings → Claude Code CLI."
+                    )
+                result = call_claude_cli_print(
+                    claude_exe, user_p,
+                    system_prompt=sys_p,
+                    timeout=60,
+                    model=llm_cfg.get("model") or "",
+                    cwd=path,
+                )
+            else:
+                from helpers.llm import _call_llm
+                result = _call_llm(llm_cfg, sys_p, user_p)
+            return result, None
+        except Exception as exc:
+            return None, str(exc)
 
     def _inject_patterns_list(self, patterns):
         """Inject a list of patterns with trailing-slash-normalised dedup.
@@ -456,10 +473,15 @@ class GitignoreDialog(tk.Toplevel):
 
     def _build_pending_changes_section(self):
         """Read-only Text widget showing the +/- diff of pending edits."""
-        pend_label = tk.Label(self, text="PENDING CHANGES",
-                              bg=C["base"], fg=C["overlay0"],
-                              font=("Segoe UI", 8, "bold"))
-        pend_label.pack(anchor=tk.W, padx=18, pady=(10, 2))
+        pend_row = tk.Frame(self, bg=C["base"])
+        pend_row.pack(fill=tk.X, padx=18, pady=(10, 2))
+        tk.Label(pend_row, text="PENDING CHANGES",
+                 bg=C["base"], fg=C["overlay0"],
+                 font=("Segoe UI", 8, "bold")).pack(side=tk.LEFT)
+        tk.Label(pend_row,
+                 text="— click  💾 Save changes  to write to disk",
+                 bg=C["base"], fg=C["overlay0"],
+                 font=("Segoe UI", 8, "italic")).pack(side=tk.LEFT, padx=(6, 0))
         pend_wrap = tk.Frame(self, bg=C["mantle"])
         pend_wrap.pack(fill=tk.X, padx=18, pady=(0, 8))
         self._pend_txt = tk.Text(pend_wrap, height=4,
@@ -473,14 +495,70 @@ class GitignoreDialog(tk.Toplevel):
         self._pend_txt.tag_configure("dim",  foreground=C["overlay0"])
 
     def _build_save_buttons_section(self):
-        """Bottom Save / Cancel button row."""
+        """Bottom Save / Cancel button row.
+
+        Packed with side=tk.BOTTOM and built BEFORE the scrollable sections
+        so it is always anchored to the window floor — content above expands
+        into the remaining space rather than pushing this row off-screen.
+        """
         btns = tk.Frame(self, bg=C["base"], padx=18, pady=10)
-        btns.pack(fill=tk.X)
-        self._save_btn = ttk.Button(btns, text="Save changes",
+        btns.pack(fill=tk.X, side=tk.BOTTOM)
+        # Thin visual separator above the button row
+        ttk.Separator(self, orient="horizontal").pack(
+            fill=tk.X, side=tk.BOTTOM)
+        self._save_btn = ttk.Button(btns, text="💾  Save changes",
                                      command=self._on_save)
         self._save_btn.pack(side=tk.RIGHT, padx=(6, 0))
         ttk.Button(btns, text="Cancel",
                    command=self.destroy).pack(side=tk.RIGHT)
+        # v4.5: advanced "scrub from history" disclosure on the left so it's
+        # visually away from the primary Save/Cancel cluster.
+        ttk.Button(
+            btns, text="⚙  Advanced — Scrub from History…",
+            command=self._on_open_scrub_dialog,
+        ).pack(side=tk.LEFT)
+
+    def _build_privacy_banner_section(self):
+        """v4.5: novice-readable explanation of what 'Save changes' does.
+
+        Single sentence at the top so the user understands the privacy
+        semantics: files added here stop being PUSHED from now on, but
+        OLDER history may still contain them.  The Advanced button at the
+        bottom opens ScrubHistoryDialog for the full-erasure case.
+        """
+        banner = tk.Frame(self, bg=C["surface0"], padx=12, pady=8)
+        banner.pack(fill=tk.X, padx=18, pady=(0, 8))
+        tk.Label(banner,
+                 text="🔒  Privacy semantics",
+                 bg=C["surface0"], fg=C["blue"],
+                 font=("Segoe UI", 9, "bold")).pack(anchor=tk.W)
+        tk.Label(
+            banner,
+            text=(
+                "Files added here will stop being pushed from now on. "
+                "Older commits on GitHub still contain them — for a "
+                "full erase from all history, use ⚙ Advanced below."
+            ),
+            bg=C["surface0"], fg=C["text"],
+            font=("Segoe UI", 8),
+            wraplength=580, justify=tk.LEFT,
+        ).pack(anchor=tk.W, pady=(2, 0))
+
+    def _on_open_scrub_dialog(self):
+        """Open the advanced 'Scrub from History' dialog (v4.5)."""
+        # Lazy import (Rule 6) — avoids a load-time cycle between gitignore
+        # and scrub_history when both end up in the same import graph.
+        from dialogs.scrub_history import ScrubHistoryDialog
+        # Pre-fill the picker with the first pending addition if any,
+        # so the user doesn't have to retype.
+        initial = ""
+        if self._additions:
+            for a in self._additions:
+                if not a.startswith("#"):
+                    initial = a.strip().lstrip("/")
+                    break
+        ScrubHistoryDialog(self, self._path, self._cfg,
+                           initial_file=initial)
 
     def _centre_on_parent(self, parent):
         """Position the dialog roughly centred on the parent window."""

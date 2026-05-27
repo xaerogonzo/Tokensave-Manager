@@ -50,46 +50,87 @@ One-click AI-powered gitignore pattern recommendations in the `.gitignore` edito
 
 Theme: **Markdown Manager, Tokensave-Grounded Drafts, Audit Lifecycle.** Roadmap-6 hardened the doc-drafter for two files (CHANGELOG, README); Roadmap-7 generalizes it into a registry-driven Markdown Manager covering every doc type the project ships, grounds every draft in tokensave file:line context (so Ollama stops hallucinating symbol names and Claude CLI gets the same evidence Ollama does), and turns `docs/ROADMAP.md` from a write-only document into a managed lifecycle (audit → plan → ship).
 
-### 🔮 Theme A — Markdown Manager via curated DocType registry
-Generalize `DocDrafterDialog` to a registry-driven dialog. New `helpers/doc_types.py` exporting a `DocType` dataclass (key, label, target_filename, system_prompt, build_prompt, compute_apply, read_existing, parse_draft, sanity_checks, tokensave_recipe). Initial entries: existing `changelog` + `readme`, plus `architecture` (`docs/ARCHITECTURE.md`), `roadmap` (`docs/ROADMAP.md`), `memory` (`memory/<picked>.md` with YAML-frontmatter preservation), `docs_generic` (any `docs/*.md` with `## Anchor` patcher), `tokensave_guide` (`TOKENSAVE_GUIDE.md`). Memory + docs_generic get an in-tab file-picker combobox. Each new patcher (`architecture_patch.py`, `roadmap_patch.py`, `memory_patch.py`, `generic_doc_patch.py`) mirrors the Phase 2.1 shape: anchor regex + `_find_block_bounds` + pure `_compute_insert_*` helper + IO wrapper. The first real-world dogfood is using the new `architecture` DocType to update `docs/ARCHITECTURE.md` (intentionally left stale in Roadmap-6).
-**Critical files:** `src/helpers/doc_types.py` *(new)*, `src/helpers/{architecture,roadmap,memory,generic_doc}_patch.py` *(new)*, `src/helpers/doc_drafter.py` (per-mode prompt builders + new `_*_SYSTEM` constants), `src/dialogs/doc_drafter.py` (registry-driven tabs, file-picker UI), `src/controllers/projects_tab.py` (toolbar/right-click entry rename).
+Roadmap-7 shipped across an extended cascade plan (rounds v3 → v4.10, 2026-05-27). See `~/.claude/plans/write-a-comprehensive-plan-elegant-cascade.md` for the full round-by-round design and audit findings. Per-theme shipping notes below; cumulative entries in CHANGELOG.md `[Unreleased]`.
 
-### 🔮 Theme B — Tokensave-grounded drafts (inject by default, expose tools as upgrade path)
-**B1 (universal):** new `helpers/doc_grounding.py` with named recipes (`commit_range_context`, `architecture_overview`, `roadmap_evidence`, `module_deep_dive`) that shell out to `tokensave tool context/search` and return a slim markdown block (≤ ~2000 tokens) the drafter splices into every user_prompt. Works identically for Ollama AND Claude CLI print-mode — no protocol change. Silent fallback to grounding-less prompt when `.tokensave/` is missing. **B2 (Ollama only):** `dispatch_llm(enable_tokensave_tools=True)` spins a one-shot LocalAgent loop exposing the existing `_tool_tokensave_search` / `_tool_tokensave_context` mid-drafting; Claude CLI print-mode stays on B1 (limitation documented in Theme D).
-**Critical files:** `src/helpers/doc_grounding.py` *(new)*, `src/helpers/doc_drafter.py` (`dispatch_llm` gains grounding-block + tool-flag params; `build_*_prompt` accepts grounding block), `src/agent_tools.py` (extract tokensave-tool helpers to importable surface), `src/dialogs/doc_drafter.py` (per-tab "🔍 Include tokensave context" checkbox).
+### ✅ Theme A — Markdown Manager via curated DocType registry. Shipped cascade v3-v4 (2026-05-26 → 27).
+`helpers/doc_types.py` exports the `DocType` dataclass; registry seeded with `changelog`, `readme`, `architecture`, `roadmap`, `memory`, `docs_generic`, `tokensave_guide`. Each new patcher (`architecture_patch.py`, `roadmap_patch.py`, `memory_patch.py`, `generic_doc_patch.py`) mirrors the Phase 2.1 pure-`_compute_*` + IO-wrapper shape. DocDrafterDialog now spawns one tab per DocType with the file-picker UI for memory + docs_generic. (`src/helpers/doc_types.py`, `src/helpers/{architecture,roadmap,memory,generic_doc}_patch.py`, `src/helpers/doc_drafter.py`, `src/dialogs/doc_drafter.py`)
 
-### 🔮 Theme C — Ollama quality knobs
-Five small isolated changes to close the local-vs-CLI quality gap without depending on bigger hardware: (1) Ollama `num_ctx` exposure in Settings (defaults 4096 for ask_tab_llm, 8192 for doc_drafter; today's silent prompt-truncation hurts long drafts); (2) per-DocType `gen_params` (`temperature`, `top_p`, `top_k`) — CHANGELOG/README stay 0.3, architecture/memory bump to 0.5; (3) `🔁 Regenerate with feedback` button — when apply rejects, re-prompts with the rejection reason in the system message (one retry, never auto-loop); (4) optional few-shot examples per DocType, injected only on Ollama path; (5) optional Settings-gated warm-up ping (1-token Ollama request) to eliminate the cold-model first-Generate jank.
-**Critical files:** `src/helpers/llm.py` (`num_ctx` + temp/top_p plumbing, warm-up helper), `src/dialogs/settings.py` (new fields), `src/helpers/doc_drafter.py` (`dispatch_llm` honors per-DocType gen_params + few-shot splicing), `src/dialogs/doc_drafter.py` (Regenerate-with-feedback button + state), `src/helpers/doc_types.py` (`gen_params`, `examples`).
+### ✅ Theme B — Tokensave + codegraph grounding. Shipped cascade v4-v4.2 (2026-05-27).
+**B1 (universal grounding block)** lives in `helpers/doc_grounding.py` with named recipes (`commit_range_context`, `architecture_overview`, `roadmap_evidence`, `module_deep_dive`). v4.1 added a parallel codegraph grounding source (`build_codegraph_block`) including the `codegraph affected --stdin` path for test-impact mapping; `build_combined_grounding` merges both sources with per-source cap + line-level dedup (v4.4 dedup-first ordering fix). v4.2 extended grounding to commit-message draft, PR draft, AI Code Review, and the Ask tab (non-agentic path) with a Settings-level master toggle `enable_llm_grounding`. **B2 (Ollama agentic tools)** ships via the `🔍 Tokensave tools` per-tab checkbox. (`src/helpers/doc_grounding.py`, `src/helpers/codegraph_freshness.py` *(new v4.3)*, `src/helpers/commit_messages.py`, `src/helpers/pr_draft.py`, `src/dialogs/ai_code_review.py`, `src/controllers/ask_tab.py`)
 
-### 🔮 Theme D — Backend documentation + optional Claude Agent SDK spike
-Ship `docs/AGENT_BACKENDS.md` *(new)* explaining the three backend tiers (Anthropic API, Claude CLI print-mode, Ollama LocalAgent) and what each does / doesn't support — specifically that print-mode CLI gets B1 grounding-injection but cannot use B2 tool-exposure. Time-boxed spike branch `Roadmap-7-spike-claude-sdk` evaluates minimum-viable Claude Agent SDK integration (multi-turn tool use); promoted to Roadmap-8 only if the spike proves the gap is hurting users.
-**Critical files:** `docs/AGENT_BACKENDS.md` *(new)*.
+### ✅ Theme C — Ollama quality knobs. Shipped cascade v3-v4 (2026-05-27).
+`num_ctx` exposure in Settings; per-DocType `gen_params` via the `DocType` dataclass; `🔁 Regenerate with feedback` button surfaces the rejection reason on retry; few-shot examples injected only on Ollama path; warm-up ping eliminated cold-model jank. v4.3 added the elapsed-time "Drafting on Ollama (12s)…" tick and v4.4 added a self-enforced hard-timeout fallback (G6) when the OS-level subprocess hangs. (`src/helpers/llm.py`, `src/dialogs/settings.py`, `src/helpers/doc_drafter.py`, `src/dialogs/doc_drafter.py`, `src/helpers/doc_types.py`)
 
-### 🔮 Theme E — Roadmap / Audit Manager (full lifecycle dialog)
-New `📋 Roadmap…` dialog (`src/dialogs/roadmap_mgr.py`) with three tabs: **Audit** parses `docs/ROADMAP.md` into a Treeview cross-referenced against `git log --grep` + `tokensave_diff_context` (missing evidence after 30 days flags 💤 stale; evidence-found-but-still-🟡 flags 🆙 promotable); double-click opens the item in Theme A's `roadmap` DocType for editing. **Plan** runs the "Start Roadmap N+1" wizard — auto-detects the next number, takes theme/date/CHANGELOG-note inputs, generates the section skeleton, routes through ProposalBridge. **Ship** matches `[Unreleased]` CHANGELOG bullets to active 🟡 entries via Jaccard (≥ 0.5), proposes 🟡→✅ promotions and orphan-bullet candidates, routes through ProposalBridge. All roadmap mutations go through `helpers/roadmap_patch.py` (shared with Theme A's `roadmap` DocType) — no parallel write path.
-**Critical files:** `src/dialogs/roadmap_mgr.py` *(new)*, `src/helpers/roadmap_parser.py`, `roadmap_audit.py` *(new)*, `src/helpers/roadmap_patch.py` *(new, also serves Theme A)*, `src/controllers/projects_tab.py` (toolbar + right-click entry).
+### ✅ Theme D — Backend documentation. Shipped Roadmap-7.
+`docs/AGENT_BACKENDS.md` exists and documents the three backend tiers (Anthropic API, Claude CLI print-mode, Ollama LocalAgent) and the asymmetry that B1 grounding works for all but B2 agentic tool-use is Ollama-only. The Claude Agent SDK spike was time-boxed and deferred (no observed user-facing gap that the spike would close).
 
-### Order of work
-1. Pre-flight (pull master, cut `Roadmap-7`, `tokensave sync`, baseline pyflakes-green).
-2. Update `docs/ARCHITECTURE.md` via the new `architecture` DocType (first real-world dogfood — Roadmap-6 deliberately left this stale).
-3. Theme A foundation (registry + behavior-preserving `changelog`/`readme` migration).
-4. Theme A new patchers (`architecture`, `roadmap`, `memory`, `generic_doc`).
-5. Theme B1 grounding injection (wire to existing DocTypes first, propagate).
-6. Theme C knobs (each independently shippable; sequence by dogfood impact).
-7. Theme B2 agentic tools (opt-in per DocType).
-8. Theme E roadmap manager (Audit → Plan → Ship).
-9. Theme D docs + spike branch.
-10. Roadmap-7 wrap (meta-test: update CHANGELOG/README/ROADMAP themselves using the new manager).
+### ✅ Theme E — Codegraph freshness UX as the lightweight Audit substitute. Shipped cascade v4.3 (2026-05-27).
+The original Theme E full Roadmap Manager dialog (Audit → Plan → Ship tabs) was deferred to Roadmap-8 in favour of a leaner shipped subset: `helpers/codegraph_freshness.py` provides `ensure_fresh` (blocking pre-grounding refresh), `kick_autosync` (two-layer debounced background sync on project select), and `maybe_prompt_reindex` (once-per-session "broken index" dialog). The Projects tab CodeGraph column gains health glyphs (✓ indexed / ⏳ stale / ⚠ under-indexed). `roadmap_parser.py` + `roadmap_patch.py` already exist and were dogfooded by the cascade plan rounds themselves. The full lifecycle dialog is captured as a Roadmap-8 backlog item.
 
-### Cross-cutting invariants (carry forward from Roadmap-6)
+### Order of work — completed
+Implementation reordered as live testing on the doc-drafter surfaced regressions; the actual shipping sequence is preserved in the cascade plan's round-by-round structure. Highlights: prompt tone-down → three-signal candidate selector → multi-section + hallucination protection → grounding injection (Theme B1) → codegraph parity (B1 extension) → grounding everywhere (commit/PR/review/Ask) → codegraph freshness UX → privacy feature. Final markdown sweep wraps Roadmap-7.
+
+### Cross-cutting invariants (held throughout)
 - ProposalBridge gates every Apply path; no direct file writes.
 - New patchers mirror the Phase 2.1 contract: pure `_compute_*` helper + IO wrapper; compute output byte-identical to write-then-read.
-- All existing Phase 1.5–2.1 doc-drafter unit tests pass after every theme lands (registry migration must be behavior-preserving for `changelog`/`readme`).
-- `python -m compileall src/ -q && python -m pyflakes src/` exits 0 after every theme.
+- All existing Phase 1.5–2.1 doc-drafter unit tests pass after every theme lands (registry migration is behavior-preserving for `changelog`/`readme`).
+- `python -m compileall src/ -q && python -m pyflakes src/` exits 0 after every round.
 
 ### Deferred to Roadmap-8
-Claude Agent SDK migration if Theme D spike proves out; multi-project Roadmap audit; Tier C auto-suggest-after-commit banner (carried over from Roadmap-6); `mcp_config._render_block` CC reduction + `commit_messages.py` / `llm.py` complexity backlog; unified sub-section parser (eliminating drift between `_SUBSECTION_HEADER_RE` / `_SUBHEADER_RE` / `_split_readme_subsection`); hidden subsection-ID anchors (`<!-- subsection-id: ... -->`) for robust patcher matching.
+See `memory/roadmap_backlog.md` for the authoritative deferred-items registry. Headline items: full Roadmap Manager dialog (Theme E), multi-remote push (GitLab + Codeberg + per-push remote selection), Claude Agent SDK migration spike, novice-gotcha UI polish (`memory/novice_gotchas_ai.md`), full-UX audit across all tabs, full doc-drafter quality model (weighted truncation, LocalAgent scratchpad cap, `BackendCapabilities` dataclass), `mcp_config._render_block` CC reduction, unified sub-section parser, hidden subsection-ID anchors.
+
+---
+
+## Roadmap 8
+
+Theme: **Multi-remote workflow, UX polish for novices, agent-architecture deepening.** Roadmap-7 made every doc-drafting / AI-assist surface grounded and reliable; Roadmap-8 builds on that foundation with the workflow features that Roadmap-7 testing surfaced as the next-most-valuable wins.
+
+### 🔮 Multi-remote support — GitLab + Codeberg + selectable push targets
+Generalise the GitHub-specific `GitHubSetupDialog` into a provider-agnostic `RemoteSetupDialog(provider=…)` covering GitHub (gh CLI), GitLab (glab CLI), and Codeberg (web-token or Forgejo CLI). Add a `RemotesManagerDialog` listing all configured remotes with checkboxes for selective push (`git push <name> <branch>` per selected). Settings adds per-provider exe path fields. **Pickup hint**: `src/dialogs/github_setup.py` is the starting template; `src/controllers/git_tab.py:cmd_git_set_remote` is the per-remote setup wiring; `git push` callsites need to iterate selected remotes.
+**Critical files:** `src/dialogs/remote_setup.py` *(new)*, `src/dialogs/remotes_manager.py` *(new)*, `src/controllers/git_tab.py`, `src/dialogs/settings.py`.
+
+### 🔮 Theme E completion — Roadmap Manager full lifecycle dialog
+The shipped v4.3 subset (Projects-tab freshness glyph + autosync) is the lightweight slice. The full `📋 Roadmap…` dialog with Audit / Plan / Ship tabs is still planned. **Pickup hint**: `helpers/roadmap_parser.py` + `helpers/roadmap_patch.py` already exist and are dogfood-validated; the dialog needs the three-tab UI and the Jaccard-matching ship logic from the Roadmap-7 plan.
+**Critical files:** `src/dialogs/roadmap_mgr.py` *(new)*, `helpers/roadmap_audit.py` *(new)*.
+
+### 🔮 Full menu / dialog visual rework — novice-friendly layout pass
+Beyond the v4.5 spot-fixes (gitignore Save-button anchoring + scrub-history's 9-layer dialog), the broader menu system needs a coherent design pass. Live use of the Git Commit dialog and doc-drafter notebook surfaced overflowing checkbox lists, dense right-click menus, and competing controls in single rows. **Pickup hint**: see `memory/roadmap_backlog.md` "[v4.6] Full menu / dialog visual rework" for the area-by-area breakdown + approach. Should land BEFORE multi-remote so the new `RemoteSetupDialog` follows the standardised layout from day one. Major rework — touches 15+ dialogs. Surfaces benefiting most: `dialogs/git_commit.py`, `dialogs/doc_drafter.py`, `dialogs/settings.py`, Projects tab right-click menu.
+
+### 🔮 Novice-gotcha UI polish — ship-now batch (six items from the v4.3 audit)
+From `memory/novice_gotchas_ai.md`: (1) scope labels under each Settings AI section, (2) `num_ctx` label + guidance text, (3) "(you can edit before clicking Apply)" hint on the doc-drafter placeholder, (4) CLAUDE.md load indicator in the Ask tab status bar, (5) gitignore AI data-source log line, (6) rename "grounding" toggle to "Attach code context to AI requests". Each is a 2-5 line change.
+
+### 🔮 Full-UX novice-gotcha audit across all tabs
+v4.3 scoped the audit to AI/grounding surfaces. The non-AI tabs (Projects, Git, Doctor, Tasks) need the same first-time-user audit pass. Output is a `memory/novice_gotchas_full.md` companion to the existing AI-only file, plus actionable triage.
+
+### 🔮 Claude Agent SDK migration spike (if a user-visible gap appears)
+Deferred from Roadmap-7 Theme D because no observed user gap motivated it. Revisit only if real usage shows print-mode CLI users hit a quality ceiling that the Agent SDK's multi-turn tool use would solve.
+
+### 🔮 Doc-drafter quality model deepening
+From the v4.4 cascade backlog: weighted suspicion model for truncation (replaces the hard-boolean rules), LocalAgent scratchpad budget cap, `BackendCapabilities` dataclass (replaces `backend_hint: bool` plumbing), edit-aware banner invalidation (only clears when rejected titles are actually edited away), multi-section ProposalBridge tabbed diff, LLM-based pre-flight section selector (deferred from v3 Theme D).
+
+### 🔮 Codegraph filesystem-watcher daemon (true tokensave parity)
+Currently `codegraph sync` only runs on user-trigger (Projects-tab button) or via the v4.3 autosync on project-select. Tokensave has a watchdog daemon that auto-syncs on file save. Codegraph upstream could add the same; meanwhile the manager could ship a thin local watchdog wrapper.
+
+### 🔮 Carry-over: code-health backlog
+`mcp_config._render_block` CC reduction, `commit_messages.py` / `llm.py` complexity, unified sub-section parser, hidden subsection-ID anchors. All still in `memory/roadmap_backlog.md`.
+
+### 🔮 CodeGraph MCP picker — multi-agent status detection rows (carry-over from v4.7)
+The v4.7 picker can WIRE all 4 codegraph-supported agents (claude, cursor, codex, opencode) but the Settings status row only verifies Claude Code wiring. Each additional agent needs its own per-agent status check because each writes a different config format (JSON / TOML / JSONC at different paths). **Pickup hint**: extend `helpers/mcp.py:_claude_code_mcp_has_codegraph` shape with sibling helpers for the other three formats.
+
+### 🔮 Interactive `npx @colbymchenry/codegraph` spawn-console path (carry-over from v4.7)
+User picked the in-app picker over the spawned-console interactive installer. Could be added as a fourth Settings button if the auto + picker paths prove insufficient for power users.
+
+### 🔮 Tokensave alternative install paths — Scoop / Cargo (carry-over from v4.8)
+v4.8 ships the GitHub-releases-download path only. Scoop (`scoop install tokensave`) and Cargo (`cargo install tokensave`) are deferred. Should detect whether Scoop is installed and offer it as a second option in Tool Manager; Cargo requires the Rust toolchain so it's lower priority.
+
+### 🔮 Tokensave channel management (carry-over from v4.8)
+Surface `tokensave channel beta` / `tokensave channel stable` switching in Tool Manager. UI: a single dropdown labelled "Channel" beside the tokensave row.
+
+### 🔮 Codegraph auto-update notifier (carry-over from v4.8)
+Mirror the existing tokensave update poller (`controllers/update_poller.py`) for codegraph via the npm registry. When a newer version is available, surface a "🔄 Update codegraph to vX.Y.Z" promotional button in the Tool Manager.
+
+### 🔮 "Uninstall + sweep all .codegraph/ indexes" mode (carry-over from v4.8)
+Add an optional checkbox to the Tool Manager's codegraph uninstall confirmation: "Also delete .codegraph/ index directories across all known projects". Useful when migrating off codegraph entirely.
 
 ---
 
@@ -299,7 +340,22 @@ To be explicit about what we're NOT building:
 
 This file is updated whenever a stage ships or its design materially changes.
 
-**Last updated: 2026-05-25** — Roadmap-6 in progress. Code-health audit + remediation; commit-message scope fix; `mcp_config._apply` CC reduction; Ask tab final-message streaming. All upstream tokensave issues filed (see above).
+**Last updated: 2026-05-27** — Roadmap-7 shipped via the cascade plan (rounds v3 → v4.10). Themes A–E all ✅. Highlights:
+- v3–v4 doc-drafter hardening + multi-section + alignment-aware generic short-circuit
+- v4.1 codegraph parallel grounding + tiered alignment scoring
+- v4.2 grounding everywhere (commit/PR/review/Ask/doc-drafter) + master toggle
+- v4.3 codegraph freshness UX (autosync + health glyph) + novice-gotcha audit + persistent backlog memory
+- v4.4 Gemini critique remediation (G1–G6)
+- v4.5 "Make Private" + "Scrub from History" privacy feature + full markdown sweep
+- v4.6 per-feature grounding toggles (commit OFF, PR ON) + Draft PR CLI-path grounding via temp-file handoff + grounding visibility badge
+- v4.7 CodeGraph MCP wiring from the manager (auto + per-agent picker + uninstall + status detection)
+- v4.8 Tool Manager dialog — unified install/update/uninstall lifecycle for tokensave + codegraph with Gemini-fix hardening (G-A through G-G)
+- v4.9 Smoke Tests dialog (Help tab → 🧪 Run Smoke Tests, streams colour-coded output)
+- v4.10 UX hardening — full window chrome on all 26 sub-dialogs; `bind_mousewheel` utility wired to every Canvas-using dialog; Scrub History scrollable/collapsible file picker; auto-restore of `origin` remote after filter-repo history scrub; `skip_stale_check` parameter ends the untrack→commit→recheck infinite loop
+
+Cascade plan: `~/.claude/plans/write-a-comprehensive-plan-elegant-cascade.md`. Roadmap-8 section opened above.
+
+✅ **2026-05-25** — Roadmap-6 shipped. Highlights: code-health audit + remediation; commit-message scope fix; `mcp_config._apply` CC reduction; Ask tab final-message streaming; gitignore AI Suggest. Details in CHANGELOG.md.
 
 ✅ **2026-05-25 (earlier)** — Roadmap-5 initial ship. Highlights: Claude CLI model selector; pre-commit hook hang fix (Opus → Haiku); commit-message Claude CLI parity; Draft PR direct GitHub PR creation. Details in CHANGELOG.md.
 

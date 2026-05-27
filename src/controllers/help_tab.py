@@ -87,8 +87,28 @@ class HelpTabController:
         pane.pack(fill=tk.BOTH, expand=True, padx=14, pady=10)
 
         # ── Left: topic list ──────────────────────────────────────────────────
-        list_wrap = tk.Frame(pane, bg=C["mantle"])
-        list_wrap.pack(side=tk.LEFT, fill=tk.Y)
+        left_wrap = tk.Frame(pane, bg=C["base"])
+        left_wrap.pack(side=tk.LEFT, fill=tk.Y)
+
+        # v4.8: Tool Manager shortcut at the top of the left nav so it's
+        # always discoverable regardless of which help section is open.
+        ttk.Button(
+            left_wrap, text="💾  Tool Manager…",
+            command=self._open_tool_manager,
+        ).pack(side=tk.TOP, fill=tk.X, padx=(0, 0), pady=(0, 6))
+
+        # v4.13: Test Manager dialog (replaces the v4.12 "Run Smoke Tests"
+        # button). Four tabs: Run+View, Coverage Gaps, Stale Tests,
+        # Scaffold Generator. The old smoke-tests dialog still works
+        # internally (it's reused by the V-E shared background helper),
+        # but novice users get the full test-lifecycle UI here.
+        ttk.Button(
+            left_wrap, text="🧪  Test Manager…",
+            command=self._open_test_manager,
+        ).pack(side=tk.TOP, fill=tk.X, padx=(0, 0), pady=(0, 6))
+
+        list_wrap = tk.Frame(left_wrap, bg=C["mantle"])
+        list_wrap.pack(side=tk.TOP, fill=tk.Y, expand=True)
 
         self._help_lb = tk.Listbox(
             list_wrap, width=20, font=("Segoe UI", 9),
@@ -232,6 +252,52 @@ class HelpTabController:
             self._ask_btn.pack(side=tk.LEFT)
         else:
             self._ask_btn.pack_forget()
+
+    def _open_tool_manager(self) -> None:
+        """v4.8: open the Tool Manager dialog from the Help tab nav.
+
+        Lazy import so help_tab.py's import graph stays light. Uses
+        the manager's top-level Tk window as parent so the dialog
+        renders modally above all tabs.
+        """
+        from dialogs.tool_manager import ToolManagerDialog
+        # The help_lb's toplevel is the App window — same root as Settings uses.
+        try:
+            root = self._help_lb.winfo_toplevel()
+        except (tk.TclError, AttributeError):
+            return
+        ToolManagerDialog(root, self._cfg)
+
+    def _open_test_manager(self) -> None:
+        """Open the v4.13 Test Manager dialog.
+
+        Resolves the project root from the manager's currently-active
+        project. Lazy-imports the dialog so help_tab.py stays light.
+        """
+        import os
+        from dialogs.test_manager import TestManagerDialog
+
+        try:
+            root = self._help_lb.winfo_toplevel()
+        except (tk.TclError, AttributeError):
+            return
+
+        # Resolve the active project root from cfg. Same heuristic as
+        # the old _run_smoke_tests handler.
+        project_root = ""
+        try:
+            project_root = self._cfg.raw.get("projects", [{}])[0].get("path", "") or ""
+        except Exception:
+            project_root = ""
+        if not project_root or not os.path.isdir(project_root):
+            # Fall back to the manager-source dir so the dialog has
+            # SOMETHING to scan (better than crashing on an empty
+            # project_root).
+            project_root = os.path.normpath(
+                os.path.join(os.path.dirname(__file__), "..", "..")
+            )
+
+        TestManagerDialog(root, project_root, self._cfg)
 
     def _help_explain_clicked(self) -> None:
         """Handle the Explain button click — runs on the main thread."""

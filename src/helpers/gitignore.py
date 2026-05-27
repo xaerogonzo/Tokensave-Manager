@@ -53,6 +53,10 @@ logs/
 # OS noise
 Thumbs.db
 .DS_Store
+
+# Manager-generated temp files (Draft PR pre-fetched context)
+.pr_context.tmp.md
+PR_DRAFT.md
 """
 
 

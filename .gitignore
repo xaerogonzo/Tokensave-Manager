@@ -7,6 +7,11 @@ manager-config.json
 # ── tokensave index (machine-specific binary database) ──
 .tokensave/
 
+# ── Manager-owned per-project cache (test results, allowlists, etc.) ──
+# Distinct namespace from .tokensave/ to avoid colliding with tokensave's
+# own files. Contains: last_test_run.json, test_allowlist.json (v4.13+).
+.tokensave-manager/
+
 # ── CodeGraph SQLite index (machine-specific binary database) ──
 # Note: .codegraph/config.json and .codegraph/.gitignore ARE tracked —
 # they're per-project indexing config meant to be shared across machines.
@@ -46,3 +51,16 @@ Thumbs.db
 # Git history is the canonical safety net; these on-disk snapshots are
 # meant to be local-only and should never enter a commit.
 *.backup.*
+
+# ── Manager-generated temp files ──
+# .pr_context.tmp.md: pre-fetched grounding for Draft PR (CLI deletes
+#   it after writing PR_DRAFT.md; gitignored as defence in depth in
+#   case the CLI session crashes before cleanup).
+# PR_DRAFT.md: the PR description deliverable — content uploaded to
+#   GitHub via `gh pr create --body-file PR_DRAFT.md`; the local file
+#   itself is transient.
+.pr_context.tmp.md
+PR_DRAFT.md
+
+# Added by TokenSave Manager
+*.local.json

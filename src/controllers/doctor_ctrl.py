@@ -420,7 +420,10 @@ def _audit_project_tree(
             ext = os.path.splitext(fname)[1].lower()
             full = os.path.join(root, fname)
             rel = os.path.relpath(full, project_path).replace("\\", "/")
-            if rel in skip_rel_paths:
+            # Support both exact-file matches ("scripts/foo.py") and
+            # directory-prefix matches ("scripts" skips everything under it).
+            if any(rel == sp or rel.startswith(sp.rstrip("/") + "/")
+                   for sp in skip_rel_paths):
                 continue
             if ext == ".py":
                 result = _audit_python_file(full)

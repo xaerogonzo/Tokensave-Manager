@@ -28,7 +28,7 @@ from typing import TYPE_CHECKING, Callable
 import tkinter as tk
 
 from constants import C, CREATE_NO_WINDOW, _ANSI
-from helpers.mcp import _MCP_CONFIGS, _classify_mcp_entry
+from helpers.mcp import _mcp_configs, _classify_mcp_entry
 from helpers.project_discovery import clear_pinned, set_pinned
 from helpers.runtime import log
 
@@ -72,11 +72,12 @@ class SyncStatusController:
         set_pinned(path)
         self._on_log(f"Pinned → {path}", C["green"])
         try:
-            states = [_classify_mcp_entry(p, self._cfg.raw)["state"] for _, p in _MCP_CONFIGS]
+            configs = _mcp_configs()
+            states = [_classify_mcp_entry(p, self._cfg.raw)["state"] for _, p in configs]
         except Exception:
-            states = []
+            configs, states = [], []
         if "ok" in states and not all(s == "ok" for s in states):
-            bad = [lbl for (lbl, p), s in zip(_MCP_CONFIGS, states) if s != "ok"]
+            bad = [lbl for (lbl, p), s in zip(configs, states) if s != "ok"]
             self._on_log(
                 f"  Pin will take effect at next Claude restart.  "
                 f"Note: {', '.join(bad)} also still needs its MCP wiring "

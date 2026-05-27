@@ -34,23 +34,52 @@ def _is_auth_error(text: str) -> bool:
     ))
 
 
-def _build_llm_prompt(diff: str, recent: list, max_diff_chars: int) -> tuple:
-    """Construct (system, user) prompt text for the LLM call."""
+def _build_llm_prompt(diff: str, recent: list, max_diff_chars: int,
+                      grounding: str = "") -> tuple:
+    """Construct (system, user) prompt text for the LLM call.
+
+    v4.2: ``grounding`` is an optional tokensave/codegraph context block
+    spliced into the user message between the recent-commit reference and
+    the diff. Empty by default — caller decides whether to build it.
+    """
     system = (
         "You write conventional-commit messages. Output ONE commit message:\n"
         "- Subject line MUST be 72 chars or less, imperative mood "
         "(use add/fix/update, NOT added/fixed/updated).\n"
         "- Start with a conventional-commit prefix: "
         "feat / fix / chore / docs / refactor / perf / test / build / ci.\n"
-        "- Optionally include scope: feat(scope): subject.\n"
-        "- Blank line, then a body wrapped at 72 chars per line.\n"
-        "- Match the existing tone from the recent commit subjects.\n"
-        "- Output ONLY the commit message. NO preamble, NO markdown, "
-        "NO quotes, NO code fences, NO explanation."
+        "- Scope (if used) MUST be ≤20 chars with NO slashes or dots. "
+        "Use the short module name: write feat(update_poller) "
+        "NOT feat(src/controllers/update_poller.py).\n"
+        "- ALWAYS add a blank line then a body. The body MUST have one "
+        "bullet point per changed file or subsystem explaining WHAT changed "
+        "and WHY. Wrap at 72 chars per line.\n"
+        "- Match the existing tone from the recent commit subjects — "
+        "but DO NOT copy them. The recent-subjects list shows you the "
+        "STYLE (prefix vocabulary, scope length, imperative mood); your "
+        "subject must describe the STAGED DIFF below, not echo any "
+        "previous commit. If the diff doesn't clearly match any recent "
+        "subject's topic, write a fresh subject from the diff.\n"
+        "Example of a correct commit message:\n\n"
+        "feat(update_poller): add integration check after upgrade\n\n"
+        "- update_poller: hook App._run so integration check dialog opens\n"
+        "  automatically when upgrade subprocess exits rc=0; replaces the\n"
+        "  old 15 s timer hack\n"
+        "- commit_messages: add _clean_prefix_scope() to strip file-path\n"
+        "  scopes that local LLMs copy verbatim from diff headers\n"
+        "- llm: tighten system prompt with scope constraint and few-shot\n"
+        "  examples so local models produce complete messages\n\n"
+        "Output ONLY the commit message. NO preamble, NO markdown fences, "
+        "NO quotes, NO explanation."
     )
     recent_lines = "\n".join(f"- {s}" for s in recent[:5]) if recent else "(no prior commits)"
+    grounding_section = (
+        f"Repository context (auto-attached from tokensave/codegraph):\n{grounding}\n\n"
+        if grounding else ""
+    )
     user = (
         f"Recent commit subjects (tone reference):\n{recent_lines}\n\n"
+        f"{grounding_section}"
         f"Staged diff (truncated to {max_diff_chars} chars):\n"
         f"```diff\n{diff[:max_diff_chars]}\n```"
     )
@@ -221,7 +250,11 @@ def _call_anthropic(api_key: str, model: str, system_prompt: str, user_prompt: s
 
 def _call_openai_compat(url: str, api_key: str, model: str,
                         system_prompt: str, user_prompt: str,
-                        max_tokens: int, timeout: int, on_token) -> str | None:
+                        max_tokens: int, timeout: int, on_token,
+                        temperature: float = 0.3,
+                        top_p: float | None = None,
+                        top_k: int | None = None,
+                        num_ctx: int | None = None) -> str | None:
     """OpenAI Chat Completions — covers openai, openai_compatible, and ollama.
     Caller resolves the endpoint URL before dispatching here."""
     import urllib.request
@@ -232,8 +265,15 @@ def _call_openai_compat(url: str, api_key: str, model: str,
             {"role": "user", "content": user_prompt},
         ],
         "max_tokens": max_tokens,
-        "temperature": 0.3,
+        "temperature": temperature,
     }
+    if top_p is not None:
+        payload["top_p"] = top_p
+    if top_k is not None:
+        payload["top_k"] = top_k
+    if num_ctx is not None:
+        # Ollama extension — silently ignored by non-Ollama OpenAI-compat servers
+        payload["num_ctx"] = num_ctx
     if on_token is not None:
         payload["stream"] = True
     headers = {"Content-Type": "application/json"}
@@ -327,10 +367,47 @@ def _call_llm(cfg: dict, system_prompt: str, user_prompt: str,
                 if not base_url:
                     return None
                 url = base_url + "/v1/chat/completions"
+            _temp = cfg.get("temperature")
+            temperature = float(_temp) if _temp is not None else 0.3
+            _top_p = cfg.get("top_p")
+            top_p = float(_top_p) if _top_p is not None else None
+            _top_k = cfg.get("top_k")
+            top_k = int(_top_k) if _top_k is not None else None
+            _num_ctx = cfg.get("num_ctx")
+            num_ctx = int(_num_ctx) if _num_ctx is not None else None
             return _call_openai_compat(url, api_key, model, system_prompt, user_prompt,
-                                       max_tokens, timeout, on_token)
+                                       max_tokens, timeout, on_token,
+                                       temperature=temperature, top_p=top_p,
+                                       top_k=top_k, num_ctx=num_ctx)
     except (urllib.error.URLError, urllib.error.HTTPError,
             TimeoutError, json.JSONDecodeError, KeyError, OSError):
         return None
 
     return None
+
+
+def warmup_ollama(base_url: str, model: str = "", timeout: int = 10) -> bool:
+    """Send a 1-token completion to warm up the Ollama model.
+
+    Fires before the first Generate click when "Warm up Ollama" is enabled in
+    Settings.  Returns True if the server responded, False on any error (the
+    caller always continues — warmup is best-effort).
+    """
+    import urllib.request
+    import urllib.error
+    url = (base_url or "http://localhost:11434").rstrip("/") + "/v1/chat/completions"
+    payload = {
+        "model": model or "qwen2.5-coder:14b",
+        "messages": [{"role": "user", "content": "hi"}],
+        "max_tokens": 1,
+    }
+    try:
+        req = urllib.request.Request(
+            url, method="POST",
+            data=json.dumps(payload).encode("utf-8"),
+            headers={"Content-Type": "application/json"},
+        )
+        with urllib.request.urlopen(req, timeout=timeout):
+            return True
+    except Exception:
+        return False

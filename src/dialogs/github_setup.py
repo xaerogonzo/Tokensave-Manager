@@ -27,6 +27,7 @@ from tkinter import ttk, messagebox
 from typing import TYPE_CHECKING
 
 from constants import C
+from theme import bind_mousewheel
 
 if TYPE_CHECKING:
     from state import ManagerConfig
@@ -51,7 +52,6 @@ class GitHubSetupDialog(tk.Toplevel):
         self.resizable(True, True)
         self.minsize(480, 500)
         self.grab_set()
-        self.transient(parent)
 
         self._name_var      = tk.StringVar()
         self._email_var     = tk.StringVar()
@@ -62,6 +62,7 @@ class GitHubSetupDialog(tk.Toplevel):
         # Scrollable area: canvas + scrollbar wrap the body Frame.
         # body is a child of self (not canvas) — keeps Windows rendering happy.
         self._canvas = tk.Canvas(self, bg=C["base"], highlightthickness=0)
+        bind_mousewheel(self._canvas)
         _vsb = ttk.Scrollbar(self, orient="vertical", command=self._canvas.yview)
         self._canvas.configure(yscrollcommand=_vsb.set)
         _vsb.pack(side=tk.RIGHT, fill=tk.Y)

@@ -1,0 +1,36 @@
+# Project configuration for Token Save Manager.
+#
+# Currently used ONLY for pytest configuration — the manager itself is
+# not pip-installed (it's a standalone Tkinter app launched via `python
+# src/app.py`). If the project ever ships as a wheel, [project]
+# metadata can be added here without breaking the [tool.pytest.ini_options]
+# section.
+
+[tool.pytest.ini_options]
+# Where to look for tests.
+testpaths = ["tests"]
+
+# Add `src/` to sys.path so tests can `from helpers.X import Y` directly,
+# mirroring how the app itself imports (see app.py and precommit_review.py
+# for the same sys.path.insert(0, _HERE) bootstrap pattern).
+pythonpath = ["src"]
+
+# Custom markers. Tests using Tk display infrastructure must be decorated
+# with @pytest.mark.tk so they can be selectively skipped on environments
+# without Xvfb (e.g. ssh sessions on Linux).
+#
+# Run pure-logic only:    pytest -m "not tk"
+# Run Tk dialogs only:    xvfb-run -a pytest -m tk    (Linux)
+#                         pytest -m tk                (Windows)
+markers = [
+    "tk: requires Tk display (runs under xvfb-run on Linux CI)",
+]
+
+# Reasonable defaults. -v shows individual test names so CI logs are
+# easier to grep. --strict-markers prevents typos in @pytest.mark.X
+# from silently being ignored.
+addopts = [
+    "-v",
+    "--strict-markers",
+    "--tb=short",
+]

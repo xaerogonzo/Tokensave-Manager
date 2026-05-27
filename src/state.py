@@ -93,6 +93,63 @@ class ManagerConfig:
         return val if val is not None else "claude-haiku-4-5-20251001"
 
     @property
+    def enable_llm_grounding(self) -> bool:
+        """Master switch for tokensave/codegraph grounding across LLM features.
+
+        When True (default), commit-message draft, PR draft, AI code review,
+        and the doc drafter all splice a tokensave + codegraph grounding
+        block into the LLM prompt. When False, every grounding callsite
+        short-circuits to empty before doing any subprocess work.
+
+        Defaults to True; existing configs without the key upgrade
+        seamlessly via the explicit None-check below.
+        """
+        val = self.raw.get("enable_llm_grounding")
+        return True if val is None else bool(val)
+
+    @property
+    def enable_commit_grounding(self) -> bool:
+        """Per-feature override for commit-message grounding (v4.6).
+
+        Defaults to OFF, because live testing showed grounding ADDS prompt
+        weight that small local models handle poorly on big multi-file
+        commits (qwen2.5-coder copies recent commit subjects verbatim when
+        overwhelmed; Haiku CLI truncates its output). The master toggle
+        still gates every other LLM feature (PR draft / code review / Ask
+        tab / doc drafter) — those benefit from grounding because they
+        need codebase knowledge, not diff summarization.
+
+        Explicitly stored value wins; None falls back to OFF (NOT to the
+        master toggle) because commit messages are the one place where
+        grounding is empirically counterproductive.
+        """
+        if not self.enable_llm_grounding:
+            return False
+        val = self.raw.get("enable_commit_grounding")
+        return False if val is None else bool(val)
+
+    @property
+    def enable_pr_grounding(self) -> bool:
+        """Per-feature override for Draft PR grounding (v4.6 — CLI + API paths).
+
+        Defaults to ON when the master toggle is on. Unlike commit messages,
+        PR descriptions GENUINELY benefit from codegraph + tokensave context
+        — test-impact mapping (`codegraph affected --stdin`) and PR-scope
+        symbol references are the strongest grounding wins, and Claude CLI
+        / cloud APIs handle the extra prompt weight comfortably.
+
+        Plumbed through both `_draft_pr_via_api` (`helpers/pr_draft.py`)
+        AND `_draft_pr_via_cli` (manager pre-builds a context block and
+        splices it into the CLI instruction; also nudges the CLI to use
+        its own MCP tools if codegraph/tokensave are wired into Claude
+        Code's MCP config).
+        """
+        if not self.enable_llm_grounding:
+            return False
+        val = self.raw.get("enable_pr_grounding")
+        return True if val is None else bool(val)
+
+    @property
     def commit_message_backend(self) -> str:
         """Strategy order for commit-message suggestion.
 

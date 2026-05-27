@@ -105,7 +105,6 @@ class ProposalDialog(tk.Toplevel):
         self.configure(bg=C["base"])
         self.resizable(True, True)
         self.minsize(700, 500)
-        self.transient(parent)
         self.grab_set()
 
         # Window-close button (X) and Alt-F4 both count as reject — never let

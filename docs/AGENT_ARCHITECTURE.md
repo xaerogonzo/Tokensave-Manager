@@ -38,7 +38,18 @@ Autonomous execution (Stage 5+) will be opt-in per tool with an explicit allowli
 
 ---
 
-## What's built today (Stage 0 + Stage 1 + Stage 2)
+## What's built today (Stages 0 + 1 + 2 + 3 + 4, with cascade-round hardening)
+
+_Last meaningful update: 2026-05-27 — Roadmap-7 cascade rounds v3–v4.10 shipped. Stages 0–4 all live. Stage 5 (limited autonomous mode) remains 💭 considering._
+
+### Cross-cutting grounding (Roadmap-7 Theme B)
+
+Every AI surface in the manager (commit messages, PR draft, code review, Ask tab non-agentic path, doc drafter) now injects a "grounding block" into the system + user prompt:
+- **Tokensave block** built from named recipes (`commit_range_context`, `architecture_overview`, `roadmap_evidence`, `module_deep_dive`) via `helpers/doc_grounding.py:build_grounding_block`. Shells out to `tokensave tool context/search`.
+- **Codegraph block** (v4.1) built in parallel via `build_codegraph_block`. For the `roadmap_evidence` recipe it additionally invokes `codegraph affected --stdin` with the changed-files list to surface test-impact mapping.
+- **`build_combined_grounding`** (v4.4 dedup-first-then-truncate) merges both sources with per-source cap (4000 chars default; 2000 for the Ask tab tight-budget path). Line-level dedup eliminates redundancy where both sources cite the same symbols.
+- **Master toggle** `ManagerConfig.enable_llm_grounding` (Settings → "Code-graph grounding") gates the entire pipeline; default ON.
+- **Freshness gate** `helpers/codegraph_freshness.py:ensure_fresh` runs before every codegraph block invocation; if the index is stale (DB mtime > 200 s behind newest source), it blocks briefly to run `codegraph sync` and re-checks. If broken (under-indexed), the dialog surfaces a once-per-session "run a full reindex" prompt.
 
 ### Stage 0 — Smart commit-message generation (shipped)
 
@@ -119,13 +130,13 @@ These are quirks discovered while building/using the tools that future contribut
 
 ---
 
-## What's not built yet (Stage 3-5)
+## What's not built yet
 
 See `docs/ROADMAP.md` for the staged plan with status badges. Briefly:
 
-- **Stage 3** — CHANGELOG drafter. First write tool (`patch_file`) gated by `ProposalDialog`.
-- **Stage 4** — Refactor scout. Agent calls multiple tokensave analytics tools, produces structured report.
-- **Stage 5** — Limited autonomy with per-tool allow/deny configuration. **Considering, not committed.**
+- **Stage 3 (CHANGELOG drafter) — ✅ shipped** as the broader Doc Updates dialog covering 7 DocTypes (CHANGELOG, README, ARCHITECTURE, ROADMAP, MEMORY, TOKENSAVE_GUIDE, docs_generic). Each write tool gated by ProposalBridge.
+- **Stage 4 (Refactor scout) — ✅ shipped** via RefactorScoutDialog with pure-function SQL analytics against `.tokensave/tokensave.db`.
+- **Stage 5** — Limited autonomy with per-tool allow/deny configuration. **Still 💭 considering, not committed.** Roadmap-8 may revisit if lived experience with propose-only confirms specific workflows that would benefit.
 
 ---
 

@@ -37,6 +37,7 @@ from tkinter import ttk, messagebox
 from typing import TYPE_CHECKING
 
 from constants import C
+from theme import bind_mousewheel
 from helpers.release import (
     _release_basename, _last_release_tag, _commits_since,
     _suggest_bump_kind, _bump_version,
@@ -104,7 +105,6 @@ class ReleaseWizardDialog(tk.Toplevel):
         self.resizable(True, True)
         self.minsize(640, 600)
         self.grab_set()
-        self.transient(parent)
 
         # ── Discover state up front ─────────────────────────────────────────
         # Sync tags from origin first so the detected "last tag" reflects any
@@ -130,6 +130,7 @@ class ReleaseWizardDialog(tk.Toplevel):
 
         # ── Scrollable canvas (mirrors GitHubSetupDialog pattern) ───────────
         self._canvas = tk.Canvas(self, bg=C["base"], highlightthickness=0)
+        bind_mousewheel(self._canvas)
         _vsb = ttk.Scrollbar(self, orient="vertical", command=self._canvas.yview)
         self._canvas.configure(yscrollcommand=_vsb.set)
         _vsb.pack(side=tk.RIGHT, fill=tk.Y)

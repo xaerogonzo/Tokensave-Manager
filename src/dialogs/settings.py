@@ -35,11 +35,12 @@ from tkinter import ttk, filedialog, messagebox, simpledialog
 from typing import TYPE_CHECKING
 
 from constants import C, CREATE_NO_WINDOW
+from theme import bind_mousewheel
 from helpers.detection import (
     _detect_git, _detect_gh, _detect_npm, _detect_codegraph, _detect_claude_cli,
     _root_path, _root_label,
 )
-from helpers.mcp import _MCP_CONFIGS, _classify_mcp_entry
+from helpers.mcp import _mcp_configs, _classify_mcp_entry
 
 if TYPE_CHECKING:
     from state import ManagerConfig
@@ -79,7 +80,6 @@ class SettingsDialog(tk.Toplevel):
         self.minsize(640, 500)
         self.geometry("760x700")
         self.grab_set()
-        self.transient(parent)
         self._cfg = cfg
         self._save_fn = save_fn
         self._callback = callback
@@ -95,6 +95,7 @@ class SettingsDialog(tk.Toplevel):
         _scroll_wrap = tk.Frame(self, bg=C["base"])
         _scroll_wrap.pack(side=tk.TOP, fill=tk.BOTH, expand=True)
         _canvas = tk.Canvas(_scroll_wrap, bg=C["base"], highlightthickness=0, bd=0)
+        bind_mousewheel(_canvas)
         _vsb = ttk.Scrollbar(_scroll_wrap, orient="vertical", command=_canvas.yview)
         _canvas.configure(yscrollcommand=_vsb.set)
         _vsb.pack(side=tk.RIGHT, fill=tk.Y)
@@ -190,6 +191,9 @@ class SettingsDialog(tk.Toplevel):
                    command=host.cmd_upgrade_tokensave).pack(side=tk.LEFT)
         ttk.Button(upgrade_row, text="🔍  Check integration",
                    command=host.cmd_integration_check).pack(side=tk.LEFT, padx=(8, 0))
+        # v4.8: shortcut into the new Tool Manager dialog
+        ttk.Button(upgrade_row, text="🛠️  Open Tool Manager…",
+                   command=self._open_tool_manager).pack(side=tk.LEFT, padx=(8, 0))
         tk.Label(body, text=hint, bg=C["base"], fg=hint_fg,
                  font=("Segoe UI", 8), justify=tk.LEFT,
                  anchor=tk.W).pack(fill=tk.X, padx=20, pady=(0, 4))
@@ -391,10 +395,15 @@ class SettingsDialog(tk.Toplevel):
         ttk.Separator(body, orient="horizontal").pack(fill=tk.X, padx=20, pady=(12, 8))
         self._cg_section = tk.Frame(body, bg=C["base"])
         self._cg_section.pack(fill=tk.X)
-        tk.Label(self._cg_section,
+        cg_header = tk.Frame(self._cg_section, bg=C["base"])
+        cg_header.pack(fill=tk.X, padx=20)
+        tk.Label(cg_header,
                  text="CodeGraph (codegraph)  —  optional alternative code-graph tool",
                  bg=C["base"], fg=C["subtext"],
-                 font=("Segoe UI", 9)).pack(anchor=tk.W, padx=20)
+                 font=("Segoe UI", 9)).pack(side=tk.LEFT)
+        # v4.8: discovery shortcut into the new Tool Manager dialog
+        ttk.Button(cg_header, text="🛠️  Open Tool Manager…",
+                   command=self._open_tool_manager).pack(side=tk.RIGHT)
 
         # Path entry + Browse/Auto-detect buttons
         cg_path_row = tk.Frame(self._cg_section, bg=C["base"])
@@ -417,14 +426,48 @@ class SettingsDialog(tk.Toplevel):
         # Install / Check-again buttons
         cg_btn_row = tk.Frame(self._cg_section, bg=C["base"])
         cg_btn_row.pack(fill=tk.X, padx=20, pady=(4, 0))
-        self._cg_install_btn = ttk.Button(cg_btn_row, text="Install via npm", command=self._cg_install)
+        # v4.7: relabeled — disambiguates from the new MCP-config buttons below
+        self._cg_install_btn = ttk.Button(cg_btn_row, text="Install binary (npm)", command=self._cg_install)
         self._cg_install_btn.pack(side=tk.LEFT, padx=(0, 6))
         ttk.Button(cg_btn_row, text="Check again", command=self._cg_check_status).pack(side=tk.LEFT, padx=(0, 6))
         if not _detect_npm():
             self._cg_install_btn.configure(state=tk.DISABLED)
 
+        # v4.7: MCP-config buttons.  Step 2 of the codegraph setup flow.
+        # Step 1 is installing the binary (above); Step 2 is wiring it as
+        # an MCP server for whichever AI agents the user uses.
+        cg_mcp_row = tk.Frame(self._cg_section, bg=C["base"])
+        cg_mcp_row.pack(fill=tk.X, padx=20, pady=(6, 0))
+        self._cg_mcp_auto_btn = ttk.Button(
+            cg_mcp_row, text="🔌  Configure MCP (auto)",
+            command=self._cg_mcp_configure_auto,
+        )
+        self._cg_mcp_auto_btn.pack(side=tk.LEFT, padx=(0, 6))
+        self._cg_mcp_picker_btn = ttk.Button(
+            cg_mcp_row, text="⚙  Configure MCP — pick agents…",
+            command=self._cg_mcp_open_picker,
+        )
+        self._cg_mcp_picker_btn.pack(side=tk.LEFT, padx=(0, 6))
+        self._cg_mcp_uninstall_btn = ttk.Button(
+            cg_mcp_row, text="🧹  Uninstall MCP",
+            command=self._cg_mcp_uninstall,
+        )
+        self._cg_mcp_uninstall_btn.pack(side=tk.LEFT, padx=(0, 6))
+
+        # Non-modal restart-required info bar — hidden by default, shown
+        # after a successful Configure MCP (auto) run.
+        self._cg_mcp_restart_bar = tk.Label(
+            self._cg_section,
+            text="",  # populated when shown
+            bg=C["surface0"], fg=C["blue"],
+            font=("Segoe UI", 8),
+            wraplength=520, justify=tk.LEFT,
+            padx=10, pady=6,
+        )
+        # NOT packed yet — _cg_show_restart_bar packs it on demand.
+
         tk.Label(self._cg_section,
-                 text="  npm install -g @colbymchenry/codegraph  —  requires Node.js 18+ on PATH.\n"
+                 text="  Step 1: install the binary.  Step 2: wire it as an MCP server for the agents you use.\n"
                       "  Per-project actions live in the right-click menu (🧠 CodeGraph …).",
                  font=("Segoe UI", 8), bg=C["base"], fg=C["overlay0"],
                  justify=tk.LEFT).pack(anchor=tk.W, padx=20, pady=(4, 0))
@@ -452,15 +495,51 @@ class SettingsDialog(tk.Toplevel):
             self._cg_status_lbl.config(text="✗  not installed", fg=C["red"])
 
     def _cg_check_status(self):
-        """Detect codegraph on PATH and update the status label + install button."""
+        """Detect codegraph on PATH and update the status label + install button.
+
+        v4.7: also reports MCP wiring state for Claude Code via
+        ``helpers/mcp.py:_claude_code_mcp_has_codegraph``.  The status label
+        renders two lines when the binary is present — one for the binary,
+        one for the MCP wiring.  Buttons enable/disable based on both
+        states (e.g. "Uninstall MCP" only enables when MCP is currently
+        wired).
+        """
         found = _detect_codegraph()
         if found:
-            self._cg_status_lbl.config(text=f"✓  {found}", fg=C["green"])
+            # v4.7: dual-line status — binary + MCP wiring
+            try:
+                from helpers.mcp import _claude_code_mcp_has_codegraph
+                mcp_wired, mcp_key = _claude_code_mcp_has_codegraph()
+            except Exception:
+                mcp_wired, mcp_key = False, ""
+            mcp_line = (
+                f"✓  MCP wired for Claude Code (mcpServers.{mcp_key})"
+                if mcp_wired else
+                "✗  MCP not wired for Claude Code"
+            )
+            mcp_colour = C["green"] if mcp_wired else C["red"]
+            # Use a multi-line label: foreground colour reflects the
+            # OVERALL state (green only when both binary + MCP are good).
+            overall = C["green"] if mcp_wired else C["yellow"]
+            self._cg_status_lbl.config(
+                text=f"✓  {found}\n{mcp_line}",
+                fg=overall)
             self._cg_install_btn.configure(state=tk.DISABLED)
+            # MCP buttons gated on binary presence + per-button state
+            self._cg_mcp_auto_btn.configure(state=tk.NORMAL)
+            self._cg_mcp_picker_btn.configure(state=tk.NORMAL)
+            self._cg_mcp_uninstall_btn.configure(
+                state=tk.NORMAL if mcp_wired else tk.DISABLED)
+            # Mute the colour cue: the per-line text now carries the signal
+            _ = mcp_colour
             if not self._cg_exe_var.get():
                 self._cg_exe_var.set(found)
         else:
             self._cg_status_lbl.config(text="✗  not installed", fg=C["red"])
+            # No binary → all MCP buttons disabled
+            self._cg_mcp_auto_btn.configure(state=tk.DISABLED)
+            self._cg_mcp_picker_btn.configure(state=tk.DISABLED)
+            self._cg_mcp_uninstall_btn.configure(state=tk.DISABLED)
             state = tk.NORMAL if _detect_npm() else tk.DISABLED
             self._cg_install_btn.configure(state=state)
 
@@ -522,6 +601,153 @@ class SettingsDialog(tk.Toplevel):
 
         threading.Thread(target=worker, daemon=True).start()
 
+    # ── v4.7: CodeGraph MCP configure / uninstall handlers ────────────────────
+
+    def _cg_show_restart_bar(self, message: str) -> None:
+        """Show the non-modal restart-required info bar after a successful
+        Configure MCP run.  Re-shows on every install (idempotent pack)."""
+        self._cg_mcp_restart_bar.configure(text=message)
+        try:
+            # Pack just below the MCP button row if not already packed.
+            # Catches the case where it was already shown earlier in the session.
+            info = self._cg_mcp_restart_bar.pack_info()
+            if not info:  # never packed
+                raise tk.TclError("not packed")
+        except tk.TclError:
+            self._cg_mcp_restart_bar.pack(
+                fill=tk.X, padx=20, pady=(6, 0))
+
+    def _cg_mcp_configure_auto(self) -> None:
+        """🔌 Configure MCP (auto) — runs `codegraph install --yes`.
+
+        Auto-detects installed agents and wires them all.  Logs progress to
+        the status label (subprocess output is short).  On success, surfaces
+        a non-modal restart-required info bar; on failure, the status label
+        shows the error tail.
+        """
+        exe = self._cg_exe_var.get().strip() or _detect_codegraph()
+        if not exe or not os.path.isfile(exe):
+            messagebox.showerror(
+                "CodeGraph binary not found",
+                "The codegraph executable is not configured. "
+                "Install it first via 'Install binary (npm)'.",
+                parent=self)
+            return
+        self._cg_mcp_auto_btn.configure(state=tk.DISABLED)
+        self._cg_mcp_picker_btn.configure(state=tk.DISABLED)
+        self._cg_mcp_uninstall_btn.configure(state=tk.DISABLED)
+        self._cg_status_lbl.config(
+            text="Configuring MCP…  (codegraph install --yes)",
+            fg=C["yellow"])
+
+        def worker():
+            try:
+                result = subprocess.run(
+                    [exe, "install", "--yes"],
+                    capture_output=True, text=True, timeout=120,
+                    creationflags=CREATE_NO_WINDOW,
+                    encoding="utf-8", errors="replace")
+            except subprocess.TimeoutExpired:
+                self.after(0, self._cg_mcp_done, False,
+                           "Configure MCP timed out after 120 s.")
+                return
+            except (FileNotFoundError, OSError) as e:
+                self.after(0, self._cg_mcp_done, False,
+                           f"Could not launch codegraph: {e}")
+                return
+            ok = result.returncode == 0
+            log = (result.stdout or "") + (result.stderr or "")
+            self.after(0, self._cg_mcp_done, ok, log)
+
+        threading.Thread(target=worker, daemon=True).start()
+
+    def _cg_mcp_done(self, ok: bool, log: str) -> None:
+        """Main-thread callback for both Configure MCP (auto) and Uninstall MCP."""
+        # Refresh status row — this re-enables buttons based on current state.
+        self._cg_check_status()
+        if ok:
+            tail = "\n".join((log or "").splitlines()[-6:])
+            self._cg_show_restart_bar(
+                "✓  MCP server wired. Restart Claude Code (and any other "
+                "agents you wired) for the new codegraph_* tools to appear "
+                "in their sessions."
+            )
+            # Brief status banner in the status label too — fades back to
+            # the regular detail line on the next Check again click.
+            self._cg_status_lbl.config(
+                text=self._cg_status_lbl.cget("text") + "\n(just updated)",
+                fg=C["green"])
+            _ = tail
+        else:
+            tail = "\n".join((log or "").splitlines()[-8:]) or "(no output)"
+            messagebox.showerror(
+                "CodeGraph MCP — install failed",
+                f"codegraph install failed:\n\n{tail}",
+                parent=self)
+
+    def _cg_mcp_open_picker(self) -> None:
+        """⚙ Configure MCP — pick agents… — opens the picker dialog."""
+        exe = self._cg_exe_var.get().strip() or _detect_codegraph()
+        if not exe or not os.path.isfile(exe):
+            messagebox.showerror(
+                "CodeGraph binary not found",
+                "The codegraph executable is not configured. "
+                "Install it first via 'Install binary (npm)'.",
+                parent=self)
+            return
+        # Lazy import — avoids any module-load cycle and keeps the
+        # picker out of the main import graph until first use.
+        from dialogs.codegraph_mcp_picker import CodegraphMCPPickerDialog
+        CodegraphMCPPickerDialog(self, self._cfg,
+                                 on_done=self._cg_check_status)
+
+    def _cg_mcp_uninstall(self) -> None:
+        """🧹 Uninstall MCP — strip codegraph from all wired agents."""
+        exe = self._cg_exe_var.get().strip() or _detect_codegraph()
+        if not exe or not os.path.isfile(exe):
+            messagebox.showerror(
+                "CodeGraph binary not found",
+                "The codegraph executable is not configured.",
+                parent=self)
+            return
+        if not messagebox.askyesno(
+                "Uninstall CodeGraph from AI agents?",
+                "Remove CodeGraph from your AI agents' MCP servers? "
+                "They'll lose access to codegraph_* tools until you "
+                "re-configure.\n\n"
+                "This does NOT delete the binary or any project "
+                "indexes — only the MCP registrations in Claude Code "
+                "(and any other agents that have it wired).",
+                parent=self, default="no"):
+            return
+        self._cg_mcp_auto_btn.configure(state=tk.DISABLED)
+        self._cg_mcp_picker_btn.configure(state=tk.DISABLED)
+        self._cg_mcp_uninstall_btn.configure(state=tk.DISABLED)
+        self._cg_status_lbl.config(
+            text="Uninstalling MCP…  (codegraph uninstall)",
+            fg=C["yellow"])
+
+        def worker():
+            try:
+                result = subprocess.run(
+                    [exe, "uninstall"],
+                    capture_output=True, text=True, timeout=60,
+                    creationflags=CREATE_NO_WINDOW,
+                    encoding="utf-8", errors="replace")
+            except subprocess.TimeoutExpired:
+                self.after(0, self._cg_mcp_done, False,
+                           "codegraph uninstall timed out after 60 s.")
+                return
+            except (FileNotFoundError, OSError) as e:
+                self.after(0, self._cg_mcp_done, False,
+                           f"Could not launch codegraph: {e}")
+                return
+            ok = result.returncode == 0
+            log = (result.stdout or "") + (result.stderr or "")
+            self.after(0, self._cg_mcp_done, ok, log)
+
+        threading.Thread(target=worker, daemon=True).start()
+
     def _build_roots_section(self, body, raw):
         """Search roots two-column Treeview (label + path)."""
         tk.Label(body,
@@ -567,6 +793,23 @@ class SettingsDialog(tk.Toplevel):
             font=("Segoe UI", 8), bg=C["base"], fg=C["overlay0"],
             justify=tk.LEFT).pack(anchor=tk.W, padx=36, pady=(0, 8))
 
+        # ── Pre-commit smoke tests ────────────────────────────────────────
+        from helpers.smoke_runner import is_hook_installed
+        _active_project = (raw.get("projects") or [{}])[0].get("path") or ""
+        _hook_active = is_hook_installed(_active_project) if _active_project else False
+        self._var_precommit_hook = tk.BooleanVar(value=_hook_active)
+        tk.Checkbutton(body,
+            text="Run smoke tests before commits  (pre-commit hook)",
+            variable=self._var_precommit_hook,
+            bg=C["base"], fg=C["text"], selectcolor=C["surface0"],
+            activebackground=C["base"], activeforeground=C["text"],
+            font=("Segoe UI", 10)).pack(anchor=tk.W, padx=20, pady=(0, 2))
+        tk.Label(body,
+            text="  Installs a .git/hooks/pre-commit script that runs tests/smoke_test.py\n"
+                 "  before every commit.  Only affects the active project's git repo.",
+            font=("Segoe UI", 8), bg=C["base"], fg=C["overlay0"],
+            justify=tk.LEFT).pack(anchor=tk.W, padx=36, pady=(0, 8))
+
         # ── MCP integration ───────────────────────────────────────────────
         ttk.Separator(body, orient="horizontal").pack(fill=tk.X, padx=20, pady=(8, 8))
         tk.Label(body, text="MCP integration",
@@ -578,7 +821,7 @@ class SettingsDialog(tk.Toplevel):
                    command=self._open_mcp_configurator).pack(side=tk.LEFT)
         try:
             states = [_classify_mcp_entry(p, self._cfg.raw)["state"]
-                      for _, p in _MCP_CONFIGS]
+                      for _, p in _mcp_configs()]
         except Exception:
             states = []
         if states and all(s == "ok" for s in states):
@@ -652,6 +895,106 @@ class SettingsDialog(tk.Toplevel):
             font=("Segoe UI", 8), bg=C["base"], fg=C["overlay0"],
             justify=tk.LEFT).pack(anchor=tk.W, padx=24, pady=(0, 8))
 
+        ttk.Separator(lf, orient="horizontal").pack(fill=tk.X, padx=8, pady=(0, 6))
+
+        # Code-graph grounding (v4.2) — master toggle for tokensave/codegraph
+        # context injection across commit-message, PR, code-review, doc-drafter.
+        tk.Label(lf, text="Code-graph grounding",
+                 font=("Segoe UI", 9, "bold"),
+                 bg=C["base"], fg=C["text"]).pack(anchor=tk.W, padx=12, pady=(0, 2))
+        # Default ON — matches ManagerConfig.enable_llm_grounding default.
+        _grounding_initial = raw.get("enable_llm_grounding")
+        if _grounding_initial is None:
+            _grounding_initial = True
+        self._var_enable_llm_grounding = tk.BooleanVar(value=bool(_grounding_initial))
+        grounding_chk = ttk.Checkbutton(
+            lf, text="Enable tokensave + codegraph grounding for LLM features",
+            variable=self._var_enable_llm_grounding,
+        )
+        grounding_chk.pack(anchor=tk.W, padx=12, pady=(0, 2))
+        try:
+            from theme import _Tooltip
+            _Tooltip(
+                grounding_chk,
+                "When on, the manager injects tokensave + codegraph context "
+                "into commit-message drafts, PR drafts, AI code review, the "
+                "Ask tab's Claude CLI path, and the doc drafter. Silently "
+                "skipped when neither tool is indexed for the current "
+                "project. Turn off if grounding produces noisy output.",
+            )
+        except Exception:
+            pass
+        tk.Label(lf,
+            text="  Adds structural facts (callers, callees, affected tests) to the prompt.",
+            font=("Segoe UI", 8), bg=C["base"], fg=C["overlay0"],
+            justify=tk.LEFT).pack(anchor=tk.W, padx=24, pady=(0, 8))
+
+        # v4.6: per-feature opt-IN for commit messages. Default OFF because
+        # live testing showed grounding hurts commit-message quality on big
+        # multi-file diffs (small models copy recent commit subjects verbatim).
+        _commit_grounding_initial = raw.get("enable_commit_grounding")
+        if _commit_grounding_initial is None:
+            _commit_grounding_initial = False
+        self._var_enable_commit_grounding = tk.BooleanVar(
+            value=bool(_commit_grounding_initial))
+        commit_grounding_chk = ttk.Checkbutton(
+            lf,
+            text="    └─ Also use grounding for commit messages (opt-in)",
+            variable=self._var_enable_commit_grounding,
+        )
+        commit_grounding_chk.pack(anchor=tk.W, padx=12, pady=(0, 2))
+        try:
+            from theme import _Tooltip
+            _Tooltip(
+                commit_grounding_chk,
+                "Off by default. Commit messages are summaries of the staged "
+                "diff — adding repository context tends to confuse small "
+                "models (qwen2.5-coder copies recent commit subjects "
+                "verbatim) and pushes the prompt past Claude CLI's output "
+                "budget. Turn ON to experiment; revert if the Suggest button "
+                "produces poor results.",
+            )
+        except Exception:
+            pass
+        tk.Label(lf,
+            text="    Recommended OFF — small models copy recent subjects when overwhelmed.",
+            font=("Segoe UI", 8), bg=C["base"], fg=C["overlay0"],
+            justify=tk.LEFT).pack(anchor=tk.W, padx=24, pady=(0, 8))
+
+        # v4.6: per-feature opt-in for Draft PR grounding. Defaults to ON
+        # because PRs benefit a lot from test-impact + symbol-reference
+        # context, and the backends that draft them (Claude CLI, cloud
+        # APIs) handle the extra prompt weight well.
+        _pr_grounding_initial = raw.get("enable_pr_grounding")
+        if _pr_grounding_initial is None:
+            _pr_grounding_initial = True
+        self._var_enable_pr_grounding = tk.BooleanVar(
+            value=bool(_pr_grounding_initial))
+        pr_grounding_chk = ttk.Checkbutton(
+            lf,
+            text="    └─ Also use grounding for Draft PR (recommended)",
+            variable=self._var_enable_pr_grounding,
+        )
+        pr_grounding_chk.pack(anchor=tk.W, padx=12, pady=(0, 2))
+        try:
+            from theme import _Tooltip
+            _Tooltip(
+                pr_grounding_chk,
+                "ON by default. PR descriptions benefit strongly from "
+                "test-impact mapping (codegraph affected --stdin) and "
+                "symbol-reference context. Claude CLI and cloud APIs "
+                "handle the extra prompt weight comfortably. Manager "
+                "pre-builds the grounding for the CLI path AND nudges "
+                "the CLI to use its own MCP tools if codegraph/"
+                "tokensave are wired into Claude Code's MCP config.",
+            )
+        except Exception:
+            pass
+        tk.Label(lf,
+            text="    Adds test-impact + symbol-reference context to the PR draft.",
+            font=("Segoe UI", 8), bg=C["base"], fg=C["overlay0"],
+            justify=tk.LEFT).pack(anchor=tk.W, padx=24, pady=(0, 8))
+
         # ── Ollama ────────────────────────────────────────────────────────
         ttk.Separator(body, orient="horizontal").pack(fill=tk.X, padx=20, pady=(8, 8))
         tk.Label(body, text="Ollama", font=("Segoe UI", 10, "bold"),
@@ -665,6 +1008,31 @@ class SettingsDialog(tk.Toplevel):
                  "  Uses Ollama's native REST API at the base URL configured below.",
             font=("Segoe UI", 8), bg=C["base"], fg=C["overlay0"],
             justify=tk.LEFT).pack(anchor=tk.W, padx=36, pady=(0, 8))
+
+        # num_ctx spinbox
+        num_ctx_row = tk.Frame(body, bg=C["base"])
+        num_ctx_row.pack(anchor=tk.W, padx=20, pady=(0, 4))
+        tk.Label(num_ctx_row, text="Context window (num_ctx):",
+                 font=("Segoe UI", 9), bg=C["base"],
+                 fg=C["subtext"]).pack(side=tk.LEFT)
+        self._var_ollama_num_ctx = tk.IntVar(
+            value=int(raw.get("ollama_num_ctx", 4096)))
+        ttk.Spinbox(num_ctx_row, from_=512, to=131072, increment=512,
+                    textvariable=self._var_ollama_num_ctx,
+                    width=8).pack(side=tk.LEFT, padx=(8, 0))
+        tk.Label(num_ctx_row, text="  tokens  (0 = model default)",
+                 font=("Segoe UI", 8), bg=C["base"],
+                 fg=C["overlay0"]).pack(side=tk.LEFT)
+
+        # warm-up checkbox
+        self._var_ollama_warmup = tk.BooleanVar(
+            value=bool(raw.get("ollama_warmup", False)))
+        tk.Checkbutton(body,
+            text="Warm up Ollama before first Generate (loads model into VRAM early)",
+            variable=self._var_ollama_warmup,
+            bg=C["base"], fg=C["text"], selectcolor=C["surface0"],
+            activebackground=C["base"], activeforeground=C["text"],
+            font=("Segoe UI", 9)).pack(anchor=tk.W, padx=20, pady=(0, 6))
 
     def _build_ai_section(self, body, raw):
         """AI commit messages — provider, model, key env, presets, options."""
@@ -919,6 +1287,17 @@ class SettingsDialog(tk.Toplevel):
         from dialogs.mcp_config import MCPConfigDialog
         MCPConfigDialog(self, cfg=self._cfg)
 
+    def _open_tool_manager(self):
+        """Launch the v4.8 Tool Manager dialog.
+
+        Single discovery surface for install/update/uninstall of the two
+        code-graph tools (tokensave + codegraph).  Lazy-imported to
+        avoid pulling the dialog's helpers into the settings dialog
+        import graph until first use.
+        """
+        from dialogs.tool_manager import ToolManagerDialog
+        ToolManagerDialog(self, self._cfg)
+
     def _open_ollama_manager(self):
         """Launch the Ollama Model Manager dialog.
 
@@ -1070,8 +1449,33 @@ class SettingsDialog(tk.Toplevel):
             for iid in self._roots_tv.get_children()
         ]
         raw["auto_commit_after_sync"] = self._var_autocommit.get()
+
+        # Pre-commit smoke-test hook — install or uninstall based on toggle.
+        _precommit_wanted = self._var_precommit_hook.get()
+        _active_proj = (raw.get("projects") or [{}])[0].get("path") or ""
+        if _active_proj:
+            from helpers.smoke_runner import (
+                is_hook_installed, install_pre_commit_hook,
+                uninstall_pre_commit_hook,
+            )
+            from tkinter import messagebox as _mb
+            _currently = is_hook_installed(_active_proj)
+            if _precommit_wanted and not _currently:
+                _ok, _msg = install_pre_commit_hook(_active_proj)
+                if not _ok:
+                    _mb.showwarning("Smoke-test hook", _msg, parent=self)
+                    self._var_precommit_hook.set(False)
+            elif not _precommit_wanted and _currently:
+                _ok, _msg = uninstall_pre_commit_hook(_active_proj)
+                if not _ok:
+                    _mb.showwarning("Smoke-test hook", _msg, parent=self)
+                    self._var_precommit_hook.set(True)
+
         raw["draft_pr_backend"]        = self._var_draft_pr_backend.get()
         raw["commit_message_backend"]  = self._var_commit_msg_backend.get()
+        raw["enable_llm_grounding"]    = bool(self._var_enable_llm_grounding.get())
+        raw["enable_commit_grounding"] = bool(self._var_enable_commit_grounding.get())
+        raw["enable_pr_grounding"]     = bool(self._var_enable_pr_grounding.get())
         # Persist AI commit-message settings (preserves any unknown keys
         # the user may have added manually via JSON edit).
         existing_llm = raw.get("commit_message_llm") or {}
@@ -1100,6 +1504,8 @@ class SettingsDialog(tk.Toplevel):
             "api_key_env": self._var_ask_keyenv.get().strip(),
             "base_url":    self._var_ask_base_url.get().strip(),
         }
+        raw["ollama_num_ctx"]   = self._var_ollama_num_ctx.get()
+        raw["ollama_warmup"]    = self._var_ollama_warmup.get()
         raw["git_exe"]        = self._git_exe_var.get().strip()
         raw["codegraph_exe"]  = self._cg_exe_var.get().strip()
         raw["claude_cli_exe"]   = self._claude_cli_var.get().strip()

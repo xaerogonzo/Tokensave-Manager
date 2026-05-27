@@ -265,11 +265,27 @@ def read_subsection_bullets(readme_path, header_md):
             text = f.read()
     except OSError:
         return []
+    return read_subsection_bullets_from_text(text, header_md)
+
+
+def read_subsection_bullets_from_text(text, header_md):
+    """Text-mode mirror of ``read_subsection_bullets`` — operates on a string.
+
+    Used by the doc-drafter prompt builders to embed the mirror-contract
+    block without a second disk read. Accepts either the full README text
+    (with the highlights anchor present) OR just the highlights block body
+    — the function falls back to scanning the entire input as a block if
+    the anchor isn't found.
+    """
+    if not text:
+        return []
     bounds = _find_block_bounds(text)
     if bounds is None:
-        return []
-    block_start, block_end = bounds
-    block = text[block_start:block_end]
+        # No anchor — caller may have passed just the block body.
+        block = text
+    else:
+        block_start, block_end = bounds
+        block = text[block_start:block_end]
 
     target_norm = _normalise_subheader(header_md)
     matches = list(_SUBHEADER_RE.finditer(block))

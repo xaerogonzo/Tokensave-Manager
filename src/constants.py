@@ -75,10 +75,19 @@ _GIT_ENV_NO_PROMPT = {**os.environ, "GIT_TERMINAL_PROMPT": "0"}
 
 
 # ── Pin file (Claude Desktop active-project) ─────────────────────────────────
-DESKTOP_PROJECT_FILE = os.path.join(
-    os.environ.get("USERPROFILE", os.path.expanduser("~")),
-    ".tokensave", "desktop-project.txt",
-)
+def desktop_project_file() -> str:
+    """Path to the ``.tokensave/desktop-project.txt`` pin file.
+
+    Lazy resolution (re-evaluates per call) so that tests can redirect
+    ``$USERPROFILE`` via the ``fake_home`` fixture in
+    ``tests/conftest.py`` (G-F + G-J). See
+    ``tests/test_no_import_time_path_resolution.py`` (G-L) for the
+    pre-flight test that enforces this invariant.
+    """
+    return os.path.join(
+        os.environ.get("USERPROFILE", os.path.expanduser("~")),
+        ".tokensave", "desktop-project.txt",
+    )
 
 
 # ── Catppuccin Mocha palette ─────────────────────────────────────────────────

@@ -31,8 +31,9 @@ from tkinter import ttk, messagebox
 from typing import TYPE_CHECKING
 
 from constants import C
+from theme import bind_mousewheel
 from helpers.mcp import (
-    _MCP_CONFIGS, _classify_mcp_entry, _apply_mcp_fix, _is_claude_running,
+    _mcp_configs, _classify_mcp_entry, _apply_mcp_fix, _is_claude_running,
 )
 
 if TYPE_CHECKING:
@@ -69,7 +70,6 @@ class MCPConfigDialog(tk.Toplevel):
         self.minsize(680, 520)
         self.geometry("820x680")
         self.grab_set()
-        self.transient(parent)
 
         # Header
         hdr = tk.Frame(self, bg=C["base"])
@@ -92,6 +92,7 @@ class MCPConfigDialog(tk.Toplevel):
         wrap = tk.Frame(self, bg=C["base"])
         wrap.pack(fill=tk.BOTH, expand=True, padx=14, pady=(2, 4))
         self._canvas = tk.Canvas(wrap, bg=C["base"], highlightthickness=0)
+        bind_mousewheel(self._canvas)
         vsb = ttk.Scrollbar(wrap, orient="vertical", command=self._canvas.yview)
         self._canvas.configure(yscrollcommand=vsb.set)
         self._canvas.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
@@ -149,7 +150,7 @@ class MCPConfigDialog(tk.Toplevel):
         else:
             self._warn_lbl.configure(text="")
 
-        for label, path in _MCP_CONFIGS:
+        for label, path in _mcp_configs():
             self._render_block(label, path)
 
     def _render_block(self, label: str, path: str):

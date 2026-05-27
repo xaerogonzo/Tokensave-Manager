@@ -967,3 +967,29 @@ def tools_as_openai_array(tools: dict[str, ToolSpec]) -> list[dict]:
     """Convenience: render the whole registry as the `tools` payload field
     in an OpenAI-compatible chat completion request."""
     return [spec.to_openai_tool() for spec in tools.values()]
+
+
+# ── Public factory aliases (Theme B2 / Roadmap-7) ────────────────────────────
+#
+# The private _tool_tokensave_* functions above are used by build_tools() and
+# are kept private so internal callers don't depend on the combined
+# (project_path, tokensave_exe) signature.  The public factories below expose
+# the same ToolSpec construction for callers (doc_drafter agentic path) that
+# already hold the project path and exe separately.
+
+def make_tokensave_search_tool(project_path: str, tokensave_exe: str) -> ToolSpec:
+    """Public factory for the tokensave_search ToolSpec.
+
+    Used by ``dispatch_llm`` agentic path to attach the search tool to a
+    one-shot ``LocalAgent`` run during doc generation.
+    """
+    return _tool_tokensave_search(project_path, tokensave_exe)
+
+
+def make_tokensave_context_tool(project_path: str, tokensave_exe: str) -> ToolSpec:
+    """Public factory for the tokensave_context ToolSpec.
+
+    Used by ``dispatch_llm`` agentic path to attach the context tool to a
+    one-shot ``LocalAgent`` run during doc generation.
+    """
+    return _tool_tokensave_context(project_path, tokensave_exe)

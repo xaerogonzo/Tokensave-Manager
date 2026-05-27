@@ -15,7 +15,6 @@ before the executor starts, as required by Tkinter's single-thread rule.
 from __future__ import annotations
 
 import concurrent.futures
-import os
 import subprocess
 import sys
 import threading
@@ -24,6 +23,14 @@ from tkinter import messagebox
 from typing import TYPE_CHECKING, Callable
 
 from constants import C
+from helpers.quality_checks import run_syntax_check, run_pyflakes_check
+from helpers.prepush_hook import (
+    is_pre_push_hook_installed,
+    install_pre_push_hook,
+    remove_pre_push_hook,
+    prepush_runner_script_path,
+)
+from helpers.ci_workflow import generate_github_workflow
 
 if TYPE_CHECKING:
     from state import ManagerConfig
@@ -51,41 +58,17 @@ _LABELS = {
 
 
 # ── Check implementations ────────────────────────────────────────────────────
+# Syntax and pyflakes checks live in helpers/quality_checks.py (no Tk dep)
+# so the pre-push runner can import them without pulling in tkinter.
 
 def _check_syntax(path: str) -> tuple[bool, str]:
-    """Run python -m compileall src/ -q. Returns (passed, summary)."""
-    src = os.path.join(path, "src")
-    result = subprocess.run(
-        [sys.executable, "-m", "compileall", src, "-q"],
-        capture_output=True,
-        text=True,
-        cwd=path,
-    )
-    if result.returncode == 0:
-        return True, "passed (0 errors)"
-    errors = (result.stdout + result.stderr).strip()
-    first_line = errors.splitlines()[0] if errors else "syntax error"
-    return False, first_line[:200]
+    """Thin alias — delegates to the Tk-free helper."""
+    return run_syntax_check(path)
 
 
 def _check_pyflakes(path: str) -> tuple[bool, str]:
-    """Run python -m pyflakes src/. Returns (passed, summary)."""
-    src = os.path.join(path, "src")
-    result = subprocess.run(
-        [sys.executable, "-m", "pyflakes", src],
-        capture_output=True,
-        text=True,
-        cwd=path,
-    )
-    if result.returncode == 0:
-        return True, "passed (0 warnings)"
-    output = (result.stdout + result.stderr).strip()
-    lines = [l for l in output.splitlines() if l.strip()]
-    count = len(lines)
-    summary = lines[0][:200] if lines else "warnings found"
-    if count > 1:
-        summary += f" (+{count - 1} more)"
-    return False, summary
+    """Thin alias — delegates to the Tk-free helper."""
+    return run_pyflakes_check(path)
 
 
 def _check_doctor(path: str, cfg: "ManagerConfig") -> tuple[bool, str]:
@@ -182,6 +165,7 @@ class ChecksDialog(tk.Toplevel):
 
         self._vars: dict[str, tk.BooleanVar] = {}
         self._result_rows: dict[str, dict] = {}
+        self._hook_installed: bool = is_pre_push_hook_installed(path)
 
         self._build_ui()
         self.protocol("WM_DELETE_WINDOW", self._on_close)
@@ -220,7 +204,7 @@ class ChecksDialog(tk.Toplevel):
             command=self._on_run,
             bg=C["blue"],
             fg=C["base"],
-            activebackground=C["sapphire"],
+            activebackground=C["lavender"],
             activeforeground=C["base"],
             font=("Segoe UI", 10, "bold"),
             relief=tk.FLAT,
@@ -246,7 +230,7 @@ class ChecksDialog(tk.Toplevel):
             icon_lbl.pack(side=tk.LEFT)
 
             name_lbl = tk.Label(row_frame, text=label, width=18, anchor=tk.W,
-                                bg=C["base"], fg=C["subtext1"],
+                                bg=C["base"], fg=C["subtext"],
                                 font=("Segoe UI", 10, "bold"))
             name_lbl.pack(side=tk.LEFT)
 
@@ -260,6 +244,48 @@ class ChecksDialog(tk.Toplevel):
                 "icon": icon_lbl,
                 "summary": summary_lbl,
             }
+
+        # ── CI / Hook bar ─────────────────────────────────────────────────────
+        sep2 = tk.Frame(self, height=1, bg=C["surface1"])
+        sep2.pack(fill=tk.X, padx=12, pady=(4, 0))
+
+        ci_frame = tk.Frame(self, bg=C["base"])
+        ci_frame.pack(fill=tk.X, padx=12, pady=(4, 12))
+
+        _btn_kw = dict(
+            bg=C["surface0"],
+            fg=C["text"],
+            activebackground=C["surface1"],
+            activeforeground=C["text"],
+            relief=tk.FLAT,
+            font=("Segoe UI", 9),
+            padx=10,
+            pady=3,
+        )
+        tk.Button(
+            ci_frame,
+            text="📋 Generate GitHub Actions",
+            command=self._on_generate_workflow,
+            **_btn_kw,
+        ).pack(side=tk.LEFT, padx=(0, 8))
+
+        hook_label = (
+            "Remove pre-push hook" if self._hook_installed
+            else "🔗 Install pre-push hook"
+        )
+        self._hook_btn = tk.Button(
+            ci_frame,
+            text=hook_label,
+            command=self._on_toggle_hook,
+            **_btn_kw,
+        )
+        self._hook_btn.pack(side=tk.LEFT)
+
+        self._ci_status_lbl = tk.Label(
+            ci_frame, text="", bg=C["base"], fg=C["subtext"],
+            font=("Segoe UI", 9),
+        )
+        self._ci_status_lbl.pack(side=tk.LEFT, padx=(10, 0))
 
     def _on_toggle(self, key: str, var: tk.BooleanVar) -> None:
         self._enabled[key] = var.get()
@@ -364,6 +390,36 @@ class ChecksDialog(tk.Toplevel):
             if row["icon"].cget("text") == _ICONS["pending"]:
                 return
         self._run_btn.configure(state=tk.NORMAL)
+
+    def _on_generate_workflow(self) -> None:
+        """Generate .github/workflows/quality-checks.yml from enabled checks."""
+        ok, msg = generate_github_workflow(self._path, self._enabled)
+        colour = C["green"] if ok else C["red"]
+        prefix = "✓" if ok else "✗"
+        self._ci_status_lbl.configure(text=f"{prefix} {msg}", fg=colour)
+
+    def _on_toggle_hook(self) -> None:
+        """Install or remove the pre-push git hook."""
+        if self._hook_installed:
+            ok, msg = remove_pre_push_hook(self._path)
+            if ok:
+                self._hook_installed = False
+                self._hook_btn.configure(text="🔗 Install pre-push hook")
+            colour = C["green"] if ok else C["red"]
+            self._ci_status_lbl.configure(
+                text=f"{'✓' if ok else '✗'} pre-push hook {msg}", fg=colour)
+        else:
+            ok, msg = install_pre_push_hook(
+                self._path,
+                sys.executable,
+                prepush_runner_script_path(),
+            )
+            if ok:
+                self._hook_installed = True
+                self._hook_btn.configure(text="Remove pre-push hook")
+            colour = C["green"] if ok else C["red"]
+            self._ci_status_lbl.configure(
+                text=f"{'✓' if ok else '✗'} pre-push hook {msg}", fg=colour)
 
     def _on_close(self) -> None:
         self._cancelled.set()

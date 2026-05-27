@@ -26,7 +26,6 @@ class NewBranchDialog(tk.Toplevel):
         self.configure(bg=C["base"])
         self.resizable(False, False)
         self.grab_set()
-        self.transient(parent)
         self._path     = path
         self._callback = callback
 

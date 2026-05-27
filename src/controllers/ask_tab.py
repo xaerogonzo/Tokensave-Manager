@@ -494,14 +494,60 @@ class AskTabController:
                     history_parts.append(f"Assistant: {content}")
             context_str = "\n\n".join(history_parts)
             current_query = (self._ask_messages[-1].get("content") or "").strip()
+            # v4.2: tokensave+codegraph grounding for the non-agentic Claude
+            # CLI path. The agentic Ollama path discovers context via tool
+            # calls; Claude CLI gets a static block prepended. Cheap fail-
+            # open: empty grounding just means no extra context, not an error.
+            grounding = ""
+            if self._cfg.enable_llm_grounding:
+                try:
+                    from helpers.doc_grounding import (
+                        build_grounding_block,
+                        build_codegraph_block,
+                        build_combined_grounding,
+                    )
+                    try:
+                        ts_block = build_grounding_block(
+                            self._ask_path, "module_deep_dive",
+                            tokensave_exe=self._cfg.tokensave_exe,
+                        )
+                    except Exception:
+                        ts_block = ""
+                    try:
+                        # v4.3: ensure fresh before grounding call.
+                        if self._cfg.codegraph_exe:
+                            try:
+                                from helpers.codegraph_freshness import ensure_fresh
+                                ensure_fresh(self._ask_path, self._cfg.codegraph_exe)
+                            except Exception:
+                                pass
+                        cg_block = build_codegraph_block(
+                            self._ask_path, "module_deep_dive",
+                            codegraph_exe=self._cfg.codegraph_exe or "",
+                        )
+                    except Exception:
+                        cg_block = ""
+                    # Tighter cap for Ask (short-form responses, not docs).
+                    grounding = build_combined_grounding(
+                        ts_block, cg_block, per_source_cap=2000)
+                except Exception:
+                    grounding = ""
+
+            grounding_section = (
+                f"Repository context (auto-attached from tokensave/codegraph):\n\n"
+                f"{grounding}\n\n"
+                if grounding else ""
+            )
+
             if context_str:
                 prompt = (
+                    f"{grounding_section}"
                     f"Here is our ongoing conversation context:\n\n"
                     f"{context_str}\n\n"
                     f"Now answer this question:\n{current_query}"
                 )
             else:
-                prompt = current_query
+                prompt = grounding_section + current_query
 
             result = call_claude_cli_print(
                 claude_exe, prompt,

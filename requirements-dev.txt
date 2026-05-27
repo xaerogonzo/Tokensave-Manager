@@ -1,0 +1,12 @@
+# Development-only dependencies. End users do NOT need to install these —
+# the manager itself is zero-runtime-dependency Python stdlib + Tk.
+#
+# Install with:
+#     pip install -r requirements-dev.txt
+#
+# These are the dev tools used by `python -m pytest tests/` and the
+# GitHub Actions CI workflow (.github/workflows/ci.yml).
+
+pytest>=7.0
+pytest-mock>=3.10
+pyflakes>=3.0

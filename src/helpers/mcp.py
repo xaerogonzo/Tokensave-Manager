@@ -80,15 +80,35 @@ def _resolve_desktop_cfg_path() -> str:
     return traditional
 
 
-_MCP_DESKTOP_CFG_PATH = _resolve_desktop_cfg_path()
-_MCP_CODE_CFG_PATH    = os.path.join(
-    os.environ.get("USERPROFILE", ""), ".claude.json")
+def _mcp_desktop_cfg_path() -> str:
+    """Claude Desktop config path, resolved lazily (re-evaluates per call).
 
-# Friendly labels — kept short so they fit in the dialog headers.
-_MCP_CONFIGS = [
-    ("Claude Desktop", _MCP_DESKTOP_CFG_PATH),
-    ("Claude Code",    _MCP_CODE_CFG_PATH),
-]
+    Lazy resolution matters because tests redirect ``$USERPROFILE`` /
+    ``$LOCALAPPDATA`` / ``$APPDATA`` via the ``fake_home`` fixture
+    (G-F + G-J); a module-level constant would capture the developer's
+    real path at import time and silently bypass the fixture. See
+    ``tests/test_no_import_time_path_resolution.py`` (G-L) for the
+    pre-flight test that enforces this invariant.
+    """
+    return _resolve_desktop_cfg_path()
+
+
+def _mcp_code_cfg_path() -> str:
+    """Claude Code config path (``~/.claude.json``), resolved lazily."""
+    return os.path.join(os.environ.get("USERPROFILE", ""), ".claude.json")
+
+
+def _mcp_configs() -> list[tuple[str, str]]:
+    """Friendly-label + path pairs for every MCP config the manager touches.
+
+    Returns a fresh list each call so test-environment redirects apply.
+    Callers iterate ``for label, path in _mcp_configs(): ...`` — same
+    shape as the old module-level constant, just lazily evaluated.
+    """
+    return [
+        ("Claude Desktop", _mcp_desktop_cfg_path()),
+        ("Claude Code",    _mcp_code_cfg_path()),
+    ]
 
 
 def _wrapper_path() -> str:
@@ -342,3 +362,121 @@ def _is_claude_running() -> dict:
             result["code"] = True
             result["pids"].append(pid)
     return result
+
+
+# ── v4.7: CodeGraph MCP wiring detection ────────────────────────────────────
+
+def _claude_code_mcp_has_codegraph(claude_json_path: str = "") -> tuple[bool, str]:
+    """Return ``(wired, server_key_used)`` from Claude Code's MCP config.
+
+    Reads ``~/.claude.json`` (or ``claude_json_path`` if provided), walks
+    ``mcpServers``. Returns ``(True, key)`` when any entry meets any of:
+      * dict key contains "codegraph" (case-insensitive); OR
+      * entry["command"] contains "codegraph"; OR
+      * any entry["args"] element contains "codegraph"
+
+    Defensive matching covers the canonical shape (verified via
+    ``codegraph install --print-config claude``)::
+
+        "codegraph": {"type": "stdio", "command": "codegraph",
+                       "args": ["serve", "--mcp"]}
+
+    AND user-written variants (full binary path, namespaced key, etc.).
+
+    Fail-open: any IO/JSON error or missing file returns ``(False, "")``.
+    The Settings status row uses this to render the green ✓ / red ✗
+    indicator beside the codegraph binary status.
+
+    Codegraph does NOT use a wrapper like tokensave does — the MCP entry
+    invokes ``codegraph serve --mcp`` directly via PATH, so this helper
+    is much simpler than ``_classify_mcp_entry`` above (no UWP / wrapper
+    resolution needed).
+    """
+    if not claude_json_path:
+        claude_json_path = os.path.expanduser("~/.claude.json")
+    if not os.path.isfile(claude_json_path):
+        return False, ""
+    try:
+        with open(claude_json_path, "r", encoding="utf-8") as fh:
+            cfg = json.load(fh)
+    except (OSError, json.JSONDecodeError):
+        return False, ""
+    if not isinstance(cfg, dict):
+        return False, ""
+    servers = cfg.get("mcpServers")
+    if not isinstance(servers, dict):
+        return False, ""
+    for key, entry in servers.items():
+        if not isinstance(key, str):
+            continue
+        if "codegraph" in key.lower():
+            return True, key
+        if not isinstance(entry, dict):
+            continue
+        cmd = entry.get("command")
+        if isinstance(cmd, str) and "codegraph" in cmd.lower():
+            return True, key
+        args = entry.get("args")
+        if isinstance(args, list):
+            for a in args:
+                if isinstance(a, str) and "codegraph" in a.lower():
+                    return True, key
+    return False, ""
+
+
+# Codegraph install-target IDs (verified from `codegraph install --help`).
+# Web docs incorrectly listed 8 agents; the binary supports only these 4.
+_CODEGRAPH_AGENTS: tuple = (
+    ("claude",   "Claude Code"),
+    ("cursor",   "Cursor"),
+    ("codex",    "Codex CLI"),
+    ("opencode", "opencode"),
+)
+
+
+def _codegraph_agent_destination_path(agent_id: str) -> str:
+    """Return the absolute path codegraph would write to for an agent.
+
+    Verified via ``codegraph install --print-config <id>``:
+      claude    → ~/.claude.json
+      cursor    → ~/.cursor/mcp.json
+      codex     → ~/.codex/config.toml
+      opencode  → ~/AppData/Roaming/opencode/opencode.jsonc  (Windows)
+                  ~/.config/opencode/opencode.jsonc          (XDG fallback)
+
+    Returns empty string for unknown agents.  The Settings picker uses
+    this to determine "is this agent installed?" via parent-directory
+    existence — fast, no subprocess.
+    """
+    home = os.path.expanduser("~")
+    if agent_id == "claude":
+        return os.path.join(home, ".claude.json")
+    if agent_id == "cursor":
+        return os.path.join(home, ".cursor", "mcp.json")
+    if agent_id == "codex":
+        return os.path.join(home, ".codex", "config.toml")
+    if agent_id == "opencode":
+        appdata = os.environ.get("APPDATA")
+        if appdata:
+            return os.path.join(appdata, "opencode", "opencode.jsonc")
+        return os.path.join(home, ".config", "opencode", "opencode.jsonc")
+    return ""
+
+
+def _codegraph_agent_installed(agent_id: str) -> bool:
+    """Return True if the agent's config dir / file exists on this machine.
+
+    Used by the MCP picker to grey-out checkboxes for agents the user
+    doesn't actually have. Checks the destination path's existence
+    (file OR parent dir for the file-write case).
+    """
+    path = _codegraph_agent_destination_path(agent_id)
+    if not path:
+        return False
+    # Direct file or its parent directory — either indicates the agent
+    # has been used on this machine (Claude Code creates ~/.claude.json
+    # on first launch; the others create their config directories).
+    if os.path.exists(path):
+        return True
+    parent = os.path.dirname(path)
+    return os.path.isdir(parent) if parent else False

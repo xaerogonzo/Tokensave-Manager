@@ -6,8 +6,19 @@ import os
 import re
 import subprocess
 
-_CLAUDE_PROJECTS_DIR = os.path.join(os.path.expanduser("~"), ".claude", "projects")
-# On Windows resolves to C:\Users\<name>\.claude\projects
+def _claude_projects_dir() -> str:
+    """Return ``~/.claude/projects/`` resolved at call time (NOT import time).
+
+    Lazy resolution is important: tests redirect ``$HOME`` via the
+    ``fake_home`` fixture in ``tests/conftest.py``, and a module-level
+    constant would silently capture the developer's real home before the
+    fixture runs. See ``tests/test_no_import_time_path_resolution.py``
+    (G-L) for the pre-flight test that enforces this invariant project-
+    wide.
+
+    On Windows resolves to ``C:\\Users\\<name>\\.claude\\projects``.
+    """
+    return os.path.join(os.path.expanduser("~"), ".claude", "projects")
 
 
 def encode_project_path(path: str) -> str:
@@ -79,12 +90,13 @@ def scan_sessions(known_paths: list[str], limit: int = 50) -> list[dict]:
       session_id, title, project_encoded, project_display, last_activity (float),
       is_recent (bool: mtime within last 5 minutes).
     """
-    if not os.path.isdir(_CLAUDE_PROJECTS_DIR):
+    projects_dir = _claude_projects_dir()
+    if not os.path.isdir(projects_dir):
         return []
 
     candidates: list[tuple[str, float, str]] = []
     try:
-        with os.scandir(_CLAUDE_PROJECTS_DIR) as outer:
+        with os.scandir(projects_dir) as outer:
             for proj_entry in outer:
                 if not proj_entry.is_dir():
                     continue

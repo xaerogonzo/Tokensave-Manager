@@ -219,15 +219,28 @@ def read_section_bullets(changelog_path, section):
             text = f.read()
     except OSError:
         return []
+    return read_section_bullets_from_text(text, section)
 
+
+def read_section_bullets_from_text(text, section):
+    """Text-mode mirror of ``read_section_bullets`` — operates on a string
+    instead of a path. Used by the doc-drafter prompt builders so existing
+    bullets can be summarised without a second disk read (the dialog already
+    holds the unreleased body in memory)."""
+    if not text:
+        return []
     anchor_re = re.compile(r"(?m)^## \[Unreleased\][^\n]*\n")
     am = anchor_re.search(text)
     if not am:
-        return []
-    next_version_re = re.compile(r"(?m)^## \[")
-    nm = next_version_re.search(text, am.end())
-    block_end = nm.start() if nm else len(text)
-    block = text[am.end():block_end]
+        # No anchor — caller might already have passed just the body of the
+        # block (the dialog's `existing_unreleased` is exactly that). Treat
+        # the entire text as the [Unreleased] body in that case.
+        block = text
+    else:
+        next_version_re = re.compile(r"(?m)^## \[")
+        nm = next_version_re.search(text, am.end())
+        block_end = nm.start() if nm else len(text)
+        block = text[am.end():block_end]
 
     sub_re = re.compile(r"(?m)^###\s+([^\n]+)\n")
     canonical = _canonicalise_section(section)

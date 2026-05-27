@@ -46,7 +46,10 @@ Token Save Manager Source/
 │   ├── constants.py               Immutable constants: C palette, regex tables,
 │   │                              CREATE_NO_WINDOW, _ANSI, _GIT_ENV_NO_PROMPT,
 │   │                              paths (_BASE_DIR, _CONFIG_PATH, LOG_FILE).
-│   ├── theme.py                   _Tooltip widget (Tk-coupled UI primitive).
+│   ├── theme.py                   _Tooltip widget (Tk-coupled UI primitive) +
+│   │                              bind_mousewheel(canvas) — <Enter>/<Leave>
+│   │                              activate/deactivate pattern so multiple
+│   │                              simultaneous scrollable regions never conflict.
 │   ├── tokensave-wrapper.py       Claude Desktop auto-detection wrapper (~120 lines)
 │   ├── agent.py                   LocalAgent loop for the 🤖 Ask tab — Stage 2
 │   │                              read-only tool calling + Stage 3 write-tool dispatch
@@ -59,7 +62,7 @@ Token Save Manager Source/
 │   │                              to backend, parses severity, exits 0 (warn) or 1
 │   │                              (block per threshold). Fail-open on every error.
 │   │
-│   ├── helpers/                   20 modules of pure / IO helpers — no UI deps.
+│   ├── helpers/                   23 modules of pure / IO helpers — no UI deps.
 │   │   ├── config.py              _load_config, _save_config, _migrate_config
 │   │   ├── detection.py           _detect_git/_gh/_npm/_codegraph/_claude_cli,
 │   │   │                          _root_path/_label, _version_lt
@@ -93,32 +96,175 @@ Token Save Manager Source/
 │   │   │                          (Summary / Technical / Threat Model / Verification)
 │   │   ├── changelog_patch.py     insert_changelog_release (versioned release patcher);
 │   │   │                          update_unreleased (replaces [Unreleased] body, EOF-safe);
-│   │   │                          read_unreleased (returns current [Unreleased] body for
-│   │   │                          LLM integration). All atomic via .tmp + os.replace.
-│   │   │                          (original insert_changelog_release: replaces ## [version]
-│   │   │                          block bounded by next ^## \[ line; falls back to insertion under
-│   │   │                          ## [Unreleased]). Wired into ReleaseWizard P2.
+│   │   │                          read_unreleased / read_unreleased_from_text (returns
+│   │   │                          current [Unreleased] body for LLM integration);
+│   │   │                          _compute_insert_unreleased_bullets(text, bullets) PURE
+│   │   │                          → (new_text, ok, msg) — Phase 2.1 mirror-contract helper;
+│   │   │                          read_section_bullets. All atomic via .tmp + os.replace.
+│   │   │                          Wired into ReleaseWizard P2 + DocDrafterDialog.
 │   │   ├── claude_cli.py          spawn_claude_cli — detached cmd.exe via CREATE_NEW_CONSOLE
 │   │   │                          with ""outer"" multi-quote fix + \r\n strip (TTY safety).
 │   │   │                          call_claude_cli_print(model="", cwd=None) — non-interactive
 │   │   │                          --print path; model="" omits --model flag; cwd=~ isolates
 │   │   │                          from project CLAUDE.md (prevents "assistant mode" on small
 │   │   │                          models). Stderr logged on non-zero exit (sys.stderr guard).
+│   │   ├── ci_workflow.py         generate_github_workflow — writes
+│   │   │                          .github/workflows/quality-checks.yml from the
+│   │   │                          dialog's checks_enabled dict. Omits doctor/Claude
+│   │   │                          steps (CI-incompatible). Idempotent re-generate.
 │   │   ├── precommit_hook.py      install/remove/detect git pre-commit AI review hook
 │   │   │                          + the review runner (run_review, parse_severity_summary,
 │   │   │                          severity_blocks_commit, backend dispatch for
 │   │   │                          "auto"/"claude_cli"/"llm"). Roadmap-2 P5b.
-│   │   └── refactor_scout.py      Pure-function SQL analytics against .tokensave/tokensave.db.
-│   │                              Finding @dataclass (stable md5 ID, kind, file, symbol,
-│   │                              line, message, evidence). Four _scout_* query functions:
-│   │                              complexity (CC>10), god_class (>40 methods), god_file
-│   │                              (>1500 lines), dead_code (no incoming call edges, filtered
-│   │                              by conservative entry-point allowlist). run_scout() returns
-│   │                              (findings_by_kind, suppressed_count). Helper functions for
-│   │                              formatting investigate context, writing temp .md briefings
-│   │                              for CLI handoff, and batch briefings. Roadmap-3 P6.
+│   │   ├── prepush_hook.py        install/remove/detect git pre-push quality-check
+│   │   │                          hook. Mirrors precommit_hook.py shape. Hook script
+│   │   │                          passes project_path as argv[1] to prepush_runner.py.
+│   │   │                          _HOOK_MARKER distinct from pre-commit marker.
+│   │   ├── quality_checks.py      run_syntax_check / run_pyflakes_check — pure
+│   │   │                          subprocess helpers with no Tk dependency. Shared
+│   │   │                          between checks_dialog.py (UI) and prepush_runner.py
+│   │   │                          (headless hook context).
+│   │   ├── refactor_scout.py      Pure-function SQL analytics against .tokensave/tokensave.db.
+│   │   │                          Finding @dataclass (stable md5 ID, kind, file, symbol,
+│   │   │                          line, message, evidence). Four _scout_* query functions:
+│   │   │                          complexity (CC>10), god_class (>40 methods), god_file
+│   │   │                          (>1500 lines), dead_code (no incoming call edges, filtered
+│   │   │                          by conservative entry-point allowlist). run_scout() returns
+│   │   │                          (findings_by_kind, suppressed_count). Roadmap-3 P6.
+│   │   ├── tray_manager.py        TrayManager — 5 cohesive tray methods extracted from
+│   │   │                          App (Roadmap-6 W5). Owns pystray setup, hide/show, icon,
+│   │   │                          quit callback. App.__init__ holds a single instance.
+│   │   ├── doc_drafter.py         LLM-backed documentation draft helpers. Key exports:
+│   │   │                          build_changelog_prompt, build_readme_prompt,
+│   │   │                          dispatch_llm (routes claude_cli vs _call_llm),
+│   │   │                          resolve_commit_range (4 modes: since_last_doc /
+│   │   │                          since_last_commit / since_last_tag / custom),
+│   │   │                          changed_file_paths. Roadmap-6 Tier B.
+│   │   ├── readme_patch.py        README highlights sub-section splicer (append-only,
+│   │   │                          Roadmap-6 Phase 2.1 shape). Key exports:
+│   │   │                          read_highlights(path), read_highlights_from_text(text),
+│   │   │                          _compute_insert_readme_highlights_subsection(text, header, bullets)
+│   │   │                          → (new_text, ok, msg) PURE; insert_readme_highlights_subsection
+│   │   │                          → IO wrapper; _find_block_bounds + _BOUNDARY_RE anchor detection.
+│   │   ├── doc_types.py           Roadmap-7 Theme A. `DocType` frozen dataclass:
+│   │   │                          key/label/target_filename/build_prompt/compute_apply/
+│   │   │                          read_existing/parse_draft/tokensave_recipe/codegraph_recipe/
+│   │   │                          gen_params/examples. Registry seeds 7 DocTypes
+│   │   │                          (changelog/readme/architecture/roadmap/memory/
+│   │   │                          tokensave_guide/docs_generic). All `build_*_prompt`
+│   │   │                          functions return `PromptBuildResult(system, user,
+│   │   │                          aligned, warnings)` immutable dataclass (v4).
+│   │   ├── architecture_patch.py  Roadmap-7 anchor-based section update patcher for
+│   │   │                          `docs/ARCHITECTURE.md`. Pure `_compute_*` + IO wrapper.
+│   │   ├── roadmap_patch.py       Roadmap-7 patcher for `docs/ROADMAP.md`. Used by both
+│   │   │                          Theme A roadmap DocType and the deferred Theme E
+│   │   │                          Roadmap Manager dialog.
+│   │   ├── roadmap_parser.py      Tokenises `docs/ROADMAP.md` into typed sections.
+│   │   ├── roadmap_audit.py       Cross-references parsed ROADMAP entries against
+│   │   │                          git log + tokensave_diff_context for stale/promotable
+│   │   │                          detection. Deferred to Roadmap-8 dialog wiring.
+│   │   ├── memory_patch.py        Roadmap-7 patcher for CCD memory files
+│   │   │                          (`memory/<slug>.md`). Preserves YAML frontmatter.
+│   │   ├── generic_doc_patch.py   Roadmap-7 generic `docs/*.md` patcher with `## Anchor`
+│   │   │                          detection. v4 alignment-aware: refuses if the candidate
+│   │   │                          sections don't reach the alignment threshold (≥ 2
+│   │   │                          weighted points; tiered scoring per v4.1 Revision C).
+│   │   ├── doc_grounding.py       v4 cascade Theme B1. `build_grounding_block` shells out
+│   │   │                          to `tokensave tool context/search`; `build_codegraph_block`
+│   │   │                          (v4.1) does the same for codegraph (incl. `codegraph
+│   │   │                          affected --stdin` for roadmap recipe);
+│   │   │                          `build_combined_grounding` (v4.4 dedup-FIRST-then-truncate)
+│   │   │                          merges both with per-source cap.
+│   │   │                          `_codegraph_index_health` returns
+│   │   │                          missing/broken/stale/healthy. Stale tolerance 200s.
+│   │   ├── codegraph_freshness.py v4.3 codegraph freshness UX module. `ensure_fresh()`
+│   │   │                          blocking pre-grounding sync; `kick_autosync()` two-layer
+│   │   │                          debounced background sync on project select (per-project
+│   │   │                          30s + single-worker ThreadPoolExecutor); `maybe_prompt_reindex()`
+│   │   │                          once-per-session "broken index" dialog.
+│   │   ├── install_codegraph.py   v4.8 npm-driven codegraph lifecycle:
+│   │   │                          install_codegraph / update_codegraph (@latest form
+│   │   │                          for Windows reliability) / uninstall_codegraph;
+│   │   │                          codegraph_version; detect_codegraph_after_install
+│   │   │                          3-step PATH-fallback chain (shutil.which → `npm
+│   │   │                          prefix -g` probe → APPDATA\\npm probe) — G-B fix.
+│   │   │                          All callsites take npm_exe as resolved absolute path
+│   │   │                          (G-A: never bare "npm" on Windows where it's a .cmd).
+│   │   ├── install_tokensave.py   v4.8 GitHub-releases-driven tokensave install:
+│   │   │                          latest_tokensave_release with HTTP-403 rate-limit
+│   │   │                          detection (G-E); download_tokensave_zip with
+│   │   │                          PK\\x03\\x04 magic-byte verification (G-E DiD);
+│   │   │                          extract_tokensave_zip with Zip-Slip guards (G-C —
+│   │   │                          manual namelist() walk + abspath validation, reject
+│   │   │                          first violation); manager_install_dir at
+│   │   │                          %LOCALAPPDATA%\\TokenSaveManager\\bin\\;
+│   │   │                          is_manager_installed via os.path.commonpath.
+│   │   ├── smoke_runner.py        v4.9/v4.12/v4.13 pytest runner helpers.
+│   │   │                          `run_smoke_tests` (sync) parses X/Y from the
+│   │   │                          summary line. **v4.13 V-E**: `run_pytest_in_background`
+│   │   │                          spawns pytest in a daemon thread and returns a
+│   │   │                          `PytestRun` handle whose `.cancel()` terminates
+│   │   │                          the subprocess (5s grace before SIGKILL) — used
+│   │   │                          by Test Manager's 🛑 Stop button. Hook helpers:
+│   │   │                          `install_pre_commit_hook` / `uninstall_pre_commit_hook`
+│   │   │                          / `is_hook_installed` manage .git/hooks/pre-commit
+│   │   │                          via the `# TokenSaveManager-smoke-hook` marker.
+│   │   ├── test_discovery.py      v4.13 pure helpers for Test Manager. `list_test_files`
+│   │   │                          (V-C: counts both module-level and class-indented
+│   │   │                          `def test_*` via ast.FunctionDef walk),
+│   │   │                          `scan_coverage_gaps` (filename heuristic source→test
+│   │   │                          mapping), `detect_stale_tests` (V-D: top-level imports
+│   │   │                          only — `ast.iter_child_nodes(tree)`, NOT `ast.walk()`
+│   │   │                          — so TYPE_CHECKING / function-scoped / try-guarded
+│   │   │                          imports never false-flag), `load/save_last_run_results`,
+│   │   │                          `load/save_stale_allowlist` (V-B: cache lives in
+│   │   │                          `.tokensave-manager/`, NOT `.tokensave/`).
+│   │   ├── test_scaffold.py       v4.13 template renderer for Test Manager Tab 4.
+│   │   │                          Four embedded multi-line string templates:
+│   │   │                          `pure_helper` / `subprocess_helper` (with G-E
+│   │   │                          import-site mock pattern) / `dialog_tk` (with
+│   │   │                          @mark.tk + tk_root/mock_config fixtures) / `blank`.
+│   │   │                          `generate_test_file` refuses to overwrite existing
+│   │   │                          test files. `preview_test_file` returns the rendered
+│   │   │                          content for live UI previews.
+│   │   ├── pr_checklist.py        v4.13 Sync PR Checklist integration. `get_open_pr`
+│   │   │                          via `gh pr view --json number,body,title`. **V-A**:
+│   │   │                          `update_pr_body` uses `gh api ... -X PATCH --input -`
+│   │   │                          (stdin-piped JSON) — NOT `-f body=...` which
+│   │   │                          URL-encodes and mangles markdown specials.
+│   │   │                          `sync_checklist_section` re-renders only the
+│   │   │                          `### Automated` subsection inside a manager-marked
+│   │   │                          `## Testing checklist` block; refuses to touch
+│   │   │                          hand-written PRs without the marker comment.
+│   │   ├── git_scrub.py           v4.5 privacy feature. Pure helpers for the "Scrub from
+│   │   │                          History" dialog: `has_filter_repo` detection,
+│   │   │                          `install_filter_repo` (pip install --user),
+│   │   │                          `is_tracked_in_head` / `working_tree_clean`,
+│   │   │                          `list_affected_commits`, `build_backup_branch_name` +
+│   │   │                          `create_backup_branch`, `untrack_and_commit`,
+│   │   │                          `run_scrub` (filter-repo --force with safety-net
+│   │   │                          rationale documented inline). BFG documented as
+│   │   │                          manual alternative. v4.10: `get_remote_url` snapshots
+│   │   │                          origin URL before filter-repo removes it;
+│   │   │                          `restore_remote_if_missing` re-adds origin
+│   │   │                          automatically after the scrub; `preflight` dict now
+│   │   │                          includes `remote_url` so the dialog has it even if
+│   │   │                          the user-initiated scrub already cleared the remote.
+│   │   └── doc_drafter.py         LLM-backed documentation draft helpers (Roadmap-6 +
+│   │                              cascade v3-v4.4 hardening). Key exports:
+│   │                              `build_*_prompt` (all return `PromptBuildResult`);
+│   │                              `dispatch_llm` (routes claude_cli vs _call_llm;
+│   │                              v4 timeout 180→300s; v4.1 backend_hint plumbing for
+│   │                              local-model body-budget reduction); `resolve_commit_range`
+│   │                              (4 modes); `_select_candidate_sections` (v4.1 tiered
+│   │                              scoring path×2 / scope×2 / subject×1; v4.4 G3
+│   │                              saturating-cap on subject body hits); `_looks_truncated`
+│   │                              (v4.4 G1 structural-markup regex restricted to
+│   │                              `[`()\[\]/=<>{}|&*]` + snake_case + dotted identifiers);
+│   │                              `_merge_wrapped_bullets` preprocessing (v4.1 Revision B
+│   │                              for qwen2.5-coder wrap-aggressive output).
 │   │
-│   ├── dialogs/                   22 tk.Toplevel dialog classes — one per file.
+│   ├── dialogs/                   23 tk.Toplevel dialog classes — one per file.
 │   │   ├── settings.py            SettingsDialog (+ _probe_loaded_model helper)
 │   │   ├── release_wizard.py      ReleaseWizardDialog + _ReleaseCtx (paired)
 │   │   ├── mcp_config.py          MCPConfigDialog
@@ -137,6 +283,56 @@ Token Save Manager Source/
 │   │   ├── switch_branch.py       SwitchBranchDialog (+ static pick() helper)
 │   │   ├── assign_category.py     AssignCategoryDialog
 │   │   ├── untrack_ignored.py     UntrackIgnoredDialog
+│   │   ├── tool_manager.py        v4.8 ToolManagerDialog — unified install/update/
+│   │   │                          uninstall for both code-graph tools in one dialog.
+│   │   │                          Per-tool rows show binary status + MCP wiring;
+│   │   │                          shared output log pane; sticky-bottom Close bar.
+│   │   │                          Cascading uninstall (MCP cleanup first, non-fatal
+│   │   │                          per G-D; binary removal second, fatal). G-F:
+│   │   │                          _persist_cfg_clear helper makes save()-after-mutate
+│   │   │                          visible at every callsite. G-G: _set_row_busy
+│   │   │                          synchronously before worker spawn; try/finally
+│   │   │                          guarantees state restore.
+│   │   ├── codegraph_mcp_picker.py v4.7 CodegraphMCPPickerDialog — per-agent MCP-wiring
+│   │   │                          picker (claude / cursor / codex / opencode).
+│   │   │                          Destination-path detection (instant, no subprocess
+│   │   │                          at open). --no-permissions advanced toggle for
+│   │   │                          Claude Code. Sticky-bottom Install/Cancel bar.
+│   │   ├── scrub_history.py       v4.5 ScrubHistoryDialog — advanced "erase from all
+│   │   │                          history" privacy feature with 9-layer safety net.
+│   │   │                          Opens from GitignoreDialog → "⚙ Advanced". Detects
+│   │   │                          filter-repo, offers one-click pip install if absent;
+│   │   │                          auto-untrack-and-commit preamble; affected-commits
+│   │   │                          display; auto backup branch; confirmation-phrase
+│   │   │                          typing gate; force-push guidance post-scrub.
+│   │   │                          v4.10: file-picker rewritten as Canvas+Scrollbar
+│   │   │                          with collapsible ▼/▶ toggle (no 20-item cap, fully
+│   │   │                          scrollable, bind_mousewheel); origin URL is
+│   │   │                          snapshotted before scrub and auto-restored if
+│   │   │                          filter-repo deletes it (three-fallback chain:
+│   │   │                          same-session URL → preflight dict → askstring).
+│   │   ├── smoke_tests.py         v4.9 SmokeTestsDialog — legacy lightweight runner.
+│   │   │                          Still works (kept as a quick-fire UI) but the v4.13
+│   │   │                          TestManagerDialog is the recommended surface for new
+│   │   │                          users. v4.13 V-E: migrated `_worker` to use the
+│   │   │                          shared `helpers.smoke_runner.run_pytest_in_background`
+│   │   │                          helper so both dialogs share the same plumbing.
+│   │   ├── test_manager.py        v4.13 TestManagerDialog — opens from Help tab
+│   │   │                          "🧪 Test Manager…" button (replaces v4.12's "Run
+│   │   │                          Smoke Tests" button). 4-tab notebook covering the
+│   │   │                          full test lifecycle:
+│   │   │                            Tab 1 — Run + View (per-file last-run state,
+│   │   │                              ▶ Run All / Run Selected / 🛑 Stop, 🔁 Sync PR
+│   │   │                              Checklist via helpers/pr_checklist.py).
+│   │   │                            Tab 2 — Coverage Gaps (filename heuristic; click
+│   │   │                              "Add Tests for Selected" → jumps to Tab 4).
+│   │   │                            Tab 3 — Stale Tests (AST top-level imports only;
+│   │   │                              per-row Mark-as-still-valid + Delete).
+│   │   │                            Tab 4 — Scaffold generator (4 template kinds:
+│   │   │                              pure_helper / subprocess_helper / dialog_tk /
+│   │   │                              blank; live preview + Generate).
+│   │   │                          Visual template: roadmap_mgr.py (Notebook + Treeview).
+│   │   │                          See memory/test_manager.md for the decision tree.
 │   │   ├── cost_viewer.py         CostViewerDialog (2x2 metric grid; bg-threaded fetch)
 │   │   ├── refactor_scout.py      RefactorScoutDialog — scrollable findings panel grouped
 │   │   │                          by kind. Per-card checkboxes + selection toolbar (All/None/
@@ -152,18 +348,30 @@ Token Save Manager Source/
 │   │   │                          directly (pure fn, no subprocess). cfg.raw
 │   │   │                          ["checks_enabled"] persists toggle state.
 │   │   │                          cancel_futures=True on close. Roadmap-3.
-│   │   └── proposal.py            WriteProposal dataclass + ProposalDialog +
-│   │                              ProposalBridge (P1 — race-safe _resolve under Lock,
-│   │                              5-min event.wait timeout, WM_DELETE_WINDOW = reject,
-│   │                              post-timeout expired-state UX, automated test harness
-│   │                              in __main__ covering 4 race-safety paths)
+│   │   ├── proposal.py            WriteProposal dataclass + ProposalDialog +
+│   │   │                          ProposalBridge (P1 — race-safe _resolve under Lock,
+│   │   │                          5-min event.wait timeout, WM_DELETE_WINDOW = reject,
+│   │   │                          post-timeout expired-state UX, automated test harness
+│   │   │                          in __main__ covering 4 race-safety paths)
+│   │   └── doc_drafter.py         DocDrafterDialog — 📝 Doc Updates… 7-tab registry-
+│   │                              driven dialog (CHANGELOG / README / ARCHITECTURE /
+│   │                              ROADMAP / MEMORY / TOKENSAVE_GUIDE / Generic).
+│   │                              Per-tab thread isolation via _tab_state[key]["stop"]
+│   │                              identity (generation token). v4 hardening:
+│   │                              PromptBuildResult, read-only warning banner above
+│   │                              text widget, _suppressed_modified context manager,
+│   │                              Python-side mismatch askyesno short-circuit,
+│   │                              _draft_tick elapsed-time status bar, HARD_TIMEOUT
+│   │                              self-enforced at 310 s (G6). ALL applies route
+│   │                              through ProposalBridge.
 │   │
 │   └── controllers/               Tab controllers + Round-5 sub-controllers extracted
 │       │                          from the original god classes. Each takes cfg via
 │       │                          callback injection (never a parent reference).
 │       ├── projects_tab.py        ProjectsTabController (thin orchestrator after Round 5
-│       │                          extracted 9 sub-controllers — ~45 direct methods after
-│       │                          Roadmap-2 P5b added one wrapper)
+│       │                          extracted 9 sub-controllers — ~51 direct methods).
+│       │                          Right-click context menu includes 📝 Doc Updates… →
+│       │                          opens DocDrafterDialog (Roadmap-6 Tier B).
 │       ├── git_tab.py             GitTabController (push/pull/release/Draft PR/Open PR
 │       │                          on GitHub — ~38 direct methods after Roadmap-2 P4
 │       │                          extracted BranchManagementController).
@@ -242,6 +450,40 @@ Token Save Manager Source/
 │   ├── CHANGELOG.md
 │   ├── templates\                 All template files (copied by build.ps1)
 │   └── docs\                      GITHUB_GUIDE.md, ARCHITECTURE.md, ARCHITECTURE_TOKENSAVE.md
+│
+├── tests/                         v4.12 pytest test suite — wired into CI as a
+│   │                              first-class gate (`.github/workflows/ci.yml`).
+│   │                              Existing smoke_test.py runs unchanged; new
+│   │                              per-module + per-dialog files added.
+│   ├── conftest.py                Shared fixtures: `tk_root` (session-scoped Tk
+│   │                              root, sidesteps Windows init.tcl flakiness),
+│   │                              `wait_for` (G-G/G-M event-loop-driving poll),
+│   │                              `patch_after` (G-A/G-H AfterHarness for
+│   │                              recursive after() loops), `fake_home` (G-F
+│   │                              per-test HOME/APPDATA redirect), `mock_config`.
+│   ├── smoke_test.py              v4.9 logic-layer suite — 123 tests, 14 classes.
+│   ├── test_no_import_time_path_resolution.py
+│   │                              G-L pre-flight: imports every src/ module with
+│   │                              sentinel env vars; fails if any module captured
+│   │                              a user-path at import time (would silently
+│   │                              break fake_home for dialog tests).
+│   ├── test_ci_workflow.py        22 tests — generate_github_workflow YAML.
+│   ├── test_prepush_hook.py       26 tests — hook install/remove + G-K msgbox.
+│   ├── test_quality_checks.py     12 tests — subprocess-mocked syntax/pyflakes.
+│   ├── test_git_scrub.py          27 tests — filter-repo argv (safety-critical).
+│   ├── test_codegraph_freshness.py 19 tests — health tiers + autosync debounce.
+│   ├── test_install_codegraph.py  19 tests — npm argv (G-A + G-B).
+│   ├── test_dialog_checks.py      13 tests (@mark.tk) — ChecksDialog buttons.
+│   ├── test_dialog_tool_manager.py 13 tests (@mark.tk) — cascade uninstall ORDER.
+│   ├── test_dialog_codegraph_mcp_picker.py
+│   │                              8 tests (@mark.tk) — agent detection + argv.
+│   └── test_dialog_scrub_history.py
+│                                  7 tests (@mark.tk) — filter-repo gate + scrub argv.
+│
+│  Run all:    pip install -r requirements-dev.txt && python -m pytest
+│  Pure-only:  python -m pytest -m "not tk"
+│  Tk-only:    python -m pytest -m tk           (Linux: xvfb-run -a python -m pytest -m tk)
+│  In-app:     Help tab → "🧪 Run Smoke Tests" (subprocess-launched, streamed UI)
 │
 ├── logs/
 │   └── manager.log                Rotating log (500 KB x 5 backups)
@@ -625,6 +867,7 @@ Editable through the Settings dialog without touching JSON directly.
 | `commit_message_llm` | Dict. AI-commit-message + general LLM settings. Keys: `enabled` (bool), `provider` (str — `anthropic`/`openai`/`openai_compatible`/`ollama`), `model` (str), `api_key_env` (str — env var name), `base_url` (str — for OpenAI-compatible local servers), `min_diff_lines` (int — default 30), `max_diff_chars` (int — default 24000), `timeout_seconds` (int — default 90), `use_for_sync_autocommit` (bool), `num_ctx` (int — Ollama context window, default 32768, only Ollama). The agent in `src/agent.py` reads this whole dict. |
 | `mcp_skip_warnings` | List of absolute file paths. Each path corresponds to an MCP config file (`claude_desktop_config.json` or `.claude.json`) the user has chosen NOT to be warned about further. `_check_config` honours this list to keep the startup banner silent for explicitly-dismissed configs. Managed via `MCPConfigDialog`'s Skip button. |
 | `tokensave_update_poll_hours` | Float, default 1.0 (min 0.25). How often the daemon background poller hits the GitHub releases API to check for tokensave updates. Tunable to balance freshness against GitHub API rate limits (60/hr unauthenticated). |
+| `ask_tab_llm` | Dict. Ask tab AI backend settings (Roadmap-6). Same shape as `commit_message_llm` (provider, model, api_key_env, base_url, etc.) plus `claude_cli` as a valid provider. Falls back to `commit_message_llm` when key absent (migration path). Configured via Settings → "Ask Tab AI" section. When provider is `claude_cli`, api_key_env + base_url fields are disabled. |
 
 ### Nuitka onefile path resolution
 

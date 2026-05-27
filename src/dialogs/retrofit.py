@@ -25,7 +25,6 @@ class RetrofitDialog(tk.Toplevel):
         self.configure(bg=C["base"])
         self.resizable(False, False)
         self.grab_set()
-        self.transient(parent)
         self.callback = callback
         self.path = path
 

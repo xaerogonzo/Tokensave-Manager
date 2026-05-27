@@ -132,6 +132,7 @@ The manager's design philosophy: **never force a choice you don't want to make**
   - **🤖 AI Suggest button** — one click scans the project and asks the configured AI (Ollama / Claude CLI / Anthropic / any OpenAI-compatible provider) for gitignore patterns tailored to the actual project's tech stack. Context is gathered without scanning deep trees: if CodeGraph has indexed the project (`.codegraph/codegraph.db` exists), the full file-extension and top-level directory list is read from CodeGraph's SQLite database for zero extra I/O cost — otherwise falls back to `os.listdir`. The AI also sees untracked files (`git ls-files --others`) and the current ignore state so it never repeats patterns already present. Suggestions appear as pending additions in the diff panel (with a `# AI suggested patterns` attribution header) — nothing is written until you click Save. Reuses the `ask_tab_llm → commit_message_llm` config fallback chain so no extra settings are needed.
   - **📂 Browse… button** lets you pick a file or folder via the OS file picker; the path is auto-relativized against the project root and `/` is appended for directories. Cross-drive picks (Windows) and parent-of-project picks both surface a warning instead of producing invalid `..\` patterns.
   - **UNTRACKED FILES panel** (git repos only) lists output from `git ls-files --others --exclude-standard` with a click-to-add `[+]` button per file — populated in a background thread so opening the dialog stays instant even on large repos. Clicking `[+]` strikes through the row visually so you can see what's pending.
+  - **🔒 Privacy semantics banner + ⚙ Advanced — Scrub from History…** — files added here stop being PUSHED from now on, but older commits on GitHub still contain them. For full-history erase, the Advanced disclosure opens a dedicated dialog with a 9-layer safety net: one-click `pip install git-filter-repo` if absent, auto untrack-and-commit preamble (filter-repo refuses non-clean trees), scrollable file picker pre-filled from the tracked-but-ignored list, affected-commits preview, auto backup branch (`backup/before-scrub-<ts>`), confirmation-phrase typing (must type the file's basename), `git filter-repo --invert-paths --force`, post-scrub force-push guidance with re-clone warning, and a destructive-action red banner so a novice can't fire the action accidentally. The manager snapshots the `origin` remote URL before the scrub and automatically re-adds it afterward — `git filter-repo` unconditionally removes all remotes during history rewrite, which would otherwise leave the force-push step with no remote to push to. The manager never auto-pushes — the force-push command is shown for the user to run manually after they've verified the result.
 
 ### Git Integration (no command line needed)
 - **Git tab** — live view of any project's git state: current branch, remote URL, working tree changes, recent commits, colour-coded diff viewer
@@ -151,15 +152,20 @@ The manager's design philosophy: **never force a choice you don't want to make**
 - **Auto-commit after sync** — optional toggle (Settings) that runs `git add -A + git commit` automatically after every successful tokensave sync; amends the previous commit if it was also a sync commit, to avoid history pile-up. With the AI integration enabled, can produce a fresh AI-generated message per sync instead (no amend-stacking) — opt-in via the **"Also use AI for sync auto-commit messages"** sub-toggle
 - **Auto-commit Stop hook** — optional per-project Claude Code hook that commits whatever Claude changed at the end of each session
 
-### AI features (Stages 0–2 shipped)
+### AI features (Stages 0–4 shipped; Roadmap-7 cascade rounds completed)
 - **Stage 0 — Smart commit-message generation** (described under "Git Integration" above)
 - **Stage 1 — 🔍 AI Code Review** — right-click any project → "🔍 AI Code Review…" opens a split-pane dialog: top pane shows `git diff HEAD` with green/red colour-coding, bottom pane streams an AI-generated structured review (⚠ High / ⚡ Medium / 💡 Low / ℹ Observations sections). Async with token-by-token streaming via byte-aligned SSE parsing — visible progress instead of a long spinner. Stop / Regenerate / Copy buttons. Pure read-only: no tools, no file writes
 - **Stage 2 — 🤖 Ask tab** — notebook tab next to Git. Chat interface where a local LLM uses six READ-ONLY tools (`read_file`, `list_directory`, `git_log`, `git_diff`, `tokensave_search`, `tokensave_context`) to answer questions about the selected project. Bounded loop (8 iterations default), cumulative context budget (~40 000 chars across tool outputs), per-tool error wrapping, path-containment validation, stop-via-event-flag cancellation. Tool calls + results appear inline in the chat log (peach for call, dim grey for result, blue for user, default for assistant). See `docs/AGENT_ARCHITECTURE.md` for the locked architectural rules
-- **🦙 Ollama Model Manager** — Settings → "🦙 Manage Ollama Models…" launches a dedicated dialog that uses Ollama's native REST API (`GET /api/tags`, `POST /api/show`, streaming `POST /api/pull`, `DELETE /api/delete`) to browse installed models, pull new ones with live progress, see per-model context windows, and delete unwanted ones. Cancel during a pull explicitly closes the `HTTPResponse` to unblock the worker (setting a `threading.Event` alone doesn't break out of `read()`)
+- **Stage 3 — 📝 Doc Updates dialog** — right-click any project → "📝 Doc Updates…" opens a registry-driven dialog with one tab per doc type (CHANGELOG, README, ARCHITECTURE, ROADMAP, MEMORY, TOKENSAVE_GUIDE, generic docs). Drafts targeted updates from a commit-range against the existing file content; multi-section + hallucination protection refuses to invent section titles not present in the existing doc. Apply routes through ProposalBridge for old-vs-new diff review. Per-tab `🔍 Tokensave tools` checkbox enables Ollama-only mid-drafting tool calls. Apply-time validation surfaces a warning banner above the text widget when rejected (e.g. hallucinated section titles); the banner auto-clears the moment the user edits the draft content. The whole pipeline auto-resolves a commit range from the doc-anchor markers and shows an elapsed-time tick (`"Drafting on Ollama (12s)…"`) so long generations never look like a hang
+- **Tokensave + codegraph grounding** — every AI surface (commit messages, PR draft, code review, Ask tab non-agentic, Doc Updates) injects a slim grounding block built from `tokensave tool context/search` PLUS `codegraph context/affected` (when codegraph is indexed for the project). Both sources are dedup-merged with per-source caps so the prompt stays bounded. Master toggle in Settings → AI backend selection → "Code-graph grounding"; default ON. Grounding is silent-fail — projects without either tool indexed get a clean grounding-less prompt
+- **Codegraph freshness UX** — selecting a project in the Projects tab kicks a debounced background `codegraph sync` if the index is stale (200 s tolerance). The CG column shows a health glyph: `✓ indexed` / `⏳ stale` / `⚠ under-indexed` / `—`. If the index is genuinely broken (tokensave sees ≫ more files than codegraph — common after a project refactor), a one-time-per-session dialog offers a full reindex. Every grounded LLM call passes through `ensure_fresh` first, so a stale index won't silently feed bad signal to the model
+- **🦙 Ollama Model Manager** — Settings → "🦙 Manage Ollama Models…" launches a dedicated dialog that uses Ollama's native REST API to browse installed models, pull new ones with live progress, see per-model context windows, and delete unwanted ones
+- **🦙 Ollama Model Manager — detailed view** — the dedicated dialog uses Ollama's REST API (`GET /api/tags`, `POST /api/show`, streaming `POST /api/pull`, `DELETE /api/delete`). Cancel during a pull explicitly closes the `HTTPResponse` to unblock the worker (setting a `threading.Event` alone doesn't break out of `read()`)
 - **🔄 Upgrade tokensave from the manager** — Settings has an always-visible "🔄 Upgrade tokensave" button that runs `tokensave upgrade`. Three signals keep the button label fresh: a local `tokensave --version` probe at startup, the sync-output parser catching `Update available: vA → vB` lines, and an hourly GitHub releases poller (`api.github.com/.../releases/latest`). When a newer version is available the button promotes to a green Primary "🔄 Upgrade tokensave to vX.Y.Z". A "🔍 Check integration" button sits beside it — runs `scripts/check_tokensave_integration.py` and shows the report in a scrollable dialog. Right-click any project → **🔄 Integration check** for the same report. See [`docs/UPGRADE_INTEGRATION.md`](docs/UPGRADE_INTEGRATION.md) for the full workflow
 - **Claude Code CLI integration** — Settings → Git tools has a "Claude Code CLI" row with Browse + Auto-detect. When configured, the manager spawns `claude` (`npm install -g @anthropic-ai/claude-code`) in its own detached terminal window for tasks like Draft PR — your app stays fully unblocked while Claude works. Auto-detect probes the `.cmd` shim first (npm's Windows convention) and falls back to `%APPDATA%\npm\claude.cmd`. If auto-detect comes up empty (npm bin not on PATH in this launch context), paste the full path manually. A **Model** combobox below the path selects which Claude model the manager uses for its automated `claude --print` calls (pre-commit review, commit-message Suggest, Draft PR). Defaults to `claude-haiku-4-5-20251001` (fast, 3–5 s). Empty = defer to `~/.claude/settings.json`. Does not affect interactive `claude` sessions
-- **✓ Run checks…** — right-click any project → "✓ Run checks…" opens a dialog that runs four pre-merge quality checks concurrently: Python syntax (`compileall`), pyflakes, Doctor audit (calls `_audit_project_tree` directly — no subprocess), and an optional Claude Code review of the PR-scope diff (`git diff <base>...HEAD`). All four are toggleable checkboxes persisted to `cfg.raw["checks_enabled"]`; Claude review is off by default (token cost). A large-diff warning fires on the main thread if the diff exceeds 10k chars before the Claude call is sent. Results update live with ✓ / ✗ / ⏳ / — icons as each future resolves. Dialog close cancels queued futures cleanly
-- **GitHub Actions CI** — `.github/workflows/ci.yml` runs free deterministic checks (syntax + pyflakes) on every push and pull request. No secrets, no paid runners. The ✓ or ✗ badge appears on every PR automatically
+- **✓ Run checks…** — right-click any project → "✓ Run checks…" opens a dialog that runs four pre-merge quality checks concurrently: Python syntax (`compileall`), pyflakes, Doctor audit (calls `_audit_project_tree` directly — no subprocess), and an optional Claude Code review of the PR-scope diff (`git diff <base>...HEAD`). All four are toggleable checkboxes persisted to `cfg.raw["checks_enabled"]`; Claude review is off by default (token cost). A large-diff warning fires on the main thread if the diff exceeds 10k chars before the Claude call is sent. Results update live with ✓ / ✗ / ⏳ / — icons as each future resolves. Dialog close cancels queued futures cleanly. Footer bar adds two one-click actions: **📋 Generate GitHub Actions** (writes `quality-checks.yml` from enabled checks) and **🔗 Install/Remove pre-push hook** (blocks bad pushes at the git level)
+- **GitHub Actions CI** — `.github/workflows/ci.yml` runs free deterministic checks (syntax + pyflakes) on every push and pull request. No secrets, no paid runners. The ✓ or ✗ badge appears on every PR automatically. The **Run Checks dialog** can also generate a manager-curated `quality-checks.yml` covering your currently-enabled checks
+- **Pre-push hook** — one click in the Run Checks dialog installs `.git/hooks/pre-push`, which blocks every `git push` if syntax, pyflakes, or the doctor audit fail. Claude check is always skipped (too slow for automatic gating). Fail-open on infrastructure errors; remove via the same dialog
 - **📊 Cost viewer** — `📊 Cost` button next to View Log opens a metric dashboard showing tokens saved, dollar value recouped, and total input/output token counts (parsed from `tokensave cost`). Subprocess runs in a background thread so the dialog opens instantly with `Loading…` placeholders, then updates when the data arrives
 
 ### Settings & Tools
@@ -167,7 +173,10 @@ The manager's design philosophy: **never force a choice you don't want to make**
 - **🔌 MCP Integration configurator** — Settings → "🔌 Manage MCP wiring…" opens a dialog that classifies the `tokensave` MCP entries in BOTH Claude Desktop's `claude_desktop_config.json` AND Claude Code's `~/.claude.json`. UWP-aware: detects Microsoft Store / packaged Claude installs and targets the per-package config under `%LOCALAPPDATA%\Packages\Claude_*\LocalCache\Roaming\Claude\` (where the legacy `%APPDATA%\Claude\` path resolves to a DIFFERENT file from inside the package's process tree — see `docs/MCP_INTEGRATION_GOTCHAS.md` for the full story). Each config row shows ✓ correct / ⚠ bypasses wrapper / ✗ missing. Recognises `tokensave install --agent claude`'s canonical direct-serve shape (`{"command": "tokensave.exe", "args": ["serve"]}`) as valid for Claude Code so the banner doesn't fight an upstream tool. Apply writes via `shutil.copy2` backup-first; refuses to write while Claude is running (the config would be silently clobbered by Desktop's preferences-save). Skip list persists so dismissed warnings don't return
 - **AI commit messages** — Settings dialog has a dedicated **"AI commit messages"** section with a provider dropdown (Anthropic / OpenAI / OpenAI-compatible / Ollama), model field, API-key env-var name, and base URL for local OpenAI-compatible servers. Quick-preset buttons for **Anthropic** (Claude Haiku/Sonnet/Opus), **LM Studio** (`http://localhost:1234`), and **Ollama** (`http://localhost:11434`). Min-diff-lines threshold so trivial commits skip the LLM. All LLM failures silent-fallback to the heuristic chain — never blocks the commit dialog
 - **GitHub CLI installer** — Settings dialog includes a **"Install via winget"** button that installs the GitHub CLI (`gh`) in the background; shows a green checkmark when found on PATH
-- **CodeGraph installer** — Settings dialog includes a **"Install via npm"** button that installs `@colbymchenry/codegraph` globally. Runs on a background thread so the GUI never freezes; surfaces Windows EPERM/EACCES errors with actionable hints
+- **CodeGraph installer** — Settings dialog includes a **"Install binary (npm)"** button that installs `@colbymchenry/codegraph` globally. Runs on a background thread so the GUI never freezes; surfaces Windows EPERM/EACCES errors with actionable hints
+- **CodeGraph MCP configuration** — three Step-2 buttons in Settings → CodeGraph: **🔌 Configure MCP (auto)** runs `codegraph install --yes` to wire codegraph into Claude Code's MCP servers (`~/.claude.json`) so the `mcp__codegraph__*` tools appear in agent sessions; **⚙ Configure MCP — pick agents…** opens a picker for choosing among the 4 supported agents (claude / cursor / codex / opencode) with destination-path detection so un-installed agents render disabled; **🧹 Uninstall MCP** reverses everything. Status row reports per-agent wiring state by parsing `~/.claude.json` directly
+- **💾 Tool Manager dialog** — single discovery surface (Settings → tokensave or CodeGraph section → 🛠️ Open Tool Manager…; OR Help tab → 💾 Tool Manager… in the left nav) for the full **install / update / uninstall** lifecycle of both code-graph tools. Tokensave install downloads the latest Windows zip from GitHub releases and extracts to `%LOCALAPPDATA%\TokenSaveManager\bin\` (no admin needed). Codegraph update runs `npm install -g @colbymchenry/codegraph@latest`. Cascading uninstall strips MCP wiring FIRST then removes the binary, with graceful fallback if MCP cleanup fails so users never get trapped with a broken-but-undeletable tool. Hardened against Windows npm-shim crashes, Zip Slip, GitHub rate-limit (403), and double-click races
+- **Per-feature grounding toggles** — Settings → AI backend selection nests two checkboxes under the master "Code-graph grounding" toggle: opt-in for commit-message Suggest (default OFF — live testing showed grounding hurts on big multi-file commits for small models) and opt-out for Draft PR (default ON — PRs genuinely benefit from test-impact + symbol context). The Git Commit dialog's strategy badge appends 🔗 grounded or ✕ ungrounded after each Suggest so you can see at a glance which mode produced any given message
 - **Git auto-detection** — finds `git.exe` via PATH or common Windows install locations automatically
 - **CodeGraph auto-detection** — finds `codegraph.cmd` in `%APPDATA%\npm\` or wherever npm placed it; probes `.cmd` before bare names since Windows `subprocess.run` requires the extension on shim files
 - **Reference tab** — CLI cheatsheet + 12 built-in Claude prompt snippets (codebase overview, symbol search, impact analysis, health check, etc.) with copy-to-clipboard; add your own custom snippets
@@ -671,6 +680,69 @@ See [CHANGELOG.md](CHANGELOG.md) for the full history.
 **Recent highlights (Unreleased)** — see CHANGELOG.md for the detailed bullets on each:
 
 
+
+**Refactoring**
+- Helper extraction across doc-drafter, agent, gitignore editor, and projects tab to reduce method complexity
+
+(Add this as a new sub-section in the "Recent highlights (Unreleased)" block. The existing sections can remain unchanged.)
+
+**Doc-drafter refinements**
+- 📝 Doc Updates… — refined bullet filtering with noop-removal and quality-based truncation, post-apply state preview for honest diffs, literal template/placeholder detection with mirror-contract safety validation, per-session backend override for flexible model selection, improved README deduplication and draft sanitization
+- ⚙ Backend override dropdown (`_backend_override_var` in `dialogs/doc_drafter.py`)
+- 🛠 Narrowed doc pathspec to prevent masking code commits (`doc_drafter.py`)
+**Roadmap-6 — Ask tab + gitignore AI + doc-drafter**
+- 🤖 Ask tab — separate `ask_tab_llm` config (independent of commit-message model), Claude CLI provider option, SSE streaming for final-turn tokens, session log persistence (`logs/ask_sessions.md`)
+- 🤖 Gitignore AI Suggest — one-click AI-powered pattern recommendations in the .gitignore editor; CodeGraph SQLite used as a zero-cost project file listing when available; path-scoped basename dedup suppresses redundant `src/__pycache__/` style suggestions when the broader pattern is already ignored
+- 📝 Doc Updates… right-click dialog — drafts CHANGELOG `[Unreleased]` bullets AND README "Recent highlights" sub-section content from a commit range via the configured local AI. Per-tab thread isolation, ProposalBridge-gated Apply, mixed-commit boundary handling, sparse-commit safety net. Both CHANGELOG and README use append-only insertion (`insert_unreleased_bullets` / `insert_readme_highlights_subsection`) — drafter generates only new content; patcher splices into the right sub-section while preserving everything else verbatim. Robust against small-model truncation that wiped detail on the original full-block-regeneration design. Architecture + Memory tabs deferred to Roadmap-7
+- 📝 Documentation snippet category in Reference tab — 7 curated copy-paste prompts for README / CHANGELOG / architecture / memory / consistency-check / migration-note / PR description
+- Help tab — comprehensive static reference content with per-section follow-up ask prompts
+- tokensave CLI subcommand fix (`tokensave tool search` / `tokensave tool context` — old `query` / `context` subcommands removed upstream)
+
+**Major: local-AI integration (Stages 0–2 of the roadmap)**
+- 🤖 Ask tab — Stage 2 chat interface with bounded tool-calling agent (`src/agent.py` + `src/agent_tools.py`)
+- 🔍 AI Code Review with token-by-token streaming
+- 🦙 Ollama Model Manager dialog with native REST API integration
+- 🔄 Upgrade tokensave from the manager, with hourly GitHub releases polling
+- Tool-call rescue for local models that emit calls as JSON-in-content
+- read_file with `start_line`/`end_line` for large files + basename-match suggestions on not-found errors
+
+**MCP / wrapper hardening**
+- 🔌 MCP Integration configurator (UWP-aware, label-aware classification — recognises `tokensave install` canonical shape for Claude Code)
+- Wrapper stdio fix: explicit `stdin=sys.stdin, stdout=sys.stdout, stderr=sys.stderr` in Popen (the root cause of the 30-second MCP attach timeout)
+- 🔍 Doctor button with stale-entry purge offer + cmd.exe spawn fallback for TTY-gated prompts
+- Last Synced column now reads max mtime across `.db`/`.db-wal`/`.db-shm` (SQLite WAL-mode aware)
+
+**Git workflow**
+- 🐙 Merge PR button — full GitHub PR merge from the manager (lists PRs via `gh pr list`, three strategies, auto-syncs local after)
+- ⇄ Merge button — merge a branch INTO the current one
+- Remote-aware Delete Branch — prompts to also delete `origin/<branch>`
+- `[project-name]` prefix on all git log lines
+
+**Docs**
+- `docs/AGENT_ARCHITECTURE.md` — agent loop design
+- `docs/ROADMAP.md` — staged plan with status badges
+- `docs/MCP_INTEGRATION_GOTCHAS.md` — postmortem field manual
+- `docs/upstream-issues/tokensave-hook-quoting.md` — draft of an upstream bug we discovered
+
+**Earlier highlights** (these landed before the current cycle):
+- Git tab with full push/pull/commit/branch/diff UI, per-file staging, conventional-commit auto-suggest
+- GitHub Setup wizard, Open PR button, Release Wizard with `gh release create` pipeline
+- Project categories + sub-categories, gitignore editor with template inject + diff preview
+- Ensure .gitignore, Auto-commit after sync, Claude session Stop hook
+
+**Doc-drafter refinements**
+
+**Roadmap-6 — Ask tab + gitignore AI + doc-drafter**
+
+**Major: local-AI integration (Stages 0–2 of the roadmap)**
+
+**MCP / wrapper hardening**
+
+**Git workflow**
+
+**Docs**
+
+**Earlier highlights** (these landed before the current cycle):
 **Doc-drafter refinements**
 - 📝 Doc Updates… — refined bullet filtering with noop-removal and quality-based truncation, post-apply state preview for honest diffs, literal template/placeholder detection with mirror-contract safety validation, per-session backend override for flexible model selection, improved README deduplication and draft sanitization
 
@@ -713,6 +785,94 @@ See [CHANGELOG.md](CHANGELOG.md) for the full history.
 - GitHub Setup wizard, Open PR button, Release Wizard with `gh release create` pipeline
 - Project categories + sub-categories, gitignore editor with template inject + diff preview
 - Ensure .gitignore, Auto-commit after sync, Claude session Stop hook
+
+**Doc-drafter refinements**
+- 📝 Doc Updates… — refined bullet filtering with noop-removal and quality-based truncation, post-apply state preview for honest diffs, literal template/placeholder detection with mirror-contract safety validation, per-session backend override for flexible model selection, improved README deduplication and draft sanitization
+
+**Roadmap-6 — Ask tab + gitignore AI + doc-drafter**
+- 🤖 Ask tab — separate `ask_tab_llm` config (independent of commit-message model), Claude CLI provider option, SSE streaming for final-turn tokens, session log persistence (`logs/ask_sessions.md`)
+- 🤖 Gitignore AI Suggest — one-click AI-powered pattern recommendations in the .gitignore editor; CodeGraph SQLite used as a zero-cost project file listing when available; path-scoped basename dedup suppresses redundant `src/__pycache__/` style suggestions when the broader pattern is already ignored
+- 📝 Doc Updates… right-click dialog — drafts CHANGELOG `[Unreleased]` bullets AND README "Recent highlights" sub-section content from a commit range via the configured local AI. Per-tab thread isolation, ProposalBridge-gated Apply, mixed-commit boundary handling, sparse-commit safety net. Both CHANGELOG and README use append-only insertion (`insert_unreleased_bullets` / `insert_readme_highlights_subsection`) — drafter generates only new content; patcher splices into the right sub-section while preserving everything else verbatim. Robust against small-model truncation that wiped detail on the original full-block-regeneration design. Architecture + Memory tabs deferred to Roadmap-7
+- 📝 Documentation snippet category in Reference tab — 7 curated copy-paste prompts for README / CHANGELOG / architecture / memory / consistency-check / migration-note / PR description
+- Help tab — comprehensive static reference content with per-section follow-up ask prompts
+- tokensave CLI subcommand fix (`tokensave tool search` / `tokensave tool context` — old `query` / `context` subcommands removed upstream)
+
+**Major: local-AI integration (Stages 0–2 of the roadmap)**
+- 🤖 Ask tab — Stage 2 chat interface with bounded tool-calling agent (`src/agent.py` + `src/agent_tools.py`)
+- 🔍 AI Code Review with token-by-token streaming
+- 🦙 Ollama Model Manager dialog with native REST API integration
+- 🔄 Upgrade tokensave from the manager, with hourly GitHub releases polling
+- Tool-call rescue for local models that emit calls as JSON-in-content
+- read_file with `start_line`/`end_line` for large files + basename-match suggestions on not-found errors
+
+**MCP / wrapper hardening**
+- 🔌 MCP Integration configurator (UWP-aware, label-aware classification — recognises `tokensave install` canonical shape for Claude Code)
+- Wrapper stdio fix: explicit `stdin=sys.stdin, stdout=sys.stdout, stderr=sys.stderr` in Popen (the root cause of the 30-second MCP attach timeout)
+- 🔍 Doctor button with stale-entry purge offer + cmd.exe spawn fallback for TTY-gated prompts
+- Last Synced column now reads max mtime across `.db`/`.db-wal`/`.db-shm` (SQLite WAL-mode aware)
+
+**Git workflow**
+- 🐙 Merge PR button — full GitHub PR merge from the manager (lists PRs via `gh pr list`, three strategies, auto-syncs local after)
+- ⇄ Merge button — merge a branch INTO the current one
+- Remote-aware Delete Branch — prompts to also delete `origin/<branch>`
+- `[project-name]` prefix on all git log lines
+
+**Docs**
+- `docs/AGENT_ARCHITECTURE.md` — agent loop design
+- `docs/ROADMAP.md` — staged plan with status badges
+- `docs/MCP_INTEGRATION_GOTCHAS.md` — postmortem field manual
+- `docs/upstream-issues/tokensave-hook-quoting.md` — draft of an upstream bug we discovered
+
+**Earlier highlights** (these landed before the current cycle):
+- Git tab with full push/pull/commit/branch/diff UI, per-file staging, conventional-commit auto-suggest
+- GitHub Setup wizard, Open PR button, Release Wizard with `gh release create` pipeline
+- Project categories + sub-categories, gitignore editor with template inject + diff preview
+- Ensure .gitignore, Auto-commit after sync, Claude session Stop hook
+
+---
+
+## Testing
+
+The manager ships with a pytest test suite covering both pure-logic helpers
+and the four newest dialogs (checks, tool manager, codegraph MCP picker,
+scrub history). Tests are zero-runtime-dependency for end users — only the
+dev workflow installs pytest.
+
+```bash
+pip install -r requirements-dev.txt
+python -m pytest                    # everything (~3-5 s on Windows)
+python -m pytest -m "not tk"        # pure-logic only — no display needed
+python -m pytest -m tk              # dialog tests only
+```
+
+On Linux CI the dialog tests run under `xvfb-run -a` with `python3-tk`
+installed. The GitHub Actions workflow (`.github/workflows/ci.yml`) splits
+the test runs into three gating tiers:
+
+- `test-warn`: pushes to `Roadmap-*` branches → warn-only
+- `test-gate`: PRs to `main`/`master` → HARD gate (failing tests block the merge)
+- `test-postmerge`: pushes to `main`/`master` → HARD gate (catches bad merges)
+
+### Test Manager dialog (v4.13)
+
+The Help tab's **🧪 Test Manager…** button opens a 4-tab dialog that
+covers the full test lifecycle for novice users:
+
+- **Run + View**: per-file last-run status, ▶ Run All / Run Selected /
+  🛑 Stop buttons, and 🔁 Sync PR Checklist (writes back to the open
+  PR via `gh api ... --input -`).
+- **Coverage Gaps**: lists `src/` files without matching tests; one
+  click takes you to the Scaffold tab to generate a starter test file.
+- **Stale Tests**: AST-based scanner flags tests that import deleted
+  modules or non-existent symbols; "Mark as still valid" silences
+  false positives.
+- **Scaffold**: pick a source file + template kind, preview the
+  generated test, click Generate. Generated files pass pytest
+  immediately so you get green feedback before customising.
+
+See `memory/tests_pattern.md` for the fixture catalogue + Tk gotchas
+(G-A through G-K) when writing new tests, and `memory/test_manager.md`
+for the v4.13 decision tree ("when should I add tests?").
 
 ---
 
