@@ -332,6 +332,79 @@ def untrack_and_commit(repo_path: str, git_exe: str, rel_file: str,
         return False, "\n".join(log_chunks)
 
 
+def git_rm_cached(repo_path: str, git_exe: str, rel_file: str,
+                  on_log=None) -> Tuple[bool, str]:
+    """Run ``git rm --cached -- <rel_file>`` WITHOUT committing.
+
+    Use this instead of :func:`untrack_and_commit` when you want to open the
+    manager's ``GitCommitDialog`` afterwards so the user can compose (and
+    AI-suggest) the commit message themselves.
+
+    Returns ``(ok, log)``.
+    """
+    log_chunks: List[str] = []
+
+    def _log(msg: str) -> None:
+        log_chunks.append(msg)
+        if on_log is not None:
+            try:
+                on_log(msg)
+            except Exception:
+                pass
+
+    try:
+        proc = subprocess.run(
+            [git_exe, "-C", repo_path, "rm", "--cached", "--", rel_file],
+            capture_output=True, text=True, timeout=15,
+            encoding="utf-8", errors="replace",
+            creationflags=CREATE_NO_WINDOW,
+        )
+        _log(f"$ git rm --cached -- {rel_file}")
+        if proc.stdout:
+            _log(proc.stdout.rstrip())
+        if proc.stderr:
+            _log(proc.stderr.rstrip())
+        return proc.returncode == 0, "\n".join(log_chunks)
+    except (FileNotFoundError, subprocess.TimeoutExpired, OSError) as exc:
+        _log(f"git_rm_cached error: {exc}")
+        return False, "\n".join(log_chunks)
+
+
+def force_push(repo_path: str, git_exe: str, branch: str,
+               on_log=None) -> Tuple[bool, str]:
+    """Run ``git push --force-with-lease origin <branch>``.
+
+    Called from ``ScrubHistoryDialog`` after a successful scrub so the
+    rewritten history reaches the remote.  Returns ``(ok, log)``.
+    """
+    log_chunks: List[str] = []
+
+    def _log(msg: str) -> None:
+        log_chunks.append(msg)
+        if on_log is not None:
+            try:
+                on_log(msg)
+            except Exception:
+                pass
+
+    try:
+        _log(f"$ git push --force-with-lease origin {branch}")
+        proc = subprocess.run(
+            [git_exe, "-C", repo_path, "push",
+             "--force-with-lease", "origin", branch],
+            capture_output=True, text=True, timeout=120,
+            encoding="utf-8", errors="replace",
+            creationflags=CREATE_NO_WINDOW,
+        )
+        combined = (proc.stdout + proc.stderr).rstrip()
+        if combined:
+            _log(combined)
+        return proc.returncode == 0, "\n".join(log_chunks)
+    except (FileNotFoundError, subprocess.TimeoutExpired, OSError) as exc:
+        _log(f"force_push error: {exc}")
+        return False, "\n".join(log_chunks)
+
+
 # ── Scrub execution ───────────────────────────────────────────────────────────
 
 def run_scrub(repo_path: str, git_exe: str, rel_file: str,

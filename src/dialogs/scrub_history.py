@@ -1,24 +1,33 @@
-"""ScrubHistoryDialog — Advanced "erase from all history" privacy feature (v4.5).
+"""ScrubHistoryDialog — Erase a file from GitHub history (v4.5 / v4.9).
 
-This dialog is INTENTIONALLY hard to use accidentally. Layered safety
-nets — read the v4.5 plan section "Flow B" in
-``~/.claude/plans/write-a-comprehensive-plan-elegant-cascade.md`` for the
-full design rationale.
+Goal: remove a sensitive file (build script, credential, etc.) from the
+remote repository's history so it can no longer be downloaded from GitHub.
+
+How it works (unavoidable, by how git is designed):
+  GitHub stores whatever git history you push to it.  To change what
+  GitHub has, you must rewrite your LOCAL git history first, then
+  force-push so GitHub adopts the rewritten version.  There is no way
+  to edit GitHub directly — git filter-repo is the standard tool for the
+  local rewrite step.
 
 User flow:
   1. Open from GitignoreDialog → "⚙ Advanced" disclosure button.
   2. Filter-repo availability gate — install via pip if absent.
-  3. Pick the file to scrub (tracked-but-ignored list, or manual entry).
+  3. Pick the file to erase from GitHub history.
   4. Workflow-ordering preamble — untrack + commit FIRST if file still
      in HEAD; gates the Scrub Now button.
-  5. Affected-commits display — show what will be erased.
+  5. Affected-commits display — show what will be rewritten.
   6. Auto backup branch — names + creates `backup/before-scrub-<ts>`.
   7. Confirmation-phrase entry — must type the file's basename.
-  8. Scrub Now → runs `git filter-repo --invert-paths --path <file> --force`.
-  9. Post-scrub guidance — exact force-push command + re-clone warning.
+  8. Scrub Now → runs `git filter-repo --invert-paths --path <file> --force`
+     to rewrite local history.
+  9. Force Push → pushes the rewritten history to GitHub so the remote
+     is also cleaned.  (Step 8 is pointless without this step.)
 
-The dialog never auto-pushes. Force-push is left to the user (matches
-universal industry guidance).
+If you have already run Scrub Now in a previous session, the Force Push
+button appears immediately when 0 affected commits are found — no need
+to re-run the scrub.  Just re-add your remote via Set Remote in the Git
+tab, then open this dialog and force-push.
 """
 
 from __future__ import annotations
@@ -34,12 +43,13 @@ from helpers.git import _find_tracked_but_ignored
 from helpers.git_scrub import (
     build_backup_branch_name,
     create_backup_branch,
+    force_push,
+    git_rm_cached,
     install_filter_repo,
     is_tracked_in_head,
     list_affected_commits,
     preflight,
     run_scrub,
-    untrack_and_commit,
     working_tree_clean,
 )
 
@@ -73,6 +83,7 @@ class ScrubHistoryDialog(tk.Toplevel):
         self._scrub_in_flight = False
         self._backup_branch_name = ""
         self._preflight = preflight(self._path, self._cfg.git_exe)
+        self._already_scrubbed = False   # True when 0 commits found + not in HEAD
 
         # Build sections — Save-style: bottom bar FIRST so it's always visible.
         self._build_destructive_banner()
@@ -91,38 +102,49 @@ class ScrubHistoryDialog(tk.Toplevel):
     # ── Section builders ──────────────────────────────────────────────────────
 
     def _build_destructive_banner(self):
-        """Layer 9 — hard "this is destructive" red banner."""
+        """Top banner — explains the two-step process and destructive nature."""
         banner = tk.Frame(self, bg=C["red"], padx=14, pady=10)
         banner.pack(fill=tk.X)
-        tk.Label(banner, text="⚠  Destructive — rewrites git history",
+        tk.Label(banner, text="⚠  Erase from GitHub history — rewrites git commits",
                  bg=C["red"], fg=C["base"],
                  font=("Segoe UI", 11, "bold")).pack(anchor=tk.W)
         for bullet in (
-            "Every past commit that touched the file will be rewritten.",
-            "Force-push is required afterwards (collaborators must re-clone).",
-            "Older clones / archived branches on GitHub may still expose the file.",
+            "Step 1 (Scrub Now): rewrites your LOCAL history — the file disappears from all commits.",
+            "Step 2 (Force Push): pushes rewritten history to GitHub — the file is gone from the remote.",
+            "Anyone who cloned the repo will need to re-clone after force-push.",
+            "Files on disk are NOT deleted — only the git history is changed.",
         ):
             tk.Label(banner, text=f"  • {bullet}",
                      bg=C["red"], fg=C["base"],
                      font=("Segoe UI", 9)).pack(anchor=tk.W)
 
     def _build_bottom_action_bar(self):
-        """Bottom action row — Scrub Now + Close.
+        """Bottom action row — Scrub Now + (post-scrub) Force Push + Close.
 
         Packed with ``side=tk.BOTTOM`` BEFORE the scrollable middle sections,
         so it can never be pushed off-screen (same pattern as the fixed
         GitignoreDialog Save bar).
+
+        The Force Push button is created here but not packed — it becomes
+        visible in ``_show_postscrub_guidance`` after a successful scrub.
         """
         ttk.Separator(self, orient="horizontal").pack(
             fill=tk.X, side=tk.BOTTOM)
-        btns = tk.Frame(self, bg=C["base"], padx=18, pady=10)
-        btns.pack(fill=tk.X, side=tk.BOTTOM)
+        self._btns_frame = tk.Frame(self, bg=C["base"], padx=18, pady=10)
+        self._btns_frame.pack(fill=tk.X, side=tk.BOTTOM)
+
+        # Force-push button — hidden until scrub succeeds
+        self._force_push_btn = ttk.Button(
+            self._btns_frame, text="⬆  Force Push to GitHub",
+            command=self._on_force_push,
+        )
+
         self._scrub_btn = ttk.Button(
-            btns, text="🧨  Scrub Now",
+            self._btns_frame, text="🧨  Scrub Now",
             command=self._on_scrub_now, state=tk.DISABLED,
         )
         self._scrub_btn.pack(side=tk.RIGHT, padx=(6, 0))
-        ttk.Button(btns, text="Close",
+        ttk.Button(self._btns_frame, text="Close",
                    command=self.destroy).pack(side=tk.RIGHT)
 
     def _build_filter_repo_gate(self):
@@ -392,6 +414,7 @@ class ScrubHistoryDialog(tk.Toplevel):
             and self._preflight.get("is_git_repo")
             and confirm_ok
             and not self._scrub_in_flight
+            and not self._already_scrubbed
         )
         # Also require: file no longer tracked + working tree clean
         if ready and rel_file:
@@ -405,9 +428,23 @@ class ScrubHistoryDialog(tk.Toplevel):
                 ready = False
         self._scrub_btn.configure(state=tk.NORMAL if ready else tk.DISABLED)
 
+        # Show Force Push button if scrub is already done (previous session)
+        if self._already_scrubbed:
+            self._scrub_btn.configure(state=tk.DISABLED, text="✓ Scrubbed")
+            # Pack the force push button if not already visible
+            try:
+                self._force_push_btn.pack_info()  # raises if not packed
+            except tk.TclError:
+                self._force_push_btn.pack(side=tk.RIGHT, padx=(6, 0))
+        elif self._scrub_btn.cget("text") == "✓ Scrubbed":
+            # File changed — reset button label
+            self._scrub_btn.configure(text="🧨  Scrub Now")
+
     def _refresh_affected_commits(self, rel_file: str):
         self._affected_txt.configure(state=tk.NORMAL)
         self._affected_txt.delete("1.0", tk.END)
+        self._already_scrubbed = False
+
         if not rel_file or not self._preflight.get("git_exe_present"):
             self._affected_txt.insert(
                 "1.0", "(pick a file to see affected commits)")
@@ -426,9 +463,27 @@ class ScrubHistoryDialog(tk.Toplevel):
                     tk.END,
                     f"\nTotal: {len(commits)} commit"
                     f"{'s' if len(commits) != 1 else ''} touch this file.\n")
-            elif not self._affected_txt.get("1.0", tk.END).strip():
-                self._affected_txt.insert(
-                    "1.0", "(no commits found that touch this file)")
+            else:
+                # 0 commits found. Check if file is absent from HEAD too —
+                # that's the signature of a completed scrub.
+                try:
+                    still_tracked = is_tracked_in_head(
+                        self._path, self._cfg.git_exe, rel_file)
+                except Exception:
+                    still_tracked = True
+                if not still_tracked:
+                    self._already_scrubbed = True
+                    self._affected_txt.insert(
+                        "1.0",
+                        "✓ No commits found touching this file — local history\n"
+                        "  is already clean (Scrub Now ran in a previous session).\n\n"
+                        "  Next step: click ⬆  Force Push to GitHub below\n"
+                        "  to push the rewritten history to the remote.\n\n"
+                        "  (If you haven't re-added your remote yet, use\n"
+                        "  Set Remote in the Git tab first.)")
+                else:
+                    self._affected_txt.insert(
+                        "1.0", "(no commits found that touch this file)")
         self._affected_txt.configure(state=tk.DISABLED)
 
     # ── Handlers ──────────────────────────────────────────────────────────────
@@ -506,40 +561,117 @@ class ScrubHistoryDialog(tk.Toplevel):
         threading.Thread(target=_worker, daemon=True).start()
 
     def _on_untrack_and_commit(self):
+        """Untrack the file (git rm --cached) then open GitCommitDialog.
+
+        The commit dialog gives the user AI-suggest for the message instead
+        of auto-committing with a hardcoded string.
+        """
         rel_file = (self._selected_file.get() or "").strip()
         if not rel_file:
             return
         if not messagebox.askyesno(
-                "Untrack and commit?",
-                f"Run `git rm --cached -- {rel_file}` and commit?\n\n"
-                "This is the lightweight 'stop tracking from now on' step "
-                "that has to happen before the full history scrub. The "
-                "file stays on disk; only its index entry is removed.",
+                "Untrack file?",
+                f"Run `git rm --cached -- {rel_file}` then open the Commit\n"
+                "dialog so you can compose (and AI-suggest) the message?\n\n"
+                "The file stays on disk; only its tracking entry is removed.",
                 parent=self, default="no"):
             return
         self._wf_action_btn.configure(state=tk.DISABLED)
-        self._log_append(f"--- Untracking + committing {rel_file} ---")
+        self._log_append(f"--- Untracking {rel_file} ---")
 
         def _worker():
-            ok, log = untrack_and_commit(
+            ok, log = git_rm_cached(
                 self._path, self._cfg.git_exe, rel_file,
                 on_log=self._log_append_threadsafe,
             )
-            self.after(0, lambda: _done(ok, log))
+            self.after(0, lambda: _done(ok))
 
-        def _done(ok, _log):
+        def _done(ok: bool):
             try:
                 if not self.winfo_exists():
                     return
             except tk.TclError:
                 return
-            # Re-probe working tree state.
-            self._preflight = preflight(self._path, self._cfg.git_exe)
-            self._refresh_state()
             if not ok:
-                self._log_append("[untrack+commit FAILED — see output above]")
+                self._log_append("[git rm --cached FAILED — see output above]")
+                self._preflight = preflight(self._path, self._cfg.git_exe)
+                self._refresh_state()
+                return
+            # Open the full commit dialog so the user gets AI-suggest.
+            self._open_commit_dialog_after_untrack(rel_file)
 
         threading.Thread(target=_worker, daemon=True).start()
+
+    def _open_commit_dialog_after_untrack(self, rel_file: str):
+        """Open GitCommitDialog after ``git rm --cached`` succeeds.
+
+        The dialog's callback runs the actual ``git commit`` so the user
+        can review, AI-suggest, and edit the message before committing.
+        """
+        import subprocess as _sp
+
+        try:
+            from constants import CREATE_NO_WINDOW as _CNW
+        except ImportError:
+            _CNW = 0
+
+        try:
+            status_proc = _sp.run(
+                [self._cfg.git_exe, "-C", self._path, "status", "--short"],
+                capture_output=True, text=True, timeout=10,
+                encoding="utf-8", errors="replace",
+                creationflags=_CNW,
+            )
+            status_out = status_proc.stdout
+        except Exception:
+            status_out = ""
+
+        def _commit_callback(path: str, message: str, selected: list):
+            """Stage-and-commit callback wired into GitCommitDialog."""
+            if not selected:
+                return
+            # selected may be list[str] (legacy) or list[(filename, xy)]
+            if selected and isinstance(selected[0], str):
+                selected = [(f, "??") for f in selected]
+
+            # xy[1] == ' ' means index-only change — already staged, no add.
+            files_to_add = [f for f, xy in selected
+                            if len(xy) >= 2 and xy[1] != " "]
+
+            def _worker():
+                try:
+                    if files_to_add:
+                        _sp.run(
+                            [self._cfg.git_exe, "-C", path, "add", "--"]
+                            + files_to_add,
+                            capture_output=True, timeout=15,
+                            encoding="utf-8", errors="replace",
+                            creationflags=_CNW,
+                        )
+                    _sp.run(
+                        [self._cfg.git_exe, "-C", path, "commit", "-m", message],
+                        capture_output=True, timeout=30,
+                        encoding="utf-8", errors="replace",
+                        creationflags=_CNW,
+                    )
+                finally:
+                    self.after(0, self._post_commit_refresh)
+
+            threading.Thread(target=_worker, daemon=True).start()
+
+        from dialogs.git_commit import GitCommitDialog
+        GitCommitDialog(self, self._path, status_out, True,
+                        _commit_callback, self._cfg)
+
+    def _post_commit_refresh(self):
+        """Re-probe git state after the commit dialog completes."""
+        try:
+            if not self.winfo_exists():
+                return
+        except tk.TclError:
+            return
+        self._preflight = preflight(self._path, self._cfg.git_exe)
+        self._refresh_state()
 
     def _on_scrub_now(self):
         rel_file = (self._selected_file.get() or "").strip()
@@ -602,21 +734,76 @@ class ScrubHistoryDialog(tk.Toplevel):
         threading.Thread(target=_worker, daemon=True).start()
 
     def _show_postscrub_guidance(self, rel_file: str):
-        """Layer 8 — post-scrub force-push guidance."""
-        head = self._preflight.get("head_branch") or "<branch>"
-        guidance = (
-            f"✓ Scrub succeeded. '{rel_file}' is no longer in any commit.\n\n"
-            f"Next step (manual — review then run):\n\n"
-            f"    git push --force-with-lease origin {head}\n\n"
-            f"⚠ Anyone who has cloned this repo will need to re-clone — "
-            f"their old history is now divergent.\n\n"
-            f"To undo (only works BEFORE you force-push):\n\n"
-            f"    git reset --hard {self._backup_branch_name}"
+        """Layer 8 — post-scrub: surface the Force Push button.
+
+        Rather than showing a messagebox with a manual command to copy,
+        we reveal the Force Push button in the bottom action bar so the
+        user can complete the workflow entirely within the manager.
+        """
+        head = self._preflight.get("head_branch") or "HEAD"
+        self._head_branch = head
+        self._log_append(
+            f"\n✓ Scrub complete — '{rel_file}' erased from all commits.\n"
+            f"\nTo undo (BEFORE force-push only):\n"
+            f"    git reset --hard {self._backup_branch_name}\n"
+            f"\nWhen ready, click ⬆  Force Push to GitHub below."
         )
-        self._log_append("\n" + guidance)
-        messagebox.showinfo(
-            "Scrub complete — manual force-push required",
-            guidance, parent=self)
+        # Swap bottom-bar: dim Scrub Now, reveal Force Push
+        self._scrub_btn.configure(state=tk.DISABLED, text="✓ Scrubbed")
+        self._force_push_btn.pack(side=tk.RIGHT, padx=(6, 0))
+
+    def _on_force_push(self):
+        """Force-push the rewritten history to origin."""
+        head = getattr(self, "_head_branch", None) \
+               or self._preflight.get("head_branch") or "HEAD"
+        if not messagebox.askyesno(
+                "⚠  Force Push — overwrite remote history?",
+                f"Push rewritten history to origin/{head}.\n\n"
+                "Anyone who has cloned this repo will need to re-clone "
+                "afterwards — their local history is now divergent.\n\n"
+                "Uses --force-with-lease (refuses if someone else pushed\n"
+                "new commits since your last fetch).\n\n"
+                "Proceed?",
+                parent=self, default="no", icon="warning"):
+            return
+
+        self._force_push_btn.configure(state=tk.DISABLED, text="⬆  Pushing…")
+        self._log_append(f"\n--- Force-pushing to origin/{head} ---")
+
+        def _worker():
+            ok, _ = force_push(
+                self._path, self._cfg.git_exe, head,
+                on_log=self._log_append_threadsafe,
+            )
+            self.after(0, lambda: _done(ok))
+
+        def _done(ok: bool):
+            try:
+                if not self.winfo_exists():
+                    return
+            except tk.TclError:
+                return
+            if ok:
+                self._force_push_btn.configure(
+                    state=tk.DISABLED, text="✓ Force-pushed")
+                self._log_append(
+                    "✓ Force-push succeeded — remote history is now clean.")
+                messagebox.showinfo(
+                    "Done — remote history rewritten",
+                    "Force-push succeeded.\n\n"
+                    "The file is gone from the remote repository's history.\n\n"
+                    "Anyone who had a clone will need to re-clone to stay\n"
+                    "in sync.",
+                    parent=self)
+            else:
+                self._force_push_btn.configure(
+                    state=tk.NORMAL, text="⬆  Force Push to GitHub")
+                self._log_append(
+                    "[Force-push FAILED — check output above. "
+                    "If the remote has new commits, run git pull --rebase "
+                    "first, then try again.]")
+
+        threading.Thread(target=_worker, daemon=True).start()
 
     # ── Log helpers ───────────────────────────────────────────────────────────
 

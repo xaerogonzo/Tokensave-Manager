@@ -339,8 +339,6 @@ class GitTabController:
                                          if self._git_path else None)
         btn_undo    = ttk.Button(row1, text="↩  Undo Last Commit",
                                  command=self.cmd_git_undo_commit)
-        btn_force_push = ttk.Button(row1, text="⚠  Force Push…",
-                                    command=self.cmd_git_force_push)
         btn_new     = ttk.Button(row2, text="🌿  New Branch",
                                  command=self._branch_mgmt.cmd_git_new_branch)
         btn_switch  = ttk.Button(row2, text="🔀  Switch Branch…",
@@ -359,7 +357,6 @@ class GitTabController:
                                   command=self.cmd_draft_pr)
 
         for btn in (btn_push, btn_pull, btn_fetch, btn_commit, btn_undo,
-                    btn_force_push,
                     btn_new, btn_switch, btn_merge, btn_del, btn_openpr,
                     btn_mergepr, btn_release, btn_draft_pr):
             btn.pack(side=tk.LEFT, padx=(0, 6))
@@ -388,14 +385,6 @@ class GitTabController:
             "Remove the most recent save point, but keep all your changes.\n"
             "Nothing is deleted — your edits stay exactly as they were.\n\n"
             "Useful if you committed too early or with the wrong message.")
-        _Tooltip(btn_force_push,
-            "Force-push the current branch to GitHub, overwriting remote history.\n\n"
-            "Use this ONLY after rewriting history — e.g. after removing a\n"
-            "sensitive file with 'Scrub from History' (⚙ Advanced in Gitignore).\n\n"
-            "Uses --force-with-lease, which is safer than --force: it refuses\n"
-            "to overwrite commits someone else pushed since your last fetch.\n\n"
-            "⚠  Anyone who has cloned this repo will need to re-clone it\n"
-            "    (their local branch will no longer match the rewritten history).")
         _Tooltip(btn_new,
             "Create a separate copy of the project to try out an idea.\n"
             "Changes on this branch won't touch your main code\n"
