@@ -853,8 +853,26 @@ the test runs into three gating tiers:
 - `test-gate`: PRs to `main`/`master` → HARD gate (failing tests block the merge)
 - `test-postmerge`: pushes to `main`/`master` → HARD gate (catches bad merges)
 
-See `memory/tests_pattern.md` for the fixture catalogue + Tk gotchas (G-A
-through G-K) when writing new tests.
+### Test Manager dialog (v4.13)
+
+The Help tab's **🧪 Test Manager…** button opens a 4-tab dialog that
+covers the full test lifecycle for novice users:
+
+- **Run + View**: per-file last-run status, ▶ Run All / Run Selected /
+  🛑 Stop buttons, and 🔁 Sync PR Checklist (writes back to the open
+  PR via `gh api ... --input -`).
+- **Coverage Gaps**: lists `src/` files without matching tests; one
+  click takes you to the Scaffold tab to generate a starter test file.
+- **Stale Tests**: AST-based scanner flags tests that import deleted
+  modules or non-existent symbols; "Mark as still valid" silences
+  false positives.
+- **Scaffold**: pick a source file + template kind, preview the
+  generated test, click Generate. Generated files pass pytest
+  immediately so you get green feedback before customising.
+
+See `memory/tests_pattern.md` for the fixture catalogue + Tk gotchas
+(G-A through G-K) when writing new tests, and `memory/test_manager.md`
+for the v4.13 decision tree ("when should I add tests?").
 
 ---
 

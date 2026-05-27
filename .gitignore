@@ -7,6 +7,11 @@ manager-config.json
 # ── tokensave index (machine-specific binary database) ──
 .tokensave/
 
+# ── Manager-owned per-project cache (test results, allowlists, etc.) ──
+# Distinct namespace from .tokensave/ to avoid colliding with tokensave's
+# own files. Contains: last_test_run.json, test_allowlist.json (v4.13+).
+.tokensave-manager/
+
 # ── CodeGraph SQLite index (machine-specific binary database) ──
 # Note: .codegraph/config.json and .codegraph/.gitignore ARE tracked —
 # they're per-project indexing config meant to be shared across machines.

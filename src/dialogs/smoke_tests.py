@@ -7,7 +7,6 @@ without leaving the manager.
 """
 from __future__ import annotations
 
-import threading
 import tkinter as tk
 from tkinter import ttk
 
@@ -139,12 +138,19 @@ class SmokeTestsDialog(tk.Toplevel):
         self._run_btn.configure(state=tk.DISABLED)
         self._clear()
         self._set_status("Running…", C["peach"])
-        threading.Thread(target=self._worker, daemon=True).start()
+        # V-E (v4.13): both this dialog and the new TestManagerDialog share
+        # the same background helper in helpers/smoke_runner.py.
+        from helpers.smoke_runner import run_pytest_in_background
 
-    def _worker(self) -> None:
-        from helpers.smoke_runner import run_smoke_tests
-        passed, total, output = run_smoke_tests(self._project_root)
-        self.after(0, lambda: self._on_done(passed, total, output))
+        def _cb(passed: int, total: int, output: str, cancelled: bool) -> None:
+            # Fires from the worker thread → marshal back to Tk main thread.
+            try:
+                self.after(0, lambda: self._on_done(passed, total, output))
+            except tk.TclError:
+                # Dialog destroyed mid-run; drop the callback silently.
+                pass
+
+        run_pytest_in_background(self._project_root, _cb)
 
     def _on_done(self, passed: int, total: int, output: str) -> None:
         try:

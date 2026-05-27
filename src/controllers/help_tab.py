@@ -97,12 +97,14 @@ class HelpTabController:
             command=self._open_tool_manager,
         ).pack(side=tk.TOP, fill=tk.X, padx=(0, 0), pady=(0, 6))
 
-        # Smoke-test runner button — runs the logic-layer test suite and
-        # shows a results dialog so the user can verify all Gemini-critique
-        # fixes are intact without leaving the manager.
+        # v4.13: Test Manager dialog (replaces the v4.12 "Run Smoke Tests"
+        # button). Four tabs: Run+View, Coverage Gaps, Stale Tests,
+        # Scaffold Generator. The old smoke-tests dialog still works
+        # internally (it's reused by the V-E shared background helper),
+        # but novice users get the full test-lifecycle UI here.
         ttk.Button(
-            left_wrap, text="🧪  Run Smoke Tests",
-            command=self._run_smoke_tests,
+            left_wrap, text="🧪  Test Manager…",
+            command=self._open_test_manager,
         ).pack(side=tk.TOP, fill=tk.X, padx=(0, 0), pady=(0, 6))
 
         list_wrap = tk.Frame(left_wrap, bg=C["mantle"])
@@ -266,18 +268,36 @@ class HelpTabController:
             return
         ToolManagerDialog(root, self._cfg)
 
-    def _run_smoke_tests(self) -> None:
-        """Open the smoke-test runner dialog.
+    def _open_test_manager(self) -> None:
+        """Open the v4.13 Test Manager dialog.
 
-        Lazy import — keeps help_tab.py's import graph light. Uses the
-        manager root as parent so the dialog floats above all tabs.
+        Resolves the project root from the manager's currently-active
+        project. Lazy-imports the dialog so help_tab.py stays light.
         """
-        from dialogs.smoke_tests import SmokeTestsDialog
+        import os
+        from dialogs.test_manager import TestManagerDialog
+
         try:
             root = self._help_lb.winfo_toplevel()
         except (tk.TclError, AttributeError):
             return
-        SmokeTestsDialog(root, self._cfg)
+
+        # Resolve the active project root from cfg. Same heuristic as
+        # the old _run_smoke_tests handler.
+        project_root = ""
+        try:
+            project_root = self._cfg.raw.get("projects", [{}])[0].get("path", "") or ""
+        except Exception:
+            project_root = ""
+        if not project_root or not os.path.isdir(project_root):
+            # Fall back to the manager-source dir so the dialog has
+            # SOMETHING to scan (better than crashing on an empty
+            # project_root).
+            project_root = os.path.normpath(
+                os.path.join(os.path.dirname(__file__), "..", "..")
+            )
+
+        TestManagerDialog(root, project_root, self._cfg)
 
     def _help_explain_clicked(self) -> None:
         """Handle the Explain button click — runs on the main thread."""

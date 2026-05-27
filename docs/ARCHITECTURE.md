@@ -199,13 +199,43 @@ Token Save Manager Source/
 │   │   │                          first violation); manager_install_dir at
 │   │   │                          %LOCALAPPDATA%\\TokenSaveManager\\bin\\;
 │   │   │                          is_manager_installed via os.path.commonpath.
-│   │   ├── smoke_runner.py        v4.9 smoke-test runner helpers. `run_smoke_tests`
-│   │   │                          invokes tests/smoke_test.py via subprocess and
-│   │   │                          parses X/Y from the summary line. `install_pre_commit_hook`
-│   │   │                          / `uninstall_pre_commit_hook` / `is_hook_installed`
-│   │   │                          manage .git/hooks/pre-commit using a
-│   │   │                          `# TokenSaveManager-smoke-hook` marker so the manager
-│   │   │                          never overwrites or silently deletes a user's own hook.
+│   │   ├── smoke_runner.py        v4.9/v4.12/v4.13 pytest runner helpers.
+│   │   │                          `run_smoke_tests` (sync) parses X/Y from the
+│   │   │                          summary line. **v4.13 V-E**: `run_pytest_in_background`
+│   │   │                          spawns pytest in a daemon thread and returns a
+│   │   │                          `PytestRun` handle whose `.cancel()` terminates
+│   │   │                          the subprocess (5s grace before SIGKILL) — used
+│   │   │                          by Test Manager's 🛑 Stop button. Hook helpers:
+│   │   │                          `install_pre_commit_hook` / `uninstall_pre_commit_hook`
+│   │   │                          / `is_hook_installed` manage .git/hooks/pre-commit
+│   │   │                          via the `# TokenSaveManager-smoke-hook` marker.
+│   │   ├── test_discovery.py      v4.13 pure helpers for Test Manager. `list_test_files`
+│   │   │                          (V-C: counts both module-level and class-indented
+│   │   │                          `def test_*` via ast.FunctionDef walk),
+│   │   │                          `scan_coverage_gaps` (filename heuristic source→test
+│   │   │                          mapping), `detect_stale_tests` (V-D: top-level imports
+│   │   │                          only — `ast.iter_child_nodes(tree)`, NOT `ast.walk()`
+│   │   │                          — so TYPE_CHECKING / function-scoped / try-guarded
+│   │   │                          imports never false-flag), `load/save_last_run_results`,
+│   │   │                          `load/save_stale_allowlist` (V-B: cache lives in
+│   │   │                          `.tokensave-manager/`, NOT `.tokensave/`).
+│   │   ├── test_scaffold.py       v4.13 template renderer for Test Manager Tab 4.
+│   │   │                          Four embedded multi-line string templates:
+│   │   │                          `pure_helper` / `subprocess_helper` (with G-E
+│   │   │                          import-site mock pattern) / `dialog_tk` (with
+│   │   │                          @mark.tk + tk_root/mock_config fixtures) / `blank`.
+│   │   │                          `generate_test_file` refuses to overwrite existing
+│   │   │                          test files. `preview_test_file` returns the rendered
+│   │   │                          content for live UI previews.
+│   │   ├── pr_checklist.py        v4.13 Sync PR Checklist integration. `get_open_pr`
+│   │   │                          via `gh pr view --json number,body,title`. **V-A**:
+│   │   │                          `update_pr_body` uses `gh api ... -X PATCH --input -`
+│   │   │                          (stdin-piped JSON) — NOT `-f body=...` which
+│   │   │                          URL-encodes and mangles markdown specials.
+│   │   │                          `sync_checklist_section` re-renders only the
+│   │   │                          `### Automated` subsection inside a manager-marked
+│   │   │                          `## Testing checklist` block; refuses to touch
+│   │   │                          hand-written PRs without the marker comment.
 │   │   ├── git_scrub.py           v4.5 privacy feature. Pure helpers for the "Scrub from
 │   │   │                          History" dialog: `has_filter_repo` detection,
 │   │   │                          `install_filter_repo` (pip install --user),
@@ -281,11 +311,28 @@ Token Save Manager Source/
 │   │   │                          snapshotted before scrub and auto-restored if
 │   │   │                          filter-repo deletes it (three-fallback chain:
 │   │   │                          same-session URL → preflight dict → askstring).
-│   │   ├── smoke_tests.py         v4.9 SmokeTestsDialog — opens from Help tab "🧪 Run
-│   │   │                          Smoke Tests" button. Runs tests/smoke_test.py in a
-│   │   │                          background thread; streams colour-coded output (green
-│   │   │                          ok / red FAIL) into a scrolled text pane; bold status
-│   │   │                          bar shows pass/fail summary. Re-runnable.
+│   │   ├── smoke_tests.py         v4.9 SmokeTestsDialog — legacy lightweight runner.
+│   │   │                          Still works (kept as a quick-fire UI) but the v4.13
+│   │   │                          TestManagerDialog is the recommended surface for new
+│   │   │                          users. v4.13 V-E: migrated `_worker` to use the
+│   │   │                          shared `helpers.smoke_runner.run_pytest_in_background`
+│   │   │                          helper so both dialogs share the same plumbing.
+│   │   ├── test_manager.py        v4.13 TestManagerDialog — opens from Help tab
+│   │   │                          "🧪 Test Manager…" button (replaces v4.12's "Run
+│   │   │                          Smoke Tests" button). 4-tab notebook covering the
+│   │   │                          full test lifecycle:
+│   │   │                            Tab 1 — Run + View (per-file last-run state,
+│   │   │                              ▶ Run All / Run Selected / 🛑 Stop, 🔁 Sync PR
+│   │   │                              Checklist via helpers/pr_checklist.py).
+│   │   │                            Tab 2 — Coverage Gaps (filename heuristic; click
+│   │   │                              "Add Tests for Selected" → jumps to Tab 4).
+│   │   │                            Tab 3 — Stale Tests (AST top-level imports only;
+│   │   │                              per-row Mark-as-still-valid + Delete).
+│   │   │                            Tab 4 — Scaffold generator (4 template kinds:
+│   │   │                              pure_helper / subprocess_helper / dialog_tk /
+│   │   │                              blank; live preview + Generate).
+│   │   │                          Visual template: roadmap_mgr.py (Notebook + Treeview).
+│   │   │                          See memory/test_manager.md for the decision tree.
 │   │   ├── cost_viewer.py         CostViewerDialog (2x2 metric grid; bg-threaded fetch)
 │   │   ├── refactor_scout.py      RefactorScoutDialog — scrollable findings panel grouped
 │   │   │                          by kind. Per-card checkboxes + selection toolbar (All/None/
