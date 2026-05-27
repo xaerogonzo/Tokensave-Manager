@@ -73,3 +73,7 @@ npm-debug.log
 yarn-error.log
 package-lock.json
 .pycache__/
+
+# Added by TokenSave Manager
+build.bat
+build.ps1

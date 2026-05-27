@@ -762,7 +762,8 @@ class App(tk.Tk):
                                      # offers a fresh commit prompt of its own
                     UntrackIgnoredDialog(self, path, stale,
                         reason="tracked but listed in .gitignore "
-                               "(blocks commit until untracked)")
+                               "(blocks commit until untracked)",
+                        on_confirm=self._projects._gitops._do_untrack_ignored)
                     return
         # No conflicts, OR user chose to proceed anyway
         status_out, _ = self._shell_capture(
