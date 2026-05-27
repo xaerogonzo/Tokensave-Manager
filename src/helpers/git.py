@@ -40,6 +40,30 @@ def _is_git_repo(path: str, git_exe: str) -> bool:
         return False
 
 
+def _find_gitignored_on_disk(path: str, git_exe: str) -> list:
+    """Return rel paths of files that are gitignored but exist on disk.
+
+    Uses `git ls-files --others --ignored --exclude-standard` which lists
+    untracked files whose paths match the project's .gitignore rules.
+    Directories (trailing /) are excluded — only individual files are returned.
+    Returns [] on any failure (not a repo, git missing, etc.).
+    """
+    try:
+        proc = subprocess.run(
+            [git_exe, "-C", path,
+             "ls-files", "--others", "--ignored", "--exclude-standard"],
+            capture_output=True, text=True, timeout=10,
+            encoding="utf-8", errors="replace",
+            creationflags=CREATE_NO_WINDOW,
+        )
+    except (FileNotFoundError, subprocess.TimeoutExpired):
+        return []
+    if proc.returncode != 0:
+        return []
+    return [ln for ln in proc.stdout.splitlines()
+            if ln.strip() and not ln.endswith("/")]
+
+
 def _find_tracked_but_ignored(path: str, git_exe: str) -> list:
     """Return a list of paths that are TRACKED by git in `path` but ALSO
     match a pattern in `.gitignore`.

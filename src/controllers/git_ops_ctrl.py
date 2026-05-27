@@ -24,11 +24,12 @@ from typing import TYPE_CHECKING, Callable
 import tkinter as tk
 
 from constants import C
-from helpers.git import _find_tracked_but_ignored, _is_git_repo, _is_local_git_repo
+from helpers.git import _find_tracked_but_ignored, _find_gitignored_on_disk, _is_git_repo, _is_local_git_repo
 from helpers.gitignore import _BASELINE_GITIGNORE
 from dialogs.ai_code_review import AICodeReviewDialog
 from dialogs.gitignore import GitignoreDialog
 from dialogs.untrack_ignored import UntrackIgnoredDialog
+from dialogs.private_repo_setup import PrivateRepoSetupDialog
 
 if TYPE_CHECKING:
     from state import ManagerConfig
@@ -171,6 +172,15 @@ class GitOpsController:
                 parent=self._root)
             return
         UntrackIgnoredDialog(self._root, path, files, on_confirm=self._do_untrack_ignored)
+
+    def cmd_create_private_repo(self, path: str) -> None:
+        """Open the wizard to create a local-only git repo for gitignored files."""
+        gitignored = _find_gitignored_on_disk(path, self._cfg.git_exe)
+        PrivateRepoSetupDialog(
+            self._root, path, gitignored,
+            git_exe=self._cfg.git_exe,
+            on_log=self._on_log,
+        )
 
     # ── Worker ────────────────────────────────────────────────────────────────
 
