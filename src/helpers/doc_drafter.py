@@ -20,11 +20,43 @@ from __future__ import annotations
 import os
 import re
 import subprocess
+from dataclasses import dataclass
 
 from constants import CREATE_NO_WINDOW
 from helpers.release import (
     _commits_since, _last_release_tag,
 )
+
+
+@dataclass(frozen=True)
+class PromptBuildResult:
+    """Return type for every ``build_*_prompt`` callable.
+
+    Round-4 architectural prerequisite: as orchestration metadata
+    (alignment flags, warnings, backend hints, section traces, etc.)
+    accretes, growing the tuple length at every callsite is brittle.
+    A frozen dataclass with named fields makes the contract explicit
+    and additive — new fields default to safe values, existing callers
+    keep working.
+
+    Fields:
+      system:    System prompt string.
+      user:      User prompt string.
+      aligned:   True when the candidate-section selector found
+                 token-aligned matches. False only from
+                 ``build_generic_doc_prompt`` when no section scored
+                 highly enough to suggest the commits actually relate
+                 to the target file. Drives the mismatch-detect
+                 askyesno dialog upstream.
+      warnings:  Tuple of user-visible warnings to surface in the
+                 dialog's banner. Currently unused (banner content
+                 is computed at simulate time), but reserved for
+                 future build-time warnings.
+    """
+    system:   str
+    user:     str
+    aligned:  bool                 = True
+    warnings: "tuple[str, ...]"    = ()
 
 
 # Doc files whose modifications mark a commit as "documented".  Used by
@@ -698,30 +730,46 @@ def _split_into_sections(text):
     return sections
 
 
+_ALIGNMENT_THRESHOLD = 2   # v4: top weighted score must reach this to count
+                            # as "aligned". 1 title hit = 3 points, 1 body
+                            # hit = 1 point. Threshold 2 catches title hits
+                            # AND multi-token body matches; excludes
+                            # incidental single-token noise.
+
+
 def _select_candidate_sections(existing_text, changed_files, commits,
                                 max_candidates=5, max_body_chars=8000):
-    """Return list of (title, body) pairs scored by combined-token overlap
-    with the section's title AND body. Three-signal token set (path, scope,
-    subject words) handles both file-rooted documentation and concept-rooted
-    documentation.
+    """Return ``(candidates, aligned)`` — candidates is a list of
+    ``(title, body)`` pairs scored by combined-token overlap with the
+    section's title AND body; ``aligned`` is True iff the top section
+    reached the alignment threshold (≥ 2 weighted points), indicating
+    the commit signals genuinely map to at least one existing section.
 
-    Sections are scored by hit count across title + body. Title hits weigh
-    3× body hits because matching a section's NAME is a much stronger
-    signal than incidental body mentions.
+    Three-signal token set (path, scope, subject words) handles both
+    file-rooted documentation and concept-rooted documentation.
 
-    Fallback: if no section scores > 0, return the top `max_candidates`
-    sections by raw size (largest first) so the model has substantive
-    content. Body-char budget caps cumulative body size to bound prompt
-    width — drops the lowest-scoring trailing candidates first.
+    Sections are scored by hit count across title + body. Title hits
+    weigh 3× body hits — matching a section's NAME is a stronger signal
+    than incidental body mentions.
+
+    Fallback: if no section scores > 0, return top-K by size so the
+    model has substantive content (but ``aligned=False``). Body-char
+    budget caps cumulative body size — wholesale-block drop at
+    boundaries (no mid-section slicing, no unclosed code fences).
+
+    Args:
+        max_body_chars: Per-call body budget. v4: callers pass 4000 for
+                        local backends (Ollama), 8000 for cloud (Haiku).
     """
     sections = _split_into_sections(existing_text)
     if not sections:
-        return []
+        return [], False
 
     tokens = _path_tokens(changed_files) | _subject_tokens(commits)
 
+    aligned = False
     if not tokens:
-        # No signal — fall back to top-K by size
+        # No signal — fall back to top-K by size (aligned stays False)
         ordered = sorted(sections, key=lambda tb: -len(tb[1]))[:max_candidates]
     else:
         scored = []
@@ -734,31 +782,42 @@ def _select_candidate_sections(existing_text, changed_files, commits,
                 scored.append((score, title, body))
         if scored:
             scored.sort(key=lambda t: -t[0])
+            # v4: aligned iff top score reaches threshold — prevents one
+            # stray token overlap from bypassing the mismatch warning.
+            aligned = scored[0][0] >= _ALIGNMENT_THRESHOLD
             ordered = [(t, b) for _, t, b in scored[:max_candidates]]
         else:
             # No token alignment — fall back to top-K by size
             ordered = sorted(sections, key=lambda tb: -len(tb[1]))[:max_candidates]
 
-    # Body-char budget
+    # Body-char budget — wholesale-block drop at boundaries (never
+    # mid-section slicing, which could leave an unclosed code fence).
+    # The `and out` guard ensures the top-scoring section is always
+    # included even if its body alone exceeds the budget.
     out, total = [], 0
     for title, body in ordered:
         if total + len(body) > max_body_chars and out:
             break
         out.append((title, body))
         total += len(body)
-    return out
+    return out, aligned
 
 
 def build_changelog_prompt(commits, classified, existing_unreleased,
                            project_name, project_desc,
-                           changed_files, boundary_note):
-    """Return (system_prompt, user_prompt) for the CHANGELOG tab.
+                           changed_files, boundary_note,
+                           backend_hint=None):
+    """Return ``PromptBuildResult`` for the CHANGELOG tab.
 
     Existing [Unreleased] content is summarised as section name + bullet
     count + scope-prefix vocabulary, NOT dumped verbatim. The patcher
     handles dedup against on-disk content; the model only needs to know
     which section headers exist and what scope-prefix style to match.
+
+    `backend_hint` is unused for CHANGELOG (append-mode patcher, no
+    candidate-section selector). Accepted for uniform builder signature.
     """
+    del backend_hint  # reserved for uniform signature; unused here
     from helpers.changelog_patch import read_section_bullets_from_text
     system = _CHANGELOG_SYSTEM
     parts = [
@@ -835,17 +894,23 @@ def build_changelog_prompt(commits, classified, existing_unreleased,
             for p in changed_files:
                 parts.append(f"- {p}")
 
-    return system, "\n".join(parts)
+    return PromptBuildResult(system=system, user="\n".join(parts))
 
 
 def build_readme_prompt(commits, classified, existing_highlights,
                         project_name, project_desc,
-                        changed_files, boundary_note):
-    """Return (system_prompt, user_prompt) for the README tab.
+                        changed_files, boundary_note,
+                        backend_hint=None):
+    """Return ``PromptBuildResult`` for the README tab.
 
     ``existing_highlights`` is the current body of the 'Recent highlights'
     block (output of ``helpers.readme_patch.read_highlights``).
+
+    `backend_hint` is unused for README (mirror-contract patcher dumps
+    the existing body unconditionally — no body-budget reduction).
+    Accepted for uniform builder signature.
     """
+    del backend_hint  # reserved for uniform signature; unused here
     system = _README_SYSTEM
     parts = [
         f"Project: {project_name}",
@@ -929,7 +994,7 @@ def build_readme_prompt(commits, classified, existing_highlights,
             "echo a terse commit subject verbatim — describe what changed."
         )
 
-    return system, "\n".join(parts)
+    return PromptBuildResult(system=system, user="\n".join(parts))
 
 
 # ── LLM dispatch ────────────────────────────────────────────────────────────
@@ -1153,9 +1218,27 @@ def _is_noop_bullet(bullet):
 
 
 def _looks_truncated(bullet):
+    """Heuristic detector for mid-clause Ollama truncations.
+
+    v4 rule (combines structural markup + word-count + trailing-operator
+    checks). Returns True only when ALL of:
+
+      * The bullet ends on a function-word stopword (`for`, `to`, ...)
+        OR a dangling operator/bracket (`(`, `/`, `=`, `+`, `[`, ...)
+      * AND the bullet has no structural markup (commas, periods,
+        backticks, parens, snake_case identifiers)
+      * AND the bullet is ≤ 12 words
+
+    Real bullets pass at least one of these gates. The rule is
+    deliberately specific: it catches genuine truncation while letting
+    substantive content through.
+    """
     s = (bullet or "").rstrip()
     if not s:
         return False
+
+    # Strip trailing decorations like `... (note)`, `[label](url)`,
+    # ``` `inline-code` ``` — they may hide the real ending word.
     for _ in range(3):
         before = s
         m = re.search(r"\s+\([^()]*\)\s*[:!?.]?\s*$", s)
@@ -1172,12 +1255,48 @@ def _looks_truncated(bullet):
             continue
         if s == before:
             break
+
     if not s:
         return False
+
+    # Terminal sentence punctuation — not truncated.
     if s.endswith((".", ":", "!", "?", ")", "`", '"', "'")):
         return False
+
+    # Trailing-operator garbage: bullet ends mid-clause on `(`, `/`, `=`,
+    # etc. Gemini's specific examples — none end on a stopword (last_word
+    # check below misses them) but they're clearly truncated mid-expression.
+    if s[-1:] in "/=({[<&|+*":
+        return True
+    # Unmatched-opener: more `(` than `)` → dangling clause.
+    if s.count("(") > s.count(")"):
+        return True
+
     last_word = s.split()[-1].lower().rstrip(",;:")
-    return last_word in _TRUNCATION_TRAILING
+    if last_word not in _TRUNCATION_TRAILING:
+        return False
+
+    # High-word-count safety valve. A bullet ≥ 12 words is statistically
+    # unlikely to be a true Ollama truncation (those tend to be short).
+    bare = re.sub(r"^\s*[-*]\s+", "", s).strip()
+    if len(bare.split()) > 12:
+        return False
+
+    # Structural markup integrity. Any non-alphabetic technical character
+    # (`.`, `,`, `/`, `=`, etc.) OR snake_case identifier (`db_pool`) signals
+    # structural intent. `_` is in `\w`, so a bare `[^\w\s\-]` check misses
+    # snake_case — the alternation explicitly catches it.
+    #
+    # IMPORTANT: strip the leading conventional-commit scope prefix
+    # (`- (scope-name) `) before checking — scope parens are markers, not
+    # structural content. Otherwise `- (foo) added X for` would falsely
+    # pass via the `()` chars in the scope marker.
+    s_for_markup = re.sub(r"^\s*[-*]\s+\([^()]*\)\s*", "", s)
+    has_markup = bool(re.search(r"[^\w\s\-]|\b\w+_\w+\b", s_for_markup))
+    if has_markup:
+        return False
+
+    return True
 
 
 def _token_set(bullet):
@@ -1664,7 +1783,23 @@ _ARCHITECTURE_SYSTEM = (
     "- Match the existing document's style: tree-formatted file listings, "
     "one-liner module descriptions, Key-exports annotations.\n"
     "- Cite exported symbol names in backticks: `read_unreleased`, "
-    "`_compute_insert_*`.\n\n"
+    "`_compute_insert_*`.\n"
+    # v4 Fix 2b: hard path-grounding rule with explicit new-module exception.
+    # Local models switch from transformation to synthesis mode otherwise,
+    # producing generic Python project templates like `src/main.py` /
+    # `utils/helpers.py` that don't exist in the actual project.
+    "- File paths in tree-formatted listings must come from one of: the "
+    "candidate section's existing body, OR the changed-files list in the "
+    "user prompt below. Do NOT invent paths that appear in neither source. "
+    "Concrete negative example: do not output `src/main.py`, "
+    "`utils/helpers.py`, or `modules/module1/` unless those paths appear "
+    "verbatim in the prompt.\n"
+    "- Exception for new modules: if commits introduce a deep new file "
+    "like `src/api/v2/routes/users.py`, the implicit parent directories "
+    "(`src/api/v2/`, `src/api/v2/routes/`) may appear in the tree even "
+    "though only the leaf file is in the changed-files list. Render the "
+    "new file at its actual path; the directory hierarchy is inferred "
+    "from that path.\n\n"
     "Example output (illustrative — the actual sections you update will "
     "come from the user prompt):\n\n"
     "## Daemon\n\n"
@@ -1705,20 +1840,34 @@ _ROADMAP_SYSTEM = (
 _MEMORY_SYSTEM = (
     "You author persistent-memory files. Your output is the body text only "
     "— no YAML frontmatter, no code fences, no preamble.\n\n"
+    # v4 Fix 5a: Context block — clarifies that the picker workflow has
+    # already chosen the file. Haiku was falling into "what would you
+    # like me to help with?" mode because the prompt looked like a
+    # meta-instruction.
+    "Context: the user has already selected the memory file (its current "
+    "body appears at the end of the user prompt). Your task is to produce "
+    "NEW or UPDATED content for THAT file based on the commits. Do not "
+    "ask which file; do not ask what update is wanted — extend the body "
+    "in the style of the existing content.\n\n"
     "Format: lead with the key fact, then a `**Why:**` line (reason / "
     "motivation), then a `**How to apply:**` line (when this guidance "
     "kicks in). Link related memories with `[[slug-name]]`.\n\n"
     "Guidelines:\n"
     "- Be specific and actionable. 'Always use X when Y' beats 'Consider X'.\n"
     "- No filler, no hedging.\n\n"
-    "Example output (illustrative):\n\n"
+    # v4 Fix 3: Related: line omitted from example to prevent local
+    # coders from literally echoing the slug. The `[[slug-name]]` syntax
+    # is still documented in the format spec above — model can use it
+    # when context warrants, just not primed to invent a fake slug.
+    "Example output (illustrative — your actual content comes from the "
+    "user prompt's commits and memory body):\n\n"
     "When updating a doc-drafter prompt, run the smoke battery before "
     "shipping; the parser/filter tests catch echo-loop regressions early.\n\n"
     "**Why:** local LLMs drift toward template-echoing when prompts change; "
     "regressions in `parse_grouped_bullets` slip through pyflakes.\n\n"
     "**How to apply:** kicks in whenever any `_*_SYSTEM` constant or "
     "`build_*_prompt` function is touched. Re-run `_smoke_test_doc_drafter` "
-    "before merging. Related: [[round1_results]].\n\n"
+    "before merging.\n\n"
     "<<<END_OF_DRAFT>>>"
 ) + _STATELESS_FILTER_RULE + _ANTI_FABRICATION_RULE + _STOP_MARKER_RULE
 
@@ -1765,8 +1914,19 @@ def _render_commit_summary(commits, classified):
 def _build_replace_mode_prompt(system, doctype_label, commits, classified,
                                 existing_full, project_name, project_desc,
                                 changed_files, boundary_note,
-                                grounding_block, output_reminder):
+                                grounding_block, output_reminder,
+                                backend_hint=None):
     """Shared builder for ARCHITECTURE / ROADMAP / GENERIC.
+
+    Returns ``PromptBuildResult`` — aligned reflects the three-signal
+    selector's verdict (True iff a section reached the alignment
+    threshold; False signals the doc may not match the commits and
+    drives the upstream mismatch-detect askyesno dialog).
+
+    `backend_hint`: pass True when the dispatch target is a local
+    backend (Ollama / openai_compatible on localhost). Halves the
+    candidate-body budget (8000 → 4000 chars) to keep Ollama agentic
+    runs under the 300 s timeout.
 
     Topology (per Theme A + Theme C):
       1. Project / description / boundary
@@ -1806,9 +1966,11 @@ def _build_replace_mode_prompt(system, doctype_label, commits, classified,
 
     # Candidate bodies: full text for the sections most likely affected by
     # this commit range. Bounded by max_body_chars so a 900-line ARCH file
-    # doesn't blow the prompt out.
-    candidates = _select_candidate_sections(
-        existing_full or "", changed_files or [], commits or [])
+    # doesn't blow the prompt out. Halve the budget for local backends.
+    max_body_chars = 4000 if backend_hint else 8000
+    candidates, aligned = _select_candidate_sections(
+        existing_full or "", changed_files or [], commits or [],
+        max_body_chars=max_body_chars)
     parts.append("")
     if candidates:
         parts.append("--- BEGIN CANDIDATE SECTIONS (most likely affected by "
@@ -1827,14 +1989,16 @@ def _build_replace_mode_prompt(system, doctype_label, commits, classified,
     parts.append("")
     parts.append(output_reminder)
 
-    return system, "\n".join(parts)
+    return PromptBuildResult(
+        system=system, user="\n".join(parts), aligned=aligned,
+    )
 
 
 def build_architecture_prompt(commits, classified, existing_full,
                                project_name, project_desc,
                                changed_files, boundary_note,
-                               grounding_block=""):
-    """Return (system, user) for the architecture tab."""
+                               grounding_block="", backend_hint=None):
+    """Return ``PromptBuildResult`` for the architecture tab."""
     reminder = (
         "What to output:\n"
         "- One or more `## Title` blocks updating sections from the "
@@ -1847,14 +2011,15 @@ def build_architecture_prompt(commits, classified, existing_full,
         _ARCHITECTURE_SYSTEM, "ARCHITECTURE.md",
         commits, classified, existing_full, project_name, project_desc,
         changed_files, boundary_note, grounding_block, reminder,
+        backend_hint=backend_hint,
     )
 
 
 def build_roadmap_prompt(commits, classified, existing_full,
                           project_name, project_desc,
                           changed_files, boundary_note,
-                          grounding_block=""):
-    """Return (system, user) for the roadmap tab."""
+                          grounding_block="", backend_hint=None):
+    """Return ``PromptBuildResult`` for the roadmap tab."""
     reminder = (
         "What to output:\n"
         "- One `## Roadmap N — Theme` block (this DocType accepts either an "
@@ -1866,14 +2031,20 @@ def build_roadmap_prompt(commits, classified, existing_full,
         _ROADMAP_SYSTEM, "ROADMAP.md",
         commits, classified, existing_full, project_name, project_desc,
         changed_files, boundary_note, grounding_block, reminder,
+        backend_hint=backend_hint,
     )
 
 
 def build_memory_prompt(commits, classified, existing_body,
                          project_name, project_desc,
                          changed_files, boundary_note,
-                         grounding_block=""):
-    """Return (system, user) for the memory tab."""
+                         grounding_block="", backend_hint=None):
+    """Return ``PromptBuildResult`` for the memory tab.
+
+    `backend_hint` is unused for MEMORY (single-target splice patcher,
+    no candidate-section selector). Accepted for uniform builder signature.
+    """
+    del backend_hint  # reserved for uniform signature; unused here
     system = _MEMORY_SYSTEM
     parts = [f"Project: {project_name}"]
     if project_desc:
@@ -1903,14 +2074,14 @@ def build_memory_prompt(commits, classified, existing_body,
                  "apply time):")
     parts.append("")
     parts.append(body_for_prompt or "(currently empty)")
-    return system, "\n".join(parts)
+    return PromptBuildResult(system=system, user="\n".join(parts))
 
 
 def build_generic_doc_prompt(commits, classified, existing_full,
                               project_name, project_desc,
                               changed_files, boundary_note,
-                              grounding_block=""):
-    """Return (system, user) for the docs_generic / tokensave_guide tab."""
+                              grounding_block="", backend_hint=None):
+    """Return ``PromptBuildResult`` for docs_generic / tokensave_guide tabs."""
     reminder = (
         "What to output:\n"
         "- One or more `## Title` blocks updating sections from the "
@@ -1922,6 +2093,7 @@ def build_generic_doc_prompt(commits, classified, existing_full,
         _GENERIC_DOC_SYSTEM, "document",
         commits, classified, existing_full, project_name, project_desc,
         changed_files, boundary_note, grounding_block, reminder,
+        backend_hint=backend_hint,
     )
 
 

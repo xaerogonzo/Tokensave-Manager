@@ -158,28 +158,44 @@ def _readme_parse_draft(draft_text):
 # ── Prompt wrappers (add grounding_block kwarg for Theme B) ───────────────────
 
 def _changelog_build_prompt(commits, classified, existing, name, desc,
-                             files, boundary, grounding_block=""):
-    system, user = build_changelog_prompt(
-        commits, classified, existing, name, desc, files, boundary)
+                             files, boundary, grounding_block="",
+                             backend_hint=None):
+    result = build_changelog_prompt(
+        commits, classified, existing, name, desc, files, boundary,
+        backend_hint=backend_hint)
+    user = result.user
     if grounding_block:
         # Splice between commit list section and existing content.
         marker = "Current [Unreleased] content"
         idx = user.find(marker)
         if idx >= 0:
             user = user[:idx] + grounding_block + "\n\n" + user[idx:]
-    return system, user
+    # Round-trip through the dataclass — preserves aligned/warnings if
+    # ever populated by build_changelog_prompt (currently always defaults).
+    from helpers.doc_drafter import PromptBuildResult
+    return PromptBuildResult(
+        system=result.system, user=user,
+        aligned=result.aligned, warnings=result.warnings,
+    )
 
 
 def _readme_build_prompt(commits, classified, existing, name, desc,
-                          files, boundary, grounding_block=""):
-    system, user = build_readme_prompt(
-        commits, classified, existing, name, desc, files, boundary)
+                          files, boundary, grounding_block="",
+                          backend_hint=None):
+    result = build_readme_prompt(
+        commits, classified, existing, name, desc, files, boundary,
+        backend_hint=backend_hint)
+    user = result.user
     if grounding_block:
         marker = "Current README"
         idx = user.find(marker)
         if idx >= 0:
             user = user[:idx] + grounding_block + "\n\n" + user[idx:]
-    return system, user
+    from helpers.doc_drafter import PromptBuildResult
+    return PromptBuildResult(
+        system=result.system, user=user,
+        aligned=result.aligned, warnings=result.warnings,
+    )
 
 
 # ── Initial registry entries ──────────────────────────────────────────────────

@@ -27,8 +27,9 @@ from __future__ import annotations
 
 import os
 import threading
+import time
 import tkinter as tk
-from tkinter import ttk
+from tkinter import ttk, messagebox
 from typing import TYPE_CHECKING
 
 from constants import C
@@ -839,6 +840,20 @@ class DocDrafterDialog(tk.Toplevel):
                      bg=C["base"], fg=C["overlay0"],
                      font=("Consolas", 8)).pack(anchor=tk.W, pady=(0, 4))
 
+        # v4 Fix 2a: read-only warning banner above the text widget.
+        # Surfaces simulate-time title-rejection / mismatch warnings
+        # WITHOUT polluting the editable text payload — keeps the Apply
+        # button's data clean. pack_forget'd by default; the
+        # `_show_warning_banner` / `_hide_warning_banner` helpers
+        # toggle visibility.
+        warning_var = tk.StringVar(value="")
+        warning_lbl = tk.Label(
+            frame, textvariable=warning_var,
+            bg=C["base"], fg=C["red"], font=("Segoe UI", 9, "bold"),
+            wraplength=900, justify=tk.LEFT, anchor=tk.W,
+        )
+        # Not packed yet — visibility managed by _show_warning_banner.
+
         # Editable text area for the draft
         txt_wrap = tk.Frame(frame, bg=C["mantle"])
         txt_wrap.pack(fill=tk.BOTH, expand=True)
@@ -910,6 +925,7 @@ class DocDrafterDialog(tk.Toplevel):
         self._tab_widgets[key] = {
             "frame":          frame,
             "text":           txt,
+            "txt_wrap":       txt_wrap,    # v4: pack-anchor for warning banner
             "gen_btn":        gen_btn,
             "apply_btn":      apply_btn,
             "feedback_btn":   feedback_btn,
@@ -917,6 +933,8 @@ class DocDrafterDialog(tk.Toplevel):
             "btn_row":        btn_row,
             "status_var":     status_var,
             "status_lbl":     status_lbl,
+            "warning_var":    warning_var,   # v4: simulate-time warnings
+            "warning_lbl":    warning_lbl,
             "target":         target_file,
             "target_var":     target_var,   # None for fixed-target DocTypes
         }
@@ -1178,13 +1196,61 @@ class DocDrafterDialog(tk.Toplevel):
                 f"({rd.get('range_label', '?')}) — nothing to draft.")
             return
 
+        # v4 Fix 5b: Python-side mismatch detection for generic-doc /
+        # tokensave_guide tabs. Cheap commit-tokens-only `aligned` check
+        # on the main thread before any LLM commitment. If misaligned,
+        # ask the user via stateless askyesno — no leaky Override mode,
+        # no LLM-conditional routing.
+        if key in ("docs_generic", "tokensave_guide"):
+            target_path = self._resolve_target_path(key)
+            if target_path and os.path.exists(target_path):
+                aligned = True   # fail-open default
+                try:
+                    with open(target_path, encoding="utf-8-sig") as f:
+                        existing_full = f.read()
+                    # commits-only token set — skip the synchronous git
+                    # call for changed_files (the worker does the full
+                    # version with path tokens later). Subject + scope
+                    # tokens are sufficient to catch the obvious mismatch.
+                    _, aligned = dd._select_candidate_sections(
+                        existing_full, [], rd["commits"])
+                except (OSError, AttributeError):
+                    pass   # fail-open
+                if not aligned:
+                    target_basename = os.path.basename(target_path)
+                    confirm = messagebox.askyesno(
+                        "No section alignment",
+                        f"The commit subjects don't appear to align with "
+                        f"any section in {target_basename}.\n\n"
+                        f"This file may not be the right target for the "
+                        f"current commit range.\n\n"
+                        f"Generate anyway?",
+                        parent=self,   # X11 z-order anchor
+                        default="no",
+                    )
+                    if not confirm:
+                        self._show_warning_banner(
+                            key,
+                            f"Mismatch — commit subjects don't align "
+                            f"with any section in {target_basename}. "
+                            f"Pick a different target file, widen the "
+                            f"commit range, or click Generate to override.")
+                        return
+
         # Cancel any in-flight generate for THIS tab.
         self._tab_state[key]["stop"].set()
         self._tab_state[key]["stop"] = threading.Event()
         stop_event = self._tab_state[key]["stop"]
 
+        # v4: clear any stale warning banner from a previous generation.
+        self._hide_warning_banner(key)
+
         self._tab_widgets[key]["gen_btn"].configure(state=tk.DISABLED)
         self._set_status(key, "Drafting…", C["overlay0"])
+
+        # v4 Fix 4c: start the elapsed-time tick. Self-cancels on
+        # completion / dialog destruction / stop-event identity change.
+        self._start_draft_tick(key, stop_event)
 
         # Snapshot context for the worker.
         commits     = rd["commits"]
@@ -1232,11 +1298,26 @@ class DocDrafterDialog(tk.Toplevel):
                     tokensave_exe=tokensave_exe,
                 )
 
-            system, user = dt.build_prompt(
+            # v4: build_prompt returns PromptBuildResult — named-field
+            # access. backend_hint=True triggers smaller candidate-body
+            # budget for local agentic backends (Ollama).
+            _provider = (llm_cfg.get("provider") or "").lower()
+            is_local_backend = (
+                _provider == "ollama"
+                or (_provider == "openai_compatible"
+                    and "localhost" in (llm_cfg.get("base_url") or "").lower())
+            )
+            prompt_result = dt.build_prompt(
                 commits, classified, existing,
                 self._project_name, self._project_desc,
                 changed_files, boundary,
-                grounding_block=grounding)
+                grounding_block=grounding,
+                backend_hint=is_local_backend)
+            system = prompt_result.system
+            user = prompt_result.user
+            # prompt_result.aligned / .warnings consumed by step 5
+            # (banner + mismatch askyesno). Not used in the build path
+            # itself — the worker already committed to dispatch_llm.
 
             # C3: append rejection feedback as a note in the user prompt
             # (one-shot — last_rejection was cleared before the worker started).
@@ -1262,10 +1343,15 @@ class DocDrafterDialog(tk.Toplevel):
             )
             ts_exe = getattr(self._cfg, "tokensave_exe", "") or ""
 
+            # v4 Fix 4b: timeout bumped 120 → 300 s. Local agentic loops
+            # (Ollama qwen2.5-coder:14b) with multiple candidate-section
+            # bodies were timing out on ROADMAP / DOCS_GENERIC at the
+            # previous ceiling. 300 s matches the integration-check CLI
+            # audit timeout in update_poller.
             text, err = dd.dispatch_llm(
                 llm_cfg, system, user,
                 claude_cli_exe=self._cfg.claude_cli_exe,
-                cwd=project, timeout=120,
+                cwd=project, timeout=300,
                 gen_params=gen_params or None,
                 examples=dt.examples or None,
                 enable_tokensave_tools=use_ts_tools,
@@ -1277,10 +1363,15 @@ class DocDrafterDialog(tk.Toplevel):
                 return
 
             if err or not text:
-                self.after(0, lambda m=(err or "empty result"):
-                           self._on_generate_error(key, m))
+                self.after(0, lambda m=(err or "empty result"), se=stop_event:
+                           self._on_generate_error(key, m, captured_stop_event=se))
                 return
-            self.after(0, lambda t=text: self._on_generate_done(key, t))
+            # v4: pass the captured stop_event so _on_generate_done can
+            # verify identity. If the user clicked Generate again while
+            # this worker was running, the stop_event in _tab_state has
+            # been replaced and this result is stale.
+            self.after(0, lambda t=text, se=stop_event:
+                       self._on_generate_done(key, t, captured_stop_event=se))
 
         t = threading.Thread(target=_worker, daemon=True,
                               name=f"doc-drafter:{key}")
@@ -1334,15 +1425,27 @@ class DocDrafterDialog(tk.Toplevel):
         except (tk.TclError, RuntimeError, OSError):
             return None
 
-    def _on_generate_done(self, key, raw_text):
+    def _on_generate_done(self, key, raw_text, captured_stop_event=None):
         try:
             if not self.winfo_exists():
+                return
+            # v4: stop the draft tick + stop-event identity guard. If the
+            # captured Event is no longer the current one, a newer
+            # Generate has been started — drop this stale result.
+            self._stop_draft_tick(key)
+            if (captured_stop_event is not None
+                    and captured_stop_event is not self._tab_state.get(
+                        key, {}).get("stop")):
                 return
             # Filter raw model output against existing target content
             filtered_text, t_n, d_n, n_n = self._filter_draft_text(
                 key, raw_text)
             w = self._tab_widgets[key]
             txt = w["text"]
+            # v4: suppress_modified flag guards the programmatic insert
+            # below from clearing the warning banner via the
+            # <<Modified>> handler.
+            self._tab_state[key]["suppress_modified"] = True
             txt.delete("1.0", tk.END)
             has_content = bool(filtered_text.strip())
             if has_content:
@@ -1374,6 +1477,10 @@ class DocDrafterDialog(tk.Toplevel):
                 txt.edit_modified(False)
             except tk.TclError:
                 pass
+            # v4: clear the suppress flag now that the programmatic insert
+            # is complete. Subsequent <<Modified>> events from real user
+            # edits will be honoured.
+            self._tab_state[key]["suppress_modified"] = False
             w["gen_btn"].configure(state=tk.NORMAL)
             # LOAD-BEARING: Apply enabled only when filtered text has content.
             # Empty filtered result means the visible text widget holds the
@@ -1400,6 +1507,12 @@ class DocDrafterDialog(tk.Toplevel):
                     f"All bullets filtered.{suffix}  Click Generate to retry.",
                     C["red"])
         except (tk.TclError, RuntimeError):
+            # Defensive: ensure suppress_modified gets cleared even on
+            # exception so the next Generate doesn't see stale True state.
+            try:
+                self._tab_state[key]["suppress_modified"] = False
+            except KeyError:
+                pass
             return
 
     def _on_text_modified(self, key):
@@ -1411,9 +1524,27 @@ class DocDrafterDialog(tk.Toplevel):
 
         Tk only fires <<Modified>> once per modified-flag toggle; we have to
         reset edit_modified(False) explicitly to keep receiving events.
+
+        v4 extensions:
+          - Skip when `state["suppress_modified"]` is True (programmatic
+            insert in progress — _on_generate_done sets/clears this so its
+            own insert doesn't self-clear the banner).
+          - Clear the warning banner on actual user content mutation. The
+            user has visually acknowledged the warning by starting to fix
+            the draft; if they Ctrl-Z back to bad state, Apply-time
+            validation re-surfaces the rejection.
         """
         try:
             if not self.winfo_exists():
+                return
+            state = self._tab_state.get(key) or {}
+            if state.get("suppress_modified"):
+                # Programmatic insert in progress — don't react.
+                w = self._tab_widgets[key]
+                try:
+                    w["text"].edit_modified(False)
+                except tk.TclError:
+                    pass
                 return
             w = self._tab_widgets[key]
             txt = w["text"]
@@ -1424,6 +1555,8 @@ class DocDrafterDialog(tk.Toplevel):
                               or current.startswith("(no draft yet"))
             if current and not is_placeholder:
                 w["apply_btn"].configure(state=tk.NORMAL)
+            # v4: actual user edit → clear warning banner.
+            self._hide_warning_banner(key)
             txt.edit_modified(False)
             # Phase 1.9: debounced README mirror-warning re-check.  If the
             # user manually adds the missing bullets back, the status bar
@@ -1471,9 +1604,16 @@ class DocDrafterDialog(tk.Toplevel):
         except (tk.TclError, RuntimeError):
             return
 
-    def _on_generate_error(self, key, msg):
+    def _on_generate_error(self, key, msg, captured_stop_event=None):
         try:
             if not self.winfo_exists():
+                return
+            # v4: stop the tick + stop-event identity guard against stale
+            # error callbacks from a superseded generation.
+            self._stop_draft_tick(key)
+            if (captured_stop_event is not None
+                    and captured_stop_event is not self._tab_state.get(
+                        key, {}).get("stop")):
                 return
             self._tab_widgets[key]["gen_btn"].configure(state=tk.NORMAL)
             # Mirror the error into the text widget so it isn't hidden in
@@ -1758,3 +1898,117 @@ class DocDrafterDialog(tk.Toplevel):
                 lbl.configure(fg=fg)
         except (tk.TclError, RuntimeError):
             pass
+
+    # ── v4 Fix 2a: warning banner helpers ─────────────────────────────────
+    #
+    # The banner is a read-only `tk.Label` packed above the text widget.
+    # Used to surface simulate-time title-rejection warnings and the
+    # mismatch-detect dialog's "no LLM call made" message. Critically:
+    # the banner is NOT part of the editable Apply payload, so the user
+    # can't accidentally write the warning into a markdown file.
+
+    def _show_warning_banner(self, key, message):
+        """Display `message` in the warning banner above the tab's text widget."""
+        try:
+            w = self._tab_widgets[key]
+            w["warning_var"].set(f"⚠  {message}")
+            lbl = w["warning_lbl"]
+            # Pack just above the text widget — txt_wrap is the pack anchor.
+            lbl.pack(in_=w["frame"], fill=tk.X, padx=8, pady=(0, 4),
+                     before=w["txt_wrap"])
+        except (tk.TclError, KeyError, RuntimeError):
+            pass
+
+    def _hide_warning_banner(self, key):
+        """Hide the warning banner without clearing its underlying text
+        (so a later show with the same message is cheap)."""
+        try:
+            w = self._tab_widgets[key]
+            w["warning_lbl"].pack_forget()
+            w["warning_var"].set("")
+        except (tk.TclError, KeyError, RuntimeError):
+            pass
+
+    # ── v4 Fix 4c: draft-tick (elapsed time during generation) ───────────
+
+    def _backend_label_for_status(self, key):
+        """Short human-readable backend name for the 'Drafting on X' tick.
+
+        Reads the resolved LLM config at tick time so a backend-override
+        change during generation reflects in the visible label.
+        """
+        try:
+            cfg = self._llm_cfg_resolved() or {}
+        except (AttributeError, RuntimeError):
+            return "LLM"
+        provider = (cfg.get("provider") or "").lower()
+        if provider == "claude_cli":
+            return "Claude CLI"
+        if provider == "ollama":
+            return "Ollama"
+        if provider == "anthropic":
+            return "Anthropic"
+        if provider == "openai":
+            return "OpenAI"
+        if provider == "openai_compatible":
+            base = (cfg.get("base_url") or "").lower()
+            return "Ollama" if "localhost" in base else "OpenAI-compat"
+        return provider or "LLM"
+
+    def _draft_tick(self, key):
+        """Periodic status-bar tick during a long Generate run.
+
+        Updates the status text every second with elapsed seconds, e.g.
+        `"Drafting on Ollama (12s)…"`. Lets the user see the background
+        loop is alive even on 300 s agentic runs (without this, a 5-min
+        block looks like a hang). Self-cancels when:
+          - dialog destroyed (winfo_exists guard)
+          - draft_start_ts cleared (completion / error)
+          - stop_event identity changed (newer generation in flight)
+        """
+        try:
+            if not self.winfo_exists():
+                return
+        except tk.TclError:
+            return
+        state = self._tab_state.get(key) or {}
+        start = state.get("draft_start_ts")
+        if not start:
+            return   # completed / cancelled
+        # Stop-event identity guard against stale tick loops left over
+        # from a previous generation that was superseded.
+        captured = state.get("draft_tick_stop_event")
+        if captured is not None and captured is not state.get("stop"):
+            return
+        elapsed = int(time.monotonic() - start)
+        backend = self._backend_label_for_status(key)
+        self._set_status(key, f"Drafting on {backend} ({elapsed}s)…",
+                         C["overlay0"])
+        try:
+            state["draft_tick_after"] = self.after(
+                1000, lambda k=key: self._draft_tick(k))
+        except tk.TclError:
+            pass
+
+    def _start_draft_tick(self, key, stop_event):
+        """Start the per-second draft tick. Called from _on_generate."""
+        state = self._tab_state.setdefault(key, {})
+        state["draft_start_ts"] = time.monotonic()
+        state["draft_tick_stop_event"] = stop_event
+        try:
+            state["draft_tick_after"] = self.after(
+                1000, lambda k=key: self._draft_tick(k))
+        except tk.TclError:
+            pass
+
+    def _stop_draft_tick(self, key):
+        """Cancel the tick. Called from _on_generate_done / _on_generate_error."""
+        state = self._tab_state.get(key) or {}
+        state["draft_start_ts"] = None
+        state["draft_tick_stop_event"] = None
+        after_id = state.pop("draft_tick_after", None)
+        if after_id is not None:
+            try:
+                self.after_cancel(after_id)
+            except tk.TclError:
+                pass
