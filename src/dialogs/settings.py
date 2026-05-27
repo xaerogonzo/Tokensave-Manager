@@ -792,6 +792,23 @@ class SettingsDialog(tk.Toplevel):
             font=("Segoe UI", 8), bg=C["base"], fg=C["overlay0"],
             justify=tk.LEFT).pack(anchor=tk.W, padx=36, pady=(0, 8))
 
+        # ── Pre-commit smoke tests ────────────────────────────────────────
+        from helpers.smoke_runner import is_hook_installed
+        _active_project = (raw.get("projects") or [{}])[0].get("path") or ""
+        _hook_active = is_hook_installed(_active_project) if _active_project else False
+        self._var_precommit_hook = tk.BooleanVar(value=_hook_active)
+        tk.Checkbutton(body,
+            text="Run smoke tests before commits  (pre-commit hook)",
+            variable=self._var_precommit_hook,
+            bg=C["base"], fg=C["text"], selectcolor=C["surface0"],
+            activebackground=C["base"], activeforeground=C["text"],
+            font=("Segoe UI", 10)).pack(anchor=tk.W, padx=20, pady=(0, 2))
+        tk.Label(body,
+            text="  Installs a .git/hooks/pre-commit script that runs tests/smoke_test.py\n"
+                 "  before every commit.  Only affects the active project's git repo.",
+            font=("Segoe UI", 8), bg=C["base"], fg=C["overlay0"],
+            justify=tk.LEFT).pack(anchor=tk.W, padx=36, pady=(0, 8))
+
         # ── MCP integration ───────────────────────────────────────────────
         ttk.Separator(body, orient="horizontal").pack(fill=tk.X, padx=20, pady=(8, 8))
         tk.Label(body, text="MCP integration",
@@ -1431,6 +1448,28 @@ class SettingsDialog(tk.Toplevel):
             for iid in self._roots_tv.get_children()
         ]
         raw["auto_commit_after_sync"] = self._var_autocommit.get()
+
+        # Pre-commit smoke-test hook — install or uninstall based on toggle.
+        _precommit_wanted = self._var_precommit_hook.get()
+        _active_proj = (raw.get("projects") or [{}])[0].get("path") or ""
+        if _active_proj:
+            from helpers.smoke_runner import (
+                is_hook_installed, install_pre_commit_hook,
+                uninstall_pre_commit_hook,
+            )
+            from tkinter import messagebox as _mb
+            _currently = is_hook_installed(_active_proj)
+            if _precommit_wanted and not _currently:
+                _ok, _msg = install_pre_commit_hook(_active_proj)
+                if not _ok:
+                    _mb.showwarning("Smoke-test hook", _msg, parent=self)
+                    self._var_precommit_hook.set(False)
+            elif not _precommit_wanted and _currently:
+                _ok, _msg = uninstall_pre_commit_hook(_active_proj)
+                if not _ok:
+                    _mb.showwarning("Smoke-test hook", _msg, parent=self)
+                    self._var_precommit_hook.set(True)
+
         raw["draft_pr_backend"]        = self._var_draft_pr_backend.get()
         raw["commit_message_backend"]  = self._var_commit_msg_backend.get()
         raw["enable_llm_grounding"]    = bool(self._var_enable_llm_grounding.get())

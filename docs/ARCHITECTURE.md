@@ -184,6 +184,13 @@ Token Save Manager Source/
 │   │   │                          first violation); manager_install_dir at
 │   │   │                          %LOCALAPPDATA%\\TokenSaveManager\\bin\\;
 │   │   │                          is_manager_installed via os.path.commonpath.
+│   │   ├── smoke_runner.py        v4.9 smoke-test runner helpers. `run_smoke_tests`
+│   │   │                          invokes tests/smoke_test.py via subprocess and
+│   │   │                          parses X/Y from the summary line. `install_pre_commit_hook`
+│   │   │                          / `uninstall_pre_commit_hook` / `is_hook_installed`
+│   │   │                          manage .git/hooks/pre-commit using a
+│   │   │                          `# TokenSaveManager-smoke-hook` marker so the manager
+│   │   │                          never overwrites or silently deletes a user's own hook.
 │   │   ├── git_scrub.py           v4.5 privacy feature. Pure helpers for the "Scrub from
 │   │   │                          History" dialog: `has_filter_repo` detection,
 │   │   │                          `install_filter_repo` (pip install --user),
@@ -248,6 +255,11 @@ Token Save Manager Source/
 │   │   │                          auto-untrack-and-commit preamble; affected-commits
 │   │   │                          display; auto backup branch; confirmation-phrase
 │   │   │                          typing gate; force-push guidance post-scrub.
+│   │   ├── smoke_tests.py         v4.9 SmokeTestsDialog — opens from Help tab "🧪 Run
+│   │   │                          Smoke Tests" button. Runs tests/smoke_test.py in a
+│   │   │                          background thread; streams colour-coded output (green
+│   │   │                          ok / red FAIL) into a scrolled text pane; bold status
+│   │   │                          bar shows pass/fail summary. Re-runnable.
 │   │   ├── cost_viewer.py         CostViewerDialog (2x2 metric grid; bg-threaded fetch)
 │   │   ├── refactor_scout.py      RefactorScoutDialog — scrollable findings panel grouped
 │   │   │                          by kind. Per-card checkboxes + selection toolbar (All/None/
@@ -363,6 +375,15 @@ Token Save Manager Source/
 │   ├── CHANGELOG.md
 │   ├── templates\                 All template files (copied by build.ps1)
 │   └── docs\                      GITHUB_GUIDE.md, ARCHITECTURE.md, ARCHITECTURE_TOKENSAVE.md
+│
+├── tests/
+│   └── smoke_test.py              v4.9 logic-layer smoke test suite — 123 tests,
+│                                  no Tk window, no real network. 14 test classes
+│                                  covering G1–G6 Gemini-critique fixes, alignment
+│                                  scoring, Zip-Slip / rate-limit / path-spoof guards,
+│                                  MCP detection, and filter helpers. Runs in ~0.06 s.
+│                                  Run via manager Help tab → "🧪 Run Smoke Tests" or
+│                                  `python tests/smoke_test.py` directly.
 │
 ├── logs/
 │   └── manager.log                Rotating log (500 KB x 5 backups)

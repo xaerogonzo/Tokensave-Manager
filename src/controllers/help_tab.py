@@ -97,6 +97,14 @@ class HelpTabController:
             command=self._open_tool_manager,
         ).pack(side=tk.TOP, fill=tk.X, padx=(0, 0), pady=(0, 6))
 
+        # Smoke-test runner button — runs the logic-layer test suite and
+        # shows a results dialog so the user can verify all Gemini-critique
+        # fixes are intact without leaving the manager.
+        ttk.Button(
+            left_wrap, text="🧪  Run Smoke Tests",
+            command=self._run_smoke_tests,
+        ).pack(side=tk.TOP, fill=tk.X, padx=(0, 0), pady=(0, 6))
+
         list_wrap = tk.Frame(left_wrap, bg=C["mantle"])
         list_wrap.pack(side=tk.TOP, fill=tk.Y, expand=True)
 
@@ -257,6 +265,19 @@ class HelpTabController:
         except (tk.TclError, AttributeError):
             return
         ToolManagerDialog(root, self._cfg)
+
+    def _run_smoke_tests(self) -> None:
+        """Open the smoke-test runner dialog.
+
+        Lazy import — keeps help_tab.py's import graph light. Uses the
+        manager root as parent so the dialog floats above all tabs.
+        """
+        from dialogs.smoke_tests import SmokeTestsDialog
+        try:
+            root = self._help_lb.winfo_toplevel()
+        except (tk.TclError, AttributeError):
+            return
+        SmokeTestsDialog(root, self._cfg)
 
     def _help_explain_clicked(self) -> None:
         """Handle the Explain button click — runs on the main thread."""

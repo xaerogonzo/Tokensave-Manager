@@ -476,14 +476,32 @@ class ScrubHistoryDialog(tk.Toplevel):
                     return
             except tk.TclError:
                 return
-            if ok:
-                # Re-probe filter-repo.
-                self._preflight = preflight(self._path, self._cfg.git_exe)
-            self._refresh_state()
             if not ok:
                 self._fr_status_lbl.configure(
-                    text="Install failed — see the Output pane.",
+                    text="Install failed — see the Output pane below.",
                     fg=C["red"])
+                self._fr_install_btn.configure(state=tk.NORMAL)
+                return
+
+            # pip exited 0 — re-probe to confirm git can see the script.
+            self._preflight = preflight(self._path, self._cfg.git_exe)
+            if not self._preflight.get("filter_repo"):
+                # pip succeeded but git's subcommand lookup still fails.
+                # Most common cause: pip --user Scripts dir not on PATH in
+                # the current process snapshot. The user should restart the
+                # manager so the new PATH is inherited.  The scrub will also
+                # try the standalone script directly, so it may work anyway.
+                self._fr_status_lbl.configure(
+                    text="pip install succeeded but git can't locate filter-repo yet.\n"
+                         "Restart the manager to refresh PATH, then try again —\n"
+                         "or click Scrub Now directly; the manager will try the\n"
+                         "standalone script as a fallback.",
+                    fg=C["peach"])
+                self._fr_install_btn.configure(state=tk.DISABLED)
+                # Force filter_repo=True so Scrub Now isn't blocked — the
+                # run_scrub fallback path will handle actual invocation.
+                self._preflight["filter_repo"] = True
+            self._refresh_state()
 
         threading.Thread(target=_worker, daemon=True).start()
 

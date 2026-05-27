@@ -50,25 +50,82 @@ except ImportError:
 
 # ── filter-repo availability ──────────────────────────────────────────────────
 
-def has_filter_repo(git_exe: str) -> bool:
-    """Return True if ``git filter-repo`` is available as a git subcommand.
+def _user_scripts_dir() -> str:
+    """Return the pip --user Scripts directory for the running interpreter.
 
-    Detection: invoke ``git filter-repo --version``; rc==0 means installed.
-    Any FileNotFoundError or non-zero return is treated as "not installed".
-    Cached at call-site by the dialog; this helper is safe to call repeatedly.
+    On Windows this is ``%LOCALAPPDATA%\\Python\\PythonXX\\Scripts\\`` (or the
+    equivalent ``site.getuserbase() / Scripts``).  On POSIX it's
+    ``~/.local/bin``.  Returns an empty string on any error.
     """
-    if not git_exe or not os.path.isfile(git_exe):
-        return False
     try:
-        proc = subprocess.run(
-            [git_exe, "filter-repo", "--version"],
-            capture_output=True, text=True, timeout=5,
-            encoding="utf-8", errors="replace",
-            creationflags=CREATE_NO_WINDOW,
-        )
-        return proc.returncode == 0
-    except (FileNotFoundError, subprocess.TimeoutExpired, OSError):
-        return False
+        import site as _site
+        base = _site.getuserbase()
+        if sys.platform == "win32":
+            return os.path.join(base, "Scripts")
+        return os.path.join(base, "bin")
+    except Exception:
+        return ""
+
+
+def _find_filter_repo_script() -> str:
+    """Locate the git-filter-repo standalone script, or return ``""``.
+
+    Tries in order:
+      1. ``shutil.which("git-filter-repo")`` — covers the case where the user
+         scripts dir is already on PATH.
+      2. The pip ``--user`` scripts directory derived from
+         ``site.getuserbase()`` — the newly-installed script may not appear in
+         the current process's PATH snapshot even though it's on disk.
+    """
+    found = shutil.which("git-filter-repo")
+    if found:
+        return found
+    scripts_dir = _user_scripts_dir()
+    if scripts_dir:
+        for name in ("git-filter-repo", "git-filter-repo.exe",
+                     "git-filter-repo.cmd"):
+            candidate = os.path.join(scripts_dir, name)
+            if os.path.isfile(candidate):
+                return candidate
+    return ""
+
+
+def has_filter_repo(git_exe: str) -> bool:
+    """Return True if ``git filter-repo`` (or the standalone script) is found.
+
+    Detection order:
+      1. ``git filter-repo --version`` via the git subcommand mechanism —
+         the canonical check when the Scripts directory is already on PATH.
+      2. ``_find_filter_repo_script()`` — fallback for Windows pip ``--user``
+         installs where the Scripts dir is NOT yet in the process's PATH
+         snapshot.  If the script file exists on disk we treat it as installed;
+         the script itself is invokable directly or via an augmented PATH in
+         ``run_scrub``.
+    """
+    # Primary: git subcommand probe (augmented PATH so newly-installed scripts
+    # are visible even if the current process inherited a stale PATH).
+    scripts_dir = _user_scripts_dir()
+    env = os.environ.copy()
+    if scripts_dir:
+        env["PATH"] = scripts_dir + os.pathsep + env.get("PATH", "")
+
+    if git_exe and os.path.isfile(git_exe):
+        try:
+            proc = subprocess.run(
+                [git_exe, "filter-repo", "--version"],
+                capture_output=True, text=True, timeout=5,
+                encoding="utf-8", errors="replace",
+                creationflags=CREATE_NO_WINDOW,
+                env=env,
+            )
+            if proc.returncode == 0:
+                return True
+        except (FileNotFoundError, subprocess.TimeoutExpired, OSError):
+            pass
+
+    # Fallback: check for the script file directly (covers fresh pip --user
+    # installs where git hasn't picked up the new PATH entry yet).
+    return bool(_find_filter_repo_script())
 
 
 def install_filter_repo(on_log=None) -> Tuple[bool, str]:
@@ -305,28 +362,108 @@ def run_scrub(repo_path: str, git_exe: str, rel_file: str,
             except Exception:
                 pass
 
+    # Build the subprocess environment with the pip --user Scripts dir prepended
+    # so git can find filter-repo even when the current process has a stale PATH
+    # snapshot (common after a fresh pip --user install this session).
+    env = os.environ.copy()
+    scripts_dir = _user_scripts_dir()
+    if scripts_dir:
+        env["PATH"] = scripts_dir + os.pathsep + env.get("PATH", "")
+
+    # Primary: invoke as a git subcommand (git filter-repo --invert-paths …).
+    # Fallback: invoke the standalone script directly if git still can't find it
+    # (covers Windows pip --user paths that git's exec-path doesn't scan).
     args = [git_exe, "-C", repo_path, "filter-repo",
             "--invert-paths", "--path", rel_file, "--force"]
     _log(f"$ git filter-repo --invert-paths --path {rel_file} --force")
-    try:
+
+    def _run_args(cmd):
         proc = subprocess.Popen(
-            args,
+            cmd,
             stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
             text=True, encoding="utf-8", errors="replace",
             creationflags=CREATE_NO_WINDOW,
+            env=env,
         )
         if proc.stdout is not None:
             for line in proc.stdout:
                 _log(line.rstrip())
         proc.wait(timeout=600)
+        return proc.returncode
+
+    try:
+        rc = _run_args(args)
     except subprocess.TimeoutExpired:
-        proc.kill()
         _log("[scrub timed out after 10 min]")
         return False, "\n".join(log_chunks)
     except (FileNotFoundError, OSError) as exc:
-        _log(f"scrub launch error: {exc}")
+        _log(f"git filter-repo launch error: {exc}")
         return False, "\n".join(log_chunks)
-    return proc.returncode == 0, "\n".join(log_chunks)
+
+    if rc != 0:
+        # git subcommand failed — git for Windows has its own exec-path and
+        # often can't find scripts installed via pip --user even when they're
+        # on the Windows PATH.  Two fallback strategies in order:
+        #
+        # 1. importlib: find git_filter_repo.py in site-packages and invoke it
+        #    via sys.executable — zero PATH dependency, always works when the
+        #    package is installed.
+        # 2. shutil.which / _find_filter_repo_script(): invoke the .exe/.cmd
+        #    wrapper script directly if importlib can't locate the module.
+        #
+        # Both fallbacks run with cwd=repo_path so filter-repo auto-detects
+        # the repository (same behaviour as `git -C repo_path filter-repo`).
+
+        fallback_script: str = ""
+
+        # Strategy 1: importlib (most reliable on Windows pip --user installs)
+        try:
+            import importlib.util as _ilu
+            spec = _ilu.find_spec("git_filter_repo")
+            if spec and spec.origin and os.path.isfile(spec.origin):
+                fallback_script = spec.origin
+        except Exception:
+            pass
+
+        # Strategy 2: PATH / user-scripts probe
+        if not fallback_script:
+            fallback_script = _find_filter_repo_script()
+
+        if fallback_script:
+            # Determine the interpreter: if it's a .py file, run via Python.
+            # If it's a .exe/.cmd wrapper, execute it directly.
+            if fallback_script.lower().endswith(".py"):
+                direct_cmd = [sys.executable, fallback_script]
+            else:
+                direct_cmd = [fallback_script]
+            direct_cmd += ["--invert-paths", "--path", rel_file, "--force"]
+            _log(f"[git subcommand not found; retrying via: {fallback_script}]")
+
+            def _run_direct(cmd):
+                proc = subprocess.Popen(
+                    cmd,
+                    stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
+                    text=True, encoding="utf-8", errors="replace",
+                    creationflags=CREATE_NO_WINDOW,
+                    cwd=repo_path,   # filter-repo auto-detects the repo from cwd
+                    env=env,
+                )
+                if proc.stdout is not None:
+                    for line in proc.stdout:
+                        _log(line.rstrip())
+                proc.wait(timeout=600)
+                return proc.returncode
+
+            try:
+                rc = _run_direct(direct_cmd)
+            except subprocess.TimeoutExpired:
+                _log("[scrub timed out after 10 min (standalone)]")
+            except (FileNotFoundError, OSError) as exc:
+                _log(f"standalone scrub error: {exc}")
+        else:
+            _log("[no standalone filter-repo script found; cannot retry]")
+
+    return rc == 0, "\n".join(log_chunks)
 
 
 # ── Convenience: full audit before showing the dialog ────────────────────────

@@ -3,6 +3,12 @@
 
 ## [Unreleased]
 
+### Added — v4.9 (smoke-test UI integration, 2026-05-27)
+- (help-tab) `🧪 Run Smoke Tests` button in the Help tab left nav — opens the new `SmokeTestsDialog` without leaving the manager. Button sits directly below the existing `💾 Tool Manager…` button.
+- (dialogs) New `dialogs/smoke_tests.py` — `SmokeTestsDialog` runs `tests/smoke_test.py` in a background thread and streams colour-coded output (`ok` lines in green, `FAIL`/`ERROR` in red) into a scrolled text pane. A bold status bar at the top shows the final pass/fail summary. Re-runnable: click `▶ Run Tests` as many times as needed; the output clears and re-streams each time.
+- (helpers) New `helpers/smoke_runner.py` — `run_smoke_tests(project_root)` invokes the test script via subprocess and parses the `X/Y passed` summary from its output. `install_pre_commit_hook` / `uninstall_pre_commit_hook` / `is_hook_installed` manage a `.git/hooks/pre-commit` script identified by a `# TokenSaveManager-smoke-hook` marker — the manager never overwrites a hook it didn't write, and never deletes a user's custom hook.
+- (settings) New **"Run smoke tests before commits"** checkbox in Settings → Behaviour. Reads the current hook state at dialog open; installs or uninstalls the hook on Save. If a conflicting custom hook already exists, surfaces a `showwarning` with the hook path and instructions, and reverts the checkbox — the user must remove their hook manually first.
+
 ### Added — v4.8 (Tool Manager + binary lifecycle, 2026-05-27)
 - (tool-manager) New `dialogs/tool_manager.py` — unified install / update / uninstall dialog covering BOTH code-graph tools in one place. Per-tool rows show binary status (path + version + manager-managed vs external) and MCP-wiring status. Shared output log pane streams subprocess stdout in real time. Sticky-bottom Close bar (v4.5 layout convention).
 - (install-codegraph) New `helpers/install_codegraph.py` — npm-driven lifecycle: `install_codegraph`, `update_codegraph` (uses `@latest` form for Windows reliability), `uninstall_codegraph`, `codegraph_version`, `detect_codegraph_after_install` 3-step PATH-fallback chain (G-B fix). All callsites take `npm_exe` as resolved absolute path — never bare `"npm"` (G-A fix).

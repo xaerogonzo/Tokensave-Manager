@@ -339,6 +339,8 @@ class GitTabController:
                                          if self._git_path else None)
         btn_undo    = ttk.Button(row1, text="↩  Undo Last Commit",
                                  command=self.cmd_git_undo_commit)
+        btn_force_push = ttk.Button(row1, text="⚠  Force Push…",
+                                    command=self.cmd_git_force_push)
         btn_new     = ttk.Button(row2, text="🌿  New Branch",
                                  command=self._branch_mgmt.cmd_git_new_branch)
         btn_switch  = ttk.Button(row2, text="🔀  Switch Branch…",
@@ -357,6 +359,7 @@ class GitTabController:
                                   command=self.cmd_draft_pr)
 
         for btn in (btn_push, btn_pull, btn_fetch, btn_commit, btn_undo,
+                    btn_force_push,
                     btn_new, btn_switch, btn_merge, btn_del, btn_openpr,
                     btn_mergepr, btn_release, btn_draft_pr):
             btn.pack(side=tk.LEFT, padx=(0, 6))
@@ -385,6 +388,14 @@ class GitTabController:
             "Remove the most recent save point, but keep all your changes.\n"
             "Nothing is deleted — your edits stay exactly as they were.\n\n"
             "Useful if you committed too early or with the wrong message.")
+        _Tooltip(btn_force_push,
+            "Force-push the current branch to GitHub, overwriting remote history.\n\n"
+            "Use this ONLY after rewriting history — e.g. after removing a\n"
+            "sensitive file with 'Scrub from History' (⚙ Advanced in Gitignore).\n\n"
+            "Uses --force-with-lease, which is safer than --force: it refuses\n"
+            "to overwrite commits someone else pushed since your last fetch.\n\n"
+            "⚠  Anyone who has cloned this repo will need to re-clone it\n"
+            "    (their local branch will no longer match the rewritten history).")
         _Tooltip(btn_new,
             "Create a separate copy of the project to try out an idea.\n"
             "Changes on this branch won't touch your main code\n"
@@ -446,7 +457,7 @@ class GitTabController:
             lambda e: self._show_draft_pr_menu(e, btn_draft_pr))
 
         self._git_all_btns       = [self._btn_set_remote, btn_push, btn_pull,
-                                     btn_commit, btn_undo, btn_new,
+                                     btn_commit, btn_undo, btn_force_push, btn_new,
                                      btn_switch, btn_merge, btn_del, btn_openpr,
                                      btn_mergepr, btn_release, btn_draft_pr]
         self._git_push_pull_btns = [btn_push, btn_pull, btn_openpr]
@@ -677,6 +688,55 @@ class GitTabController:
                 out, rc = self._on_shell(
                     [self._cfg.git_exe, "-C", path, "push", "-u", "origin", "HEAD"], path,
                     env=_GIT_ENV_NO_PROMPT)
+                col = C["green"] if rc == 0 else C["red"]
+                for line in out.strip().splitlines()[-6:]:
+                    self._log_queue.put((f"  {line}", col))
+                if rc != 0 and _is_auth_error(out):
+                    self._tab.after(0, lambda: messagebox.showinfo(
+                        "GitHub Authentication Required",
+                        "GitHub needs to verify your identity.\n\n"
+                        "Open a terminal in this project folder and run:\n"
+                        "    git push\n\n"
+                        "A browser window will open asking you to log in to GitHub.\n"
+                        "After that, this button will work normally.",
+                        parent=self._root))
+            finally:
+                self._tab.after(0, self._git_end_op)
+
+        threading.Thread(target=worker, daemon=True).start()
+
+    def cmd_git_force_push(self):
+        """Force-push current branch using --force-with-lease (safe force push)."""
+        path = self._git_path
+        if not path:
+            return
+        if self._git_op_in_flight:
+            return
+        confirmed = messagebox.askyesno(
+            "⚠  Force Push — are you sure?",
+            "Force-pushing rewrites the remote branch history.\n\n"
+            "This is safe to use after 'Scrub from History' removed a\n"
+            "sensitive file — but anyone who has cloned this repo will need\n"
+            "to re-clone afterwards (their history will no longer match).\n\n"
+            "Uses --force-with-lease, which refuses to overwrite commits\n"
+            "that someone else pushed since your last fetch.\n\n"
+            "Force-push now?",
+            icon="warning",
+            default="no",
+            parent=self._root,
+        )
+        if not confirmed:
+            return
+        name = os.path.basename(path)
+        self._on_log(f"[{name}] Force-pushing…", C["peach"])
+        self._git_begin_op()
+
+        def worker():
+            try:
+                out, rc = self._on_shell(
+                    [self._cfg.git_exe, "-C", path,
+                     "push", "--force-with-lease", "origin", "HEAD"],
+                    path, env=_GIT_ENV_NO_PROMPT)
                 col = C["green"] if rc == 0 else C["red"]
                 for line in out.strip().splitlines()[-6:]:
                     self._log_queue.put((f"  {line}", col))
