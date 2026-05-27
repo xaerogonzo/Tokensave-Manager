@@ -24,7 +24,6 @@ class ScaffoldDialog(tk.Toplevel):
         self.configure(bg=C["base"])
         self.resizable(False, False)
         self.grab_set()
-        self.transient(parent)
         self.path = path
         self.callback = callback
         self._parent = parent

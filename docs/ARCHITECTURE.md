@@ -46,7 +46,10 @@ Token Save Manager Source/
 │   ├── constants.py               Immutable constants: C palette, regex tables,
 │   │                              CREATE_NO_WINDOW, _ANSI, _GIT_ENV_NO_PROMPT,
 │   │                              paths (_BASE_DIR, _CONFIG_PATH, LOG_FILE).
-│   ├── theme.py                   _Tooltip widget (Tk-coupled UI primitive).
+│   ├── theme.py                   _Tooltip widget (Tk-coupled UI primitive) +
+│   │                              bind_mousewheel(canvas) — <Enter>/<Leave>
+│   │                              activate/deactivate pattern so multiple
+│   │                              simultaneous scrollable regions never conflict.
 │   ├── tokensave-wrapper.py       Claude Desktop auto-detection wrapper (~120 lines)
 │   ├── agent.py                   LocalAgent loop for the 🤖 Ask tab — Stage 2
 │   │                              read-only tool calling + Stage 3 write-tool dispatch
@@ -199,7 +202,12 @@ Token Save Manager Source/
 │   │   │                          `create_backup_branch`, `untrack_and_commit`,
 │   │   │                          `run_scrub` (filter-repo --force with safety-net
 │   │   │                          rationale documented inline). BFG documented as
-│   │   │                          manual alternative.
+│   │   │                          manual alternative. v4.10: `get_remote_url` snapshots
+│   │   │                          origin URL before filter-repo removes it;
+│   │   │                          `restore_remote_if_missing` re-adds origin
+│   │   │                          automatically after the scrub; `preflight` dict now
+│   │   │                          includes `remote_url` so the dialog has it even if
+│   │   │                          the user-initiated scrub already cleared the remote.
 │   │   └── doc_drafter.py         LLM-backed documentation draft helpers (Roadmap-6 +
 │   │                              cascade v3-v4.4 hardening). Key exports:
 │   │                              `build_*_prompt` (all return `PromptBuildResult`);
@@ -255,6 +263,12 @@ Token Save Manager Source/
 │   │   │                          auto-untrack-and-commit preamble; affected-commits
 │   │   │                          display; auto backup branch; confirmation-phrase
 │   │   │                          typing gate; force-push guidance post-scrub.
+│   │   │                          v4.10: file-picker rewritten as Canvas+Scrollbar
+│   │   │                          with collapsible ▼/▶ toggle (no 20-item cap, fully
+│   │   │                          scrollable, bind_mousewheel); origin URL is
+│   │   │                          snapshotted before scrub and auto-restored if
+│   │   │                          filter-repo deletes it (three-fallback chain:
+│   │   │                          same-session URL → preflight dict → askstring).
 │   │   ├── smoke_tests.py         v4.9 SmokeTestsDialog — opens from Help tab "🧪 Run
 │   │   │                          Smoke Tests" button. Runs tests/smoke_test.py in a
 │   │   │                          background thread; streams colour-coded output (green
@@ -280,15 +294,17 @@ Token Save Manager Source/
 │   │   │                          5-min event.wait timeout, WM_DELETE_WINDOW = reject,
 │   │   │                          post-timeout expired-state UX, automated test harness
 │   │   │                          in __main__ covering 4 race-safety paths)
-│   │   └── doc_drafter.py         DocDrafterDialog — 📝 Doc Updates… CHANGELOG + README
-│   │                              tabs (Roadmap-6). Per-tab thread isolation via
-│   │                              _tab_state[key]["stop"]. Phase 1.5–2.1 hardening:
-│   │                              bullet-quality filter, mirror-contract (_preserve_score,
-│   │                              bipartite matching, 40% floor), _LITERAL_PLACEHOLDER_RE
-│   │                              literal-placeholder rejection, backend dropdown (Default /
-│   │                              Force Ollama / Force Claude CLI), ProposalBridge honest-diff
-│   │                              via _simulate_changelog_body / _simulate_readme_body (pure
-│   │                              _compute_* helpers). ALL applies route through ProposalBridge.
+│   │   └── doc_drafter.py         DocDrafterDialog — 📝 Doc Updates… 7-tab registry-
+│   │                              driven dialog (CHANGELOG / README / ARCHITECTURE /
+│   │                              ROADMAP / MEMORY / TOKENSAVE_GUIDE / Generic).
+│   │                              Per-tab thread isolation via _tab_state[key]["stop"]
+│   │                              identity (generation token). v4 hardening:
+│   │                              PromptBuildResult, read-only warning banner above
+│   │                              text widget, _suppressed_modified context manager,
+│   │                              Python-side mismatch askyesno short-circuit,
+│   │                              _draft_tick elapsed-time status bar, HARD_TIMEOUT
+│   │                              self-enforced at 310 s (G6). ALL applies route
+│   │                              through ProposalBridge.
 │   │
 │   └── controllers/               Tab controllers + Round-5 sub-controllers extracted
 │       │                          from the original god classes. Each takes cfg via

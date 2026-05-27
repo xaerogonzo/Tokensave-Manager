@@ -33,7 +33,7 @@ from tkinter import font as tkfont
 from typing import TYPE_CHECKING
 
 from constants import C, CREATE_NO_WINDOW
-from theme import _Tooltip
+from theme import _Tooltip, bind_mousewheel
 from helpers.gitignore import (
     _read_gitignore_lines, _write_gitignore_lines, _GITIGNORE_TEMPLATES,
 )
@@ -73,7 +73,6 @@ class GitignoreDialog(tk.Toplevel):
         self.resizable(True, True)
         self.minsize(560, 520)
         self.grab_set()
-        self.transient(parent)
 
         # ── State ──────────────────────────────────────────────────────────
         self._original_lines: list  = _read_gitignore_lines(path)
@@ -143,6 +142,7 @@ class GitignoreDialog(tk.Toplevel):
 
         self._cur_canvas = tk.Canvas(cur_wrap, bg=C["mantle"],
                                      highlightthickness=0, height=180)
+        bind_mousewheel(self._cur_canvas)
         cur_vsb = ttk.Scrollbar(cur_wrap, orient="vertical",
                                 command=self._cur_canvas.yview)
         self._cur_canvas.configure(yscrollcommand=cur_vsb.set)

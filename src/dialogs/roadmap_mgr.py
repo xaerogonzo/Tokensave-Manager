@@ -18,6 +18,7 @@ import tkinter as tk
 from tkinter import messagebox, ttk
 
 from constants import C
+from theme import bind_mousewheel
 
 
 # ── Jaccard helper ────────────────────────────────────────────────────────────
@@ -201,6 +202,7 @@ class RoadmapManagerDialog(tk.Toplevel):
         canvas_frame = tk.Frame(f, bg=C["base"])
         canvas_frame.pack(fill=tk.BOTH, expand=True, padx=8, pady=(0, 8))
         canvas = tk.Canvas(canvas_frame, bg=C["base"], highlightthickness=0)
+        bind_mousewheel(canvas)
         sb = ttk.Scrollbar(canvas_frame, orient=tk.VERTICAL, command=canvas.yview)
         canvas.configure(yscrollcommand=sb.set)
         canvas.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)

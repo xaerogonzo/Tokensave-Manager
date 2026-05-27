@@ -70,7 +70,6 @@ class CodegraphMCPPickerDialog(tk.Toplevel):
         self.resizable(True, True)
         self.minsize(560, 480)
         self.grab_set()
-        self.transient(parent)
 
         # State
         self._agent_vars: dict = {}        # agent_id -> tk.BooleanVar

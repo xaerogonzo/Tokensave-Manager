@@ -32,7 +32,6 @@ class SmokeTestsDialog(tk.Toplevel):
         self.configure(bg=C["base"])
         self.resizable(True, True)
         self.geometry("700x520")
-        self.transient(parent)
 
         # Resolve project root from cfg if available; fall back to cwd.
         import os

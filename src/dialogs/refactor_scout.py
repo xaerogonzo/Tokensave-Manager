@@ -22,6 +22,7 @@ from tkinter import ttk
 from typing import Callable
 
 from constants import C
+from theme import bind_mousewheel
 from helpers.refactor_scout import EVIDENCE_MAX_LINES, Finding, kind_label
 
 
@@ -80,7 +81,6 @@ class RefactorScoutDialog(tk.Toplevel):
         self.title("🔬 Refactor scout")
         self.configure(bg=C["base"])
         self.geometry("960x780")
-        self.transient(parent)
 
         self._project_path = project_path
         self._findings = findings
@@ -194,6 +194,7 @@ class RefactorScoutDialog(tk.Toplevel):
         outer.pack(fill=tk.BOTH, expand=True)
 
         canvas = tk.Canvas(outer, bg=C["base"], highlightthickness=0)
+        bind_mousewheel(canvas)
         vsb = ttk.Scrollbar(outer, orient="vertical", command=canvas.yview)
         canvas.configure(yscrollcommand=vsb.set)
         vsb.pack(side=tk.RIGHT, fill=tk.Y)

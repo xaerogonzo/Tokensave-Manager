@@ -39,16 +39,19 @@ from tkinter import filedialog, messagebox, ttk
 from typing import TYPE_CHECKING
 
 from constants import C
+from theme import bind_mousewheel
 from helpers.git import _find_tracked_but_ignored
 from helpers.git_scrub import (
     build_backup_branch_name,
     create_backup_branch,
     force_push,
+    get_remote_url,
     git_rm_cached,
     install_filter_repo,
     is_tracked_in_head,
     list_affected_commits,
     preflight,
+    restore_remote_if_missing,
     run_scrub,
     working_tree_clean,
 )
@@ -75,7 +78,6 @@ class ScrubHistoryDialog(tk.Toplevel):
         self.resizable(True, True)
         self.minsize(640, 620)
         self.grab_set()
-        self.transient(parent)
 
         # State
         self._selected_file = tk.StringVar(value=initial_file)
@@ -84,6 +86,7 @@ class ScrubHistoryDialog(tk.Toplevel):
         self._backup_branch_name = ""
         self._preflight = preflight(self._path, self._cfg.git_exe)
         self._already_scrubbed = False   # True when 0 commits found + not in HEAD
+        self._saved_remote_url = ""      # Captured before scrub; filter-repo always removes origin
 
         # Build sections — Save-style: bottom bar FIRST so it's always visible.
         self._build_destructive_banner()
@@ -167,7 +170,12 @@ class ScrubHistoryDialog(tk.Toplevel):
         self._fr_install_btn.pack(anchor=tk.W, padx=10, pady=(0, 8))
 
     def _build_file_picker_section(self):
-        """Layer 3 — file picker (tracked-but-ignored list + manual entry)."""
+        """Layer 3 — file picker (tracked-but-ignored list + manual entry).
+
+        The candidate list uses a Canvas+Scrollbar so it stays height-capped
+        and scrollable no matter how many files are tracked.  A ▼/▶ toggle
+        collapses/expands the list so other sections remain reachable.
+        """
         wrap = tk.LabelFrame(
             self, text="Step 2 — pick a file to erase",
             fg=C["subtext"], bg=C["base"],
@@ -175,7 +183,7 @@ class ScrubHistoryDialog(tk.Toplevel):
         )
         wrap.pack(fill=tk.X, padx=18, pady=(4, 4))
 
-        # Manual entry
+        # Manual entry row
         row = tk.Frame(wrap, bg=C["base"])
         row.pack(fill=tk.X, padx=10, pady=(8, 4))
         tk.Label(row, text="Relative path:", bg=C["base"], fg=C["text"],
@@ -187,7 +195,7 @@ class ScrubHistoryDialog(tk.Toplevel):
         ttk.Button(row, text="Browse…",
                    command=self._on_browse).pack(side=tk.LEFT)
 
-        # Tracked-but-ignored quick picker
+        # Tracked-but-ignored quick picker — scrollable, collapsible
         tracked = []
         try:
             if self._cfg.git_exe:
@@ -195,23 +203,64 @@ class ScrubHistoryDialog(tk.Toplevel):
                     self._path, self._cfg.git_exe)
         except Exception:
             tracked = []
-        if tracked:
-            tk.Label(wrap,
-                     text="Tracked-but-ignored candidates (click to fill):",
-                     bg=C["base"], fg=C["overlay0"],
-                     font=("Segoe UI", 8)).pack(anchor=tk.W, padx=10,
-                                                pady=(4, 2))
-            list_wrap = tk.Frame(wrap, bg=C["mantle"])
-            list_wrap.pack(fill=tk.X, padx=10, pady=(0, 8))
-            for f in tracked[:20]:
-                row = tk.Frame(list_wrap, bg=C["mantle"])
-                row.pack(fill=tk.X, padx=2, pady=1)
-                lbl = tk.Label(row, text=f, bg=C["mantle"], fg=C["text"],
-                               font=("Consolas", 9), cursor="hand2",
-                               anchor=tk.W)
-                lbl.pack(side=tk.LEFT, fill=tk.X, expand=True, padx=4)
-                lbl.bind("<Button-1>",
-                         lambda _e, p=f: self._fill_path(p))
+        if not tracked:
+            return
+
+        # Header row with collapse toggle
+        hdr = tk.Frame(wrap, bg=C["base"])
+        hdr.pack(fill=tk.X, padx=10, pady=(4, 2))
+        tk.Label(hdr, text="Tracked-but-ignored candidates (click to fill):",
+                 bg=C["base"], fg=C["overlay0"],
+                 font=("Segoe UI", 8)).pack(side=tk.LEFT)
+        self._picker_collapsed = False
+        toggle_btn = tk.Label(hdr, text="▼ Hide", bg=C["base"],
+                              fg=C["blue"], font=("Segoe UI", 8),
+                              cursor="hand2")
+        toggle_btn.pack(side=tk.RIGHT)
+
+        # Scrollable canvas list (capped at ~190 px ≈ 8–9 rows)
+        list_outer = tk.Frame(wrap, bg=C["mantle"])
+        list_outer.pack(fill=tk.X, padx=10, pady=(0, 8))
+
+        canvas = tk.Canvas(list_outer, bg=C["mantle"],
+                           highlightthickness=0, height=190)
+        vsb = ttk.Scrollbar(list_outer, orient="vertical",
+                            command=canvas.yview)
+        canvas.configure(yscrollcommand=vsb.set)
+        vsb.pack(side=tk.RIGHT, fill=tk.Y)
+        canvas.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
+        bind_mousewheel(canvas)
+
+        body = tk.Frame(canvas, bg=C["mantle"])
+        body_id = canvas.create_window((0, 0), window=body, anchor="nw")
+        canvas.bind("<Configure>",
+                    lambda e: canvas.itemconfigure(body_id, width=e.width))
+        body.bind("<Configure>",
+                  lambda e: canvas.configure(
+                      scrollregion=canvas.bbox("all")))
+
+        for f in tracked:
+            lbl = tk.Label(body, text=f, bg=C["mantle"], fg=C["text"],
+                           font=("Consolas", 9), cursor="hand2",
+                           anchor=tk.W, padx=6, pady=2)
+            lbl.pack(fill=tk.X)
+            lbl.bind("<Button-1>", lambda _e, p=f: self._fill_path(p))
+            lbl.bind("<Enter>",
+                     lambda e: e.widget.configure(bg=C["surface0"]))
+            lbl.bind("<Leave>",
+                     lambda e: e.widget.configure(bg=C["mantle"]))
+
+        # Collapse/expand toggle wires list_outer visibility
+        def _toggle(_evt=None):
+            if self._picker_collapsed:
+                list_outer.pack(fill=tk.X, padx=10, pady=(0, 8))
+                toggle_btn.configure(text="▼ Hide")
+                self._picker_collapsed = False
+            else:
+                list_outer.pack_forget()
+                toggle_btn.configure(text="▶ Show")
+                self._picker_collapsed = True
+        toggle_btn.bind("<Button-1>", _toggle)
 
     def _build_workflow_ordering_preamble(self):
         """Layer 2 — untrack + commit preamble (gates Scrub Now)."""
@@ -714,7 +763,15 @@ class ScrubHistoryDialog(tk.Toplevel):
                 self.after(0, lambda: _done(False,
                     "Backup branch creation FAILED — aborting before scrub."))
                 return
-            # 2. Scrub
+            # 2. Snapshot remote URL — filter-repo unconditionally removes
+            #    all remotes; we restore it automatically before force-push.
+            self._saved_remote_url = get_remote_url(
+                self._path, self._cfg.git_exe)
+            if self._saved_remote_url:
+                self._log_append_threadsafe(
+                    f"(remote URL saved: {self._saved_remote_url})")
+
+            # 3. Scrub
             self._log_append_threadsafe(
                 f"--- Running filter-repo on {rel_file} ---")
             ok_scrub, _ = run_scrub(
@@ -779,6 +836,37 @@ class ScrubHistoryDialog(tk.Toplevel):
         self._log_append(f"\n--- Force-pushing to origin/{head} ---")
 
         def _worker():
+            # filter-repo removes 'origin' during the scrub — re-add it
+            # automatically so the push doesn't fail with "not a git repository".
+            # _saved_remote_url is populated when the scrub ran in this session.
+            # If the dialog was re-opened after a previous scrub session the URL
+            # may be empty; in that case we try to read it from a preflight hint
+            # first, then ask the user if still missing.
+            url = self._saved_remote_url
+            if not url:
+                # Try preflight (reads existing remote config)
+                url = self._preflight.get("remote_url", "")
+            if not url:
+                # Last resort: ask via main thread, block worker until answered
+                import queue
+                q: queue.Queue = queue.Queue()
+                from tkinter.simpledialog import askstring
+                def _ask():
+                    val = askstring(
+                        "Remote URL needed",
+                        "filter-repo removed the origin remote in a previous "
+                        "session.\n\nEnter the GitHub URL to re-add it:",
+                        parent=self)
+                    q.put(val or "")
+                self.after(0, _ask)
+                url = q.get()
+            if url:
+                self._saved_remote_url = url  # cache for subsequent pushes
+            restore_remote_if_missing(
+                self._path, self._cfg.git_exe,
+                "origin", url,
+                on_log=self._log_append_threadsafe,
+            )
             ok, _ = force_push(
                 self._path, self._cfg.git_exe, head,
                 on_log=self._log_append_threadsafe,

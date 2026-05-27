@@ -50,7 +50,7 @@ One-click AI-powered gitignore pattern recommendations in the `.gitignore` edito
 
 Theme: **Markdown Manager, Tokensave-Grounded Drafts, Audit Lifecycle.** Roadmap-6 hardened the doc-drafter for two files (CHANGELOG, README); Roadmap-7 generalizes it into a registry-driven Markdown Manager covering every doc type the project ships, grounds every draft in tokensave file:line context (so Ollama stops hallucinating symbol names and Claude CLI gets the same evidence Ollama does), and turns `docs/ROADMAP.md` from a write-only document into a managed lifecycle (audit → plan → ship).
 
-Roadmap-7 shipped across an extended cascade plan (rounds v3 → v4.5, 2026-05-27). See `~/.claude/plans/write-a-comprehensive-plan-elegant-cascade.md` for the full round-by-round design and audit findings. Per-theme shipping notes below; cumulative entries in CHANGELOG.md `[Unreleased]`.
+Roadmap-7 shipped across an extended cascade plan (rounds v3 → v4.10, 2026-05-27). See `~/.claude/plans/write-a-comprehensive-plan-elegant-cascade.md` for the full round-by-round design and audit findings. Per-theme shipping notes below; cumulative entries in CHANGELOG.md `[Unreleased]`.
 
 ### ✅ Theme A — Markdown Manager via curated DocType registry. Shipped cascade v3-v4 (2026-05-26 → 27).
 `helpers/doc_types.py` exports the `DocType` dataclass; registry seeded with `changelog`, `readme`, `architecture`, `roadmap`, `memory`, `docs_generic`, `tokensave_guide`. Each new patcher (`architecture_patch.py`, `roadmap_patch.py`, `memory_patch.py`, `generic_doc_patch.py`) mirrors the Phase 2.1 pure-`_compute_*` + IO-wrapper shape. DocDrafterDialog now spawns one tab per DocType with the file-picker UI for memory + docs_generic. (`src/helpers/doc_types.py`, `src/helpers/{architecture,roadmap,memory,generic_doc}_patch.py`, `src/helpers/doc_drafter.py`, `src/dialogs/doc_drafter.py`)
@@ -340,7 +340,7 @@ To be explicit about what we're NOT building:
 
 This file is updated whenever a stage ships or its design materially changes.
 
-**Last updated: 2026-05-27** — Roadmap-7 shipped via the cascade plan (rounds v3 → v4.8). Themes A–E all ✅. Highlights:
+**Last updated: 2026-05-27** — Roadmap-7 shipped via the cascade plan (rounds v3 → v4.10). Themes A–E all ✅. Highlights:
 - v3–v4 doc-drafter hardening + multi-section + alignment-aware generic short-circuit
 - v4.1 codegraph parallel grounding + tiered alignment scoring
 - v4.2 grounding everywhere (commit/PR/review/Ask/doc-drafter) + master toggle
@@ -350,6 +350,8 @@ This file is updated whenever a stage ships or its design materially changes.
 - v4.6 per-feature grounding toggles (commit OFF, PR ON) + Draft PR CLI-path grounding via temp-file handoff + grounding visibility badge
 - v4.7 CodeGraph MCP wiring from the manager (auto + per-agent picker + uninstall + status detection)
 - v4.8 Tool Manager dialog — unified install/update/uninstall lifecycle for tokensave + codegraph with Gemini-fix hardening (G-A through G-G)
+- v4.9 Smoke Tests dialog (Help tab → 🧪 Run Smoke Tests, streams colour-coded output)
+- v4.10 UX hardening — full window chrome on all 26 sub-dialogs; `bind_mousewheel` utility wired to every Canvas-using dialog; Scrub History scrollable/collapsible file picker; auto-restore of `origin` remote after filter-repo history scrub; `skip_stale_check` parameter ends the untrack→commit→recheck infinite loop
 
 Cascade plan: `~/.claude/plans/write-a-comprehensive-plan-elegant-cascade.md`. Roadmap-8 section opened above.
 

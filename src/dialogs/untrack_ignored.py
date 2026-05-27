@@ -22,6 +22,7 @@ import tkinter as tk
 from tkinter import ttk, messagebox
 
 from constants import C
+from theme import bind_mousewheel
 
 
 class UntrackIgnoredDialog(tk.Toplevel):
@@ -56,7 +57,6 @@ class UntrackIgnoredDialog(tk.Toplevel):
         self.resizable(True, True)
         self.minsize(540, 380)
         self.grab_set()
-        self.transient(parent)
 
         self._build_header_section(name)
         self._build_explanation_section(reason)
@@ -98,6 +98,7 @@ class UntrackIgnoredDialog(tk.Toplevel):
         list_outer.pack(fill=tk.BOTH, expand=True, padx=18, pady=(0, 8))
         self._canvas = tk.Canvas(list_outer, bg=C["mantle"],
                                  highlightthickness=0, height=180)
+        bind_mousewheel(self._canvas)
         _vsb = ttk.Scrollbar(list_outer, orient="vertical",
                               command=self._canvas.yview)
         self._canvas.configure(yscrollcommand=_vsb.set)

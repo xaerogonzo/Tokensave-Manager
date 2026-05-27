@@ -109,7 +109,6 @@ class ToolManagerDialog(tk.Toplevel):
         self.resizable(True, True)
         self.minsize(640, 540)
         self.grab_set()
-        self.transient(parent)
 
         # Per-tool widget bookkeeping (populated by _build_tool_row).
         self._tool_widgets: dict = {}

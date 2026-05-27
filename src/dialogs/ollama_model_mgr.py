@@ -73,7 +73,6 @@ class OllamaModelManagerDialog(tk.Toplevel):
         self.minsize(640, 500)
         self.geometry("780x620")
         self.grab_set()
-        self.transient(parent)
 
         self._base_url = base_url.rstrip("/") if base_url else "http://localhost:11434"
         self._on_use_for_ai = on_use_for_ai

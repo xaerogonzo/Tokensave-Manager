@@ -370,6 +370,75 @@ def git_rm_cached(repo_path: str, git_exe: str, rel_file: str,
         return False, "\n".join(log_chunks)
 
 
+def get_remote_url(repo_path: str, git_exe: str,
+                   remote: str = "origin") -> str:
+    """Return the fetch URL for ``remote``, or '' if the remote doesn't exist.
+
+    Used to snapshot the URL before ``git filter-repo`` runs, because
+    filter-repo unconditionally removes all remotes as part of its safety
+    model (see 'Why is my origin removed?' in the filter-repo manual).
+    Capturing the URL first lets ``restore_remote_if_missing`` put it back
+    immediately before the force-push.
+    """
+    try:
+        proc = subprocess.run(
+            [git_exe, "-C", repo_path, "remote", "get-url", remote],
+            capture_output=True, text=True, timeout=10,
+            encoding="utf-8", errors="replace",
+            creationflags=CREATE_NO_WINDOW,
+        )
+        return proc.stdout.strip() if proc.returncode == 0 else ""
+    except (FileNotFoundError, subprocess.TimeoutExpired, OSError):
+        return ""
+
+
+def restore_remote_if_missing(repo_path: str, git_exe: str,
+                               remote: str, url: str,
+                               on_log=None) -> bool:
+    """Re-add ``remote`` → ``url`` if it was removed by filter-repo.
+
+    filter-repo always removes remotes during a history rewrite (its
+    'Why is my origin removed?' note in the manual explains this is
+    intentional — it prevents an accidental push of the rewritten
+    history to the wrong remote).  Before force-pushing, the manager
+    re-adds the remote so the push can proceed without manual
+    intervention.
+
+    Returns True if the remote already existed or was re-added
+    successfully; False if the re-add command failed.
+    """
+    def _log(msg: str) -> None:
+        if on_log is not None:
+            try:
+                on_log(msg)
+            except Exception:
+                pass
+
+    if not url:
+        return False
+    # Check whether remote already exists
+    chk = subprocess.run(
+        [git_exe, "-C", repo_path, "remote", "get-url", remote],
+        capture_output=True, text=True, timeout=10,
+        encoding="utf-8", errors="replace",
+        creationflags=CREATE_NO_WINDOW,
+    )
+    if chk.returncode == 0:
+        return True  # still there — nothing to do
+    _log(f"filter-repo removed '{remote}' — re-adding: {url}")
+    add = subprocess.run(
+        [git_exe, "-C", repo_path, "remote", "add", remote, url],
+        capture_output=True, text=True, timeout=10,
+        encoding="utf-8", errors="replace",
+        creationflags=CREATE_NO_WINDOW,
+    )
+    if add.returncode == 0:
+        _log(f"✓ Remote '{remote}' restored.")
+        return True
+    _log(f"✗ Could not re-add remote: {(add.stdout + add.stderr).strip()}")
+    return False
+
+
 def force_push(repo_path: str, git_exe: str, branch: str,
                on_log=None) -> Tuple[bool, str]:
     """Run ``git push --force origin <branch>``.
@@ -608,6 +677,9 @@ def preflight(repo_path: str, git_exe: str) -> dict:
     except (FileNotFoundError, subprocess.TimeoutExpired, OSError):
         pass
     info["working_tree_clean"] = working_tree_clean(repo_path, git_exe)
+    # Remote URL — captured at open so the force-push path can restore it
+    # even when the dialog is re-opened after a previous scrub session.
+    info["remote_url"] = get_remote_url(repo_path, git_exe)
     return info
 
 

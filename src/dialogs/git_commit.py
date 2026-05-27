@@ -26,6 +26,7 @@ from tkinter import ttk, messagebox
 from typing import TYPE_CHECKING
 
 from constants import C
+from theme import bind_mousewheel
 from helpers.commit_messages import CommitSuggestion, _suggest_commit_message
 from helpers.runtime import log
 
@@ -68,7 +69,6 @@ class GitCommitDialog(tk.Toplevel):
         self.resizable(True, True)
         self.minsize(540, 480)
         self.grab_set()
-        self.transient(parent)
         self._path       = path
         self._callback   = callback
         self._is_repo    = is_repo
@@ -145,6 +145,7 @@ class GitCommitDialog(tk.Toplevel):
         list_outer.pack(fill=tk.BOTH, expand=True, padx=20, pady=(0, 6))
         self._canvas = tk.Canvas(list_outer, bg=C["mantle"],
                                  highlightthickness=0, height=160)
+        bind_mousewheel(self._canvas)
         _vsb = ttk.Scrollbar(list_outer, orient="vertical",
                              command=self._canvas.yview)
         self._canvas.configure(yscrollcommand=_vsb.set)

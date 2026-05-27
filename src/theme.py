@@ -63,3 +63,31 @@ class _Tooltip:
                  padx=10, pady=6,
                  wraplength=300,
                  justify=tk.LEFT).pack()
+
+
+def bind_mousewheel(canvas: tk.Canvas) -> None:
+    """Wire mouse-wheel scrolling to a tk.Canvas.
+
+    Uses <Enter>/<Leave> to activate/deactivate bind_all so the binding
+    fires only while the pointer is hovering over this canvas (or its
+    child widgets). Safe when multiple scrollable regions are on screen
+    simultaneously — each one registers/deregisters on hover.
+
+    Call once after the Canvas is created:
+        self._canvas = tk.Canvas(...)
+        bind_mousewheel(self._canvas)
+    """
+    def _scroll(event: tk.Event) -> None:
+        # event.delta is ±120 per notch on Windows; divide to get scroll units
+        canvas.yview_scroll(int(-1 * (event.delta / 120)), "units")
+
+    def _activate(_event: tk.Event | None = None) -> None:
+        canvas.bind_all("<MouseWheel>", _scroll)
+
+    def _deactivate(_event: tk.Event | None = None) -> None:
+        canvas.unbind_all("<MouseWheel>")
+
+    canvas.bind("<Enter>", _activate)
+    canvas.bind("<Leave>", _deactivate)
+    # Also activate when a child widget inside the canvas gets the cursor —
+    # bind_all means the event propagates up, so no child-by-child wiring needed.

@@ -78,7 +78,6 @@ class AICodeReviewDialog(tk.Toplevel):
         self.minsize(700, 500)
         self.geometry("900x720")
         self.grab_set()
-        self.transient(parent)
 
         self._path = path
         self._llm_cfg = llm_cfg

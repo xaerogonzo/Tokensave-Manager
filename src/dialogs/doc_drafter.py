@@ -540,7 +540,6 @@ class DocDrafterDialog(tk.Toplevel):
         self.resizable(True, True)
         self.minsize(720, 580)
         self.grab_set()
-        self.transient(parent)
 
         # ── State ──────────────────────────────────────────────────────────
         self._range_data = None    # set by _refresh_range

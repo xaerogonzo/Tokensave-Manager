@@ -13,6 +13,7 @@ from tkinter import ttk
 from typing import TYPE_CHECKING
 
 from constants import C
+from theme import bind_mousewheel
 from helpers.daemon_cost import parse_tokensave_cost
 
 if TYPE_CHECKING:
@@ -30,11 +31,11 @@ class CostViewerDialog(tk.Toplevel):
         self.configure(bg=C["base"])
         self.resizable(True, True)
         self.minsize(500, 380)
-        self.transient(parent)
         self.grab_set()
 
         # ── Scrollable wrapper ─────────────────────────────────────────────
         self._canvas = tk.Canvas(self, bg=C["base"], highlightthickness=0)
+        bind_mousewheel(self._canvas)
         self._vsb    = ttk.Scrollbar(self, orient="vertical",
                                      command=self._canvas.yview)
         self.body    = tk.Frame(self._canvas, bg=C["base"])

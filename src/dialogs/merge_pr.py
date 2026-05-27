@@ -40,7 +40,6 @@ class MergePRDialog(tk.Toplevel):
         self.minsize(720, 380)
         self.geometry("840x460")
         self.grab_set()
-        self.transient(parent)
 
         self._path = path
         self._prs = prs

@@ -35,6 +35,7 @@ from tkinter import ttk, filedialog, messagebox, simpledialog
 from typing import TYPE_CHECKING
 
 from constants import C, CREATE_NO_WINDOW
+from theme import bind_mousewheel
 from helpers.detection import (
     _detect_git, _detect_gh, _detect_npm, _detect_codegraph, _detect_claude_cli,
     _root_path, _root_label,
@@ -79,7 +80,6 @@ class SettingsDialog(tk.Toplevel):
         self.minsize(640, 500)
         self.geometry("760x700")
         self.grab_set()
-        self.transient(parent)
         self._cfg = cfg
         self._save_fn = save_fn
         self._callback = callback
@@ -95,6 +95,7 @@ class SettingsDialog(tk.Toplevel):
         _scroll_wrap = tk.Frame(self, bg=C["base"])
         _scroll_wrap.pack(side=tk.TOP, fill=tk.BOTH, expand=True)
         _canvas = tk.Canvas(_scroll_wrap, bg=C["base"], highlightthickness=0, bd=0)
+        bind_mousewheel(_canvas)
         _vsb = ttk.Scrollbar(_scroll_wrap, orient="vertical", command=_canvas.yview)
         _canvas.configure(yscrollcommand=_vsb.set)
         _vsb.pack(side=tk.RIGHT, fill=tk.Y)

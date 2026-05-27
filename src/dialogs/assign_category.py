@@ -32,7 +32,6 @@ class AssignCategoryDialog(tk.Toplevel):
         self.configure(bg=C["base"])
         self.resizable(False, False)
         self.grab_set()
-        self.transient(parent)
         self._path     = path
         self._subs_map = subs_by_cat
         self._callback = callback

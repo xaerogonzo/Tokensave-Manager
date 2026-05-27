@@ -40,7 +40,7 @@ Autonomous execution (Stage 5+) will be opt-in per tool with an explicit allowli
 
 ## What's built today (Stages 0 + 1 + 2 + 3 + 4, with cascade-round hardening)
 
-_Last meaningful update: 2026-05-27 — Roadmap-7 cascade rounds v3–v4.5 shipped. Stages 0–4 all live. Stage 5 (limited autonomous mode) remains 💭 considering._
+_Last meaningful update: 2026-05-27 — Roadmap-7 cascade rounds v3–v4.10 shipped. Stages 0–4 all live. Stage 5 (limited autonomous mode) remains 💭 considering._
 
 ### Cross-cutting grounding (Roadmap-7 Theme B)
 
@@ -50,8 +50,6 @@ Every AI surface in the manager (commit messages, PR draft, code review, Ask tab
 - **`build_combined_grounding`** (v4.4 dedup-first-then-truncate) merges both sources with per-source cap (4000 chars default; 2000 for the Ask tab tight-budget path). Line-level dedup eliminates redundancy where both sources cite the same symbols.
 - **Master toggle** `ManagerConfig.enable_llm_grounding` (Settings → "Code-graph grounding") gates the entire pipeline; default ON.
 - **Freshness gate** `helpers/codegraph_freshness.py:ensure_fresh` runs before every codegraph block invocation; if the index is stale (DB mtime > 200 s behind newest source), it blocks briefly to run `codegraph sync` and re-checks. If broken (under-indexed), the dialog surfaces a once-per-session "run a full reindex" prompt.
-
-### Stage 0 — Smart commit-message generation (shipped)
 
 ### Stage 0 — Smart commit-message generation (shipped)
 
