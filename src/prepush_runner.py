@@ -1,8 +1,8 @@
 """src/prepush_runner.py — git pre-push hook entry point.
 
 Invoked by `.git/hooks/pre-push` (installed via the manager's Run Checks
-dialog). Runs the enabled quality checks (syntax, pyflakes, doctor) and
-exits 1 to block the push on any failure, or 0 to allow it.
+dialog). Runs the enabled quality checks (syntax, pyflakes) and exits 1
+to block the push on any failure, or 0 to allow it.
 
 ## Fail-open invariant (infrastructure errors only)
 
@@ -12,9 +12,14 @@ hook philosophy: don't punish the developer because the manager is sick.
 
 The ONLY case we exit 1 is when a check actually runs and fails.
 
-## Claude check
+## Skipped checks (doctor + claude)
 
-Always skipped here — too slow (60s timeout) and token-consuming for
+Doctor is skipped by default: it audits the entire project tree for
+pre-existing style/complexity violations and will block pushes for issues
+the current commit didn't introduce.  Run it manually from the Run Checks
+dialog to track down violations at your own pace.
+
+Claude is always skipped — too slow (60s timeout) and token-consuming for
 automatic push gating. Run it manually from the Run Checks dialog.
 
 ## Usage
@@ -40,8 +45,8 @@ if _HERE not in sys.path:
 _DEFAULT_CHECKS: dict[str, bool] = {
     "syntax":   True,
     "pyflakes": True,
-    "doctor":   True,
-    "claude":   False,  # never runs in pre-push; always skipped
+    "doctor":   False,  # skipped by default — audits pre-existing debt, not new breakage
+    "claude":   False,  # never runs in pre-push; too slow + token cost
 }
 
 
@@ -132,7 +137,8 @@ def main() -> int:
         **_DEFAULT_CHECKS,
         **raw.get("checks_enabled", {}),
     }
-    # claude is never run from the pre-push hook regardless of config
+    # doctor + claude are never run from the pre-push hook regardless of config
+    checks_enabled["doctor"] = False
     checks_enabled["claude"] = False
 
     results = _run_checks(project_path, checks_enabled)
