@@ -122,6 +122,7 @@ class DocType:
     filter_draft:            Callable
     sanity_checks:           list = field(default_factory=list)
     tokensave_recipe:        Any = None
+    codegraph_recipe:        Any = None   # v4.1 — parallel codegraph grounding
     gen_params:              dict = field(default_factory=dict)
     examples:                list = field(default_factory=list)
     doc_anchor_paths:        list = field(default_factory=list)
@@ -280,6 +281,7 @@ REGISTRY["architecture"] = DocType(
     parse_draft=architecture_parse_draft,
     filter_draft=architecture_filter_draft,
     tokensave_recipe="architecture_overview",
+    codegraph_recipe="architecture_overview",   # v4.1 — DSM complements tokensave's call-graph
     gen_params={"temperature": 0.5},
     examples=[],
     doc_anchor_paths=["docs/ARCHITECTURE.md"],
@@ -299,6 +301,7 @@ REGISTRY["roadmap"] = DocType(
     parse_draft=roadmap_parse_draft,
     filter_draft=roadmap_filter_draft,
     tokensave_recipe="roadmap_evidence",
+    codegraph_recipe="roadmap_evidence",   # v4.1 — unlocks `codegraph affected` test-impact signal
     gen_params={},
     examples=[],
     doc_anchor_paths=["docs/ROADMAP.md"],
@@ -320,6 +323,7 @@ REGISTRY["memory"] = DocType(
     parse_draft=memory_parse_draft,
     filter_draft=memory_filter_draft,
     tokensave_recipe="module_deep_dive",
+    codegraph_recipe="module_deep_dive",   # v4.1 — parallel call-graph view
     gen_params={"temperature": 0.5},
     examples=[],
 )

@@ -469,10 +469,11 @@ class ProjectsTabController:
         m.add_command(label="⟳  Force Re-sync",  command=self.cmd_force_sync)
         m.add_command(label="🔍  Doctor",         command=self.cmd_doctor)
         m.add_separator()
-        m.add_command(label="🧠  CodeGraph Init",          command=self.cmd_codegraph_init)
-        m.add_command(label="🧠  CodeGraph Sync",          command=self.cmd_codegraph_sync)
-        m.add_command(label="🧠  CodeGraph Status",        command=self.cmd_codegraph_status)
-        m.add_command(label="🧠  Remove CodeGraph Index…", command=self.cmd_codegraph_remove)
+        m.add_command(label="🧠  CodeGraph Init",            command=self.cmd_codegraph_init)
+        m.add_command(label="🧠  CodeGraph Sync",            command=self.cmd_codegraph_sync)
+        m.add_command(label="🧠  CodeGraph Reindex (Full)…", command=self.cmd_codegraph_reindex)
+        m.add_command(label="🧠  CodeGraph Status",          command=self.cmd_codegraph_status)
+        m.add_command(label="🧠  Remove CodeGraph Index…",   command=self.cmd_codegraph_remove)
         m.add_separator()
         m.add_command(label="📜  Git Log",        command=self.cmd_git_log)
         m.add_command(label="📝  Git Commit…",        command=self.cmd_git_commit)
@@ -509,10 +510,70 @@ class ProjectsTabController:
         self._ctx_menu.tk_popup(event.x_root, event.y_root)
 
     def _on_tree_select(self, event=None) -> None:
-        """Internal handler for <<TreeviewSelect>> — fires the project-select callback."""
+        """Internal handler for <<TreeviewSelect>> — fires the project-select callback.
+
+        v4.3: also kicks a background codegraph autosync when the index is
+        stale, and surfaces a once-per-session reindex prompt when broken.
+        """
         path = self.get_selected_path()
         if path:
             self._on_project_select(path)
+            self._kick_codegraph_autosync(path)
+
+    def _kick_codegraph_autosync(self, path: str) -> None:
+        """Kick a background codegraph autosync for the selected project.
+
+        Two-layer debounced (see codegraph_freshness.kick_autosync).
+        After the check/sync completes:
+          - Updates the "cg" column glyph (✓/⏳/⚠/—) on the main thread.
+          - If the index is broken, fires maybe_prompt_reindex once per session.
+        """
+        exe = self._cfg.codegraph_exe
+        if not exe:
+            return
+        try:
+            from helpers.codegraph_freshness import (
+                kick_autosync, maybe_prompt_reindex,
+            )
+            from helpers.doc_grounding import _codegraph_index_health
+        except ImportError:
+            return
+
+        def _after_autosync():
+            """Called from the autosync worker thread after sync finishes."""
+            try:
+                status, _detail = _codegraph_index_health(path, exe)
+            except Exception:
+                return
+            # Marshal UI updates to the main thread.
+            glyph_map = {
+                "healthy": "✓ indexed",
+                "stale":   "⏳ stale",
+                "broken":  "⚠ under-indexed",
+                "missing": "—",
+            }
+            glyph = glyph_map.get(status, "—")
+            piid = f"proj:{path}"
+
+            def _update_ui():
+                try:
+                    if self._tree.exists(piid):
+                        self._tree.set(piid, "cg", glyph)
+                except tk.TclError:
+                    pass
+                if status == "broken":
+                    root = self._tab.winfo_toplevel()
+                    maybe_prompt_reindex(
+                        root, path, exe,
+                        on_complete=self._on_refresh,
+                    )
+
+            try:
+                self._tab.after(0, _update_ui)
+            except tk.TclError:
+                pass
+
+        kick_autosync(path, exe, on_complete=_after_autosync)
 
     def _insert_pending_row(self, path: str, name: str) -> None:
         """Add a placeholder row while tokensave init is running."""
@@ -630,6 +691,10 @@ class ProjectsTabController:
     def cmd_codegraph_sync(self) -> None:
         if path := self._selected_path():
             self._codegraph.cmd_sync(path)
+
+    def cmd_codegraph_reindex(self) -> None:
+        if path := self._selected_path():
+            self._codegraph.cmd_reindex(path)
 
     def cmd_codegraph_status(self) -> None:
         if path := self._selected_path():

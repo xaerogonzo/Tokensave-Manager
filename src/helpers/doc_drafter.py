@@ -692,18 +692,50 @@ def _path_tokens(changed_files):
     return out
 
 
-def _subject_tokens(commits):
-    """Significant words from commit subjects + scope prefixes (both
-    hyphen and underscore variants)."""
+_COMMIT_SCOPE_RE = re.compile(r"^\s*(\w+)\(([^)]{1,30})\)\s*[:!]")
+
+
+def _scope_prefix_tokens(commits):
+    """Extract `(scope-name)` from conventional-commit subjects, with
+    hyphen and underscore variants generated for cross-style matching
+    against section text (`doc-drafter` and `doc_drafter` both hit).
+
+    Recognises:
+      ``feat(scope): description``
+      ``fix(scope)!: breaking change``
+      ``refactor(scope): ...``
+      etc. — the leading type word is ignored; only the inner scope
+      name is extracted.
+
+    v4.1 Revision C: separated from _subject_tokens so the candidate
+    selector can weight scope tokens HIGHER than free-form subject
+    words — scope prefixes are project-vocabulary signal, generic
+    subject words are noise-prone.
+    """
     out = set()
     for c in commits or []:
         subj = (c.get("subject") if isinstance(c, dict) else str(c)) or ""
-        m = _SCOPE_PREFIX_RE.match("- " + subj)
+        m = _COMMIT_SCOPE_RE.match(subj)
         if m:
-            scope = m.group(1).lower()
+            scope = m.group(2).lower()
             out.add(scope)
             out.add(scope.replace("-", "_"))
             out.add(scope.replace("_", "-"))
+    return out
+
+
+def _subject_tokens(commits):
+    """Free-form significant words from commit subjects (≥ 4 chars,
+    stopword-filtered).
+
+    v4.1 Revision C: NO LONGER includes scope prefixes — those moved to
+    ``_scope_prefix_tokens``. Caller weights this set lower than path
+    and scope tokens because subject words can be generic ("worker",
+    "timeout", "prompt") and produce lexical-poisoning false matches.
+    """
+    out = set()
+    for c in commits or []:
+        subj = (c.get("subject") if isinstance(c, dict) else str(c)) or ""
         for tok in re.findall(r"\b\w{4,}\b", subj.lower()):
             if tok not in _SUBJECT_TOKEN_STOPWORDS:
                 out.add(tok)
@@ -765,25 +797,46 @@ def _select_candidate_sections(existing_text, changed_files, commits,
     if not sections:
         return [], False
 
-    tokens = _path_tokens(changed_files) | _subject_tokens(commits)
+    # v4.1 Revision C: tiered token sets. Path tokens (literal files touched)
+    # and scope-prefix tokens (project-vocabulary commit scopes) carry
+    # CONCRETE evidence — weight 2. Subject-word tokens are weaker —
+    # weight 1. Title hits multiply 3× the base weight regardless of tier.
+    strong_tokens = _path_tokens(changed_files) | _scope_prefix_tokens(commits)
+    weak_tokens   = _subject_tokens(commits) - strong_tokens
 
     aligned = False
-    if not tokens:
-        # No signal — fall back to top-K by size (aligned stays False)
+    if not strong_tokens and not weak_tokens:
+        # No signal at all — fall back to top-K by size (aligned stays False)
         ordered = sorted(sections, key=lambda tb: -len(tb[1]))[:max_candidates]
     else:
         scored = []
         for title, body in sections:
             tl, bl = title.lower(), body.lower()
-            title_hits = sum(1 for t in tokens if t in tl)
-            body_hits  = sum(1 for t in tokens if t in bl)
-            score = title_hits * 3 + body_hits
+            # Title hits — base weight 3.
+            strong_title_hits = sum(1 for t in strong_tokens if t in tl)
+            weak_title_hits   = sum(1 for t in weak_tokens   if t in tl)
+            # Body hits — base weight 1.
+            strong_body_hits  = sum(1 for t in strong_tokens if t in bl)
+            weak_body_hits    = sum(1 for t in weak_tokens   if t in bl)
+            # Tier multiplier: strong × 2, weak × 1.
+            # G3 (v4.4): cap weak-body contribution at 1 (saturating) so
+            # that two stray subject-word body hits (e.g. "update" +
+            # "worker" in any generic doc) score 1, not 2, and therefore
+            # cannot cross the alignment threshold on their own.  Reaching
+            # the threshold of 2 now requires at least one path/scope body
+            # hit (×2), any title hit, or a title+body weak combination.
+            score = (
+                (strong_title_hits * 3 + strong_body_hits) * 2
+                + (weak_title_hits * 3 + min(weak_body_hits, 1)) * 1
+            )
             if score > 0:
                 scored.append((score, title, body))
         if scored:
             scored.sort(key=lambda t: -t[0])
-            # v4: aligned iff top score reaches threshold — prevents one
-            # stray token overlap from bypassing the mismatch warning.
+            # v4 threshold (≥ 2) preserved but semantically tightened by the
+            # tier weighting — a single weak-body hit = 1 point doesn't
+            # cross the bar; a single strong-body hit = 2 points does;
+            # a title hit (any tier) easily passes.
             aligned = scored[0][0] >= _ALIGNMENT_THRESHOLD
             ordered = [(t, b) for _, t, b in scored[:max_candidates]]
         else:
@@ -1181,6 +1234,19 @@ _TRUNCATION_TRAILING = {
     "in", "on", "at", "by", "as", "is", "a", "an",
 }
 
+# Structural-markup characters that indicate a bullet has intentional
+# technical content (not a raw prose fragment). Prose punctuation
+# (comma, semicolon, single-quote) is intentionally excluded so bullets
+# like "- updated the connection pool, " or "- said 'hello' to" are
+# still flagged as truncated.
+#
+# G1 (v4.4): restricted from broad [^\w\s\-] to this explicit set.
+# Note: \b\w+[._]\w+\b matches BOTH snake_case identifiers (db_pool)
+# AND dotted filenames/extensions (config.json, utils.py) — treating
+# both as structural markers. Prose periods that end a sentence are
+# handled by the early endswith(".") check, so mid-token dots are safe.
+_STRUCTURAL_MARKUP_RE = re.compile(r"[`()\[\]/=<>{}|&*]|\b\w+[._]\w+\b")
+
 _STOP_WORDS = {
     "the", "a", "an", "and", "or", "but", "if", "then", "than",
     "of", "to", "in", "on", "at", "by", "as", "for", "with", "from", "into",
@@ -1292,7 +1358,9 @@ def _looks_truncated(bullet):
     # structural content. Otherwise `- (foo) added X for` would falsely
     # pass via the `()` chars in the scope marker.
     s_for_markup = re.sub(r"^\s*[-*]\s+\([^()]*\)\s*", "", s)
-    has_markup = bool(re.search(r"[^\w\s\-]|\b\w+_\w+\b", s_for_markup))
+    # G1 (v4.4): structural chars only — prose commas/periods/quotes
+    # intentionally excluded so "- updated the pool, " is still flagged.
+    has_markup = bool(_STRUCTURAL_MARKUP_RE.search(s_for_markup))
     if has_markup:
         return False
 
@@ -1414,9 +1482,49 @@ def _mirror_contract_check(draft_bullets, existing_bullets,
     return True, matched, missing, []
 
 
+def _merge_wrapped_bullets(bullets_md):
+    """Join indented continuation lines into their preceding bullet.
+
+    v4.1 Revision B: Ollama qwen2.5-coder wraps long bullets aggressively,
+    producing output like:
+
+        - move parser state machine into
+          shared retry coordinator
+
+    The first line ends on a stopword with no markup and would be flagged
+    as truncated by ``_looks_truncated``; the second line is the
+    continuation. Without this preprocessor, the v4 truncation rule
+    would falsely reject the bullet.
+
+    Rules:
+      - A line matching `^\\s{2,}\\S` after a bullet line gets joined onto
+        the bullet with a single space separator.
+      - Tree-character continuations (`├`, `└`, `│`, `─`) are EXCLUDED so
+        tree-formatted listings inside bullets stay multi-line (defensive
+        guard — _filter_bullets isn't called on doctypes that emit trees,
+        but cost-free to be paranoid).
+      - The function is idempotent: bullets already on one line pass
+        through unchanged.
+    """
+    out_lines = []
+    for line in bullets_md.splitlines():
+        if (out_lines
+                and re.match(r"^\s{2,}\S", line)
+                and not re.match(r"^\s{2,}[│├└─]", line)
+                and out_lines[-1].lstrip().startswith(("- ", "* "))):
+            out_lines[-1] = out_lines[-1].rstrip() + " " + line.strip()
+        else:
+            out_lines.append(line)
+    return "\n".join(out_lines)
+
+
 def _filter_bullets(bullets_md, existing_bullets, *,
                     dedup_against_existing=True):
     """Apply truncation / noop / dedup filters to a bullet body.
+
+    v4.1: pre-processes wrapped bullets via _merge_wrapped_bullets so
+    `_looks_truncated` evaluates each bullet as a complete semantic unit
+    rather than fragments.
 
     Drops non-bullet lines entirely (prose paragraphs the model added between
     bullets, footer commentary, code-fence detritus). Blank lines are kept as
@@ -1429,6 +1537,7 @@ def _filter_bullets(bullets_md, existing_bullets, *,
     comparison. The O(1) exact check handles verbatim copies; the fuzzy
     check only runs when exact-match fails.
     """
+    bullets_md = _merge_wrapped_bullets(bullets_md)
     kept = []
     seen_norm = set()
     truncated_n = duplicate_n = noop_n = 0

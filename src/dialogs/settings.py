@@ -652,6 +652,40 @@ class SettingsDialog(tk.Toplevel):
             font=("Segoe UI", 8), bg=C["base"], fg=C["overlay0"],
             justify=tk.LEFT).pack(anchor=tk.W, padx=24, pady=(0, 8))
 
+        ttk.Separator(lf, orient="horizontal").pack(fill=tk.X, padx=8, pady=(0, 6))
+
+        # Code-graph grounding (v4.2) — master toggle for tokensave/codegraph
+        # context injection across commit-message, PR, code-review, doc-drafter.
+        tk.Label(lf, text="Code-graph grounding",
+                 font=("Segoe UI", 9, "bold"),
+                 bg=C["base"], fg=C["text"]).pack(anchor=tk.W, padx=12, pady=(0, 2))
+        # Default ON — matches ManagerConfig.enable_llm_grounding default.
+        _grounding_initial = raw.get("enable_llm_grounding")
+        if _grounding_initial is None:
+            _grounding_initial = True
+        self._var_enable_llm_grounding = tk.BooleanVar(value=bool(_grounding_initial))
+        grounding_chk = ttk.Checkbutton(
+            lf, text="Enable tokensave + codegraph grounding for LLM features",
+            variable=self._var_enable_llm_grounding,
+        )
+        grounding_chk.pack(anchor=tk.W, padx=12, pady=(0, 2))
+        try:
+            from theme import _Tooltip
+            _Tooltip(
+                grounding_chk,
+                "When on, the manager injects tokensave + codegraph context "
+                "into commit-message drafts, PR drafts, AI code review, the "
+                "Ask tab's Claude CLI path, and the doc drafter. Silently "
+                "skipped when neither tool is indexed for the current "
+                "project. Turn off if grounding produces noisy output.",
+            )
+        except Exception:
+            pass
+        tk.Label(lf,
+            text="  Adds structural facts (callers, callees, affected tests) to the prompt.",
+            font=("Segoe UI", 8), bg=C["base"], fg=C["overlay0"],
+            justify=tk.LEFT).pack(anchor=tk.W, padx=24, pady=(0, 8))
+
         # ── Ollama ────────────────────────────────────────────────────────
         ttk.Separator(body, orient="horizontal").pack(fill=tk.X, padx=20, pady=(8, 8))
         tk.Label(body, text="Ollama", font=("Segoe UI", 10, "bold"),
@@ -1097,6 +1131,7 @@ class SettingsDialog(tk.Toplevel):
         raw["auto_commit_after_sync"] = self._var_autocommit.get()
         raw["draft_pr_backend"]        = self._var_draft_pr_backend.get()
         raw["commit_message_backend"]  = self._var_commit_msg_backend.get()
+        raw["enable_llm_grounding"]    = bool(self._var_enable_llm_grounding.get())
         # Persist AI commit-message settings (preserves any unknown keys
         # the user may have added manually via JSON edit).
         existing_llm = raw.get("commit_message_llm") or {}

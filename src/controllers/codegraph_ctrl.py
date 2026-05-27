@@ -120,6 +120,50 @@ class CodeGraphController:
 
         threading.Thread(target=worker, daemon=True).start()
 
+    def cmd_reindex(self, path: str) -> None:
+        """Run ``codegraph index --force`` for a full rebuild.
+
+        Sync only catches files that have CHANGED since the last index
+        run — files never touched between init and now stay invisible.
+        For projects where init didn't index the full tree (or where
+        the layout has been refactored), this is the way to get
+        codegraph back in sync with reality.
+
+        Heavier than sync (touches every file in the tree), so behind
+        an askyesno confirmation.
+        """
+        if not self._require_installed():
+            return
+        if not _is_codegraph_project(path):
+            messagebox.showinfo(
+                "Not initialised",
+                f"{os.path.basename(path)} hasn't been initialised with "
+                "CodeGraph yet.\n\nRight-click → 🧠 CodeGraph Init first.",
+                parent=self._root)
+            return
+        name = os.path.basename(path)
+        if not messagebox.askyesno(
+                "Full re-index?",
+                f"Force a full CodeGraph re-index of {name}?\n\n"
+                "This rebuilds the entire index from scratch and can "
+                "take 30 s – several minutes depending on project size. "
+                "Use this when CodeGraph Sync isn't catching all your "
+                "files (e.g. after a major refactor or if the initial "
+                "index missed most of the project).",
+                parent=self._root, default="no"):
+            return
+        self._on_log(f"Running codegraph index --force in {name}…", C["peach"])
+
+        def worker():
+            out, rc = self._on_shell(
+                [self._cfg.codegraph_exe, "index", "--force", path], path)
+            col = C["green"] if rc == 0 else C["red"]
+            for line in out.strip().splitlines()[-12:]:
+                self._on_log(f"  {line}", col)
+            self._tab.after(0, self._on_refresh)
+
+        threading.Thread(target=worker, daemon=True).start()
+
     def cmd_status(self, path: str) -> None:
         if not self._require_installed():
             return

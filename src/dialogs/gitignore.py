@@ -86,6 +86,14 @@ class GitignoreDialog(tk.Toplevel):
         self._ai_suggest_stop = threading.Event()
 
         self._build_header_section(path)
+        # Build Save/Cancel bar BEFORE the scrollable/expandable sections so
+        # pack(side=BOTTOM) anchors it to the window floor regardless of how
+        # much content sits above it.  (Packing it last caused it to be pushed
+        # off-screen whenever the combined sections exceeded the dialog height.)
+        self._build_save_buttons_section()
+        # v4.5: novice-friendly privacy semantics banner — first thing the
+        # user reads under the header.
+        self._build_privacy_banner_section()
         self._build_current_entries_section()
         self._build_ai_suggest_section()
         self._build_template_buttons_section()
@@ -93,7 +101,6 @@ class GitignoreDialog(tk.Toplevel):
             self._build_untracked_panel()
         self._build_custom_entry_section()
         self._build_pending_changes_section()
-        self._build_save_buttons_section()
 
         self._update_pending_panel()
         self._centre_on_parent(parent)
@@ -466,10 +473,15 @@ class GitignoreDialog(tk.Toplevel):
 
     def _build_pending_changes_section(self):
         """Read-only Text widget showing the +/- diff of pending edits."""
-        pend_label = tk.Label(self, text="PENDING CHANGES",
-                              bg=C["base"], fg=C["overlay0"],
-                              font=("Segoe UI", 8, "bold"))
-        pend_label.pack(anchor=tk.W, padx=18, pady=(10, 2))
+        pend_row = tk.Frame(self, bg=C["base"])
+        pend_row.pack(fill=tk.X, padx=18, pady=(10, 2))
+        tk.Label(pend_row, text="PENDING CHANGES",
+                 bg=C["base"], fg=C["overlay0"],
+                 font=("Segoe UI", 8, "bold")).pack(side=tk.LEFT)
+        tk.Label(pend_row,
+                 text="— click  💾 Save changes  to write to disk",
+                 bg=C["base"], fg=C["overlay0"],
+                 font=("Segoe UI", 8, "italic")).pack(side=tk.LEFT, padx=(6, 0))
         pend_wrap = tk.Frame(self, bg=C["mantle"])
         pend_wrap.pack(fill=tk.X, padx=18, pady=(0, 8))
         self._pend_txt = tk.Text(pend_wrap, height=4,
@@ -483,14 +495,70 @@ class GitignoreDialog(tk.Toplevel):
         self._pend_txt.tag_configure("dim",  foreground=C["overlay0"])
 
     def _build_save_buttons_section(self):
-        """Bottom Save / Cancel button row."""
+        """Bottom Save / Cancel button row.
+
+        Packed with side=tk.BOTTOM and built BEFORE the scrollable sections
+        so it is always anchored to the window floor — content above expands
+        into the remaining space rather than pushing this row off-screen.
+        """
         btns = tk.Frame(self, bg=C["base"], padx=18, pady=10)
-        btns.pack(fill=tk.X)
-        self._save_btn = ttk.Button(btns, text="Save changes",
+        btns.pack(fill=tk.X, side=tk.BOTTOM)
+        # Thin visual separator above the button row
+        ttk.Separator(self, orient="horizontal").pack(
+            fill=tk.X, side=tk.BOTTOM)
+        self._save_btn = ttk.Button(btns, text="💾  Save changes",
                                      command=self._on_save)
         self._save_btn.pack(side=tk.RIGHT, padx=(6, 0))
         ttk.Button(btns, text="Cancel",
                    command=self.destroy).pack(side=tk.RIGHT)
+        # v4.5: advanced "scrub from history" disclosure on the left so it's
+        # visually away from the primary Save/Cancel cluster.
+        ttk.Button(
+            btns, text="⚙  Advanced — Scrub from History…",
+            command=self._on_open_scrub_dialog,
+        ).pack(side=tk.LEFT)
+
+    def _build_privacy_banner_section(self):
+        """v4.5: novice-readable explanation of what 'Save changes' does.
+
+        Single sentence at the top so the user understands the privacy
+        semantics: files added here stop being PUSHED from now on, but
+        OLDER history may still contain them.  The Advanced button at the
+        bottom opens ScrubHistoryDialog for the full-erasure case.
+        """
+        banner = tk.Frame(self, bg=C["surface0"], padx=12, pady=8)
+        banner.pack(fill=tk.X, padx=18, pady=(0, 8))
+        tk.Label(banner,
+                 text="🔒  Privacy semantics",
+                 bg=C["surface0"], fg=C["blue"],
+                 font=("Segoe UI", 9, "bold")).pack(anchor=tk.W)
+        tk.Label(
+            banner,
+            text=(
+                "Files added here will stop being pushed from now on. "
+                "Older commits on GitHub still contain them — for a "
+                "full erase from all history, use ⚙ Advanced below."
+            ),
+            bg=C["surface0"], fg=C["text"],
+            font=("Segoe UI", 8),
+            wraplength=580, justify=tk.LEFT,
+        ).pack(anchor=tk.W, pady=(2, 0))
+
+    def _on_open_scrub_dialog(self):
+        """Open the advanced 'Scrub from History' dialog (v4.5)."""
+        # Lazy import (Rule 6) — avoids a load-time cycle between gitignore
+        # and scrub_history when both end up in the same import graph.
+        from dialogs.scrub_history import ScrubHistoryDialog
+        # Pre-fill the picker with the first pending addition if any,
+        # so the user doesn't have to retype.
+        initial = ""
+        if self._additions:
+            for a in self._additions:
+                if not a.startswith("#"):
+                    initial = a.strip().lstrip("/")
+                    break
+        ScrubHistoryDialog(self, self._path, self._cfg,
+                           initial_file=initial)
 
     def _centre_on_parent(self, parent):
         """Position the dialog roughly centred on the parent window."""

@@ -93,6 +93,21 @@ class ManagerConfig:
         return val if val is not None else "claude-haiku-4-5-20251001"
 
     @property
+    def enable_llm_grounding(self) -> bool:
+        """Master switch for tokensave/codegraph grounding across LLM features.
+
+        When True (default), commit-message draft, PR draft, AI code review,
+        and the doc drafter all splice a tokensave + codegraph grounding
+        block into the LLM prompt. When False, every grounding callsite
+        short-circuits to empty before doing any subprocess work.
+
+        Defaults to True; existing configs without the key upgrade
+        seamlessly via the explicit None-check below.
+        """
+        val = self.raw.get("enable_llm_grounding")
+        return True if val is None else bool(val)
+
+    @property
     def commit_message_backend(self) -> str:
         """Strategy order for commit-message suggestion.
 

@@ -1,0 +1,392 @@
+"""git_scrub — Pure helpers for the "Scrub from History" privacy feature (v4.5).
+
+Companion to ``UntrackIgnoredDialog`` / ``GitignoreDialog._on_save`` which
+handle the lightweight "stop tracking going forward" path. This module
+backs the advanced ``ScrubHistoryDialog`` which fully erases a file from
+all commit history via ``git filter-repo``.
+
+Why filter-repo (not filter-branch, not BFG):
+  • Git 2.42+ deprecates ``filter-branch`` and prints a banner steering
+    users to filter-repo.  Filter-branch is error-prone and 10–720× slower.
+  • BFG Repo-Cleaner is a viable alternative (Java JAR, simpler interface)
+    but requires Java.  The manager defaults to filter-repo because once
+    installed via ``pip install --user git-filter-repo`` it's a single
+    Python script with zero further dependencies.
+  • If a user prefers BFG, they can run it manually — this module's
+    helpers (backup branch, affected-commit display) still apply.
+
+Why ``--force`` is required:
+  filter-repo refuses by default to run on non-fresh-clones (a safety
+  check against accidental overwrites).  The manager always runs against
+  the user's working clone — there is no opportunity to fresh-clone
+  invisibly.  We substitute the safety check with our own layered nets:
+    1. auto-created backup branch (recoverable via ``git reset --hard``)
+    2. confirmation-phrase typing requirement in the dialog
+    3. visible commit-affected list before any action
+    4. universal-language destructive-action banner
+  These reproduce the intent of filter-repo's "fresh clone" guard:
+  prevent accidental loss.
+
+All shell-out callsites use ``subprocess.run`` with explicit timeouts and
+``CREATE_NO_WINDOW`` on Windows to avoid console-flicker. UTF-8 with
+``errors='replace'`` so a misencoded filename never crashes the helper.
+"""
+
+from __future__ import annotations
+
+import os
+import re
+import shutil
+import subprocess
+import sys
+import time
+from typing import Tuple, List
+
+try:
+    from constants import CREATE_NO_WINDOW
+except ImportError:
+    CREATE_NO_WINDOW = 0
+
+
+# ── filter-repo availability ──────────────────────────────────────────────────
+
+def has_filter_repo(git_exe: str) -> bool:
+    """Return True if ``git filter-repo`` is available as a git subcommand.
+
+    Detection: invoke ``git filter-repo --version``; rc==0 means installed.
+    Any FileNotFoundError or non-zero return is treated as "not installed".
+    Cached at call-site by the dialog; this helper is safe to call repeatedly.
+    """
+    if not git_exe or not os.path.isfile(git_exe):
+        return False
+    try:
+        proc = subprocess.run(
+            [git_exe, "filter-repo", "--version"],
+            capture_output=True, text=True, timeout=5,
+            encoding="utf-8", errors="replace",
+            creationflags=CREATE_NO_WINDOW,
+        )
+        return proc.returncode == 0
+    except (FileNotFoundError, subprocess.TimeoutExpired, OSError):
+        return False
+
+
+def install_filter_repo(on_log=None) -> Tuple[bool, str]:
+    """Attempt ``pip install --user git-filter-repo`` and return (success, log).
+
+    Streams stdout/stderr line-by-line into ``on_log(line)`` if provided,
+    so the dialog can display install progress in real time. Returns a
+    ``(ok, combined_output)`` tuple — ``ok`` is True iff pip exited 0.
+
+    Pip availability: tries ``python -m pip`` (more portable than calling
+    ``pip`` directly, which may not be on PATH on Windows).
+    """
+    py = sys.executable
+    if not py:
+        return False, "could not locate python interpreter"
+    try:
+        proc = subprocess.Popen(
+            [py, "-m", "pip", "install", "--user", "git-filter-repo"],
+            stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
+            text=True, encoding="utf-8", errors="replace",
+            creationflags=CREATE_NO_WINDOW,
+        )
+    except (FileNotFoundError, OSError) as exc:
+        return False, f"pip launch failed: {exc}"
+
+    log_lines: List[str] = []
+    try:
+        if proc.stdout is not None:
+            for line in proc.stdout:
+                log_lines.append(line.rstrip())
+                if on_log is not None:
+                    try:
+                        on_log(line.rstrip())
+                    except Exception:
+                        pass
+        proc.wait(timeout=300)
+    except subprocess.TimeoutExpired:
+        proc.kill()
+        return False, "\n".join(log_lines) + "\n[timed out after 5 min]"
+    return proc.returncode == 0, "\n".join(log_lines)
+
+
+# ── Pre-flight inspection ─────────────────────────────────────────────────────
+
+def is_tracked_in_head(repo_path: str, git_exe: str, rel_file: str) -> bool:
+    """Return True if ``rel_file`` is currently tracked by git in HEAD.
+
+    Uses ``git ls-files --error-unmatch -- <file>``: returns 0 only when
+    the file is in the index. This is the signal for "the file is still
+    tracked and needs to be untracked first before filter-repo can run".
+    """
+    try:
+        proc = subprocess.run(
+            [git_exe, "-C", repo_path, "ls-files", "--error-unmatch",
+             "--", rel_file],
+            capture_output=True, text=True, timeout=10,
+            encoding="utf-8", errors="replace",
+            creationflags=CREATE_NO_WINDOW,
+        )
+        return proc.returncode == 0
+    except (FileNotFoundError, subprocess.TimeoutExpired, OSError):
+        return False
+
+
+def working_tree_clean(repo_path: str, git_exe: str) -> bool:
+    """Return True if there are no uncommitted changes (clean for scrub).
+
+    filter-repo refuses to run with an unclean working tree. The dialog
+    uses this to gate the Scrub Now button.
+    """
+    try:
+        proc = subprocess.run(
+            [git_exe, "-C", repo_path, "status", "--porcelain"],
+            capture_output=True, text=True, timeout=10,
+            encoding="utf-8", errors="replace",
+            creationflags=CREATE_NO_WINDOW,
+        )
+        return proc.returncode == 0 and not proc.stdout.strip()
+    except (FileNotFoundError, subprocess.TimeoutExpired, OSError):
+        return False
+
+
+def list_affected_commits(repo_path: str, git_exe: str, rel_file: str,
+                          max_n: int = 200) -> List[Tuple[str, str]]:
+    """Return ``[(short_sha, subject), …]`` for every commit that touched the file.
+
+    Powers the "show consequences before scrubbing" display in the dialog.
+    Caps at ``max_n`` to avoid runaway output for files with very long
+    histories — the UI shows "… and N more" beyond the cap.
+    """
+    try:
+        proc = subprocess.run(
+            [git_exe, "-C", repo_path, "log",
+             f"--max-count={max_n}",
+             "--pretty=format:%h\t%s",
+             "--all",
+             "--", rel_file],
+            capture_output=True, text=True, timeout=20,
+            encoding="utf-8", errors="replace",
+            creationflags=CREATE_NO_WINDOW,
+        )
+    except (FileNotFoundError, subprocess.TimeoutExpired, OSError):
+        return []
+    if proc.returncode != 0:
+        return []
+    out: List[Tuple[str, str]] = []
+    for line in proc.stdout.splitlines():
+        if "\t" in line:
+            sha, subject = line.split("\t", 1)
+            out.append((sha.strip(), subject.strip()))
+    return out
+
+
+# ── Backup branch ─────────────────────────────────────────────────────────────
+
+_BACKUP_BRANCH_RE = re.compile(r"^[A-Za-z0-9._/+-]+$")
+
+
+def build_backup_branch_name(prefix: str = "backup/before-scrub") -> str:
+    """Return a unique backup branch name like ``backup/before-scrub-1716835200``."""
+    ts = int(time.time())
+    return f"{prefix}-{ts}"
+
+
+def create_backup_branch(repo_path: str, git_exe: str,
+                         branch_name: str) -> Tuple[bool, str]:
+    """Create ``branch_name`` pointing at HEAD; return ``(ok, log)``.
+
+    Validates ``branch_name`` matches a conservative whitelist regex before
+    invoking git, so a malformed name can't smuggle CLI flags.
+    """
+    if not _BACKUP_BRANCH_RE.match(branch_name):
+        return False, f"refusing branch name: {branch_name!r}"
+    try:
+        proc = subprocess.run(
+            [git_exe, "-C", repo_path, "branch", branch_name, "HEAD"],
+            capture_output=True, text=True, timeout=10,
+            encoding="utf-8", errors="replace",
+            creationflags=CREATE_NO_WINDOW,
+        )
+        return (proc.returncode == 0,
+                (proc.stdout or "") + (proc.stderr or ""))
+    except (FileNotFoundError, subprocess.TimeoutExpired, OSError) as exc:
+        return False, str(exc)
+
+
+# ── Untrack-and-commit helper (workflow-ordering preamble) ───────────────────
+
+def untrack_and_commit(repo_path: str, git_exe: str, rel_file: str,
+                       on_log=None) -> Tuple[bool, str]:
+    """Untrack ``rel_file`` and commit the change, in one atomic step.
+
+    Sequence:
+      1. ``git rm --cached -- <rel_file>``
+      2. ``git commit -m "Stop tracking <rel_file>"``
+
+    Adding the path to ``.gitignore`` is the caller's responsibility
+    (the gitignore dialog already does this via its own Save flow).
+
+    Returns ``(ok, combined_log)``. On failure, no commit is created;
+    the caller can re-stage / re-commit manually.
+    """
+    log_chunks: List[str] = []
+    def _log(msg: str) -> None:
+        log_chunks.append(msg)
+        if on_log is not None:
+            try:
+                on_log(msg)
+            except Exception:
+                pass
+
+    try:
+        # Step 1: untrack
+        rm_proc = subprocess.run(
+            [git_exe, "-C", repo_path, "rm", "--cached", "--", rel_file],
+            capture_output=True, text=True, timeout=15,
+            encoding="utf-8", errors="replace",
+            creationflags=CREATE_NO_WINDOW,
+        )
+        _log(f"$ git rm --cached -- {rel_file}")
+        if rm_proc.stdout:
+            _log(rm_proc.stdout.rstrip())
+        if rm_proc.stderr:
+            _log(rm_proc.stderr.rstrip())
+        if rm_proc.returncode != 0:
+            return False, "\n".join(log_chunks)
+
+        # Step 2: commit
+        msg = f"Stop tracking {rel_file}"
+        ci_proc = subprocess.run(
+            [git_exe, "-C", repo_path, "commit", "-m", msg],
+            capture_output=True, text=True, timeout=30,
+            encoding="utf-8", errors="replace",
+            creationflags=CREATE_NO_WINDOW,
+        )
+        _log(f"$ git commit -m '{msg}'")
+        if ci_proc.stdout:
+            _log(ci_proc.stdout.rstrip())
+        if ci_proc.stderr:
+            _log(ci_proc.stderr.rstrip())
+        return ci_proc.returncode == 0, "\n".join(log_chunks)
+    except (FileNotFoundError, subprocess.TimeoutExpired, OSError) as exc:
+        _log(f"untrack_and_commit error: {exc}")
+        return False, "\n".join(log_chunks)
+
+
+# ── Scrub execution ───────────────────────────────────────────────────────────
+
+def run_scrub(repo_path: str, git_exe: str, rel_file: str,
+              on_log=None) -> Tuple[bool, str]:
+    """Erase ``rel_file`` from all of git history.
+
+    Invokes ``git filter-repo --invert-paths --path <rel_file> --force``
+    in ``repo_path``.  Returns ``(ok, combined_log)``.
+
+    **Why ``--force``**: filter-repo refuses non-fresh-clones by default
+    to prevent accidental overwrites.  Our use case ALWAYS runs on the
+    user's working clone — there is no fresh-clone opportunity.  We
+    substitute filter-repo's safety check with our own layered nets
+    (auto-backup branch + confirmation phrase + visible commit list +
+    destructive-action banner). See module docstring.
+
+    Caller MUST ensure (via ``working_tree_clean`` + ``is_tracked_in_head``):
+      • working tree is clean (no uncommitted changes)
+      • file is no longer tracked in HEAD (use ``untrack_and_commit`` first)
+    Otherwise filter-repo will error early.
+    """
+    log_chunks: List[str] = []
+    def _log(msg: str) -> None:
+        log_chunks.append(msg)
+        if on_log is not None:
+            try:
+                on_log(msg)
+            except Exception:
+                pass
+
+    args = [git_exe, "-C", repo_path, "filter-repo",
+            "--invert-paths", "--path", rel_file, "--force"]
+    _log(f"$ git filter-repo --invert-paths --path {rel_file} --force")
+    try:
+        proc = subprocess.Popen(
+            args,
+            stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
+            text=True, encoding="utf-8", errors="replace",
+            creationflags=CREATE_NO_WINDOW,
+        )
+        if proc.stdout is not None:
+            for line in proc.stdout:
+                _log(line.rstrip())
+        proc.wait(timeout=600)
+    except subprocess.TimeoutExpired:
+        proc.kill()
+        _log("[scrub timed out after 10 min]")
+        return False, "\n".join(log_chunks)
+    except (FileNotFoundError, OSError) as exc:
+        _log(f"scrub launch error: {exc}")
+        return False, "\n".join(log_chunks)
+    return proc.returncode == 0, "\n".join(log_chunks)
+
+
+# ── Convenience: full audit before showing the dialog ────────────────────────
+
+def preflight(repo_path: str, git_exe: str) -> dict:
+    """Single-call snapshot of everything the scrub dialog needs at open.
+
+    Returns a dict::
+
+        {
+            "git_exe":           str,
+            "git_exe_present":   bool,
+            "filter_repo":       bool,        # is `git filter-repo` callable
+            "is_git_repo":       bool,
+            "head_branch":       str,
+            "working_tree_clean": bool,
+        }
+
+    Lets the dialog disable/enable widgets atomically without scattering
+    subprocess calls across the UI thread.
+    """
+    info = {
+        "git_exe":            git_exe,
+        "git_exe_present":    bool(git_exe and os.path.isfile(git_exe)),
+        "filter_repo":        False,
+        "is_git_repo":        False,
+        "head_branch":        "",
+        "working_tree_clean": False,
+    }
+    if not info["git_exe_present"]:
+        return info
+    info["filter_repo"] = has_filter_repo(git_exe)
+    # is_git_repo via `git rev-parse --is-inside-work-tree`
+    try:
+        proc = subprocess.run(
+            [git_exe, "-C", repo_path, "rev-parse", "--is-inside-work-tree"],
+            capture_output=True, text=True, timeout=5,
+            encoding="utf-8", errors="replace",
+            creationflags=CREATE_NO_WINDOW,
+        )
+        info["is_git_repo"] = (proc.returncode == 0
+                               and proc.stdout.strip() == "true")
+    except (FileNotFoundError, subprocess.TimeoutExpired, OSError):
+        return info
+    # head branch
+    try:
+        proc = subprocess.run(
+            [git_exe, "-C", repo_path, "rev-parse", "--abbrev-ref", "HEAD"],
+            capture_output=True, text=True, timeout=5,
+            encoding="utf-8", errors="replace",
+            creationflags=CREATE_NO_WINDOW,
+        )
+        if proc.returncode == 0:
+            info["head_branch"] = proc.stdout.strip()
+    except (FileNotFoundError, subprocess.TimeoutExpired, OSError):
+        pass
+    info["working_tree_clean"] = working_tree_clean(repo_path, git_exe)
+    return info
+
+
+# Suppress unused-import warnings for `shutil` — reserved for future
+# add-on (sanity-cleanup of stale .git/refs/original/ post-scrub).
+_ = shutil

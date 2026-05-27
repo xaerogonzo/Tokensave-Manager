@@ -363,7 +363,7 @@ class GitCommitDialog(tk.Toplevel):
         if not llm_active:
             # Heuristics only — instant, no spinner needed.
             suggestion = _suggest_commit_message(
-                self._path, status_text, raw, self._cfg.git_exe
+                self._path, status_text, raw, self._cfg.git_exe, mc=self._cfg
             )
             self._apply_suggestion(suggestion.message or "chore: update files")
             self._show_strategy_badge(suggestion.strategy)
@@ -388,9 +388,9 @@ class GitCommitDialog(tk.Toplevel):
             self._user_has_edited = False
 
         def _worker(path=self._path, st=status_text, tok=my_token,
-                    raw=raw, git=self._cfg.git_exe):
+                    raw=raw, git=self._cfg.git_exe, mc=self._cfg):
             try:
-                suggestion = _suggest_commit_message(path, st, raw, git)
+                suggestion = _suggest_commit_message(path, st, raw, git, mc=mc)
             except Exception:
                 log.exception("Suggestion worker failed")
                 suggestion = CommitSuggestion(message="", strategy="error")

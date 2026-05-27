@@ -196,6 +196,44 @@ Output is capped at 8 000 characters (truncated at the last complete line).
 
 ---
 
+## v4.1 — Codegraph parallel grounding (additive)
+
+Roadmap-7's cascade rounds added a second grounding source alongside
+tokensave: **CodeGraph**, via `helpers/doc_grounding.py:build_codegraph_block`.
+Mirror contract of `build_grounding_block`. For the `roadmap_evidence`
+recipe it additionally invokes `codegraph affected --stdin` with the
+changed-files list — this is the unique value-add codegraph has that
+tokensave doesn't (test-impact mapping from a diff).
+
+`build_combined_grounding` (v4.4 dedup-first-then-truncate) merges both
+sources with per-source cap (default 4000 chars; combined cap = 8000
+to match the v3 single-source ceiling). Line-level dedup eliminates
+redundancy where both sources cite the same symbols.
+
+Both blocks fail-open: a project with only one tool indexed gets only
+that tool's block; a project with neither gets an empty grounding section
+and the prompt proceeds normally.
+
+### v4.3 — Freshness gate (`helpers/codegraph_freshness.py`)
+
+`ensure_fresh(project_path, codegraph_exe)` runs immediately before
+every `build_codegraph_block` call. If the index is `stale` (DB mtime
+> 200 s behind the newest source file), it runs `codegraph sync`
+synchronously (~2-5 s) and re-checks before the grounding call
+proceeds. If the index is `broken` (under-indexed — < 30 % of the
+tokensave file count or < 5 absolute), the block returns empty and the
+caller's UI surfaces a once-per-session "run a full reindex" dialog.
+
+### v4.2 — Master toggle
+
+`ManagerConfig.enable_llm_grounding` gates the entire pipeline across
+EVERY AI surface (commit messages, PR draft, AI Code Review, Ask tab
+non-agentic, doc drafter). Default ON; persisted via
+`cfg.raw["enable_llm_grounding"]`. Settings → AI backend selection →
+"Code-graph grounding".
+
+---
+
 ## Roadmap-8 decision gate: Anthropic Agent SDK migration
 
 The current `LocalAgent` implementation uses stdlib `urllib.request` and the

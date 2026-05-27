@@ -25,6 +25,7 @@ pattern as the gitignore AI-Suggest worker).
 
 from __future__ import annotations
 
+import contextlib
 import os
 import threading
 import time
@@ -498,6 +499,28 @@ _BACKEND_CLAUDE_CLI  = "Force Claude CLI"
 _BACKEND_OPTIONS     = [_BACKEND_DEFAULT, _BACKEND_OLLAMA, _BACKEND_CLAUDE_CLI]
 
 
+@contextlib.contextmanager
+def _suppressed_modified(state: dict):
+    """v4.4 (Gemini #2): guarantee the suppress_modified flag clears.
+
+    Tk's ``<<Modified>>`` virtual event fires on programmatic
+    ``text.insert(...)`` too, which would otherwise clear the warning
+    banner the moment a draft lands. The dialog uses
+    ``state["suppress_modified"]`` to gate the handler. Without
+    ``try``/``finally``, any exception mid-insert (a TclError, a Unicode
+    glitch, a worker race) leaves the flag stuck True for the rest of
+    the session — the banner can never auto-clear again.
+
+    This context manager wraps every programmatic mutation site so the
+    flag is always reset, regardless of what happens inside the block.
+    """
+    state["suppress_modified"] = True
+    try:
+        yield
+    finally:
+        state["suppress_modified"] = False
+
+
 class DocDrafterDialog(tk.Toplevel):
     """Tabbed doc-update drafter (CHANGELOG + README)."""
 
@@ -913,6 +936,24 @@ class DocDrafterDialog(tk.Toplevel):
                                         variable=ts_tools_var)
         ts_tools_chk.pack(side=tk.RIGHT, padx=(6, 0))
 
+        # v4.1: tooltip explaining the Ollama-only asymmetry. The checkbox
+        # only routes to the agentic LocalAgent loop for ollama /
+        # openai_compatible providers — Claude CLI and Anthropic use
+        # single-shot completion regardless. The always-on tokensave
+        # GROUNDING block (separate from this checkbox) runs for every
+        # backend; the checkbox specifically enables runtime tool-use.
+        from theme import _Tooltip
+        _Tooltip(
+            ts_tools_chk,
+            "Enables an Ollama-only agentic loop where the local model "
+            "can call tokensave_search and tokensave_context as tools "
+            "mid-generation. Silently ignored for Claude CLI / Anthropic "
+            "/ OpenAI — those backends use single-shot completion. "
+            "Disable if Ollama drafts time out. "
+            "(The always-on tokensave grounding block runs separately "
+            "for all backends.)",
+        )
+
         status_var = tk.StringVar(value="")
         # wraplength keeps long filter messages from pushing buttons off-screen
         # on narrow window sizes; status text wraps inside the row instead.
@@ -1133,13 +1174,15 @@ class DocDrafterDialog(tk.Toplevel):
         self._set_status(key, msg, C["red"])
         try:
             txt = self._tab_widgets[key]["text"]
-            txt.delete("1.0", tk.END)
-            txt.insert("1.0", f"⚠  {msg}")
-            txt.tag_add("placeholder", "1.0", tk.END)
-            try:
-                txt.edit_modified(False)
-            except tk.TclError:
-                pass
+            state = self._tab_state.get(key, {})
+            with _suppressed_modified(state):
+                txt.delete("1.0", tk.END)
+                txt.insert("1.0", f"⚠  {msg}")
+                txt.tag_add("placeholder", "1.0", tk.END)
+                try:
+                    txt.edit_modified(False)
+                except tk.TclError:
+                    pass
         except (tk.TclError, KeyError):
             pass
 
@@ -1289,14 +1332,40 @@ class DocDrafterDialog(tk.Toplevel):
             # Theme B1: tokensave grounding injection.  build_grounding_block
             # returns "" silently when .tokensave/ is absent or the recipe
             # is unset — the prompt is always valid with or without it.
-            from helpers.doc_grounding import build_grounding_block
-            grounding = ""
+            #
+            # v4.1: also runs build_codegraph_block in parallel (silently
+            # skipped if codegraph isn't installed / index is unhealthy)
+            # and combines both via build_combined_grounding for per-source
+            # cap + line-level dedup.
+            from helpers.doc_grounding import (
+                build_grounding_block, build_codegraph_block,
+                build_combined_grounding,
+            )
+            tokensave_block = ""
             if dt.tokensave_recipe:
-                grounding = build_grounding_block(
+                tokensave_block = build_grounding_block(
                     project, dt.tokensave_recipe,
                     commit_range=range_spec,
                     tokensave_exe=tokensave_exe,
                 )
+            codegraph_block = ""
+            if getattr(dt, "codegraph_recipe", None):
+                # v4.3: ensure the index is fresh before building the block.
+                _cg_exe = self._cfg.codegraph_exe or ""
+                if _cg_exe:
+                    try:
+                        from helpers.codegraph_freshness import ensure_fresh
+                        ensure_fresh(project, _cg_exe)
+                    except Exception:
+                        pass
+                codegraph_block = build_codegraph_block(
+                    project, dt.codegraph_recipe,
+                    commit_range=range_spec,
+                    changed_files=changed_files,
+                    codegraph_exe=_cg_exe,
+                )
+            grounding = build_combined_grounding(
+                tokensave_block, codegraph_block)
 
             # v4: build_prompt returns PromptBuildResult — named-field
             # access. backend_hint=True triggers smaller candidate-body
@@ -1442,45 +1511,40 @@ class DocDrafterDialog(tk.Toplevel):
                 key, raw_text)
             w = self._tab_widgets[key]
             txt = w["text"]
-            # v4: suppress_modified flag guards the programmatic insert
-            # below from clearing the warning banner via the
-            # <<Modified>> handler.
-            self._tab_state[key]["suppress_modified"] = True
-            txt.delete("1.0", tk.END)
-            has_content = bool(filtered_text.strip())
-            if has_content:
-                txt.insert("1.0", filtered_text.strip())
-                self._tab_state[key]["draft"] = filtered_text.strip()
-            else:
-                # Visual placeholder ONLY — Apply button is hard-disabled
-                # below so this string never reaches the patchers.  README
-                # gets an extra-explicit message because its REPLACE patcher
-                # would delete the existing sub-section if applied with
-                # nothing.  CHANGELOG's append-only patcher is recoverable
-                # (no destructive failure mode).
-                if key == "readme":
-                    placeholder = (
-                        "(all bullets filtered — README's REPLACE patcher "
-                        "would DELETE the existing sub-section if Applied "
-                        "with no bullets.  Apply is disabled.  Click "
-                        "Generate to retry.)"
-                    )
+            # v4.4 (Gemini #2): the context manager guarantees
+            # suppress_modified is reset even if insert() raises.
+            with _suppressed_modified(self._tab_state[key]):
+                txt.delete("1.0", tk.END)
+                has_content = bool(filtered_text.strip())
+                if has_content:
+                    txt.insert("1.0", filtered_text.strip())
+                    self._tab_state[key]["draft"] = filtered_text.strip()
                 else:
-                    placeholder = ("(all bullets filtered — click "
-                                   "Generate to retry)")
-                txt.insert("1.0", placeholder)
-                txt.tag_add("placeholder", "1.0", tk.END)
-                self._tab_state[key]["draft"] = ""
-            # Reset the text-widget modified flag so the <<Modified>> binding
-            # fires on subsequent USER edits (not on our programmatic insert).
-            try:
-                txt.edit_modified(False)
-            except tk.TclError:
-                pass
-            # v4: clear the suppress flag now that the programmatic insert
-            # is complete. Subsequent <<Modified>> events from real user
-            # edits will be honoured.
-            self._tab_state[key]["suppress_modified"] = False
+                    # Visual placeholder ONLY — Apply button is hard-disabled
+                    # below so this string never reaches the patchers.  README
+                    # gets an extra-explicit message because its REPLACE patcher
+                    # would delete the existing sub-section if applied with
+                    # nothing.  CHANGELOG's append-only patcher is recoverable
+                    # (no destructive failure mode).
+                    if key == "readme":
+                        placeholder = (
+                            "(all bullets filtered — README's REPLACE patcher "
+                            "would DELETE the existing sub-section if Applied "
+                            "with no bullets.  Apply is disabled.  Click "
+                            "Generate to retry.)"
+                        )
+                    else:
+                        placeholder = ("(all bullets filtered — click "
+                                       "Generate to retry)")
+                    txt.insert("1.0", placeholder)
+                    txt.tag_add("placeholder", "1.0", tk.END)
+                    self._tab_state[key]["draft"] = ""
+                # Reset the text-widget modified flag so the <<Modified>>
+                # binding fires on subsequent USER edits (not our insert).
+                try:
+                    txt.edit_modified(False)
+                except tk.TclError:
+                    pass
             w["gen_btn"].configure(state=tk.NORMAL)
             # LOAD-BEARING: Apply enabled only when filtered text has content.
             # Empty filtered result means the visible text widget holds the
@@ -1507,12 +1571,9 @@ class DocDrafterDialog(tk.Toplevel):
                     f"All bullets filtered.{suffix}  Click Generate to retry.",
                     C["red"])
         except (tk.TclError, RuntimeError):
-            # Defensive: ensure suppress_modified gets cleared even on
-            # exception so the next Generate doesn't see stale True state.
-            try:
-                self._tab_state[key]["suppress_modified"] = False
-            except KeyError:
-                pass
+            # v4.4: the _suppressed_modified context manager guarantees the
+            # flag is cleared via try/finally before this except runs, so no
+            # explicit cleanup is needed here.
             return
 
     def _on_text_modified(self, key):
@@ -1955,6 +2016,14 @@ class DocDrafterDialog(tk.Toplevel):
             return "Ollama" if "localhost" in base else "OpenAI-compat"
         return provider or "LLM"
 
+    # G6 (v4.4): tick enforces this hard timeout beyond dispatch_llm's
+    # 300 s limit. The extra 10 s grace absorbs Python thread-scheduling
+    # lag. When triggered, the captured stop_event is signalled so the
+    # worker can break its iteration loop; a hard error message is
+    # surfaced in the status bar. Note: Python cannot forcibly kill a
+    # hung subprocess, so the OS-level Ollama process may remain running.
+    _DRAFT_TICK_HARD_TIMEOUT = 310   # seconds; dispatch_llm timeout is 300
+
     def _draft_tick(self, key):
         """Periodic status-bar tick during a long Generate run.
 
@@ -1965,6 +2034,7 @@ class DocDrafterDialog(tk.Toplevel):
           - dialog destroyed (winfo_exists guard)
           - draft_start_ts cleared (completion / error)
           - stop_event identity changed (newer generation in flight)
+          - elapsed time exceeds _DRAFT_TICK_HARD_TIMEOUT (G6 v4.4)
         """
         try:
             if not self.winfo_exists():
@@ -1981,6 +2051,21 @@ class DocDrafterDialog(tk.Toplevel):
         if captured is not None and captured is not state.get("stop"):
             return
         elapsed = int(time.monotonic() - start)
+        # G6: self-enforced hard timeout. If dispatch_llm's own 300 s
+        # limit didn't fire (OS-level Ollama hang), we unblock the UI
+        # and signal the stop_event so the worker can exit its loop.
+        if elapsed > self._DRAFT_TICK_HARD_TIMEOUT:
+            if captured is not None:
+                captured.set()
+            state["draft_start_ts"] = None
+            self._set_status(
+                key,
+                f"⚠ Drafting timed out after {elapsed}s — backend hung "
+                "(no Python exception). Stop signalled. Try again or "
+                "switch to a different backend.",
+                C["red"],
+            )
+            return
         backend = self._backend_label_for_status(key)
         self._set_status(key, f"Drafting on {backend} ({elapsed}s)…",
                          C["overlay0"])

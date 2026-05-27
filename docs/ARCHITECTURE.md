@@ -125,12 +125,70 @@ Token Save Manager Source/
 │   │   │                          resolve_commit_range (4 modes: since_last_doc /
 │   │   │                          since_last_commit / since_last_tag / custom),
 │   │   │                          changed_file_paths. Roadmap-6 Tier B.
-│   │   └── readme_patch.py        README highlights sub-section splicer (append-only,
-│   │                              Roadmap-6 Phase 2.1 shape). Key exports:
-│   │                              read_highlights(path), read_highlights_from_text(text),
-│   │                              _compute_insert_readme_highlights_subsection(text, header, bullets)
-│   │                              → (new_text, ok, msg) PURE; insert_readme_highlights_subsection
-│   │                              → IO wrapper; _find_block_bounds + _BOUNDARY_RE anchor detection.
+│   │   ├── readme_patch.py        README highlights sub-section splicer (append-only,
+│   │   │                          Roadmap-6 Phase 2.1 shape). Key exports:
+│   │   │                          read_highlights(path), read_highlights_from_text(text),
+│   │   │                          _compute_insert_readme_highlights_subsection(text, header, bullets)
+│   │   │                          → (new_text, ok, msg) PURE; insert_readme_highlights_subsection
+│   │   │                          → IO wrapper; _find_block_bounds + _BOUNDARY_RE anchor detection.
+│   │   ├── doc_types.py           Roadmap-7 Theme A. `DocType` frozen dataclass:
+│   │   │                          key/label/target_filename/build_prompt/compute_apply/
+│   │   │                          read_existing/parse_draft/tokensave_recipe/codegraph_recipe/
+│   │   │                          gen_params/examples. Registry seeds 7 DocTypes
+│   │   │                          (changelog/readme/architecture/roadmap/memory/
+│   │   │                          tokensave_guide/docs_generic). All `build_*_prompt`
+│   │   │                          functions return `PromptBuildResult(system, user,
+│   │   │                          aligned, warnings)` immutable dataclass (v4).
+│   │   ├── architecture_patch.py  Roadmap-7 anchor-based section update patcher for
+│   │   │                          `docs/ARCHITECTURE.md`. Pure `_compute_*` + IO wrapper.
+│   │   ├── roadmap_patch.py       Roadmap-7 patcher for `docs/ROADMAP.md`. Used by both
+│   │   │                          Theme A roadmap DocType and the deferred Theme E
+│   │   │                          Roadmap Manager dialog.
+│   │   ├── roadmap_parser.py      Tokenises `docs/ROADMAP.md` into typed sections.
+│   │   ├── roadmap_audit.py       Cross-references parsed ROADMAP entries against
+│   │   │                          git log + tokensave_diff_context for stale/promotable
+│   │   │                          detection. Deferred to Roadmap-8 dialog wiring.
+│   │   ├── memory_patch.py        Roadmap-7 patcher for CCD memory files
+│   │   │                          (`memory/<slug>.md`). Preserves YAML frontmatter.
+│   │   ├── generic_doc_patch.py   Roadmap-7 generic `docs/*.md` patcher with `## Anchor`
+│   │   │                          detection. v4 alignment-aware: refuses if the candidate
+│   │   │                          sections don't reach the alignment threshold (≥ 2
+│   │   │                          weighted points; tiered scoring per v4.1 Revision C).
+│   │   ├── doc_grounding.py       v4 cascade Theme B1. `build_grounding_block` shells out
+│   │   │                          to `tokensave tool context/search`; `build_codegraph_block`
+│   │   │                          (v4.1) does the same for codegraph (incl. `codegraph
+│   │   │                          affected --stdin` for roadmap recipe);
+│   │   │                          `build_combined_grounding` (v4.4 dedup-FIRST-then-truncate)
+│   │   │                          merges both with per-source cap.
+│   │   │                          `_codegraph_index_health` returns
+│   │   │                          missing/broken/stale/healthy. Stale tolerance 200s.
+│   │   ├── codegraph_freshness.py v4.3 codegraph freshness UX module. `ensure_fresh()`
+│   │   │                          blocking pre-grounding sync; `kick_autosync()` two-layer
+│   │   │                          debounced background sync on project select (per-project
+│   │   │                          30s + single-worker ThreadPoolExecutor); `maybe_prompt_reindex()`
+│   │   │                          once-per-session "broken index" dialog.
+│   │   ├── git_scrub.py           v4.5 privacy feature. Pure helpers for the "Scrub from
+│   │   │                          History" dialog: `has_filter_repo` detection,
+│   │   │                          `install_filter_repo` (pip install --user),
+│   │   │                          `is_tracked_in_head` / `working_tree_clean`,
+│   │   │                          `list_affected_commits`, `build_backup_branch_name` +
+│   │   │                          `create_backup_branch`, `untrack_and_commit`,
+│   │   │                          `run_scrub` (filter-repo --force with safety-net
+│   │   │                          rationale documented inline). BFG documented as
+│   │   │                          manual alternative.
+│   │   └── doc_drafter.py         LLM-backed documentation draft helpers (Roadmap-6 +
+│   │                              cascade v3-v4.4 hardening). Key exports:
+│   │                              `build_*_prompt` (all return `PromptBuildResult`);
+│   │                              `dispatch_llm` (routes claude_cli vs _call_llm;
+│   │                              v4 timeout 180→300s; v4.1 backend_hint plumbing for
+│   │                              local-model body-budget reduction); `resolve_commit_range`
+│   │                              (4 modes); `_select_candidate_sections` (v4.1 tiered
+│   │                              scoring path×2 / scope×2 / subject×1; v4.4 G3
+│   │                              saturating-cap on subject body hits); `_looks_truncated`
+│   │                              (v4.4 G1 structural-markup regex restricted to
+│   │                              `[`()\[\]/=<>{}|&*]` + snake_case + dotted identifiers);
+│   │                              `_merge_wrapped_bullets` preprocessing (v4.1 Revision B
+│   │                              for qwen2.5-coder wrap-aggressive output).
 │   │
 │   ├── dialogs/                   23 tk.Toplevel dialog classes — one per file.
 │   │   ├── settings.py            SettingsDialog (+ _probe_loaded_model helper)
@@ -151,6 +209,13 @@ Token Save Manager Source/
 │   │   ├── switch_branch.py       SwitchBranchDialog (+ static pick() helper)
 │   │   ├── assign_category.py     AssignCategoryDialog
 │   │   ├── untrack_ignored.py     UntrackIgnoredDialog
+│   │   ├── scrub_history.py       v4.5 ScrubHistoryDialog — advanced "erase from all
+│   │   │                          history" privacy feature with 9-layer safety net.
+│   │   │                          Opens from GitignoreDialog → "⚙ Advanced". Detects
+│   │   │                          filter-repo, offers one-click pip install if absent;
+│   │   │                          auto-untrack-and-commit preamble; affected-commits
+│   │   │                          display; auto backup branch; confirmation-phrase
+│   │   │                          typing gate; force-push guidance post-scrub.
 │   │   ├── cost_viewer.py         CostViewerDialog (2x2 metric grid; bg-threaded fetch)
 │   │   ├── refactor_scout.py      RefactorScoutDialog — scrollable findings panel grouped
 │   │   │                          by kind. Per-card checkboxes + selection toolbar (All/None/

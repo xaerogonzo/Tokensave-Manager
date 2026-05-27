@@ -33,6 +33,67 @@ from helpers.llm import _build_llm_prompt, _call_llm
 from helpers.claude_cli import call_claude_cli_print
 
 
+# ── v4.2 grounding helpers ───────────────────────────────────────────────────
+
+# Diff header marker for the post-image filename: ``+++ b/<path>``.
+# `/dev/null` indicates a deletion target and is filtered.
+_DIFF_FILE_RE = re.compile(r"^\+\+\+ b/(.+)$", re.MULTILINE)
+
+
+def _files_from_diff(diff_text: str) -> list[str]:
+    """Extract changed-file paths from a unified diff (``+++ b/<path>``).
+
+    Used by commit-message draft, PR draft, and AI code review to feed
+    ``build_codegraph_block(changed_files=...)`` which enables the
+    ``codegraph affected --stdin`` test-impact path.
+    """
+    return [m.group(1) for m in _DIFF_FILE_RE.finditer(diff_text or "")
+            if not m.group(1).startswith("/dev/null")]
+
+
+def _build_commit_grounding(repo_path: str, tokensave_exe: str,
+                            codegraph_exe: str, diff_text: str) -> str:
+    """Build the combined tokensave+codegraph grounding block for commit messages.
+
+    Recipe: ``commit_range_context``. Returns ``""`` on any failure (both
+    sub-builders fail silent per v4.1 contract).
+    """
+    # Lazy import — keeps the module's import graph stable when grounding
+    # is disabled (helpers.doc_grounding pulls in subprocess/json paths).
+    try:
+        from helpers.doc_grounding import (
+            build_grounding_block,
+            build_codegraph_block,
+            build_combined_grounding,
+        )
+    except ImportError:
+        return ""
+    files = _files_from_diff(diff_text)
+    try:
+        ts_block = build_grounding_block(
+            repo_path, "commit_range_context",
+            tokensave_exe=tokensave_exe or "",
+        )
+    except Exception:
+        ts_block = ""
+    try:
+        # v4.3: ensure index is fresh before building grounding block.
+        if codegraph_exe:
+            try:
+                from helpers.codegraph_freshness import ensure_fresh
+                ensure_fresh(repo_path, codegraph_exe)
+            except Exception:
+                pass
+        cg_block = build_codegraph_block(
+            repo_path, "commit_range_context",
+            changed_files=files,
+            codegraph_exe=codegraph_exe or "",
+        )
+    except Exception:
+        cg_block = ""
+    return build_combined_grounding(ts_block, cg_block)
+
+
 # ── Conventional-commit reverse-lookup + scope vocabulary ────────────────────
 
 # Inverse of `_TYPE_TO_SECTION`, used when reading a CHANGELOG bullet
@@ -731,7 +792,8 @@ def _suggest_from_filenames(status_text: str) -> str:
 
 def _strat_claude_cli(repo_path: str, git_exe: str,
                       claude_cli_exe: str,
-                      claude_cli_model: str = "") -> "tuple[str, str] | None":
+                      claude_cli_model: str = "",
+                      grounding: str = "") -> "tuple[str, str] | None":
     """Strategy: Claude CLI (claude --print). Returns (subject, body) or None.
 
     Reuses _build_llm_prompt from helpers.llm so Claude CLI produces the same
@@ -751,7 +813,8 @@ def _strat_claude_cli(repo_path: str, git_exe: str,
     if not diff:
         return None
     recent = _recent_commit_subjects(repo_path, git_exe, n=5)
-    system, user = _build_llm_prompt(diff, recent, max_diff_chars=24000)
+    system, user = _build_llm_prompt(diff, recent, max_diff_chars=24000,
+                                     grounding=grounding)
     # cwd=home: Claude Code loads <cwd>/CLAUDE.md as project context, which
     # puts smaller models like Haiku into "assistant mode" — they respond
     # conversationally to the diff instead of generating a commit message.
@@ -773,7 +836,8 @@ def _strat_claude_cli(repo_path: str, git_exe: str,
 
 # ── LLM strategy + orchestrator entry point ──────────────────────────────────
 
-def _call_llm_for_commit_message(cfg: dict, repo_path: str, git_exe: str) -> str | None:
+def _call_llm_for_commit_message(cfg: dict, repo_path: str, git_exe: str,
+                                 grounding: str = "") -> str | None:
     """Commit-message-specific LLM wrapper. Composes the prompt and calls _call_llm.
 
     Skipped when the diff is shorter than `min_diff_lines` — trivial commits
@@ -815,12 +879,13 @@ def _call_llm_for_commit_message(cfg: dict, repo_path: str, git_exe: str) -> str
             cfg = {**cfg, "num_ctx": 8192}   # shadow; caller's dict is unchanged
 
     recent    = _recent_commit_subjects(repo_path, git_exe, n=5)
-    system, user = _build_llm_prompt(diff, recent, max_chars)
+    system, user = _build_llm_prompt(diff, recent, max_chars, grounding=grounding)
     return _call_llm(cfg, system, user, max_tokens=1500)
 
 
 def _strat_llm(repo_path: str, has_source: bool,
-               cfg: dict, git_exe: str) -> "tuple[str, str] | None":
+               cfg: dict, git_exe: str,
+               grounding: str = "") -> "tuple[str, str] | None":
     """Strategy 0: LLM (opt-in). Returns (subject, body) or None.
 
     `cfg` is the full manager config dict (so we can read
@@ -831,7 +896,8 @@ def _strat_llm(repo_path: str, has_source: bool,
     llm_cfg = (cfg.get("commit_message_llm") or {}) if isinstance(cfg, dict) else {}
     if not llm_cfg.get("enabled"):
         return None
-    raw = _call_llm_for_commit_message(llm_cfg, repo_path, git_exe)
+    raw = _call_llm_for_commit_message(llm_cfg, repo_path, git_exe,
+                                       grounding=grounding)
     if not raw:
         return None
     head, _, tail = raw.partition("\n\n")
@@ -875,7 +941,8 @@ class CommitSuggestion:
 
 def _suggest_commit_message(repo_path: str = "", status_text: str = "",
                             cfg: dict | None = None,
-                            git_exe: str = "") -> CommitSuggestion:
+                            git_exe: str = "",
+                            mc=None) -> CommitSuggestion:
     """Generate a conventional-commit-style message for the staged changes.
 
     Multi-strategy orchestrator — tries the highest-quality strategy first
@@ -896,9 +963,28 @@ def _suggest_commit_message(repo_path: str = "", status_text: str = "",
     # raw.get returns None if the JSON key is `null`; coerce defensively.
     claude_cli_model = cfg.get("claude_cli_model") or ""
 
+    # v4.2: build the tokensave+codegraph grounding block ONCE if the
+    # master switch is on. Both LLM-shaped strategies (`_strat_llm`,
+    # `_strat_claude_cli`) consume the same block; heuristics-only
+    # strategies ignore it. Builds in the orchestrator (which has the
+    # full ManagerConfig in scope) keeps the strategies cfg-dict-only.
+    grounding = ""
+    if mc is not None and getattr(mc, "enable_llm_grounding", False) and repo_path and git_exe:
+        try:
+            diff_for_grounding = _pending_diff(repo_path, git_exe=git_exe)
+        except Exception:
+            diff_for_grounding = ""
+        if diff_for_grounding:
+            grounding = _build_commit_grounding(
+                repo_path,
+                getattr(mc, "tokensave_exe", "") or "",
+                getattr(mc, "codegraph_exe", "") or "",
+                diff_for_grounding,
+            )
+
     # Build strategy chain from backend setting — no if/elif cascade.
-    _cli   = ("claude_cli", lambda: _strat_claude_cli(repo_path, git_exe, claude_cli_exe, claude_cli_model) if git_exe else None)
-    _llm   = ("llm",        lambda: _strat_llm(repo_path, has_source, cfg, git_exe) if git_exe else None)
+    _cli   = ("claude_cli", lambda: _strat_claude_cli(repo_path, git_exe, claude_cli_exe, claude_cli_model, grounding=grounding) if git_exe else None)
+    _llm   = ("llm",        lambda: _strat_llm(repo_path, has_source, cfg, git_exe, grounding=grounding) if git_exe else None)
     _cl    = ("changelog",  lambda: _strat_changelog(repo_path, files, git_exe) if git_exe else None)
     _diff  = ("diff",       lambda: _strat_diff(repo_path, files, git_exe) if git_exe else None)
     _fnames= ("filenames",  lambda: _strat_filenames(status_text))

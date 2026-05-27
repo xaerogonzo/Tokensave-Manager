@@ -609,7 +609,7 @@ class App(tk.Tk):
             self._log("  Composing AI commit message…", C["peach"])
             status_out, _ = self._shell_capture(
                 [self._cfg.git_exe, "-C", cwd, "status", "--short"], cwd)
-            _suggestion = _suggest_commit_message(cwd, status_out, self._cfg.raw, self._cfg.git_exe)
+            _suggestion = _suggest_commit_message(cwd, status_out, self._cfg.raw, self._cfg.git_exe, mc=self._cfg)
             ai_msg = _suggestion.message or "chore: tokensave sync"
             commit_cmd = [self._cfg.git_exe, "-C", cwd, "commit", "-m", ai_msg.split("\n", 1)[0]]
             if "\n\n" in ai_msg:

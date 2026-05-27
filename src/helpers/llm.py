@@ -34,8 +34,14 @@ def _is_auth_error(text: str) -> bool:
     ))
 
 
-def _build_llm_prompt(diff: str, recent: list, max_diff_chars: int) -> tuple:
-    """Construct (system, user) prompt text for the LLM call."""
+def _build_llm_prompt(diff: str, recent: list, max_diff_chars: int,
+                      grounding: str = "") -> tuple:
+    """Construct (system, user) prompt text for the LLM call.
+
+    v4.2: ``grounding`` is an optional tokensave/codegraph context block
+    spliced into the user message between the recent-commit reference and
+    the diff. Empty by default — caller decides whether to build it.
+    """
     system = (
         "You write conventional-commit messages. Output ONE commit message:\n"
         "- Subject line MUST be 72 chars or less, imperative mood "
@@ -62,8 +68,13 @@ def _build_llm_prompt(diff: str, recent: list, max_diff_chars: int) -> tuple:
         "NO quotes, NO explanation."
     )
     recent_lines = "\n".join(f"- {s}" for s in recent[:5]) if recent else "(no prior commits)"
+    grounding_section = (
+        f"Repository context (auto-attached from tokensave/codegraph):\n{grounding}\n\n"
+        if grounding else ""
+    )
     user = (
         f"Recent commit subjects (tone reference):\n{recent_lines}\n\n"
+        f"{grounding_section}"
         f"Staged diff (truncated to {max_diff_chars} chars):\n"
         f"```diff\n{diff[:max_diff_chars]}\n```"
     )
