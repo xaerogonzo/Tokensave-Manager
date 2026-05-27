@@ -20,7 +20,7 @@ import os
 import re
 from datetime import datetime
 
-from constants import DESKTOP_PROJECT_FILE, SKIP_DIRS, MAX_DEPTH
+from constants import desktop_project_file, SKIP_DIRS, MAX_DEPTH
 from helpers.detection import _root_path, _root_label
 
 
@@ -120,8 +120,9 @@ def find_projects(roots: list) -> list:
 
 def get_pinned():
     """Return the path the user pinned (or None if no valid pin)."""
-    if os.path.isfile(DESKTOP_PROJECT_FILE):
-        p = open(DESKTOP_PROJECT_FILE, encoding="utf-8").read().strip()
+    pin_file = desktop_project_file()
+    if os.path.isfile(pin_file):
+        p = open(pin_file, encoding="utf-8").read().strip()
         if p and os.path.isfile(os.path.join(p, ".tokensave", "tokensave.db")):
             return p
     return None
@@ -129,15 +130,17 @@ def get_pinned():
 
 def set_pinned(path):
     """Write `path` to the pin file (creates parent dir if needed)."""
-    os.makedirs(os.path.dirname(DESKTOP_PROJECT_FILE), exist_ok=True)
-    with open(DESKTOP_PROJECT_FILE, "w", encoding="utf-8") as f:
+    pin_file = desktop_project_file()
+    os.makedirs(os.path.dirname(pin_file), exist_ok=True)
+    with open(pin_file, "w", encoding="utf-8") as f:
         f.write(path)
 
 
 def clear_pinned():
     """Remove the pin file if it exists (no-op otherwise)."""
-    if os.path.isfile(DESKTOP_PROJECT_FILE):
-        os.remove(DESKTOP_PROJECT_FILE)
+    pin_file = desktop_project_file()
+    if os.path.isfile(pin_file):
+        os.remove(pin_file)
 
 
 # ── Misc display helpers ─────────────────────────────────────────────────────

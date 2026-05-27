@@ -40,7 +40,7 @@ from helpers.detection import (
     _detect_git, _detect_gh, _detect_npm, _detect_codegraph, _detect_claude_cli,
     _root_path, _root_label,
 )
-from helpers.mcp import _MCP_CONFIGS, _classify_mcp_entry
+from helpers.mcp import _mcp_configs, _classify_mcp_entry
 
 if TYPE_CHECKING:
     from state import ManagerConfig
@@ -821,7 +821,7 @@ class SettingsDialog(tk.Toplevel):
                    command=self._open_mcp_configurator).pack(side=tk.LEFT)
         try:
             states = [_classify_mcp_entry(p, self._cfg.raw)["state"]
-                      for _, p in _MCP_CONFIGS]
+                      for _, p in _mcp_configs()]
         except Exception:
             states = []
         if states and all(s == "ok" for s in states):

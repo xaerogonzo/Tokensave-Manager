@@ -241,7 +241,11 @@ def list_affected_commits(repo_path: str, git_exe: str, rel_file: str,
 
 # ── Backup branch ─────────────────────────────────────────────────────────────
 
-_BACKUP_BRANCH_RE = re.compile(r"^[A-Za-z0-9._/+-]+$")
+# First character must NOT be `-` so a name like "--force" can't be
+# interpreted as a git flag (subprocess.run uses argv, but git's own
+# parser would still see it as a flag). Subsequent characters may
+# include hyphens for normal branch names like ``backup/before-scrub-1700000000``.
+_BACKUP_BRANCH_RE = re.compile(r"^[A-Za-z0-9._/+][A-Za-z0-9._/+-]*$")
 
 
 def build_backup_branch_name(prefix: str = "backup/before-scrub") -> str:

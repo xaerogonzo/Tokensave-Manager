@@ -5,10 +5,16 @@ Provides:
   install_pre_commit_hook(repo_root)     → (ok, message)
   uninstall_pre_commit_hook(repo_root)   → (ok, message)
   is_hook_installed(repo_root)           → bool
+
+As of v4.12 this runs the full pytest suite under ``tests/`` (not just
+the original ``smoke_test.py``). pytest auto-discovers both pytest-native
+files AND the existing ``unittest.TestCase`` classes in ``smoke_test.py``,
+so coverage strictly expanded.
 """
 from __future__ import annotations
 
 import os
+import re
 import subprocess
 import sys
 
@@ -16,13 +22,15 @@ import sys
 _HOOK_MARKER = "# TokenSaveManager-smoke-hook"
 
 # Content written to .git/hooks/pre-commit.
+# v4.12: switched from `python tests/smoke_test.py` to the full pytest
+# suite excluding Tk-marked tests (so the hook doesn't need a display).
 _HOOK_SCRIPT = """\
 #!/bin/sh
 {marker} — managed by Token Save Manager
 # To disable: Settings → Behaviour → uncheck "Run smoke tests before commits"
 REPO_ROOT="$(git rev-parse --show-toplevel)"
 cd "$REPO_ROOT"
-python tests/smoke_test.py
+python -m pytest tests/ -m "not tk" -q
 exit $?
 """.format(marker=_HOOK_MARKER)
 
@@ -36,46 +44,59 @@ except AttributeError:
 # ── Public helpers ─────────────────────────────────────────────────────────
 
 def run_smoke_tests(project_root: str) -> tuple[int, int, str]:
-    """Run ``tests/smoke_test.py`` in *project_root* and return
+    """Run the full ``tests/`` pytest suite in *project_root* and return
     ``(passed, total, combined_output)``.
 
-    Returns ``(0, 0, err_text)`` when the test script can't be found or the
-    Python interpreter fails to start.
+    Returns ``(0, 0, err_text)`` when the tests directory can't be found
+    or pytest fails to launch.
+
+    v4.12: now invokes ``python -m pytest tests/`` instead of the single
+    ``smoke_test.py`` file. Tk-marked tests are excluded by default since
+    most users running this from the manager are on Windows where Tk
+    works, BUT the pre-commit hook variant also excludes them — pytest's
+    own discovery + the existing fixtures take it from there.
     """
-    test_script = os.path.join(project_root, "tests", "smoke_test.py")
-    if not os.path.isfile(test_script):
-        return 0, 0, f"smoke test file not found: {test_script}"
+    tests_dir = os.path.join(project_root, "tests")
+    if not os.path.isdir(tests_dir):
+        return 0, 0, f"tests/ directory not found: {tests_dir}"
 
     try:
         proc = subprocess.run(
-            [sys.executable, test_script],
+            [sys.executable, "-m", "pytest", "tests/", "-v"],
             capture_output=True,
             text=True,
             cwd=project_root,
-            timeout=120,
+            timeout=300,             # bumped from 120 — full suite incl. Tk
             creationflags=_CREATE_NO_WINDOW,
         )
     except subprocess.TimeoutExpired:
-        return 0, 0, "Smoke tests timed out after 120 s."
+        return 0, 0, "pytest timed out after 300 s."
     except OSError as exc:
-        return 0, 0, f"Failed to launch Python: {exc}"
+        return 0, 0, f"Failed to launch pytest: {exc}"
 
     combined = (proc.stdout or "") + (proc.stderr or "")
 
-    # Parse "N - PASS / FAIL" from the final summary line.
-    passed = total = 0
+    # Parse pytest's summary line — e.g.:
+    #   "===== 290 passed, 1 skipped in 5.19s ====="
+    #   "===== 2 failed, 288 passed in 4.87s ====="
+    #   "===== 290 passed in 5.19s ====="
+    # We compute "total" as passed + failed + errored (skipped not counted
+    # in the X/Y display since "passed" already excludes them).
+    passed = failed = errored = 0
     for line in combined.splitlines():
-        stripped = line.strip()
-        # Our runner prints e.g. "ALL PASSED: 123/123 passed"
-        if "passed" in stripped and "/" in stripped:
-            try:
-                # Grab the "X/Y" fragment.
-                frac = [tok for tok in stripped.split() if "/" in tok][0]
-                p, t = frac.split("/")
-                passed, total = int(p), int(t)
-            except (ValueError, IndexError):
-                pass
+        if "passed" not in line and "failed" not in line and "error" not in line:
+            continue
+        # Conservative: only consider the summary-style "===== ... =====" line.
+        if "=" not in line:
+            continue
+        m_pass  = re.search(r"(\d+)\s+passed",  line)
+        m_fail  = re.search(r"(\d+)\s+failed",  line)
+        m_error = re.search(r"(\d+)\s+errors?", line)
+        if m_pass:   passed  = int(m_pass.group(1))
+        if m_fail:   failed  = int(m_fail.group(1))
+        if m_error:  errored = int(m_error.group(1))
 
+    total = passed + failed + errored
     return passed, total, combined
 
 

@@ -152,10 +152,52 @@ def main() -> int:
     if failures:
         _stderr(f"{len(failures)} check(s) failed — push blocked.")
         _stderr("Fix the issues above, or use  git push --no-verify  to skip.")
+
+        # G-K: GUI git clients (GitHub Desktop, GitKraken, Sourcetree, the
+        # VS Code git panel, etc.) swallow stderr — the user sees only a
+        # generic "hook rejected push" message with no idea WHICH check
+        # failed.  When stderr is NOT a TTY, also surface a tkinter
+        # messagebox so GUI users at least see the failures summary.
+        #
+        # Wrapped in try/except Exception:pass so headless Linux/WSL/SSH
+        # contexts where Tk init fails (no DISPLAY) still get a clean
+        # exit 1 with the stderr output they already have.
+        if not _stderr_is_tty():
+            try:
+                import tkinter as _tk
+                from tkinter import messagebox as _mb
+                _root = _tk.Tk()
+                _root.withdraw()
+                summary = "\n".join(
+                    f"  • {name}: {msg}" for name, msg in failures
+                )
+                _mb.showerror(
+                    "Push blocked by quality checks",
+                    f"{len(failures)} check(s) failed:\n\n{summary}\n\n"
+                    "Fix the issues, or from a terminal run:\n"
+                    "    git push --no-verify"
+                )
+                _root.destroy()
+            except Exception:
+                # Fail-open on the GUI fallback itself — exit 1 still
+                # happens, the user sees stderr (or the GUI client's
+                # "hook rejected" message, however unhelpful).
+                pass
+
         return 1
 
     _stderr("All checks passed.")
     return 0
+
+
+def _stderr_is_tty() -> bool:
+    """Best-effort isatty() probe. G-K helper, isolated for testability."""
+    try:
+        return bool(sys.stderr.isatty())
+    except (AttributeError, OSError, ValueError):
+        # If stderr has been replaced with something exotic (e.g. an
+        # io.StringIO from pytest's capture), treat as non-TTY.
+        return False
 
 
 if __name__ == "__main__":

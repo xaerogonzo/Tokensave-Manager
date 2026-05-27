@@ -831,6 +831,33 @@ See [CHANGELOG.md](CHANGELOG.md) for the full history.
 
 ---
 
+## Testing
+
+The manager ships with a pytest test suite covering both pure-logic helpers
+and the four newest dialogs (checks, tool manager, codegraph MCP picker,
+scrub history). Tests are zero-runtime-dependency for end users — only the
+dev workflow installs pytest.
+
+```bash
+pip install -r requirements-dev.txt
+python -m pytest                    # everything (~3-5 s on Windows)
+python -m pytest -m "not tk"        # pure-logic only — no display needed
+python -m pytest -m tk              # dialog tests only
+```
+
+On Linux CI the dialog tests run under `xvfb-run -a` with `python3-tk`
+installed. The GitHub Actions workflow (`.github/workflows/ci.yml`) splits
+the test runs into three gating tiers:
+
+- `test-warn`: pushes to `Roadmap-*` branches → warn-only
+- `test-gate`: PRs to `main`/`master` → HARD gate (failing tests block the merge)
+- `test-postmerge`: pushes to `main`/`master` → HARD gate (catches bad merges)
+
+See `memory/tests_pattern.md` for the fixture catalogue + Tk gotchas (G-A
+through G-K) when writing new tests.
+
+---
+
 ## Credits
 
 Created by **Alexander L Corthell**

@@ -54,7 +54,7 @@ from dialogs.settings import SettingsDialog
 from dialogs.untrack_ignored import UntrackIgnoredDialog
 from helpers.commit_messages import _suggest_commit_message
 from helpers.git import _find_tracked_but_ignored, _is_git_repo, _is_local_git_repo
-from helpers.mcp import _MCP_CONFIGS, _classify_mcp_entry
+from helpers.mcp import _mcp_configs, _classify_mcp_entry
 from helpers.project_discovery import find_projects, get_pinned
 from helpers.runtime import (
     _acquire_instance_lock,
@@ -417,7 +417,7 @@ class App(tk.Tk):
         skips = (self._cfg.raw.get("mcp_skip_warnings") or []) \
                 if isinstance(self._cfg.raw, dict) else []
         mcp_drift = []
-        for label, path in _MCP_CONFIGS:
+        for label, path in _mcp_configs():
             if path in skips:
                 continue
             try:

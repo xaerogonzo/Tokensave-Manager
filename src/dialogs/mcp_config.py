@@ -33,7 +33,7 @@ from typing import TYPE_CHECKING
 from constants import C
 from theme import bind_mousewheel
 from helpers.mcp import (
-    _MCP_CONFIGS, _classify_mcp_entry, _apply_mcp_fix, _is_claude_running,
+    _mcp_configs, _classify_mcp_entry, _apply_mcp_fix, _is_claude_running,
 )
 
 if TYPE_CHECKING:
@@ -150,7 +150,7 @@ class MCPConfigDialog(tk.Toplevel):
         else:
             self._warn_lbl.configure(text="")
 
-        for label, path in _MCP_CONFIGS:
+        for label, path in _mcp_configs():
             self._render_block(label, path)
 
     def _render_block(self, label: str, path: str):

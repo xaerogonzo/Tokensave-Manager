@@ -1,8 +1,41 @@
+# TokenSave Manager — CI pipeline.
+#
+# Three layers of safety on top of the existing syntax + pyflakes check
+# (v4.12 / G-I from the cascade plan):
+#
+#   1. `check`           — syntax + pyflakes lint (always runs).
+#   2. `test-warn`       — full pytest suite on push to long-lived
+#                          integration branches (Roadmap-*); warn-only.
+#   3. `test-gate`       — full pytest suite on PRs to main/master;
+#                          HARD gate — failing tests block the merge.
+#   4. `test-postmerge`  — full pytest suite on push to main/master
+#                          (i.e. the merge itself); HARD gate so bad
+#                          merge resolutions surface immediately.
+#
+# Why three test jobs instead of one with conditional `continue-on-error`:
+# self-documenting in the Actions UI. Each job's `if:` predicate makes
+# the gating story obvious without reading expression syntax.
+#
+# Branch policy:
+#   * Push to short-lived feature branches: NO test workflow runs. Run
+#     tests locally before opening a PR.
+#   * Push to Roadmap-* integration branches: `test-warn` only.
+#   * Open / update PRs to main or master: `test-gate` only.
+#   * Push to main / master directly (post-merge): `test-postmerge` only.
+#
+# This split also prevents the test job from firing twice on the same
+# SHA when a PR's branch is pushed (only ONE predicate matches per event).
+
 name: CI
 
-on: [push, pull_request]
+on:
+  push:
+    branches: [main, master, 'Roadmap-*']
+  pull_request:
+    branches: [main, master]
 
 jobs:
+  # ── Existing syntax + pyflakes check (always runs) ──────────────────────
   check:
     runs-on: ubuntu-latest
     steps:
@@ -16,4 +49,60 @@ jobs:
         run: |
           pip install pyflakes --quiet
           python -m pyflakes src/
-          # If a tests/ directory is ever added, extend both commands to include it
+
+  # ── Pytest suite on Roadmap-* branches (warn-only) ─────────────────────
+  test-warn:
+    if: github.event_name == 'push' && startsWith(github.ref, 'refs/heads/Roadmap-')
+    runs-on: ubuntu-latest
+    continue-on-error: true   # warn-only: a red test doesn't fail the workflow
+    steps:
+      - uses: actions/checkout@v4.2.2
+      - uses: actions/setup-python@v5.6.0
+        with:
+          python-version: "3.11"
+      - name: Install dev deps
+        run: pip install -r requirements-dev.txt
+      - name: Install Tk for headless dialog tests
+        run: sudo apt-get update && sudo apt-get install -y python3-tk xvfb
+      - name: Pure-logic tests
+        run: python -m pytest -m "not tk" -v
+      - name: Tk dialog tests (under xvfb)
+        run: xvfb-run -a python -m pytest -m tk -v
+
+  # ── Pytest suite on PRs to main/master (HARD gate) ─────────────────────
+  test-gate:
+    if: github.event_name == 'pull_request'
+    runs-on: ubuntu-latest
+    # No continue-on-error — a failing test BLOCKS the merge.
+    steps:
+      - uses: actions/checkout@v4.2.2
+      - uses: actions/setup-python@v5.6.0
+        with:
+          python-version: "3.11"
+      - name: Install dev deps
+        run: pip install -r requirements-dev.txt
+      - name: Install Tk for headless dialog tests
+        run: sudo apt-get update && sudo apt-get install -y python3-tk xvfb
+      - name: Pure-logic tests
+        run: python -m pytest -m "not tk" -v
+      - name: Tk dialog tests (under xvfb)
+        run: xvfb-run -a python -m pytest -m tk -v
+
+  # ── Pytest suite on push to main/master (HARD gate, post-merge) ────────
+  test-postmerge:
+    if: github.event_name == 'push' && (github.ref == 'refs/heads/main' || github.ref == 'refs/heads/master')
+    runs-on: ubuntu-latest
+    # No continue-on-error — bad merge resolutions must surface as red.
+    steps:
+      - uses: actions/checkout@v4.2.2
+      - uses: actions/setup-python@v5.6.0
+        with:
+          python-version: "3.11"
+      - name: Install dev deps
+        run: pip install -r requirements-dev.txt
+      - name: Install Tk for headless dialog tests
+        run: sudo apt-get update && sudo apt-get install -y python3-tk xvfb
+      - name: Pure-logic tests
+        run: python -m pytest -m "not tk" -v
+      - name: Tk dialog tests (under xvfb)
+        run: xvfb-run -a python -m pytest -m tk -v

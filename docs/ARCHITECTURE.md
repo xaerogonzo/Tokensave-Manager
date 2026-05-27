@@ -404,14 +404,39 @@ Token Save Manager Source/
 │   ├── templates\                 All template files (copied by build.ps1)
 │   └── docs\                      GITHUB_GUIDE.md, ARCHITECTURE.md, ARCHITECTURE_TOKENSAVE.md
 │
-├── tests/
-│   └── smoke_test.py              v4.9 logic-layer smoke test suite — 123 tests,
-│                                  no Tk window, no real network. 14 test classes
-│                                  covering G1–G6 Gemini-critique fixes, alignment
-│                                  scoring, Zip-Slip / rate-limit / path-spoof guards,
-│                                  MCP detection, and filter helpers. Runs in ~0.06 s.
-│                                  Run via manager Help tab → "🧪 Run Smoke Tests" or
-│                                  `python tests/smoke_test.py` directly.
+├── tests/                         v4.12 pytest test suite — wired into CI as a
+│   │                              first-class gate (`.github/workflows/ci.yml`).
+│   │                              Existing smoke_test.py runs unchanged; new
+│   │                              per-module + per-dialog files added.
+│   ├── conftest.py                Shared fixtures: `tk_root` (session-scoped Tk
+│   │                              root, sidesteps Windows init.tcl flakiness),
+│   │                              `wait_for` (G-G/G-M event-loop-driving poll),
+│   │                              `patch_after` (G-A/G-H AfterHarness for
+│   │                              recursive after() loops), `fake_home` (G-F
+│   │                              per-test HOME/APPDATA redirect), `mock_config`.
+│   ├── smoke_test.py              v4.9 logic-layer suite — 123 tests, 14 classes.
+│   ├── test_no_import_time_path_resolution.py
+│   │                              G-L pre-flight: imports every src/ module with
+│   │                              sentinel env vars; fails if any module captured
+│   │                              a user-path at import time (would silently
+│   │                              break fake_home for dialog tests).
+│   ├── test_ci_workflow.py        22 tests — generate_github_workflow YAML.
+│   ├── test_prepush_hook.py       26 tests — hook install/remove + G-K msgbox.
+│   ├── test_quality_checks.py     12 tests — subprocess-mocked syntax/pyflakes.
+│   ├── test_git_scrub.py          27 tests — filter-repo argv (safety-critical).
+│   ├── test_codegraph_freshness.py 19 tests — health tiers + autosync debounce.
+│   ├── test_install_codegraph.py  19 tests — npm argv (G-A + G-B).
+│   ├── test_dialog_checks.py      13 tests (@mark.tk) — ChecksDialog buttons.
+│   ├── test_dialog_tool_manager.py 13 tests (@mark.tk) — cascade uninstall ORDER.
+│   ├── test_dialog_codegraph_mcp_picker.py
+│   │                              8 tests (@mark.tk) — agent detection + argv.
+│   └── test_dialog_scrub_history.py
+│                                  7 tests (@mark.tk) — filter-repo gate + scrub argv.
+│
+│  Run all:    pip install -r requirements-dev.txt && python -m pytest
+│  Pure-only:  python -m pytest -m "not tk"
+│  Tk-only:    python -m pytest -m tk           (Linux: xvfb-run -a python -m pytest -m tk)
+│  In-app:     Help tab → "🧪 Run Smoke Tests" (subprocess-launched, streamed UI)
 │
 ├── logs/
 │   └── manager.log                Rotating log (500 KB x 5 backups)

@@ -80,15 +80,35 @@ def _resolve_desktop_cfg_path() -> str:
     return traditional
 
 
-_MCP_DESKTOP_CFG_PATH = _resolve_desktop_cfg_path()
-_MCP_CODE_CFG_PATH    = os.path.join(
-    os.environ.get("USERPROFILE", ""), ".claude.json")
+def _mcp_desktop_cfg_path() -> str:
+    """Claude Desktop config path, resolved lazily (re-evaluates per call).
 
-# Friendly labels — kept short so they fit in the dialog headers.
-_MCP_CONFIGS = [
-    ("Claude Desktop", _MCP_DESKTOP_CFG_PATH),
-    ("Claude Code",    _MCP_CODE_CFG_PATH),
-]
+    Lazy resolution matters because tests redirect ``$USERPROFILE`` /
+    ``$LOCALAPPDATA`` / ``$APPDATA`` via the ``fake_home`` fixture
+    (G-F + G-J); a module-level constant would capture the developer's
+    real path at import time and silently bypass the fixture. See
+    ``tests/test_no_import_time_path_resolution.py`` (G-L) for the
+    pre-flight test that enforces this invariant.
+    """
+    return _resolve_desktop_cfg_path()
+
+
+def _mcp_code_cfg_path() -> str:
+    """Claude Code config path (``~/.claude.json``), resolved lazily."""
+    return os.path.join(os.environ.get("USERPROFILE", ""), ".claude.json")
+
+
+def _mcp_configs() -> list[tuple[str, str]]:
+    """Friendly-label + path pairs for every MCP config the manager touches.
+
+    Returns a fresh list each call so test-environment redirects apply.
+    Callers iterate ``for label, path in _mcp_configs(): ...`` — same
+    shape as the old module-level constant, just lazily evaluated.
+    """
+    return [
+        ("Claude Desktop", _mcp_desktop_cfg_path()),
+        ("Claude Code",    _mcp_code_cfg_path()),
+    ]
 
 
 def _wrapper_path() -> str:
