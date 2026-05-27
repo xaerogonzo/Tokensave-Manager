@@ -428,17 +428,27 @@ class ScrubHistoryDialog(tk.Toplevel):
                 ready = False
         self._scrub_btn.configure(state=tk.NORMAL if ready else tk.DISABLED)
 
-        # Show Force Push button if scrub is already done (previous session)
+        # Force Push button visibility — driven entirely by _already_scrubbed.
+        # Re-evaluated on every file change so picking a second already-scrubbed
+        # file re-enables the button even if a previous push already completed.
         if self._already_scrubbed:
             self._scrub_btn.configure(state=tk.DISABLED, text="✓ Scrubbed")
-            # Pack the force push button if not already visible
+            # Always reset to enabled — the file just changed, it's a fresh target.
+            self._force_push_btn.configure(
+                state=tk.NORMAL, text="⬆  Force Push to GitHub")
             try:
-                self._force_push_btn.pack_info()  # raises if not packed
+                self._force_push_btn.pack_info()   # already visible — no-op
             except tk.TclError:
                 self._force_push_btn.pack(side=tk.RIGHT, padx=(6, 0))
-        elif self._scrub_btn.cget("text") == "✓ Scrubbed":
-            # File changed — reset button label
-            self._scrub_btn.configure(text="🧨  Scrub Now")
+        else:
+            # File not yet scrubbed — reset scrub button label and hide Force Push.
+            if self._scrub_btn.cget("text") in ("✓ Scrubbed", "🧨  Scrubbing…"):
+                self._scrub_btn.configure(text="🧨  Scrub Now")
+            try:
+                self._force_push_btn.pack_info()   # visible — hide it
+                self._force_push_btn.pack_forget()
+            except tk.TclError:
+                pass   # already hidden
 
     def _refresh_affected_commits(self, rel_file: str):
         self._affected_txt.configure(state=tk.NORMAL)
