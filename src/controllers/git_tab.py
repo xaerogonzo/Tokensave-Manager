@@ -446,7 +446,7 @@ class GitTabController:
             lambda e: self._show_draft_pr_menu(e, btn_draft_pr))
 
         self._git_all_btns       = [self._btn_set_remote, btn_push, btn_pull,
-                                     btn_commit, btn_undo, btn_force_push, btn_new,
+                                     btn_commit, btn_undo, btn_new,
                                      btn_switch, btn_merge, btn_del, btn_openpr,
                                      btn_mergepr, btn_release, btn_draft_pr]
         self._git_push_pull_btns = [btn_push, btn_pull, btn_openpr]

@@ -761,8 +761,6 @@ class ScrubHistoryDialog(tk.Toplevel):
                 f"Push rewritten history to origin/{head}.\n\n"
                 "Anyone who has cloned this repo will need to re-clone "
                 "afterwards — their local history is now divergent.\n\n"
-                "Uses --force-with-lease (refuses if someone else pushed\n"
-                "new commits since your last fetch).\n\n"
                 "Proceed?",
                 parent=self, default="no", icon="warning"):
             return

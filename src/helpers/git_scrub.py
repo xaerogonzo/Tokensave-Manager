@@ -372,10 +372,25 @@ def git_rm_cached(repo_path: str, git_exe: str, rel_file: str,
 
 def force_push(repo_path: str, git_exe: str, branch: str,
                on_log=None) -> Tuple[bool, str]:
-    """Run ``git push --force-with-lease origin <branch>``.
+    """Run ``git push --force origin <branch>``.
 
     Called from ``ScrubHistoryDialog`` after a successful scrub so the
     rewritten history reaches the remote.  Returns ``(ok, log)``.
+
+    Why ``--force`` and not ``--force-with-lease``:
+    ``--force-with-lease`` compares the remote-tracking ref (what we last
+    fetched from origin) against the remote's current tip.  After
+    ``git filter-repo`` removes the remote and the user re-adds it via
+    Set Remote, there are no remote-tracking refs — git has never fetched
+    from this fresh remote entry — so ``--force-with-lease`` always
+    reports "stale info" and refuses.
+
+    ``--force`` is appropriate here because the user has already passed
+    through:
+      1. the destructive-action banner,
+      2. the confirmation-phrase typing gate,
+      3. the "Proceed?" askyesno dialog in ``_on_force_push``.
+    Three explicit confirmations substitute for the lease check.
     """
     log_chunks: List[str] = []
 
@@ -388,10 +403,9 @@ def force_push(repo_path: str, git_exe: str, branch: str,
                 pass
 
     try:
-        _log(f"$ git push --force-with-lease origin {branch}")
+        _log(f"$ git push --force origin {branch}")
         proc = subprocess.run(
-            [git_exe, "-C", repo_path, "push",
-             "--force-with-lease", "origin", branch],
+            [git_exe, "-C", repo_path, "push", "--force", "origin", branch],
             capture_output=True, text=True, timeout=120,
             encoding="utf-8", errors="replace",
             creationflags=CREATE_NO_WINDOW,
