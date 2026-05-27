@@ -162,6 +162,45 @@ def read_architecture_section_from_text(text: str, section_header: str) -> str:
     return text[body_start:body_end].strip()
 
 
+def _list_section_titles(text: str) -> list[str]:
+    """Return every `## Title` heading text in `text`, in document order.
+
+    Used by ``architecture_compute_apply`` (Theme B v3) to validate that a
+    multi-section draft's titles match existing headings — hallucinated
+    titles are refused rather than auto-appended.
+    """
+    titles = []
+    for m in _SECTION_ANCHOR_RE.finditer(text or ""):
+        # _SECTION_ANCHOR_RE matches "## <title>\n" — strip "## " prefix and "\n"
+        line = m.group(0)
+        if line.startswith("## "):
+            titles.append(line[3:].rstrip("\n").strip())
+    return titles
+
+
+def extract_sections_as_document(text: str, titles: list[str]) -> str:
+    """Build a synthetic document containing only the named sections.
+
+    Used by the doc-drafter simulator to build aligned before/after sides
+    for the ProposalBridge diff. Both sides share identical structure
+    (same titles in same order), so the diff lines up section-by-section.
+
+    Sections missing from `text` are emitted with a placeholder body so
+    new-section additions (rare — gated by `allow_new_sections` in the
+    DocType) still appear in the diff as pure additions.
+    """
+    if not titles:
+        return ""
+    parts = []
+    for title in titles:
+        body = read_architecture_section_from_text(text or "", title)
+        if body:
+            parts.append(f"## {title}\n\n{body}")
+        else:
+            parts.append(f"## {title}\n\n_(new section — no prior content)_")
+    return "\n\n".join(parts)
+
+
 def read_architecture_full(path: str) -> str:
     """Return the entire architecture file contents.
 

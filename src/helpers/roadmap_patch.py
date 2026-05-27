@@ -235,20 +235,10 @@ def append_note(
 
 # ── Shared IO helpers ─────────────────────────────────────────────────────────
 
-def _atomic_write(path: str, text: str, msg: str) -> tuple[bool, str]:
-    tmp_path = path + ".tmp"
-    try:
-        with open(tmp_path, "w", encoding="utf-8", newline="\n") as f:
-            f.write(text)
-        os.replace(tmp_path, path)
-    except OSError as e:
-        try:
-            if os.path.exists(tmp_path):
-                os.remove(tmp_path)
-        except OSError:
-            pass
-        return False, f"Failed writing {os.path.basename(path)}: {e}"
-    return True, msg
+# Re-export from helpers.io_utils so the existing import sites (insert_roadmap_section
+# etc.) keep working. The shared module lets architecture_patch and
+# generic_doc_patch use the same atomic-write pattern without duplicating it.
+from helpers.io_utils import _atomic_write   # noqa: F401
 
 
 def read_roadmap_section(path: str, roadmap_n: int) -> str:
@@ -272,6 +262,52 @@ def read_roadmap_section_from_text(text: str, roadmap_n: int) -> str:
         return ""
     block_start, block_end = bounds
     return text[block_start:block_end].strip()
+
+
+_ROADMAP_HEADING_LINE_RE = re.compile(
+    r"(?m)^## Roadmap (\d+)(?:\s*[—–-]\s*([^\n]+))?$"
+)
+
+
+def _list_section_titles(text: str) -> list[str]:
+    """Return roadmap headings as 'Roadmap N — Theme' strings, in document order.
+
+    Theme B title-validation uses these as the allowed-titles set. Caller
+    can match against `## Roadmap N` prefix to validate even when the model
+    drifts on the theme suffix.
+    """
+    titles = []
+    for m in _ROADMAP_HEADING_LINE_RE.finditer(text or ""):
+        n = m.group(1)
+        theme = (m.group(2) or "").strip()
+        if theme:
+            titles.append(f"Roadmap {n} — {theme}")
+        else:
+            titles.append(f"Roadmap {n}")
+    return titles
+
+
+def extract_sections_as_document(text: str, titles: list[str]) -> str:
+    """Build a synthetic document containing only the named roadmap sections.
+
+    `titles` are strings of the form 'Roadmap N' or 'Roadmap N — Theme'.
+    Used by the simulator for aligned before/after diff sides.
+    """
+    if not titles:
+        return ""
+    parts = []
+    for title in titles:
+        # Extract roadmap number from "Roadmap N" or "Roadmap N — Theme"
+        m = re.match(r"Roadmap (\d+)", title)
+        if not m:
+            continue
+        n = int(m.group(1))
+        body = read_roadmap_section_from_text(text or "", n)
+        if body:
+            parts.append(f"## {title}\n\n{body}")
+        else:
+            parts.append(f"## {title}\n\n_(new roadmap section — no prior content)_")
+    return "\n\n".join(parts)
 
 
 def read_roadmap_full(path: str) -> str:

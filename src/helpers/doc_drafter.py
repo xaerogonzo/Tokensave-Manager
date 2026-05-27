@@ -85,29 +85,35 @@ def _strip_end_marker(text: str) -> str:
 # Shared rule blocks appended to every _*_SYSTEM constant. Centralising them
 # here keeps the six prompts in lockstep — a single edit to either rule
 # propagates to all drafters.
+#
+# Tone: 2026 prompt research shows that aggressive caps ("CRITICAL!",
+# "(MANDATORY)", "YOU MUST", "NEVER EVER") overtriggers newer Claude models
+# and produces worse output. Calm direct prose works better. We also frame
+# positively where possible — "Don't X" forces the model to process X
+# first (the "Pink Elephant" problem). These blocks therefore read as
+# descriptions of the execution environment, not warnings.
 _STOP_MARKER_RULE = (
-    "\n\nTermination (MANDATORY):\n"
-    "- After the LAST line of valid output, write a line containing only "
-    "`<<<END_OF_DRAFT>>>` and stop. Do NOT write any prose, note, summary, "
-    "explanation, or further markdown after the marker. The post-processor "
-    "strips the marker AND everything after it; anything you put past the "
-    "marker will be silently discarded."
+    "\n\nTermination:\n"
+    "When your output is complete, write `<<<END_OF_DRAFT>>>` on its own "
+    "line. The post-processor strips this marker and anything past it, so "
+    "leave nothing of value after it."
 )
 
 _ANTI_FABRICATION_RULE = (
-    "\n\nGrounding (MANDATORY):\n"
-    "- NEVER invent details that are not visible in the commit subjects, "
-    "classified changes, or changed-file paths in the user prompt below. "
-    "If a commit subject says only \"feat(llm): tighten prompt\", do NOT "
-    "write \"Idempotent; safe to run on CI/release pipelines\" or other "
-    "padding that is not in the diff. A generic-but-accurate bullet "
-    "((llm) tighten commit-message prompt) is better than a detailed-"
-    "but-fabricated one.\n"
-    "- NEVER invent symbol names. Function, class, and module names you "
-    "cite in backticks MUST appear in the changed-file paths or be "
-    "derivable from them. Do NOT make up plausible-sounding names like "
-    "`DocTypeRegistry`, `_enable_agentic_tokensave_tool`, or "
-    "`_feedback_driven_regeneration` to fill space."
+    "\n\nGrounding:\n"
+    "Cite only details that appear in the commit subjects, classified "
+    "changes, or changed-file paths in the user prompt. Generic-but-"
+    "accurate is better than detailed-but-fabricated. Symbol names in "
+    "backticks must be derivable from the changed files — if you can't "
+    "trace a name back to a path, drop the citation rather than guess."
+)
+
+_STATELESS_FILTER_RULE = (
+    "\n\nExecution context:\n"
+    "Your output is consumed by a markdown patcher script. The user prompt "
+    "is the complete input — produce the requested output in one pass. "
+    "Start writing the markdown content immediately; begin with the leading "
+    "characters the output-format section above specifies (e.g. `## `)."
 )
 
 
@@ -608,6 +614,139 @@ def _summarise_existing_headings(existing_text, max_levels=3):
     if not lines:
         return "  (no existing sections)"
     return "\n".join(lines)
+
+
+# ── Theme C: three-signal candidate section selector ────────────────────────
+#
+# Picks the existing `## ` sections most likely affected by the commit range
+# so the prompt only includes their bodies (not the entire file). Three token
+# sources:
+#
+#   1. Path tokens — file basenames + parent dirs from changed_files
+#   2. Scope prefixes — `(scope-name)` extracted from commit subjects, with
+#      hyphen→underscore variant generation (catches both "doc-drafter" and
+#      "doc_drafter" forms in section text)
+#   3. Significant subject words — ≥4 chars, stopword-filtered tokens from
+#      commit subjects (catches conceptual hits in architecture docs that
+#      describe systems by name rather than by file path)
+
+_PATH_TOKEN_STOPWORDS = {"src", "lib", "app", "source", "init", "main"}
+_SUBJECT_TOKEN_STOPWORDS = {
+    "feat", "fix", "chore", "docs", "refactor", "perf", "test", "build", "ci",
+    "the", "and", "for", "with", "from", "into", "this", "that", "when",
+    "where", "what", "how", "add", "use", "make", "new", "remove",
+    "update", "change", "fixed", "adds", "uses",
+}
+
+
+def _path_tokens(changed_files):
+    """Tokens drawn from changed-file paths: basename(no ext), parent dir."""
+    out = set()
+    for p in changed_files or []:
+        p = p.replace("\\", "/")
+        parts = [x for x in p.split("/") if x]
+        if not parts:
+            continue
+        base = parts[-1].rsplit(".", 1)[0]
+        if base and base.lower() not in _PATH_TOKEN_STOPWORDS:
+            out.add(base.lower())
+            # Hyphen-variant for cross-style matching
+            if "_" in base:
+                out.add(base.lower().replace("_", "-"))
+        if len(parts) >= 2:
+            parent = parts[-2]
+            if parent.lower() not in _PATH_TOKEN_STOPWORDS:
+                out.add(parent.lower())
+    return out
+
+
+def _subject_tokens(commits):
+    """Significant words from commit subjects + scope prefixes (both
+    hyphen and underscore variants)."""
+    out = set()
+    for c in commits or []:
+        subj = (c.get("subject") if isinstance(c, dict) else str(c)) or ""
+        m = _SCOPE_PREFIX_RE.match("- " + subj)
+        if m:
+            scope = m.group(1).lower()
+            out.add(scope)
+            out.add(scope.replace("-", "_"))
+            out.add(scope.replace("_", "-"))
+        for tok in re.findall(r"\b\w{4,}\b", subj.lower()):
+            if tok not in _SUBJECT_TOKEN_STOPWORDS:
+                out.add(tok)
+    return out
+
+
+def _split_into_sections(text):
+    """Split markdown text into [(title, body), ...] tuples on `## ` boundaries.
+
+    Title is the line after `## ` (stripped). Body is everything from the
+    line after the heading up to (but not including) the next `## ` heading
+    or EOF. Body trailing whitespace is preserved as-is to round-trip cleanly
+    with downstream patchers.
+    """
+    if not text:
+        return []
+    sections = []
+    # finditer-based — non-greedy with lookahead to the next ## heading or EOF
+    pattern = re.compile(
+        r"(?ms)^##\s+(?P<title>[^\n]+)\n(?P<body>.*?)(?=^##\s|\Z)"
+    )
+    for m in pattern.finditer(text):
+        sections.append((m["title"].strip(), m["body"].rstrip("\n")))
+    return sections
+
+
+def _select_candidate_sections(existing_text, changed_files, commits,
+                                max_candidates=5, max_body_chars=8000):
+    """Return list of (title, body) pairs scored by combined-token overlap
+    with the section's title AND body. Three-signal token set (path, scope,
+    subject words) handles both file-rooted documentation and concept-rooted
+    documentation.
+
+    Sections are scored by hit count across title + body. Title hits weigh
+    3× body hits because matching a section's NAME is a much stronger
+    signal than incidental body mentions.
+
+    Fallback: if no section scores > 0, return the top `max_candidates`
+    sections by raw size (largest first) so the model has substantive
+    content. Body-char budget caps cumulative body size to bound prompt
+    width — drops the lowest-scoring trailing candidates first.
+    """
+    sections = _split_into_sections(existing_text)
+    if not sections:
+        return []
+
+    tokens = _path_tokens(changed_files) | _subject_tokens(commits)
+
+    if not tokens:
+        # No signal — fall back to top-K by size
+        ordered = sorted(sections, key=lambda tb: -len(tb[1]))[:max_candidates]
+    else:
+        scored = []
+        for title, body in sections:
+            tl, bl = title.lower(), body.lower()
+            title_hits = sum(1 for t in tokens if t in tl)
+            body_hits  = sum(1 for t in tokens if t in bl)
+            score = title_hits * 3 + body_hits
+            if score > 0:
+                scored.append((score, title, body))
+        if scored:
+            scored.sort(key=lambda t: -t[0])
+            ordered = [(t, b) for _, t, b in scored[:max_candidates]]
+        else:
+            # No token alignment — fall back to top-K by size
+            ordered = sorted(sections, key=lambda tb: -len(tb[1]))[:max_candidates]
+
+    # Body-char budget
+    out, total = [], 0
+    for title, body in ordered:
+        if total + len(body) > max_body_chars and out:
+            break
+        out.append((title, body))
+        total += len(body)
+    return out
 
 
 def build_changelog_prompt(commits, classified, existing_unreleased,
@@ -1509,82 +1648,102 @@ def readme_io_apply(target_path, draft_text):
 # ── Phase 2 DocType system prompts ────────────────────────────────────────────
 
 _ARCHITECTURE_SYSTEM = (
-    "You are an architecture documentation maintainer.\n\n"
-    "CRITICAL: Output ONLY the updated section content — raw markdown starting "
-    "with a ``## `` heading.  NO preamble, NO explanation, NO questions, NO "
-    "permission requests, NO code fences.  Your entire response must begin with "
-    "``## `` and contain nothing before it.\n\n"
-    "Task: update ONE named section in ARCHITECTURE.md based on the provided commits.\n\n"
+    "You maintain architecture documentation. Your output is one or more "
+    "`## SectionName` blocks, each followed by the updated section body. "
+    "Nothing before the first `## `, nothing after the last block except "
+    "the termination marker.\n\n"
     "Output format:\n"
     "  ## Section Name\n"
     "  <updated section body>\n\n"
-    "Rules:\n"
-    "- Preserve all factual content in the existing section that is still "
-    "accurate.  Only ADD or UPDATE what the commits actually change.\n"
-    "- Use the same style as the existing document: tree-formatted file "
-    "listings, one-liner descriptions per module, Key exports annotations.\n"
-    "- New helpers get an entry under ``helpers/`` sorted alphabetically. "
-    "New dialogs get an entry under ``dialogs/`` sorted alphabetically.\n"
-    "- Cite exported symbol names in backtick format, e.g. "
-    "``read_unreleased``, ``_compute_insert_*``.\n"
-    "- Do NOT invent details not supported by the commits or existing text.\n"
-    "- Do NOT ask for permission or confirmation.  Just output the section."
-) + _ANTI_FABRICATION_RULE + _STOP_MARKER_RULE
+    "Guidelines:\n"
+    "- Pick section titles from the existing-document headings shown in the "
+    "user prompt. Titles you emit must match an existing title exactly — "
+    "the patcher refuses to auto-create new sections.\n"
+    "- Preserve existing factual content that is still accurate; only "
+    "ADD or UPDATE what the commits actually change.\n"
+    "- Match the existing document's style: tree-formatted file listings, "
+    "one-liner module descriptions, Key-exports annotations.\n"
+    "- Cite exported symbol names in backticks: `read_unreleased`, "
+    "`_compute_insert_*`.\n\n"
+    "Example output (illustrative — the actual sections you update will "
+    "come from the user prompt):\n\n"
+    "## Daemon\n\n"
+    "The daemon orchestrates tokensave's index-update lifecycle.\n\n"
+    "- `_run_loop` (in `daemon.py`) drives the 60s polling cadence\n"
+    "- `_should_index` consults `state.json` to skip noop runs\n\n"
+    "<<<END_OF_DRAFT>>>"
+) + _STATELESS_FILTER_RULE + _ANTI_FABRICATION_RULE + _STOP_MARKER_RULE
 
 _ROADMAP_SYSTEM = (
-    "You are a roadmap document maintainer.\n\n"
-    "CRITICAL: Output ONLY raw markdown — no preamble, no explanation, no "
-    "questions, no permission requests.  Your response must begin with "
-    "``## Roadmap`` and contain nothing before it.\n\n"
-    "Task: draft content for a roadmap section based on the provided commits.\n\n"
+    "You maintain roadmap documentation. Your output begins with "
+    "`## Roadmap N — Theme Title` and contains one updated roadmap "
+    "section.\n\n"
     "Output format:\n"
     "  ## Roadmap N — Theme Title\n"
     "  ### ✅ Item title\n"
     "  Description.\n"
     "  ### 🟡 Another item\n"
     "  Description.\n\n"
-    "Status emoji meanings: ✅ shipped  🟡 in-progress  🔮 planned  "
-    "💭 idea  💤 stale.\n\n"
-    "Rules:\n"
-    "- The first line MUST be ``## Roadmap N — Theme``.  Use the roadmap "
-    "number from the user prompt.\n"
-    "- Each entry starts with ``### <emoji> <title>``.\n"
-    "- Body text per entry: 1–3 short sentences.  Technical, not marketing.\n"
-    "- Only describe work evidenced by the provided commits.\n"
-    "- Do NOT ask for permission or confirmation.  Just output the section."
-) + _ANTI_FABRICATION_RULE + _STOP_MARKER_RULE
+    "Status emojis: ✅ shipped  🟡 in-progress  🔮 planned  💭 idea  💤 stale.\n\n"
+    "Guidelines:\n"
+    "- Use the active roadmap number from the user prompt's headings. "
+    "Adding a new `## Roadmap N` section is allowed for this DocType.\n"
+    "- Each entry: `### <emoji> <title>` followed by 1–3 short technical "
+    "sentences. No marketing voice.\n"
+    "- Describe only work evidenced by the provided commits.\n\n"
+    "Example output (illustrative):\n\n"
+    "## Roadmap 7 — Doc-drafter hardening\n\n"
+    "### ✅ STOP marker + anti-fabrication guardrails\n"
+    "Output post-processing strips `<<<END_OF_DRAFT>>>` and anything past "
+    "it. Anti-fabrication rule blocks invented symbol names in bullets.\n\n"
+    "### 🟡 Multi-section drafting\n"
+    "Replace-mode patchers now accept N sections per draft; titles "
+    "validate against the existing document.\n\n"
+    "<<<END_OF_DRAFT>>>"
+) + _STATELESS_FILTER_RULE + _ANTI_FABRICATION_RULE + _STOP_MARKER_RULE
 
 _MEMORY_SYSTEM = (
-    "You are a persistent-memory file author.\n\n"
-    "CRITICAL: Output ONLY the body text — no YAML frontmatter, no code "
-    "fences, no preamble, no explanation, no questions.  Start writing the "
-    "memory content immediately.\n\n"
-    "Task: write the body of a memory file based on the provided commits.\n\n"
-    "Format: lead with the key fact, then a **Why:** line (reason / "
-    "motivation), then a **How to apply:** line (when this guidance kicks "
-    "in).  Link related memories with ``[[slug-name]]``.\n\n"
-    "Rules:\n"
-    "- Be specific and actionable.  'Always use X when Y' beats 'Consider X'.\n"
-    "- No filler, no hedging.\n"
-    "- Do NOT ask for permission or confirmation.  Just output the content."
-) + _ANTI_FABRICATION_RULE + _STOP_MARKER_RULE
+    "You author persistent-memory files. Your output is the body text only "
+    "— no YAML frontmatter, no code fences, no preamble.\n\n"
+    "Format: lead with the key fact, then a `**Why:**` line (reason / "
+    "motivation), then a `**How to apply:**` line (when this guidance "
+    "kicks in). Link related memories with `[[slug-name]]`.\n\n"
+    "Guidelines:\n"
+    "- Be specific and actionable. 'Always use X when Y' beats 'Consider X'.\n"
+    "- No filler, no hedging.\n\n"
+    "Example output (illustrative):\n\n"
+    "When updating a doc-drafter prompt, run the smoke battery before "
+    "shipping; the parser/filter tests catch echo-loop regressions early.\n\n"
+    "**Why:** local LLMs drift toward template-echoing when prompts change; "
+    "regressions in `parse_grouped_bullets` slip through pyflakes.\n\n"
+    "**How to apply:** kicks in whenever any `_*_SYSTEM` constant or "
+    "`build_*_prompt` function is touched. Re-run `_smoke_test_doc_drafter` "
+    "before merging. Related: [[round1_results]].\n\n"
+    "<<<END_OF_DRAFT>>>"
+) + _STATELESS_FILTER_RULE + _ANTI_FABRICATION_RULE + _STOP_MARKER_RULE
 
 _GENERIC_DOC_SYSTEM = (
-    "You are a markdown documentation maintainer.\n\n"
-    "CRITICAL: Output ONLY the updated section content — raw markdown "
-    "starting with a ``## `` heading.  NO preamble, NO explanation, NO "
-    "questions, NO permission requests.  Begin with ``## `` immediately.\n\n"
-    "Task: update ONE named section in the target document based on the "
-    "provided commits.\n\n"
+    "You maintain markdown documentation. Your output is one or more "
+    "`## SectionName` blocks, each followed by the updated section body. "
+    "Nothing before the first `## `, nothing after the last block except "
+    "the termination marker.\n\n"
     "Output format:\n"
     "  ## Section Name\n"
     "  <updated section body>\n\n"
-    "Rules:\n"
-    "- Preserve all still-accurate content from the existing section.  "
-    "Only ADD or UPDATE what the commits actually change.\n"
-    "- Match the voice and style of the existing document.\n"
-    "- Do NOT ask for permission or confirmation.  Just output the section."
-) + _ANTI_FABRICATION_RULE + _STOP_MARKER_RULE
+    "Guidelines:\n"
+    "- Pick section titles from the existing-document headings shown in the "
+    "user prompt. Titles you emit must match an existing title exactly — "
+    "the patcher refuses to auto-create new sections.\n"
+    "- Preserve still-accurate content; only ADD or UPDATE what the "
+    "commits actually change.\n"
+    "- Match the existing document's voice and style.\n\n"
+    "Example output (illustrative):\n\n"
+    "## Installation\n\n"
+    "Install via pip:\n\n"
+    "```\npip install tokensave-manager\n```\n\n"
+    "Configuration lives in `~/.config/tokensave/manager.toml`.\n\n"
+    "<<<END_OF_DRAFT>>>"
+) + _STATELESS_FILTER_RULE + _ANTI_FABRICATION_RULE + _STOP_MARKER_RULE
 
 
 # ── Phase 2 build_prompt functions ───────────────────────────────────────────
@@ -1603,12 +1762,23 @@ def _render_commit_summary(commits, classified):
     return "\n".join(parts)
 
 
-def build_architecture_prompt(commits, classified, existing_full,
-                               project_name, project_desc,
-                               changed_files, boundary_note,
-                               grounding_block=""):
-    """Return (system, user) for the architecture tab."""
-    system = _ARCHITECTURE_SYSTEM
+def _build_replace_mode_prompt(system, doctype_label, commits, classified,
+                                existing_full, project_name, project_desc,
+                                changed_files, boundary_note,
+                                grounding_block, output_reminder):
+    """Shared builder for ARCHITECTURE / ROADMAP / GENERIC.
+
+    Topology (per Theme A + Theme C):
+      1. Project / description / boundary
+      2. Commits + classified + changed files (the SIGNAL)
+      3. Grounding block (tokensave context if available)
+      4. Existing-document headings (navigation aid)
+      5. CANDIDATE SECTIONS — body content for the most-likely-affected
+         sections, picked via three-signal selector (path + scope + subject
+         tokens). Bounded by max_body_chars to control prompt size.
+      6. Closing "What to output" reminder — final-token-zone where
+         attention concentrates. Reinforces output format, not file template.
+    """
     parts = [f"Project: {project_name}"]
     if project_desc:
         parts.append(f"Description: {project_desc}")
@@ -1625,14 +1795,59 @@ def build_architecture_prompt(commits, classified, existing_full,
     if grounding_block:
         parts.append("")
         parts.append(grounding_block)
+
+    # Navigation: headings of EVERY section so the model knows the full
+    # set of valid titles (even if a section's body isn't in the candidates
+    # block, its title is still a valid target). Compact — 1 line per
+    # heading.
     parts.append("")
-    parts.append(
-        "Existing ARCHITECTURE.md sections (pick the one most affected by "
-        "the commits above; patcher will splice or replace just that "
-        "section — do NOT echo other sections, do NOT duplicate a heading):"
-    )
+    parts.append(f"Existing {doctype_label} section headings:")
     parts.append(_summarise_existing_headings(existing_full, max_levels=3))
+
+    # Candidate bodies: full text for the sections most likely affected by
+    # this commit range. Bounded by max_body_chars so a 900-line ARCH file
+    # doesn't blow the prompt out.
+    candidates = _select_candidate_sections(
+        existing_full or "", changed_files or [], commits or [])
+    parts.append("")
+    if candidates:
+        parts.append("--- BEGIN CANDIDATE SECTIONS (most likely affected by "
+                     "the commits above) ---")
+        for title, body in candidates:
+            parts.append(f"## {title}")
+            parts.append(body)
+            parts.append("")
+        parts.append("--- END CANDIDATE SECTIONS ---")
+    else:
+        parts.append("(No existing sections matched the commit signals.)")
+
+    # Final-position output reminder. Tokens at the end of the prompt
+    # have outsized influence on what the model continues — so we use
+    # them for output-format directives, not file content.
+    parts.append("")
+    parts.append(output_reminder)
+
     return system, "\n".join(parts)
+
+
+def build_architecture_prompt(commits, classified, existing_full,
+                               project_name, project_desc,
+                               changed_files, boundary_note,
+                               grounding_block=""):
+    """Return (system, user) for the architecture tab."""
+    reminder = (
+        "What to output:\n"
+        "- One or more `## Title` blocks updating sections from the "
+        "candidates above.\n"
+        "- Each title must match an existing heading exactly — capitalisation "
+        "and wording.\n"
+        "- End with `<<<END_OF_DRAFT>>>`."
+    )
+    return _build_replace_mode_prompt(
+        _ARCHITECTURE_SYSTEM, "ARCHITECTURE.md",
+        commits, classified, existing_full, project_name, project_desc,
+        changed_files, boundary_note, grounding_block, reminder,
+    )
 
 
 def build_roadmap_prompt(commits, classified, existing_full,
@@ -1640,26 +1855,18 @@ def build_roadmap_prompt(commits, classified, existing_full,
                           changed_files, boundary_note,
                           grounding_block=""):
     """Return (system, user) for the roadmap tab."""
-    system = _ROADMAP_SYSTEM
-    parts = [f"Project: {project_name}"]
-    if project_desc:
-        parts.append(f"Description: {project_desc}")
-    if boundary_note:
-        parts.append("")
-        parts.append(boundary_note)
-    parts.append("")
-    parts.append(_render_commit_summary(commits, classified))
-    if grounding_block:
-        parts.append("")
-        parts.append(grounding_block)
-    parts.append("")
-    parts.append(
-        "Existing ROADMAP.md sections (identify the active roadmap number "
-        "from the headings below; output ONE updated ## Roadmap N section "
-        "— patcher splices/replaces just that one):"
+    reminder = (
+        "What to output:\n"
+        "- One `## Roadmap N — Theme` block (this DocType accepts either an "
+        "update to an existing roadmap OR a brand-new `## Roadmap N` if the "
+        "commits represent a new phase).\n"
+        "- End with `<<<END_OF_DRAFT>>>`."
     )
-    parts.append(_summarise_existing_headings(existing_full, max_levels=3))
-    return system, "\n".join(parts)
+    return _build_replace_mode_prompt(
+        _ROADMAP_SYSTEM, "ROADMAP.md",
+        commits, classified, existing_full, project_name, project_desc,
+        changed_files, boundary_note, grounding_block, reminder,
+    )
 
 
 def build_memory_prompt(commits, classified, existing_body,
@@ -1704,31 +1911,18 @@ def build_generic_doc_prompt(commits, classified, existing_full,
                               changed_files, boundary_note,
                               grounding_block=""):
     """Return (system, user) for the docs_generic / tokensave_guide tab."""
-    system = _GENERIC_DOC_SYSTEM
-    parts = [f"Project: {project_name}"]
-    if project_desc:
-        parts.append(f"Description: {project_desc}")
-    if boundary_note:
-        parts.append("")
-        parts.append(boundary_note)
-    parts.append("")
-    parts.append(_render_commit_summary(commits, classified))
-    if changed_files:
-        parts.append("")
-        parts.append("Changed files:")
-        for f in changed_files[:60]:
-            parts.append(f"  {f}")
-    if grounding_block:
-        parts.append("")
-        parts.append(grounding_block)
-    parts.append("")
-    parts.append(
-        "Existing document headings (pick the section most affected by the "
-        "commits above; patcher will splice or replace just that section — "
-        "do NOT echo other sections, do NOT duplicate a heading):"
+    reminder = (
+        "What to output:\n"
+        "- One or more `## Title` blocks updating sections from the "
+        "candidates above.\n"
+        "- Each title must match an existing heading exactly.\n"
+        "- End with `<<<END_OF_DRAFT>>>`."
     )
-    parts.append(_summarise_existing_headings(existing_full, max_levels=3))
-    return system, "\n".join(parts)
+    return _build_replace_mode_prompt(
+        _GENERIC_DOC_SYSTEM, "document",
+        commits, classified, existing_full, project_name, project_desc,
+        changed_files, boundary_note, grounding_block, reminder,
+    )
 
 
 # ── Phase 2 parse_draft functions ────────────────────────────────────────────
@@ -1750,22 +1944,33 @@ _ROADMAP_HEADING_RE = re.compile(
 
 
 def architecture_parse_draft(draft_text):
-    """Extract (section_header, content) from draft. Returns (None, '') on failure."""
-    m = _SECTION_HEADING_RE.search((draft_text or "").strip())
-    if not m:
-        return (None, "")
-    return (m["title"].strip(), m["body"].strip())
+    """Extract ALL `## SectionName` blocks from draft. Returns (sections_list,)
+    where sections_list is [(title, body), ...]. Empty list on failure.
+
+    Multi-section support (Theme B v3): finditer pulls every `## ` block;
+    the non-greedy regex lookahead `(?=^## |\\Z)` makes each match stop at
+    the next heading or EOF.
+    """
+    text = (draft_text or "").strip()
+    sections = [
+        (m["title"].strip(), m["body"].strip())
+        for m in _SECTION_HEADING_RE.finditer(text)
+    ]
+    return (sections,)
 
 
 def roadmap_parse_draft(draft_text):
-    """Extract (roadmap_n, theme_title, content) from draft. Returns (None, '', '') on failure."""
-    m = _ROADMAP_HEADING_RE.search((draft_text or "").strip())
-    if not m:
-        return (None, "", "")
-    n = int(m["n"])
-    theme_rest = m["theme"].strip().lstrip("—").strip()
-    theme = theme_rest or f"Roadmap {n}"
-    return (n, theme, m["body"].strip())
+    """Extract ALL `## Roadmap N — Theme` blocks. Returns (sections_list,)
+    where each item is (roadmap_n, theme_title, content). Empty list on failure.
+    """
+    text = (draft_text or "").strip()
+    sections = []
+    for m in _ROADMAP_HEADING_RE.finditer(text):
+        n = int(m["n"])
+        theme_rest = m["theme"].strip().lstrip("—").strip()
+        theme = theme_rest or f"Roadmap {n}"
+        sections.append((n, theme, m["body"].strip()))
+    return (sections,)
 
 
 def memory_parse_draft(draft_text):
@@ -1777,11 +1982,15 @@ def memory_parse_draft(draft_text):
 
 
 def generic_parse_draft(draft_text):
-    """Extract (section_header, content) from draft. Returns (None, '') on failure."""
-    m = _SECTION_HEADING_RE.search((draft_text or "").strip())
-    if not m:
-        return (None, "")
-    return (m["title"].strip(), m["body"].strip())
+    """Extract ALL `## SectionName` blocks. Returns (sections_list,)
+    where each item is (title, body). Empty list on failure.
+    """
+    text = (draft_text or "").strip()
+    sections = [
+        (m["title"].strip(), m["body"].strip())
+        for m in _SECTION_HEADING_RE.finditer(text)
+    ]
+    return (sections,)
 
 
 # ── Phase 2 filter_draft functions ────────────────────────────────────────────
@@ -1944,70 +2153,218 @@ def generic_filter_draft(raw_text, target_path):
 
 # ── Phase 2 compute_apply (PURE) functions ────────────────────────────────────
 
-def architecture_compute_apply(full_text, section_header, content):
-    """PURE: apply architecture section to full file. Returns (new_text, ok, msg)."""
-    from helpers.architecture_patch import _compute_insert_architecture_section
-    if section_header is None:
-        return full_text, False, "Could not parse section header from draft."
-    return _compute_insert_architecture_section(full_text, section_header, content)
+def _apply_sections(full_text, sections, compute_fn, known_titles, *,
+                     allow_new=False, title_for=None):
+    """Shared multi-section apply helper.
+
+    Iterates through ``sections``, validating each title against
+    ``known_titles`` (unless ``allow_new`` is True). For each known title:
+    runs ``compute_fn(simulated, *section_args)`` and accumulates the
+    cumulative simulated state. Returns ``(simulated, ok, msg, stats)``.
+
+    Args:
+      full_text:    Starting document text.
+      sections:     List of section tuples. Each item is splatted into compute_fn
+                    AFTER ``simulated``: e.g. (title, body) for architecture,
+                    (n, theme, body) for roadmap.
+      compute_fn:   `_compute_insert_*` function. Signature: (text, *args) -> (new_text, ok, msg).
+      known_titles: Set of lowercased titles that are valid update targets.
+                    Unknown titles get rejected (refused, not auto-appended).
+      allow_new:    If True, unknown titles are accepted (auto-append). Default
+                    False — refuses hallucinations.
+      title_for:    Callable section_args -> "human title" for skip reporting.
+                    Default: stringify first arg.
+
+    Stats dict contains ``applied`` (list of titles) and ``skipped``
+    (list of (title, reason) pairs) for UI surfacing.
+    """
+    if title_for is None:
+        title_for = lambda args: str(args[0])  # noqa: E731
+
+    if not sections:
+        return full_text, False, "Draft produced no `## Section` block.", {
+            "applied": [], "skipped": []
+        }
+
+    simulated = full_text
+    applied, skipped = [], []
+    for section_args in sections:
+        title = title_for(section_args)
+        if not allow_new and title.lower() not in known_titles:
+            skipped.append((
+                title,
+                "title not in existing document — refused to auto-append "
+                "(likely hallucinated)"
+            ))
+            continue
+        next_state, ok, msg = compute_fn(simulated, *section_args)
+        if ok:
+            simulated = next_state
+            applied.append(title)
+        else:
+            skipped.append((title, msg))
+
+    stats = {"applied": applied, "skipped": skipped}
+
+    if not applied:
+        return full_text, False, (
+            "All sections rejected: "
+            + "; ".join(f"{t}: {m}" for t, m in skipped)
+        ), stats
+    if skipped:
+        msg = (f"Applied {len(applied)}/{len(sections)}; skipped: "
+               + ", ".join(f"{t} ({m})" for t, m in skipped))
+    else:
+        msg = f"ok ({len(applied)} section(s))"
+    return simulated, True, msg, stats
 
 
-def roadmap_compute_apply(full_text, roadmap_n, theme_title, content):
-    """PURE: apply roadmap section to full file. Returns (new_text, ok, msg)."""
-    from helpers.roadmap_patch import _compute_insert_roadmap_section
-    if roadmap_n is None:
-        return full_text, False, "Could not parse roadmap number from draft."
-    return _compute_insert_roadmap_section(full_text, roadmap_n, theme_title, content)
+def architecture_compute_apply(full_text, sections):
+    """PURE: apply N `## Title` sections. Returns (new_text, ok, msg).
+
+    Validates titles against existing `## ` headings; unknown titles are
+    REFUSED (not auto-appended). Multi-section partial-apply: known-good
+    sections apply against the cumulative simulated state; skipped sections
+    are reported in the msg suffix.
+    """
+    from helpers.architecture_patch import (
+        _compute_insert_architecture_section, _list_section_titles,
+    )
+    known = {t.lower() for t in _list_section_titles(full_text or "")}
+    simulated, ok, msg, _stats = _apply_sections(
+        full_text, sections, _compute_insert_architecture_section,
+        known, allow_new=False, title_for=lambda args: args[0],
+    )
+    return simulated, ok, msg
+
+
+def roadmap_compute_apply(full_text, sections):
+    """PURE: apply N `## Roadmap N — Theme` sections. Returns (new_text, ok, msg).
+
+    Unlike architecture/generic, roadmap ALLOWS new sections — adding a new
+    `## Roadmap N` for a new phase is a valid user workflow.
+    """
+    from helpers.roadmap_patch import (
+        _compute_insert_roadmap_section, _list_section_titles,
+    )
+    known = {t.lower() for t in _list_section_titles(full_text or "")}
+    # Title for skip reporting: "Roadmap N" prefix derived from the args
+    simulated, ok, msg, _stats = _apply_sections(
+        full_text, sections, _compute_insert_roadmap_section,
+        known, allow_new=True,
+        title_for=lambda args: f"Roadmap {args[0]} — {args[1]}",
+    )
+    return simulated, ok, msg
 
 
 def memory_compute_apply(full_text, new_body):
-    """PURE: replace memory body. Returns (new_text, ok, msg)."""
+    """PURE: replace memory body. Returns (new_text, ok, msg).
+
+    Memory is single-section by design — the entire draft is the new body.
+    No multi-section migration applies here.
+    """
     from helpers.memory_patch import _compute_insert_memory_body
     if new_body is None:
         return full_text, False, "Draft body is empty."
     return _compute_insert_memory_body(full_text, new_body)
 
 
-def generic_compute_apply(full_text, section_header, content):
-    """PURE: apply generic section to full file. Returns (new_text, ok, msg)."""
-    from helpers.generic_doc_patch import _compute_insert_generic_section
-    if section_header is None:
-        return full_text, False, "Could not parse section header from draft."
-    return _compute_insert_generic_section(full_text, section_header, content)
+def generic_compute_apply(full_text, sections):
+    """PURE: apply N `## Title` sections. Returns (new_text, ok, msg).
+
+    Same shape as architecture_compute_apply — validates titles, refuses
+    hallucinations, partial-apply on per-section failure.
+    """
+    from helpers.generic_doc_patch import (
+        _compute_insert_generic_section, _list_section_titles,
+    )
+    known = {t.lower() for t in _list_section_titles(full_text or "")}
+    simulated, ok, msg, _stats = _apply_sections(
+        full_text, sections, _compute_insert_generic_section,
+        known, allow_new=False, title_for=lambda args: args[0],
+    )
+    return simulated, ok, msg
 
 
 # ── Phase 2 io_apply functions ────────────────────────────────────────────────
 
+def _read_file_text(path):
+    """Read file as UTF-8 with BOM tolerance. Returns "" on missing or read error."""
+    if not os.path.exists(path):
+        return ""
+    try:
+        with open(path, encoding="utf-8-sig") as f:
+            return f.read()
+    except OSError:
+        return ""
+
+
 def architecture_io_apply(target_path, draft_text):
-    """Apply architecture draft. Returns (ok, msg, stats_dict)."""
-    from helpers.architecture_patch import insert_architecture_section
-    parsed = architecture_parse_draft(draft_text)
-    section_header, content = parsed
-    if section_header is None:
+    """Apply architecture draft (multi-section). Returns (ok, msg, stats_dict).
+
+    Reads file once → runs compute_apply (validates + iterates) → writes
+    once atomically. Returns stats including applied/skipped section lists
+    for UI surfacing.
+    """
+    from helpers.architecture_patch import (
+        _compute_insert_architecture_section, _list_section_titles,
+    )
+    from helpers.io_utils import _atomic_write
+
+    (sections,) = architecture_parse_draft(draft_text)
+    if not sections:
         return False, (
-            "Draft is missing a ``## Section Name`` heading — architecture "
+            "Draft is missing a `## Section Name` heading — architecture "
             "mode requires the output to start with a level-2 heading."
         ), {}
-    ok, msg = insert_architecture_section(target_path, section_header, content)
-    return ok, msg, {}
+
+    full_text = _read_file_text(target_path)
+    known = {t.lower() for t in _list_section_titles(full_text)}
+    simulated, ok, msg, stats = _apply_sections(
+        full_text, sections, _compute_insert_architecture_section,
+        known, allow_new=False, title_for=lambda args: args[0],
+    )
+    if not ok:
+        return False, msg, stats
+
+    write_ok, write_msg = _atomic_write(target_path, simulated, msg)
+    if not write_ok:
+        return False, write_msg, stats
+    return True, msg, stats
 
 
 def roadmap_io_apply(target_path, draft_text):
-    """Apply roadmap draft. Returns (ok, msg, stats_dict)."""
-    from helpers.roadmap_patch import insert_roadmap_section
-    parsed = roadmap_parse_draft(draft_text)
-    roadmap_n, theme_title, content = parsed
-    if roadmap_n is None:
+    """Apply roadmap draft (multi-section, allow_new=True). Returns (ok, msg, stats_dict)."""
+    from helpers.roadmap_patch import (
+        _compute_insert_roadmap_section, _list_section_titles,
+    )
+    from helpers.io_utils import _atomic_write
+
+    (sections,) = roadmap_parse_draft(draft_text)
+    if not sections:
         return False, (
-            "Draft is missing a ``## Roadmap N`` heading — roadmap mode "
+            "Draft is missing a `## Roadmap N` heading — roadmap mode "
             "requires the output to start with '## Roadmap <number>'."
         ), {}
-    ok, msg = insert_roadmap_section(target_path, roadmap_n, theme_title, content)
-    return ok, msg, {}
+
+    full_text = _read_file_text(target_path)
+    known = {t.lower() for t in _list_section_titles(full_text)}
+    simulated, ok, msg, stats = _apply_sections(
+        full_text, sections, _compute_insert_roadmap_section,
+        known, allow_new=True,
+        title_for=lambda args: f"Roadmap {args[0]} — {args[1]}",
+    )
+    if not ok:
+        return False, msg, stats
+
+    write_ok, write_msg = _atomic_write(target_path, simulated, msg)
+    if not write_ok:
+        return False, write_msg, stats
+    return True, msg, stats
 
 
 def memory_io_apply(target_path, draft_text):
-    """Apply memory draft. Returns (ok, msg, stats_dict)."""
+    """Apply memory draft. Returns (ok, msg, stats_dict). Single-section."""
     from helpers.memory_patch import insert_memory_body
     body = (draft_text or "").strip()
     if not body:
@@ -2017,14 +2374,29 @@ def memory_io_apply(target_path, draft_text):
 
 
 def generic_io_apply(target_path, draft_text):
-    """Apply generic doc draft. Returns (ok, msg, stats_dict)."""
-    from helpers.generic_doc_patch import insert_generic_section
-    parsed = generic_parse_draft(draft_text)
-    section_header, content = parsed
-    if section_header is None:
+    """Apply generic doc draft (multi-section). Returns (ok, msg, stats_dict)."""
+    from helpers.generic_doc_patch import (
+        _compute_insert_generic_section, _list_section_titles,
+    )
+    from helpers.io_utils import _atomic_write
+
+    (sections,) = generic_parse_draft(draft_text)
+    if not sections:
         return False, (
-            "Draft is missing a ``## Section Name`` heading — generic doc "
+            "Draft is missing a `## Section Name` heading — generic doc "
             "mode requires the output to start with a level-2 heading."
         ), {}
-    ok, msg = insert_generic_section(target_path, section_header, content)
-    return ok, msg, {}
+
+    full_text = _read_file_text(target_path)
+    known = {t.lower() for t in _list_section_titles(full_text)}
+    simulated, ok, msg, stats = _apply_sections(
+        full_text, sections, _compute_insert_generic_section,
+        known, allow_new=False, title_for=lambda args: args[0],
+    )
+    if not ok:
+        return False, msg, stats
+
+    write_ok, write_msg = _atomic_write(target_path, simulated, msg)
+    if not write_ok:
+        return False, write_msg, stats
+    return True, msg, stats

@@ -175,3 +175,29 @@ def read_generic_full(path: str) -> str:
             return f.read()
     except OSError:
         return ""
+
+
+_L2_HEADING_RE = re.compile(r"(?m)^## ([^\n]+)$")
+
+
+def _list_section_titles(text: str) -> list[str]:
+    """Return every `## Title` heading text in `text`, in document order."""
+    return [m.group(1).strip() for m in _L2_HEADING_RE.finditer(text or "")]
+
+
+def extract_sections_as_document(text: str, titles: list[str]) -> str:
+    """Build a synthetic document containing only the named sections.
+
+    Used by the doc-drafter simulator (Theme B v3) to build aligned
+    before/after diff sides for ProposalBridge.
+    """
+    if not titles:
+        return ""
+    parts = []
+    for title in titles:
+        body = read_generic_section_from_text(text or "", title)
+        if body:
+            parts.append(f"## {title}\n\n{body}")
+        else:
+            parts.append(f"## {title}\n\n_(new section — no prior content)_")
+    return "\n\n".join(parts)

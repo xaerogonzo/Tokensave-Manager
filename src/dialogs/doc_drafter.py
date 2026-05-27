@@ -923,19 +923,115 @@ class DocDrafterDialog(tk.Toplevel):
 
     # ── File-picker helpers ────────────────────────────────────────────────
 
+    # Glob patterns relative to the project root. Each value is a list so a
+    # picker can pull from multiple locations within the repo. External
+    # locations are added via the dedicated discovery functions below.
     _PICKER_GLOBS = {
-        "memory":      "memory/*.md",
-        "docs_generic": "docs/*.md",
+        "memory":       ["memory/*.md"],
+        "docs_generic": ["docs/*.md"],
     }
 
     def _list_picker_files(self, key):
-        """Return relative paths for the file-picker combobox of ``key``."""
+        """Return display paths for the file-picker combobox of ``key``.
+
+        Aggregates files from:
+          1. Repo-local globs in _PICKER_GLOBS for this key
+          2. Optional user-config `<key>_paths` glob list in manager-config.json
+          3. (memory only) Auto-discovered CCD-managed memory directory
+        """
         import glob
-        pattern = self._PICKER_GLOBS.get(key, "*.md")
-        full_pattern = os.path.join(self._project_path, pattern)
-        paths = sorted(glob.glob(full_pattern))
-        return [os.path.relpath(p, self._project_path).replace("\\", "/")
-                for p in paths]
+        paths: list = []
+
+        for pat in self._PICKER_GLOBS.get(key, ["*.md"]):
+            paths += sorted(glob.glob(os.path.join(self._project_path, pat)))
+
+        # Config-provided extra glob patterns (per-key field, e.g. "memory_paths")
+        cfg_paths = (self._cfg.raw or {}).get(f"{key}_paths") or []
+        for pat in cfg_paths:
+            for p in sorted(glob.glob(os.path.expanduser(pat))):
+                if os.path.isfile(p) and p.lower().endswith(".md"):
+                    paths.append(p)
+
+        if key == "memory":
+            paths += self._discover_ccd_memory_files()
+
+        # Stable de-dup while preserving order
+        seen: set = set()
+        unique: list = []
+        for p in paths:
+            if p not in seen:
+                seen.add(p)
+                unique.append(p)
+
+        return [self._display_path(p) for p in unique]
+
+    def _discover_ccd_memory_files(self):
+        """Find CCD-managed memory files for this project.
+
+        Primary path (fast): construct the CCD-encoded directory name by
+        replacing ``:``, ``\\``, ``/``, and SPACE with ``-``. This matches
+        the actual on-disk encoding verified via live listing of
+        ``~/.claude/projects/`` (e.g. ``D:\\Claude Co worker\\Token Save
+        Manager Source`` → ``D--Claude-Co-worker-Token-Save-Manager-Source``).
+
+        Fallback path (durable): if the encoded directory doesn't exist,
+        scan ``~/.claude/projects/*/memory`` and pick the directory whose
+        name has the highest token-overlap score against the project root
+        path. This survives future encoding changes because we never
+        reverse-engineer the encoding — we match purely by content.
+        """
+        import glob
+        ccd_root = os.path.expanduser("~/.claude/projects")
+        if not os.path.isdir(ccd_root):
+            return []
+
+        # Primary: verified encoding
+        encoded = self._project_path
+        for ch in (":", "\\", "/", " "):
+            encoded = encoded.replace(ch, "-")
+        primary = os.path.join(ccd_root, encoded, "memory")
+        if os.path.isdir(primary):
+            return sorted(glob.glob(os.path.join(primary, "*.md")))
+
+        # Fallback: token-overlap scan
+        import re as _re
+        project_tokens = {
+            t.lower() for t in _re.split(r"[\\/ \-_]+", self._project_path)
+            if len(t) > 2 and t.lower() not in {"src", "lib", "etc"}
+        }
+        if not project_tokens:
+            return []
+        best_dir, best_score = None, 0
+        try:
+            for entry in os.listdir(ccd_root):
+                entry_tokens = {
+                    t.lower() for t in _re.split(r"[\\/ \-_]+", entry)
+                    if len(t) > 2
+                }
+                score = len(project_tokens & entry_tokens)
+                if score > best_score:
+                    memdir = os.path.join(ccd_root, entry, "memory")
+                    if os.path.isdir(memdir):
+                        best_dir, best_score = memdir, score
+        except OSError:
+            return []
+        if best_dir:
+            return sorted(glob.glob(os.path.join(best_dir, "*.md")))
+        return []
+
+    def _display_path(self, abs_path):
+        """Return project-relative display path when possible; absolute path
+        when the file lives outside the project tree (CCD memory files,
+        external user-configured paths)."""
+        try:
+            rel = os.path.relpath(abs_path, self._project_path)
+            # Detect "way outside" — multiple .. segments. Prefer absolute
+            # display in that case so the dropdown doesn't look like garbage.
+            if rel.count(".." + os.sep) >= 2:
+                return abs_path.replace("\\", "/")
+            return rel.replace("\\", "/")
+        except ValueError:
+            return abs_path.replace("\\", "/")
 
     def _resolve_target_path(self, key):
         """Return the absolute target path for ``key``, or None if unresolvable."""
@@ -1429,8 +1525,15 @@ class DocDrafterDialog(tk.Toplevel):
         # bullets twice is dropped by dedup, dropping mirrored bullets is
         # blocked by the 40 % preservation floor.
         dt = REGISTRY[key]
+        # Multi-section simulator returns (before, after) tuple — both sides
+        # are concatenated affected-section bodies. Single-section returns
+        # the after-side body only (legacy contract).
         existing = dt.read_existing(target_path)
-        simulated_body = self._simulate_body(dt, target_path, text)
+        sim_result = self._simulate_body(dt, target_path, text)
+        if isinstance(sim_result, tuple) and len(sim_result) == 2:
+            simulated_existing, simulated_proposed = sim_result
+        else:
+            simulated_existing, simulated_proposed = existing, sim_result
         _RATIONALE = {
             "changelog": (
                 "Append-only CHANGELOG apply.  Diff shows current "
@@ -1448,13 +1551,14 @@ class DocDrafterDialog(tk.Toplevel):
         }
         rationale = _RATIONALE.get(
             key,
-            f"{dt.label} apply.  Diff shows current content (left) vs "
-            "simulated post-apply content (right).  The named ## section "
-            "is replaced; other sections are untouched."
+            f"{dt.label} apply.  Diff shows the affected sections only "
+            "(left = before, right = after).  Each section is REPLACED in "
+            "place; unmatched titles are refused as likely hallucinations."
         )
         # Fallback: if simulation failed (parse error / missing anchor),
         # fall back to the raw draft so the user can still see / edit it.
-        proposed_for_dialog = simulated_body if simulated_body else text
+        proposed_for_dialog = simulated_proposed if simulated_proposed else text
+        original_for_dialog = simulated_existing or existing or "(empty)"
 
         self._set_status(key, "Opening proposal…", C["overlay0"])
         self._tab_widgets[key]["apply_btn"].configure(state=tk.DISABLED)
@@ -1465,7 +1569,7 @@ class DocDrafterDialog(tk.Toplevel):
             from dialogs.proposal import ProposalBridge, WriteProposal
             proposal = WriteProposal(
                 filepath=target_path,
-                original_content=existing or "(empty)",
+                original_content=original_for_dialog,
                 proposed_content=proposed_for_dialog,
                 rationale=rationale,
             )
@@ -1568,17 +1672,27 @@ class DocDrafterDialog(tk.Toplevel):
         from helpers.doc_drafter import parse_grouped_bullets
         return parse_grouped_bullets(draft_text)
 
+    # DocTypes whose patchers operate at the FULL-file level on multiple
+    # `## Section` blocks. For these, the simulator builds a synthetic
+    # before/after document containing only the affected sections so the
+    # ProposalBridge diff lines up section-by-section. Single-section types
+    # (changelog, readme, memory) use the legacy read_existing_from_text path.
+    _MULTI_SECTION_KEYS = {"architecture", "roadmap", "docs_generic",
+                            "tokensave_guide"}
+
     def _simulate_body(self, dt, target_path, draft_text):
-        """Return the simulated post-apply section body for the ProposalBridge diff.
+        """Return (before, after) for the ProposalBridge diff.
 
-        Phase 2.1: populates ProposalBridge with an honest diff (current section
-        body vs body that will exist after the patcher runs).  Uses compute_apply
-        on the full file text without writing, then extracts the relevant section
-        via read_existing_from_text.
+        Returns either a (before_text, after_text) tuple — when the DocType
+        is multi-section — or a single string (after-only — legacy single-
+        section path). Callers must handle both shapes.
 
-        Simulation does NOT apply the truncation/dedup/noop filter — the
-        proposed body shows the upper bound.  The actual apply will drop dupes
-        and noop placeholders.
+        Multi-section path (Theme B v3):
+          1. Parse the draft into a list of sections
+          2. Run compute_apply to get the simulated post-apply file state
+          3. Build synthetic before/after documents containing only the
+             affected section titles — both sides share identical structure
+             so the diff lines up cleanly
         """
         try:
             with open(target_path, encoding="utf-8-sig") as f:
@@ -1588,6 +1702,35 @@ class DocDrafterDialog(tk.Toplevel):
         parsed = dt.parse_draft(draft_text)
         if not parsed or parsed[0] is None:
             return None
+
+        # Multi-section path: parsed is (sections_list,) where sections_list
+        # is a non-empty list of section tuples. Empty list means the parser
+        # found no `## Section` blocks — simulation impossible.
+        is_multi = dt.key in self._MULTI_SECTION_KEYS
+        if is_multi:
+            sections_list = parsed[0]
+            if not sections_list:
+                return None
+            simulated, ok, _msg = dt.compute_apply(full_text, sections_list)
+            if not ok:
+                return None
+            # Affected titles for the synthetic diff. Roadmap titles come
+            # back as `Roadmap N — Theme`; arch/generic use `(title, body)`.
+            if dt.key == "roadmap":
+                titles = [f"Roadmap {n} — {theme}"
+                          for n, theme, _body in sections_list]
+                from helpers.roadmap_patch import extract_sections_as_document
+            elif dt.key == "architecture":
+                titles = [t for t, _body in sections_list]
+                from helpers.architecture_patch import extract_sections_as_document
+            else:  # docs_generic / tokensave_guide
+                titles = [t for t, _body in sections_list]
+                from helpers.generic_doc_patch import extract_sections_as_document
+            before = extract_sections_as_document(full_text, titles)
+            after  = extract_sections_as_document(simulated, titles)
+            return (before, after)
+
+        # Legacy single-section path (changelog, readme, memory).
         simulated, ok, _msg = dt.compute_apply(full_text, *parsed)
         if not ok:
             return None
