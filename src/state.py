@@ -129,6 +129,27 @@ class ManagerConfig:
         return False if val is None else bool(val)
 
     @property
+    def enable_pr_grounding(self) -> bool:
+        """Per-feature override for Draft PR grounding (v4.6 — CLI + API paths).
+
+        Defaults to ON when the master toggle is on. Unlike commit messages,
+        PR descriptions GENUINELY benefit from codegraph + tokensave context
+        — test-impact mapping (`codegraph affected --stdin`) and PR-scope
+        symbol references are the strongest grounding wins, and Claude CLI
+        / cloud APIs handle the extra prompt weight comfortably.
+
+        Plumbed through both `_draft_pr_via_api` (`helpers/pr_draft.py`)
+        AND `_draft_pr_via_cli` (manager pre-builds a context block and
+        splices it into the CLI instruction; also nudges the CLI to use
+        its own MCP tools if codegraph/tokensave are wired into Claude
+        Code's MCP config).
+        """
+        if not self.enable_llm_grounding:
+            return False
+        val = self.raw.get("enable_pr_grounding")
+        return True if val is None else bool(val)
+
+    @property
     def commit_message_backend(self) -> str:
         """Strategy order for commit-message suggestion.
 

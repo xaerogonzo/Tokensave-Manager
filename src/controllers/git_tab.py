@@ -1186,6 +1186,40 @@ class GitTabController:
             "Note: gh CLI is not on PATH, so the PR_DRAFT.md file is your deliverable — "
             "skip any gh commands."
         )
+
+        # v4.6: pre-build tokensave + codegraph grounding when enabled, AND
+        # nudge the CLI to use its own MCP tools if they're wired. Two
+        # complementary mechanisms: the grounding block gives the CLI
+        # ready-made facts (works regardless of MCP config), the MCP nudge
+        # exercises tools the user has already configured for Claude Code
+        # (works without any pre-fetch latency on subsequent investigations).
+        grounding_block, grounded = self._build_pr_grounding(path, base)
+        if grounded:
+            self._on_log("  Draft PR: built grounding from tokensave + codegraph",
+                          C["green"])
+        else:
+            reason = "off in Settings" if not self._cfg.enable_pr_grounding \
+                     else "neither tool indexed for this project"
+            self._on_log(f"  Draft PR: no grounding attached ({reason})",
+                          C["overlay0"])
+
+        grounding_section = (
+            f"\n\n## Repository context (pre-fetched by manager)\n\n"
+            f"{grounding_block}\n\n"
+            if grounding_block else ""
+        )
+        mcp_nudge = (
+            "\nIf you have `mcp__tokensave__*` or `mcp__codegraph__*` tools "
+            "available in this session, prefer them over running `git log` "
+            "or repeated `git diff` calls — `mcp__tokensave__tokensave_pr_context` "
+            "and `mcp__codegraph__codegraph_affected` give branch-scoped "
+            "structural facts (test impact, callers, changed-symbol "
+            "summaries) that turn the PR description from bulleted commits "
+            "into reviewer-useful narrative. Fall back to bash git commands "
+            "only if those MCP tools are not registered."
+            if grounded or self._cfg.enable_pr_grounding else ""
+        )
+
         instruction = (
             f"Draft a PR description for this branch against `{base}`. "
             f"Run `git log {base}..HEAD --oneline` to see the commits, then "
@@ -1195,6 +1229,8 @@ class GitTabController:
             f"(use a relative path — just PR_DRAFT.md, not an absolute path). "
             f"Include: a one-line summary, bullet list of key changes, and a testing checklist. "
             f"{gh_step}"
+            f"{grounding_section}"
+            f"{mcp_nudge}"
         )
         ok, err = spawn_claude_cli(
             self._cfg.claude_cli_exe, path, instruction,
@@ -1202,6 +1238,67 @@ class GitTabController:
         )
         if not ok:
             messagebox.showerror("Claude Code CLI error", err, parent=self._root)
+
+    def _build_pr_grounding(self, path: str, base: str) -> "tuple[str, bool]":
+        """Pre-build the tokensave + codegraph grounding block for a CLI PR draft.
+
+        Returns ``(block_text, grounded)``. ``grounded`` is True iff at least
+        one source returned non-empty content AND the per-feature setting
+        is on.  Fail-open: any exception returns ``("", False)`` and the
+        Draft PR proceeds without grounding.
+        """
+        if not self._cfg.enable_pr_grounding:
+            return "", False
+        try:
+            from helpers.doc_grounding import (
+                build_grounding_block,
+                build_codegraph_block,
+                build_combined_grounding,
+            )
+            # Best-effort changed-files snapshot (triple-dot merge-base diff).
+            # If git_exe is missing or the diff fails, the codegraph block
+            # falls back to project-scoped queries — still useful.
+            changed_files: list = []
+            try:
+                import subprocess
+                from constants import CREATE_NO_WINDOW
+                proc = subprocess.run(
+                    [self._cfg.git_exe, "-C", path, "diff",
+                     "--name-only", f"{base}...HEAD"],
+                    capture_output=True, text=True, timeout=10,
+                    encoding="utf-8", errors="replace",
+                    creationflags=CREATE_NO_WINDOW,
+                )
+                if proc.returncode == 0 and proc.stdout:
+                    changed_files = [ln.strip() for ln in
+                                     proc.stdout.splitlines() if ln.strip()]
+            except Exception:
+                pass
+            try:
+                ts_block = build_grounding_block(
+                    path, "roadmap_evidence",
+                    tokensave_exe=self._cfg.tokensave_exe,
+                )
+            except Exception:
+                ts_block = ""
+            try:
+                if self._cfg.codegraph_exe:
+                    try:
+                        from helpers.codegraph_freshness import ensure_fresh
+                        ensure_fresh(path, self._cfg.codegraph_exe)
+                    except Exception:
+                        pass
+                cg_block = build_codegraph_block(
+                    path, "roadmap_evidence",
+                    changed_files=changed_files,
+                    codegraph_exe=self._cfg.codegraph_exe or "",
+                )
+            except Exception:
+                cg_block = ""
+            combined = build_combined_grounding(ts_block, cg_block)
+            return combined, bool(combined.strip())
+        except Exception:
+            return "", False
 
     def _draft_pr_via_api(self, path: str):
         import threading

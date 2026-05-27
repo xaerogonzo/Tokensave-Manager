@@ -45,8 +45,11 @@ def generate_pr_draft(cfg, project_path: str) -> str | None:
     # v4.2: build tokensave+codegraph grounding (roadmap_evidence recipe —
     # codegraph triggers `codegraph affected --stdin` on the changed-files
     # list, surfacing test-impact information for the PR description).
+    # v4.6: gated by enable_pr_grounding (per-feature, default ON) rather
+    # than the master toggle directly. Lets users opt out of grounding
+    # for PR drafting specifically without disabling it everywhere.
     grounding = ""
-    if cfg.enable_llm_grounding:
+    if cfg.enable_pr_grounding:
         try:
             from helpers.doc_grounding import (
                 build_grounding_block,

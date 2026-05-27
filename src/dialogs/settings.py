@@ -718,6 +718,40 @@ class SettingsDialog(tk.Toplevel):
             font=("Segoe UI", 8), bg=C["base"], fg=C["overlay0"],
             justify=tk.LEFT).pack(anchor=tk.W, padx=24, pady=(0, 8))
 
+        # v4.6: per-feature opt-in for Draft PR grounding. Defaults to ON
+        # because PRs benefit a lot from test-impact + symbol-reference
+        # context, and the backends that draft them (Claude CLI, cloud
+        # APIs) handle the extra prompt weight well.
+        _pr_grounding_initial = raw.get("enable_pr_grounding")
+        if _pr_grounding_initial is None:
+            _pr_grounding_initial = True
+        self._var_enable_pr_grounding = tk.BooleanVar(
+            value=bool(_pr_grounding_initial))
+        pr_grounding_chk = ttk.Checkbutton(
+            lf,
+            text="    └─ Also use grounding for Draft PR (recommended)",
+            variable=self._var_enable_pr_grounding,
+        )
+        pr_grounding_chk.pack(anchor=tk.W, padx=12, pady=(0, 2))
+        try:
+            from theme import _Tooltip
+            _Tooltip(
+                pr_grounding_chk,
+                "ON by default. PR descriptions benefit strongly from "
+                "test-impact mapping (codegraph affected --stdin) and "
+                "symbol-reference context. Claude CLI and cloud APIs "
+                "handle the extra prompt weight comfortably. Manager "
+                "pre-builds the grounding for the CLI path AND nudges "
+                "the CLI to use its own MCP tools if codegraph/"
+                "tokensave are wired into Claude Code's MCP config.",
+            )
+        except Exception:
+            pass
+        tk.Label(lf,
+            text="    Adds test-impact + symbol-reference context to the PR draft.",
+            font=("Segoe UI", 8), bg=C["base"], fg=C["overlay0"],
+            justify=tk.LEFT).pack(anchor=tk.W, padx=24, pady=(0, 8))
+
         # ── Ollama ────────────────────────────────────────────────────────
         ttk.Separator(body, orient="horizontal").pack(fill=tk.X, padx=20, pady=(8, 8))
         tk.Label(body, text="Ollama", font=("Segoe UI", 10, "bold"),
@@ -1165,6 +1199,7 @@ class SettingsDialog(tk.Toplevel):
         raw["commit_message_backend"]  = self._var_commit_msg_backend.get()
         raw["enable_llm_grounding"]    = bool(self._var_enable_llm_grounding.get())
         raw["enable_commit_grounding"] = bool(self._var_enable_commit_grounding.get())
+        raw["enable_pr_grounding"]     = bool(self._var_enable_pr_grounding.get())
         # Persist AI commit-message settings (preserves any unknown keys
         # the user may have added manually via JSON edit).
         existing_llm = raw.get("commit_message_llm") or {}
