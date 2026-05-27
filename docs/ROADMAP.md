@@ -114,6 +114,24 @@ Currently `codegraph sync` only runs on user-trigger (Projects-tab button) or vi
 ### 🔮 Carry-over: code-health backlog
 `mcp_config._render_block` CC reduction, `commit_messages.py` / `llm.py` complexity, unified sub-section parser, hidden subsection-ID anchors. All still in `memory/roadmap_backlog.md`.
 
+### 🔮 CodeGraph MCP picker — multi-agent status detection rows (carry-over from v4.7)
+The v4.7 picker can WIRE all 4 codegraph-supported agents (claude, cursor, codex, opencode) but the Settings status row only verifies Claude Code wiring. Each additional agent needs its own per-agent status check because each writes a different config format (JSON / TOML / JSONC at different paths). **Pickup hint**: extend `helpers/mcp.py:_claude_code_mcp_has_codegraph` shape with sibling helpers for the other three formats.
+
+### 🔮 Interactive `npx @colbymchenry/codegraph` spawn-console path (carry-over from v4.7)
+User picked the in-app picker over the spawned-console interactive installer. Could be added as a fourth Settings button if the auto + picker paths prove insufficient for power users.
+
+### 🔮 Tokensave alternative install paths — Scoop / Cargo (carry-over from v4.8)
+v4.8 ships the GitHub-releases-download path only. Scoop (`scoop install tokensave`) and Cargo (`cargo install tokensave`) are deferred. Should detect whether Scoop is installed and offer it as a second option in Tool Manager; Cargo requires the Rust toolchain so it's lower priority.
+
+### 🔮 Tokensave channel management (carry-over from v4.8)
+Surface `tokensave channel beta` / `tokensave channel stable` switching in Tool Manager. UI: a single dropdown labelled "Channel" beside the tokensave row.
+
+### 🔮 Codegraph auto-update notifier (carry-over from v4.8)
+Mirror the existing tokensave update poller (`controllers/update_poller.py`) for codegraph via the npm registry. When a newer version is available, surface a "🔄 Update codegraph to vX.Y.Z" promotional button in the Tool Manager.
+
+### 🔮 "Uninstall + sweep all .codegraph/ indexes" mode (carry-over from v4.8)
+Add an optional checkbox to the Tool Manager's codegraph uninstall confirmation: "Also delete .codegraph/ index directories across all known projects". Useful when migrating off codegraph entirely.
+
 ---
 
 ## Major direction: local AI assistant integration
@@ -322,7 +340,18 @@ To be explicit about what we're NOT building:
 
 This file is updated whenever a stage ships or its design materially changes.
 
-**Last updated: 2026-05-27** — Roadmap-7 shipped via the cascade plan (rounds v3 → v4.5). Themes A–E all ✅. Highlights: registry-driven Markdown Manager with 7 DocTypes; tokensave + codegraph dual grounding across commit/PR/review/Ask/doc-drafter; codegraph freshness UX (autosync + health glyph); Gemini critique remediation (G1–G6); novice-gotcha audit (`memory/novice_gotchas_ai.md`); persistent backlog memory (`memory/roadmap_backlog.md`); v4.5 "Make Private" + "Scrub from History" privacy feature. Cascade plan: `~/.claude/plans/write-a-comprehensive-plan-elegant-cascade.md`. Roadmap-8 section opened above.
+**Last updated: 2026-05-27** — Roadmap-7 shipped via the cascade plan (rounds v3 → v4.8). Themes A–E all ✅. Highlights:
+- v3–v4 doc-drafter hardening + multi-section + alignment-aware generic short-circuit
+- v4.1 codegraph parallel grounding + tiered alignment scoring
+- v4.2 grounding everywhere (commit/PR/review/Ask/doc-drafter) + master toggle
+- v4.3 codegraph freshness UX (autosync + health glyph) + novice-gotcha audit + persistent backlog memory
+- v4.4 Gemini critique remediation (G1–G6)
+- v4.5 "Make Private" + "Scrub from History" privacy feature + full markdown sweep
+- v4.6 per-feature grounding toggles (commit OFF, PR ON) + Draft PR CLI-path grounding via temp-file handoff + grounding visibility badge
+- v4.7 CodeGraph MCP wiring from the manager (auto + per-agent picker + uninstall + status detection)
+- v4.8 Tool Manager dialog — unified install/update/uninstall lifecycle for tokensave + codegraph with Gemini-fix hardening (G-A through G-G)
+
+Cascade plan: `~/.claude/plans/write-a-comprehensive-plan-elegant-cascade.md`. Roadmap-8 section opened above.
 
 ✅ **2026-05-25** — Roadmap-6 shipped. Highlights: code-health audit + remediation; commit-message scope fix; `mcp_config._apply` CC reduction; Ask tab final-message streaming; gitignore AI Suggest. Details in CHANGELOG.md.
 

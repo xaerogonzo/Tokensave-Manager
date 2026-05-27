@@ -3,6 +3,37 @@
 
 ## [Unreleased]
 
+### Added — v4.8 (Tool Manager + binary lifecycle, 2026-05-27)
+- (tool-manager) New `dialogs/tool_manager.py` — unified install / update / uninstall dialog covering BOTH code-graph tools in one place. Per-tool rows show binary status (path + version + manager-managed vs external) and MCP-wiring status. Shared output log pane streams subprocess stdout in real time. Sticky-bottom Close bar (v4.5 layout convention).
+- (install-codegraph) New `helpers/install_codegraph.py` — npm-driven lifecycle: `install_codegraph`, `update_codegraph` (uses `@latest` form for Windows reliability), `uninstall_codegraph`, `codegraph_version`, `detect_codegraph_after_install` 3-step PATH-fallback chain (G-B fix). All callsites take `npm_exe` as resolved absolute path — never bare `"npm"` (G-A fix).
+- (install-tokensave) New `helpers/install_tokensave.py` — GitHub-releases-driven install: `latest_tokensave_release` with HTTP-403 detection (G-E fix); `download_tokensave_zip` with magic-byte verification (G-E defence-in-depth); `extract_tokensave_zip` with Zip-Slip guards (G-C fix); `manager_install_dir` at `%LOCALAPPDATA%\TokenSaveManager\bin\`; `is_manager_installed` via `os.path.commonpath`. End-to-end orchestrator `install_tokensave_via_download` returns typed error tags for novice-friendly messages.
+- (tool-manager) Cascading uninstall — runs MCP-cleanup FIRST (`<tool> uninstall`), then binary removal. MCP step is NON-FATAL (G-D fix): failure logs a warning and continues to binary uninstall so the user can never end up trapped with a broken-but-undeletable tool.
+- (tool-manager) `_persist_cfg_clear(cfg, key)` helper makes the cfg-mutation + `cfg.save()` pair visible at every callsite (G-F symmetry fix).
+- (tool-manager) `_set_row_busy(tool_id, busy)` synchronously disables action buttons BEFORE the worker thread spawns; `try/finally` always restores state (G-G double-click race fix).
+- (settings) `🛠️ Open Tool Manager…` button in both tokensave and CodeGraph sections.
+- (help-tab) `💾 Tool Manager…` button at the top of the left nav, always visible regardless of which help section is open.
+
+### Added — v4.7 (CodeGraph MCP wiring, 2026-05-27)
+- (codegraph-mcp) New `dialogs/codegraph_mcp_picker.py` — per-agent MCP-wiring picker with destination-path detection. Agents supported (verified live from `codegraph install --help`): claude, cursor, codex, opencode. Detected agents render enabled-and-checked-by-default; un-detected render disabled with `(not installed)`. `--no-permissions` advanced toggle. Sticky-bottom Install/Cancel bar.
+- (helpers/mcp) New `_claude_code_mcp_has_codegraph(path='')` — reads `~/.claude.json`, walks `mcpServers`, defensive matching on key/command/args containing `codegraph`. Fail-open on JSON errors. Lives alongside the tokensave classifier; doesn't depend on its UWP / wrapper-resolution machinery (codegraph uses bare PATH lookup).
+- (helpers/mcp) New `_codegraph_agent_destination_path(agent_id)` + `_codegraph_agent_installed(agent_id)` — maps the 4 supported agent IDs to their per-agent config paths (`~/.claude.json`, `~/.cursor/mcp.json`, `~/.codex/config.toml`, `~/AppData/Roaming/opencode/opencode.jsonc`) and detects installation via destination-path existence. Verified live via `codegraph install --print-config <id>`.
+- (settings) Renamed "Install via npm" → "Install binary (npm)" to disambiguate from Step-2 MCP buttons.
+- (settings) Three new MCP buttons in Settings → CodeGraph section: 🔌 Configure MCP (auto) runs `codegraph install --yes`; ⚙ Configure MCP — pick agents… opens the new picker; 🧹 Uninstall MCP runs `codegraph uninstall` after a novice-friendly confirmation.
+- (settings) Extended `_cg_check_status` to report dual-line status: binary path + MCP wiring state. Uninstall MCP button only enables when MCP is currently wired. Non-modal "restart Claude Code" info bar after successful Configure MCP run.
+
+### Added — v4.6 (Draft PR grounding + commit-message regression fix, 2026-05-27)
+- (state) `ManagerConfig.enable_pr_grounding` property — per-feature override for Draft PR grounding, default ON (Claude CLI + cloud APIs handle the extra prompt weight comfortably; PRs genuinely benefit from test-impact + symbol-reference context).
+- (state) `ManagerConfig.enable_commit_grounding` property — per-feature override for commit-message grounding, default OFF (live testing showed grounding ADDS prompt weight that small models handle poorly on big multi-file commits; qwen2.5-coder copies recent commit subjects verbatim when overwhelmed; Haiku CLI truncates).
+- (settings) Two new nested checkboxes under the master grounding toggle: "Also use grounding for commit messages (opt-in)" + "Also use grounding for Draft PR (recommended)".
+- (git-tab) `_draft_pr_via_cli` now pre-builds tokensave + codegraph grounding via the new `_build_pr_grounding` helper, writes the block to `.pr_context.tmp.md`, and tells the CLI to read it as Step 1. Avoids command-line metachar crashes that v4.6's first attempt hit when the markdown block was inlined into the cmd.exe argument.
+- (git-tab) MCP-tool nudge appended to the Draft PR CLI instruction encouraging the spawned CLI to prefer `mcp__tokensave__tokensave_pr_context` over additional `git diff` calls when those MCP tools are wired.
+- (git-tab) Manager log surfaces grounding state per Draft PR click: "built grounding from tokensave + codegraph" (green) or "no grounding attached (off in Settings / neither tool indexed)" (dim grey).
+- (git-commit) Strategy badge in the Git Commit dialog now appends `🔗 grounded` or `✕ ungrounded` after the strategy tag so the user can link a bad suggestion to whether grounding contributed.
+- (.gitignore) `.pr_context.tmp.md` and `PR_DRAFT.md` added to both `_BASELINE_GITIGNORE` (the template helper) and the project's own `.gitignore`.
+
+### Changed — v4.6
+- (helpers/llm) `_build_llm_prompt` system prompt tightened: tone-reference instruction now explicitly says "DO NOT copy them — they show STYLE; your subject must describe the staged DIFF below". Belt-and-braces fix against the Ollama copy-recent-subjects regression even when grounding is off.
+
 ### Added — v4.5 (privacy feature + markdown sweep, 2026-05-27)
 - (gitignore-dialog) "🔒 Privacy semantics" banner explaining novice-readable what saving does: files added stop being pushed from now on; older commits on GitHub still contain them; use Advanced for full-history erase. (`src/dialogs/gitignore.py`)
 - (gitignore-dialog) "⚙ Advanced — Scrub from History…" disclosure button that opens the new `ScrubHistoryDialog`. (`src/dialogs/gitignore.py`)

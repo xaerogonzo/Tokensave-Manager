@@ -167,6 +167,23 @@ Token Save Manager Source/
 │   │   │                          debounced background sync on project select (per-project
 │   │   │                          30s + single-worker ThreadPoolExecutor); `maybe_prompt_reindex()`
 │   │   │                          once-per-session "broken index" dialog.
+│   │   ├── install_codegraph.py   v4.8 npm-driven codegraph lifecycle:
+│   │   │                          install_codegraph / update_codegraph (@latest form
+│   │   │                          for Windows reliability) / uninstall_codegraph;
+│   │   │                          codegraph_version; detect_codegraph_after_install
+│   │   │                          3-step PATH-fallback chain (shutil.which → `npm
+│   │   │                          prefix -g` probe → APPDATA\\npm probe) — G-B fix.
+│   │   │                          All callsites take npm_exe as resolved absolute path
+│   │   │                          (G-A: never bare "npm" on Windows where it's a .cmd).
+│   │   ├── install_tokensave.py   v4.8 GitHub-releases-driven tokensave install:
+│   │   │                          latest_tokensave_release with HTTP-403 rate-limit
+│   │   │                          detection (G-E); download_tokensave_zip with
+│   │   │                          PK\\x03\\x04 magic-byte verification (G-E DiD);
+│   │   │                          extract_tokensave_zip with Zip-Slip guards (G-C —
+│   │   │                          manual namelist() walk + abspath validation, reject
+│   │   │                          first violation); manager_install_dir at
+│   │   │                          %LOCALAPPDATA%\\TokenSaveManager\\bin\\;
+│   │   │                          is_manager_installed via os.path.commonpath.
 │   │   ├── git_scrub.py           v4.5 privacy feature. Pure helpers for the "Scrub from
 │   │   │                          History" dialog: `has_filter_repo` detection,
 │   │   │                          `install_filter_repo` (pip install --user),
@@ -209,6 +226,21 @@ Token Save Manager Source/
 │   │   ├── switch_branch.py       SwitchBranchDialog (+ static pick() helper)
 │   │   ├── assign_category.py     AssignCategoryDialog
 │   │   ├── untrack_ignored.py     UntrackIgnoredDialog
+│   │   ├── tool_manager.py        v4.8 ToolManagerDialog — unified install/update/
+│   │   │                          uninstall for both code-graph tools in one dialog.
+│   │   │                          Per-tool rows show binary status + MCP wiring;
+│   │   │                          shared output log pane; sticky-bottom Close bar.
+│   │   │                          Cascading uninstall (MCP cleanup first, non-fatal
+│   │   │                          per G-D; binary removal second, fatal). G-F:
+│   │   │                          _persist_cfg_clear helper makes save()-after-mutate
+│   │   │                          visible at every callsite. G-G: _set_row_busy
+│   │   │                          synchronously before worker spawn; try/finally
+│   │   │                          guarantees state restore.
+│   │   ├── codegraph_mcp_picker.py v4.7 CodegraphMCPPickerDialog — per-agent MCP-wiring
+│   │   │                          picker (claude / cursor / codex / opencode).
+│   │   │                          Destination-path detection (instant, no subprocess
+│   │   │                          at open). --no-permissions advanced toggle for
+│   │   │                          Claude Code. Sticky-bottom Install/Cancel bar.
 │   │   ├── scrub_history.py       v4.5 ScrubHistoryDialog — advanced "erase from all
 │   │   │                          history" privacy feature with 9-layer safety net.
 │   │   │                          Opens from GitignoreDialog → "⚙ Advanced". Detects
