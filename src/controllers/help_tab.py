@@ -87,8 +87,18 @@ class HelpTabController:
         pane.pack(fill=tk.BOTH, expand=True, padx=14, pady=10)
 
         # ── Left: topic list ──────────────────────────────────────────────────
-        list_wrap = tk.Frame(pane, bg=C["mantle"])
-        list_wrap.pack(side=tk.LEFT, fill=tk.Y)
+        left_wrap = tk.Frame(pane, bg=C["base"])
+        left_wrap.pack(side=tk.LEFT, fill=tk.Y)
+
+        # v4.8: Tool Manager shortcut at the top of the left nav so it's
+        # always discoverable regardless of which help section is open.
+        ttk.Button(
+            left_wrap, text="💾  Tool Manager…",
+            command=self._open_tool_manager,
+        ).pack(side=tk.TOP, fill=tk.X, padx=(0, 0), pady=(0, 6))
+
+        list_wrap = tk.Frame(left_wrap, bg=C["mantle"])
+        list_wrap.pack(side=tk.TOP, fill=tk.Y, expand=True)
 
         self._help_lb = tk.Listbox(
             list_wrap, width=20, font=("Segoe UI", 9),
@@ -232,6 +242,21 @@ class HelpTabController:
             self._ask_btn.pack(side=tk.LEFT)
         else:
             self._ask_btn.pack_forget()
+
+    def _open_tool_manager(self) -> None:
+        """v4.8: open the Tool Manager dialog from the Help tab nav.
+
+        Lazy import so help_tab.py's import graph stays light. Uses
+        the manager's top-level Tk window as parent so the dialog
+        renders modally above all tabs.
+        """
+        from dialogs.tool_manager import ToolManagerDialog
+        # The help_lb's toplevel is the App window — same root as Settings uses.
+        try:
+            root = self._help_lb.winfo_toplevel()
+        except (tk.TclError, AttributeError):
+            return
+        ToolManagerDialog(root, self._cfg)
 
     def _help_explain_clicked(self) -> None:
         """Handle the Explain button click — runs on the main thread."""

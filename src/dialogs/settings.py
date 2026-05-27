@@ -190,6 +190,9 @@ class SettingsDialog(tk.Toplevel):
                    command=host.cmd_upgrade_tokensave).pack(side=tk.LEFT)
         ttk.Button(upgrade_row, text="🔍  Check integration",
                    command=host.cmd_integration_check).pack(side=tk.LEFT, padx=(8, 0))
+        # v4.8: shortcut into the new Tool Manager dialog
+        ttk.Button(upgrade_row, text="🛠️  Open Tool Manager…",
+                   command=self._open_tool_manager).pack(side=tk.LEFT, padx=(8, 0))
         tk.Label(body, text=hint, bg=C["base"], fg=hint_fg,
                  font=("Segoe UI", 8), justify=tk.LEFT,
                  anchor=tk.W).pack(fill=tk.X, padx=20, pady=(0, 4))
@@ -391,10 +394,15 @@ class SettingsDialog(tk.Toplevel):
         ttk.Separator(body, orient="horizontal").pack(fill=tk.X, padx=20, pady=(12, 8))
         self._cg_section = tk.Frame(body, bg=C["base"])
         self._cg_section.pack(fill=tk.X)
-        tk.Label(self._cg_section,
+        cg_header = tk.Frame(self._cg_section, bg=C["base"])
+        cg_header.pack(fill=tk.X, padx=20)
+        tk.Label(cg_header,
                  text="CodeGraph (codegraph)  —  optional alternative code-graph tool",
                  bg=C["base"], fg=C["subtext"],
-                 font=("Segoe UI", 9)).pack(anchor=tk.W, padx=20)
+                 font=("Segoe UI", 9)).pack(side=tk.LEFT)
+        # v4.8: discovery shortcut into the new Tool Manager dialog
+        ttk.Button(cg_header, text="🛠️  Open Tool Manager…",
+                   command=self._open_tool_manager).pack(side=tk.RIGHT)
 
         # Path entry + Browse/Auto-detect buttons
         cg_path_row = tk.Frame(self._cg_section, bg=C["base"])
@@ -1260,6 +1268,17 @@ class SettingsDialog(tk.Toplevel):
         """
         from dialogs.mcp_config import MCPConfigDialog
         MCPConfigDialog(self, cfg=self._cfg)
+
+    def _open_tool_manager(self):
+        """Launch the v4.8 Tool Manager dialog.
+
+        Single discovery surface for install/update/uninstall of the two
+        code-graph tools (tokensave + codegraph).  Lazy-imported to
+        avoid pulling the dialog's helpers into the settings dialog
+        import graph until first use.
+        """
+        from dialogs.tool_manager import ToolManagerDialog
+        ToolManagerDialog(self, self._cfg)
 
     def _open_ollama_manager(self):
         """Launch the Ollama Model Manager dialog.
