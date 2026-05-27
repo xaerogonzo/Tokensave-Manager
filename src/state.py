@@ -108,6 +108,27 @@ class ManagerConfig:
         return True if val is None else bool(val)
 
     @property
+    def enable_commit_grounding(self) -> bool:
+        """Per-feature override for commit-message grounding (v4.6).
+
+        Defaults to OFF, because live testing showed grounding ADDS prompt
+        weight that small local models handle poorly on big multi-file
+        commits (qwen2.5-coder copies recent commit subjects verbatim when
+        overwhelmed; Haiku CLI truncates its output). The master toggle
+        still gates every other LLM feature (PR draft / code review / Ask
+        tab / doc drafter) — those benefit from grounding because they
+        need codebase knowledge, not diff summarization.
+
+        Explicitly stored value wins; None falls back to OFF (NOT to the
+        master toggle) because commit messages are the one place where
+        grounding is empirically counterproductive.
+        """
+        if not self.enable_llm_grounding:
+            return False
+        val = self.raw.get("enable_commit_grounding")
+        return False if val is None else bool(val)
+
+    @property
     def commit_message_backend(self) -> str:
         """Strategy order for commit-message suggestion.
 

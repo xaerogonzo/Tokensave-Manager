@@ -434,13 +434,27 @@ class GitCommitDialog(tk.Toplevel):
 
         Maps the orchestrator's strategy tag onto a short, palette-coloured
         label in the existing _suggest_status_lbl. Empty strategy → cleared.
+
+        v4.6: also surfaces whether tokensave/codegraph grounding was active
+        for this attempt, so the user can see at a glance and link a bad
+        suggestion to whether grounding contributed.
         """
         label, colour_key = self._STRATEGY_BADGES.get(
             strategy, (f"via {strategy}", "subtext"))
         if not label:
             self._suggest_status_lbl.configure(text="")
             return
-        self._suggest_status_lbl.configure(text=label, fg=C.get(colour_key, C["subtext"]))
+        # v4.6: append grounding indicator. Looks like "via LLM  🔗 grounded"
+        # when on, "via LLM  ✕ ungrounded" when off. Both visible at the
+        # same dim subtext colour to keep visual weight on the strategy itself.
+        try:
+            grounded = bool(getattr(self._cfg, "enable_commit_grounding", False))
+        except Exception:
+            grounded = False
+        suffix = "  🔗 grounded" if grounded else "  ✕ ungrounded"
+        self._suggest_status_lbl.configure(
+            text=label + suffix,
+            fg=C.get(colour_key, C["subtext"]))
 
     def _apply_suggestion(self, suggestion: str):
         """Insert `suggestion` into the message field, select first line."""

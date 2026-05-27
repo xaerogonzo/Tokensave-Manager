@@ -686,6 +686,38 @@ class SettingsDialog(tk.Toplevel):
             font=("Segoe UI", 8), bg=C["base"], fg=C["overlay0"],
             justify=tk.LEFT).pack(anchor=tk.W, padx=24, pady=(0, 8))
 
+        # v4.6: per-feature opt-IN for commit messages. Default OFF because
+        # live testing showed grounding hurts commit-message quality on big
+        # multi-file diffs (small models copy recent commit subjects verbatim).
+        _commit_grounding_initial = raw.get("enable_commit_grounding")
+        if _commit_grounding_initial is None:
+            _commit_grounding_initial = False
+        self._var_enable_commit_grounding = tk.BooleanVar(
+            value=bool(_commit_grounding_initial))
+        commit_grounding_chk = ttk.Checkbutton(
+            lf,
+            text="    └─ Also use grounding for commit messages (opt-in)",
+            variable=self._var_enable_commit_grounding,
+        )
+        commit_grounding_chk.pack(anchor=tk.W, padx=12, pady=(0, 2))
+        try:
+            from theme import _Tooltip
+            _Tooltip(
+                commit_grounding_chk,
+                "Off by default. Commit messages are summaries of the staged "
+                "diff — adding repository context tends to confuse small "
+                "models (qwen2.5-coder copies recent commit subjects "
+                "verbatim) and pushes the prompt past Claude CLI's output "
+                "budget. Turn ON to experiment; revert if the Suggest button "
+                "produces poor results.",
+            )
+        except Exception:
+            pass
+        tk.Label(lf,
+            text="    Recommended OFF — small models copy recent subjects when overwhelmed.",
+            font=("Segoe UI", 8), bg=C["base"], fg=C["overlay0"],
+            justify=tk.LEFT).pack(anchor=tk.W, padx=24, pady=(0, 8))
+
         # ── Ollama ────────────────────────────────────────────────────────
         ttk.Separator(body, orient="horizontal").pack(fill=tk.X, padx=20, pady=(8, 8))
         tk.Label(body, text="Ollama", font=("Segoe UI", 10, "bold"),
@@ -1132,6 +1164,7 @@ class SettingsDialog(tk.Toplevel):
         raw["draft_pr_backend"]        = self._var_draft_pr_backend.get()
         raw["commit_message_backend"]  = self._var_commit_msg_backend.get()
         raw["enable_llm_grounding"]    = bool(self._var_enable_llm_grounding.get())
+        raw["enable_commit_grounding"] = bool(self._var_enable_commit_grounding.get())
         # Persist AI commit-message settings (preserves any unknown keys
         # the user may have added manually via JSON edit).
         existing_llm = raw.get("commit_message_llm") or {}

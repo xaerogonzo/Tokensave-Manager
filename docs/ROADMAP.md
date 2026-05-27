@@ -93,6 +93,9 @@ Generalise the GitHub-specific `GitHubSetupDialog` into a provider-agnostic `Rem
 The shipped v4.3 subset (Projects-tab freshness glyph + autosync) is the lightweight slice. The full `📋 Roadmap…` dialog with Audit / Plan / Ship tabs is still planned. **Pickup hint**: `helpers/roadmap_parser.py` + `helpers/roadmap_patch.py` already exist and are dogfood-validated; the dialog needs the three-tab UI and the Jaccard-matching ship logic from the Roadmap-7 plan.
 **Critical files:** `src/dialogs/roadmap_mgr.py` *(new)*, `helpers/roadmap_audit.py` *(new)*.
 
+### 🔮 Full menu / dialog visual rework — novice-friendly layout pass
+Beyond the v4.5 spot-fixes (gitignore Save-button anchoring + scrub-history's 9-layer dialog), the broader menu system needs a coherent design pass. Live use of the Git Commit dialog and doc-drafter notebook surfaced overflowing checkbox lists, dense right-click menus, and competing controls in single rows. **Pickup hint**: see `memory/roadmap_backlog.md` "[v4.6] Full menu / dialog visual rework" for the area-by-area breakdown + approach. Should land BEFORE multi-remote so the new `RemoteSetupDialog` follows the standardised layout from day one. Major rework — touches 15+ dialogs. Surfaces benefiting most: `dialogs/git_commit.py`, `dialogs/doc_drafter.py`, `dialogs/settings.py`, Projects tab right-click menu.
+
 ### 🔮 Novice-gotcha UI polish — ship-now batch (six items from the v4.3 audit)
 From `memory/novice_gotchas_ai.md`: (1) scope labels under each Settings AI section, (2) `num_ctx` label + guidance text, (3) "(you can edit before clicking Apply)" hint on the doc-drafter placeholder, (4) CLAUDE.md load indicator in the Ask tab status bar, (5) gitignore AI data-source log line, (6) rename "grounding" toggle to "Attach code context to AI requests". Each is a 2-5 line change.
 

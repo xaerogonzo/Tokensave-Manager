@@ -968,8 +968,15 @@ def _suggest_commit_message(repo_path: str = "", status_text: str = "",
     # `_strat_claude_cli`) consume the same block; heuristics-only
     # strategies ignore it. Builds in the orchestrator (which has the
     # full ManagerConfig in scope) keeps the strategies cfg-dict-only.
+    #
+    # v4.6: gated by `enable_commit_grounding` (per-feature, default OFF)
+    # rather than the master `enable_llm_grounding`. Live testing showed
+    # that grounding hurts commit-message quality on big multi-file diffs:
+    # small models like qwen2.5-coder copy recent commit subjects verbatim
+    # when the prompt gets large, and Haiku CLI truncates its output.
+    # Users who want grounded commit messages opt in via Settings.
     grounding = ""
-    if mc is not None and getattr(mc, "enable_llm_grounding", False) and repo_path and git_exe:
+    if mc is not None and getattr(mc, "enable_commit_grounding", False) and repo_path and git_exe:
         try:
             diff_for_grounding = _pending_diff(repo_path, git_exe=git_exe)
         except Exception:
