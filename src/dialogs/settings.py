@@ -417,14 +417,48 @@ class SettingsDialog(tk.Toplevel):
         # Install / Check-again buttons
         cg_btn_row = tk.Frame(self._cg_section, bg=C["base"])
         cg_btn_row.pack(fill=tk.X, padx=20, pady=(4, 0))
-        self._cg_install_btn = ttk.Button(cg_btn_row, text="Install via npm", command=self._cg_install)
+        # v4.7: relabeled — disambiguates from the new MCP-config buttons below
+        self._cg_install_btn = ttk.Button(cg_btn_row, text="Install binary (npm)", command=self._cg_install)
         self._cg_install_btn.pack(side=tk.LEFT, padx=(0, 6))
         ttk.Button(cg_btn_row, text="Check again", command=self._cg_check_status).pack(side=tk.LEFT, padx=(0, 6))
         if not _detect_npm():
             self._cg_install_btn.configure(state=tk.DISABLED)
 
+        # v4.7: MCP-config buttons.  Step 2 of the codegraph setup flow.
+        # Step 1 is installing the binary (above); Step 2 is wiring it as
+        # an MCP server for whichever AI agents the user uses.
+        cg_mcp_row = tk.Frame(self._cg_section, bg=C["base"])
+        cg_mcp_row.pack(fill=tk.X, padx=20, pady=(6, 0))
+        self._cg_mcp_auto_btn = ttk.Button(
+            cg_mcp_row, text="🔌  Configure MCP (auto)",
+            command=self._cg_mcp_configure_auto,
+        )
+        self._cg_mcp_auto_btn.pack(side=tk.LEFT, padx=(0, 6))
+        self._cg_mcp_picker_btn = ttk.Button(
+            cg_mcp_row, text="⚙  Configure MCP — pick agents…",
+            command=self._cg_mcp_open_picker,
+        )
+        self._cg_mcp_picker_btn.pack(side=tk.LEFT, padx=(0, 6))
+        self._cg_mcp_uninstall_btn = ttk.Button(
+            cg_mcp_row, text="🧹  Uninstall MCP",
+            command=self._cg_mcp_uninstall,
+        )
+        self._cg_mcp_uninstall_btn.pack(side=tk.LEFT, padx=(0, 6))
+
+        # Non-modal restart-required info bar — hidden by default, shown
+        # after a successful Configure MCP (auto) run.
+        self._cg_mcp_restart_bar = tk.Label(
+            self._cg_section,
+            text="",  # populated when shown
+            bg=C["surface0"], fg=C["blue"],
+            font=("Segoe UI", 8),
+            wraplength=520, justify=tk.LEFT,
+            padx=10, pady=6,
+        )
+        # NOT packed yet — _cg_show_restart_bar packs it on demand.
+
         tk.Label(self._cg_section,
-                 text="  npm install -g @colbymchenry/codegraph  —  requires Node.js 18+ on PATH.\n"
+                 text="  Step 1: install the binary.  Step 2: wire it as an MCP server for the agents you use.\n"
                       "  Per-project actions live in the right-click menu (🧠 CodeGraph …).",
                  font=("Segoe UI", 8), bg=C["base"], fg=C["overlay0"],
                  justify=tk.LEFT).pack(anchor=tk.W, padx=20, pady=(4, 0))
@@ -452,15 +486,51 @@ class SettingsDialog(tk.Toplevel):
             self._cg_status_lbl.config(text="✗  not installed", fg=C["red"])
 
     def _cg_check_status(self):
-        """Detect codegraph on PATH and update the status label + install button."""
+        """Detect codegraph on PATH and update the status label + install button.
+
+        v4.7: also reports MCP wiring state for Claude Code via
+        ``helpers/mcp.py:_claude_code_mcp_has_codegraph``.  The status label
+        renders two lines when the binary is present — one for the binary,
+        one for the MCP wiring.  Buttons enable/disable based on both
+        states (e.g. "Uninstall MCP" only enables when MCP is currently
+        wired).
+        """
         found = _detect_codegraph()
         if found:
-            self._cg_status_lbl.config(text=f"✓  {found}", fg=C["green"])
+            # v4.7: dual-line status — binary + MCP wiring
+            try:
+                from helpers.mcp import _claude_code_mcp_has_codegraph
+                mcp_wired, mcp_key = _claude_code_mcp_has_codegraph()
+            except Exception:
+                mcp_wired, mcp_key = False, ""
+            mcp_line = (
+                f"✓  MCP wired for Claude Code (mcpServers.{mcp_key})"
+                if mcp_wired else
+                "✗  MCP not wired for Claude Code"
+            )
+            mcp_colour = C["green"] if mcp_wired else C["red"]
+            # Use a multi-line label: foreground colour reflects the
+            # OVERALL state (green only when both binary + MCP are good).
+            overall = C["green"] if mcp_wired else C["yellow"]
+            self._cg_status_lbl.config(
+                text=f"✓  {found}\n{mcp_line}",
+                fg=overall)
             self._cg_install_btn.configure(state=tk.DISABLED)
+            # MCP buttons gated on binary presence + per-button state
+            self._cg_mcp_auto_btn.configure(state=tk.NORMAL)
+            self._cg_mcp_picker_btn.configure(state=tk.NORMAL)
+            self._cg_mcp_uninstall_btn.configure(
+                state=tk.NORMAL if mcp_wired else tk.DISABLED)
+            # Mute the colour cue: the per-line text now carries the signal
+            _ = mcp_colour
             if not self._cg_exe_var.get():
                 self._cg_exe_var.set(found)
         else:
             self._cg_status_lbl.config(text="✗  not installed", fg=C["red"])
+            # No binary → all MCP buttons disabled
+            self._cg_mcp_auto_btn.configure(state=tk.DISABLED)
+            self._cg_mcp_picker_btn.configure(state=tk.DISABLED)
+            self._cg_mcp_uninstall_btn.configure(state=tk.DISABLED)
             state = tk.NORMAL if _detect_npm() else tk.DISABLED
             self._cg_install_btn.configure(state=state)
 
@@ -519,6 +589,153 @@ class SettingsDialog(tk.Toplevel):
                 tail = "\n".join(err_text.splitlines()[-8:]) or "(no output)"
                 self.after(0, self._cg_on_install_done, False,
                            f"✗  Install failed (exit {result.returncode}):\n\n{tail}{hint}")
+
+        threading.Thread(target=worker, daemon=True).start()
+
+    # ── v4.7: CodeGraph MCP configure / uninstall handlers ────────────────────
+
+    def _cg_show_restart_bar(self, message: str) -> None:
+        """Show the non-modal restart-required info bar after a successful
+        Configure MCP run.  Re-shows on every install (idempotent pack)."""
+        self._cg_mcp_restart_bar.configure(text=message)
+        try:
+            # Pack just below the MCP button row if not already packed.
+            # Catches the case where it was already shown earlier in the session.
+            info = self._cg_mcp_restart_bar.pack_info()
+            if not info:  # never packed
+                raise tk.TclError("not packed")
+        except tk.TclError:
+            self._cg_mcp_restart_bar.pack(
+                fill=tk.X, padx=20, pady=(6, 0))
+
+    def _cg_mcp_configure_auto(self) -> None:
+        """🔌 Configure MCP (auto) — runs `codegraph install --yes`.
+
+        Auto-detects installed agents and wires them all.  Logs progress to
+        the status label (subprocess output is short).  On success, surfaces
+        a non-modal restart-required info bar; on failure, the status label
+        shows the error tail.
+        """
+        exe = self._cg_exe_var.get().strip() or _detect_codegraph()
+        if not exe or not os.path.isfile(exe):
+            messagebox.showerror(
+                "CodeGraph binary not found",
+                "The codegraph executable is not configured. "
+                "Install it first via 'Install binary (npm)'.",
+                parent=self)
+            return
+        self._cg_mcp_auto_btn.configure(state=tk.DISABLED)
+        self._cg_mcp_picker_btn.configure(state=tk.DISABLED)
+        self._cg_mcp_uninstall_btn.configure(state=tk.DISABLED)
+        self._cg_status_lbl.config(
+            text="Configuring MCP…  (codegraph install --yes)",
+            fg=C["yellow"])
+
+        def worker():
+            try:
+                result = subprocess.run(
+                    [exe, "install", "--yes"],
+                    capture_output=True, text=True, timeout=120,
+                    creationflags=CREATE_NO_WINDOW,
+                    encoding="utf-8", errors="replace")
+            except subprocess.TimeoutExpired:
+                self.after(0, self._cg_mcp_done, False,
+                           "Configure MCP timed out after 120 s.")
+                return
+            except (FileNotFoundError, OSError) as e:
+                self.after(0, self._cg_mcp_done, False,
+                           f"Could not launch codegraph: {e}")
+                return
+            ok = result.returncode == 0
+            log = (result.stdout or "") + (result.stderr or "")
+            self.after(0, self._cg_mcp_done, ok, log)
+
+        threading.Thread(target=worker, daemon=True).start()
+
+    def _cg_mcp_done(self, ok: bool, log: str) -> None:
+        """Main-thread callback for both Configure MCP (auto) and Uninstall MCP."""
+        # Refresh status row — this re-enables buttons based on current state.
+        self._cg_check_status()
+        if ok:
+            tail = "\n".join((log or "").splitlines()[-6:])
+            self._cg_show_restart_bar(
+                "✓  MCP server wired. Restart Claude Code (and any other "
+                "agents you wired) for the new codegraph_* tools to appear "
+                "in their sessions."
+            )
+            # Brief status banner in the status label too — fades back to
+            # the regular detail line on the next Check again click.
+            self._cg_status_lbl.config(
+                text=self._cg_status_lbl.cget("text") + "\n(just updated)",
+                fg=C["green"])
+            _ = tail
+        else:
+            tail = "\n".join((log or "").splitlines()[-8:]) or "(no output)"
+            messagebox.showerror(
+                "CodeGraph MCP — install failed",
+                f"codegraph install failed:\n\n{tail}",
+                parent=self)
+
+    def _cg_mcp_open_picker(self) -> None:
+        """⚙ Configure MCP — pick agents… — opens the picker dialog."""
+        exe = self._cg_exe_var.get().strip() or _detect_codegraph()
+        if not exe or not os.path.isfile(exe):
+            messagebox.showerror(
+                "CodeGraph binary not found",
+                "The codegraph executable is not configured. "
+                "Install it first via 'Install binary (npm)'.",
+                parent=self)
+            return
+        # Lazy import — avoids any module-load cycle and keeps the
+        # picker out of the main import graph until first use.
+        from dialogs.codegraph_mcp_picker import CodegraphMCPPickerDialog
+        CodegraphMCPPickerDialog(self, self._cfg,
+                                 on_done=self._cg_check_status)
+
+    def _cg_mcp_uninstall(self) -> None:
+        """🧹 Uninstall MCP — strip codegraph from all wired agents."""
+        exe = self._cg_exe_var.get().strip() or _detect_codegraph()
+        if not exe or not os.path.isfile(exe):
+            messagebox.showerror(
+                "CodeGraph binary not found",
+                "The codegraph executable is not configured.",
+                parent=self)
+            return
+        if not messagebox.askyesno(
+                "Uninstall CodeGraph from AI agents?",
+                "Remove CodeGraph from your AI agents' MCP servers? "
+                "They'll lose access to codegraph_* tools until you "
+                "re-configure.\n\n"
+                "This does NOT delete the binary or any project "
+                "indexes — only the MCP registrations in Claude Code "
+                "(and any other agents that have it wired).",
+                parent=self, default="no"):
+            return
+        self._cg_mcp_auto_btn.configure(state=tk.DISABLED)
+        self._cg_mcp_picker_btn.configure(state=tk.DISABLED)
+        self._cg_mcp_uninstall_btn.configure(state=tk.DISABLED)
+        self._cg_status_lbl.config(
+            text="Uninstalling MCP…  (codegraph uninstall)",
+            fg=C["yellow"])
+
+        def worker():
+            try:
+                result = subprocess.run(
+                    [exe, "uninstall"],
+                    capture_output=True, text=True, timeout=60,
+                    creationflags=CREATE_NO_WINDOW,
+                    encoding="utf-8", errors="replace")
+            except subprocess.TimeoutExpired:
+                self.after(0, self._cg_mcp_done, False,
+                           "codegraph uninstall timed out after 60 s.")
+                return
+            except (FileNotFoundError, OSError) as e:
+                self.after(0, self._cg_mcp_done, False,
+                           f"Could not launch codegraph: {e}")
+                return
+            ok = result.returncode == 0
+            log = (result.stdout or "") + (result.stderr or "")
+            self.after(0, self._cg_mcp_done, ok, log)
 
         threading.Thread(target=worker, daemon=True).start()
 
