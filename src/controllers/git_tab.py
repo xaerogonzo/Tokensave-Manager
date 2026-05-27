@@ -1191,8 +1191,15 @@ class GitTabController:
         # nudge the CLI to use its own MCP tools if they're wired. Two
         # complementary mechanisms: the grounding block gives the CLI
         # ready-made facts (works regardless of MCP config), the MCP nudge
-        # exercises tools the user has already configured for Claude Code
-        # (works without any pre-fetch latency on subsequent investigations).
+        # exercises tools the user has already configured for Claude Code.
+        #
+        # The grounding block CANNOT be inlined into the instruction string
+        # because spawn_claude_cli passes it as a cmd.exe command-line
+        # argument and cmd.exe interprets `|`, `&`, `(`, `)`, `"` in the
+        # markdown content as shell metacharacters — the spawned process
+        # crashes immediately.  Write the grounding to a sibling file
+        # (`.pr_context.tmp.md` next to PR_DRAFT.md) and tell the CLI to
+        # read it as step 1.  The CLI removes the temp file when done.
         grounding_block, grounded = self._build_pr_grounding(path, base)
         if grounded:
             self._on_log("  Draft PR: built grounding from tokensave + codegraph",
@@ -1203,24 +1210,42 @@ class GitTabController:
             self._on_log(f"  Draft PR: no grounding attached ({reason})",
                           C["overlay0"])
 
-        grounding_section = (
-            f"\n\n## Repository context (pre-fetched by manager)\n\n"
-            f"{grounding_block}\n\n"
-            if grounding_block else ""
-        )
+        context_step = ""
+        context_path = ""
+        if grounded:
+            try:
+                context_path = os.path.join(path, ".pr_context.tmp.md")
+                header = (
+                    "# Repository context (pre-fetched by manager)\n\n"
+                    "_Auto-generated for Draft PR — delete this file when "
+                    "PR_DRAFT.md is written._\n\n"
+                )
+                with open(context_path, "w", encoding="utf-8", newline="\n") as fh:
+                    fh.write(header + grounding_block + "\n")
+                context_step = (
+                    "First, read `.pr_context.tmp.md` in the current working "
+                    "directory — the manager pre-fetched tokensave + codegraph "
+                    "context for this branch's diff so you can cite specific "
+                    "symbols and test-impact information in the PR body. "
+                    "After PR_DRAFT.md is written successfully, delete "
+                    "`.pr_context.tmp.md`. Then: "
+                )
+            except OSError as exc:
+                self._on_log(f"  Draft PR: could not write context file "
+                             f"({exc}); proceeding without it.", C["peach"])
+                context_step = ""
+
         mcp_nudge = (
-            "\nIf you have `mcp__tokensave__*` or `mcp__codegraph__*` tools "
-            "available in this session, prefer them over running `git log` "
-            "or repeated `git diff` calls — `mcp__tokensave__tokensave_pr_context` "
-            "and `mcp__codegraph__codegraph_affected` give branch-scoped "
-            "structural facts (test impact, callers, changed-symbol "
-            "summaries) that turn the PR description from bulleted commits "
-            "into reviewer-useful narrative. Fall back to bash git commands "
-            "only if those MCP tools are not registered."
-            if grounded or self._cfg.enable_pr_grounding else ""
+            " Note: if `mcp__tokensave__*` tools are available in this "
+            "session, prefer `mcp__tokensave__tokensave_pr_context` and "
+            "`mcp__tokensave__tokensave_diff_context` over additional "
+            "`git diff` calls — they return branch-scoped structural facts. "
+            "Fall back to bash git when those MCP tools are not registered."
+            if (grounded or self._cfg.enable_pr_grounding) else ""
         )
 
         instruction = (
+            f"{context_step}"
             f"Draft a PR description for this branch against `{base}`. "
             f"Run `git log {base}..HEAD --oneline` to see the commits, then "
             f"`git diff {base}...HEAD` to see the full diff (triple-dot gives the "
@@ -1229,7 +1254,6 @@ class GitTabController:
             f"(use a relative path — just PR_DRAFT.md, not an absolute path). "
             f"Include: a one-line summary, bullet list of key changes, and a testing checklist. "
             f"{gh_step}"
-            f"{grounding_section}"
             f"{mcp_nudge}"
         )
         ok, err = spawn_claude_cli(
