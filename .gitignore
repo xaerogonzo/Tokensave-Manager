@@ -56,3 +56,6 @@ Thumbs.db
 #   itself is transient.
 .pr_context.tmp.md
 PR_DRAFT.md
+
+# Added by TokenSave Manager
+*.local.json

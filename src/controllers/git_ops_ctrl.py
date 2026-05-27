@@ -199,9 +199,15 @@ class GitOpsController:
                     C["green"])
             finally:
                 self._tab.after(0, self._on_refresh)
+                # skip_stale_check=True prevents an infinite loop: _open_commit_dialog
+                # would otherwise re-run the tracked-but-ignored check, find any files
+                # the user deliberately left tracked, and prompt for Untrack again.
+                # Any remaining stale files after this point are the user's conscious
+                # choice — we should open the commit dialog, not re-prompt.
                 self._tab.after(0, lambda: self._on_commit_offer(
                     path,
-                    f"untrack {len(files)} ignored file{'s' if len(files) != 1 else ''}"))
+                    f"untrack {len(files)} ignored file{'s' if len(files) != 1 else ''}",
+                    skip_stale_check=True))
 
         threading.Thread(target=worker, daemon=True).start()
 

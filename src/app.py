@@ -721,7 +721,7 @@ class App(tk.Tk):
     # ── Commit dialog (shared by Projects context menu, Git tab, and
     #    offer-commit-after-change flow) ──────────────────────────────────────
 
-    def _open_commit_dialog(self, path: str):
+    def _open_commit_dialog(self, path: str, skip_stale_check: bool = False):
         """Open GitCommitDialog for a given project path. Reused by
         `cmd_git_commit` (Projects-tab right-click) AND by the
         offer-commit-after-change flow that runs after Ensure .gitignore,
@@ -731,8 +731,13 @@ class App(tk.Tk):
         offer to run Untrack Ignored Files FIRST. Otherwise the commit
         attempt would inevitably hit git's "paths are ignored" error and
         the user would have to come back and untrack anyway.
+
+        ``skip_stale_check=True`` bypasses this pre-flight when the caller
+        has just run Untrack Ignored Files — any remaining stale files are
+        ones the user deliberately chose to keep tracked, and re-prompting
+        would create an infinite loop.
         """
-        if _is_local_git_repo(path):
+        if not skip_stale_check and _is_local_git_repo(path):
             stale = _find_tracked_but_ignored(path, self._cfg.git_exe)
             if stale:
                 n = len(stale)
@@ -765,7 +770,8 @@ class App(tk.Tk):
         is_repo = _is_git_repo(path, self._cfg.git_exe)
         GitCommitDialog(self, path, status_out, is_repo, self._do_git_commit, self._cfg)
 
-    def _offer_commit_after_change(self, path: str, summary_label: str) -> None:
+    def _offer_commit_after_change(self, path: str, summary_label: str,
+                                   skip_stale_check: bool = False) -> None:
         """After a manager action (Ensure .gitignore, Scaffold, Retrofit, etc.),
         check whether the working tree is dirty and offer a commit dialog if so.
 
@@ -773,6 +779,10 @@ class App(tk.Tk):
         GitignoreDialog via self._app._offer_commit_after_change). The
         ProjectsTabController has its own copy for internal flows; this one
         serves external callers that go through App.
+
+        ``skip_stale_check=True`` is forwarded to ``_open_commit_dialog`` to
+        prevent an infinite untrack→commit→stale-check→untrack loop when the
+        caller has just finished running Untrack Ignored Files.
         """
         if not _is_local_git_repo(path):
             return
@@ -789,7 +799,7 @@ class App(tk.Tk):
                 "Click 'Yes' to open the Commit dialog with the changed files "
                 "ready to stage. Click 'No' to leave the working tree dirty.",
                 parent=self):
-            self._open_commit_dialog(path)
+            self._open_commit_dialog(path, skip_stale_check=skip_stale_check)
         else:
             self._log("  Working tree left dirty — commit when you're ready.",
                       C["yellow"])
