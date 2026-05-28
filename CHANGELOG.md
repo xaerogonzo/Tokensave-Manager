@@ -3,6 +3,33 @@
 
 ## [Unreleased]
 
+### Added — v4.14 (Roadmap 7.5: PR base override + AI test pipeline, 2026-05-27)
+
+**PR base branch override**
+- (git-tab) `_resolve_pr_base(path)` — checks `raw["pr_base_branch_override"][path]` before falling back to the 7-step `_detect_base_branch` chain. All three PR paths (`_draft_pr_via_cli`, `_create_pr_via_gh`, `_draft_pr_via_api`) now go through this method. Accessible via Draft PR right-click / Shift+click: `"Set PR base branch…  (now: auto / Roadmap-7.5)"`. (`src/controllers/git_tab.py`)
+- (pr-draft) `_branch_diff(repo_path, base, git_exe)` — runs `git merge-base base HEAD` then `git diff <merge-base>` (no trailing ref → merge-base to **working tree**, so committed + staged + unstaged all reach the AI). `generate_pr_draft` now accepts `base: str = ""` and uses `_branch_diff` when provided; falls back to `_pending_diff` for keyless callers. (`src/helpers/pr_draft.py`)
+
+**Test gap detection & scaffolding pipeline**
+- (helpers) **New `src/helpers/test_gap_report.py`** — `suggest_tests_for_diff(project_root, git_exe, base)` returns one `SuggestedTest` per changed `src/*.py` file with no `tests/test_*.py`. Uses `git diff --name-only base...HEAD` cross-referenced with `scan_coverage_gaps`. Template hint auto-detected: `dialogs/` → `dialog_tk`; subprocess usage in content → `subprocess_helper`; else `pure_helper`.
+- (git-tab) **`🧪 Test Gaps…` button** on the Git tab — standalone dialog that resolves the base branch and shows the gap panel without needing to open the PR draft dialog. Key for users who draft PRs via the Claude CLI path. (`cmd_show_test_gaps`)
+- (git-tab) **Test gap panel** inside the Ollama / API PR draft dialog — populated on a background thread; hidden when no gaps found. Per-file checkboxes with template hints, master AI enable switch, `📝 Generate stubs` and `✨ AI generate selected` buttons with progress label and Cancel. Cancellation checks `threading.Event` at the top of every file iteration; `proc.terminate() + proc.wait(timeout=2)` cleans up on Windows. Completion callback guards with `winfo_exists()` and checks project root before refreshing UI.
+
+**AI test content generation**
+- (helpers) **New `src/helpers/test_gen_llm.py`** — `generate_ai_test_content(source_path, project_root, backend, cfg, cancel_event)`. Backend dispatch: `"claude_cli"` → `call_claude_cli_print` (90 s), `"llm"` → `_call_llm` (120 s), `"auto"` → CLI if configured else LLM. System prompt injects test conventions + smallest example test file ≤ 100 lines (search bounded to `project_root`; hardcoded fallback for empty repos). All subprocess calls use `CREATE_NO_WINDOW`.
+- (test-manager) **AI backend radio row** in Scaffold tab (Auto / Claude CLI / Ollama API key). Per-task, defaults to `"auto"`, not persisted to config.
+- (test-manager) **`✨ AI Generate…`** button in Scaffold tab. Generates on a daemon thread, loads result into preview pane. `📝 Generate Test File` writes AI content to disk when available; falls back to template otherwise.
+- (test-manager) **Discard protection banner** — changing source file or template while an AI draft is loaded shows a yellow `⚠` banner with a `"Discard draft"` confirmation button instead of silently wiping the content.
+
+**UX fix**
+- (git-tab) Renamed `"Use API key (inline dialog)"` → `"Use Ollama / API (inline dialog)"` throughout (menu label, tooltip, error messages, comments). The LLM path was never API-key-exclusive — Ollama works too, and this name was causing confusion.
+
+### Fixed — v4.14 (Roadmap 7.5 code-health audit)
+- (doc-drafter) Removed 7 dead helpers (`_is_noop_bullet`, `_looks_truncated`, `_is_duplicate`, `_sanitise_raw_draft`, `_filter_bullets`, `_TRUNCATION_TRAILING`, `_NOOP_BULLET_PATTERNS`) unreachable after the Phase 2.1 quality-filter refactor. Extracted `_generate_worker` from the closure inside `_on_generate_impl` — 10 previously implicit closure variables now explicit parameters. (`src/dialogs/doc_drafter.py`)
+- (settings) `_build_behavior_section` (258-line monolith) split into a 6-line router + 4 focused sub-builders. (`src/dialogs/settings.py`)
+- (commit-messages) Replaced 4-branch `if/elif` backend selector with `_BACKEND_CHAINS` dict. (`src/helpers/commit_messages.py`)
+- (scrub-history) `_refresh_state` (135-line method) split into a 12-line dispatcher + 4 helpers. (`src/dialogs/scrub_history.py`)
+- (git-scrub) Extracted `_stream_filter_repo_proc` and `_run_scrub_fallback` from `run_scrub`'s inner closures; `run_scrub` reduced from ~130 to ~30 lines. (`src/helpers/git_scrub.py`)
+
 ### Added — v4.13 (Test Manager dialog + PR checklist integration, 2026-05-27)
 - (test-manager) **New 4-tab Test Manager dialog** (`src/dialogs/test_manager.py`) replaces the v4.12 "🧪 Run Smoke Tests" button in the Help tab. Same discovery point, much richer surface — novice users now have a UI for the whole test lifecycle without leaving the manager. Tabs:
   - **Tab 1 — Run + View**: Treeview of every `tests/test_*.py` with per-file last-run status (✓/✗/🛑/—), test counts (from AST parse via V-C — catches both module-level `def test_*` AND class-indented `def test_*` in the existing 14 `unittest.TestCase` classes in `smoke_test.py`). Buttons: Run All, Run Selected, **🛑 Stop** (V-G: cancels the in-flight pytest subprocess with 5s grace before SIGKILL), and **🔁 Sync PR Checklist**.
