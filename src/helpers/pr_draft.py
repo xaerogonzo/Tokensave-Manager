@@ -14,8 +14,11 @@ test runs.
 
 from __future__ import annotations
 
+import subprocess
+
 from helpers.llm import _call_llm
 from helpers.commit_messages import _pending_diff, _files_from_diff
+from constants import CREATE_NO_WINDOW
 
 
 _PR_SYSTEM_PROMPT = """\
@@ -50,7 +53,37 @@ to identify the section it owns.
 """
 
 
-def generate_pr_draft(cfg, project_path: str) -> str | None:
+def _branch_diff(repo_path: str, base: str, git_exe: str = "git") -> str:
+    """Diff from merge-base of ``base`` to the working tree.
+
+    Uses ``git diff <merge-base>`` (no trailing ref) so committed,
+    staged, *and* unstaged changes are all visible to the AI — preserving
+    the pre-commit drafting workflow where the user reviews AI output
+    before making the final commit.
+    """
+    _git = git_exe or "git"
+    try:
+        merge_base = subprocess.check_output(
+            [_git, "merge-base", base, "HEAD"],
+            cwd=repo_path, text=True,
+            creationflags=CREATE_NO_WINDOW,
+        ).strip()
+    except subprocess.CalledProcessError:
+        # merge-base failed (shallow clone, no common history) — fall back to
+        # a straight diff of HEAD vs working tree so the user still gets output.
+        return subprocess.check_output(
+            [_git, "diff"],
+            cwd=repo_path, text=True,
+            creationflags=CREATE_NO_WINDOW,
+        )
+    return subprocess.check_output(
+        [_git, "diff", merge_base],   # no trailing ref → compares to working tree
+        cwd=repo_path, text=True,
+        creationflags=CREATE_NO_WINDOW,
+    )
+
+
+def generate_pr_draft(cfg, project_path: str, base: str = "") -> str | None:
     """Compute local working-tree changes and ask the LLM to draft a PR description.
 
     Args:
@@ -61,7 +94,13 @@ def generate_pr_draft(cfg, project_path: str) -> str | None:
         Markdown string from the LLM, or an error/empty-diff message string.
         Returns None only if _call_llm itself returns None (no LLM configured).
     """
-    diff_data = _pending_diff(project_path, git_exe=cfg.git_exe)
+    if base:
+        try:
+            diff_data = _branch_diff(project_path, base, git_exe=cfg.git_exe)
+        except Exception:
+            diff_data = _pending_diff(project_path, git_exe=cfg.git_exe)
+    else:
+        diff_data = _pending_diff(project_path, git_exe=cfg.git_exe)
     if not diff_data or len(diff_data.strip()) < 50:
         return "Empty diff or changes too trivial to generate a structured PR description."
 

@@ -151,13 +151,17 @@ class GitTabController:
         self._on_log             = on_log
         self._on_shell           = on_shell
         self._on_commit          = on_commit
-        self._git_path: "str | None"   = None
-        self._git_status_files: list   = []
-        self._git_all_btns: list       = []
-        self._git_push_pull_btns: list = []
-        self._git_release_btns: list   = []
-        self._git_op_in_flight: bool   = False
-        self._log_queue                = queue.Queue()
+        self._git_path: "str | None"      = None
+        self._git_status_files: list      = []
+        self._git_all_btns: list          = []
+        self._git_push_pull_btns: list    = []
+        self._git_release_btns: list      = []
+        self._git_op_in_flight: bool      = False
+        self._log_queue                   = queue.Queue()
+        # Weak reference to an open TestManagerDialog — set externally when
+        # the dialog is opened so the test-gap panel can refresh coverage.
+        # None when the dialog has not been opened or has been destroyed.
+        self._test_manager_ref            = None
         self._tab = tk.Frame(notebook, bg=C["base"])
         notebook.add(self._tab, text="  Git  ")
         # Phase 4 (Roadmap-2): branch new/switch/merge/delete extracted into a
@@ -1193,6 +1197,50 @@ class GitTabController:
                     "Configure a Claude Code CLI path or an API key in Settings to use Draft PR.",
                     parent=self._root)
 
+    # ------------------------------------------------------------------
+    # PR base branch override helpers
+    # ------------------------------------------------------------------
+
+    def _resolve_pr_base(self, path: str) -> "str | None":
+        """Return the base branch for a PR, honouring any per-project override.
+
+        Checks ``raw["pr_base_branch_override"][path]`` first; falls back to
+        the automatic 7-step ``_detect_base_branch`` chain when no override is
+        stored.
+        """
+        override = (self._cfg.raw
+                    .get("pr_base_branch_override", {})
+                    .get(path, ""))
+        if override:
+            return override
+        return _detect_base_branch(path, self._cfg.git_exe)
+
+    def _cmd_set_pr_base(self, path: str) -> None:
+        """Prompt the user for a PR base branch override and persist it."""
+        from tkinter import simpledialog
+        current = (self._cfg.raw
+                   .get("pr_base_branch_override", {})
+                   .get(path, ""))
+        new_val = simpledialog.askstring(
+            "Set PR base branch",
+            "Enter the base branch for Draft PR (leave blank to reset to auto-detect):\n\n"
+            f"Current: {current or '(auto)'}",
+            initialvalue=current,
+            parent=self._root,
+        )
+        if new_val is None:   # user cancelled the dialog
+            return
+        overrides = self._cfg.raw.setdefault("pr_base_branch_override", {})
+        if new_val.strip():
+            overrides[path] = new_val.strip()
+            self._on_log(f"  Draft PR base branch override set to '{new_val.strip()}' "
+                         f"for {os.path.basename(path)}", C["green"])
+        else:
+            overrides.pop(path, None)
+            self._on_log(f"  Draft PR base branch override cleared for "
+                         f"{os.path.basename(path)} (back to auto-detect)", C["overlay0"])
+        self._cfg.save()
+
     def _show_draft_pr_menu(self, event, btn):
         """Show an override menu for right-click / Shift+click on Draft PR."""
         path = self._git_path
@@ -1203,6 +1251,14 @@ class GitTabController:
                          command=lambda: self._draft_pr_via_cli(path))
         menu.add_command(label="Use API key (inline dialog)",
                          command=lambda: self._draft_pr_via_api(path))
+        # Base branch override
+        current_base = (self._cfg.raw
+                        .get("pr_base_branch_override", {})
+                        .get(path, ""))
+        base_label = f"Set PR base branch…  (now: {current_base or 'auto'})"
+        menu.add_separator()
+        menu.add_command(label=base_label,
+                         command=lambda: self._cmd_set_pr_base(path))
         try:
             menu.tk_popup(event.x_root, event.y_root)
         finally:
@@ -1210,12 +1266,14 @@ class GitTabController:
 
     def _draft_pr_via_cli(self, path: str):
         from helpers.claude_cli import spawn_claude_cli   # lazy import
-        base = _detect_base_branch(path, self._cfg.git_exe)
+        base = self._resolve_pr_base(path)
         if base is None:
             messagebox.showerror(
                 "Draft PR — base branch not found",
                 "Could not detect the base branch for this PR.\n\n"
-                "Push to a remote, or set a tracking branch with:\n"
+                "Right-click the Draft PR button and choose\n"
+                "'Set PR base branch…' to specify one manually, or\n"
+                "push to a remote and set a tracking branch with:\n"
                 "  git branch --set-upstream-to=origin/<base> <branch>",
                 parent=self._root)
             return
@@ -1376,15 +1434,16 @@ class GitTabController:
     def _draft_pr_via_api(self, path: str):
         import threading
         self._on_log("  Drafting PR description via API…", C["blue"])
+        base = self._resolve_pr_base(path)
 
         def _fetch():
             from helpers.pr_draft import generate_pr_draft   # lazy import
-            result = generate_pr_draft(self._cfg, path)
-            self._tab.after(0, lambda text=result: self._show_pr_draft_dialog(text, path))
+            result = generate_pr_draft(self._cfg, path, base=base or "")
+            self._tab.after(0, lambda text=result: self._show_pr_draft_dialog(text, path, base=base or ""))
 
         threading.Thread(target=_fetch, daemon=True).start()
 
-    def _show_pr_draft_dialog(self, text: "str | None", path: str):
+    def _show_pr_draft_dialog(self, text: "str | None", path: str, base: str = ""):
         if not self._tab.winfo_exists():
             return
         if not text:
@@ -1461,6 +1520,12 @@ class GitTabController:
 
         ttk.Button(btn_row, text="Close", command=dlg.destroy).pack(side=tk.RIGHT)
 
+        # ------------------------------------------------------------------
+        # 🧪 Test gap panel — populated asynchronously when base is known
+        # ------------------------------------------------------------------
+        if base:
+            self._build_test_gap_panel(dlg, path, base)
+
         dlg.update_idletasks()
         w, h = 720, 520
         try:
@@ -1469,6 +1534,277 @@ class GitTabController:
             dlg.geometry(f"{w}x{h}+{max(0, px)}+{max(0, py)}")
         except tk.TclError:
             dlg.geometry(f"{w}x{h}")
+
+    # ------------------------------------------------------------------
+    # Test gap panel helpers (Feature 2)
+    # ------------------------------------------------------------------
+
+    def _build_test_gap_panel(self, dlg: tk.Toplevel, path: str, base: str) -> None:
+        """Attach a collapsible 🧪 test-gap panel to the PR draft dialog.
+
+        Runs ``suggest_tests_for_diff`` on a background thread; reveals the
+        panel only if untested changed files are found.
+        """
+        import threading
+
+        # Placeholder frame — packed after the button row; hidden until populated
+        panel = tk.Frame(dlg, bg=C["surface0"], relief=tk.FLAT, bd=1)
+
+        def _fetch():
+            from helpers.test_gap_report import suggest_tests_for_diff
+            try:
+                suggestions = suggest_tests_for_diff(path, self._cfg.git_exe, base)
+            except Exception:
+                suggestions = []
+            if dlg.winfo_exists():
+                dlg.after(0, lambda s=suggestions: _populate(s))
+
+        def _populate(suggestions: list) -> None:
+            if not dlg.winfo_exists() or not suggestions:
+                return
+            panel.pack(fill=tk.X, padx=12, pady=(4, 8))
+            _fill_panel(panel, suggestions)
+
+        def _fill_panel(parent: tk.Frame, suggestions: list) -> None:
+            """Build the panel widgets inside *parent*."""
+            # Header row
+            hdr = tk.Frame(parent, bg=C["surface0"])
+            hdr.pack(fill=tk.X, padx=8, pady=(6, 2))
+            tk.Label(
+                hdr,
+                text=f"🧪  {len(suggestions)} changed file(s) have no tests",
+                font=("Segoe UI", 9, "bold"),
+                bg=C["surface0"], fg=C["yellow"],
+            ).pack(side=tk.LEFT)
+
+            # AI master switch
+            ai_available = bool(
+                getattr(self._cfg, "claude_cli_exe", "") or
+                self._cfg.raw.get("commit_message_llm", {}).get("provider")
+            )
+            ai_enabled_var = tk.BooleanVar(value=ai_available)
+            ai_chk = tk.Checkbutton(
+                hdr,
+                text="Enable AI generation",
+                variable=ai_enabled_var,
+                bg=C["surface0"], fg=C["subtext"],
+                activebackground=C["surface0"],
+                font=("Segoe UI", 9),
+                state=tk.NORMAL if ai_available else tk.DISABLED,
+            )
+            ai_chk.pack(side=tk.RIGHT)
+
+            # Checkbox list
+            list_frame = tk.Frame(parent, bg=C["surface0"])
+            list_frame.pack(fill=tk.X, padx=16, pady=2)
+
+            check_vars: list[tk.BooleanVar] = []
+            for sg in suggestions:
+                var = tk.BooleanVar(value=True)
+                check_vars.append(var)
+                row = tk.Frame(list_frame, bg=C["surface0"])
+                row.pack(fill=tk.X, pady=1)
+                tk.Checkbutton(
+                    row, variable=var,
+                    text=sg.rel_path,
+                    bg=C["surface0"], fg=C["text"],
+                    activebackground=C["surface0"],
+                    font=("Consolas", 8),
+                    anchor="w",
+                ).pack(side=tk.LEFT)
+                tk.Label(
+                    row,
+                    text=f"→ {sg.template}",
+                    bg=C["surface0"], fg=C["overlay0"],
+                    font=("Segoe UI", 8),
+                ).pack(side=tk.LEFT, padx=(4, 0))
+
+            # Action buttons
+            act_row = tk.Frame(parent, bg=C["surface0"])
+            act_row.pack(fill=tk.X, padx=8, pady=(4, 6))
+
+            status_var = tk.StringVar()
+            status_lbl = tk.Label(
+                act_row,
+                textvariable=status_var,
+                bg=C["surface0"], fg=C["subtext"],
+                font=("Segoe UI", 8),
+            )
+            status_lbl.pack(side=tk.LEFT)
+
+            cancel_event = threading.Event()
+
+            stub_btn = ttk.Button(
+                act_row, text="📝 Generate stubs",
+                command=lambda: self._gap_generate_stubs(
+                    suggestions, check_vars, path,
+                    status_var, stub_btn, ai_btn, cancel_event, dlg),
+            )
+            stub_btn.pack(side=tk.RIGHT, padx=(4, 0))
+
+            ai_btn = ttk.Button(
+                act_row, text="✨ AI generate selected",
+                command=lambda: self._gap_generate_ai(
+                    suggestions, check_vars, path,
+                    status_var, stub_btn, ai_btn, ai_enabled_var,
+                    cancel_event, dlg),
+            )
+            ai_btn.pack(side=tk.RIGHT, padx=(4, 0))
+
+            cancel_btn = ttk.Button(
+                act_row, text="Cancel",
+                command=cancel_event.set,
+            )
+            cancel_btn.pack(side=tk.RIGHT, padx=(4, 0))
+
+            if not ai_available:
+                ai_btn.configure(state=tk.DISABLED)
+                _Tooltip(ai_btn,
+                    "Configure Claude Code CLI or an LLM provider in Settings "
+                    "to enable AI test generation.")
+
+        threading.Thread(target=_fetch, daemon=True).start()
+
+    def _gap_generate_stubs(
+        self, suggestions: list, check_vars: list, path: str,
+        status_var: tk.StringVar, stub_btn, ai_btn,
+        cancel_event: "threading.Event", dlg: tk.Toplevel,
+    ) -> None:
+        """Generate template stubs for all checked entries."""
+        import threading
+        from helpers.test_scaffold import generate_test_file
+
+        selected = [sg for sg, v in zip(suggestions, check_vars) if v.get()]
+        if not selected:
+            status_var.set("Nothing selected.")
+            return
+
+        stub_btn.configure(state=tk.DISABLED)
+        ai_btn.configure(state=tk.DISABLED)
+        status_var.set("Generating…")
+        captured_root = path   # snapshot project root at button-press time
+
+        def _run():
+            ok, skipped = [], []
+            for sg in selected:
+                if cancel_event.is_set():
+                    break
+                try:
+                    generate_test_file(captured_root, sg.source_path, sg.template)
+                    ok.append(sg.rel_path)
+                except FileExistsError:
+                    skipped.append(sg.rel_path)
+                except Exception as exc:
+                    skipped.append(f"{sg.rel_path} ({exc})")
+            if dlg.winfo_exists():
+                dlg.after(0, lambda: _done(ok, skipped))
+
+        def _done(ok: list, skipped: list) -> None:
+            if not dlg.winfo_exists():
+                return
+            stub_btn.configure(state=tk.NORMAL)
+            ai_btn.configure(state=tk.NORMAL)
+            msg_parts = []
+            if ok:
+                msg_parts.append(f"Created: {', '.join(ok)}")
+            if skipped:
+                msg_parts.append(f"Skipped (already exist): {', '.join(skipped)}")
+            status_var.set(" | ".join(msg_parts) or "Done.")
+            # Refresh Test Manager coverage view if open and same project
+            if (self._test_manager_ref is not None
+                    and self._test_manager_ref.winfo_exists()):
+                try:
+                    self._test_manager_ref.refresh_coverage()
+                except Exception:
+                    pass
+
+        threading.Thread(target=_run, daemon=True).start()
+
+    def _gap_generate_ai(
+        self, suggestions: list, check_vars: list, path: str,
+        status_var: tk.StringVar, stub_btn, ai_btn,
+        ai_enabled_var: tk.BooleanVar,
+        cancel_event: "threading.Event", dlg: tk.Toplevel,
+    ) -> None:
+        """AI-generate test content for all checked entries."""
+        import threading
+        from helpers.test_gen_llm import generate_ai_test_content
+
+        if not ai_enabled_var.get():
+            status_var.set("AI generation is disabled.")
+            return
+
+        selected = [sg for sg, v in zip(suggestions, check_vars) if v.get()]
+        if not selected:
+            status_var.set("Nothing selected.")
+            return
+
+        stub_btn.configure(state=tk.DISABLED)
+        ai_btn.configure(state=tk.DISABLED)
+        captured_root = path   # snapshot project root at button-press time
+
+        def _run():
+            n = len(selected)
+            for i, sg in enumerate(selected, 1):
+                if cancel_event.is_set():
+                    break
+                if dlg.winfo_exists():
+                    dlg.after(0, lambda i=i, n=n: status_var.set(
+                        f"Generating {i}/{n}…"))
+                content, err = generate_ai_test_content(
+                    sg.source_path, captured_root,
+                    backend="auto", cfg=self._cfg,
+                    cancel_event=cancel_event,
+                )
+                if cancel_event.is_set():
+                    break
+                if err or not content:
+                    if dlg.winfo_exists():
+                        dlg.after(0, lambda e=err or "No output": status_var.set(
+                            f"Error: {e}"))
+                    continue
+                # Write to disk
+                from helpers.test_scaffold import _test_filename_for
+                try:
+                    out_path = os.path.join(
+                        captured_root, "tests",
+                        _test_filename_for(sg.source_path, captured_root),
+                    )
+                    os.makedirs(os.path.dirname(out_path), exist_ok=True)
+                    with open(out_path, "w", encoding="utf-8", newline="\n") as fh:
+                        fh.write(content)
+                    self._on_log(
+                        f"  AI test stub written: {os.path.basename(out_path)}",
+                        C["green"])
+                except OSError as exc:
+                    if dlg.winfo_exists():
+                        dlg.after(0, lambda e=str(exc): status_var.set(
+                            f"Write error: {e}"))
+
+            if dlg.winfo_exists():
+                dlg.after(0, _done)
+
+        def _done() -> None:
+            if not dlg.winfo_exists():
+                return
+            # Guard: only refresh if same project is still active
+            if captured_root != self._git_path:
+                return
+            stub_btn.configure(state=tk.NORMAL)
+            ai_btn.configure(state=tk.NORMAL)
+            if cancel_event.is_set():
+                status_var.set("Cancelled.")
+            else:
+                status_var.set("AI generation complete.")
+            # Refresh Test Manager if still open and same project
+            if (self._test_manager_ref is not None
+                    and self._test_manager_ref.winfo_exists()):
+                try:
+                    self._test_manager_ref.refresh_coverage()
+                except Exception:
+                    pass
+
+        threading.Thread(target=_run, daemon=True).start()
 
     def _open_pr_via_gh(self, gh_exe: str, path: str, body_text: str, dlg) -> None:
         """Write body to a temp file and spawn `gh pr create --web --body-file`.
@@ -1526,12 +1862,14 @@ class GitTabController:
             messagebox.showwarning("Create PR", "Enter a PR title first.", parent=dlg)
             return
 
-        base = _detect_base_branch(path, self._cfg.git_exe)
+        base = self._resolve_pr_base(path)
         if base is None:
             messagebox.showerror(
                 "Create PR",
                 "Could not detect base branch.\n"
-                "Push the branch and set a tracking upstream first.",
+                "Right-click the Draft PR button and choose\n"
+                "'Set PR base branch…' to specify one manually, or\n"
+                "push the branch and set a tracking upstream first.",
                 parent=dlg)
             return
 

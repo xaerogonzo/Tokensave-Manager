@@ -96,6 +96,13 @@ class TestManagerDialog(tk.Toplevel):
         self._stale:      list[StaleSignal]   = []
         self._allowlist: set[str] = load_stale_allowlist(project_root)
 
+        # Scaffold tab — AI generation state (Feature 3)
+        # Set by _on_scaffold_ai_generate; consumed (and cleared) by
+        # _on_scaffold_generate to write AI content instead of the template.
+        self._scaffold_ai_content: "str | None" = None
+        # Cancel event for in-flight AI generation (single-file only in TM).
+        self._scaffold_cancel_event: "Optional[object]" = None
+
         self._build_ui()
         # Populate Tab 1 from disk cache so the dialog opens with
         # meaningful data even on first open since the manager started.
@@ -659,17 +666,133 @@ class TestManagerDialog(tk.Toplevel):
         pv_vsb.pack(side=tk.RIGHT, fill=tk.Y)
         self._scaffold_preview.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
 
-        # Generate row.
-        gen = tk.Frame(parent, bg=C["base"])
+        # AI discard-warning banner (shown when a UI change would wipe an
+        # active AI draft from the preview pane). Hidden by default.
+        self._scaffold_discard_banner = tk.Frame(parent, bg=C["yellow"])
+        tk.Label(
+            self._scaffold_discard_banner,
+            text="⚠  Changing source/template will discard the AI draft. "
+                 "Click '📝 Generate' first to save it, or confirm to discard.",
+            bg=C["yellow"], fg=C["base"],
+            font=("Segoe UI", 8, "bold"),
+            wraplength=540, justify=tk.LEFT,
+        ).pack(side=tk.LEFT, padx=8, pady=4)
+        ttk.Button(
+            self._scaffold_discard_banner,
+            text="Discard draft",
+            command=self._on_scaffold_confirm_discard,
+        ).pack(side=tk.RIGHT, padx=8, pady=4)
+
+        # AI backend selector row — NOT in Settings (per-task preference).
+        backend_row = tk.Frame(parent, bg=C["base"])
+        backend_row.pack(fill=tk.X, padx=8, pady=(4, 0))
+        tk.Label(backend_row, text="AI backend:",
+                 bg=C["base"], fg=C["subtext"],
+                 font=("Segoe UI", 9)).pack(side=tk.LEFT)
+        self._scaffold_backend_var = tk.StringVar(value="auto")
+        for bname, blabel in [("auto", "Auto"), ("claude_cli", "Claude CLI"),
+                               ("llm", "Ollama / API key")]:
+            ttk.Radiobutton(
+                backend_row, text=blabel,
+                value=bname, variable=self._scaffold_backend_var,
+            ).pack(side=tk.LEFT, padx=(6, 0))
+
+        # Generate row — template button + AI generate button side-by-side.
+        gen = self._scaffold_gen_row = tk.Frame(parent, bg=C["base"])
         gen.pack(fill=tk.X, padx=8, pady=(4, 8))
         self._scaffold_status_var = tk.StringVar(value="")
         tk.Label(gen, textvariable=self._scaffold_status_var,
                  anchor=tk.W, bg=C["base"], fg=C["overlay0"],
                  font=("Segoe UI", 9)
                  ).pack(side=tk.LEFT, fill=tk.X, expand=True)
-        ttk.Button(gen, text="📝 Generate Test File",
-                   command=self._on_scaffold_generate
-                   ).pack(side=tk.RIGHT)
+        self._scaffold_ai_btn = ttk.Button(
+            gen, text="✨ AI Generate…",
+            command=self._on_scaffold_ai_generate,
+        )
+        self._scaffold_ai_btn.pack(side=tk.RIGHT, padx=(4, 0))
+        self._scaffold_gen_btn = ttk.Button(
+            gen, text="📝 Generate Test File",
+            command=self._on_scaffold_generate,
+        )
+        self._scaffold_gen_btn.pack(side=tk.RIGHT)
+
+    def _on_scaffold_ai_generate(self) -> None:
+        """Launch AI test generation for the currently selected source file."""
+        import threading
+        from helpers.test_gen_llm import generate_ai_test_content
+
+        source = self._scaffold_source_var.get().strip()
+        if not source or not os.path.isfile(source):
+            messagebox.showinfo(
+                "Pick a source file",
+                "Click the … button and pick a .py file under src/.",
+                parent=self,
+            )
+            return
+
+        # Validate backend
+        backend = self._scaffold_backend_var.get()
+        cli_ok  = bool(getattr(self._cfg, "claude_cli_exe", ""))
+        llm_ok  = bool(self._cfg.raw.get("commit_message_llm", {}).get("provider"))
+        if backend == "claude_cli" and not cli_ok:
+            messagebox.showwarning(
+                "Claude CLI not configured",
+                "Set the Claude Code CLI path in Settings → AI Backend.",
+                parent=self)
+            return
+        if backend == "llm" and not llm_ok:
+            messagebox.showwarning(
+                "LLM not configured",
+                "Set an LLM provider/API key in Settings → LLM.",
+                parent=self)
+            return
+        if backend == "auto" and not cli_ok and not llm_ok:
+            messagebox.showwarning(
+                "No AI backend",
+                "Configure a Claude Code CLI path or an LLM provider in Settings.",
+                parent=self)
+            return
+
+        # Cancel any previous in-flight generation
+        if self._scaffold_cancel_event is not None:
+            self._scaffold_cancel_event.set()
+        cancel_event = threading.Event()
+        self._scaffold_cancel_event = cancel_event
+
+        # Disable UI during generation
+        self._scaffold_gen_btn.configure(state=tk.DISABLED)
+        self._scaffold_ai_btn.configure(state=tk.DISABLED)
+        self._scaffold_status_var.set("✨ Generating — this may take up to 90 s…")
+
+        def _run():
+            content, err = generate_ai_test_content(
+                source_path=source,
+                project_root=self._project_root,
+                backend=backend,
+                cfg=self._cfg,
+                cancel_event=cancel_event,
+            )
+            if self.winfo_exists():
+                self.after(0, lambda c=content, e=err: _done(c, e))
+
+        def _done(content: "str | None", err: "str | None") -> None:
+            if not self.winfo_exists():
+                return
+            self._scaffold_gen_btn.configure(state=tk.NORMAL)
+            self._scaffold_ai_btn.configure(state=tk.NORMAL)
+            if err or not content:
+                self._scaffold_status_var.set(f"✗ {err or 'No output from AI'}")
+                return
+            # Load AI content into preview pane
+            self._scaffold_ai_content = content
+            self._scaffold_preview.configure(state=tk.NORMAL)
+            self._scaffold_preview.delete("1.0", tk.END)
+            self._scaffold_preview.insert("1.0", content)
+            self._scaffold_preview.configure(state=tk.DISABLED)
+            self._scaffold_status_var.set(
+                "AI draft ready — click 📝 Generate Test File to write it to disk.")
+
+        threading.Thread(target=_run, daemon=True).start()
 
     def _refresh_tab_scaffold(self) -> None:
         # No-op refresh — preview reflects the current picker state.
@@ -689,6 +812,27 @@ class TestManagerDialog(tk.Toplevel):
             self._on_scaffold_preview_changed()
 
     def _on_scaffold_preview_changed(self) -> None:
+        """Refresh the preview pane; guard against silently discarding AI drafts."""
+        # If an AI draft is loaded, show the discard banner instead of
+        # wiping the content immediately.
+        if self._scaffold_ai_content is not None:
+            self._scaffold_discard_banner.pack(
+                fill=tk.X, padx=8, pady=(0, 4), before=self._scaffold_gen_row,
+            )
+            return   # don't overwrite the preview; user must confirm first
+        self._scaffold_discard_banner.pack_forget()
+        self._on_scaffold_refresh_preview()
+
+    def _on_scaffold_confirm_discard(self) -> None:
+        """User confirmed discarding the AI draft — clear it and refresh."""
+        self._scaffold_ai_content = None
+        if self._scaffold_cancel_event is not None:
+            self._scaffold_cancel_event.set()
+        self._scaffold_discard_banner.pack_forget()
+        self._on_scaffold_refresh_preview()
+
+    def _on_scaffold_refresh_preview(self) -> None:
+        """Unconditionally refresh the template preview (no AI-draft guard)."""
         source = self._scaffold_source_var.get().strip()
         template = self._scaffold_template_var.get()
         try:
@@ -721,6 +865,12 @@ class TestManagerDialog(tk.Toplevel):
                 parent=self,
             )
             return
+
+        # If an AI draft is loaded, write it directly instead of the template.
+        if self._scaffold_ai_content is not None:
+            self._on_scaffold_write_ai_content(source)
+            return
+
         ok, msg = generate_test_file(
             self._project_root, source, template)
         if ok:
@@ -738,6 +888,33 @@ class TestManagerDialog(tk.Toplevel):
             self._scaffold_status_var.set(f"✗ {msg}")
             messagebox.showwarning(
                 "Could not generate", msg, parent=self)
+
+    def _on_scaffold_write_ai_content(self, source: str) -> None:
+        """Write the buffered AI-generated test content to disk."""
+        from helpers.test_scaffold import _test_filename_for
+        content = self._scaffold_ai_content
+        if not content:
+            return
+        out_path = os.path.join(
+            self._project_root, "tests",
+            _test_filename_for(source, self._project_root),
+        )
+        try:
+            os.makedirs(os.path.dirname(out_path), exist_ok=True)
+            with open(out_path, "w", encoding="utf-8", newline="\n") as fh:
+                fh.write(content)
+        except OSError as exc:
+            messagebox.showerror("Write error", str(exc), parent=self)
+            return
+        self._scaffold_ai_content = None
+        self._scaffold_status_var.set(f"✓ wrote {out_path}")
+        messagebox.showinfo(
+            "AI test file written",
+            f"Wrote AI-generated test file:\n  {out_path}\n\n"
+            "Review and run it; adjust any assertions that need real fixtures.",
+            parent=self,
+        )
+        self._refresh_tab_coverage()
 
 
 # ``time`` is imported for potential future use (timestamping); reference
