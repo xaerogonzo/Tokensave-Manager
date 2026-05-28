@@ -1500,13 +1500,48 @@ class GitTabController:
 
     def _draft_pr_via_api(self, path: str):
         import threading
-        self._on_log("  Drafting PR description via API…", C["blue"])
         base = self._resolve_pr_base(path)
+        if base is None:
+            messagebox.showerror(
+                "Draft PR — base branch not found",
+                "Could not detect the base branch for this PR.\n\n"
+                "Right-click the Draft PR button and choose\n"
+                "'Set PR base branch…' to specify one manually, or\n"
+                "push to a remote and set a tracking branch with:\n"
+                "  git branch --set-upstream-to=origin/<base> <branch>",
+                parent=self._root)
+            return
+        self._on_log("  Drafting PR description via API…", C["blue"])
 
         def _fetch():
             from helpers.pr_draft import generate_pr_draft   # lazy import
-            result = generate_pr_draft(self._cfg, path, base=base or "")
-            self._tab.after(0, lambda text=result: self._show_pr_draft_dialog(text, path, base=base or ""))
+            try:
+                result = generate_pr_draft(self._cfg, path, base=base or "")
+                err = None
+            except Exception as exc:
+                result = None
+                err = str(exc)
+
+            def _show(text=result, error=err):
+                if not self._tab.winfo_exists():
+                    return
+                if error:
+                    messagebox.showerror("Draft PR — error", error,
+                                         parent=self._root)
+                    return
+                if text and text.startswith("Empty diff"):
+                    messagebox.showwarning(
+                        "Draft PR — no diff found",
+                        f"{text}\n\n"
+                        f"Base branch used: {base!r}\n\n"
+                        "If this is wrong, right-click → Set PR base branch…\n"
+                        "to configure a different merge target.",
+                        parent=self._root,
+                    )
+                    return
+                self._show_pr_draft_dialog(text, path, base=base or "")
+
+            self._tab.after(0, _show)
 
         threading.Thread(target=_fetch, daemon=True).start()
 
