@@ -175,18 +175,76 @@ class GitOpsController:
 
     def cmd_create_private_repo(self, path: str) -> None:
         """Open the wizard to create a local-only git repo for gitignored files."""
-        _NOISE = (".pyc", ".pyo", ".pyd", ".log", ".db-wal", ".db-shm")
-        _NOISE_DIRS = ("__pycache__", ".tokensave", ".codegraph", ".git")
-        gitignored = [
-            f for f in _find_gitignored_on_disk(path, self._cfg.git_exe)
-            if not any(f.endswith(ext) for ext in _NOISE)
-            and not any(part in _NOISE_DIRS for part in f.replace("\\", "/").split("/"))
+        _NOISE_EXTS = (".pyc", ".pyo", ".pyd", ".log", ".db-wal", ".db-shm", ".db-wal2")
+        _NOISE_DIRS = (
+            "__pycache__", ".tokensave", ".codegraph", ".git",
+            "node_modules", ".venv", "venv", ".tox", ".mypy_cache",
+            ".pytest_cache", ".ruff_cache", ".eggs",
+        )
+        _FILE_CAP = 300
+
+        raw = _find_gitignored_on_disk(path, self._cfg.git_exe)
+
+        # Filter noise, sort by path depth (root files first — G3)
+        filtered = [
+            f for f in raw
+            if not any(f.endswith(ext) for ext in _NOISE_EXTS)
+            and not any(
+                part in _NOISE_DIRS
+                for part in f.replace("\\", "/").split("/")
+            )
         ]
+        filtered.sort(key=lambda f: (f.replace("\\", "/").count("/"), f.lower()))
+
+        # Cap after filtering so root-level files are never cut off (G3/G13)
+        # The dialog shows the warning banner when capped.
+        gitignored = filtered  # dialog handles the cap and warning internally
+
         PrivateRepoSetupDialog(
             self._root, path, gitignored,
             git_exe=self._cfg.git_exe,
             on_log=self._on_log,
+            on_registered=lambda dest, files: self._register_private_repo(
+                path, dest, files),
         )
+
+    def _register_private_repo(self, src_path: str, dest: str, files: list) -> None:
+        """Save private repo mapping to config (runs on main thread — G11)."""
+        self._cfg.raw.setdefault("private_repos", {})[src_path] = {
+            "dest":  dest,
+            "files": files,
+        }
+        self._cfg.save()
+        self._on_log(
+            f"  ✓ Private repo registered — auto-sync enabled for future commits.",
+            C["green"])
+
+    def cmd_sync_private_repo(self, path: str) -> None:
+        """On-demand sync: copy changed private files and commit to private repo."""
+        from helpers.private_repo import sync_private_repo
+        cfg_entry = self._cfg.raw.get("private_repos", {}).get(path)
+        if not cfg_entry:
+            from tkinter import messagebox
+            messagebox.showinfo(
+                "No private repo configured",
+                "No private local repo is linked to this project.\n\n"
+                "Right-click → 🔒 Create Private Local Repo… to set one up.",
+                parent=self._root)
+            return
+        dest  = cfg_entry.get("dest", "")
+        files = cfg_entry.get("files", [])
+        self._on_log(f"Syncing private repo for {os.path.basename(path)}…",
+                     C["peach"])
+
+        def worker():
+            sync_private_repo(
+                self._cfg.git_exe, path, dest, files,
+                on_log=self._on_log,
+                commit_msg="",
+            )
+            self._tab.after(0, self._on_refresh)
+
+        threading.Thread(target=worker, daemon=True).start()
 
     # ── Worker ────────────────────────────────────────────────────────────────
 

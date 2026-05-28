@@ -2,18 +2,20 @@
 
 Lets the user pick a destination folder and choose which files to copy
 from the current project.  On confirm:
-  1. Creates the destination directory
-  2. Runs `git init`
-  3. Copies selected files (preserving subdirectory structure)
-  4. Runs `git add -A && git commit`
-  5. Opens the new folder in Explorer
+  1. Validates dest is not inside src (G4/G12)
+  2. Creates the destination directory
+  3. Runs `git init`
+  4. Copies selected files (subdirs created automatically — G1)
+  5. Runs `git add -A && git commit` with injected identity (G7)
+  6. Opens the new folder in Explorer
+  7. Dispatches config registration back to the main thread (G11)
 
-No terminal is ever required.  Follows the same canvas+checkbox layout
-as UntrackIgnoredDialog.
+No terminal is ever required.
 """
 
 from __future__ import annotations
 
+import hashlib
 import os
 import shutil
 import subprocess
@@ -22,7 +24,11 @@ import tkinter as tk
 from tkinter import filedialog, messagebox, ttk
 
 from constants import C, CREATE_NO_WINDOW
+from helpers.private_repo import _BACKUP_GIT_ENV
 from theme import bind_mousewheel
+
+# Cap: filter + sort applied first, then this limit (G3/G13)
+_FILE_CAP = 300
 
 
 class PrivateRepoSetupDialog(tk.Toplevel):
@@ -35,11 +41,14 @@ class PrivateRepoSetupDialog(tk.Toplevel):
         gitignored_files: list,
         git_exe: str,
         on_log=None,
+        on_registered=None,   # callable(dest, files) → dispatched on main thread
     ):
         super().__init__(parent)
-        self._src      = src_path
-        self._git_exe  = git_exe
-        self._on_log   = on_log or (lambda msg, col="": None)
+        self._src          = src_path
+        self._git_exe      = git_exe
+        self._on_log       = on_log or (lambda msg, col="": None)
+        self._on_registered = on_registered
+        self._parent_after = parent.after   # captured before any destroy
         name = os.path.basename(src_path)
 
         self.title(f"Create Private Local Repo — {name}")
@@ -48,7 +57,7 @@ class PrivateRepoSetupDialog(tk.Toplevel):
         self.minsize(560, 440)
         self.grab_set()
 
-        self._dest_var = tk.StringVar(value=self._default_dest(name))
+        self._dest_var = tk.StringVar(value=self._default_dest(src_path, name))
         self._file_vars: list = []
 
         self._build_header(name)
@@ -104,6 +113,19 @@ class PrivateRepoSetupDialog(tk.Toplevel):
                  bg=C["base"], fg=C["overlay0"],
                  font=("Segoe UI", 8, "bold")).pack(anchor=tk.W, padx=18, pady=(0, 2))
 
+        # Cap warning banner (G13)
+        total = len(files)
+        if total > _FILE_CAP:
+            files = files[:_FILE_CAP]
+            warn = tk.Label(
+                self,
+                text=f"⚠  Showing first {_FILE_CAP} of {total} files. "
+                     "Use Add File… for anything not listed.",
+                bg=C["base"], fg=C["yellow"],
+                font=("Segoe UI", 8), justify=tk.LEFT,
+            )
+            warn.pack(anchor=tk.W, padx=18, pady=(0, 4))
+
         list_outer = tk.Frame(self, bg=C["mantle"])
         list_outer.pack(fill=tk.BOTH, expand=True, padx=18, pady=(0, 6))
         self._canvas = tk.Canvas(list_outer, bg=C["mantle"],
@@ -155,11 +177,15 @@ class PrivateRepoSetupDialog(tk.Toplevel):
 
     # ── Helpers ───────────────────────────────────────────────────────────────
 
-    def _default_dest(self, project_name: str) -> str:
+    def _default_dest(self, src_path: str, project_name: str) -> str:
+        """Include a short path hash to avoid collisions with same-named projects (G9)."""
+        path_hash = hashlib.md5(
+            os.path.abspath(src_path).encode("utf-8")
+        ).hexdigest()[:8]
         base = os.path.join(os.path.expanduser("~"), "Private-Repos")
-        return os.path.join(base, project_name)
+        return os.path.join(base, f"{project_name}-{path_hash}")
 
-    def _add_file_row(self, fname: str, checked: bool = True):
+    def _add_file_row(self, fname: str, checked: bool = False):
         row = tk.Frame(self._list_body, bg=C["mantle"])
         row.pack(fill=tk.X, padx=4, pady=1)
         var = tk.BooleanVar(value=checked)
@@ -200,11 +226,19 @@ class PrivateRepoSetupDialog(tk.Toplevel):
             initialdir=self._src,
             parent=self,
         )
+        existing = {f for _, f in self._file_vars}
         for p in paths:
-            rel = os.path.relpath(p, self._src)
-            existing = [f for _, f in self._file_vars]
+            try:
+                rel = os.path.relpath(p, self._src)
+            except ValueError:
+                # Cross-drive path on Windows — can't make relative (G10)
+                continue
+            if rel.startswith(".."):
+                # File is outside the project tree — reject (G10)
+                continue
             if rel not in existing:
-                self._add_file_row(rel)
+                self._add_file_row(rel, checked=True)
+                existing.add(rel)
         self._list_body.update_idletasks()
         self._canvas.configure(scrollregion=self._canvas.bbox("all"))
 
@@ -217,6 +251,17 @@ class PrivateRepoSetupDialog(tk.Toplevel):
                 "Choose a destination folder first.", parent=self)
             return
 
+        # G4 / G12: reject if dest is the same as src or nested inside it
+        abs_src  = os.path.abspath(self._src)
+        abs_dest = os.path.abspath(dest)
+        if abs_dest == abs_src or abs_dest.startswith(abs_src + os.sep):
+            messagebox.showerror(
+                "Invalid destination",
+                "The private repo cannot be inside the project folder.\n\n"
+                "Choose a folder outside the project (e.g. your home folder).",
+                parent=self)
+            return
+
         selected = [fname for var, fname in self._file_vars if var.get()]
         if not selected:
             messagebox.showwarning("Nothing selected",
@@ -224,18 +269,20 @@ class PrivateRepoSetupDialog(tk.Toplevel):
             return
 
         self._create_btn.configure(state=tk.DISABLED)
-        src, git_exe = self._src, self._git_exe
+        src         = self._src
+        git_exe     = self._git_exe
+        log         = self._on_log
+        registered  = self._on_registered
+        parent_after = self._parent_after
         self.destroy()
 
         def worker():
-            log = self._on_log
-
             # 1. Create dest dir
             try:
                 os.makedirs(dest, exist_ok=True)
                 log(f"  Created {dest}", C["green"])
             except OSError as e:
-                log(f"  Error creating folder: {e}", C["red"])
+                log(f"  ✗ Error creating folder: {e}", C["red"])
                 return
 
             # 2. git init
@@ -243,16 +290,17 @@ class PrivateRepoSetupDialog(tk.Toplevel):
                 [git_exe, "-C", dest, "init"],
                 capture_output=True, text=True, timeout=15,
                 encoding="utf-8", errors="replace",
+                env=_BACKUP_GIT_ENV,
                 creationflags=CREATE_NO_WINDOW,
             )
             log("$ git init", C["overlay0"])
             for line in proc.stdout.strip().splitlines():
                 log(f"  {line}", C["green"] if proc.returncode == 0 else C["red"])
             if proc.returncode != 0:
-                log("  git init failed — aborting.", C["red"])
+                log("  ✗ git init failed — aborting.", C["red"])
                 return
 
-            # 3. Copy files
+            # 3. Copy files (G1: makedirs before copy)
             failed_copies = []
             for fname in selected:
                 src_file  = os.path.join(src, fname)
@@ -262,31 +310,34 @@ class PrivateRepoSetupDialog(tk.Toplevel):
                     shutil.copy2(src_file, dest_file)
                     log(f"  Copied {fname}", C["green"])
                 except OSError as e:
-                    log(f"  Could not copy {fname}: {e}", C["red"])
+                    log(f"  ✗ Could not copy {fname}: {e}", C["red"])
                     failed_copies.append(fname)
 
             if failed_copies:
-                log(f"  {len(failed_copies)} file(s) could not be copied — continuing.", C["yellow"])
+                log(f"  {len(failed_copies)} file(s) could not be copied — continuing.",
+                    C["yellow"])
 
             # 4. git add -A
             proc = subprocess.run(
                 [git_exe, "-C", dest, "add", "-A"],
                 capture_output=True, text=True, timeout=15,
                 encoding="utf-8", errors="replace",
+                env=_BACKUP_GIT_ENV,
                 creationflags=CREATE_NO_WINDOW,
             )
             log("$ git add -A", C["overlay0"])
             if proc.returncode != 0:
-                log(f"  {proc.stderr.strip()}", C["red"])
+                log(f"  ✗ {proc.stderr.strip()}", C["red"])
                 return
 
-            # 5. git commit
+            # 5. git commit (G7: identity via env, not --author flag)
             proj_name = os.path.basename(src)
             msg = f"Initial: private backup from {proj_name}"
             proc = subprocess.run(
                 [git_exe, "-C", dest, "commit", "-m", msg],
                 capture_output=True, text=True, timeout=15,
                 encoding="utf-8", errors="replace",
+                env=_BACKUP_GIT_ENV,
                 creationflags=CREATE_NO_WINDOW,
             )
             log("$ git commit", C["overlay0"])
@@ -295,8 +346,11 @@ class PrivateRepoSetupDialog(tk.Toplevel):
 
             if proc.returncode == 0:
                 log(f"  ✓ Private repo ready at {dest}", C["green"])
+                # G11: dispatch config save to main thread
+                if registered:
+                    parent_after(0, lambda: registered(dest, selected))
                 os.startfile(dest)
             else:
-                log("  commit failed — check log above.", C["red"])
+                log(f"  ✗ commit failed: {proc.stderr.strip()}", C["red"])
 
         threading.Thread(target=worker, daemon=True).start()
