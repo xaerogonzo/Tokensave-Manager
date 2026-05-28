@@ -1532,8 +1532,11 @@ class GitTabController:
             return
 
         provider = llm_cfg.get("provider", "ollama")
+        _wait_hint = ("may take several minutes"
+                      if provider in ("ollama", "openai_compatible")
+                      else "may take 30–120 s")
         self._on_log(
-            f"  Drafting PR description via {provider}… (may take 30–120 s)",
+            f"  Drafting PR description via {provider}… ({_wait_hint})",
             C["blue"])
         _start_time = time.monotonic()
 

@@ -112,6 +112,19 @@ def generate_pr_draft(cfg, project_path: str, base: str = "") -> str | None:
     if len(diff_data) > max_chars:
         diff_data = diff_data[:max_chars] + "\n[Diff truncated for context limits]"
 
+    # Additional cap for local providers — must run before user_prompt is assembled.
+    # Mirrors the is_local pattern in commit_messages._call_llm_for_commit_message.
+    _p = cfg.raw.get("commit_message_llm", {})
+    _is_local_pre = (
+        _p.get("provider") == "ollama"
+        or (_p.get("provider") == "openai_compatible"
+            and "localhost" in (_p.get("base_url") or ""))
+    )
+    if _is_local_pre:
+        _local_max = min(max_chars, 8000)
+        if len(diff_data) > _local_max:
+            diff_data = diff_data[:_local_max] + "\n[Diff truncated for local model context limit]"
+
     # v4.2: build tokensave+codegraph grounding (roadmap_evidence recipe —
     # codegraph triggers `codegraph affected --stdin` on the changed-files
     # list, surfacing test-impact information for the PR description).
@@ -172,12 +185,22 @@ def generate_pr_draft(cfg, project_path: str, base: str = "") -> str | None:
     )
 
     llm_cfg = cfg.raw.get("commit_message_llm", {})
+    _provider = llm_cfg.get("provider", "")
+    _is_local = (
+        _provider == "ollama"
+        or (_provider == "openai_compatible"
+            and "localhost" in (llm_cfg.get("base_url") or ""))
+    )
+    if _is_local and not llm_cfg.get("num_ctx"):
+        llm_cfg = {**llm_cfg, "num_ctx": 8192}
+    _max_tokens = 1500 if _is_local else 3000
+    _timeout    = 300  if _is_local else 120
     return _call_llm(
         cfg=llm_cfg,
         system_prompt=_PR_SYSTEM_PROMPT,
         user_prompt=user_prompt,
-        max_tokens=3000,
-        timeout=120,
+        max_tokens=_max_tokens,
+        timeout=_timeout,
     )
 
 
