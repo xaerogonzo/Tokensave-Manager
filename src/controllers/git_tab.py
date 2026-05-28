@@ -359,10 +359,12 @@ class GitTabController:
                                  command=self.cmd_git_release)
         btn_draft_pr = ttk.Button(row2, text="Draft PR…",
                                   command=self.cmd_draft_pr)
+        btn_test_gaps = ttk.Button(row2, text="🧪 Test Gaps…",
+                                   command=self.cmd_show_test_gaps)
 
         for btn in (btn_push, btn_pull, btn_fetch, btn_commit, btn_undo,
                     btn_new, btn_switch, btn_merge, btn_del, btn_openpr,
-                    btn_mergepr, btn_release, btn_draft_pr):
+                    btn_mergepr, btn_release, btn_draft_pr, btn_test_gaps):
             btn.pack(side=tk.LEFT, padx=(0, 6))
 
         _Tooltip(btn_push,
@@ -439,20 +441,30 @@ class GitTabController:
 
         _Tooltip(btn_draft_pr,
             "Draft a PR description using AI.\n\n"
-            "Primary click: uses Claude Code CLI if configured, otherwise the API key.\n"
+            "Primary click: uses Claude Code CLI if configured, otherwise Ollama / API.\n"
             "Right-click or Shift+click: choose which tool to use.\n\n"
             "CLI mode opens a new terminal window running `claude` with a write\n"
             "instruction — your app stays unblocked while it runs.\n"
-            "API mode drafts the description inline and shows it in a dialog.")
+            "Ollama / API mode drafts the description inline and shows it in a dialog\n"
+            "(also shows the 🧪 test-gap panel for changed files with no tests).")
         btn_draft_pr.bind("<Button-3>",
             lambda e: self._show_draft_pr_menu(e, btn_draft_pr))
         btn_draft_pr.bind("<Shift-Button-1>",
             lambda e: self._show_draft_pr_menu(e, btn_draft_pr))
 
+        _Tooltip(btn_test_gaps,
+            "Show which changed files on this branch have no tests yet.\n\n"
+            "Compares this branch against its base (auto-detected or overridden\n"
+            "via the Draft PR right-click menu) and lists any src/ .py files\n"
+            "that are missing a tests/test_*.py counterpart.\n\n"
+            "From the panel you can generate template stubs or AI-written tests\n"
+            "for the flagged files in one click.")
+
         self._git_all_btns       = [self._btn_set_remote, btn_push, btn_pull,
                                      btn_commit, btn_undo, btn_new,
                                      btn_switch, btn_merge, btn_del, btn_openpr,
-                                     btn_mergepr, btn_release, btn_draft_pr]
+                                     btn_mergepr, btn_release, btn_draft_pr,
+                                     btn_test_gaps]
         self._git_push_pull_btns = [btn_push, btn_pull, btn_openpr]
         self._git_release_btns   = [btn_release, btn_mergepr]
 
@@ -1156,9 +1168,9 @@ class GitTabController:
         """Draft a PR description using the configured AI backend.
 
         Backend is resolved from `draft_pr_backend` config key:
-          "auto"       — CLI if available, else API key
+          "auto"       — CLI if available, else Ollama / API
           "claude_cli" — force Claude Code CLI
-          "llm"        — force API key path
+          "llm"        — force Ollama / API path
         Shift-click / right-click shows an override menu.
         """
         path = self._git_path
@@ -1182,9 +1194,9 @@ class GitTabController:
                 self._draft_pr_via_api(path)
             else:
                 messagebox.showinfo(
-                    "No API configured",
-                    "draft_pr_backend=llm but no API key is configured.\n"
-                    "Add a key in Settings → AI commit messages.",
+                    "No Ollama / API configured",
+                    "draft_pr_backend=llm but no Ollama or API provider is configured.\n"
+                    "Add one in Settings → AI commit messages.",
                     parent=self._root)
         else:  # "auto"
             if cli:
@@ -1194,8 +1206,63 @@ class GitTabController:
             else:
                 messagebox.showinfo(
                     "No AI configured",
-                    "Configure a Claude Code CLI path or an API key in Settings to use Draft PR.",
+                    "Configure a Claude Code CLI path or an Ollama / API provider in Settings to use Draft PR.",
                     parent=self._root)
+
+    def cmd_show_test_gaps(self):
+        """Open a standalone Test Gaps dialog for the current branch.
+
+        Resolves the base branch (override or auto-detect), then runs
+        ``suggest_tests_for_diff`` and shows the same panel that appears
+        inside the PR draft dialog — without needing to draft a PR first.
+        Useful when you draft PRs via the CLI path.
+        """
+        path = self._git_path
+        if not path:
+            return
+        base = self._resolve_pr_base(path)
+        if base is None:
+            messagebox.showerror(
+                "Test Gaps — base branch not found",
+                "Could not detect the base branch to diff against.\n\n"
+                "Right-click the Draft PR button and choose\n"
+                "'Set PR base branch…' to specify one manually, or\n"
+                "push to a remote and set a tracking branch.",
+                parent=self._root)
+            return
+
+        dlg = tk.Toplevel(self._root)
+        dlg.title(f"🧪 Test Gaps — {os.path.basename(path)} vs {base.split('/')[-1]}")
+        dlg.configure(bg=C["base"])
+        dlg.resizable(True, True)
+        dlg.minsize(560, 200)
+        dlg.transient(self._root)
+
+        # Header showing what we're diffing
+        hdr_row = tk.Frame(dlg, bg=C["base"])
+        hdr_row.pack(fill=tk.X, padx=12, pady=(10, 0))
+        tk.Label(
+            hdr_row,
+            text=f"Scanning changed files on this branch vs  {base.split('/')[-1]}…",
+            bg=C["base"], fg=C["subtext"],
+            font=("Segoe UI", 9),
+        ).pack(side=tk.LEFT)
+
+        # The test gap panel fills the rest of the dialog
+        self._build_test_gap_panel(dlg, path, base)
+
+        ttk.Button(dlg, text="Close",
+                   command=dlg.destroy).pack(side=tk.BOTTOM, anchor=tk.E,
+                                             padx=12, pady=(4, 10))
+
+        dlg.update_idletasks()
+        w, h = 620, 300
+        try:
+            px = self._root.winfo_x() + (self._root.winfo_width()  - w) // 2
+            py = self._root.winfo_y() + (self._root.winfo_height() - h) // 2
+            dlg.geometry(f"{w}x{h}+{max(0, px)}+{max(0, py)}")
+        except tk.TclError:
+            dlg.geometry(f"{w}x{h}")
 
     # ------------------------------------------------------------------
     # PR base branch override helpers
@@ -1249,7 +1316,7 @@ class GitTabController:
         menu = tk.Menu(self._tab, tearoff=0)
         menu.add_command(label="Use Claude Code CLI",
                          command=lambda: self._draft_pr_via_cli(path))
-        menu.add_command(label="Use API key (inline dialog)",
+        menu.add_command(label="Use Ollama / API (inline dialog)",
                          command=lambda: self._draft_pr_via_api(path))
         # Base branch override
         current_base = (self._cfg.raw
