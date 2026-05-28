@@ -25,6 +25,14 @@ _PR_SYSTEM_PROMPT = """\
 You are a senior technical writer and developer assistant.
 Analyze the git diff and provide a detailed, highly professional, clean markdown \
 pull request description.
+
+FORMATTING RULES (follow exactly):
+- Write ALL sections in clear PROSE only. Do NOT include code snippets, \
+  code blocks (```), raw patches, diffs, or file content anywhere in your output.
+- "## Technical Implementation Details" must describe WHAT changed and WHY at \
+  a conceptual level — never reproduce code or diffs.
+- Keep each section focused on what a human reviewer needs to understand or act on.
+
 Output should be formatted with these exact markdown headers:
 ## Summary of Changes
 ## Technical Implementation Details
@@ -50,6 +58,40 @@ subsection's bullet points based on the changed files):
 Critically: keep the marker comment <!-- tokensave-manager:testing-checklist v1 --> \
 exactly as written — the manager's "Sync PR Checklist" feature relies on it \
 to identify the section it owns.
+"""
+
+
+_PR_SYSTEM_PROMPT_LOCAL = """\
+You are a technical writer drafting a pull request description.
+Write a professional, concise Markdown PR description based on the git diff.
+
+STRICT RULES — follow exactly:
+- Write ALL sections in clear PROSE. Do NOT include code snippets, code blocks \
+  (```), raw patches, diffs, or any file content.
+- Describe WHAT changed and WHY — not how the code looks.
+- Be concise: PR reviewers skim; prefer short paragraphs and bullet points.
+- "## Technical Implementation Details" explains decisions and changed \
+  behaviour — never pastes code.
+
+Use these exact section headers in this exact order:
+## Summary of Changes
+## Technical Implementation Details
+## Threat Model & Security Implications
+## Manual Verification & Testing Steps Performed
+## Testing checklist
+
+For "## Threat Model & Security Implications": write "None" if the changes \
+are trivial or internal only.
+
+For "## Testing checklist": output exactly the following two lines, then a \
+"### Manual" subsection with 2-5 smoke-check bullets implied by the diff. \
+Do NOT write a "### Automated" subsection — it will be added automatically.
+
+## Testing checklist
+<!-- tokensave-manager:testing-checklist v1 -->
+### Manual (please verify before merge)
+- [ ] <one smoke check per meaningful UI flow or changed behaviour>
+- [ ] <2-5 bullets total>
 """
 
 
@@ -172,17 +214,26 @@ def generate_pr_draft(cfg, project_path: str, base: str = "") -> str | None:
     )
 
     # v4.13: pre-fill the Testing checklist's "Automated" subsection from
-    # the last-run cache. The LLM is instructed to copy this verbatim.
+    # the last-run cache.
     automated_block = _render_automated_for_pr(project_path)
 
-    user_prompt = (
-        f"{grounding_section}"
-        f"Please draft a comprehensive PR description based on this git diff.\n\n"
-        f"Pre-rendered '### Automated' subsection (copy verbatim into the "
-        f"'## Testing checklist' section):\n\n"
-        f"{automated_block}\n\n"
-        f"--- git diff ---\n\n{diff_data}"
-    )
+    if _is_local_pre:
+        # Local path: don't double-feed automated_block; Python injects it later.
+        user_prompt = (
+            f"{grounding_section}"
+            f"Please draft a PR description based on this git diff.\n\n"
+            f"--- git diff ---\n\n{diff_data}"
+        )
+    else:
+        # Cloud path: instruct the LLM to copy automated_block verbatim.
+        user_prompt = (
+            f"{grounding_section}"
+            f"Please draft a comprehensive PR description based on this git diff.\n\n"
+            f"Pre-rendered '### Automated' subsection (copy verbatim into the "
+            f"'## Testing checklist' section):\n\n"
+            f"{automated_block}\n\n"
+            f"--- git diff ---\n\n{diff_data}"
+        )
 
     llm_cfg = cfg.raw.get("commit_message_llm", {})
     _provider = llm_cfg.get("provider", "")
@@ -195,13 +246,24 @@ def generate_pr_draft(cfg, project_path: str, base: str = "") -> str | None:
         llm_cfg = {**llm_cfg, "num_ctx": 8192}
     _max_tokens = 1500 if _is_local else 3000
     _timeout    = 300  if _is_local else 120
-    return _call_llm(
+    _system     = _PR_SYSTEM_PROMPT_LOCAL if _is_local else _PR_SYSTEM_PROMPT
+
+    result = _call_llm(
         cfg=llm_cfg,
-        system_prompt=_PR_SYSTEM_PROMPT,
+        system_prompt=_system,
         user_prompt=user_prompt,
         max_tokens=_max_tokens,
         timeout=_timeout,
     )
+
+    # Local providers: strip any accidental code blocks, then inject the
+    # automated checklist block programmatically (more reliable than asking
+    # the model to copy-paste it verbatim).
+    if _is_local and result:
+        result = _clean_local_artifacts(result)
+        result = _inject_automated_block(result, automated_block)
+
+    return result
 
 
 def _render_automated_for_pr(project_path: str) -> str:
@@ -239,3 +301,30 @@ def _render_automated_for_pr(project_path: str) -> str:
         f"({passed}/{total} passed as of {ran_at})\n"
         "- [ ] CI test-gate job passes on this PR (check GitHub Actions tab)\n"
     )
+
+
+def _clean_local_artifacts(text: str) -> str:
+    """Remove triple-backtick code blocks that local models sometimes include.
+
+    Despite explicit prose-only instructions, small models occasionally paste
+    diff snippets inside ``` blocks. This defensive pass strips them without
+    touching the rest of the output.
+    """
+    import re
+    return re.sub(r'```[^\n]*\n.*?```\n?', '', text, flags=re.DOTALL).strip()
+
+
+def _inject_automated_block(text: str, automated_block: str) -> str:
+    """Insert the pre-rendered Automated subsection before ### Manual in the checklist.
+
+    The local-model prompt asks for ### Manual but not ### Automated.
+    This function splices the automated_block (computed from the test-run cache)
+    into the right location so the final output matches the cloud-path format
+    expected by the Sync PR Checklist feature.
+    """
+    marker = "### Manual"
+    idx = text.find(marker)
+    if idx != -1:
+        return text[:idx] + automated_block + "\n" + text[idx:]
+    # Fallback: the model omitted the checklist entirely — append it
+    return text + "\n\n## Testing checklist\n<!-- tokensave-manager:testing-checklist v1 -->\n" + automated_block

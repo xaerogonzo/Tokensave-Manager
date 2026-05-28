@@ -1384,30 +1384,52 @@ class GitTabController:
             self._on_log(f"  Draft PR: no grounding attached ({reason})",
                           C["overlay0"])
 
+        # Pre-render the automated checklist block from the test-run cache so
+        # Claude can copy it verbatim into PR_DRAFT.md — shell metacharacters in
+        # the markdown ([, ], `, |) prevent inlining it into the instruction string,
+        # so it lives in the context file alongside the grounding data.
+        from helpers.pr_draft import _render_automated_for_pr  # lazy — avoids circular import
+        automated_block = _render_automated_for_pr(path)
+        _checklist_tmpl = (
+            "## Testing checklist\n"
+            "<!-- tokensave-manager:testing-checklist v1 -->\n"
+            + automated_block
+            + "\n### Manual (please verify before merge)\n"
+            "- [ ] <one smoke check per meaningful UI flow or changed behaviour>\n"
+            "- [ ] <2-5 bullets total>\n"
+        )
+
         context_step = ""
         context_path = ""
-        if grounded:
-            try:
-                context_path = os.path.join(path, ".pr_context.tmp.md")
-                header = (
-                    "# Repository context (pre-fetched by manager)\n\n"
-                    "_Auto-generated for Draft PR — delete this file when "
-                    "PR_DRAFT.md is written._\n\n"
-                )
-                with open(context_path, "w", encoding="utf-8", newline="\n") as fh:
-                    fh.write(header + grounding_block + "\n")
-                context_step = (
-                    "First, read `.pr_context.tmp.md` in the current working "
-                    "directory — the manager pre-fetched tokensave + codegraph "
-                    "context for this branch's diff so you can cite specific "
-                    "symbols and test-impact information in the PR body. "
-                    "After PR_DRAFT.md is written successfully, delete "
-                    "`.pr_context.tmp.md`. Then: "
-                )
-            except OSError as exc:
-                self._on_log(f"  Draft PR: could not write context file "
-                             f"({exc}); proceeding without it.", C["peach"])
-                context_step = ""
+        try:
+            context_path = os.path.join(path, ".pr_context.tmp.md")
+            parts = [
+                "# PR context (pre-fetched by manager)\n\n"
+                "_Delete this file after PR_DRAFT.md is written._\n",
+            ]
+            if grounded:
+                parts.append(grounding_block + "\n")
+            parts.append(
+                "\n---\n\n"
+                "## Required Testing Checklist Format\n\n"
+                "The `## Testing checklist` section in PR_DRAFT.md MUST use this exact "
+                "format, including the HTML comment marker — the manager's "
+                "'Sync PR Checklist' button depends on it:\n\n"
+                + _checklist_tmpl
+            )
+            with open(context_path, "w", encoding="utf-8", newline="\n") as fh:
+                fh.write("".join(parts))
+            _ctx_hint = "project context and " if grounded else ""
+            context_step = (
+                f"First, read `.pr_context.tmp.md` — it contains {_ctx_hint}"
+                f"the required PR checklist format (copy it verbatim into PR_DRAFT.md). "
+                f"After PR_DRAFT.md is written, delete `.pr_context.tmp.md`. Then: "
+            )
+        except OSError as exc:
+            self._on_log(
+                f"  Draft PR: could not write context file ({exc}); proceeding without it.",
+                C["peach"])
+            context_step = ""
 
         mcp_nudge = (
             " Note: if `mcp__tokensave__*` tools are available in this "
@@ -1426,7 +1448,8 @@ class GitTabController:
             f"merge-base diff, isolating only this branch's changes — not upstream). "
             f"Write the PR description to PR_DRAFT.md in the current working directory "
             f"(use a relative path — just PR_DRAFT.md, not an absolute path). "
-            f"Include: a one-line summary, bullet list of key changes, and a testing checklist. "
+            f"Include: a one-line summary, bullet list of key changes, and a testing checklist "
+            f"copied verbatim from the format in .pr_context.tmp.md. "
             f"{gh_step}"
             f"{mcp_nudge}"
         )
