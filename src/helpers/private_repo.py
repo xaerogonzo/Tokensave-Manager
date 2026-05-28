@@ -132,7 +132,7 @@ def sync_private_repo(
     if commit_proc.returncode == 0:
         for line in commit_proc.stdout.strip().splitlines()[-3:]:
             on_log(f"  {line}", C["green"])
-        on_log(f"  ✓ Private repo synced.", C["green"])
+        on_log("  ✓ Private repo synced.", C["green"])
         return True
     else:
         on_log(f"  ✗ git commit: {commit_proc.stderr.strip()}", C["red"])

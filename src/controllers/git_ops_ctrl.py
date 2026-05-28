@@ -181,8 +181,6 @@ class GitOpsController:
             "node_modules", ".venv", "venv", ".tox", ".mypy_cache",
             ".pytest_cache", ".ruff_cache", ".eggs",
         )
-        _FILE_CAP = 300
-
         raw = _find_gitignored_on_disk(path, self._cfg.git_exe)
 
         # Filter noise, sort by path depth (root files first — G3)
@@ -216,7 +214,7 @@ class GitOpsController:
         }
         self._cfg.save()
         self._on_log(
-            f"  ✓ Private repo registered — auto-sync enabled for future commits.",
+            "  ✓ Private repo registered — auto-sync enabled for future commits.",
             C["green"])
 
     def cmd_sync_private_repo(self, path: str) -> None:
