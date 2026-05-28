@@ -777,8 +777,14 @@ class SettingsDialog(tk.Toplevel):
         ttk.Button(root_btns, text="Remove",     command=self._remove_root).pack(fill=tk.X)
 
     def _build_behavior_section(self, body, raw):
-        """Auto-commit toggle, MCP integration status, Ollama shortcut."""
-        # ── Auto-commit ───────────────────────────────────────────────────
+        """Auto-commit toggle, MCP, AI backend selection, and Ollama — router."""
+        self._build_git_toggles_section(body, raw)
+        self._build_mcp_section(body)
+        self._build_backend_selection_section(body, raw)
+        self._build_ollama_section(body, raw)
+
+    def _build_git_toggles_section(self, body, raw):
+        """Auto-commit after sync + pre-commit smoke-test hook."""
         ttk.Separator(body, orient="horizontal").pack(fill=tk.X, padx=20, pady=(12, 8))
         self._var_autocommit = tk.BooleanVar(value=bool(raw.get("auto_commit_after_sync", False)))
         tk.Checkbutton(body,
@@ -793,7 +799,6 @@ class SettingsDialog(tk.Toplevel):
             font=("Segoe UI", 8), bg=C["base"], fg=C["overlay0"],
             justify=tk.LEFT).pack(anchor=tk.W, padx=36, pady=(0, 8))
 
-        # ── Pre-commit smoke tests ────────────────────────────────────────
         from helpers.smoke_runner import is_hook_installed
         _active_project = (raw.get("projects") or [{}])[0].get("path") or ""
         _hook_active = is_hook_installed(_active_project) if _active_project else False
@@ -810,7 +815,8 @@ class SettingsDialog(tk.Toplevel):
             font=("Segoe UI", 8), bg=C["base"], fg=C["overlay0"],
             justify=tk.LEFT).pack(anchor=tk.W, padx=36, pady=(0, 8))
 
-        # ── MCP integration ───────────────────────────────────────────────
+    def _build_mcp_section(self, body):
+        """MCP integration status row and wrapper health summary."""
         ttk.Separator(body, orient="horizontal").pack(fill=tk.X, padx=20, pady=(8, 8))
         tk.Label(body, text="MCP integration",
                  font=("Segoe UI", 10, "bold"),
@@ -847,7 +853,8 @@ class SettingsDialog(tk.Toplevel):
             font=("Segoe UI", 8), bg=C["base"], fg=C["overlay0"],
             justify=tk.LEFT).pack(anchor=tk.W, padx=36, pady=(0, 8))
 
-        # ── AI backend selection (grouped) ────────────────────────────────
+    def _build_backend_selection_section(self, body, raw):
+        """AI backend selection LabelFrame: Draft PR, commit message, grounding."""
         ttk.Separator(body, orient="horizontal").pack(fill=tk.X, padx=20, pady=(8, 8))
         lf = tk.LabelFrame(body, text="AI backend selection",
                            bg=C["base"], fg=C["subtext"],
@@ -995,7 +1002,8 @@ class SettingsDialog(tk.Toplevel):
             font=("Segoe UI", 8), bg=C["base"], fg=C["overlay0"],
             justify=tk.LEFT).pack(anchor=tk.W, padx=24, pady=(0, 8))
 
-        # ── Ollama ────────────────────────────────────────────────────────
+    def _build_ollama_section(self, body, raw):
+        """Ollama model manager shortcut, num_ctx spinbox, and warm-up toggle."""
         ttk.Separator(body, orient="horizontal").pack(fill=tk.X, padx=20, pady=(8, 8))
         tk.Label(body, text="Ollama", font=("Segoe UI", 10, "bold"),
                  bg=C["base"], fg=C["text"]).pack(anchor=tk.W, padx=20, pady=(0, 2))

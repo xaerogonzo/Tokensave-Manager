@@ -38,21 +38,10 @@ import re
 
 
 
-# ── Bullet-quality helpers (truncation + redundancy filters) ────────────────
+# ── README mirror-contract helpers ──────────────────────────────────────────
 #
-# These run on the AI's output BEFORE the patcher applies it.  Catch the two
-# Ollama failure modes observed during dogfooding:
-#   1. Truncation — bullet ends mid-clause with no closing punctuation and
-#      a trailing stop-word ("for", "the", "to", ...)
-#   2. Redundancy — bullet semantically restates an existing entry that the
-#      patcher would happily duplicate.
-#
-# Same prompt-then-code-defence pattern as the gitignore AI Suggest dedup.
-
-_TRUNCATION_TRAILING = {
-    "for", "the", "to", "with", "and", "or", "of",
-    "in", "on", "at", "by", "as", "is", "a", "an",
-}
+# _mirror_contract_check + support constants/functions enforce that the AI
+# draft preserves existing sub-section bullets under REPLACE semantics.
 
 _STOP_WORDS = {
     # articles / conjunctions
@@ -66,20 +55,6 @@ _STOP_WORDS = {
     # adverbs that surface a lot in commit prose with no scope info
     "also", "now", "still", "even", "just", "only",
 }
-
-
-# Placeholder bullets the model writes despite the prompt telling it to omit
-# empty sections.  ``### Fixed\n- None`` happens regularly with small models;
-# anchor with ``^...$`` so legitimate bullets that merely START with one of
-# these words ("- None of the existing patches handle case X") stay through.
-_NOOP_BULLET_PATTERNS = [
-    re.compile(
-        r"^-?\s*(none|n/?a|nothing|tbd|no\s+changes?"
-        r"|nothing\s+to\s+(add|report|note|do)"
-        r"|n\.?a\.?|empty|placeholder)\s*\.?$",
-        re.IGNORECASE,
-    ),
-]
 
 
 # Phase 2.0 — literal template placeholder detector for README sub-section
@@ -114,93 +89,6 @@ _LITERAL_PLACEHOLDER_RE = re.compile(
 )
 
 
-def _is_noop_bullet(bullet):
-    """True if the bullet is a literal placeholder with no content.
-
-    Catches: ``- None``, ``- N/A``, ``- Nothing``, ``- TBD``,
-    ``- no changes``, ``- nothing to add``, ``- nothing to report``,
-    ``- (none)``.  Conservative — the regex is anchored with ``^...$`` so a
-    bullet that merely STARTS with one of these words is preserved (e.g.
-    ``- None of the existing patches handle case X``).
-
-    The normalisation chain MUST start with .strip() (NOT .lstrip("-")) so
-    Windows CRLF carriage returns are removed BEFORE the dash-strip.
-    Ollama on Windows occasionally emits ``\\r\\n`` line endings inside
-    the stream.
-    """
-    # ``lstrip("-*")`` covers both dash- and asterisk-prefixed bullets
-    # (Phase 1.8).  Ollama emits ``-`` consistently; Claude CLI commonly
-    # emits ``*``.  Without the ``*`` here, ``* None`` would slip past
-    # the noop regex (which begins with ``^-?``, not ``^[-*]?``).
-    s = (bullet or "").strip().lstrip("-*").strip().strip("()").strip()
-    return any(p.match(s) for p in _NOOP_BULLET_PATTERNS)
-
-
-def _looks_truncated(bullet):
-    """Return True if ``bullet`` looks cut off mid-sentence.
-
-    Phase 1.9 rewrite: strips trailing metadata BEFORE the punctuation
-    check, otherwise a bullet like ``"...and (`path`)."`` would
-    early-return False on the trailing period and never expose the
-    truncated ``and``.
-
-    Strips up to 3 layers of trailing citation patterns in a loop:
-      1. Parenthetical: ``"...prose (`path`)"`` (with optional ``.``)
-      2. Markdown link:  ``"...prose [text](url)"`` (with optional ``.``)
-      3. Inline code:    ``"...prose `path`"`` (with optional ``.``)
-
-    Each pattern's anchor permits OPTIONAL trailing punctuation
-    (``[:!?.]?$``) so common Claude CLI output ``"...and (path)."``
-    matches on pass 1 of the loop, not bypassed.  Once metadata is
-    peeled, the punctuation + stop-word check runs on the actual prose
-    tail.
-
-    Known limitation: nested parens like ``(as verified in foo())``
-    aren't stripped (regex stops at inner ``)``).  False negative only —
-    never causes a write-side data loss.
-
-    Conservative on positives:
-      - bullets ending in non-stop-word ("... fix bug") → not flagged
-      - bullets ending in proper punctuation → not flagged
-      - bullets where stripped-prose ends in stop-word → FLAGGED
-    """
-    s = (bullet or "").rstrip()
-    if not s:
-        return False
-
-    # Strip up to 3 layers of trailing metadata.  Each pattern permits
-    # OPTIONAL trailing punctuation so "...path)." matches the paren
-    # citation, not just "...path)".  Loop terminates when nothing
-    # strips on a given pass.
-    for _ in range(3):
-        before = s
-        # 1. Parenthetical citation
-        m = re.search(r"\s+\([^()]*\)\s*[:!?.]?\s*$", s)
-        if m:
-            s = s[:m.start()].rstrip()
-            continue
-        # 2. Markdown link
-        m = re.search(r"\s+\[[^\]]*\]\([^)]*\)\s*[:!?.]?\s*$", s)
-        if m:
-            s = s[:m.start()].rstrip()
-            continue
-        # 3. Inline code backtick
-        m = re.search(r"\s+`[^`]*`\s*[:!?.]?\s*$", s)
-        if m:
-            s = s[:m.start()].rstrip()
-            continue
-        if s == before:
-            break
-
-    if not s:
-        return False
-    # NOW the punctuation check is safe — citations have been peeled.
-    if s.endswith((".", ":", "!", "?", ")", "`", '"', "'")):
-        return False
-    last_word = s.split()[-1].lower().rstrip(",;:")
-    return last_word in _TRUNCATION_TRAILING
-
-
 def _token_set(bullet):
     """Lowercase-tokenise + strip stop-words + drop short tokens.
 
@@ -211,78 +99,6 @@ def _token_set(bullet):
     """
     s = re.sub(r"[^\w\s]", " ", (bullet or "").lower())
     return {t for t in s.split() if t not in _STOP_WORDS and len(t) > 2}
-
-
-def _is_duplicate(new_bullet, existing_bullet):
-    """Combined Jaccard + containment check against ONE existing bullet.
-
-    Jaccard ≥ 0.6 catches "mostly the same words" cases.  The containment
-    (overlap) coefficient at 0.70 catches the asymmetric case where one
-    bullet is much shorter than the other but its tokens are largely a
-    SUBSET of the larger one — plain Jaccard misses these because the
-    union inflates the denominator.
-
-    Threshold 0.65 was chosen by dogfooding against the realistic failure
-    case: existing 13-token detailed bullet, new 6-token generic summary
-    bullet describing the same feature ('add automated CHANGELOG updates
-    via AI'), shared 4 tokens → 4/6 = 0.67 overlap.  Stricter 0.85 missed
-    every paraphrase-style failure; lower than 0.60 starts catching
-    unrelated bullets that happen to share scope prefix words.  0.65 is
-    the sweet spot from the live test data.
-    """
-    a = _token_set(new_bullet)
-    b = _token_set(existing_bullet)
-    if not a or not b:
-        return False
-    union = a | b
-    jaccard = len(a & b) / len(union) if union else 0.0
-    overlap = len(a & b) / min(len(a), len(b))
-    return jaccard >= 0.6 or overlap >= 0.65
-
-
-def _sanitise_raw_draft(text):
-    """Strip head/tail artefacts the model sometimes appends before parsing.
-
-    Local models occasionally wrap their output with markdown code fences,
-    italic 'generated by AI' footers, HTML comments, or horizontal-rule
-    separators.  None of these are bullets, and if they slip past the
-    section parser into a bullet body they distort the tokeniser /
-    truncation guard / dedup math (e.g. ``- ``` text`` would not be
-    flagged as truncated because it ends in a backtick).
-
-    Conservative — only strips lines that are *clearly* not bullets and
-    only at the head/tail.  In-body content is untouched, so a bullet
-    that legitimately mentions a code fence inside its text survives.
-
-    Patterns removed (lines, after .strip()):
-      - empty / whitespace-only
-      - ``\\`\\`\\``` opener / closer (with or without language hint)
-      - ``<!--`` HTML comment opener
-      - ``---`` / ``***`` / ``___`` horizontal rules
-      - lines starting with ``*generated``, ``_generated``, ``*draft``,
-        ``*ai-generated`` (italic AI-footer markers)
-    """
-    lines = text.splitlines()
-    # Trailing junk
-    while lines:
-        last = lines[-1].strip()
-        if (not last
-                or last.startswith("```")
-                or last.startswith("<!--")
-                or last in {"---", "***", "___"}
-                or last.lower().startswith(("*generated", "_generated",
-                                            "*draft", "*ai-generated"))):
-            lines.pop()
-            continue
-        break
-    # Leading junk (e.g. ``` opener or blank lines)
-    while lines:
-        first = lines[0].strip()
-        if not first or first.startswith("```"):
-            lines.pop(0)
-            continue
-        break
-    return "\n".join(lines)
 
 
 # ── Mirror-contract safety net (Phase 1.9) ──────────────────────────────────
@@ -393,85 +209,6 @@ def _mirror_contract_check(draft_bullets, existing_bullets,
     return True, matched, missing, []
 
 
-def _filter_bullets(bullets_md, existing_bullets, *,
-                    dedup_against_existing=True):
-    """Apply truncation + dedup + noop-placeholder filters to a bullet block.
-
-    Args:
-        bullets_md:               newline-separated bullet block from the LLM
-        existing_bullets:         list of existing bullet lines to dedup against
-        dedup_against_existing:   keyword-only.
-
-            **True (CHANGELOG mode, default)** — drop any new bullet that
-            semantically duplicates anything in ``existing_bullets``.  The
-            CHANGELOG drafter prompt asks the model to output ONLY new
-            content under append-only semantics, so any output bullet that
-            mirrors an existing on-disk bullet is unwanted duplication.
-
-            **False (README mode)** — the README drafter prompt asks the
-            model to mirror ALL existing bullets PLUS new ones, because the
-            ``insert_readme_highlights_subsection`` patcher REPLACES the
-            whole sub-section (omitting a mirrored bullet deletes it from
-            the file).  Dropping bullets that match existing would be
-            DESTRUCTIVE.  Instead, dedup is performed against ``kept``
-            (the bullets already accepted from THIS DRAFT) so the model
-            duplicating its OWN new bullets is still caught.  Quality-swap
-            precedence: when a duplicate is detected, the LONGER bullet
-            wins by +8 character slack — prevents a truncated paraphrase
-            earlier in the stream from displacing a polished later version.
-
-    Returns ``(kept_md, truncated_n, duplicate_n, noop_n)`` where
-    ``kept_md`` is the filtered bullets joined back into a newline-separated
-    string.  Counters track each rejection class so the status bar can
-    surface a per-class summary.
-    """
-    kept = []
-    truncated_n = 0
-    duplicate_n = 0
-    noop_n = 0
-    for line in bullets_md.splitlines():
-        stripped = line.lstrip()
-        # Pass through non-bullet lines untouched (lets prose interleave —
-        # not common in our output but harmless).
-        if not (stripped.startswith("- ") or stripped.startswith("* ")):
-            kept.append(line)
-            continue
-        if _looks_truncated(stripped):
-            truncated_n += 1
-            continue
-        if _is_noop_bullet(stripped):
-            noop_n += 1
-            continue
-        if dedup_against_existing:
-            # CHANGELOG mode — drop if it matches anything on disk.
-            if any(_is_duplicate(stripped, eb) for eb in existing_bullets):
-                duplicate_n += 1
-                continue
-            kept.append(line)
-        else:
-            # README mode — dedup only against bullets we've already kept
-            # FROM THIS SAME DRAFT.  Existing-on-disk bullets are NOT a
-            # target; the model is supposed to mirror them back so the
-            # REPLACE patcher preserves them.  Quality-swap when matched:
-            # longer (more detailed) bullet wins.
-            is_dup = False
-            for idx, kb in enumerate(kept):
-                kb_stripped = kb.lstrip()
-                if not kb_stripped.startswith(("- ", "* ")):
-                    continue
-                if _is_duplicate(stripped, kb_stripped):
-                    is_dup = True
-                    # Swap when the incoming bullet is materially longer
-                    # (~ a phrase more detail).  +8 slack avoids
-                    # thrashing on single-word differences.  Ties favour
-                    # the earlier-kept line for stable diff order.
-                    if len(stripped) > len(kb_stripped) + 8:
-                        kept[idx] = line
-                    duplicate_n += 1
-                    break
-            if not is_dup:
-                kept.append(line)
-    return "\n".join(kept).strip(), truncated_n, duplicate_n, noop_n
 from helpers.release import _classify_commits_for_changelog
 from helpers import doc_drafter as dd
 from helpers.doc_types import REGISTRY
@@ -1313,138 +1050,129 @@ class DocDrafterDialog(tk.Toplevel):
             pass
 
         def _worker():
-            # Both tabs get the always-on changed-file context (Phase 1.8).
-            # Pushes the model toward per-file granularity regardless of
-            # commit-message quality — symmetric for CHANGELOG and README.
-            # The 60-path cap inside changed_file_paths bounds prompt size.
-            changed_files = dd.changed_file_paths(
-                project, range_spec, self._cfg.git_exe)
-
-            dt = REGISTRY[key]
-            target_path = self._resolve_target_path(key)
-            if not target_path:
-                self.after(0, lambda: self._on_generate_error(
-                    key, "No target file selected — pick a file first."))
-                return
-            existing = dt.read_existing(target_path)
-
-            # Theme B1: tokensave grounding injection.  build_grounding_block
-            # returns "" silently when .tokensave/ is absent or the recipe
-            # is unset — the prompt is always valid with or without it.
-            #
-            # v4.1: also runs build_codegraph_block in parallel (silently
-            # skipped if codegraph isn't installed / index is unhealthy)
-            # and combines both via build_combined_grounding for per-source
-            # cap + line-level dedup.
-            from helpers.doc_grounding import (
-                build_grounding_block, build_codegraph_block,
-                build_combined_grounding,
-            )
-            tokensave_block = ""
-            if dt.tokensave_recipe:
-                tokensave_block = build_grounding_block(
-                    project, dt.tokensave_recipe,
-                    commit_range=range_spec,
-                    tokensave_exe=tokensave_exe,
-                )
-            codegraph_block = ""
-            if getattr(dt, "codegraph_recipe", None):
-                # v4.3: ensure the index is fresh before building the block.
-                _cg_exe = self._cfg.codegraph_exe or ""
-                if _cg_exe:
-                    try:
-                        from helpers.codegraph_freshness import ensure_fresh
-                        ensure_fresh(project, _cg_exe)
-                    except Exception:
-                        pass
-                codegraph_block = build_codegraph_block(
-                    project, dt.codegraph_recipe,
-                    commit_range=range_spec,
-                    changed_files=changed_files,
-                    codegraph_exe=_cg_exe,
-                )
-            grounding = build_combined_grounding(
-                tokensave_block, codegraph_block)
-
-            # v4: build_prompt returns PromptBuildResult — named-field
-            # access. backend_hint=True triggers smaller candidate-body
-            # budget for local agentic backends (Ollama).
-            _provider = (llm_cfg.get("provider") or "").lower()
-            is_local_backend = (
-                _provider == "ollama"
-                or (_provider == "openai_compatible"
-                    and "localhost" in (llm_cfg.get("base_url") or "").lower())
-            )
-            prompt_result = dt.build_prompt(
-                commits, classified, existing,
-                self._project_name, self._project_desc,
-                changed_files, boundary,
-                grounding_block=grounding,
-                backend_hint=is_local_backend)
-            system = prompt_result.system
-            user = prompt_result.user
-            # prompt_result.aligned / .warnings consumed by step 5
-            # (banner + mismatch askyesno). Not used in the build path
-            # itself — the worker already committed to dispatch_llm.
-
-            # C3: append rejection feedback as a note in the user prompt
-            # (one-shot — last_rejection was cleared before the worker started).
-            if last_rejection:
-                user = (user + "\n\n---\nNote: your previous draft was rejected "
-                        f"for this reason — please address it:\n{last_rejection}")
-
-            # C1: merge global num_ctx setting into per-call gen_params so
-            # dispatch_llm can pass it to _call_llm / _call_openai_compat.
-            raw_cfg = self._cfg.raw if isinstance(self._cfg.raw, dict) else {}
-            global_num_ctx = raw_cfg.get("ollama_num_ctx", 0)
-            gen_params = dict(dt.gen_params)
-            if global_num_ctx and "num_ctx" not in gen_params:
-                gen_params["num_ctx"] = global_num_ctx
-
-            if stop_event.is_set():
-                return
-
-            # B2: read per-tab tokensave-tools checkbox.
-            use_ts_tools = bool(
-                self._tab_widgets.get(key, {}).get("ts_tools_var",
-                    tk.BooleanVar()).get()
-            )
-            ts_exe = getattr(self._cfg, "tokensave_exe", "") or ""
-
-            # v4 Fix 4b: timeout bumped 120 → 300 s. Local agentic loops
-            # (Ollama qwen2.5-coder:14b) with multiple candidate-section
-            # bodies were timing out on ROADMAP / DOCS_GENERIC at the
-            # previous ceiling. 300 s matches the integration-check CLI
-            # audit timeout in update_poller.
-            text, err = dd.dispatch_llm(
-                llm_cfg, system, user,
-                claude_cli_exe=self._cfg.claude_cli_exe,
-                cwd=project, timeout=300,
-                gen_params=gen_params or None,
-                examples=dt.examples or None,
-                enable_tokensave_tools=use_ts_tools,
-                tokensave_exe=ts_exe,
-                stop_event=stop_event,
-            )
-
-            if stop_event.is_set():
-                return
-
-            if err or not text:
-                self.after(0, lambda m=(err or "empty result"), se=stop_event:
-                           self._on_generate_error(key, m, captured_stop_event=se))
-                return
-            # v4: pass the captured stop_event so _on_generate_done can
-            # verify identity. If the user clicked Generate again while
-            # this worker was running, the stop_event in _tab_state has
-            # been replaced and this result is stale.
-            self.after(0, lambda t=text, se=stop_event:
-                       self._on_generate_done(key, t, captured_stop_event=se))
+            self._generate_worker(
+                key, stop_event, commits, classified, boundary,
+                range_spec, project, tokensave_exe, last_rejection, llm_cfg)
 
         t = threading.Thread(target=_worker, daemon=True,
                               name=f"doc-drafter:{key}")
         self._tab_state[key]["thread"] = t
         t.start()
+
+    def _generate_worker(self, key, stop_event, commits, classified, boundary,
+                         range_spec, project, tokensave_exe, last_rejection,
+                         llm_cfg):
+        """Background worker body for _on_generate_impl.
+
+        Runs on a daemon thread — all Tk mutations go through
+        ``self.after(0, callback)``.  Parameters are snapshots taken on the
+        main thread before the thread was started (immutable once passed).
+        """
+        # Both tabs get the always-on changed-file context (Phase 1.8).
+        changed_files = dd.changed_file_paths(
+            project, range_spec, self._cfg.git_exe)
+
+        dt = REGISTRY[key]
+        target_path = self._resolve_target_path(key)
+        if not target_path:
+            self.after(0, lambda: self._on_generate_error(
+                key, "No target file selected — pick a file first."))
+            return
+        existing = dt.read_existing(target_path)
+
+        # Theme B1: tokensave + codegraph grounding injection.
+        from helpers.doc_grounding import (
+            build_grounding_block, build_codegraph_block,
+            build_combined_grounding,
+        )
+        tokensave_block = ""
+        if dt.tokensave_recipe:
+            tokensave_block = build_grounding_block(
+                project, dt.tokensave_recipe,
+                commit_range=range_spec,
+                tokensave_exe=tokensave_exe,
+            )
+        codegraph_block = ""
+        if getattr(dt, "codegraph_recipe", None):
+            # v4.3: ensure the index is fresh before building the block.
+            _cg_exe = self._cfg.codegraph_exe or ""
+            if _cg_exe:
+                try:
+                    from helpers.codegraph_freshness import ensure_fresh
+                    ensure_fresh(project, _cg_exe)
+                except Exception:
+                    pass
+            codegraph_block = build_codegraph_block(
+                project, dt.codegraph_recipe,
+                commit_range=range_spec,
+                changed_files=changed_files,
+                codegraph_exe=_cg_exe,
+            )
+        grounding = build_combined_grounding(tokensave_block, codegraph_block)
+
+        # v4: build_prompt returns PromptBuildResult — named-field access.
+        # backend_hint=True triggers smaller candidate-body budget for local
+        # agentic backends (Ollama).
+        _provider = (llm_cfg.get("provider") or "").lower()
+        is_local_backend = (
+            _provider == "ollama"
+            or (_provider == "openai_compatible"
+                and "localhost" in (llm_cfg.get("base_url") or "").lower())
+        )
+        prompt_result = dt.build_prompt(
+            commits, classified, existing,
+            self._project_name, self._project_desc,
+            changed_files, boundary,
+            grounding_block=grounding,
+            backend_hint=is_local_backend)
+        system = prompt_result.system
+        user = prompt_result.user
+
+        # C3: append rejection feedback (one-shot — cleared before thread start).
+        if last_rejection:
+            user = (user + "\n\n---\nNote: your previous draft was rejected "
+                    f"for this reason — please address it:\n{last_rejection}")
+
+        # C1: merge global num_ctx into per-call gen_params.
+        raw_cfg = self._cfg.raw if isinstance(self._cfg.raw, dict) else {}
+        global_num_ctx = raw_cfg.get("ollama_num_ctx", 0)
+        gen_params = dict(dt.gen_params)
+        if global_num_ctx and "num_ctx" not in gen_params:
+            gen_params["num_ctx"] = global_num_ctx
+
+        if stop_event.is_set():
+            return
+
+        # B2: read per-tab tokensave-tools checkbox.
+        use_ts_tools = bool(
+            self._tab_widgets.get(key, {}).get("ts_tools_var",
+                tk.BooleanVar()).get()
+        )
+        ts_exe = getattr(self._cfg, "tokensave_exe", "") or ""
+
+        # v4 Fix 4b: timeout bumped 120 → 300 s for local agentic loops.
+        text, err = dd.dispatch_llm(
+            llm_cfg, system, user,
+            claude_cli_exe=self._cfg.claude_cli_exe,
+            cwd=project, timeout=300,
+            gen_params=gen_params or None,
+            examples=dt.examples or None,
+            enable_tokensave_tools=use_ts_tools,
+            tokensave_exe=ts_exe,
+            stop_event=stop_event,
+        )
+
+        if stop_event.is_set():
+            return
+
+        if err or not text:
+            self.after(0, lambda m=(err or "empty result"), se=stop_event:
+                       self._on_generate_error(key, m, captured_stop_event=se))
+            return
+        # v4: pass the captured stop_event so _on_generate_done can verify
+        # identity — stale results from superseded Generate clicks are dropped.
+        self.after(0, lambda t=text, se=stop_event:
+                   self._on_generate_done(key, t, captured_stop_event=se))
 
     def _filter_draft_text(self, key, raw_text):
         """Filter raw LLM output at generate time.
