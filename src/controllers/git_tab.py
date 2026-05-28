@@ -1500,6 +1500,7 @@ class GitTabController:
 
     def _draft_pr_via_api(self, path: str):
         import threading
+        import time
         base = self._resolve_pr_base(path)
         if base is None:
             messagebox.showerror(
@@ -1511,25 +1512,67 @@ class GitTabController:
                 "  git branch --set-upstream-to=origin/<base> <branch>",
                 parent=self._root)
             return
-        self._on_log("  Drafting PR description via API…", C["blue"])
+
+        llm_cfg = self._cfg.raw.get("commit_message_llm", {})
+        if not llm_cfg.get("enabled"):
+            messagebox.showerror(
+                "Draft PR — LLM not enabled",
+                "The Ollama / API provider is not enabled.\n\n"
+                "Go to Settings → Commit Message LLM and enable it,\n"
+                "then set a provider and model.",
+                parent=self._root)
+            return
+        if not llm_cfg.get("model"):
+            messagebox.showerror(
+                "Draft PR — no model configured",
+                "No model name is set for the LLM provider.\n\n"
+                "Go to Settings → Commit Message LLM and enter\n"
+                "a model name (e.g. 'llama3.2' for Ollama).",
+                parent=self._root)
+            return
+
+        provider = llm_cfg.get("provider", "ollama")
+        self._on_log(
+            f"  Drafting PR description via {provider}… (may take 30–120 s)",
+            C["blue"])
+        _start_time = time.monotonic()
 
         def _fetch():
-            from helpers.pr_draft import generate_pr_draft   # lazy import
+            from helpers.pr_draft import generate_pr_draft
+            from helpers.llm import get_last_llm_error
             try:
                 result = generate_pr_draft(self._cfg, path, base=base or "")
                 err = None
             except Exception as exc:
                 result = None
                 err = str(exc)
+            # Capture on the worker thread — _tls.last_error is thread-local
+            llm_diag = get_last_llm_error() if (result is None and err is None) else None
 
-            def _show(text=result, error=err):
+            def _show(text=result, error=err, _diag=llm_diag):
+                elapsed = int(time.monotonic() - _start_time)
                 if not self._tab.winfo_exists():
                     return
                 if error:
-                    messagebox.showerror("Draft PR — error", error,
-                                         parent=self._root)
+                    self._on_log(f"  ✗ PR draft failed ({elapsed}s): {error}", C["red"])
+                    messagebox.showerror("Draft PR — error", error, parent=self._root)
                     return
-                if text and text.startswith("Empty diff"):
+                if text is None:
+                    reason = _diag or "LLM returned no output"
+                    self._on_log(f"  ✗ PR draft: no LLM response ({elapsed}s)", C["red"])
+                    messagebox.showerror(
+                        "Draft PR — no response from LLM",
+                        f"{reason}\n\n"
+                        f"Provider: {provider}\n"
+                        f"Elapsed: {elapsed}s\n\n"
+                        "Check Settings → Commit Message LLM and verify:\n"
+                        "• The service is running\n"
+                        "• The model name is correct\n"
+                        "• The model is downloaded (ollama pull <model>)",
+                        parent=self._root)
+                    return
+                if text.startswith("Empty diff"):
+                    self._on_log(f"  ✗ PR draft: empty diff ({elapsed}s)", C["yellow"])
                     messagebox.showwarning(
                         "Draft PR — no diff found",
                         f"{text}\n\n"
@@ -1539,6 +1582,7 @@ class GitTabController:
                         parent=self._root,
                     )
                     return
+                self._on_log(f"  ✓ PR draft ready ({elapsed}s)", C["green"])
                 self._show_pr_draft_dialog(text, path, base=base or "")
 
             self._tab.after(0, _show)
@@ -1549,8 +1593,10 @@ class GitTabController:
         if not self._tab.winfo_exists():
             return
         if not text:
-            messagebox.showinfo("Draft PR", "No response from AI — check your API settings.",
-                                parent=self._root)
+            messagebox.showinfo(
+                "Draft PR",
+                "No response from AI.\n\nCheck Settings → Commit Message LLM.",
+                parent=self._root)
             return
         dlg = tk.Toplevel(self._root)
         dlg.title("PR Description Draft")

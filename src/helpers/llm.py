@@ -17,8 +17,20 @@ from __future__ import annotations
 import json
 import logging
 import os
+import threading
 
 log = logging.getLogger(__name__)
+
+_tls = threading.local()
+
+
+def get_last_llm_error() -> "str | None":
+    """Return the specific error from the most recent _call_llm call on THIS thread.
+
+    Thread-local: must be called on the same thread that called _call_llm.
+    Returns None if no error occurred or _call_llm was never called on this thread.
+    """
+    return getattr(_tls, "last_error", None)
 
 
 def _is_auth_error(text: str) -> bool:
@@ -354,6 +366,7 @@ def _call_llm(cfg: dict, system_prompt: str, user_prompt: str,
         if not base_url:
             base_url = "http://localhost:11434"
 
+    _tls.last_error = None
     try:
         if provider == "anthropic":
             if not api_key:
@@ -379,8 +392,19 @@ def _call_llm(cfg: dict, system_prompt: str, user_prompt: str,
                                        max_tokens, timeout, on_token,
                                        temperature=temperature, top_p=top_p,
                                        top_k=top_k, num_ctx=num_ctx)
-    except (urllib.error.URLError, urllib.error.HTTPError,
-            TimeoutError, json.JSONDecodeError, KeyError, OSError):
+    except urllib.error.HTTPError as exc:        # HTTPError is a URLError subclass — match first
+        _tls.last_error = f"HTTP {exc.code} from {provider}: {exc.reason}"
+        return None
+    except urllib.error.URLError as exc:
+        _tls.last_error = f"Connection failed ({exc.reason}) — is {provider} running?"
+        return None
+    except TimeoutError:
+        _tls.last_error = (
+            f"Timed out after {timeout}s — diff may be too large or {provider} is slow"
+        )
+        return None
+    except (json.JSONDecodeError, KeyError, OSError) as exc:
+        _tls.last_error = f"Unexpected error: {exc}"
         return None
 
     return None
