@@ -26,6 +26,7 @@ import subprocess
 import sys
 
 from constants import CREATE_NO_WINDOW
+from helpers.runtime import log
 
 
 def spawn_claude_cli(
@@ -133,10 +134,8 @@ def call_claude_cli_print(
         return None
     if proc.returncode != 0:
         err = (proc.stderr or "").strip()
-        # sys.stderr can be None under pythonw.exe / windowed Nuitka builds —
-        # guard the print so an unexpected runtime never crashes the worker.
-        if err and sys.stderr is not None:
-            print(f"[claude_cli] claude --print exited {proc.returncode}: {err[:400]}",
-                  file=sys.stderr)
+        # Log through the manager's logger — always captured even under
+        # pythonw.exe / windowed Nuitka builds where sys.stderr is None.
+        log.warning("claude --print exited %d: %s", proc.returncode, err[:400])
         return None
     return (proc.stdout or "").strip() or None

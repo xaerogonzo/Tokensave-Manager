@@ -281,8 +281,8 @@ class GitCommitDialog(tk.Toplevel):
             self._user_has_edited = True
         self._msg_txt.bind("<KeyPress>", _on_key, add="+")
 
-        if is_repo:
-            self._populate_suggestion(status_text, source="initial")
+        # Message field intentionally left blank on open — the user picks a
+        # backend and clicks 💡 Suggest when they're ready.
         self._msg_txt.focus_set()
 
     def _build_actions(self, is_repo: bool) -> None:
@@ -417,6 +417,13 @@ class GitCommitDialog(tk.Toplevel):
             return
         msg = result.message or "chore: update files"
         self._apply_suggestion(msg)
+        # Surface backend mismatch — user explicitly chose Claude CLI but
+        # the strategy that actually produced a result was a fallback.
+        if self._session_backend == "claude_cli" and result.strategy != "claude_cli":
+            self._suggest_status_lbl.configure(
+                text="⚠ Claude CLI failed — used fallback. Check Settings → claude_cli_exe.",
+                fg=C["red"])
+            return
         self._show_strategy_badge(result.strategy)
 
     _STRATEGY_BADGES = {

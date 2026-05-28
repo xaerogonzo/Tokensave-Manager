@@ -481,8 +481,7 @@ class ProjectsTabController:
         m.add_command(label="🔧  Git Init",           command=self.cmd_git_init)
         m.add_command(label="📋  Manage .gitignore…",      command=self.cmd_manage_gitignore)
         m.add_command(label="🧹  Untrack Ignored Files…",  command=self.cmd_untrack_ignored)
-        m.add_command(label="🔒  Create Private Local Repo…", command=self.cmd_create_private_repo)
-        m.add_command(label="🔄  Sync Private Repo",          command=self.cmd_sync_private_repo)
+        m.add_command(label="🔒  Private Repo…",               command=self.cmd_private_repo)
         m.add_command(label="🔍  Pre-commit AI Review hook…", command=self.cmd_precommit_hook)
         m.add_command(label="📝  Doc Updates… (CHANGELOG + README)", command=self.cmd_doc_updates)
         m.add_command(label="📋  Roadmap…",                 command=self.cmd_roadmap_manager)
@@ -738,13 +737,9 @@ class ProjectsTabController:
         if path := self._selected_path():
             self._gitops.cmd_untrack_ignored(path)
 
-    def cmd_create_private_repo(self) -> None:
+    def cmd_private_repo(self) -> None:
         if path := self._selected_path():
-            self._gitops.cmd_create_private_repo(path)
-
-    def cmd_sync_private_repo(self) -> None:
-        if path := self._selected_path():
-            self._gitops.cmd_sync_private_repo(path)
+            self._gitops.cmd_private_repo(path)
 
     def cmd_draft_changelog(self) -> None:
         if path := self._selected_path():

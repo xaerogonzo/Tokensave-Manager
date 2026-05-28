@@ -217,6 +217,20 @@ class GitOpsController:
             "  ✓ Private repo registered — auto-sync enabled for future commits.",
             C["green"])
 
+    def cmd_private_repo(self, path: str) -> None:
+        """Smart-route: manager dialog if configured, setup wizard otherwise."""
+        from dialogs.private_repo_mgr import PrivateRepoManagerDialog
+        entry = self._cfg.raw.get("private_repos", {}).get(path)
+        if entry:
+            PrivateRepoManagerDialog(
+                self._root, path, entry, self._cfg,
+                git_exe=self._cfg.git_exe,
+                on_log=self._on_log,
+                on_refresh=self._on_refresh,
+            )
+        else:
+            self.cmd_create_private_repo(path)
+
     def cmd_sync_private_repo(self, path: str) -> None:
         """On-demand sync: copy changed private files and commit to private repo."""
         from helpers.private_repo import sync_private_repo
