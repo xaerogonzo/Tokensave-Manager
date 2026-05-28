@@ -89,6 +89,13 @@ def test_preview_subprocess_helper_includes_import_site_warning(proj):
     assert '"helpers.quality_checks.subprocess.run"' in content
 
 
+def test_preview_subprocess_helper_mentions_create_no_window(proj):
+    """Subprocess template must hint at CREATE_NO_WINDOW assertion (G-WIN)."""
+    source = str(proj / "src" / "helpers" / "quality_checks.py")
+    content = preview_test_file(source, "subprocess_helper", str(proj))
+    assert "CREATE_NO_WINDOW" in content
+
+
 def test_preview_dialog_tk_marks_test_file(proj):
     """The dialog template MUST include pytestmark = pytest.mark.tk
     so Linux CI without xvfb will skip it correctly."""
