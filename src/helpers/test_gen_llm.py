@@ -194,7 +194,7 @@ def _dispatch_llm(cfg, system_prompt: str, user_prompt: str) -> "str | None":
     """Call the configured LLM provider with the combined prompt."""
     from helpers.llm import _call_llm
     return _call_llm(
-        cfg=cfg,
+        cfg=cfg.raw.get("commit_message_llm", {}),
         system_prompt=system_prompt,
         user_prompt=user_prompt,
         max_tokens=2500,

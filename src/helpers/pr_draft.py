@@ -171,8 +171,9 @@ def generate_pr_draft(cfg, project_path: str, base: str = "") -> str | None:
         f"--- git diff ---\n\n{diff_data}"
     )
 
+    llm_cfg = cfg.raw.get("commit_message_llm", {})
     return _call_llm(
-        cfg=cfg,
+        cfg=llm_cfg,
         system_prompt=_PR_SYSTEM_PROMPT,
         user_prompt=user_prompt,
         max_tokens=3000,
