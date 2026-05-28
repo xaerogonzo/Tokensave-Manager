@@ -175,7 +175,13 @@ class GitOpsController:
 
     def cmd_create_private_repo(self, path: str) -> None:
         """Open the wizard to create a local-only git repo for gitignored files."""
-        gitignored = _find_gitignored_on_disk(path, self._cfg.git_exe)
+        _NOISE = (".pyc", ".pyo", ".pyd", ".log", ".db-wal", ".db-shm")
+        _NOISE_DIRS = ("__pycache__", ".tokensave", ".codegraph", ".git")
+        gitignored = [
+            f for f in _find_gitignored_on_disk(path, self._cfg.git_exe)
+            if not any(f.endswith(ext) for ext in _NOISE)
+            and not any(part in _NOISE_DIRS for part in f.replace("\\", "/").split("/"))
+        ]
         PrivateRepoSetupDialog(
             self._root, path, gitignored,
             git_exe=self._cfg.git_exe,
