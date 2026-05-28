@@ -54,12 +54,13 @@ to identify the section it owns.
 
 
 def _branch_diff(repo_path: str, base: str, git_exe: str = "git") -> str:
-    """Diff from merge-base of ``base`` to the working tree.
+    """Diff committed branch history using pure object-store refs.
 
-    Uses ``git diff <merge-base>`` (no trailing ref) so committed,
-    staged, *and* unstaged changes are all visible to the AI — preserving
-    the pre-commit drafting workflow where the user reviews AI output
-    before making the final commit.
+    Uses ``git diff <merge-base> HEAD`` — a two-commit comparison that reads
+    only the git object store, not the working directory. Consistent with the
+    CLI path (``git diff base...HEAD``). Works correctly in no-console Windows
+    subprocesses (pythonw.exe + CREATE_NO_WINDOW) where working-tree reads
+    silently return empty output.
     """
     _git = git_exe or "git"
     try:
@@ -68,19 +69,22 @@ def _branch_diff(repo_path: str, base: str, git_exe: str = "git") -> str:
             cwd=repo_path, text=True,
             creationflags=CREATE_NO_WINDOW,
         ).strip()
-    except subprocess.CalledProcessError:
-        # merge-base failed (shallow clone, no common history) — fall back to
-        # a straight diff of HEAD vs working tree so the user still gets output.
         return subprocess.check_output(
-            [_git, "diff"],
+            [_git, "diff", merge_base, "HEAD"],
             cwd=repo_path, text=True,
             creationflags=CREATE_NO_WINDOW,
         )
-    return subprocess.check_output(
-        [_git, "diff", merge_base],   # no trailing ref → compares to working tree
-        cwd=repo_path, text=True,
-        creationflags=CREATE_NO_WINDOW,
-    )
+    except Exception:
+        # merge-base failed (shallow clone, no common history, detached HEAD)
+        # — fall back to the most recent commit diff as best-effort context.
+        try:
+            return subprocess.check_output(
+                [_git, "diff", "HEAD~1", "HEAD"],
+                cwd=repo_path, text=True,
+                creationflags=CREATE_NO_WINDOW,
+            )
+        except Exception:
+            return ""
 
 
 def generate_pr_draft(cfg, project_path: str, base: str = "") -> str | None:
