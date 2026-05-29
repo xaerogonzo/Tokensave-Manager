@@ -105,8 +105,30 @@ def update_codegraph(npm_exe: str,
 
     Per v4.8 user decision: prefer ``install …@latest`` over
     ``npm update -g`` (which sometimes silently no-ops on Windows).
+
+    Post-update: if npm emitted EPERM cleanup warnings (Windows file-lock
+    on the old better_sqlite3.node native binary), append a friendly note
+    so the user knows the update still completed and a restart is all that
+    is needed.
     """
-    return _run_npm(npm_exe, ["install", "-g", f"{_PKG}@latest"], on_log)
+    ok, log = _run_npm(npm_exe, ["install", "-g", f"{_PKG}@latest"], on_log)
+    if "EPERM" in log:
+        note = (
+            "\n"
+            "ℹ️  The 'EPERM cleanup' warnings above are harmless on Windows.\n"
+            "   npm could not delete a temp directory because the old\n"
+            "   codegraph binary was still loaded in memory — this is normal\n"
+            "   when the file watcher is running. The update completed\n"
+            "   successfully. Restart TokenSave Manager to fully release\n"
+            "   the old binary and pick up the new version."
+        )
+        if on_log is not None:
+            try:
+                on_log(note)
+            except Exception:
+                pass
+        log += note
+    return ok, log
 
 
 def uninstall_codegraph(npm_exe: str,

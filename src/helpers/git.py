@@ -73,6 +73,11 @@ def _find_tracked_but_ignored(path: str, git_exe: str) -> list:
       -i  filter to those that are ignored
       --exclude-standard  use the project's actual .gitignore rules
 
+    Files that are already staged for deletion (``git rm --cached`` was
+    already run but not yet committed) are excluded from the result — the
+    user already did the right thing; re-prompting them on every commit
+    until they commit the deletion would be a confusing loop.
+
     Returns paths relative to the repo root, one per line, empty string
     filtered out. Returns [] if the call fails (not a repo, git missing,
     etc.) — caller can treat empty as "nothing to do".
@@ -94,7 +99,35 @@ def _find_tracked_but_ignored(path: str, git_exe: str) -> list:
         return []
     if proc.returncode != 0:
         return []
-    return [ln for ln in proc.stdout.splitlines() if ln.strip()]
+    stale = [ln for ln in proc.stdout.splitlines() if ln.strip()]
+    if not stale:
+        return []
+
+    # Filter out files already staged for deletion — `git rm --cached` was
+    # run but the commit hasn't landed yet. These show as D in column 1 of
+    # `git diff --cached --name-status`. Re-prompting would create a loop
+    # where every commit attempt re-warns about a fix already in progress.
+    try:
+        del_proc = subprocess.run(
+            [git_exe, "-C", path,
+             "diff", "--cached", "--name-only", "--diff-filter=D"],
+            capture_output=True, text=True, timeout=10,
+            encoding="utf-8", errors="replace",
+            creationflags=CREATE_NO_WINDOW,
+        )
+        if del_proc.returncode == 0:
+            already_staged = {
+                ln.strip().replace("\\", "/")
+                for ln in del_proc.stdout.splitlines() if ln.strip()
+            }
+            stale = [
+                f for f in stale
+                if f.replace("\\", "/") not in already_staged
+            ]
+    except (FileNotFoundError, subprocess.TimeoutExpired):
+        pass  # If the extra check fails, return the full stale list
+
+    return stale
 
 
 def _is_local_git_repo(path: str) -> bool:
