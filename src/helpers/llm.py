@@ -18,6 +18,8 @@ import json
 import logging
 import os
 import threading
+import urllib.error
+import urllib.request
 
 log = logging.getLogger(__name__)
 
@@ -231,7 +233,6 @@ def _call_anthropic(api_key: str, model: str, system_prompt: str, user_prompt: s
                     max_tokens: int, timeout: int, on_token) -> str | None:
     """Anthropic Messages API — streaming and non-streaming. Pure execution layer;
     validation and error handling live in the _call_llm dispatcher."""
-    import urllib.request
     payload = {
         "model": model or "claude-haiku-4-5",
         "max_tokens": max_tokens,
@@ -269,7 +270,6 @@ def _call_openai_compat(url: str, api_key: str, model: str,
                         num_ctx: int | None = None) -> str | None:
     """OpenAI Chat Completions — covers openai, openai_compatible, and ollama.
     Caller resolves the endpoint URL before dispatching here."""
-    import urllib.request
     payload = {
         "model": model or "gpt-4o-mini",
         "messages": [
@@ -342,8 +342,6 @@ def _call_llm(cfg: dict, system_prompt: str, user_prompt: str,
     Callers that need to push deltas to a Tk UI must wrap it in a
     `self.after(0, ...)` schedule (see AICodeReviewDialog._start_review).
     """
-    import urllib.error
-
     if not cfg.get("enabled"):
         return None
 

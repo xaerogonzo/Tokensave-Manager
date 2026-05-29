@@ -309,9 +309,14 @@ def _clean_local_artifacts(text: str) -> str:
     Despite explicit prose-only instructions, small models occasionally paste
     diff snippets inside ``` blocks. This defensive pass strips them without
     touching the rest of the output.
+
+    The `[ \\t]*` on the closing fence handles trailing spaces that small models
+    sometimes emit before the newline (e.g. "```  \\n"). Global `.strip()` is
+    intentionally omitted — it would destroy intentional structural whitespace
+    (leading blank lines, section spacing) in the PR body.
     """
     import re
-    return re.sub(r'```[^\n]*\n.*?```\n?', '', text, flags=re.DOTALL).strip()
+    return re.sub(r'```[^\n]*\n.*?```[ \t]*\n?', '', text, flags=re.DOTALL)
 
 
 def _inject_automated_block(text: str, automated_block: str) -> str:
@@ -326,5 +331,13 @@ def _inject_automated_block(text: str, automated_block: str) -> str:
     idx = text.find(marker)
     if idx != -1:
         return text[:idx] + automated_block + "\n" + text[idx:]
-    # Fallback: the model omitted the checklist entirely — append it
-    return text + "\n\n## Testing checklist\n<!-- tokensave-manager:testing-checklist v1 -->\n" + automated_block
+    # Fallback: the model omitted the checklist entirely — append full structure
+    # including a ### Manual stub so the Sync PR Checklist template contract is met.
+    return (
+        text
+        + "\n\n## Testing checklist\n"
+        "<!-- tokensave-manager:testing-checklist v1 -->\n"
+        + automated_block
+        + "\n### Manual (please verify before merge)\n"
+        "- [ ] Manually verify the key changed behaviour\n"
+    )
