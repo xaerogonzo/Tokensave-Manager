@@ -27,6 +27,12 @@ __pycache__/
 *.pyc
 *.pyo
 
+# ── Test / coverage artefacts ──
+.coverage
+.coverage.*
+coverage.xml
+.pytest_cache/
+
 # ── Nuitka build output ──
 *.onefile-build/
 *.build/
