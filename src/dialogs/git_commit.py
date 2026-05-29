@@ -26,7 +26,7 @@ from tkinter import ttk, messagebox
 from typing import TYPE_CHECKING
 
 from constants import C
-from theme import bind_mousewheel
+from theme import bind_mousewheel, themed_checkbutton
 from helpers.commit_messages import CommitSuggestion, _suggest_commit_message
 from helpers.runtime import log
 
@@ -197,9 +197,8 @@ class GitCommitDialog(tk.Toplevel):
             "?": C["blue"], "!": C["overlay0"],
         }.get(status_char, C["text"])
         desc = self._STATUS_DESC.get(status_char, status_char)
-        cb = tk.Checkbutton(row, variable=var,
-                            bg=C["mantle"], activebackground=C["mantle"],
-                            selectcolor=C["surface0"])
+        cb = themed_checkbutton(row, variable=var,
+                               bg=C["mantle"], activebackground=C["mantle"])
         cb.pack(side=tk.LEFT)
         tk.Label(row, text=xy_clean, width=3, anchor=tk.W,
                  font=("Consolas", 9, "bold"),

@@ -91,3 +91,17 @@ def bind_mousewheel(canvas: tk.Canvas) -> None:
     canvas.bind("<Leave>", _deactivate)
     # Also activate when a child widget inside the canvas gets the cursor —
     # bind_all means the event propagates up, so no child-by-child wiring needed.
+
+
+def themed_checkbutton(parent: tk.Widget, **kw) -> tk.Checkbutton:
+    """tk.Checkbutton pre-styled for the Catppuccin Mocha dark theme.
+
+    Sets selectcolor=C['blue'] so the checkmark is visible on dark
+    backgrounds — without it, the OS draws a dark checkmark on a dark box
+    making it invisible. All keyword args are forwarded to tk.Checkbutton;
+    callers can override any default by passing the key explicitly.
+    """
+    kw.setdefault("selectcolor", C["blue"])
+    kw.setdefault("activebackground", C["surface0"])
+    kw.setdefault("activeforeground", C["text"])
+    return tk.Checkbutton(parent, **kw)

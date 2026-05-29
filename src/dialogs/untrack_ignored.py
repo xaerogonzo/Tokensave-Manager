@@ -22,7 +22,7 @@ import tkinter as tk
 from tkinter import ttk, messagebox
 
 from constants import C
-from theme import bind_mousewheel
+from theme import bind_mousewheel, themed_checkbutton
 
 
 class UntrackIgnoredDialog(tk.Toplevel):
@@ -126,9 +126,8 @@ class UntrackIgnoredDialog(tk.Toplevel):
                 row.pack(fill=tk.X, padx=4, pady=1)
                 var = tk.BooleanVar(value=True)
                 self._file_vars.append((var, fname))
-                cb = tk.Checkbutton(row, variable=var, bg=C["mantle"],
-                                     activebackground=C["mantle"],
-                                     selectcolor=C["surface0"])
+                cb = themed_checkbutton(row, variable=var, bg=C["mantle"],
+                                        activebackground=C["mantle"])
                 cb.pack(side=tk.LEFT)
                 tk.Label(row, text=fname, anchor=tk.W,
                          font=("Consolas", 9),

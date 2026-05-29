@@ -25,7 +25,7 @@ from tkinter import filedialog, messagebox, ttk
 
 from constants import C, CREATE_NO_WINDOW
 from helpers.private_repo import _BACKUP_GIT_ENV
-from theme import bind_mousewheel
+from theme import bind_mousewheel, themed_checkbutton
 
 # Cap: filter + sort applied first, then this limit (G3/G13)
 _FILE_CAP = 300
@@ -190,9 +190,8 @@ class PrivateRepoSetupDialog(tk.Toplevel):
         row.pack(fill=tk.X, padx=4, pady=1)
         var = tk.BooleanVar(value=checked)
         self._file_vars.append((var, fname))
-        tk.Checkbutton(row, variable=var, bg=C["mantle"],
-                        activebackground=C["mantle"],
-                        selectcolor=C["surface0"]).pack(side=tk.LEFT)
+        themed_checkbutton(row, variable=var, bg=C["mantle"],
+                           activebackground=C["mantle"]).pack(side=tk.LEFT)
         tk.Label(row, text=fname, anchor=tk.W,
                  font=("Consolas", 9), bg=C["mantle"],
                  fg=C["text"]).pack(side=tk.LEFT, padx=(4, 6))

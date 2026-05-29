@@ -35,7 +35,7 @@ from tkinter import ttk, filedialog, messagebox, simpledialog
 from typing import TYPE_CHECKING
 
 from constants import C, CREATE_NO_WINDOW
-from theme import bind_mousewheel
+from theme import bind_mousewheel, themed_checkbutton
 from helpers.detection import (
     _detect_git, _detect_gh, _detect_npm, _detect_codegraph, _detect_claude_cli,
     _root_path, _root_label,
@@ -787,10 +787,10 @@ class SettingsDialog(tk.Toplevel):
         """Auto-commit after sync + pre-commit smoke-test hook."""
         ttk.Separator(body, orient="horizontal").pack(fill=tk.X, padx=20, pady=(12, 8))
         self._var_autocommit = tk.BooleanVar(value=bool(raw.get("auto_commit_after_sync", False)))
-        tk.Checkbutton(body,
+        themed_checkbutton(body,
             text="Auto-commit after sync  (git add -A + git commit)",
             variable=self._var_autocommit,
-            bg=C["base"], fg=C["text"], selectcolor=C["surface0"],
+            bg=C["base"], fg=C["text"],
             activebackground=C["base"], activeforeground=C["text"],
             font=("Segoe UI", 10)).pack(anchor=tk.W, padx=20, pady=(0, 2))
         tk.Label(body,
@@ -803,10 +803,10 @@ class SettingsDialog(tk.Toplevel):
         _active_project = (raw.get("projects") or [{}])[0].get("path") or ""
         _hook_active = is_hook_installed(_active_project) if _active_project else False
         self._var_precommit_hook = tk.BooleanVar(value=_hook_active)
-        tk.Checkbutton(body,
+        themed_checkbutton(body,
             text="Run smoke tests before commits  (pre-commit hook)",
             variable=self._var_precommit_hook,
-            bg=C["base"], fg=C["text"], selectcolor=C["surface0"],
+            bg=C["base"], fg=C["text"],
             activebackground=C["base"], activeforeground=C["text"],
             font=("Segoe UI", 10)).pack(anchor=tk.W, padx=20, pady=(0, 2))
         tk.Label(body,
@@ -1035,10 +1035,10 @@ class SettingsDialog(tk.Toplevel):
         # warm-up checkbox
         self._var_ollama_warmup = tk.BooleanVar(
             value=bool(raw.get("ollama_warmup", False)))
-        tk.Checkbutton(body,
+        themed_checkbutton(body,
             text="Warm up Ollama before first Generate (loads model into VRAM early)",
             variable=self._var_ollama_warmup,
-            bg=C["base"], fg=C["text"], selectcolor=C["surface0"],
+            bg=C["base"], fg=C["text"],
             activebackground=C["base"], activeforeground=C["text"],
             font=("Segoe UI", 9)).pack(anchor=tk.W, padx=20, pady=(0, 6))
 
@@ -1051,10 +1051,10 @@ class SettingsDialog(tk.Toplevel):
 
         llm_cfg = raw.get("commit_message_llm") or {}
         self._var_llm_enabled = tk.BooleanVar(value=bool(llm_cfg.get("enabled", False)))
-        tk.Checkbutton(body,
+        themed_checkbutton(body,
             text="Use AI to generate commit message suggestions",
             variable=self._var_llm_enabled,
-            bg=C["base"], fg=C["text"], selectcolor=C["surface0"],
+            bg=C["base"], fg=C["text"],
             activebackground=C["base"], activeforeground=C["text"],
             font=("Segoe UI", 10)).pack(anchor=tk.W, padx=20, pady=(0, 4))
 
@@ -1081,10 +1081,10 @@ class SettingsDialog(tk.Toplevel):
                  justify=tk.LEFT).pack(anchor=tk.W, padx=20, pady=(0, 4))
 
         self._var_ask_enabled = tk.BooleanVar(value=bool(ask_cfg.get("enabled", False)))
-        tk.Checkbutton(body,
+        themed_checkbutton(body,
             text="Enable AI in the Ask tab",
             variable=self._var_ask_enabled,
-            bg=C["base"], fg=C["text"], selectcolor=C["surface0"],
+            bg=C["base"], fg=C["text"],
             activebackground=C["base"], activeforeground=C["text"],
             font=("Segoe UI", 10)).pack(anchor=tk.W, padx=20, pady=(0, 4))
 
@@ -1269,10 +1269,10 @@ class SettingsDialog(tk.Toplevel):
         ttk.Entry(min_row, textvariable=self._var_llm_min_diff, width=6).pack(side=tk.LEFT)
 
         self._var_llm_for_sync = tk.BooleanVar(value=bool(llm_cfg.get("use_for_sync_autocommit", False)))
-        tk.Checkbutton(body,
+        themed_checkbutton(body,
             text="Also use AI for sync auto-commit messages (disables amend-stacking)",
             variable=self._var_llm_for_sync,
-            bg=C["base"], fg=C["text"], selectcolor=C["surface0"],
+            bg=C["base"], fg=C["text"],
             activebackground=C["base"], activeforeground=C["text"],
             font=("Segoe UI", 9)).pack(anchor=tk.W, padx=20, pady=(6, 2))
         tk.Label(body,

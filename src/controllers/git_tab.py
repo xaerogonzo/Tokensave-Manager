@@ -28,7 +28,7 @@ from tkinter import messagebox, ttk
 from typing import TYPE_CHECKING
 
 from constants import C, CREATE_NO_WINDOW, _ANSI, _GIT_ENV_NO_PROMPT
-from theme import _Tooltip
+from theme import _Tooltip, themed_checkbutton
 from helpers.git import _is_local_git_repo
 from helpers.llm import _is_auth_error
 from dialogs.set_remote import SetRemoteDialog
@@ -1757,7 +1757,7 @@ class GitTabController:
                 self._cfg.raw.get("commit_message_llm", {}).get("provider")
             )
             ai_enabled_var = tk.BooleanVar(value=ai_available)
-            ai_chk = tk.Checkbutton(
+            ai_chk = themed_checkbutton(
                 hdr,
                 text="Enable AI generation",
                 variable=ai_enabled_var,
@@ -1804,7 +1804,7 @@ class GitTabController:
                 check_vars.append(var)
                 row = tk.Frame(list_frame, bg=C["surface0"])
                 row.pack(fill=tk.X, pady=1)
-                tk.Checkbutton(
+                themed_checkbutton(
                     row, variable=var,
                     text=sg.rel_path,
                     bg=C["surface0"], fg=C["text"],
