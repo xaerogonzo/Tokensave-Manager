@@ -1736,7 +1736,7 @@ class GitTabController:
         def _populate(suggestions: list) -> None:
             if not dlg.winfo_exists() or not suggestions:
                 return
-            panel.pack(fill=tk.X, padx=12, pady=(4, 8))
+            panel.pack(fill=tk.BOTH, expand=True, padx=12, pady=(4, 8))
             _fill_panel(panel, suggestions)
 
         def _fill_panel(parent: tk.Frame, suggestions: list) -> None:
@@ -1768,9 +1768,35 @@ class GitTabController:
             )
             ai_chk.pack(side=tk.RIGHT)
 
-            # Checkbox list
-            list_frame = tk.Frame(parent, bg=C["surface0"])
-            list_frame.pack(fill=tk.X, padx=16, pady=2)
+            # Scrollable checkbox list
+            scroll_outer = tk.Frame(parent, bg=C["surface0"])
+            scroll_outer.pack(fill=tk.BOTH, expand=True, padx=16, pady=2)
+
+            canvas = tk.Canvas(scroll_outer, bg=C["surface0"],
+                               highlightthickness=0, height=160)
+            vsb = ttk.Scrollbar(scroll_outer, orient="vertical",
+                                command=canvas.yview)
+            canvas.configure(yscrollcommand=vsb.set)
+            vsb.pack(side=tk.RIGHT, fill=tk.Y)
+            canvas.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
+
+            list_frame = tk.Frame(canvas, bg=C["surface0"])
+            _cw = canvas.create_window((0, 0), window=list_frame, anchor="nw")
+
+            def _sync_scroll(event, _c=canvas):
+                _c.configure(scrollregion=_c.bbox("all"))
+
+            def _sync_width(event, _c=canvas, _id=_cw):
+                _c.itemconfig(_id, width=event.width)
+
+            list_frame.bind("<Configure>", _sync_scroll)
+            canvas.bind("<Configure>", _sync_width)
+
+            def _on_wheel(event, _c=canvas):
+                _c.yview_scroll(int(-1 * (event.delta / 120)), "units")
+
+            for _w in (canvas, list_frame):
+                _w.bind("<MouseWheel>", _on_wheel)
 
             check_vars: list[tk.BooleanVar] = []
             for sg in suggestions:
