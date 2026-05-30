@@ -18,6 +18,12 @@ from constants import CREATE_NO_WINDOW
 TemplateHint = Literal["pure_helper", "subprocess_helper", "dialog_tk", "blank"]
 
 
+# Templates whose files genuinely benefit from automated tests. dialog_tk
+# (Tk-coupled UI) and blank (unclassified) are low-ROI — they belong in the
+# local test-gap panel for manual judgement, NOT in the drafted PR checklist.
+_AUTOMATABLE_TEMPLATES: frozenset = frozenset({"pure_helper", "subprocess_helper"})
+
+
 @dataclass
 class SuggestedTest:
     """One test gap entry surfaced for a branch diff."""
@@ -26,6 +32,18 @@ class SuggestedTest:
     rel_path: str           # path relative to project_root, for display
     template: TemplateHint  # scaffold template best suited for this file
     test_exists: bool       # always False here — only untested files are returned
+
+    @property
+    def requires_automation(self) -> bool:
+        """True when this file warrants an automated test in the PR checklist.
+
+        The classification lives HERE (not in the PR-draft renderer) so the
+        text layer stays dumb: callers do ``if s.requires_automation`` and any
+        future high-ROI template (e.g. ``api_client``) just joins
+        ``_AUTOMATABLE_TEMPLATES``. Tk-dialog and unclassified files return
+        False — they stay in the local panel, off the PR checklist.
+        """
+        return self.template in _AUTOMATABLE_TEMPLATES
 
 
 def suggest_tests_for_diff(
@@ -83,7 +101,7 @@ def _changed_src_files(project_root: str, base: str, git_exe: str) -> list[str]:
         out = subprocess.check_output(
             [_git, "diff", "--name-only", f"{base}...HEAD"],
             cwd=project_root,
-            text=True,
+            text=True, encoding="utf-8", errors="replace",
             creationflags=CREATE_NO_WINDOW,
             timeout=10,
         )

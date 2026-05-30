@@ -3,8 +3,28 @@
 Covers:
   _clean_local_artifacts  — regex fence-stripping, structural-whitespace preservation
   _inject_automated_block — insertion ordering, fallback structure, marker robustness
+  _render_coverage_gaps   — requires_automation filtering, backtick escaping
+  _inject_coverage_gaps   — ordering (Automated < Coverage gaps < Manual)
 """
-from helpers.pr_draft import _clean_local_artifacts, _inject_automated_block
+from dataclasses import dataclass
+
+from helpers.pr_draft import (
+    _clean_local_artifacts,
+    _inject_automated_block,
+    _inject_coverage_gaps,
+    _render_coverage_gaps,
+)
+
+
+@dataclass
+class _FakeSuggestion:
+    """Stand-in for test_gap_report.SuggestedTest with the attrs the renderer reads."""
+    rel_path: str
+    template: str
+
+    @property
+    def requires_automation(self) -> bool:
+        return self.template in ("pure_helper", "subprocess_helper")
 
 # ── _clean_local_artifacts ────────────────────────────────────────────────────
 
@@ -114,3 +134,77 @@ def test_inject_no_crash_when_marker_absent():
     assert "### Automated" in result
     assert "### Manual" in result
     assert result.index("### Automated") < result.index("### Manual")
+
+
+# ── _render_coverage_gaps ───────────────────────────────────────────────────────
+
+def test_render_gaps_empty_list_returns_empty():
+    assert _render_coverage_gaps([]) == ""
+    assert _render_coverage_gaps(None) == ""
+
+
+def test_render_gaps_filters_to_automatable_only():
+    """dialog_tk and blank are excluded; pure/subprocess kept."""
+    sugg = [
+        _FakeSuggestion("src/helpers/a.py", "pure_helper"),
+        _FakeSuggestion("src/controllers/b.py", "subprocess_helper"),
+        _FakeSuggestion("src/dialogs/c.py", "dialog_tk"),     # excluded
+        _FakeSuggestion("src/d.py", "blank"),                 # excluded
+    ]
+    out = _render_coverage_gaps(sugg)
+    assert "src/helpers/a.py" in out
+    assert "src/controllers/b.py" in out
+    assert "src/dialogs/c.py" not in out
+    assert "src/d.py" not in out
+
+
+def test_render_gaps_all_excluded_returns_empty():
+    sugg = [_FakeSuggestion("src/dialogs/c.py", "dialog_tk")]
+    assert _render_coverage_gaps(sugg) == ""
+
+
+def test_render_gaps_has_header_and_checkboxes():
+    out = _render_coverage_gaps([_FakeSuggestion("src/helpers/a.py", "pure_helper")])
+    assert out.startswith("### Coverage gaps")
+    assert "- [ ] `src/helpers/a.py`" in out
+    assert "pure_helper" in out
+
+
+def test_render_gaps_escapes_backticks_in_path():
+    """A backtick in a path must not break the surrounding markdown."""
+    out = _render_coverage_gaps([_FakeSuggestion("src/we`ird.py", "pure_helper")])
+    assert "`" in out                      # the wrapping backticks remain
+    assert "we`ird" not in out             # raw backtick neutralised
+    assert "we'ird" in out                 # replaced with a safe quote
+
+
+# ── _inject_coverage_gaps ───────────────────────────────────────────────────────
+
+_GAPS = "### Coverage gaps (changed files with no test file)\n- [ ] `src/a.py` — no test yet (pure_helper)\n"
+
+
+def test_inject_gaps_orders_automated_gaps_manual():
+    text = "### Automated\n- [x] suite\n### Manual\n- [ ] smoke"
+    result = _inject_coverage_gaps(text, _GAPS)
+    assert result.index("### Automated") < result.index("### Coverage gaps")
+    assert result.index("### Coverage gaps") < result.index("### Manual")
+
+
+def test_inject_gaps_empty_block_is_noop():
+    text = "### Manual\n- [ ] smoke"
+    assert _inject_coverage_gaps(text, "") == text
+
+
+def test_inject_gaps_fallback_appends_when_no_manual():
+    text = "## Summary\n\nprose only"
+    result = _inject_coverage_gaps(text, _GAPS)
+    assert "### Coverage gaps" in result
+    assert "src/a.py" in result
+    # Original prose preserved and the gaps block follows it.
+    assert result.index("## Summary") < result.index("### Coverage gaps")
+
+
+def test_inject_gaps_preserves_manual_bullets():
+    text = "### Manual\n- [ ] keep me"
+    result = _inject_coverage_gaps(text, _GAPS)
+    assert "- [ ] keep me" in result

@@ -134,17 +134,36 @@ def _branch_diff(repo_path: str, base: str, git_exe: str = "git") -> str:
             return ""
 
 
-def generate_pr_draft(cfg, project_path: str, base: str = "") -> str | None:
+def generate_pr_draft(cfg, project_path: str, base: str = "", *,
+                      on_token=None, on_status=None,
+                      coverage_gaps_md: str = "") -> str | None:
     """Compute local working-tree changes and ask the LLM to draft a PR description.
 
     Args:
         cfg: ManagerConfig instance (read at call time — never snapshot).
         project_path: Absolute path to the git repository root.
+        base: PR base ref (e.g. "origin/master"); empty → working-tree diff.
+        on_token: optional callback(delta_str) for streaming — forwarded to
+            `_call_llm`. Runs on the calling thread; UI callers must marshal to
+            the Tk thread themselves.
+        on_status: optional callback(phase_str) called at phase boundaries
+            ("grounding", "generating") so the UI can show progress before any
+            token arrives.
+        coverage_gaps_md: optional pre-rendered "### Coverage gaps" block
+            (built by the controller via :func:`_render_coverage_gaps`) spliced
+            into the Testing checklist before "### Manual". Kept as a param so
+            this module stays decoupled from `test_gap_report`.
 
     Returns:
         Markdown string from the LLM, or an error/empty-diff message string.
         Returns None only if _call_llm itself returns None (no LLM configured).
     """
+    def _status(phase: str) -> None:
+        if on_status is not None:
+            try:
+                on_status(phase)
+            except Exception:
+                pass
     if base:
         try:
             diff_data = _branch_diff(project_path, base, git_exe=cfg.git_exe)
@@ -180,6 +199,7 @@ def generate_pr_draft(cfg, project_path: str, base: str = "") -> str | None:
     # for PR drafting specifically without disabling it everywhere.
     grounding = ""
     if cfg.enable_pr_grounding:
+        _status("grounding")
         try:
             from helpers.doc_grounding import (
                 build_grounding_block,
@@ -253,12 +273,14 @@ def generate_pr_draft(cfg, project_path: str, base: str = "") -> str | None:
     _timeout    = 300  if _is_local else 120
     _system     = _PR_SYSTEM_PROMPT_LOCAL if _is_local else _PR_SYSTEM_PROMPT
 
+    _status("generating")
     result = _call_llm(
         cfg=llm_cfg,
         system_prompt=_system,
         user_prompt=user_prompt,
         max_tokens=_max_tokens,
         timeout=_timeout,
+        on_token=on_token,
     )
 
     # Local providers: strip any accidental code blocks, then inject the
@@ -267,6 +289,11 @@ def generate_pr_draft(cfg, project_path: str, base: str = "") -> str | None:
     if _is_local and result:
         result = _clean_local_artifacts(result)
         result = _inject_automated_block(result, automated_block)
+
+    # Both paths: splice the coverage-gaps block (if provided) into the
+    # Testing checklist — ordering Automated < Coverage gaps < Manual.
+    if result and coverage_gaps_md:
+        result = _inject_coverage_gaps(result, coverage_gaps_md)
 
     return result
 
@@ -346,3 +373,46 @@ def _inject_automated_block(text: str, automated_block: str) -> str:
         + "\n### Manual (please verify before merge)\n"
         "- [ ] Manually verify the key changed behaviour\n"
     )
+
+
+def _render_coverage_gaps(suggestions) -> str:
+    """Render a ``### Coverage gaps`` checklist block from SuggestedTest items.
+
+    Only entries with ``requires_automation`` True are included — Tk-dialog and
+    unclassified files are deliberately excluded (they're low-ROI and would
+    create blocked checklist lines for files we don't intend to auto-test; they
+    remain visible in the local test-gap panel). Backticks in paths are escaped
+    so an unusual filename can't shatter the surrounding markdown.
+
+    Returns "" when there are no qualifying gaps, so callers can treat the
+    result as "splice only if truthy".
+    """
+    gaps = [s for s in (suggestions or [])
+            if getattr(s, "requires_automation", False)]
+    if not gaps:
+        return ""
+    lines = ["### Coverage gaps (changed files with no test file)"]
+    for s in gaps:
+        safe = (s.rel_path or "").replace("`", "'")   # neutralise markdown
+        lines.append(
+            f"- [ ] `{safe}` — no test yet ({s.template}) — scaffold candidate"
+        )
+    return "\n".join(lines) + "\n"
+
+
+def _inject_coverage_gaps(text: str, block: str) -> str:
+    """Splice a coverage-gaps block into the Testing checklist before ### Manual.
+
+    Runs for BOTH local and cloud paths (cloud already has ### Automated from the
+    LLM; local gets it via _inject_automated_block first). Inserting before
+    "### Manual" yields the ordering Automated < Coverage gaps < Manual. If no
+    "### Manual" marker exists, append the block at the end as a best-effort
+    fallback.
+    """
+    if not block:
+        return text
+    marker = "### Manual"
+    idx = text.find(marker)
+    if idx != -1:
+        return text[:idx] + block + "\n" + text[idx:]
+    return text.rstrip() + "\n\n" + block
