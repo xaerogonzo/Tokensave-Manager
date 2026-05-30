@@ -10,8 +10,10 @@ No Tkinter imports.  The caller is responsible for threading.
 
 from __future__ import annotations
 
+import ast
 import logging
 import os
+import re
 import threading
 
 log = logging.getLogger(__name__)
@@ -66,9 +68,13 @@ creationflags=CREATE_NO_WINDOW to Popen/run/check_output, assert it in the \
 test: _, kwargs = mock.call_args; assert kwargs.get("creationflags") == \
 CREATE_NO_WINDOW
 - Keep tests focused and independent — no shared mutable state between tests.
-- Write ONLY the file content, starting with the module docstring (triple \
-quotes). Do not include any explanation, markdown fences, or commentary \
-outside the Python code.
+
+OUTPUT CONTRACT (critical):
+- Respond with ONLY the Python source of the test file, as your message text.
+- Do NOT create or write any files. Do NOT use any tools. Do NOT ask for
+  permission. Do NOT include any explanation, preamble, markdown fences, or
+  commentary — only the .py file contents.
+- Begin your reply with the module docstring (triple quotes).
 
 Example of a well-structured test file from this project:
 {example_test}
@@ -84,7 +90,19 @@ Source code:
 {source_code}
 ```
 
-Write the full content of tests/{test_filename} below.
+Output the full Python source for tests/{test_filename} as your reply text —
+ONLY the code, no prose, no markdown fences, no file-writing, no permission
+requests. Start with the module docstring.
+"""
+
+# Appended to the user prompt on a single repair retry when the first reply
+# didn't parse as Python (e.g. the model emitted prose or a permission request).
+_REPAIR_PROMPT_TEMPLATE = """\
+Your previous reply was NOT valid Python and could not be parsed:
+  {error}
+
+Reply again with ONLY the corrected Python source of the test file — no prose,
+no markdown fences, no commentary, no tool use. Start with the module docstring.
 """
 
 
@@ -136,20 +154,41 @@ def generate_ai_test_content(
     if cancel_event and cancel_event.is_set():
         return None, "Cancelled."
 
-    # Dispatch
-    if effective_backend == "claude_cli":
-        result = _dispatch_claude_cli(cfg, system_prompt, user_prompt, project_root)
-    else:
-        result = _dispatch_llm(cfg, system_prompt, user_prompt)
+    def _run(up: str) -> "str | None":
+        if effective_backend == "claude_cli":
+            return _dispatch_claude_cli(cfg, system_prompt, up, project_root)
+        return _dispatch_llm(cfg, system_prompt, up)
 
-    if result is None:
+    # First attempt.
+    raw = _run(user_prompt)
+    if raw is None:
         return None, "AI backend returned no output — check your settings."
-
-    cleaned = _strip_markdown_fences(result)
-    if not cleaned.strip():
+    code = _extract_code(raw)
+    if not code.strip():
         return None, "AI returned an empty response."
+    err = _looks_like_python(code)
 
-    return cleaned, None
+    # One repair pass when the reply isn't valid Python — covers the case where
+    # the model emitted prose or a permission request ("May I write this file?")
+    # instead of code. NEVER return un-parseable text (the caller writes it to disk).
+    if err is not None:
+        if cancel_event and cancel_event.is_set():
+            return None, "Cancelled."
+        repair_up = user_prompt + "\n\n" + _REPAIR_PROMPT_TEMPLATE.format(error=err)
+        raw2 = _run(repair_up)
+        if raw2:
+            code2 = _extract_code(raw2)
+            err2 = _looks_like_python(code2)
+            if err2 is None and code2.strip():
+                return code2, None
+            err, code = (err2 or err), (code2 or code)
+        first_line = (code.strip().splitlines() or [""])[0][:80]
+        return None, (
+            f"AI did not return valid Python ({err}). "
+            f"First line was: {first_line!r}"
+        )
+
+    return code, None
 
 
 # ---------------------------------------------------------------------------
@@ -178,7 +217,15 @@ def _resolve_backend(backend: str, cfg) -> "str | None":
 
 def _dispatch_claude_cli(cfg, system_prompt: str, user_prompt: str,
                           project_root: str) -> "str | None":
-    """Call Claude CLI in --print mode with the combined prompt."""
+    """Call Claude CLI in --print mode with the combined prompt.
+
+    cwd is a NEUTRAL dir (~), NOT project_root: running `claude --print` inside
+    the repo loads CLAUDE.md/AGENTS.md and pushes Claude into agentic mode, where
+    a "generate a test file" task makes it try to USE its Write tool and ask for
+    permission (which it returns as prose) instead of printing the code. The
+    source is already inlined in the prompt, so project context isn't needed.
+    (Same rationale as commit-message generation — see call_claude_cli_print.)
+    """
     from helpers.claude_cli import call_claude_cli_print
     return call_claude_cli_print(
         claude_exe=cfg.claude_cli_exe,
@@ -186,7 +233,7 @@ def _dispatch_claude_cli(cfg, system_prompt: str, user_prompt: str,
         system_prompt=system_prompt,
         timeout=90,
         model=getattr(cfg, "claude_cli_model", "") or "",
-        cwd=project_root,
+        cwd=os.path.expanduser("~"),
     )
 
 
@@ -291,11 +338,37 @@ def _find_example_test(project_root: str) -> str:
 # Post-processing
 # ---------------------------------------------------------------------------
 
-def _strip_markdown_fences(text: str) -> str:
-    """Remove ```python ... ``` fences if the model wrapped its output in them."""
+_CODE_START_PREFIXES = ('"""', "'''", "import ", "from ", "#", "@", "def ", "class ")
+
+
+def _extract_code(text: str) -> str:
+    """Pull the Python source out of an LLM reply.
+
+    Handles three shapes:
+      1. A fenced ``` ```python … ``` ``` (or bare ``` ``` ```) block anywhere →
+         return the first block's body.
+      2. A prose preamble followed by code (the failure mode that wrote 8 junk
+         files) → drop leading lines until the first code-ish line.
+      3. Already-clean code → returned unchanged.
+
+    Returns the best-effort code; :func:`_looks_like_python` is the real gate.
+    """
+    if not text:
+        return ""
+    fence = re.search(r"```[A-Za-z0-9_]*\n(.*?)```", text, re.DOTALL)
+    if fence:
+        return fence.group(1).strip("\n")
     lines = text.splitlines()
-    if lines and lines[0].startswith("```"):
-        lines = lines[1:]
-    if lines and lines[-1].strip() == "```":
-        lines = lines[:-1]
-    return "\n".join(lines)
+    for i, ln in enumerate(lines):
+        if ln.lstrip().startswith(_CODE_START_PREFIXES):
+            return "\n".join(lines[i:]).strip("\n")
+    return text.strip()
+
+
+def _looks_like_python(text: str) -> "str | None":
+    """Return None if *text* parses as a Python module, else the error message."""
+    try:
+        ast.parse(text)
+        return None
+    except SyntaxError as exc:
+        return f"line {exc.lineno}: {exc.msg}"
