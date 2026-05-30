@@ -107,3 +107,46 @@ def test_no_callbacks_still_works(monkeypatch):
     _patch(monkeypatch, capture)
     assert generate_pr_draft(_cfg(), ".", base="") == _BODY
     assert capture["on_token"] is None
+
+
+# ── Phase D: diff cap scales with local context window ──────────────────────────
+
+def _capture_prompt(monkeypatch):
+    """Patch _call_llm to record the user_prompt it receives; return the recorder."""
+    seen: dict = {}
+
+    def fake_call_llm(*, cfg, system_prompt, user_prompt, max_tokens, timeout,
+                      on_token=None):
+        seen["user_prompt"] = user_prompt
+        return _BODY
+
+    monkeypatch.setattr(prd, "_call_llm", fake_call_llm)
+    return seen
+
+
+def test_local_diff_cap_scales_past_old_8000(monkeypatch):
+    """A local provider must now accept far more than the old 8000-char cap."""
+    big = "diff --git a/x b/x\n" + ("+a line of changes\n" * 4000)  # ~76 KB
+    monkeypatch.setattr(prd, "_pending_diff", lambda *a, **kw: big)
+    monkeypatch.setattr(prd, "_files_from_diff", lambda *a, **kw: [])
+    seen = _capture_prompt(monkeypatch)
+
+    cfg = _cfg(provider="ollama")          # local → scaled cap (num_ctx 16384)
+    generate_pr_draft(cfg, ".", base="")
+
+    # Old behaviour truncated to 8000 chars; scaled cap is ~36 KB.
+    assert len(seen["user_prompt"]) > 20000
+
+
+def test_explicit_max_diff_chars_overrides(monkeypatch):
+    big = "diff --git a/x b/x\n" + ("+a line\n" * 4000)
+    monkeypatch.setattr(prd, "_pending_diff", lambda *a, **kw: big)
+    monkeypatch.setattr(prd, "_files_from_diff", lambda *a, **kw: [])
+    seen = _capture_prompt(monkeypatch)
+
+    cfg = _cfg(provider="ollama")
+    cfg.raw["commit_message_llm"]["max_diff_chars"] = 5000
+    generate_pr_draft(cfg, ".", base="")
+
+    # Diff portion capped at 5000; prompt is diff + a little scaffolding.
+    assert len(seen["user_prompt"]) < 9000

@@ -174,22 +174,28 @@ def generate_pr_draft(cfg, project_path: str, base: str = "", *,
     if not diff_data or len(diff_data.strip()) < 50:
         return "Empty diff or changes too trivial to generate a structured PR description."
 
-    max_chars = cfg.raw.get("commit_message_llm", {}).get("max_diff_chars", 24000)
-    if len(diff_data) > max_chars:
-        diff_data = diff_data[:max_chars] + "\n[Diff truncated for context limits]"
-
-    # Additional cap for local providers — must run before user_prompt is assembled.
-    # Mirrors the is_local pattern in commit_messages._call_llm_for_commit_message.
+    # Unified diff cap (Phase D): the old code hard-capped local providers at
+    # 8000 chars, so a 250 KB diff fed the model only ~3% of the changes — the
+    # main reason local drafts were far worse than Claude CLI. Now the local cap
+    # SCALES with the model's context window (num_ctx): with num_ctx=16384 tokens
+    # (~4 chars/token) we reserve ~45% for grounding + system prompt + output and
+    # allow the rest (~36 KB) for the diff. Cloud keeps a 24 KB default. An
+    # explicit `max_diff_chars` always wins.
     _p = cfg.raw.get("commit_message_llm", {})
     _is_local_pre = (
         _p.get("provider") == "ollama"
         or (_p.get("provider") == "openai_compatible"
             and "localhost" in (_p.get("base_url") or ""))
     )
+    _explicit_cap = _p.get("max_diff_chars")
     if _is_local_pre:
-        _local_max = min(max_chars, 8000)
-        if len(diff_data) > _local_max:
-            diff_data = diff_data[:_local_max] + "\n[Diff truncated for local model context limit]"
+        _num_ctx = int(_p.get("num_ctx") or 16384)
+        _scaled = max(8000, int(_num_ctx * 0.55) * 4)   # ~55% of ctx → chars
+        max_chars = int(_explicit_cap) if _explicit_cap else _scaled
+    else:
+        max_chars = int(_explicit_cap) if _explicit_cap else 24000
+    if len(diff_data) > max_chars:
+        diff_data = diff_data[:max_chars] + "\n[Diff truncated for context limits]"
 
     # v4.2: build tokensave+codegraph grounding (roadmap_evidence recipe —
     # codegraph triggers `codegraph affected --stdin` on the changed-files
@@ -268,7 +274,10 @@ def generate_pr_draft(cfg, project_path: str, base: str = "", *,
             and "localhost" in (llm_cfg.get("base_url") or ""))
     )
     if _is_local and not llm_cfg.get("num_ctx"):
-        llm_cfg = {**llm_cfg, "num_ctx": 8192}
+        # Phase D: 16384 (was 8192) so a 14B-class local model can take a much
+        # larger diff (the cap above scales to this). Streaming makes the longer
+        # generation tolerable. Override via commit_message_llm.num_ctx.
+        llm_cfg = {**llm_cfg, "num_ctx": 16384}
     _max_tokens = 1500 if _is_local else 3000
     _timeout    = 300  if _is_local else 120
     _system     = _PR_SYSTEM_PROMPT_LOCAL if _is_local else _PR_SYSTEM_PROMPT

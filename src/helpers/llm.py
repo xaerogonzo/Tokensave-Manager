@@ -25,6 +25,36 @@ log = logging.getLogger(__name__)
 
 _tls = threading.local()
 
+# base_urls already probed for Ollama version (one warning per URL per process).
+_ollama_ctx_warned: set = set()
+
+
+def _warn_if_old_ollama(base_url: str) -> None:
+    """One-time best-effort check that Ollama honours top-level ``num_ctx``.
+
+    Ollama added top-level ``num_ctx`` support for ``/v1/chat/completions`` in
+    PR #6137 (~v0.3.x). Older builds silently truncate context to 4096 tokens —
+    which would quietly defeat the larger PR-draft diff budget. Probe
+    ``GET {base_url}/api/version`` once per base_url and warn if it's old.
+    Never raises (not-Ollama / unreachable → silent).
+    """
+    if not base_url or base_url in _ollama_ctx_warned:
+        return
+    _ollama_ctx_warned.add(base_url)
+    try:
+        req = urllib.request.Request(base_url.rstrip("/") + "/api/version")
+        with urllib.request.urlopen(req, timeout=3) as resp:
+            ver = (json.loads(resp.read().decode("utf-8")) or {}).get("version", "")
+        parts = [int(x) for x in str(ver).split("-")[0].split(".")[:2]]
+    except Exception:
+        return  # not Ollama, unreachable, or unparseable — stay quiet
+    if len(parts) >= 2 and (parts[0], parts[1]) < (0, 3):
+        log.warning(
+            "Ollama %s may ignore top-level num_ctx (truncates context to 4096). "
+            "Upgrade Ollama, or set `PARAMETER num_ctx` in a Modelfile and run "
+            "`ollama create` to bake in a larger context.", ver,
+        )
+
 
 def get_last_llm_error() -> "str | None":
     """Return the specific error from the most recent _call_llm call on THIS thread.
@@ -286,6 +316,8 @@ def _call_openai_compat(url: str, api_key: str, model: str,
     if num_ctx is not None:
         # Ollama extension — silently ignored by non-Ollama OpenAI-compat servers
         payload["num_ctx"] = num_ctx
+        # Advisory: warn once if this Ollama build predates top-level num_ctx.
+        _warn_if_old_ollama(url.split("/v1/")[0])
     if on_token is not None:
         payload["stream"] = True
     headers = {"Content-Type": "application/json"}
