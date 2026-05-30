@@ -826,6 +826,16 @@ class App(tk.Tk):
         files_to_add = [fname for fname, xy in selected
                         if len(xy) >= 2 and xy[1] != ' ']
 
+        # Defensive guard: a pathspec commit (`git commit -- <paths>`) silently
+        # drops any staged deletion not in <paths>. Fold currently-staged
+        # deletions into the pathspec so they're never orphaned. (Ignored-file
+        # deletions are handled durably by the untrack flow's immediate commit,
+        # so they normally won't reach here.)
+        from helpers.git import _staged_deletions
+        for _d in _staged_deletions(path, self._cfg.git_exe):
+            if _d not in all_paths:
+                all_paths.append(_d)
+
         self._git._git_begin_op()
 
         def worker():

@@ -64,6 +64,34 @@ def _find_gitignored_on_disk(path: str, git_exe: str) -> list:
             if ln.strip() and not ln.endswith("/")]
 
 
+def _staged_deletions(path: str, git_exe: str) -> list:
+    """Return repo-relative paths currently staged for deletion.
+
+    Reads ``git diff --cached --name-only --diff-filter=D`` — files that have
+    been ``git rm`` / ``git rm --cached``'d but not yet committed. Returns []
+    on any failure (not a repo, git missing, timeout).
+
+    Used in two places:
+      * ``_find_tracked_but_ignored`` — to exclude in-progress untracks from
+        the stale-ignore warning so it doesn't loop.
+      * the commit flow — to reason about staged deletions that a pathspec
+        commit would otherwise leave dangling.
+    """
+    try:
+        proc = subprocess.run(
+            [git_exe, "-C", path,
+             "diff", "--cached", "--name-only", "--diff-filter=D"],
+            capture_output=True, text=True, timeout=10,
+            encoding="utf-8", errors="replace",
+            creationflags=CREATE_NO_WINDOW,
+        )
+    except (FileNotFoundError, subprocess.TimeoutExpired):
+        return []
+    if proc.returncode != 0:
+        return []
+    return [ln.strip() for ln in proc.stdout.splitlines() if ln.strip()]
+
+
 def _find_tracked_but_ignored(path: str, git_exe: str) -> list:
     """Return a list of paths that are TRACKED by git in `path` but ALSO
     match a pattern in `.gitignore`.
@@ -104,28 +132,13 @@ def _find_tracked_but_ignored(path: str, git_exe: str) -> list:
         return []
 
     # Filter out files already staged for deletion — `git rm --cached` was
-    # run but the commit hasn't landed yet. These show as D in column 1 of
-    # `git diff --cached --name-status`. Re-prompting would create a loop
+    # run but the commit hasn't landed yet. Re-prompting would create a loop
     # where every commit attempt re-warns about a fix already in progress.
-    try:
-        del_proc = subprocess.run(
-            [git_exe, "-C", path,
-             "diff", "--cached", "--name-only", "--diff-filter=D"],
-            capture_output=True, text=True, timeout=10,
-            encoding="utf-8", errors="replace",
-            creationflags=CREATE_NO_WINDOW,
-        )
-        if del_proc.returncode == 0:
-            already_staged = {
-                ln.strip().replace("\\", "/")
-                for ln in del_proc.stdout.splitlines() if ln.strip()
-            }
-            stale = [
-                f for f in stale
-                if f.replace("\\", "/") not in already_staged
-            ]
-    except (FileNotFoundError, subprocess.TimeoutExpired):
-        pass  # If the extra check fails, return the full stale list
+    already_staged = {
+        d.replace("\\", "/") for d in _staged_deletions(path, git_exe)
+    }
+    if already_staged:
+        stale = [f for f in stale if f.replace("\\", "/") not in already_staged]
 
     return stale
 

@@ -261,15 +261,25 @@ class GitOpsController:
     # ── Worker ────────────────────────────────────────────────────────────────
 
     def _do_untrack_ignored(self, path: str, files: list) -> None:
-        """Run `git rm --cached -- <files>` in a background thread."""
+        """Untrack ignored files and commit the removal immediately.
+
+        Stages ``git rm --cached -- <files>`` then commits straight away with
+        a plain (no-pathspec) commit. This is deliberate: a pathspec commit
+        (``git commit -- <file>``) CANNOT commit a staged deletion of a file
+        that still exists on disk and matches .gitignore — git's partial-commit
+        overlay skips it and reports "nothing to commit", silently orphaning the
+        deletion. A no-pathspec commit captures exactly what we just staged
+        (the rm) and nothing else, since this is a fresh, isolated operation.
+        """
         if not files:
             return
         name = os.path.basename(path)
-        self._on_log(
-            f"Untracking {len(files)} file{'s' if len(files) != 1 else ''} in {name}…",
-            C["peach"])
+        n = len(files)
+        plural = "s" if n != 1 else ""
+        self._on_log(f"Untracking {n} file{plural} in {name}…", C["peach"])
 
         def worker():
+            committed = False
             try:
                 out, rc = self._on_shell(
                     [self._cfg.git_exe, "-C", path, "rm", "-r", "--cached", "--"] + files,
@@ -280,20 +290,37 @@ class GitOpsController:
                 if rc != 0:
                     return
                 self._on_log(
-                    f"  ✓ Untracked {len(files)} file{'s' if len(files) != 1 else ''} — "
-                    "local copies preserved",
+                    f"  ✓ Untracked {n} file{plural} — local copies preserved",
                     C["green"])
+
+                # Commit the staged removal immediately (no pathspec — see
+                # docstring). This makes the untrack durable so it can't be
+                # orphaned by a later pathspec commit or an index reset.
+                msg = (f"chore: untrack {n} ignored file{plural} "
+                       "(kept locally; matched .gitignore)")
+                cout, crc = self._on_shell(
+                    [self._cfg.git_exe, "-C", path, "commit", "-m", msg], path)
+                if crc == 0:
+                    committed = True
+                    self._on_log(f"  ✓ Committed the untrack ({msg})", C["green"])
+                else:
+                    for line in cout.strip().splitlines()[-4:]:
+                        self._on_log(f"  {line}", C["yellow"])
+                    self._on_log(
+                        "  ⚠ Could not auto-commit — the removal is staged; "
+                        "commit it manually to make it durable.",
+                        C["yellow"])
             finally:
                 self._tab.after(0, self._on_refresh)
-                # skip_stale_check=True prevents an infinite loop: _open_commit_dialog
-                # would otherwise re-run the tracked-but-ignored check, find any files
-                # the user deliberately left tracked, and prompt for Untrack again.
-                # Any remaining stale files after this point are the user's conscious
-                # choice — we should open the commit dialog, not re-prompt.
-                self._tab.after(0, lambda: self._on_commit_offer(
-                    path,
-                    f"untrack {len(files)} ignored file{'s' if len(files) != 1 else ''}",
-                    skip_stale_check=True))
+                # Only offer a follow-up commit dialog if we did NOT already
+                # commit — otherwise there's nothing left from this operation.
+                # skip_stale_check=True prevents re-prompting for any files the
+                # user deliberately left tracked.
+                if not committed:
+                    self._tab.after(0, lambda: self._on_commit_offer(
+                        path,
+                        f"untrack {n} ignored file{plural}",
+                        skip_stale_check=True))
 
         threading.Thread(target=worker, daemon=True).start()
 
