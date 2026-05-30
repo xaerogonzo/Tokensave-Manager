@@ -1237,6 +1237,15 @@ class GitTabController:
                 parent=self._root)
             return
 
+        self._open_test_gaps_window(path, base)
+
+    def _open_test_gaps_window(self, path: str, base: str,
+                               suggestions: "list | None" = None) -> None:
+        """Open the standalone 🧪 Test Gaps window for *path* vs *base*.
+
+        Shared by `cmd_show_test_gaps` (async scan) and the Claude CLI draft
+        path (passes pre-computed *suggestions* so there's no second scan).
+        """
         dlg = tk.Toplevel(self._root)
         dlg.title(f"🧪 Test Gaps — {os.path.basename(path)} vs {base.split('/')[-1]}")
         dlg.configure(bg=C["base"])
@@ -1249,13 +1258,13 @@ class GitTabController:
         hdr_row.pack(fill=tk.X, padx=12, pady=(10, 0))
         tk.Label(
             hdr_row,
-            text=f"Scanning changed files on this branch vs  {base.split('/')[-1]}…",
+            text=f"Changed files on this branch vs  {base.split('/')[-1]}",
             bg=C["base"], fg=C["subtext"],
             font=("Segoe UI", 9),
         ).pack(side=tk.LEFT)
 
         # The test gap panel fills the rest of the dialog
-        self._build_test_gap_panel(dlg, path, base)
+        self._build_test_gap_panel(dlg, path, base, suggestions=suggestions)
 
         ttk.Button(dlg, text="Close",
                    command=dlg.destroy).pack(side=tk.BOTTOM, anchor=tk.E,
@@ -1394,12 +1403,23 @@ class GitTabController:
         # Claude can copy it verbatim into PR_DRAFT.md — shell metacharacters in
         # the markdown ([, ], `, |) prevent inlining it into the instruction string,
         # so it lives in the context file alongside the grounding data.
-        from helpers.pr_draft import _render_automated_for_pr  # lazy — avoids circular import
+        from helpers.pr_draft import (  # lazy — avoids circular import
+            _render_automated_for_pr, _render_coverage_gaps)
         automated_block = _render_automated_for_pr(path)
+        # Coverage gaps (changed files lacking tests) — same filtered list the
+        # Ollama path injects, so both PR bodies carry it. Reused below to open
+        # the test-gap window after the CLI launches.
+        try:
+            from helpers.test_gap_report import suggest_tests_for_diff
+            _gap_suggestions = suggest_tests_for_diff(path, self._cfg.git_exe, base)
+        except Exception:
+            _gap_suggestions = []
+        _gaps_block = _render_coverage_gaps(_gap_suggestions)
         _checklist_tmpl = (
             "## Testing checklist\n"
             "<!-- tokensave-manager:testing-checklist v1 -->\n"
             + automated_block
+            + (("\n" + _gaps_block) if _gaps_block else "")
             + "\n### Manual (please verify before merge)\n"
             "- [ ] <one smoke check per meaningful UI flow or changed behaviour>\n"
             "- [ ] <2-5 bullets total>\n"
@@ -1464,7 +1484,14 @@ class GitTabController:
             model=self._cfg.claude_cli_model,
         )
         if not ok:
+            # Primary action failed — surface the error and STOP; don't pop the
+            # secondary test-gap window into a disjoint "failed but soliciting" state.
             messagebox.showerror("Claude Code CLI error", err, parent=self._root)
+            return
+        # CLI launched (non-blocking Popen) — open the manager's test-gap window
+        # so CLI users get the same coverage visibility the Ollama dialog has.
+        if base and _gap_suggestions:
+            self._open_test_gaps_window(path, base, suggestions=_gap_suggestions)
 
     def _build_pr_grounding(self, path: str, base: str) -> "tuple[str, bool]":
         """Pre-build the tokensave + codegraph grounding block for a CLI PR draft.
@@ -1954,6 +1981,16 @@ class GitTabController:
                 state=tk.NORMAL if ai_available else tk.DISABLED,
             )
             ai_chk.pack(side=tk.RIGHT)
+
+            # Proactive nudge — make the call-to-action explicit (nothing is
+            # forced; the buttons below write files only when clicked).
+            tk.Label(
+                parent,
+                text=(f"{len(suggestions)} changed file(s) lack tests — select below "
+                      "and click 📝 Generate stubs or ✨ AI generate to close the gap."),
+                font=("Segoe UI", 8), bg=C["surface0"], fg=C["subtext"],
+                anchor="w", justify=tk.LEFT, wraplength=560,
+            ).pack(fill=tk.X, padx=10, pady=(0, 2))
 
             # Scrollable checkbox list
             scroll_outer = tk.Frame(parent, bg=C["surface0"])
