@@ -15,6 +15,8 @@ import logging
 import os
 import re
 import threading
+import uuid
+from dataclasses import dataclass
 
 log = logging.getLogger(__name__)
 
@@ -105,6 +107,26 @@ Reply again with ONLY the corrected Python source of the test file — no prose,
 no markdown fences, no commentary, no tool use. Start with the module docstring.
 """
 
+# Appended to the user prompt on a runtime-failure repair pass: the generated
+# test parsed fine but FAILED when actually run under pytest.
+_RUNTIME_REPAIR_TEMPLATE = """\
+The test file you generated parsed fine but FAILED when run under pytest:
+
+--- pytest output ---
+{report}
+--- end output ---
+
+Here is the file you wrote:
+```python
+{prior}
+```
+
+Reply with ONLY the corrected, full Python source of the test file that makes
+the test pass — fix the failure (imports, fixtures, assertions, mocking at the
+import site). No prose, no markdown fences, no commentary. Start with the
+module docstring.
+"""
+
 
 # ---------------------------------------------------------------------------
 # Public API
@@ -155,9 +177,7 @@ def generate_ai_test_content(
         return None, "Cancelled."
 
     def _run(up: str) -> "str | None":
-        if effective_backend == "claude_cli":
-            return _dispatch_claude_cli(cfg, system_prompt, up, project_root)
-        return _dispatch_llm(cfg, system_prompt, up)
+        return _dispatch(effective_backend, cfg, system_prompt, up, project_root)
 
     # First attempt.
     raw = _run(user_prompt)
@@ -191,9 +211,131 @@ def generate_ai_test_content(
     return code, None
 
 
+@dataclass
+class VerifiedResult:
+    """Outcome of generate-then-verify for one source file.
+
+    status ∈ {"pass", "fail", "error", "cancelled"}:
+      * pass      — generated, ran, all assertions passed; file was WRITTEN.
+      * fail      — generated valid Python but it failed when run (after one
+                    runtime-repair attempt); NOTHING was written (discarded).
+      * error     — could not generate valid Python at all (backend/syntax).
+      * cancelled — cancel_event fired mid-flow.
+    report holds the last pytest output (for a "View failures" surface).
+    """
+    content: "str | None"
+    status: str
+    report: str = ""
+
+
+def generate_verified_test(
+    source_path: str,
+    project_root: str,
+    backend: str,
+    cfg,
+    cancel_event: "threading.Event | None" = None,
+    run: bool = True,
+    max_runtime_repairs: int = 1,
+) -> VerifiedResult:
+    """Generate a test, RUN it, repair once on failure, keep only if it passes.
+
+    Builds on :func:`generate_ai_test_content` (which already guarantees valid
+    Python via the ast gate + one syntax repair). Then writes the candidate to a
+    throwaway ``tests/test__aigen_<base>_<uuid>.py`` and runs it in isolation:
+      * pass → ``os.replace`` it onto the real ``test_<base>.py`` and return "pass".
+      * fail → re-prompt once with the pytest output, re-validate, re-run.
+      * still failing → DELETE the temp file and return "fail" (discard — a
+        failing test is worse than none).
+
+    The temp file is always cleaned up in ``finally`` so no ``test__aigen_*``
+    debris is left on any path. Caller writes nothing — this function owns the
+    write/discard decision.
+    """
+    if cancel_event and cancel_event.is_set():
+        return VerifiedResult(None, "cancelled", "")
+
+    content, err = generate_ai_test_content(
+        source_path, project_root, backend, cfg, cancel_event)
+    if err or not content:
+        return VerifiedResult(None, "error", err or "AI returned no content.")
+    if not run:
+        return VerifiedResult(content, "pass", "")
+    if cancel_event and cancel_event.is_set():
+        return VerifiedResult(None, "cancelled", "")
+
+    from helpers import smoke_runner          # lazy — avoids import cycle
+    from helpers.test_scaffold import _test_filename_for
+
+    tests_dir = os.path.join(project_root, "tests")
+    base = os.path.splitext(os.path.basename(source_path))[0]
+    tmp_name = f"test__aigen_{base}_{uuid.uuid4().hex[:8]}.py"
+    tmp_path = os.path.join(tests_dir, tmp_name)
+    tmp_rel = os.path.join("tests", tmp_name)
+
+    effective_backend = _resolve_backend(backend, cfg)
+    try:
+        system_prompt, user_prompt = _build_prompts(source_path, project_root, 8_000)
+    except Exception:
+        system_prompt = user_prompt = ""
+
+    last_report = ""
+    try:
+        os.makedirs(tests_dir, exist_ok=True)
+        attempts = max(1, max_runtime_repairs + 1)
+        for attempt in range(attempts):
+            if cancel_event and cancel_event.is_set():
+                return VerifiedResult(None, "cancelled", last_report)
+            with open(tmp_path, "w", encoding="utf-8", newline="\n") as fh:
+                fh.write(content)
+            passed, output = smoke_runner.run_single_test_file(project_root, tmp_rel)
+            last_report = output
+            if passed:
+                final_name = _test_filename_for(source_path, project_root)
+                final_path = os.path.join(tests_dir, final_name)
+                if os.path.exists(final_path):
+                    # Safety net only — suggest_tests_for_diff lists untested
+                    # files, so this normally can't happen from the panel.
+                    return VerifiedResult(
+                        content, "fail",
+                        f"Target {final_name} already exists; not overwriting.")
+                os.replace(tmp_path, final_path)
+                return VerifiedResult(content, "pass", output)
+
+            # Failed. Stop if out of repair budget or can't re-dispatch.
+            if attempt >= attempts - 1 or effective_backend is None or not system_prompt:
+                break
+            if cancel_event and cancel_event.is_set():
+                return VerifiedResult(None, "cancelled", last_report)
+            repair_up = user_prompt + "\n\n" + _RUNTIME_REPAIR_TEMPLATE.format(
+                report=(output or "")[-4000:], prior=content)
+            raw = _dispatch(effective_backend, cfg, system_prompt, repair_up, project_root)
+            if not raw:
+                break
+            fixed = _extract_code(raw)
+            if not fixed.strip() or _looks_like_python(fixed) is not None:
+                break  # repair produced non-Python → don't run garbage
+            content = fixed
+
+        return VerifiedResult(content, "fail", last_report)   # discarded
+    finally:
+        try:
+            if os.path.exists(tmp_path):
+                os.remove(tmp_path)
+        except OSError:
+            pass
+
+
 # ---------------------------------------------------------------------------
 # Backend dispatch
 # ---------------------------------------------------------------------------
+
+
+def _dispatch(effective_backend: str, cfg, system_prompt: str,
+              user_prompt: str, project_root: str) -> "str | None":
+    """Route one prompt to the resolved backend. Shared by generate + repair."""
+    if effective_backend == "claude_cli":
+        return _dispatch_claude_cli(cfg, system_prompt, user_prompt, project_root)
+    return _dispatch_llm(cfg, system_prompt, user_prompt)
 
 def _resolve_backend(backend: str, cfg) -> "str | None":
     """Return the concrete backend to use, or None if nothing is configured."""

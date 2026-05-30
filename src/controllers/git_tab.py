@@ -2057,9 +2057,15 @@ class GitTabController:
                 _w.bind("<MouseWheel>", _on_wheel)
 
             check_vars: list[tk.BooleanVar] = []
+            status_vars: list[tk.StringVar] = []
             for sg in suggestions:
-                var = tk.BooleanVar(value=True)
+                # Pre-check only files worth an automated test (pure/subprocess
+                # helpers). dialog_tk/blank start unchecked — low ROI, and AI
+                # tends to produce non-passing Tk tests.
+                var = tk.BooleanVar(value=sg.requires_automation)
                 check_vars.append(var)
+                svar = tk.StringVar(value="")   # per-row ⏳ / ✓ / ✗
+                status_vars.append(svar)
                 row = tk.Frame(list_frame, bg=C["surface0"])
                 row.pack(fill=tk.X, pady=1)
                 themed_checkbutton(
@@ -2076,6 +2082,11 @@ class GitTabController:
                     bg=C["surface0"], fg=C["overlay0"],
                     font=("Segoe UI", 8),
                 ).pack(side=tk.LEFT, padx=(4, 0))
+                tk.Label(
+                    row, textvariable=svar,
+                    bg=C["surface0"], fg=C["subtext"],
+                    font=("Segoe UI", 9),
+                ).pack(side=tk.LEFT, padx=(6, 0))
 
             # Action buttons
             act_row = tk.Frame(parent, bg=C["surface0"])
@@ -2100,11 +2111,17 @@ class GitTabController:
             )
             stub_btn.pack(side=tk.RIGHT, padx=(4, 0))
 
+            fail_btn = ttk.Button(
+                act_row, text="View failures…", state=tk.DISABLED,
+                command=lambda: self._show_ai_failures(dlg),
+            )
+            fail_btn.pack(side=tk.RIGHT, padx=(4, 0))
+
             ai_btn = ttk.Button(
                 act_row, text="✨ AI generate selected",
                 command=lambda: self._gap_generate_ai(
-                    suggestions, check_vars, path,
-                    status_var, stub_btn, ai_btn, ai_enabled_var,
+                    suggestions, check_vars, status_vars, path,
+                    status_var, stub_btn, ai_btn, fail_btn, ai_enabled_var,
                     cancel_event, dlg),
             )
             ai_btn.pack(side=tk.RIGHT, padx=(4, 0))
@@ -2184,83 +2201,91 @@ class GitTabController:
         threading.Thread(target=_run, daemon=True).start()
 
     def _gap_generate_ai(
-        self, suggestions: list, check_vars: list, path: str,
-        status_var: tk.StringVar, stub_btn, ai_btn,
+        self, suggestions: list, check_vars: list, status_vars: list, path: str,
+        status_var: tk.StringVar, stub_btn, ai_btn, fail_btn,
         ai_enabled_var: tk.BooleanVar,
         cancel_event: "threading.Event", dlg: tk.Toplevel,
     ) -> None:
-        """AI-generate test content for all checked entries."""
+        """Generate + VERIFY a test per checked entry; keep only passing tests.
+
+        Each selected file goes through generate_verified_test: generate (valid
+        Python guaranteed) → run under pytest → repair once on failure → write
+        only if it passes, else discard. Per-row ⏳/✓/✗ + a summary; discarded
+        files' pytest output is stashed for the "View failures…" button.
+        """
         import threading
-        from helpers.test_gen_llm import generate_ai_test_content
+        from helpers.test_gen_llm import generate_verified_test
 
         if not ai_enabled_var.get():
             status_var.set("AI generation is disabled.")
             return
 
-        selected = [sg for sg, v in zip(suggestions, check_vars) if v.get()]
+        selected = [(i, sg) for i, (sg, v) in enumerate(zip(suggestions, check_vars))
+                    if v.get()]
         if not selected:
             status_var.set("Nothing selected.")
             return
 
+        cancel_event.clear()           # fresh run (Event is reused across clicks)
         stub_btn.configure(state=tk.DISABLED)
         ai_btn.configure(state=tk.DISABLED)
-        captured_root = path   # snapshot project root at button-press time
+        fail_btn.configure(state=tk.DISABLED)
+        captured_root = path           # snapshot project root at button-press time
+
+        def _set_row(idx: int, glyph: str) -> None:
+            if dlg.winfo_exists():
+                dlg.after(0, lambda: status_vars[idx].set(glyph))
+
+        def _set_status(text: str) -> None:
+            if dlg.winfo_exists():
+                dlg.after(0, lambda: status_var.set(text))
 
         def _run():
             n = len(selected)
-            for i, sg in enumerate(selected, 1):
+            passed = failed = 0
+            reports: dict = {}
+            for k, (idx, sg) in enumerate(selected, 1):
                 if cancel_event.is_set():
                     break
-                if dlg.winfo_exists():
-                    dlg.after(0, lambda i=i, n=n: status_var.set(
-                        f"Generating {i}/{n}…"))
-                content, err = generate_ai_test_content(
+                _set_row(idx, "⏳")
+                _set_status(f"Verifying {k}/{n}…  (generate → run → repair)")
+                res = generate_verified_test(
                     sg.source_path, captured_root,
                     backend="auto", cfg=self._cfg,
                     cancel_event=cancel_event,
                 )
-                if cancel_event.is_set():
+                if res.status == "cancelled":
                     break
-                if err or not content:
-                    if dlg.winfo_exists():
-                        dlg.after(0, lambda e=err or "No output": status_var.set(
-                            f"Error: {e}"))
-                    continue
-                # Write to disk
-                from helpers.test_scaffold import _test_filename_for
-                try:
-                    out_path = os.path.join(
-                        captured_root, "tests",
-                        _test_filename_for(sg.source_path, captured_root),
-                    )
-                    os.makedirs(os.path.dirname(out_path), exist_ok=True)
-                    with open(out_path, "w", encoding="utf-8", newline="\n") as fh:
-                        fh.write(content)
+                if res.status == "pass":
+                    passed += 1
+                    _set_row(idx, "✓")
                     self._on_log(
-                        f"  AI test stub written: {os.path.basename(out_path)}",
-                        C["green"])
-                except OSError as exc:
-                    if dlg.winfo_exists():
-                        dlg.after(0, lambda e=str(exc): status_var.set(
-                            f"Write error: {e}"))
-
+                        f"  ✓ AI test written + passing: {sg.rel_path}", C["green"])
+                else:
+                    failed += 1
+                    reports[sg.rel_path] = res.report or res.status
+                    _set_row(idx, "✗")
+                    self._on_log(
+                        f"  ✗ AI test discarded ({res.status}): {sg.rel_path}",
+                        C["yellow"])
+            self._last_ai_fail_reports = reports
             if dlg.winfo_exists():
-                dlg.after(0, _done)
+                dlg.after(0, lambda: _done(passed, failed))
 
-        def _done() -> None:
+        def _done(passed: int, failed: int) -> None:
             if not dlg.winfo_exists():
-                return
-            # Guard: only refresh if same project is still active
-            if captured_root != self._git_path:
                 return
             stub_btn.configure(state=tk.NORMAL)
             ai_btn.configure(state=tk.NORMAL)
+            fail_btn.configure(state=(tk.NORMAL if failed else tk.DISABLED))
             if cancel_event.is_set():
-                status_var.set("Cancelled.")
+                status_var.set(f"Cancelled — {passed} ✓ / {failed} ✗ so far.")
             else:
-                status_var.set("AI generation complete.")
+                status_var.set(
+                    f"Done: {passed} ✓ / {failed} ✗ — only passing tests were written.")
             # Refresh Test Manager if still open and same project
-            if (self._test_manager_ref is not None
+            if (captured_root == self._git_path
+                    and self._test_manager_ref is not None
                     and self._test_manager_ref.winfo_exists()):
                 try:
                     self._test_manager_ref.refresh_coverage()
@@ -2268,6 +2293,31 @@ class GitTabController:
                     pass
 
         threading.Thread(target=_run, daemon=True).start()
+
+    def _show_ai_failures(self, parent) -> None:
+        """Read-only window with the last AI run's discarded-test pytest output."""
+        from tkinter import scrolledtext
+        reports = getattr(self, "_last_ai_fail_reports", {}) or {}
+        win = tk.Toplevel(parent)
+        win.title("AI test generation — failures")
+        win.configure(bg=C["base"])
+        win.geometry("800x540")
+        st = scrolledtext.ScrolledText(
+            win, wrap=tk.NONE, bg=C["mantle"], fg=C["text"],
+            font=("Consolas", 9), relief=tk.FLAT, padx=8, pady=6)
+        st.pack(fill=tk.BOTH, expand=True, padx=10, pady=(10, 4))
+        if not reports:
+            st.insert(tk.END, "No failures recorded for the last run.")
+        else:
+            st.insert(tk.END,
+                      f"{len(reports)} test(s) were generated but discarded because "
+                      "they failed when run.\nFix the source or the test, then "
+                      "re-run AI generate.\n\n")
+            for rel, rep in reports.items():
+                st.insert(tk.END, f"{'=' * 72}\n✗ {rel}\n{'=' * 72}\n{rep}\n\n")
+        st.configure(state=tk.DISABLED)            # read-only
+        ttk.Button(win, text="Close", command=win.destroy).pack(
+            side=tk.BOTTOM, anchor=tk.E, padx=10, pady=(0, 10))
 
     def _open_pr_via_gh(self, gh_exe: str, path: str, body_text: str, dlg) -> None:
         """Write body to a temp file and spawn `gh pr create --web --body-file`.

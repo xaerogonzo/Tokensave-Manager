@@ -87,6 +87,47 @@ def run_smoke_tests(project_root: str) -> tuple[int, int, str]:
     return passed, total, combined
 
 
+def run_single_test_file(project_root: str, test_relpath: str,
+                         timeout: int = 20) -> "tuple[bool, str]":
+    """Run ONE pytest file and return ``(passed, combined_output)``.
+
+    Used by the generate-then-verify loop: a freshly AI-generated test is run in
+    isolation; only tests that pass are kept.
+
+    ``passed`` is True ONLY when pytest exits 0 (ran AND all passed). pytest exits
+    non-zero on failures (1), no-tests-collected (5), and usage/marker errors (4) —
+    all correctly count as not-passing.
+
+    ``timeout`` is deliberately short (20s, decoupled from the LLM timeouts): a
+    unit test that infinite-loops or triggers ``mainloop()`` is caught fast
+    instead of hanging the worker. ``--tb=short --no-header`` keeps the traceback
+    compact for the repair prompt (``--tb=short`` is already the project default,
+    passed explicitly here in case ``addopts`` ever changes).
+
+    Source-mode only: ``sys.executable -m pytest`` assumes a real Python
+    interpreter (same assumption as ``run_smoke_tests``). Under a frozen build it
+    returns ``(False, <error>)``, which the caller treats as a normal failure.
+    """
+    try:
+        proc = subprocess.run(
+            [sys.executable, "-m", "pytest", test_relpath,
+             "--tb=short", "--no-header"],
+            capture_output=True, text=True,
+            encoding="utf-8", errors="replace",
+            cwd=project_root,
+            timeout=timeout,
+            creationflags=_CREATE_NO_WINDOW,
+        )
+    except subprocess.TimeoutExpired:
+        return False, (f"TIMEOUT after {timeout}s — the test likely has an "
+                       "infinite loop, a blocking call, or starts a Tk mainloop.")
+    except OSError as exc:
+        return False, f"Failed to launch pytest: {exc}"
+
+    combined = (proc.stdout or "") + (proc.stderr or "")
+    return proc.returncode == 0, combined
+
+
 # ── V-E: cancellable background pytest runner ──────────────────────────────
 
 class PytestRun:
