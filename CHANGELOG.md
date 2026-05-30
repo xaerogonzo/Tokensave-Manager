@@ -3,6 +3,37 @@
 
 ## [Unreleased]
 
+### Added — v4.15 (Roadmap-7.5-Audit: streaming PR draft + coverage hardening, 2026-05-30)
+
+**Streaming PR-draft dialog (Ollama / API path)**
+- (git-tab) The Draft PR dialog now **opens immediately and streams tokens** as the model writes — no more multi-minute blank wait. The worker pushes deltas into a `queue.Queue`; a single `_poll_pr_stream()` `after(50)` loop drains it with a bounded per-tick budget (mirrors the existing `_log_queue`/`_poll_log_queue` pattern) and auto-scrolls **only when the user is already at the bottom** (`vsb.get()[1] >= 0.98`). Wired through `generate_pr_draft`'s new `on_token`/`on_status` callbacks (forwarded to `_call_llm`, which already supports SSE streaming). (`src/controllers/git_tab.py`, `src/helpers/pr_draft.py`)
+- (git-tab) **Standalone window** — the dialog drops `transient()` so it gets native min/max **and its own Windows taskbar entry** (alt-tab-able, never lost behind the main app; `lift()`/`focus_force()` on show). A **non-destructive singleton + dirty-guard**: re-triggering Draft PR brings the existing window to front and, if it's mid-stream or has unsaved edits (`<<Modified>>`, re-armed via `edit_modified(False)`, programmatic inserts guarded), asks before discarding. `<Destroy>` resets the tracker — no insert-on-dead-widget `TclError`.
+- (git-tab) **Layout fix** — text + scrollbars now live in their own `grid` frame (corner-to-corner) with the button bar **pinned to the bottom**, so **Copy / Create PR on GitHub / Open in Browser are always visible** (they were previously squeezed off-screen on tall windows). Buttons enable on completion.
+- (git-tab) **Grounding badge** — the dialog header shows "✓ Grounded: tokensave + codegraph" (or "not grounded") and the status line surfaces the phase (grounding → generating), so it's visible that the draft is grounded.
+- (pr-draft) **Coverage-gaps checklist** — both the Ollama and Claude CLI PR bodies now carry a `### Coverage gaps (changed files with no test file)` subsection (ordering Automated < Coverage gaps < Manual). `_render_coverage_gaps` filters to `SuggestedTest.requires_automation` (pure/subprocess helpers only — Tk-dialog files stay in the local panel), escapes backticks in paths, and is spliced via `_inject_coverage_gaps` on both local and cloud paths. Suggestions are computed **once** in the controller and reused for both the body and the panel (no duplicate coverage scan). (`src/helpers/pr_draft.py`, `src/controllers/git_tab.py`)
+- (git-tab) **CLI path parity** — after `spawn_claude_cli` returns `ok`, the manager opens the standalone test-gap window (extracted `_open_test_gaps_window`, shared with `cmd_show_test_gaps`) so CLI users get the same coverage visibility; on launch failure it shows the error and stops. The test-gap panel gained a proactive nudge line.
+
+**Ollama draft quality (the real lever)**
+- (pr-draft) **Diff budget now scales with the model context window.** The local diff was hard-capped at 8000 chars, so a ~250 KB diff fed the model ~3% of the changes — the dominant reason local drafts were far worse than Claude CLI. The cap now scales with `num_ctx` (~55% of the window in chars, ~36 KB at `num_ctx=16384`); cloud keeps 24 KB; an explicit `commit_message_llm.max_diff_chars` always wins. Local `num_ctx` default raised 8192 → 16384. (`src/helpers/pr_draft.py`)
+- (llm) **`_warn_if_old_ollama`** — one-time best-effort `GET /api/version` probe; warns (and recommends the Modelfile `PARAMETER num_ctx` fallback) if the Ollama build predates top-level `num_ctx` support (PR #6137, ~v0.3.x). Never raises. (`src/helpers/llm.py`)
+
+**Test coverage + CI gate**
+- (tests) New `test_claude_cli.py` (14), `test_runtime.py` (5), `test_git_staged_deletions.py` (4), `test_branch_diff_encoding.py` (2), `test_pr_draft_streaming.py` (7), `test_integration_fix_summary.py` (5), plus coverage-gap/injection cases in `test_pr_draft.py`. Suite ~351 → 419.
+- (ci) `test-gate` now runs `pytest --cov=src`, emits a coverage summary to `$GITHUB_STEP_SUMMARY` (partial-data-aware), uploads `coverage.xml` (`if-no-files-found: ignore`), and enforces `--cov-fail-under=14`. `pytest-cov>=4.0` added to `requirements-dev.txt`. (`.github/workflows/ci.yml`)
+
+**UI theming**
+- (theme) **`themed_checkbutton`** — all 16 `tk.Checkbutton` call sites now use custom `PhotoImage` indicators (visible grey box unchecked, white box + dark checkmark checked) so checkboxes are legible on the dark theme regardless of the Windows native renderer. (`src/theme.py` + 10 dialog/controller files)
+- (git-tab) Test Gaps panel made **scrollable** (Canvas + scrollbar + mousewheel) and the dialog resizable, so long gap lists aren't clipped.
+
+**Integration check**
+- (update-poller) The Tokensave integration-check dialog is now a **single window** (re-runs / Apply Fixes replace it instead of stacking), and **Apply Fixes reports what changed** — a summary modal lists stubs created / issues archived, or states clearly that nothing needed doing. New `_summarize_fix_output` pure parser. (`src/controllers/update_poller.py`)
+
+### Fixed — v4.15
+- (pr-draft) **Draft PR via Ollama/API reported a bogus "empty diff".** `_branch_diff` ran `git diff` with `text=True` but no explicit encoding, so on Windows it decoded with cp1252 and raised `UnicodeDecodeError` the moment a diff contained an unmappable byte (e.g. emoji / box-drawing). The swallowed exception surfaced as "empty diff". Now decodes UTF-8 with `errors="replace"` on all three `check_output` calls; `_detect_base_branch` and `_changed_src_files` hardened the same way. The CLI path was always immune (it never decodes through Python). (`src/helpers/pr_draft.py`, `src/controllers/git_tab.py`, `src/helpers/test_gap_report.py`)
+- (git-tab) **"Untrack Ignored Files" is now durable.** The flow staged `git rm --cached` but deferred the commit to a pathspec commit, which silently drops a staged deletion not in the pathspec — and cannot commit a staged deletion of a still-on-disk ignored file at all. The untrack now commits immediately with a plain (no-pathspec) commit; `_do_git_commit` also folds any staged deletions into its pathspec as a guard. New `helpers.git._staged_deletions` (also used to exclude in-progress untracks from the stale-ignore warning so it stops looping). (`src/controllers/git_ops_ctrl.py`, `src/app.py`, `src/helpers/git.py`)
+- (repo) Untracked `.coverage` (now produced by `pytest --cov`) and `.codegraph/daemon.pid` (machine-local runtime state) from git; added the matching `.gitignore` / `.codegraph/.gitignore` rules.
+- (install-codegraph) `update_codegraph` now appends a friendly note when npm emits harmless Windows EPERM cleanup warnings (old `better_sqlite3.node` still locked by the running daemon) so the warning isn't mistaken for a failed update. (`src/helpers/install_codegraph.py`)
+
 ### Added — v4.14 (Roadmap 7.5: PR base override + AI test pipeline, 2026-05-27)
 
 **PR base branch override**
