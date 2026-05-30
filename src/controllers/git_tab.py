@@ -163,6 +163,11 @@ class GitTabController:
         # the dialog is opened so the test-gap panel can refresh coverage.
         # None when the dialog has not been opened or has been destroyed.
         self._test_manager_ref            = None
+        # Single live PR-draft dialog (standalone window). Tracked so re-drafts
+        # bring it to front / replace it instead of stacking. _pr_draft_dirty is
+        # True while a stream is in flight or the user has edited the draft.
+        self._pr_draft_dialog             = None
+        self._pr_draft_dirty: bool        = False
         self._tab = tk.Frame(notebook, bg=C["base"])
         notebook.add(self._tab, text="  Git  ")
         # Phase 4 (Roadmap-2): branch new/switch/merge/delete extracted into a
@@ -1556,153 +1561,193 @@ class GitTabController:
             return
 
         provider = llm_cfg.get("provider", "ollama")
-        _wait_hint = ("may take several minutes"
-                      if provider in ("ollama", "openai_compatible")
-                      else "may take 30–120 s")
-        self._on_log(
-            f"  Drafting PR description via {provider}… ({_wait_hint})",
-            C["blue"])
+        self._on_log(f"  Drafting PR description via {provider}…", C["blue"])
+
+        # Open the streaming dialog immediately (standalone window). Returns the
+        # context dict, or None if the user declined to discard a dirty draft.
+        ctx = self._open_pr_draft_dialog(path, base or "", provider)
+        if ctx is None:
+            return
+
         _start_time = time.monotonic()
+        q = ctx["queue"]
 
         def _fetch():
-            from helpers.pr_draft import generate_pr_draft
+            from helpers.pr_draft import generate_pr_draft, _render_coverage_gaps
             from helpers.llm import get_last_llm_error
+            # Compute test-gap suggestions ONCE — reused for the body checklist
+            # AND the panel (avoids a duplicate whole-tree coverage scan).
             try:
-                result = generate_pr_draft(self._cfg, path, base=base or "")
+                from helpers.test_gap_report import suggest_tests_for_diff
+                suggestions = suggest_tests_for_diff(path, self._cfg.git_exe, base or "")
+            except Exception:
+                suggestions = []
+            try:
+                gaps_md = _render_coverage_gaps(suggestions)
+            except Exception:
+                gaps_md = ""
+
+            try:
+                result = generate_pr_draft(
+                    self._cfg, path, base=base or "",
+                    on_token=lambda d: q.put(("token", d)),
+                    on_status=lambda p: q.put(("status", p)),
+                    coverage_gaps_md=gaps_md,
+                )
                 err = None
             except Exception as exc:
-                result = None
-                err = str(exc)
-            # Capture on the worker thread — _tls.last_error is thread-local
-            llm_diag = get_last_llm_error() if (result is None and err is None) else None
-
-            def _show(text=result, error=err, _diag=llm_diag):
-                elapsed = int(time.monotonic() - _start_time)
-                if not self._tab.winfo_exists():
-                    return
-                if error:
-                    self._on_log(f"  ✗ PR draft failed ({elapsed}s): {error}", C["red"])
-                    messagebox.showerror("Draft PR — error", error, parent=self._root)
-                    return
-                if text is None:
-                    reason = _diag or "LLM returned no output"
-                    self._on_log(f"  ✗ PR draft: no LLM response ({elapsed}s)", C["red"])
-                    messagebox.showerror(
-                        "Draft PR — no response from LLM",
-                        f"{reason}\n\n"
-                        f"Provider: {provider}\n"
-                        f"Elapsed: {elapsed}s\n\n"
-                        "Check Settings → Commit Message LLM and verify:\n"
-                        "• The service is running\n"
-                        "• The model name is correct\n"
-                        "• The model is downloaded (ollama pull <model>)",
-                        parent=self._root)
-                    return
-                if text.startswith("Empty diff"):
-                    self._on_log(f"  ✗ PR draft: empty diff ({elapsed}s)", C["yellow"])
-                    messagebox.showwarning(
-                        "Draft PR — no diff found",
-                        f"{text}\n\n"
-                        f"Base branch used: {base!r}\n\n"
-                        "If this is wrong, right-click → Set PR base branch…\n"
-                        "to configure a different merge target.",
-                        parent=self._root,
-                    )
-                    return
-                self._on_log(f"  ✓ PR draft ready ({elapsed}s)", C["green"])
-                self._show_pr_draft_dialog(text, path, base=base or "")
-
-            self._tab.after(0, _show)
+                result, err = None, str(exc)
+            # Capture on the worker thread — _tls.last_error is thread-local.
+            diag = get_last_llm_error() if (result is None and err is None) else None
+            q.put(("done", {
+                "result": result, "err": err, "diag": diag,
+                "suggestions": suggestions,
+                "elapsed": int(time.monotonic() - _start_time),
+            }))
 
         threading.Thread(target=_fetch, daemon=True).start()
+        self._poll_pr_stream(ctx)
 
-    def _show_pr_draft_dialog(self, text: "str | None", path: str, base: str = ""):
-        if not self._tab.winfo_exists():
-            return
-        if not text:
-            messagebox.showinfo(
-                "Draft PR",
-                "No response from AI.\n\nCheck Settings → Commit Message LLM.",
-                parent=self._root)
-            return
+    @staticmethod
+    def _pr_status_label(phase: str) -> str:
+        """Map a generate_pr_draft on_status phase to a human status line."""
+        return {
+            "grounding":  "Grounding with tokensave + codegraph…",
+            "generating": "Generating draft… (streaming)",
+        }.get(phase, phase)
+
+    def _open_pr_draft_dialog(self, path: str, base: str, provider: str = ""):
+        """Open the standalone streaming PR-draft window; return its context dict.
+
+        Standalone (no `transient`) → native min/max + its own taskbar entry, so
+        it's alt-tab-able and never lost behind the main window. Singleton: a
+        prior dialog is brought to front and — if dirty (streaming or user edits)
+        — the user is asked before it's discarded. Returns the ctx dict, or None
+        if the user declined to discard a dirty draft.
+        """
+        existing = self._pr_draft_dialog
+        if existing is not None:
+            try:
+                alive = bool(existing.winfo_exists())
+            except tk.TclError:
+                alive = False
+            if alive:
+                existing.lift()
+                try:
+                    existing.focus_force()
+                except tk.TclError:
+                    pass
+                if self._pr_draft_dirty and not messagebox.askyesno(
+                        "Unsaved PR draft",
+                        "The current PR draft is still generating or has unsaved "
+                        "edits.\n\nDiscard it and start a new draft?",
+                        parent=existing):
+                    return None
+                existing.destroy()
+            self._pr_draft_dialog = None
+
         dlg = tk.Toplevel(self._root)
+        self._pr_draft_dialog = dlg
+        self._pr_draft_dirty = True            # streaming in progress
         dlg.title("PR Description Draft")
         dlg.configure(bg=C["base"])
         dlg.resizable(True, True)
-        dlg.minsize(600, 400)
-        dlg.transient(self._root)
+        dlg.minsize(620, 460)
+        # NO transient() → standalone window with native min/max + a taskbar entry.
+        dlg.lift()
+        try:
+            dlg.focus_force()
+        except tk.TclError:
+            pass
 
-        txt = tk.Text(dlg, wrap=tk.NONE, bg=C["mantle"], fg=C["text"],
+        def _on_destroy(e, _d=dlg):
+            if e.widget is _d:
+                self._pr_draft_dialog = None
+                self._pr_draft_dirty = False
+        dlg.bind("<Destroy>", _on_destroy, add="+")
+
+        prog = [False]        # programmatic-insert guard (mutable for closures)
+        streamed = [False]    # first real token clears the placeholder
+        gh_exe = shutil.which("gh")
+
+        # ── Header: status + grounding badge ──
+        hdr = tk.Frame(dlg, bg=C["base"])
+        status_var = tk.StringVar(value="Preparing…")
+        tk.Label(hdr, textvariable=status_var, bg=C["base"], fg=C["blue"],
+                 font=("Segoe UI", 9, "bold")).pack(side=tk.LEFT, padx=12, pady=(8, 0))
+        grounded = bool(self._cfg.enable_pr_grounding and
+                        (self._cfg.tokensave_exe or self._cfg.codegraph_exe))
+        badge_var = tk.StringVar(
+            value="✓ Grounded: tokensave + codegraph" if grounded else "not grounded")
+        tk.Label(hdr, textvariable=badge_var, bg=C["base"],
+                 fg=(C["green"] if grounded else C["overlay0"]),
+                 font=("Segoe UI", 8)).pack(side=tk.RIGHT, padx=12, pady=(8, 0))
+
+        # ── Body: text + scrollbars in their own grid frame (corner-to-corner) ──
+        body = tk.Frame(dlg, bg=C["base"])
+        txt = tk.Text(body, wrap=tk.NONE, bg=C["mantle"], fg=C["text"],
                       font=("Consolas", 9), relief=tk.FLAT, padx=8, pady=6)
-        vsb = ttk.Scrollbar(dlg, orient="vertical",   command=txt.yview)
-        hsb = ttk.Scrollbar(dlg, orient="horizontal", command=txt.xview)
+        vsb = ttk.Scrollbar(body, orient="vertical",   command=txt.yview)
+        hsb = ttk.Scrollbar(body, orient="horizontal", command=txt.xview)
         txt.configure(yscrollcommand=vsb.set, xscrollcommand=hsb.set)
-        txt.insert(tk.END, text)
+        txt.grid(row=0, column=0, sticky="nsew")
+        vsb.grid(row=0, column=1, sticky="ns")
+        hsb.grid(row=1, column=0, sticky="ew")
+        body.rowconfigure(0, weight=1)
+        body.columnconfigure(0, weight=1)
+        txt.insert(tk.END, "Drafting… the description will stream in here.\n")
         txt.configure(state=tk.DISABLED)
 
-        hsb.pack(side=tk.BOTTOM, fill=tk.X)
-        vsb.pack(side=tk.RIGHT,  fill=tk.Y)
-        txt.pack(side=tk.LEFT,   fill=tk.BOTH, expand=True)
+        # Dirty tracking — genuine user edits only (our inserts set prog[0]).
+        def _on_modified(_e=None):
+            if prog[0]:
+                txt.edit_modified(False)
+                return
+            self._pr_draft_dirty = True
+            txt.edit_modified(False)   # re-arm: <<Modified>> fires only on False→True
+        txt.bind("<<Modified>>", _on_modified, add="+")
 
-        # Title field — pre-filled from generated text; user can edit before creating
+        # ── Title field ──
         title_row = tk.Frame(dlg, bg=C["base"], padx=12, pady=(6, 0))
-        title_row.pack(fill=tk.X)
         tk.Label(title_row, text="PR title:", font=("Segoe UI", 9),
                  bg=C["base"], fg=C["subtext"]).pack(side=tk.LEFT)
-        title_var = tk.StringVar(value=_extract_pr_title(text))
+        title_var = tk.StringVar(value="")
         ttk.Entry(title_row, textvariable=title_var, width=60).pack(
             side=tk.LEFT, padx=(6, 0), fill=tk.X, expand=True)
 
-        def _copy():
-            dlg.clipboard_clear()
-            dlg.clipboard_append(text)
-
-        gh_exe = shutil.which("gh")
+        # ── Buttons (disabled until the draft completes) ──
+        def _live_body():
+            return txt.get("1.0", tk.END).rstrip()
 
         btn_row = tk.Frame(dlg, bg=C["base"], padx=12, pady=8)
-        btn_row.pack(fill=tk.X)
-        ttk.Button(btn_row, text="Copy to clipboard", command=_copy).pack(side=tk.LEFT)
-
-        # "Create PR" — runs gh pr create directly; body from live text widget content
+        copy_btn = ttk.Button(btn_row, text="Copy to clipboard", state=tk.DISABLED,
+                              command=lambda: (dlg.clipboard_clear(),
+                                               dlg.clipboard_append(_live_body())))
+        copy_btn.pack(side=tk.LEFT)
         create_btn = ttk.Button(
-            btn_row, text="Create PR on GitHub",
+            btn_row, text="Create PR on GitHub", state=tk.DISABLED,
             command=lambda: self._create_pr_via_gh(
-                gh_exe, path, title_var.get(),
-                txt.get("1.0", tk.END).rstrip(), dlg))
+                gh_exe, path, title_var.get(), _live_body(), dlg))
         create_btn.pack(side=tk.LEFT, padx=(6, 0))
-        if not gh_exe:
-            create_btn.configure(state=tk.DISABLED)
-            _Tooltip(create_btn,
-                "GitHub CLI not on PATH. Install gh (cli.github.com) to enable.")
-        else:
-            _Tooltip(create_btn,
-                "Create the PR on GitHub directly. Edit the title above first.")
-
-        # "Open in Browser" — pre-fills gh's web form; user sets title/draft there
         open_btn = ttk.Button(
-            btn_row, text="Open in Browser",
-            command=lambda: self._open_pr_via_gh(gh_exe, path, text, dlg))
+            btn_row, text="Open in Browser", state=tk.DISABLED,
+            command=lambda: self._open_pr_via_gh(gh_exe, path, _live_body(), dlg))
         open_btn.pack(side=tk.LEFT, padx=(6, 0))
-        if not gh_exe:
-            open_btn.configure(state=tk.DISABLED)
-            _Tooltip(open_btn,
-                "GitHub CLI not on PATH. Install gh (cli.github.com) "
-                "to open a pre-filled PR-create page in your browser.")
-        else:
-            _Tooltip(open_btn,
-                "Open github.com's New PR page with this body pre-filled. "
-                "You pick the title, base branch, and draft state there.")
-
         ttk.Button(btn_row, text="Close", command=dlg.destroy).pack(side=tk.RIGHT)
 
-        # ------------------------------------------------------------------
-        # 🧪 Test gap panel — populated asynchronously when base is known
-        # ------------------------------------------------------------------
-        if base:
-            self._build_test_gap_panel(dlg, path, base)
+        # ── Test-gap panel mount point (filled on completion) ──
+        gap_frame = tk.Frame(dlg, bg=C["base"])
+
+        # Pack order: buttons + title pinned to bottom (always visible), gap panel
+        # above them, header on top, body fills the remaining space.
+        btn_row.pack(side=tk.BOTTOM, fill=tk.X)
+        title_row.pack(side=tk.BOTTOM, fill=tk.X)
+        gap_frame.pack(side=tk.BOTTOM, fill=tk.X)
+        hdr.pack(side=tk.TOP, fill=tk.X)
+        body.pack(side=tk.TOP, fill=tk.BOTH, expand=True, padx=12, pady=(6, 4))
 
         dlg.update_idletasks()
-        w, h = 720, 520
+        w, h = 760, 560
         try:
             px = self._root.winfo_x() + (self._root.winfo_width()  - w) // 2
             py = self._root.winfo_y() + (self._root.winfo_height() - h) // 2
@@ -1710,15 +1755,156 @@ class GitTabController:
         except tk.TclError:
             dlg.geometry(f"{w}x{h}")
 
+        return {
+            "dlg": dlg, "queue": queue.Queue(), "txt": txt, "vsb": vsb,
+            "status_var": status_var, "badge_var": badge_var,
+            "title_var": title_var, "gap_frame": gap_frame,
+            "copy_btn": copy_btn, "create_btn": create_btn, "open_btn": open_btn,
+            "gh_exe": gh_exe, "prog": prog, "streamed": streamed,
+            "path": path, "base": base, "provider": provider,
+        }
+
+    def _poll_pr_stream(self, ctx: dict) -> None:
+        """Drain streamed tokens from the queue into the dialog (Tk main thread).
+
+        Single recursive after(50) loop (mirrors _poll_log_queue) with a bounded
+        drain per tick so a token burst can't lock the event loop. Auto-scroll
+        only when the user is already at the bottom.
+        """
+        dlg = ctx["dlg"]
+        try:
+            if not dlg.winfo_exists():
+                return
+        except tk.TclError:
+            return
+        q = ctx["queue"]
+        txt = ctx["txt"]
+        chunks: list = []
+        budget = 0
+        done = None
+        try:
+            while budget < 8000:        # bounded drain
+                kind, data = q.get_nowait()
+                if kind == "token":
+                    chunks.append(data)
+                    budget += len(data)
+                elif kind == "status":
+                    ctx["status_var"].set(self._pr_status_label(data))
+                elif kind == "done":
+                    done = data
+                    break
+        except queue.Empty:
+            pass
+
+        if chunks:
+            try:
+                at_bottom = ctx["vsb"].get()[1] >= 0.98
+            except Exception:
+                at_bottom = True
+            ctx["prog"][0] = True
+            txt.configure(state=tk.NORMAL)
+            if not ctx["streamed"][0]:
+                txt.delete("1.0", tk.END)        # clear the placeholder
+                ctx["streamed"][0] = True
+            txt.insert(tk.END, "".join(chunks))
+            txt.configure(state=tk.DISABLED)
+            txt.edit_modified(False)
+            ctx["prog"][0] = False
+            if at_bottom:
+                txt.see(tk.END)
+
+        if done is not None:
+            self._finalize_pr_draft(ctx, done)
+            return
+        dlg.after(50, lambda: self._poll_pr_stream(ctx))
+
+    def _finalize_pr_draft(self, ctx: dict, payload: dict) -> None:
+        """Render the final body, enable actions, and attach the test-gap panel."""
+        dlg = ctx["dlg"]
+        try:
+            if not dlg.winfo_exists():
+                return
+        except tk.TclError:
+            return
+        result, elapsed = payload["result"], payload["elapsed"]
+        provider, base, path = ctx["provider"], ctx["base"], ctx["path"]
+
+        # Failure modes — log, inform, and close the now-useless window.
+        if payload["err"]:
+            self._on_log(f"  ✗ PR draft failed ({elapsed}s): {payload['err']}", C["red"])
+            messagebox.showerror("Draft PR — error", payload["err"], parent=dlg)
+            dlg.destroy()
+            return
+        if result is None:
+            reason = payload["diag"] or "LLM returned no output"
+            self._on_log(f"  ✗ PR draft: no LLM response ({elapsed}s)", C["red"])
+            messagebox.showerror(
+                "Draft PR — no response from LLM",
+                f"{reason}\n\nProvider: {provider}\nElapsed: {elapsed}s\n\n"
+                "Check Settings → Commit Message LLM and verify:\n"
+                "• The service is running\n"
+                "• The model name is correct\n"
+                "• The model is downloaded (ollama pull <model>)",
+                parent=dlg)
+            dlg.destroy()
+            return
+        if result.startswith("Empty diff"):
+            self._on_log(f"  ✗ PR draft: empty diff ({elapsed}s)", C["yellow"])
+            messagebox.showwarning(
+                "Draft PR — no diff found",
+                f"{result}\n\nBase branch used: {base!r}\n\n"
+                "If this is wrong, right-click → Set PR base branch…\n"
+                "to configure a different merge target.",
+                parent=dlg)
+            dlg.destroy()
+            return
+
+        # Success — replace the streamed raw text with the final processed body.
+        txt = ctx["txt"]
+        ctx["prog"][0] = True
+        txt.configure(state=tk.NORMAL)
+        txt.delete("1.0", tk.END)
+        txt.insert(tk.END, result)
+        txt.edit_modified(False)
+        ctx["prog"][0] = False
+        # Editable now so the user can tweak before Create PR; dirty starts clean.
+        self._pr_draft_dirty = False
+
+        ctx["status_var"].set(
+            f"✓ Draft ready ({elapsed}s) — review, edit, then Create PR")
+        ctx["title_var"].set(_extract_pr_title(result))
+        ctx["copy_btn"].configure(state=tk.NORMAL)
+        if ctx["gh_exe"]:
+            ctx["create_btn"].configure(state=tk.NORMAL)
+            ctx["open_btn"].configure(state=tk.NORMAL)
+            _Tooltip(ctx["create_btn"],
+                     "Create the PR on GitHub directly. Edit the title above first.")
+            _Tooltip(ctx["open_btn"],
+                     "Open github.com's New PR page with this body pre-filled.")
+        else:
+            _Tooltip(ctx["create_btn"],
+                     "GitHub CLI not on PATH. Install gh (cli.github.com) to enable.")
+            _Tooltip(ctx["open_btn"],
+                     "GitHub CLI not on PATH. Install gh (cli.github.com) to enable.")
+        self._on_log(f"  ✓ PR draft ready ({elapsed}s)", C["green"])
+
+        # Test-gap panel from the already-computed suggestions (no re-scan).
+        if base and payload.get("suggestions"):
+            self._build_test_gap_panel(ctx["gap_frame"], path, base,
+                                       suggestions=payload["suggestions"])
+
     # ------------------------------------------------------------------
     # Test gap panel helpers (Feature 2)
     # ------------------------------------------------------------------
 
-    def _build_test_gap_panel(self, dlg: tk.Toplevel, path: str, base: str) -> None:
-        """Attach a collapsible 🧪 test-gap panel to the PR draft dialog.
+    def _build_test_gap_panel(self, dlg, path: str, base: str,
+                              suggestions: "list | None" = None) -> None:
+        """Attach a collapsible 🧪 test-gap panel to *dlg* (Toplevel or Frame).
 
-        Runs ``suggest_tests_for_diff`` on a background thread; reveals the
-        panel only if untested changed files are found.
+        If *suggestions* is provided (already computed by the caller), the panel
+        fills synchronously with no extra coverage scan. Otherwise it runs
+        ``suggest_tests_for_diff`` on a background thread and reveals the panel
+        only if untested changed files are found.
         """
         import threading
 
@@ -1864,7 +2050,12 @@ class GitTabController:
                     "Configure Claude Code CLI or an LLM provider in Settings "
                     "to enable AI test generation.")
 
-        threading.Thread(target=_fetch, daemon=True).start()
+        if suggestions is not None:
+            # Caller already computed the suggestions — fill synchronously, no
+            # second whole-tree coverage scan.
+            _populate(suggestions)
+        else:
+            threading.Thread(target=_fetch, daemon=True).start()
 
     def _gap_generate_stubs(
         self, suggestions: list, check_vars: list, path: str,
