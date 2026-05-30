@@ -135,6 +135,20 @@ class App(tk.Tk):
         self.protocol("WM_DELETE_WINDOW", self._tray_mgr.hide)
         self.after(300, self._check_config)
 
+    def report_callback_exception(self, exc, val, tb):
+        """Log unhandled exceptions raised inside Tk callbacks.
+
+        Tk's default handler writes to sys.stderr, which is None under
+        pythonw.exe / windowed Nuitka builds — so a crash inside a button
+        command or `after` callback vanishes silently (e.g. a dialog that
+        builds halfway then throws, leaving a blank window). Routing it through
+        the manager's logger means every such failure lands in manager.log with
+        a full traceback.
+        """
+        import traceback
+        log.error("Unhandled Tk callback exception:\n%s",
+                  "".join(traceback.format_exception(exc, val, tb)))
+
     # ── Tray ───────────────────────────────────────────────────────────────────
 
     def _on_tray_quit(self) -> None:

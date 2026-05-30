@@ -1736,7 +1736,12 @@ class GitTabController:
         hsb.grid(row=1, column=0, sticky="ew")
         body.rowconfigure(0, weight=1)
         body.columnconfigure(0, weight=1)
-        txt.insert(tk.END, "Drafting… the description will stream in here.\n")
+        txt.insert(
+            tk.END,
+            "⏳  Preparing your PR draft…\n\n"
+            "Reading your branch diff and grounding context. On local models the "
+            "first tokens can take 30–90s — the draft will stream in here as it "
+            "writes. Watch the status line above for progress.\n")
         txt.configure(state=tk.DISABLED)
 
         # Dirty tracking — genuine user edits only (our inserts set prog[0]).
@@ -1749,7 +1754,10 @@ class GitTabController:
         txt.bind("<<Modified>>", _on_modified, add="+")
 
         # ── Title field ──
-        title_row = tk.Frame(dlg, bg=C["base"], padx=12, pady=(6, 0))
+        # NB: padding goes on the .pack() call below, NOT here — a tuple pady in
+        # a widget constructor raises TclError ("bad screen distance") on strict
+        # Tk builds; pack/grid accept the 2-tuple form.
+        title_row = tk.Frame(dlg, bg=C["base"])
         tk.Label(title_row, text="PR title:", font=("Segoe UI", 9),
                  bg=C["base"], fg=C["subtext"]).pack(side=tk.LEFT)
         title_var = tk.StringVar(value="")
@@ -1782,7 +1790,7 @@ class GitTabController:
         # Pack order: buttons + title pinned to bottom (always visible), gap panel
         # above them, header on top, body fills the remaining space.
         btn_row.pack(side=tk.BOTTOM, fill=tk.X)
-        title_row.pack(side=tk.BOTTOM, fill=tk.X)
+        title_row.pack(side=tk.BOTTOM, fill=tk.X, padx=12, pady=(0, 6))
         gap_frame.pack(side=tk.BOTTOM, fill=tk.X)
         hdr.pack(side=tk.TOP, fill=tk.X)
         body.pack(side=tk.TOP, fill=tk.BOTH, expand=True, padx=12, pady=(6, 4))
