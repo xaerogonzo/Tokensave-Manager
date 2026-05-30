@@ -23,6 +23,7 @@ import queue
 import shutil
 import subprocess
 import threading
+import time
 import tkinter as tk
 from tkinter import messagebox, ttk
 from typing import TYPE_CHECKING
@@ -31,6 +32,7 @@ from constants import C, CREATE_NO_WINDOW, _ANSI, _GIT_ENV_NO_PROMPT
 from theme import _Tooltip, themed_checkbutton
 from helpers.git import _is_local_git_repo
 from helpers.llm import _is_auth_error
+from helpers.runtime import log
 from dialogs.set_remote import SetRemoteDialog
 from dialogs.github_setup import GitHubSetupDialog
 from dialogs.merge_pr import MergePRDialog
@@ -1555,8 +1557,6 @@ class GitTabController:
             return "", False
 
     def _draft_pr_via_api(self, path: str):
-        import threading
-        import time
         base = self._resolve_pr_base(path)
         if base is None:
             messagebox.showerror(
@@ -1597,32 +1597,46 @@ class GitTabController:
             return
 
         _start_time = time.monotonic()
+        ctx["start"] = _start_time
         q = ctx["queue"]
 
         def _fetch():
             from helpers.pr_draft import generate_pr_draft, _render_coverage_gaps
             from helpers.llm import get_last_llm_error
-            # Compute test-gap suggestions ONCE — reused for the body checklist
-            # AND the panel (avoids a duplicate whole-tree coverage scan).
+            # Outer guard: ALWAYS enqueue ("done", …) so the poll loop can never
+            # spin forever, and log progress so a silent hang is diagnosable from
+            # manager.log (Tk-callback / thread exceptions otherwise vanish under
+            # pythonw with no console).
+            result = None
+            err = None
+            suggestions: list = []
             try:
-                from helpers.test_gap_report import suggest_tests_for_diff
-                suggestions = suggest_tests_for_diff(path, self._cfg.git_exe, base or "")
-            except Exception:
-                suggestions = []
-            try:
-                gaps_md = _render_coverage_gaps(suggestions)
-            except Exception:
-                gaps_md = ""
-
-            try:
+                log.info("PR draft worker: start (provider=%s, base=%s)",
+                         provider, base or "")
+                # Compute test-gap suggestions ONCE — reused for the body
+                # checklist AND the panel (no duplicate whole-tree scan).
+                try:
+                    from helpers.test_gap_report import suggest_tests_for_diff
+                    suggestions = suggest_tests_for_diff(path, self._cfg.git_exe, base or "")
+                except Exception:
+                    log.exception("PR draft: suggest_tests_for_diff failed")
+                    suggestions = []
+                try:
+                    gaps_md = _render_coverage_gaps(suggestions)
+                except Exception:
+                    gaps_md = ""
+                log.info("PR draft worker: %d gap(s); calling generate_pr_draft",
+                         len(suggestions))
                 result = generate_pr_draft(
                     self._cfg, path, base=base or "",
                     on_token=lambda d: q.put(("token", d)),
                     on_status=lambda p: q.put(("status", p)),
                     coverage_gaps_md=gaps_md,
                 )
-                err = None
+                log.info("PR draft worker: generate_pr_draft returned %d chars",
+                         len(result) if result else 0)
             except Exception as exc:
+                log.exception("PR draft worker failed")
                 result, err = None, str(exc)
             # Capture on the worker thread — _tls.last_error is thread-local.
             diag = get_last_llm_error() if (result is None and err is None) else None
@@ -1789,6 +1803,7 @@ class GitTabController:
             "copy_btn": copy_btn, "create_btn": create_btn, "open_btn": open_btn,
             "gh_exe": gh_exe, "prog": prog, "streamed": streamed,
             "path": path, "base": base, "provider": provider,
+            "phase": "Preparing…", "start": None,
         }
 
     def _poll_pr_stream(self, ctx: dict) -> None:
@@ -1816,7 +1831,7 @@ class GitTabController:
                     chunks.append(data)
                     budget += len(data)
                 elif kind == "status":
-                    ctx["status_var"].set(self._pr_status_label(data))
+                    ctx["phase"] = self._pr_status_label(data)
                 elif kind == "done":
                     done = data
                     break
@@ -1839,6 +1854,17 @@ class GitTabController:
             ctx["prog"][0] = False
             if at_bottom:
                 txt.see(tk.END)
+
+        # Live elapsed ticker until the first token arrives — local models spend
+        # a long "prefill" reading the diff with NO output, which otherwise looks
+        # frozen. Show the phase + seconds so the user can see it's alive.
+        if done is None and not ctx["streamed"][0]:
+            elapsed = int(time.monotonic() - ctx.get("start", time.monotonic()))
+            hint = (" — the model is reading your diff; first tokens can take "
+                    "30–90s on local models" if elapsed >= 8 else "")
+            ctx["status_var"].set(f"{ctx['phase']}  ({elapsed}s){hint}")
+        elif done is None:
+            ctx["status_var"].set(ctx["phase"])
 
         if done is not None:
             self._finalize_pr_draft(ctx, done)
