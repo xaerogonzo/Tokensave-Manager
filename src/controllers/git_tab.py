@@ -57,6 +57,7 @@ def _detect_base_branch(path: str, git_exe: str) -> "str | None":
             proc = subprocess.run(
                 [_git, "-C", path] + list(args),
                 capture_output=True, text=True, timeout=5,
+                encoding="utf-8", errors="replace",
                 creationflags=CREATE_NO_WINDOW,
             )
             return proc.returncode, proc.stdout.strip()

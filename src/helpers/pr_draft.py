@@ -105,15 +105,20 @@ def _branch_diff(repo_path: str, base: str, git_exe: str = "git") -> str:
     silently return empty output.
     """
     _git = git_exe or "git"
+    # encoding="utf-8" + errors="replace" is REQUIRED: without an explicit
+    # encoding, text=True decodes with the Windows locale codec (cp1252), which
+    # raises UnicodeDecodeError the moment a diff contains a byte it can't map
+    # (emoji ✓ 📦, box-drawing, accented names, etc.). That exception used to
+    # bubble up to the caller and surface as a bogus "empty diff" message.
     try:
         merge_base = subprocess.check_output(
             [_git, "merge-base", base, "HEAD"],
-            cwd=repo_path, text=True,
+            cwd=repo_path, text=True, encoding="utf-8", errors="replace",
             creationflags=CREATE_NO_WINDOW,
         ).strip()
         return subprocess.check_output(
             [_git, "diff", merge_base, "HEAD"],
-            cwd=repo_path, text=True,
+            cwd=repo_path, text=True, encoding="utf-8", errors="replace",
             creationflags=CREATE_NO_WINDOW,
         )
     except Exception:
@@ -122,7 +127,7 @@ def _branch_diff(repo_path: str, base: str, git_exe: str = "git") -> str:
         try:
             return subprocess.check_output(
                 [_git, "diff", "HEAD~1", "HEAD"],
-                cwd=repo_path, text=True,
+                cwd=repo_path, text=True, encoding="utf-8", errors="replace",
                 creationflags=CREATE_NO_WINDOW,
             )
         except Exception:
