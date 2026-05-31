@@ -90,6 +90,48 @@ def test_call_llm_url_error_sets_last_error(monkeypatch):
     assert "Connection" in err
 
 
+def test_call_llm_retries_on_http_500_then_succeeds(monkeypatch):
+    """Ollama cold-start 500 → retry → 200 (the reproduced bug)."""
+    import helpers.llm as llm_mod
+    monkeypatch.setattr(llm_mod.time, "sleep", lambda *_: None)   # no real delay
+    calls = [0]
+
+    def urlopen_side_effect(*args, **kwargs):
+        calls[0] += 1
+        if calls[0] == 1:
+            raise urllib.error.HTTPError(
+                "http://localhost:11434", 500, "Internal Server Error", {}, None)
+        return _MockResp(_good_body("warm"))
+
+    monkeypatch.setattr(urllib.request, "urlopen", urlopen_side_effect)
+
+    def go():
+        return _call_llm(_OLLAMA_CFG, "sys", "user"), get_last_llm_error()
+    with ThreadPoolExecutor(max_workers=1) as ex:
+        result, err = ex.submit(go).result()
+    assert result == "warm"          # second attempt succeeded
+    assert err is None
+    assert calls[0] == 2             # one retry
+
+
+def test_call_llm_500_persists_after_retries(monkeypatch):
+    """Persistent 5xx → actionable cold-start/memory message (not 'is it running')."""
+    import helpers.llm as llm_mod
+    monkeypatch.setattr(llm_mod.time, "sleep", lambda *_: None)
+    monkeypatch.setattr(
+        urllib.request, "urlopen",
+        lambda *a, **kw: (_ for _ in ()).throw(urllib.error.HTTPError(
+            "http://localhost:11434", 500, "Internal Server Error", {}, None)))
+
+    def go():
+        return _call_llm(_OLLAMA_CFG, "sys", "user"), get_last_llm_error()
+    with ThreadPoolExecutor(max_workers=1) as ex:
+        result, err = ex.submit(go).result()
+    assert result is None
+    assert err is not None and "500" in err
+    assert "cold start" in err.lower() or "num_ctx" in err
+
+
 def test_call_llm_http_404_sets_last_error(monkeypatch):
     monkeypatch.setattr(
         "helpers.llm.urllib.request.urlopen",

@@ -18,6 +18,7 @@ import json
 import logging
 import os
 import threading
+import time
 import urllib.error
 import urllib.request
 
@@ -259,6 +260,30 @@ def _stream_openai_response(resp, on_token) -> str:
     return "".join(pieces).strip()
 
 
+def _urlopen_retrying(req, timeout, retries: int = 2, backoff: float = 2.0):
+    """``urllib.request.urlopen`` with retry on transient HTTP 5xx.
+
+    The first chat request after a model is unloaded can return HTTP 500 while
+    the server loads the model + allocates its context window (reproducibly so
+    with Ollama cold-starts at large num_ctx); a brief retry lands once it's
+    warm. 4xx client errors (bad model name, etc.) are NOT retried. URLError /
+    timeouts propagate immediately. Returns the response (use as a context
+    manager); raises the last error if every attempt fails.
+    """
+    attempt = 0
+    while True:
+        try:
+            return urllib.request.urlopen(req, timeout=timeout)
+        except urllib.error.HTTPError as exc:
+            if exc.code >= 500 and attempt < retries:
+                log.warning("LLM HTTP %s — retrying (%d/%d) after cold-start/"
+                            "transient server error", exc.code, attempt + 1, retries)
+                time.sleep(backoff * (attempt + 1))
+                attempt += 1
+                continue
+            raise
+
+
 def _call_anthropic(api_key: str, model: str, system_prompt: str, user_prompt: str,
                     max_tokens: int, timeout: int, on_token) -> str | None:
     """Anthropic Messages API — streaming and non-streaming. Pure execution layer;
@@ -282,9 +307,9 @@ def _call_anthropic(api_key: str, model: str, system_prompt: str, user_prompt: s
         },
     )
     if on_token is not None:
-        with urllib.request.urlopen(req, timeout=timeout) as resp:
+        with _urlopen_retrying(req, timeout) as resp:
             return _stream_anthropic_response(resp, on_token) or None
-    with urllib.request.urlopen(req, timeout=timeout) as resp:
+    with _urlopen_retrying(req, timeout) as resp:
         data = json.loads(resp.read().decode("utf-8"))
     blocks = data.get("content") or []
     text = "".join(b.get("text", "") for b in blocks if b.get("type") == "text")
@@ -329,9 +354,9 @@ def _call_openai_compat(url: str, api_key: str, model: str,
         headers=headers,
     )
     if on_token is not None:
-        with urllib.request.urlopen(req, timeout=timeout) as resp:
+        with _urlopen_retrying(req, timeout) as resp:
             return _stream_openai_response(resp, on_token) or None
-    with urllib.request.urlopen(req, timeout=timeout) as resp:
+    with _urlopen_retrying(req, timeout) as resp:
         data = json.loads(resp.read().decode("utf-8"))
     choices = data.get("choices") or []
     if not choices:
@@ -423,7 +448,15 @@ def _call_llm(cfg: dict, system_prompt: str, user_prompt: str,
                                        temperature=temperature, top_p=top_p,
                                        top_k=top_k, num_ctx=num_ctx)
     except urllib.error.HTTPError as exc:        # HTTPError is a URLError subclass — match first
-        _tls.last_error = f"HTTP {exc.code} from {provider}: {exc.reason}"
+        if exc.code >= 500:
+            _tls.last_error = (
+                f"HTTP {exc.code} from {provider} (after retries) — the model "
+                f"likely failed to load (cold start / low memory). It often works "
+                f"on a second try once warm; otherwise lower num_ctx, or pre-load "
+                f"with `ollama run {model or '<model>'}`."
+            )
+        else:
+            _tls.last_error = f"HTTP {exc.code} from {provider}: {exc.reason}"
         return None
     except urllib.error.URLError as exc:
         _tls.last_error = f"Connection failed ({exc.reason}) — is {provider} running?"
