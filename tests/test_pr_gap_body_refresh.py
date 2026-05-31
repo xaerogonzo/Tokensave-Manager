@@ -100,3 +100,47 @@ def test_gap_copy_claude_prompt_nothing_selected(tk_root):
     GitTabController._gap_copy_claude_prompt(
         object(), [sg], [var], "/p", status, tk_root)
     assert "Nothing selected" in status.get()
+
+
+# ── _show_ai_failures: written-partials vs discarded, two sections ────────────
+
+def _descendants(w):
+    out = []
+    for c in w.winfo_children():
+        out.append(c)
+        out.extend(_descendants(c))
+    return out
+
+
+def _failures_window_text(tk_root, obj):
+    """Open _show_ai_failures and return the ScrolledText's content (the Text is
+    nested inside ScrolledText's internal Frame, so search descendants)."""
+    before = set(tk_root.winfo_children())
+    GitTabController._show_ai_failures(obj, tk_root)
+    wins = [w for w in tk_root.winfo_children()
+            if w not in before and isinstance(w, tk.Toplevel)]
+    assert wins, "no results window created"
+    win = wins[0]
+    texts = [w for w in _descendants(win) if isinstance(w, tk.Text)]
+    assert texts, "no text widget"
+    return win, texts[0].get("1.0", tk.END)
+
+
+def test_show_ai_failures_splits_partials_and_discards(tk_root):
+    obj = type("X", (), {})()
+    obj._last_ai_partials = {"src/a.py": "[prune-verify] kept 3/4; dropped: T.test_x"}
+    obj._last_ai_fail_reports = {"src/b.py": "passed alone but FAILED in the suite"}
+    win, content = _failures_window_text(tk_root, obj)
+    assert "WRITTEN" in content and "src/a.py" in content        # partial section
+    assert "DISCARDED" in content and "src/b.py" in content      # failure section
+    assert content.index("WRITTEN") < content.index("DISCARDED")  # not framed as discard
+    win.destroy()
+
+
+def test_show_ai_failures_empty_state(tk_root):
+    obj = type("X", (), {})()
+    obj._last_ai_partials = {}
+    obj._last_ai_fail_reports = {}
+    win, content = _failures_window_text(tk_root, obj)
+    assert "No failures or dropped tests" in content
+    win.destroy()

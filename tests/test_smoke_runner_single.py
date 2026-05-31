@@ -9,7 +9,7 @@ from __future__ import annotations
 import subprocess
 
 from helpers import smoke_runner
-from helpers.smoke_runner import run_single_test_file
+from helpers.smoke_runner import run_gate, run_single_test_file
 
 
 class _FakeProc:
@@ -95,3 +95,26 @@ def test_kill_tree_windows_uses_taskkill(monkeypatch):
     smoke_runner._kill_tree(_FakeProc())
     assert calls["cmd"][:3] == ["taskkill", "/F", "/T"]
     assert "4242" in calls["cmd"]
+
+
+# ── run_gate (full -m "not tk" suite, for batch re-verification) ──────────────
+
+def test_run_gate_builds_not_tk_command(monkeypatch):
+    captured = {}
+    def fake_popen(cmd, **k):
+        captured["cmd"] = cmd
+        return _FakeProc(0)
+    monkeypatch.setattr("helpers.smoke_runner.subprocess.Popen", fake_popen)
+    ok, _out = run_gate(".")
+    assert ok is True
+    cmd = captured["cmd"]
+    assert "tests/" in cmd
+    assert "-m" in cmd and "not tk" in cmd          # the gate marker
+    assert "-rfE" in cmd                            # parseable FAILED/ERROR summary
+
+
+def test_run_gate_nonzero_is_failure(monkeypatch):
+    monkeypatch.setattr("helpers.smoke_runner.subprocess.Popen",
+                        lambda cmd, **k: _FakeProc(1))
+    ok, _out = run_gate(".")
+    assert ok is False

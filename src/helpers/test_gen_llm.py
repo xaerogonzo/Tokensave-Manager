@@ -383,6 +383,8 @@ class VerifiedResult:
     preserved_existing: bool = False
     kept: int = 0
     total: int = 0
+    written_path: str = ""      # repo-relative path of the written test (pass/partial)
+    is_tk: bool = False         # written file is @pytest.mark.tk (skips the not-tk gate)
 
 
 def generate_verified_test(
@@ -421,6 +423,7 @@ def generate_verified_test(
                       else os.path.join(project_root, target_path))
     else:
         final_path = os.path.join(tests_dir, _test_filename_for(source_path, project_root))
+    final_rel = os.path.relpath(final_path, project_root).replace(os.sep, "/")
 
     # Regenerate: read the existing test so the model retains it, and capture its
     # test ids for the retention gate.
@@ -493,7 +496,9 @@ def generate_verified_test(
                         f"{os.path.basename(final_path)} is locked by another "
                         "process — close it and retry.",
                         preserved_existing=is_update)
-                return VerifiedResult(content, "pass", output)
+                return VerifiedResult(content, "pass", output,
+                                      written_path=final_rel,
+                                      is_tk=("pytest.mark.tk" in content))
 
             # Failed. Stop if out of repair budget or can't re-dispatch.
             if attempt >= attempts - 1 or effective_backend is None or not system_prompt:
@@ -619,6 +624,27 @@ def _failing_test_ids(pytest_output: str) -> "tuple[set, bool]":
     return ids, prunable
 
 
+def _failing_files(pytest_output: str) -> set:
+    """Forward-slash file paths of every ``FAILED``/``ERROR`` summary line.
+
+    Used to attribute full-suite gate failures to the file that owns them. Takes
+    element [0] after splitting on ``::`` so it captures BOTH test-level failures
+    (`FAILED tests/x.py::T::m - …`) AND collection-level aborts that have no `::id`
+    (`ERROR tests/x.py - ImportError`). Separators normalized so the match works on
+    Windows (pytest emits `/`, callers may hold `\\`).
+    """
+    files: set = set()
+    for raw in pytest_output.splitlines():
+        line = raw.strip()
+        if not (line.startswith("FAILED ") or line.startswith("ERROR ")):
+            continue
+        token = line.split(" ", 1)[1].split(" ")[0]           # tests/x.py[::…]
+        path = token.split("::")[0].replace("\\", "/").strip()
+        if path:
+            files.add(path)
+    return files
+
+
 def _prune_test_functions(code: str, failing_ids: set) -> "str | None":
     """Remove the named ``test_*`` funcs/methods from *code*; keep everything else.
 
@@ -710,10 +736,74 @@ def _prune_after_failure(content, last_report, project_root, tmp_path, tmp_rel,
     dropped = ", ".join(sorted(failing_ids))
     log.info("Pruned %s: kept %d/%d, dropped: %s",
              os.path.basename(final_path), survivors, total, dropped)
+    final_rel = os.path.relpath(final_path, project_root).replace(os.sep, "/")
     return VerifiedResult(
         pruned, "pass",
         f"[prune-verify] kept {survivors}/{total} tests; dropped: {dropped}",
-        kept=survivors, total=total)
+        kept=survivors, total=total,
+        written_path=final_rel, is_tk=("pytest.mark.tk" in pruned))
+
+
+def reverify_against_suite(project_root: str, test_relpaths: list) -> dict:
+    """Re-verify just-written test files against the FULL ``-m "not tk"`` gate and
+    roll back any that fail it. Closes the isolation gap (a test can pass alone yet
+    fail in the real suite). Returns ``{test_relpath: "ok" | "rolled_back"}`` and
+    guarantees the gate is green afterwards (assuming committed HEAD was green).
+
+    Strategy: run gate → if green, done. If the output has no parseable failures
+    (collection collapse), roll back the whole batch. Else roll back the written
+    files that OWN failures and re-run; if still red, roll back the rest (safety),
+    logging a dirty-workspace diagnostic when the residual failures are all outside
+    the batch. All rollbacks are logged to the persistent manager log.
+    """
+    from helpers import smoke_runner
+    verdict = {p: "ok" for p in test_relpaths}
+    if not test_relpaths:
+        return verdict
+    norm_to_orig = {p.replace("\\", "/"): p for p in test_relpaths}
+    batch_norm = set(norm_to_orig)
+
+    def _rollback(orig: str) -> None:
+        try:
+            os.remove(os.path.join(project_root, orig))
+        except OSError:
+            pass
+        verdict[orig] = "rolled_back"
+
+    ok, output = smoke_runner.run_gate(project_root)
+    if ok:
+        return verdict
+
+    failing = _failing_files(output)
+    if not failing:                                     # collection collapse → nuclear
+        log.warning("Full-suite gate failed with no parseable failures (collection "
+                    "collapse?); rolling back all %d generated file(s).",
+                    len(test_relpaths))
+        for p in test_relpaths:
+            _rollback(p)
+        return verdict
+
+    owners = [norm_to_orig[n] for n in failing if n in norm_to_orig]
+    for p in owners:
+        log.warning("Generated test failed the full -m 'not tk' gate — rolling back %s.", p)
+        _rollback(p)
+
+    if owners:
+        ok, output = smoke_runner.run_gate(project_root)
+        if ok:
+            return verdict
+        failing = _failing_files(output)
+
+    # Still red: roll back the rest (never leave the gate red). Diagnose whether the
+    # residual failures are even ours.
+    if failing and not (failing & batch_norm):
+        log.warning("Gate still red after rolling back failing generated files, but the "
+                    "residual failures are OUTSIDE the generated batch: %s — likely a "
+                    "pre-existing/dirty workspace, not the generator.", sorted(failing))
+    for p in [p for p in test_relpaths if verdict[p] == "ok"]:
+        log.warning("Full-batch rollback (gate still red) — rolling back %s.", p)
+        _rollback(p)
+    return verdict
 
 
 # ---------------------------------------------------------------------------

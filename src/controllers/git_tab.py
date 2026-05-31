@@ -2470,8 +2470,10 @@ class GitTabController:
         def _run():
             n = len(selected)
             passed = failed = 0
-            reports: dict = {}
-            written_paths: list = []     # rel_paths that now have a passing test
+            partials: dict = {}          # WRITTEN but some tests dropped (✓ N/M)
+            failures: dict = {}          # DISCARDED (isolation fail / gate / error)
+            written_paths: list = []     # source rel_paths that now have a passing test
+            written: list = []           # (idx, sg, test_relpath, is_tk) for re-verify
             for k, (idx, sg) in enumerate(selected, 1):
                 if cancel_event.is_set():
                     break
@@ -2492,13 +2494,14 @@ class GitTabController:
                 if res.status == "pass":
                     passed += 1
                     written_paths.append(sg.rel_path)
+                    written.append((idx, sg, res.written_path, res.is_tk))
                     # Partial pass: per-test pruning kept some, dropped the rest.
                     glyph = (f"✓ ({res.kept}/{res.total})"
                              if res.kept and res.total and res.kept < res.total
                              else "✓")
                     _set_row(idx, glyph)
                     if res.kept and res.kept < res.total:
-                        reports[sg.rel_path] = res.report      # show what was dropped
+                        partials[sg.rel_path] = res.report     # written; what was dropped
                     self._on_log(
                         f"  ✓ AI test {'updated' if is_update else 'written'} + "
                         f"passing ({glyph}): {sg.rel_path}", C["green"])
@@ -2508,17 +2511,50 @@ class GitTabController:
                     # failed new-file generate (nothing written).
                     if res.preserved_existing:
                         _set_row(idx, "↻✗")
-                        reports[sg.rel_path] = (
+                        failures[sg.rel_path] = (
                             "[Update failed] the regenerated test failed the runtime "
                             "gate (or dropped coverage); the original test file was "
                             "preserved on disk.\n\n" + (res.report or res.status))
                     else:
                         _set_row(idx, "✗")
-                        reports[sg.rel_path] = res.report or res.status
+                        failures[sg.rel_path] = res.report or res.status
                     self._on_log(
                         f"  ✗ AI test discarded ({res.status}): {sg.rel_path}",
                         C["yellow"])
-            self._last_ai_fail_reports = reports
+
+            # Re-verify the written NON-tk files against the FULL -m "not tk" gate and
+            # roll back any that pass alone but fail in the real suite. (tk files are
+            # deselected by that gate; they were hang-checked by the 20s isolation run.)
+            gate_relevant = [w for w in written if w[2] and not w[3]]
+            if gate_relevant and not cancel_event.is_set():
+                _set_status("Re-verifying generated tests against the full suite…")
+                from helpers.test_gen_llm import reverify_against_suite
+                verdicts = reverify_against_suite(
+                    captured_root, [w[2] for w in gate_relevant])
+                for (idx, sg, _wpath, _tk) in gate_relevant:
+                    if verdicts.get(_wpath) != "rolled_back":
+                        continue
+                    passed -= 1
+                    failed += 1
+                    _set_row(idx, "✗")
+                    partials.pop(sg.rel_path, None)
+                    failures[sg.rel_path] = (
+                        'This test PASSED alone but FAILED in the full `pytest -m '
+                        '"not tk"` suite (context-dependent) — discarded to keep the '
+                        'gate green. See manager.log for the failing ids.')
+                    if sg.rel_path in written_paths:
+                        written_paths.remove(sg.rel_path)
+                    try:                       # reset row model → no stale deleted path
+                        sg.test_exists = False
+                        sg.test_path = ""
+                    except Exception:
+                        pass
+                    self._on_log(
+                        f"  ✗ rolled back (failed full suite): {sg.rel_path}",
+                        C["yellow"])
+
+            self._last_ai_partials = partials
+            self._last_ai_fail_reports = failures
             if dlg.winfo_exists():
                 dlg.after(0, lambda: _done(passed, failed, written_paths))
 
@@ -2528,10 +2564,10 @@ class GitTabController:
             stub_btn.configure(state=tk.NORMAL)
             ai_btn.configure(state=tk.NORMAL)
             # Enable "View failures…" if anything failed OR a partial pass dropped
-            # some tests (those reports are stashed too).
-            has_reports = bool(getattr(self, "_last_ai_fail_reports", None))
-            fail_btn.configure(state=(tk.NORMAL if (failed or has_reports)
-                                      else tk.DISABLED))
+            # some tests (both are stashed for the viewer).
+            has_reports = bool(getattr(self, "_last_ai_fail_reports", None)
+                               or getattr(self, "_last_ai_partials", None))
+            fail_btn.configure(state=(tk.NORMAL if has_reports else tk.DISABLED))
             if cancel_event.is_set():
                 status_var.set(f"Cancelled — {passed} ✓ / {failed} ✗ so far.")
             else:
@@ -2553,26 +2589,35 @@ class GitTabController:
         threading.Thread(target=_run, daemon=True).start()
 
     def _show_ai_failures(self, parent) -> None:
-        """Read-only window with the last AI run's discarded-test pytest output."""
+        """Read-only window: written-with-drops (informational) + discarded (failed)."""
         from tkinter import scrolledtext
-        reports = getattr(self, "_last_ai_fail_reports", {}) or {}
+        partials = getattr(self, "_last_ai_partials", {}) or {}
+        failures = getattr(self, "_last_ai_fail_reports", {}) or {}
         win = tk.Toplevel(parent)
-        win.title("AI test generation — failures")
+        win.title("AI test generation — results")
         win.configure(bg=C["base"])
         win.geometry("800x540")
         st = scrolledtext.ScrolledText(
             win, wrap=tk.NONE, bg=C["mantle"], fg=C["text"],
             font=("Consolas", 9), relief=tk.FLAT, padx=8, pady=6)
         st.pack(fill=tk.BOTH, expand=True, padx=10, pady=(10, 4))
-        if not reports:
-            st.insert(tk.END, "No failures recorded for the last run.")
+        if not partials and not failures:
+            st.insert(tk.END, "No failures or dropped tests recorded for the last run.")
         else:
-            st.insert(tk.END,
-                      f"{len(reports)} test(s) were generated but discarded because "
-                      "they failed when run.\nFix the source or the test, then "
-                      "re-run AI generate.\n\n")
-            for rel, rep in reports.items():
-                st.insert(tk.END, f"{'=' * 72}\n✗ {rel}\n{'=' * 72}\n{rep}\n\n")
+            if partials:
+                st.insert(tk.END,
+                          f"WRITTEN — {len(partials)} file(s) saved with some tests "
+                          "dropped (the file passed; only the listed tests were "
+                          "removed). Informational — no action needed.\n\n")
+                for rel, rep in partials.items():
+                    st.insert(tk.END, f"{'=' * 72}\n✓ {rel}\n{'=' * 72}\n{rep}\n\n")
+            if failures:
+                st.insert(tk.END,
+                          f"\nDISCARDED — {len(failures)} file(s) failed and were NOT "
+                          "written. Fix the source or the test, then re-run AI "
+                          "generate.\n\n")
+                for rel, rep in failures.items():
+                    st.insert(tk.END, f"{'=' * 72}\n✗ {rel}\n{'=' * 72}\n{rep}\n\n")
         st.configure(state=tk.DISABLED)            # read-only
         ttk.Button(win, text="Close", command=win.destroy).pack(
             side=tk.BOTTOM, anchor=tk.E, padx=10, pady=(0, 10))

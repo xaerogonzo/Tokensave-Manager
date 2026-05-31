@@ -163,6 +163,46 @@ def run_single_test_file(project_root: str, test_relpath: str,
     return proc.returncode == 0, (out or "")
 
 
+def run_gate(project_root: str, timeout: int = 180) -> "tuple[bool, str]":
+    """Run the project's `-m "not tk"` gate once: ``(all_passed, combined_output)``.
+
+    Used to RE-VERIFY freshly generated tests against the FULL suite, not just in
+    isolation — a test can pass alone yet fail amid the real suite (shared state,
+    test-ordering, or a test that itself invokes the test runner). `-m "not tk"`
+    (not a markerless run) so a hanging generated Tk test can't consume the whole
+    timeout and nuke the batch, and to match the CI gate. ``-rfE`` guarantees the
+    parseable ``FAILED/ERROR …::id`` summary block for owner attribution.
+
+    ``all_passed`` is True only on exit 0. On timeout the whole process tree is
+    killed. Frozen build / launch failure → ``(False, <error>)``.
+    """
+    popen_kw = dict(
+        stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
+        text=True, encoding="utf-8", errors="replace",
+        cwd=project_root, creationflags=_CREATE_NO_WINDOW,
+    )
+    if sys.platform != "win32":
+        popen_kw["start_new_session"] = True
+    try:
+        proc = subprocess.Popen(
+            [sys.executable, "-m", "pytest", "tests/", "-m", "not tk",
+             "-rfE", "--tb=line", "-q"],
+            **popen_kw,
+        )
+    except OSError as exc:
+        return False, f"Failed to launch pytest: {exc}"
+    try:
+        out, _ = proc.communicate(timeout=timeout)
+    except subprocess.TimeoutExpired:
+        _kill_tree(proc)
+        try:
+            proc.communicate(timeout=5)
+        except Exception:
+            pass
+        return False, f"TIMEOUT after {timeout}s running the full -m 'not tk' gate."
+    return proc.returncode == 0, (out or "")
+
+
 # ── V-E: cancellable background pytest runner ──────────────────────────────
 
 class PytestRun:

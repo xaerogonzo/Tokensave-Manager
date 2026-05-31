@@ -764,3 +764,100 @@ def test_handoff_prompt_lists_files_and_directives():
     assert "pytest" in out                                  # run-and-fix directive
     assert "Only CREATE files under `tests/`" in out
     assert "tk_root" in out                                 # conventions embedded
+
+
+# ── _failing_files (gate-failure → owning file attribution) ──────────────────
+
+def test_failing_files_test_level():
+    assert tg._failing_files("FAILED tests/test_x.py::TestC::test_m - X\n") == {
+        "tests/test_x.py"}
+
+
+def test_failing_files_collection_level_no_colons():
+    # collection abort has NO ::id — must still attribute to the file
+    assert tg._failing_files("ERROR tests/test_x.py - ImportError: boom\n") == {
+        "tests/test_x.py"}
+
+
+def test_failing_files_multiple_and_none():
+    out = "FAILED tests/a.py::t - x\nERROR tests/b.py - y\n=== 1 passed ===\n"
+    assert tg._failing_files(out) == {"tests/a.py", "tests/b.py"}
+    assert tg._failing_files("5 passed in 0.1s") == set()
+
+
+# ── reverify_against_suite (full-suite gate + rollback) ──────────────────────
+
+def _mk_test_files(tmp_path, rels):
+    for r in rels:
+        p = tmp_path / r
+        p.parent.mkdir(parents=True, exist_ok=True)
+        p.write_text("def test_x():\n    assert True\n", encoding="utf-8")
+
+
+def _seq_gate(monkeypatch, results):
+    calls = {"n": 0}
+    def fake(project_root, timeout=180):
+        i = calls["n"]; calls["n"] += 1
+        return results[min(i, len(results) - 1)]
+    monkeypatch.setattr("helpers.smoke_runner.run_gate", fake)
+    return calls
+
+
+def test_reverify_all_green_keeps_all(tmp_path, monkeypatch):
+    _mk_test_files(tmp_path, ["tests/test_x.py", "tests/test_y.py"])
+    _seq_gate(monkeypatch, [(True, "")])
+    v = tg.reverify_against_suite(str(tmp_path), ["tests/test_x.py", "tests/test_y.py"])
+    assert v == {"tests/test_x.py": "ok", "tests/test_y.py": "ok"}
+    assert (tmp_path / "tests/test_x.py").exists()
+
+
+def test_reverify_rolls_back_owner_only(tmp_path, monkeypatch):
+    _mk_test_files(tmp_path, ["tests/test_x.py", "tests/test_y.py"])
+    _seq_gate(monkeypatch, [(False, "FAILED tests/test_x.py::T::m - X\n"), (True, "")])
+    v = tg.reverify_against_suite(str(tmp_path), ["tests/test_x.py", "tests/test_y.py"])
+    assert v["tests/test_x.py"] == "rolled_back"
+    assert v["tests/test_y.py"] == "ok"
+    assert not (tmp_path / "tests/test_x.py").exists()      # owner deleted
+    assert (tmp_path / "tests/test_y.py").exists()          # innocent kept
+
+
+def test_reverify_separator_normalization(tmp_path, monkeypatch):
+    _mk_test_files(tmp_path, ["tests/test_x.py"])
+    _seq_gate(monkeypatch, [(False, "FAILED tests/test_x.py::t - X\n"), (True, "")])
+    # caller passes a backslash (Windows-style) relpath; pytest emits forward slashes
+    v = tg.reverify_against_suite(str(tmp_path), ["tests\test_x.py"])
+    assert v["tests\test_x.py"] == "rolled_back"           # matched despite separators
+
+
+def test_reverify_collection_error_attributed(tmp_path, monkeypatch):
+    _mk_test_files(tmp_path, ["tests/test_x.py"])
+    _seq_gate(monkeypatch, [(False, "ERROR tests/test_x.py - ImportError\n"), (True, "")])
+    v = tg.reverify_against_suite(str(tmp_path), ["tests/test_x.py"])
+    assert v["tests/test_x.py"] == "rolled_back"            # surgical, not nuclear
+
+
+def test_reverify_empty_parse_is_nuclear(tmp_path, monkeypatch):
+    _mk_test_files(tmp_path, ["tests/test_x.py", "tests/test_y.py"])
+    _seq_gate(monkeypatch, [(False, "INTERNALERROR — collection crashed, no summary")])
+    v = tg.reverify_against_suite(str(tmp_path), ["tests/test_x.py", "tests/test_y.py"])
+    assert all(s == "rolled_back" for s in v.values())      # unparseable → roll all
+
+
+def test_reverify_still_red_full_rollback(tmp_path, monkeypatch):
+    _mk_test_files(tmp_path, ["tests/test_x.py", "tests/test_y.py"])
+    _seq_gate(monkeypatch, [
+        (False, "FAILED tests/test_x.py::t - X\n"),         # owner x fails
+        (False, "FAILED tests/test_other.py::t - Y\n"),     # still red, outside batch
+    ])
+    v = tg.reverify_against_suite(str(tmp_path), ["tests/test_x.py", "tests/test_y.py"])
+    assert v["tests/test_x.py"] == "rolled_back"            # owner
+    assert v["tests/test_y.py"] == "rolled_back"            # nuclear fallback
+    assert not (tmp_path / "tests/test_y.py").exists()
+
+
+def test_reverify_empty_input_noop(tmp_path, monkeypatch):
+    called = {"n": 0}
+    monkeypatch.setattr("helpers.smoke_runner.run_gate",
+                        lambda *a, **k: called.__setitem__("n", called["n"] + 1) or (True, ""))
+    assert tg.reverify_against_suite(str(tmp_path), []) == {}
+    assert called["n"] == 0                                  # no gate run for empty batch
