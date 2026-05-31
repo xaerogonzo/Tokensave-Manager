@@ -9,6 +9,9 @@ Covers:
 from dataclasses import dataclass
 
 from helpers.pr_draft import (
+    _PR_SYSTEM_PROMPT,
+    _PR_SYSTEM_PROMPT_LOCAL,
+    _branch_commit_log,
     _clean_local_artifacts,
     _inject_automated_block,
     _inject_coverage_gaps,
@@ -263,3 +266,55 @@ def test_mark_round_trip_with_renderer():
     block = _render_coverage_gaps([_FakeSuggestion("src/helpers/foo.py", "pure_helper")])
     out = _mark_gaps_addressed(block, ["src/helpers/foo.py"])
     assert out == block.replace("- [ ] ", "- [x] ", 1)
+
+
+# ── PR system prompts: positive anti-fabrication guardrails ──────────────────
+
+import pytest as _pytest
+
+
+@_pytest.mark.parametrize("prompt", [_PR_SYSTEM_PROMPT, _PR_SYSTEM_PROMPT_LOCAL])
+def test_pr_prompt_has_positive_guardrails(prompt):
+    assert "LITERALLY appear in the git diff" in prompt
+    assert "Generate ONLY these exact" in prompt
+
+
+@_pytest.mark.parametrize("prompt", [_PR_SYSTEM_PROMPT, _PR_SYSTEM_PROMPT_LOCAL])
+def test_pr_prompt_avoids_negative_constraint_echo(prompt):
+    # Must NOT print the forbidden section names — that re-introduces the
+    # negative-constraint antipattern (a strained 14B echoes printed strings).
+    for banned in ("Documentation Updates", "Deployment", "Reviewers"):
+        assert banned not in prompt
+
+
+# ── _branch_commit_log ───────────────────────────────────────────────────────
+
+def test_branch_commit_log_builds_reverse_bullets(monkeypatch):
+    captured = {}
+    def fake_co(args, **k):
+        captured["args"] = args
+        return "- first commit\n- second commit\n"
+    monkeypatch.setattr("helpers.pr_draft.subprocess.check_output", fake_co)
+    out = _branch_commit_log("/repo", "origin/master", git_exe="git")
+    assert "--reverse" in captured["args"]
+    assert "master..HEAD" in " ".join(captured["args"]) or \
+           "origin/master..HEAD" in captured["args"]
+    assert out == "- first commit\n- second commit"
+
+
+def test_branch_commit_log_caps_and_notes_overflow(monkeypatch):
+    many = "\n".join(f"- commit {i}" for i in range(250))
+    monkeypatch.setattr("helpers.pr_draft.subprocess.check_output",
+                        lambda *a, **k: many)
+    out = _branch_commit_log("/repo", "master", max_commits=200)
+    lines = out.splitlines()
+    assert len(lines) == 201                       # 200 kept + 1 overflow note
+    assert lines[0] == "- commit 0"                # oldest kept (--reverse semantics)
+    assert "later commits omitted" in lines[-1]
+    assert "Claude CLI" in lines[-1]
+
+
+def test_branch_commit_log_empty_on_git_failure(monkeypatch):
+    monkeypatch.setattr("helpers.pr_draft.subprocess.check_output",
+                        lambda *a, **k: (_ for _ in ()).throw(OSError("no git")))
+    assert _branch_commit_log("/repo", "master") == ""

@@ -32,8 +32,13 @@ FORMATTING RULES (follow exactly):
 - "## Technical Implementation Details" must describe WHAT changed and WHY at \
   a conceptual level — never reproduce code or diffs.
 - Keep each section focused on what a human reviewer needs to understand or act on.
+- Name ONLY file paths and modules that LITERALLY appear in the git diff below. \
+  If a path is not present in the raw diff lines, treat it as non-existent and \
+  omit it. State only what the git diff and the commit list show; if a detail is \
+  not derivable from them, omit it rather than guessing.
 
-Output should be formatted with these exact markdown headers:
+Generate ONLY these exact markdown headers, in this order, and end your response \
+immediately after the content of the last one:
 ## Summary of Changes
 ## Technical Implementation Details
 ## Threat Model & Security Implications (State 'None' if trivial)
@@ -72,8 +77,14 @@ STRICT RULES — follow exactly:
 - Be concise: PR reviewers skim; prefer short paragraphs and bullet points.
 - "## Technical Implementation Details" explains decisions and changed \
   behaviour — never pastes code.
+- Name ONLY file paths and modules that LITERALLY appear in the git diff below. \
+  If a path is not present in the raw diff lines, treat it as non-existent and \
+  omit it entirely.
+- State only what the git diff and the commit list show. If a detail is not \
+  derivable from them, omit it — do not guess or fill gaps.
 
-Use these exact section headers in this exact order:
+Generate ONLY these exact section headers, in this order, and end your response \
+immediately after the content of the last one:
 ## Summary of Changes
 ## Technical Implementation Details
 ## Threat Model & Security Implications
@@ -132,6 +143,38 @@ def _branch_diff(repo_path: str, base: str, git_exe: str = "git") -> str:
             )
         except Exception:
             return ""
+
+
+def _branch_commit_log(repo_path: str, base: str, git_exe: str = "git",
+                       max_commits: int = 200) -> str:
+    """Bulleted, oldest-first list of this branch's commit subjects vs *base*.
+
+    A factual scaffold prepended to the PR prompt so the model enumerates changes
+    that actually exist (mitigates the local-model "invent files/sections" failure
+    mode). ``--reverse`` yields oldest→newest, so the list reads as the branch's
+    narrative AND, if the cap is hit, drops the LATE polish commits rather than the
+    foundational ones (new files / core interfaces). Subjects are token-cheap, so
+    the cap is generous (200); a longer branch is Claude-CLI territory. Returns ""
+    on any git failure / no commits.
+    """
+    _git = git_exe or "git"
+    try:
+        out = subprocess.check_output(
+            [_git, "log", f"{base}..HEAD", "--reverse", "--pretty=format:- %s"],
+            cwd=repo_path, text=True, encoding="utf-8", errors="replace",
+            creationflags=CREATE_NO_WINDOW,
+        )
+    except Exception:
+        return ""
+    lines = [ln for ln in out.splitlines() if ln.strip()]
+    if not lines:
+        return ""
+    if len(lines) > max_commits:
+        omitted = len(lines) - max_commits
+        lines = lines[:max_commits] + [
+            f"- (+{omitted} later commits omitted — use the Claude CLI draft path "
+            "for full fidelity)"]
+    return "\n".join(lines)
 
 
 def generate_pr_draft(cfg, project_path: str, base: str = "", *,
@@ -248,18 +291,29 @@ def generate_pr_draft(cfg, project_path: str, base: str = "", *,
     # the last-run cache.
     automated_block = _render_automated_for_pr(project_path)
 
+    # Factual scaffold: the branch's real commit subjects (oldest first) anchor the
+    # feature list so the model enumerates changes that exist instead of inventing.
+    commit_log = _branch_commit_log(project_path, base, git_exe=cfg.git_exe)
+    commit_section = (
+        f"--- commits on this branch (oldest first) ---\n\n{commit_log}\n\n"
+        if commit_log else ""
+    )
+
     if _is_local_pre:
         # Local path: don't double-feed automated_block; Python injects it later.
         user_prompt = (
             f"{grounding_section}"
-            f"Please draft a PR description based on this git diff.\n\n"
+            f"{commit_section}"
+            f"Please draft a PR description based on these commits and this git diff.\n\n"
             f"--- git diff ---\n\n{diff_data}"
         )
     else:
         # Cloud path: instruct the LLM to copy automated_block verbatim.
         user_prompt = (
             f"{grounding_section}"
-            f"Please draft a comprehensive PR description based on this git diff.\n\n"
+            f"{commit_section}"
+            f"Please draft a comprehensive PR description based on these commits and "
+            f"this git diff.\n\n"
             f"Pre-rendered '### Automated' subsection (copy verbatim into the "
             f"'## Testing checklist' section):\n\n"
             f"{automated_block}\n\n"
