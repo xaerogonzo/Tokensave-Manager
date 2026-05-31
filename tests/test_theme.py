@@ -151,15 +151,37 @@ class TestTooltip:
         tooltip._cancel()
 
     def test_show_sets_topmost(self, tk_root):
-        """_show sets the -topmost attribute."""
+        """_show requests the -topmost attribute on its tip window.
+
+        We assert the CALL rather than reading back the live WM state:
+        under a headless window manager (e.g. xvfb on CI) ``-topmost`` is
+        silently ignored and reads back ``0``, so a state readback is
+        environment-dependent and flaky. Spying on ``wm_attributes``
+        verifies the code's intent portably.
+        """
         button = tk.Button(tk_root, text="Button")
         button.pack()
         tooltip = _Tooltip(button, "Tip")
 
-        tooltip._show()
+        real_toplevel = tk.Toplevel
+        captured = {}
 
-        topmost = tooltip._tip_win.wm_attributes("-topmost")
-        assert topmost in (1, True)
+        def _spy_toplevel(*a, **k):
+            win = real_toplevel(*a, **k)
+            orig = win.wm_attributes
+
+            def _rec(*args, **kwargs):
+                if args and args[0] == "-topmost":
+                    captured["topmost"] = args[1] if len(args) > 1 else None
+                return orig(*args, **kwargs)
+
+            win.wm_attributes = _rec
+            return win
+
+        with mock.patch.object(tk, "Toplevel", _spy_toplevel):
+            tooltip._show()
+
+        assert captured.get("topmost") in (1, True)
 
         tooltip._cancel()
 
