@@ -987,12 +987,19 @@ def _dispatch_claude_cli(cfg, system_prompt: str, user_prompt: str,
 
     Returns ``(content, error)``. On failure the error is the SPECIFIC cause from
     ``get_last_cli_error`` (missing binary vs expired auth vs timeout), not a guess.
+
+    The system prompt is folded into the STDIN prompt (not passed as
+    ``--append-system-prompt``): on Windows the CLI is a ``claude.cmd`` shim run via
+    cmd.exe, whose ~8191-char command-line limit a large system prompt (conventions
+    + example) blows ("The command line is too long"). stdin has no such limit, and
+    for a one-shot generate the leading-preamble placement is equivalent.
     """
     from helpers.claude_cli import call_claude_cli_print, get_last_cli_error
+    combined = f"{system_prompt}\n\n{user_prompt}" if system_prompt else user_prompt
     content = call_claude_cli_print(
         claude_exe=cfg.claude_cli_exe,
-        prompt=user_prompt,
-        system_prompt=system_prompt,
+        prompt=combined,
+        system_prompt="",                  # via stdin — keeps the command line tiny
         timeout=_CLI_GEN_TIMEOUT,          # large controllers need >90s one-shot
         model=getattr(cfg, "claude_cli_model", "") or "",
         cwd=os.path.expanduser("~"),

@@ -141,6 +141,20 @@ def test_claude_cli_dispatch_uses_neutral_cwd(monkeypatch):
     assert captured["cwd"] != "/some/project/root"
 
 
+def test_claude_cli_dispatch_folds_system_into_stdin(monkeypatch):
+    """Regression guard: the system prompt goes via stdin (combined prompt), NOT as
+    --append-system-prompt argv — that argv blew the Windows command-line limit."""
+    captured = {}
+    monkeypatch.setattr("helpers.claude_cli.call_claude_cli_print",
+                        lambda **k: captured.update(k) or _VALID)
+    cfg = SimpleNamespace(claude_cli_exe="/usr/bin/claude", claude_cli_model="")
+    tg._dispatch_claude_cli(cfg, "SYS-MARKER conventions", "USER-MARKER source",
+                            "/root")
+    assert captured["system_prompt"] == ""              # no --append-system-prompt argv
+    assert "SYS-MARKER conventions" in captured["prompt"]   # folded into stdin
+    assert "USER-MARKER source" in captured["prompt"]
+
+
 def test_claude_cli_dispatch_surfaces_specific_error(monkeypatch):
     """On None content, the SPECIFIC get_last_cli_error cause is bubbled up."""
     monkeypatch.setattr("helpers.claude_cli.call_claude_cli_print",
