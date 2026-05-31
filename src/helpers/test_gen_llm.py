@@ -127,6 +127,10 @@ never `== ("Arial", 11)`.
     * Build a real widget/controller/dialog with the `tk_root` fixture (and a real \
 parent), NEVER a `Mock()` master — `tk.Frame(Mock())` raises "Mock has no attribute \
 'tk'". Tk construction needs a live Tk parent.
+    * Use the project's real theme color dict `C` exactly as imported — it is a \
+COMPLETE palette. Never replace or patch `C` with a partial dict, or building a \
+widget raises `KeyError` on a missing colour (e.g. `C["green"]`, `C["lavender"]`). \
+Mock subprocess/network/LLM calls, but leave `C` (and other simple constants) alone.
     * Call functions with the EXACT parameter names from the source (e.g. \
 `timeout_s=`, not `timeout=`); read the signature above before calling.
 - Guard platform-specific code: only patch/assert POSIX-only calls \
