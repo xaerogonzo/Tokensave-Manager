@@ -87,6 +87,31 @@ def run_smoke_tests(project_root: str) -> tuple[int, int, str]:
     return passed, total, combined
 
 
+def _kill_tree(proc) -> None:
+    """Kill *proc* and its entire child process tree (best-effort).
+
+    A misbehaving AI test can spawn children (e.g. one that calls the real
+    ``run_smoke_tests`` launches a child pytest, or ``spawn_claude_cli`` opens a
+    console). Killing only the parent on timeout would orphan them, leaving them
+    burning CPU until reboot. Windows: ``taskkill /F /T /PID`` walks the child
+    tree by PID. POSIX: the process was started in its own session, so
+    ``killpg`` takes out the whole group.
+    """
+    try:
+        if sys.platform == "win32":
+            subprocess.run(
+                ["taskkill", "/F", "/T", "/PID", str(proc.pid)],
+                capture_output=True, creationflags=_CREATE_NO_WINDOW)
+        else:
+            import signal
+            os.killpg(os.getpgid(proc.pid), signal.SIGKILL)
+    except Exception:
+        try:
+            proc.kill()
+        except Exception:
+            pass
+
+
 def run_single_test_file(project_root: str, test_relpath: str,
                          timeout: int = 20) -> "tuple[bool, str]":
     """Run ONE pytest file and return ``(passed, combined_output)``.
@@ -99,33 +124,43 @@ def run_single_test_file(project_root: str, test_relpath: str,
     all correctly count as not-passing.
 
     ``timeout`` is deliberately short (20s, decoupled from the LLM timeouts): a
-    unit test that infinite-loops or triggers ``mainloop()`` is caught fast
-    instead of hanging the worker. ``--tb=short --no-header`` keeps the traceback
-    compact for the repair prompt (``--tb=short`` is already the project default,
-    passed explicitly here in case ``addopts`` ever changes).
+    unit test that infinite-loops, blocks, spawns a child, or starts a Tk
+    mainloop is caught fast. On timeout the WHOLE process tree is killed (see
+    ``_kill_tree``) so a child pytest/console isn't orphaned. ``--tb=short
+    --no-header`` keeps the traceback compact for the repair prompt.
 
     Source-mode only: ``sys.executable -m pytest`` assumes a real Python
     interpreter (same assumption as ``run_smoke_tests``). Under a frozen build it
     returns ``(False, <error>)``, which the caller treats as a normal failure.
     """
+    popen_kw = dict(
+        stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
+        text=True, encoding="utf-8", errors="replace",
+        cwd=project_root, creationflags=_CREATE_NO_WINDOW,
+    )
+    if sys.platform != "win32":
+        popen_kw["start_new_session"] = True       # own group → killpg on timeout
     try:
-        proc = subprocess.run(
+        proc = subprocess.Popen(
             [sys.executable, "-m", "pytest", test_relpath,
              "--tb=short", "--no-header"],
-            capture_output=True, text=True,
-            encoding="utf-8", errors="replace",
-            cwd=project_root,
-            timeout=timeout,
-            creationflags=_CREATE_NO_WINDOW,
+            **popen_kw,
         )
-    except subprocess.TimeoutExpired:
-        return False, (f"TIMEOUT after {timeout}s — the test likely has an "
-                       "infinite loop, a blocking call, or starts a Tk mainloop.")
     except OSError as exc:
         return False, f"Failed to launch pytest: {exc}"
 
-    combined = (proc.stdout or "") + (proc.stderr or "")
-    return proc.returncode == 0, combined
+    try:
+        out, _ = proc.communicate(timeout=timeout)
+    except subprocess.TimeoutExpired:
+        _kill_tree(proc)
+        try:
+            proc.communicate(timeout=5)            # reap so no zombie remains
+        except Exception:
+            pass
+        return False, (f"TIMEOUT after {timeout}s — the test likely has an "
+                       "infinite loop, a blocking call, spawns a child process, "
+                       "or starts a Tk mainloop.")
+    return proc.returncode == 0, (out or "")
 
 
 # ── V-E: cancellable background pytest runner ──────────────────────────────

@@ -2027,6 +2027,30 @@ class GitTabController:
             )
             ai_chk.pack(side=tk.RIGHT)
 
+            # AI backend selector (persisted) — Auto / Claude CLI / Ollama. So the
+            # user can force Ollama instead of silently getting "auto" → Claude CLI.
+            _cli_ok = bool(getattr(self._cfg, "claude_cli_exe", ""))
+            _llm_ok = bool(self._cfg.raw.get("commit_message_llm", {}).get("provider"))
+            backend_var = tk.StringVar(value=(self._cfg.raw.get("test_gen_backend") or "auto"))
+            if backend_var.get() == "claude_cli" and not _cli_ok:
+                backend_var.set("auto")
+            elif backend_var.get() == "llm" and not _llm_ok:
+                backend_var.set("auto")
+            backend_var.trace_add(
+                "write", lambda *_a: self._cfg.raw.__setitem__(
+                    "test_gen_backend", backend_var.get()))
+            be_row = tk.Frame(parent, bg=C["surface0"])
+            be_row.pack(fill=tk.X, padx=10, pady=(2, 0))
+            tk.Label(be_row, text="AI backend:", bg=C["surface0"], fg=C["subtext"],
+                     font=("Segoe UI", 8)).pack(side=tk.LEFT, padx=(0, 4))
+            for _bval, _blabel, _ok in (
+                    ("auto", "Auto", _cli_ok or _llm_ok),
+                    ("claude_cli", "Claude CLI", _cli_ok),
+                    ("llm", "Ollama", _llm_ok)):
+                ttk.Radiobutton(
+                    be_row, text=_blabel, value=_bval, variable=backend_var,
+                    state=(tk.NORMAL if _ok else tk.DISABLED)).pack(side=tk.LEFT, padx=(0, 6))
+
             # Proactive nudge — make the call-to-action explicit (nothing is
             # forced; the buttons below write files only when clicked).
             tk.Label(
@@ -2068,37 +2092,51 @@ class GitTabController:
             for _w in (canvas, list_frame):
                 _w.bind("<MouseWheel>", _on_wheel)
 
+            # Parallel lists, grown by _add_rows (so the action buttons, which
+            # capture these list objects, see appended update rows too). Nothing
+            # pre-checked — the user opts in via ✓ Recommend or by hand.
             check_vars: list[tk.BooleanVar] = []
             status_vars: list[tk.StringVar] = []
-            for sg in suggestions:
-                # Nothing pre-checked — the user opts in explicitly via the
-                # "✓ Recommend" quick-select (high-ROI pure/subprocess helpers)
-                # or by hand, rather than facing a wall of mystery-checked boxes.
-                var = tk.BooleanVar(value=False)
-                check_vars.append(var)
-                svar = tk.StringVar(value="")   # per-row ⏳ / ✓ / ✗
-                status_vars.append(svar)
-                row = tk.Frame(list_frame, bg=C["surface0"])
-                row.pack(fill=tk.X, pady=1)
-                themed_checkbutton(
-                    row, variable=var,
-                    text=sg.rel_path,
-                    bg=C["surface0"], fg=C["text"],
-                    activebackground=C["surface0"],
-                    font=("Consolas", 8),
-                    anchor="w",
-                ).pack(side=tk.LEFT)
-                tk.Label(
-                    row,
-                    text=f"→ {sg.template}",
-                    bg=C["surface0"], fg=C["overlay0"],
-                    font=("Segoe UI", 8),
-                ).pack(side=tk.LEFT, padx=(4, 0))
-                tk.Label(
-                    row, textvariable=svar,
-                    bg=C["surface0"], fg=C["subtext"],
-                    font=("Segoe UI", 9),
-                ).pack(side=tk.LEFT, padx=(6, 0))
+            panel_suggestions: list = []
+
+            def _add_rows(sugg_list, is_update=False):
+                for sg in sugg_list:
+                    panel_suggestions.append(sg)
+                    var = tk.BooleanVar(value=False)
+                    check_vars.append(var)
+                    svar = tk.StringVar(value="")   # per-row ⏳ / ✓ / ✗
+                    status_vars.append(svar)
+                    row = tk.Frame(list_frame, bg=C["surface0"])
+                    row.pack(fill=tk.X, pady=1)
+                    themed_checkbutton(
+                        row, variable=var, text=sg.rel_path,
+                        bg=C["surface0"], fg=C["text"],
+                        activebackground=C["surface0"],
+                        font=("Consolas", 8), anchor="w",
+                    ).pack(side=tk.LEFT)
+                    _tag = (f"↻ regenerate ({sg.template})" if is_update
+                            else f"→ {sg.template}")
+                    tk.Label(row, text=_tag, bg=C["surface0"],
+                             fg=(C["sky"] if is_update else C["overlay0"]),
+                             font=("Segoe UI", 8)).pack(side=tk.LEFT, padx=(4, 0))
+                    tk.Label(row, textvariable=svar, bg=C["surface0"],
+                             fg=C["subtext"], font=("Segoe UI", 9)).pack(
+                                 side=tk.LEFT, padx=(6, 0))
+
+            _add_rows(suggestions, is_update=False)
+
+            # Also surface changed-but-tested files (regenerate candidates) on a
+            # thread so the initial panel isn't blocked. They render tagged ↻ and
+            # are opt-in (unchecked; Recommend does NOT auto-select them).
+            def _fetch_updates():
+                try:
+                    from helpers.test_gap_report import suggest_test_updates_for_diff
+                    ups = suggest_test_updates_for_diff(path, self._cfg.git_exe, base)
+                except Exception:
+                    ups = []
+                if ups and dlg.winfo_exists():
+                    dlg.after(0, lambda u=ups: _add_rows(u, is_update=True))
+            threading.Thread(target=_fetch_updates, daemon=True).start()
 
             # Status line — shared by the quick-select row and the actions below.
             status_var = tk.StringVar()
@@ -2107,15 +2145,15 @@ class GitTabController:
             # explained action instead of silently pre-checking boxes. Mirrors the
             # Git Commit dialog's Select All / None / Modified-Only pattern.
             def _select_recommended():
-                rec = _recommended_test_selection(suggestions)
+                # Recommend NEW high-ROI helpers; ↻ existing-test regenerations
+                # stay opt-in (the user checks those by hand — regenerate is riskier).
+                rec = [bool(sg.requires_automation and not sg.test_exists)
+                       for sg in panel_suggestions]
                 for v, r in zip(check_vars, rec):
                     v.set(r)
-                n_rec = sum(rec)
-                n_skip = len(suggestions) - n_rec
                 status_var.set(
-                    f"Recommended {n_rec} high-ROI helper(s)"
-                    + (f" — skipped {n_skip} (Tk dialogs / unclassified; AI rarely "
-                       "writes passing GUI tests)." if n_skip else "."))
+                    f"Recommended {sum(rec)} new high-ROI helper(s). "
+                    "↻ existing-test regenerations are opt-in — check them by hand.")
 
             def _select_all():
                 for v in check_vars:
@@ -2155,7 +2193,7 @@ class GitTabController:
             stub_btn = ttk.Button(
                 act_row, text="📝 Generate stubs",
                 command=lambda: self._gap_generate_stubs(
-                    suggestions, check_vars, path,
+                    panel_suggestions, check_vars, path,
                     status_var, stub_btn, ai_btn, cancel_event, dlg),
             )
             stub_btn.pack(side=tk.RIGHT, padx=(4, 0))
@@ -2169,9 +2207,9 @@ class GitTabController:
             ai_btn = ttk.Button(
                 act_row, text="✨ AI generate selected",
                 command=lambda: self._gap_generate_ai(
-                    suggestions, check_vars, status_vars, path,
+                    panel_suggestions, check_vars, status_vars, path,
                     status_var, stub_btn, ai_btn, fail_btn, ai_enabled_var,
-                    cancel_event, dlg),
+                    cancel_event, dlg, backend_var),
             )
             ai_btn.pack(side=tk.RIGHT, padx=(4, 0))
 
@@ -2254,6 +2292,7 @@ class GitTabController:
         status_var: tk.StringVar, stub_btn, ai_btn, fail_btn,
         ai_enabled_var: tk.BooleanVar,
         cancel_event: "threading.Event", dlg: tk.Toplevel,
+        backend_var: "tk.StringVar | None" = None,
     ) -> None:
         """Generate + VERIFY a test per checked entry; keep only passing tests.
 
@@ -2276,6 +2315,7 @@ class GitTabController:
             return
 
         cancel_event.clear()           # fresh run (Event is reused across clicks)
+        backend = backend_var.get() if backend_var is not None else "auto"
         stub_btn.configure(state=tk.DISABLED)
         ai_btn.configure(state=tk.DISABLED)
         fail_btn.configure(state=tk.DISABLED)
@@ -2296,12 +2336,16 @@ class GitTabController:
             for k, (idx, sg) in enumerate(selected, 1):
                 if cancel_event.is_set():
                     break
+                is_update = bool(getattr(sg, "test_exists", False))
                 _set_row(idx, "⏳")
                 _set_status(f"Verifying {k}/{n}…  (generate → run → repair)")
                 res = generate_verified_test(
                     sg.source_path, captured_root,
-                    backend="auto", cfg=self._cfg,
+                    backend=backend, cfg=self._cfg,
                     cancel_event=cancel_event,
+                    template=getattr(sg, "template", None),
+                    allow_overwrite=is_update,
+                    target_path=(getattr(sg, "test_path", "") or None),
                 )
                 if res.status == "cancelled":
                     break
@@ -2309,11 +2353,21 @@ class GitTabController:
                     passed += 1
                     _set_row(idx, "✓")
                     self._on_log(
-                        f"  ✓ AI test written + passing: {sg.rel_path}", C["green"])
+                        f"  ✓ AI test {'updated' if is_update else 'written'} + "
+                        f"passing: {sg.rel_path}", C["green"])
                 else:
                     failed += 1
-                    reports[sg.rel_path] = res.report or res.status
-                    _set_row(idx, "✗")
+                    # Distinguish a failed regenerate (original preserved) from a
+                    # failed new-file generate (nothing written).
+                    if res.preserved_existing:
+                        _set_row(idx, "↻✗")
+                        reports[sg.rel_path] = (
+                            "[Update failed] the regenerated test failed the runtime "
+                            "gate (or dropped coverage); the original test file was "
+                            "preserved on disk.\n\n" + (res.report or res.status))
+                    else:
+                        _set_row(idx, "✗")
+                        reports[sg.rel_path] = res.report or res.status
                     self._on_log(
                         f"  ✗ AI test discarded ({res.status}): {sg.rel_path}",
                         C["yellow"])

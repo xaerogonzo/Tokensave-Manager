@@ -31,7 +31,8 @@ class SuggestedTest:
     source_path: str        # absolute path to the source file
     rel_path: str           # path relative to project_root, for display
     template: TemplateHint  # scaffold template best suited for this file
-    test_exists: bool       # always False here — only untested files are returned
+    test_exists: bool       # False = no test yet (new); True = update an existing one
+    test_path: str = ""     # for updates: the ACTUAL existing test file to read/overwrite
 
     @property
     def requires_automation(self) -> bool:
@@ -46,44 +47,53 @@ class SuggestedTest:
         return self.template in _AUTOMATABLE_TEMPLATES
 
 
-def suggest_tests_for_diff(
-    project_root: str,
-    git_exe: str,
-    base: str,
+def _suggestions_for_diff(
+    project_root: str, git_exe: str, base: str, *, want_tested: bool,
 ) -> list[SuggestedTest]:
-    """Return one :class:`SuggestedTest` per changed ``src/*.py`` file with no test.
+    """Shared core for the two public helpers.
 
-    Steps:
-    1. ``git diff --name-only base...HEAD`` — changed files on this branch.
-    2. ``scan_coverage_gaps`` — all src/ files that lack a test file.
-    3. Intersect: changed AND untested.
-    4. Detect the scaffold template hint from the file path + content.
-
-    Returns an empty list if ``base`` is empty, git fails, or all changed
-    files already have tests.
+    Returns one :class:`SuggestedTest` per changed ``src/*.py`` whose
+    ``has_tests`` matches ``want_tested``:
+      * ``want_tested=False`` → files with NO test (candidates to create).
+      * ``want_tested=True``  → files WITH a test (candidates to regenerate);
+        ``test_path`` carries the ACTUAL existing test file (from
+        ``CoverageRow.test_path``, which honours the naming variants in
+        ``_candidate_test_paths``) so the caller reads/overwrites the right one.
     """
     if not base:
         return []
-
     changed_rel = _changed_src_files(project_root, base, git_exe)
     if not changed_rel:
         return []
-
     gap_map = _build_gap_map(project_root)
 
     results: list[SuggestedTest] = []
     for rel in sorted(changed_rel):
         row = gap_map.get(rel)
-        if row is None or row.has_tests:
+        if row is None or bool(row.has_tests) != want_tested:
             continue
-        template = _detect_template(row.source_path, rel)
         results.append(SuggestedTest(
             source_path=row.source_path,
             rel_path=rel,
-            template=template,
-            test_exists=False,
+            template=_detect_template(row.source_path, rel),
+            test_exists=want_tested,
+            test_path=(row.test_path if want_tested else ""),
         ))
     return results
+
+
+def suggest_tests_for_diff(project_root: str, git_exe: str, base: str) -> list[SuggestedTest]:
+    """Changed ``src/*.py`` files on this branch that have NO test yet."""
+    return _suggestions_for_diff(project_root, git_exe, base, want_tested=False)
+
+
+def suggest_test_updates_for_diff(project_root: str, git_exe: str, base: str) -> list[SuggestedTest]:
+    """Changed ``src/*.py`` files on this branch that ALREADY have a test.
+
+    Candidates for regeneration: each carries ``test_path`` (the real existing
+    test) and ``test_exists=True``.
+    """
+    return _suggestions_for_diff(project_root, git_exe, base, want_tested=True)
 
 
 # ---------------------------------------------------------------------------

@@ -15,6 +15,7 @@ import logging
 import os
 import re
 import threading
+import time
 import uuid
 from dataclasses import dataclass
 
@@ -38,6 +39,45 @@ def test_basic():
 def test_returns_expected_value():
     result = example.main_function("input")
     assert result == "expected"
+'''
+
+# Template-matched fallbacks — used when the repo has no on-disk example of the
+# right shape (so a fresh repo's first Tk/subprocess test still learns the right
+# pattern instead of copying a pure example and hanging).
+_FALLBACK_EXAMPLE_SUBPROCESS = '''\
+"""Tests for helpers/example.py — subprocess helper (mock at the import site)."""
+from types import SimpleNamespace
+from helpers import example
+
+
+def test_runs_and_parses(monkeypatch):
+    monkeypatch.setattr(
+        "helpers.example.subprocess.run",
+        lambda *a, **k: SimpleNamespace(returncode=0, stdout="ok", stderr=""))
+    assert example.run_thing(".") == "ok"
+
+
+def test_failure_returns_none(monkeypatch):
+    monkeypatch.setattr(
+        "helpers.example.subprocess.run",
+        lambda *a, **k: SimpleNamespace(returncode=1, stdout="", stderr="boom"))
+    assert example.run_thing(".") is None
+'''
+
+_FALLBACK_EXAMPLE_TK = '''\
+"""Tests for dialogs/example.py — Tk dialog (tk_root fixture, never mainloop)."""
+import pytest
+
+pytestmark = pytest.mark.tk
+tk = pytest.importorskip("tkinter")
+
+from dialogs.example import ExampleDialog
+
+
+def test_builds_without_error(tk_root, mock_config):
+    dlg = ExampleDialog(tk_root, mock_config)
+    assert dlg.winfo_exists()
+    dlg.destroy()
 '''
 
 _SYSTEM_PROMPT_TEMPLATE = """\
@@ -70,6 +110,13 @@ creationflags=CREATE_NO_WINDOW to Popen/run/check_output, assert it in the \
 test: _, kwargs = mock.call_args; assert kwargs.get("creationflags") == \
 CREATE_NO_WINDOW
 - Keep tests focused and independent — no shared mutable state between tests.
+- MUST NOT (or the test is killed at a 20s timeout and discarded): call \
+`.mainloop()`; call `input()`; make a real network request; run a real \
+subprocess (git / pytest / ollama / claude); or call the real LLM. MOCK every \
+such call at the import site — e.g. \
+`monkeypatch.setattr("module.under.test.subprocess.run", ...)`, patch \
+`helpers.llm._call_llm`. For Tk, use the `tk_root` fixture — NEVER create a bare \
+`tk.Tk()` or call `mainloop()`. Each test must finish in well under 20 seconds.
 
 OUTPUT CONTRACT (critical):
 - Respond with ONLY the Python source of the test file, as your message text.
@@ -139,6 +186,8 @@ def generate_ai_test_content(
     cfg,                    # ManagerConfig — for llm + claude_cli settings
     cancel_event: "threading.Event | None" = None,
     max_source_chars: int = 8_000,
+    template: "str | None" = None,
+    existing_test: "str | None" = None,
 ) -> "tuple[str | None, str | None]":
     """Generate test file content using an AI backend.
 
@@ -148,8 +197,13 @@ def generate_ai_test_content(
         backend:        One of ``"claude_cli"``, ``"llm"``, or ``"auto"``.
         cfg:            Live ``ManagerConfig`` instance.
         cancel_event:   Optional ``threading.Event``; checked before dispatch.
-        max_source_chars: Cap on source code sent to the model (avoids huge
-                          token bills on large files).
+        max_source_chars: Cap on source code sent to the model.
+        template:       Scaffold template of the source (pure_helper /
+                        subprocess_helper / dialog_tk); steers the example test
+                        the model is shown so it copies the right mocking pattern.
+        existing_test:  For regeneration — the current test file's content. When
+                        given, the prompt instructs the model to RETAIN all
+                        existing tests and ADD coverage (no coverage loss).
 
     Returns:
         ``(content, None)`` on success or ``(None, error_message)`` on failure.
@@ -168,7 +222,8 @@ def generate_ai_test_content(
     # Build prompts
     try:
         system_prompt, user_prompt = _build_prompts(
-            source_path, project_root, max_source_chars
+            source_path, project_root, max_source_chars,
+            template=template, existing_test=existing_test,
         )
     except Exception as exc:
         return None, f"Could not read source file: {exc}"
@@ -217,15 +272,19 @@ class VerifiedResult:
 
     status ∈ {"pass", "fail", "error", "cancelled"}:
       * pass      — generated, ran, all assertions passed; file was WRITTEN.
-      * fail      — generated valid Python but it failed when run (after one
-                    runtime-repair attempt); NOTHING was written (discarded).
+      * fail      — generated valid Python but it failed when run / dropped prior
+                    coverage / target locked; NOTHING was written (discarded).
       * error     — could not generate valid Python at all (backend/syntax).
       * cancelled — cancel_event fired mid-flow.
     report holds the last pytest output (for a "View failures" surface).
+    preserved_existing — True when this was a REGENERATE that failed: the
+    original test file was left untouched (so the UI says "kept original",
+    not a bare ✗ that looks like data loss).
     """
     content: "str | None"
     status: str
     report: str = ""
+    preserved_existing: bool = False
 
 
 def generate_verified_test(
@@ -236,26 +295,50 @@ def generate_verified_test(
     cancel_event: "threading.Event | None" = None,
     run: bool = True,
     max_runtime_repairs: int = 1,
+    template: "str | None" = None,
+    allow_overwrite: bool = False,
+    target_path: "str | None" = None,
 ) -> VerifiedResult:
     """Generate a test, RUN it, repair once on failure, keep only if it passes.
 
-    Builds on :func:`generate_ai_test_content` (which already guarantees valid
-    Python via the ast gate + one syntax repair). Then writes the candidate to a
-    throwaway ``tests/test__aigen_<base>_<uuid>.py`` and runs it in isolation:
-      * pass → ``os.replace`` it onto the real ``test_<base>.py`` and return "pass".
-      * fail → re-prompt once with the pytest output, re-validate, re-run.
-      * still failing → DELETE the temp file and return "fail" (discard — a
-        failing test is worse than none).
+    New file: write a candidate to throwaway ``tests/test__aigen_<base>_<uuid>.py``,
+    run it; on pass ``os.replace`` onto the derived ``test_<base>.py``; on fail
+    discard. REGENERATE (``allow_overwrite`` + ``target_path``): read the existing
+    test, instruct the model to RETAIN all of it, and after a pass enforce a
+    coverage-retention gate (no prior ``test_*`` dropped) before overwriting the
+    real file lock-safely — a failed regenerate leaves the original untouched.
 
-    The temp file is always cleaned up in ``finally`` so no ``test__aigen_*``
-    debris is left on any path. Caller writes nothing — this function owns the
-    write/discard decision.
+    The temp file is always cleaned up in ``finally``. Caller writes nothing.
     """
     if cancel_event and cancel_event.is_set():
         return VerifiedResult(None, "cancelled", "")
 
+    from helpers.test_scaffold import _test_filename_for
+    tests_dir = os.path.join(project_root, "tests")
+
+    # Resolve the real destination: explicit (regenerate) or derived (new file).
+    if target_path:
+        final_path = (target_path if os.path.isabs(target_path)
+                      else os.path.join(project_root, target_path))
+    else:
+        final_path = os.path.join(tests_dir, _test_filename_for(source_path, project_root))
+
+    # Regenerate: read the existing test so the model retains it, and capture its
+    # test ids for the retention gate.
+    is_update = bool(allow_overwrite and os.path.exists(final_path))
+    existing_test = None
+    old_ids: set = set()
+    if is_update:
+        try:
+            with open(final_path, encoding="utf-8", errors="replace") as fh:
+                existing_test = fh.read()
+            old_ids = _test_function_ids(existing_test)
+        except OSError:
+            existing_test = None
+
     content, err = generate_ai_test_content(
-        source_path, project_root, backend, cfg, cancel_event)
+        source_path, project_root, backend, cfg, cancel_event,
+        template=template, existing_test=existing_test)
     if err or not content:
         return VerifiedResult(None, "error", err or "AI returned no content.")
     if not run:
@@ -264,9 +347,7 @@ def generate_verified_test(
         return VerifiedResult(None, "cancelled", "")
 
     from helpers import smoke_runner          # lazy — avoids import cycle
-    from helpers.test_scaffold import _test_filename_for
 
-    tests_dir = os.path.join(project_root, "tests")
     base = os.path.splitext(os.path.basename(source_path))[0]
     tmp_name = f"test__aigen_{base}_{uuid.uuid4().hex[:8]}.py"
     tmp_path = os.path.join(tests_dir, tmp_name)
@@ -274,7 +355,9 @@ def generate_verified_test(
 
     effective_backend = _resolve_backend(backend, cfg)
     try:
-        system_prompt, user_prompt = _build_prompts(source_path, project_root, 8_000)
+        system_prompt, user_prompt = _build_prompts(
+            source_path, project_root, 8_000,
+            template=template, existing_test=existing_test)
     except Exception:
         system_prompt = user_prompt = ""
 
@@ -290,15 +373,27 @@ def generate_verified_test(
             passed, output = smoke_runner.run_single_test_file(project_root, tmp_rel)
             last_report = output
             if passed:
-                final_name = _test_filename_for(source_path, project_root)
-                final_path = os.path.join(tests_dir, final_name)
-                if os.path.exists(final_path):
-                    # Safety net only — suggest_tests_for_diff lists untested
-                    # files, so this normally can't happen from the panel.
+                # Retention gate — a regenerate must not drop any prior test.
+                if is_update and old_ids:
+                    missing = old_ids - _test_function_ids(content)
+                    if missing:
+                        return VerifiedResult(
+                            content, "fail",
+                            "Regenerated test DROPPED existing tests "
+                            f"({', '.join(sorted(missing))}). Kept the original "
+                            "to avoid losing coverage.",
+                            preserved_existing=True)
+                # New-file collision (not a sanctioned overwrite) → keep existing.
+                if os.path.exists(final_path) and not allow_overwrite:
                     return VerifiedResult(
                         content, "fail",
-                        f"Target {final_name} already exists; not overwriting.")
-                os.replace(tmp_path, final_path)
+                        f"{os.path.basename(final_path)} already exists; not overwriting.")
+                if not _safe_replace(tmp_path, final_path):
+                    return VerifiedResult(
+                        content, "fail",
+                        f"{os.path.basename(final_path)} is locked by another "
+                        "process — close it and retry.",
+                        preserved_existing=is_update)
                 return VerifiedResult(content, "pass", output)
 
             # Failed. Stop if out of repair budget or can't re-dispatch.
@@ -316,13 +411,64 @@ def generate_verified_test(
                 break  # repair produced non-Python → don't run garbage
             content = fixed
 
-        return VerifiedResult(content, "fail", last_report)   # discarded
+        return VerifiedResult(content, "fail", last_report,
+                              preserved_existing=is_update)   # discarded
     finally:
         try:
             if os.path.exists(tmp_path):
                 os.remove(tmp_path)
         except OSError:
             pass
+
+
+def _safe_replace(src: str, dst: str, retries: int = 3, delay: float = 0.15) -> bool:
+    """`os.replace` with retry on a locked destination (Windows AV/IDE/test-disco
+    holds the handle → sharing violation = OSError, not always PermissionError).
+    Returns True on success, False if still locked after the retries."""
+    for i in range(retries):
+        try:
+            os.replace(src, dst)
+            return True
+        except OSError:
+            if i == retries - 1:
+                return False
+            time.sleep(delay)
+    return False
+
+
+def _test_function_ids(source: str) -> set:
+    """Qualified ids of every test function in *source*.
+
+    Walks the whole tree (NOT just module level) so tests nested in
+    ``class Test…:`` are counted; methods are qualified by class
+    (``ClassName.test_x``) so two classes' same-named methods can't mask a drop.
+    Nested helper functions inside a test are NOT collected.
+    """
+    try:
+        tree = ast.parse(source)
+    except SyntaxError:
+        return set()
+    ids: set = set()
+
+    class _V(ast.NodeVisitor):
+        def __init__(self):
+            self.cls: "str | None" = None
+
+        def visit_ClassDef(self, node):
+            prev, self.cls = self.cls, node.name
+            self.generic_visit(node)
+            self.cls = prev
+
+        def _fn(self, node):
+            if node.name.startswith("test"):
+                ids.add(f"{self.cls}.{node.name}" if self.cls else node.name)
+            # do NOT recurse — don't collect helper funcs nested in a test
+
+        visit_FunctionDef = _fn
+        visit_AsyncFunctionDef = _fn
+
+    _V().visit(tree)
+    return ids
 
 
 # ---------------------------------------------------------------------------
@@ -395,28 +541,41 @@ def _dispatch_llm(cfg, system_prompt: str, user_prompt: str) -> "str | None":
 # Prompt builders
 # ---------------------------------------------------------------------------
 
+_UPDATE_DIRECTIVE_TEMPLATE = """\
+EXISTING TEST FILE DETECTED — this file already has tests. Output the ENTIRE
+updated test file: RETAIN every existing test verbatim (same function/method
+names) and ADD coverage for the changed code. NEVER delete or rename a prior
+test. Current contents:
+```python
+{existing}
+```
+"""
+
+_SUBPROCESS_MOCK_RE = re.compile(
+    r"(monkeypatch\.setattr|mock\.patch|mocker\.patch|patch\().*subprocess")
+
+
 def _build_prompts(
     source_path: str,
     project_root: str,
     max_source_chars: int,
+    template: "str | None" = None,
+    existing_test: "str | None" = None,
 ) -> "tuple[str, str]":
     """Return ``(system_prompt, user_prompt)``."""
-    # Read source
     with open(source_path, encoding="utf-8", errors="replace") as fh:
         source_code = fh.read(max_source_chars)
     if len(source_code) == max_source_chars:
         source_code += "\n# ... [truncated]"
 
-    # Find example test file (smallest under 100 lines, scoped to project_root)
-    example_test = _find_example_test(project_root)
+    # Show the model a template-matched example so it copies the right pattern.
+    example_test = _find_example_test(project_root, template)
 
-    # Relative path for display
     try:
         rel_path = os.path.relpath(source_path, project_root).replace("\\", "/")
     except ValueError:
         rel_path = os.path.basename(source_path)
 
-    # Derive expected test filename
     base = os.path.splitext(os.path.basename(source_path))[0]
     test_filename = f"test_{base}.py"
 
@@ -426,54 +585,71 @@ def _build_prompts(
         source_code=source_code,
         test_filename=test_filename,
     )
+    if existing_test:
+        user_prompt += "\n\n" + _UPDATE_DIRECTIVE_TEMPLATE.format(existing=existing_test)
     return system_prompt, user_prompt
 
 
-def _find_example_test(project_root: str) -> str:
-    """Return the content of the smallest test file ≤ 100 lines under project_root.
+def _example_matches(body: str, template: str) -> bool:
+    """Does *body* demonstrate the pattern the *template* needs?"""
+    if template == "dialog_tk":
+        return "pytest.mark.tk" in body
+    if template == "subprocess_helper":
+        return bool(_SUBPROCESS_MOCK_RE.search(body))
+    if template == "pure_helper":
+        return "pytest.mark.tk" not in body and not _SUBPROCESS_MOCK_RE.search(body)
+    return True
 
-    The search is STRICTLY bounded to ``project_root`` — never walks above it.
-    Falls back to :data:`_FALLBACK_EXAMPLE` when no suitable file is found.
+
+def _find_example_test(project_root: str, template: "str | None" = None) -> str:
+    """Return a small example test that MATCHES *template* (so the model copies the
+    right mocking pattern), else a template-specific fallback.
+
+    Picks the smallest on-disk ``tests/test_*.py`` (≤ 120 lines) matching the
+    template's shape. If none matches a SPECIFIC template, returns the matching
+    hardcoded fallback (never a pure example for a Tk/subprocess target — that's
+    what dooms a fresh repo's first such test to hang). pure_helper/blank fall
+    back to the smallest overall, then the generic example.
     """
+    want = template if template in ("subprocess_helper", "dialog_tk", "pure_helper") else None
+    best_match: "str | None" = None
+    best_match_lines = 10 ** 9
+    smallest: "str | None" = None
+    smallest_lines = 10 ** 9
+
     tests_dir = os.path.join(project_root, "tests")
-    if not os.path.isdir(tests_dir):
-        return _FALLBACK_EXAMPLE
-
-    best_path: "str | None" = None
-    best_lines = 101  # only accept ≤ 100
-
-    try:
-        for fname in os.listdir(tests_dir):
+    if os.path.isdir(tests_dir):
+        real_root = os.path.realpath(project_root)
+        try:
+            names = os.listdir(tests_dir)
+        except OSError:
+            names = []
+        for fname in names:
             if not (fname.startswith("test_") and fname.endswith(".py")):
                 continue
             fpath = os.path.join(tests_dir, fname)
-            # Guard: ensure we haven't escaped project_root via a symlink
             try:
-                real_file = os.path.realpath(fpath)
-                real_root = os.path.realpath(project_root)
-                if not real_file.startswith(real_root):
+                if not os.path.realpath(fpath).startswith(real_root):
                     continue
-            except OSError:
-                continue
-            try:
                 with open(fpath, encoding="utf-8", errors="replace") as fh:
-                    lines = fh.readlines()
-                if len(lines) < best_lines:
-                    best_lines = len(lines)
-                    best_path = fpath
+                    body = fh.read()
             except OSError:
                 continue
-    except OSError:
-        return _FALLBACK_EXAMPLE
+            n = body.count("\n") + 1
+            if n > 120:
+                continue
+            if n < smallest_lines:
+                smallest_lines, smallest = n, body
+            if want and n < best_match_lines and _example_matches(body, want):
+                best_match_lines, best_match = n, body
 
-    if best_path is None:
-        return _FALLBACK_EXAMPLE
-
-    try:
-        with open(best_path, encoding="utf-8", errors="replace") as fh:
-            return fh.read()
-    except OSError:
-        return _FALLBACK_EXAMPLE
+    if best_match is not None:
+        return best_match
+    if want == "subprocess_helper":
+        return _FALLBACK_EXAMPLE_SUBPROCESS
+    if want == "dialog_tk":
+        return _FALLBACK_EXAMPLE_TK
+    return smallest if smallest is not None else _FALLBACK_EXAMPLE
 
 
 # ---------------------------------------------------------------------------

@@ -235,3 +235,100 @@ def test_verify_run_false_skips_pytest(tmp_path, monkeypatch):
     assert res.status == "pass"
     assert calls["n"] == 0
     assert not (tmp_path / "tests" / "test_foo.py").exists()
+
+
+# ── _test_function_ids (class-aware retention) ──────────────────────────────
+
+def test_function_ids_collects_module_and_class_methods():
+    src = (
+        "def test_a():\n    pass\n"
+        "class TestX:\n"
+        "    def test_b(self):\n        pass\n"
+        "    def helper(self):\n        pass\n"
+        "def not_a_test():\n    pass\n"
+    )
+    assert tg._test_function_ids(src) == {"test_a", "TestX.test_b"}
+
+
+def test_function_ids_qualifies_so_dupes_dont_mask():
+    src = ("class TestA:\n    def test_x(self): pass\n"
+           "class TestB:\n    def test_x(self): pass\n")
+    assert tg._test_function_ids(src) == {"TestA.test_x", "TestB.test_x"}
+
+
+# ── _find_example_test template matching ────────────────────────────────────
+
+def _mk_tests(tmp_path, files):
+    (tmp_path / "tests").mkdir(exist_ok=True)
+    for name, body in files.items():
+        (tmp_path / "tests" / name).write_text(body, encoding="utf-8")
+
+
+def test_find_example_matches_subprocess(tmp_path):
+    _mk_tests(tmp_path, {
+        "test_pure.py": '"""p."""\ndef test_x():\n    assert 1\n',
+        "test_sub.py": 'def test_y(mocker):\n    mocker.patch("m.subprocess.run")\n    assert 1\n',
+    })
+    ex = tg._find_example_test(str(tmp_path), "subprocess_helper")
+    assert "subprocess" in ex and "test_y" in ex
+
+
+def test_find_example_matches_tk(tmp_path):
+    _mk_tests(tmp_path, {
+        "test_pure.py": 'def test_x():\n    assert 1\n',
+        "test_dlg.py": 'import pytest\npytestmark = pytest.mark.tk\ndef test_z(tk_root):\n    assert 1\n',
+    })
+    ex = tg._find_example_test(str(tmp_path), "dialog_tk")
+    assert "pytest.mark.tk" in ex
+
+
+def test_find_example_tk_fallback_not_pure(tmp_path):
+    """No on-disk tk example → use the TK fallback constant, NOT the pure file."""
+    _mk_tests(tmp_path, {"test_pure.py": 'def test_x():\n    assert 1\n'})
+    ex = tg._find_example_test(str(tmp_path), "dialog_tk")
+    assert "pytest.mark.tk" in ex
+    assert "test_x" not in ex          # did not copy the pure example
+
+
+# ── regenerate: retention gate + overwrite + lock-safety ────────────────────
+
+def _existing_test(tmp_path, body):
+    (tmp_path / "tests").mkdir(exist_ok=True)
+    f = tmp_path / "tests" / "test_foo.py"
+    f.write_text(body, encoding="utf-8")
+    return str(f)
+
+
+def test_regenerate_retains_all_overwrites(tmp_path, monkeypatch):
+    root, src = _verify_repo(tmp_path)
+    target = _existing_test(tmp_path, "def test_a():\n    assert 1\n\n\ndef test_b():\n    assert 1\n")
+    new = ("def test_a():\n    assert 2\n\n\ndef test_b():\n    assert 2\n\n\n"
+           "def test_c():\n    assert 1\n")
+    _patch_verify(monkeypatch, gen=(new, None), run_results=[(True, "ok")])
+    res = generate_verified_test(src, root, "llm", _cfg(),
+                                 allow_overwrite=True, target_path=target)
+    assert res.status == "pass"
+    assert "test_c" in open(target, encoding="utf-8").read()    # overwritten
+
+
+def test_regenerate_dropping_a_test_is_rejected(tmp_path, monkeypatch):
+    root, src = _verify_repo(tmp_path)
+    target = _existing_test(tmp_path, "def test_a():\n    assert 1\n\n\ndef test_b():\n    assert 1\n")
+    _patch_verify(monkeypatch, gen=("def test_a():\n    assert 2\n", None),
+                  run_results=[(True, "ok")])          # drops test_b but PASSES
+    res = generate_verified_test(src, root, "llm", _cfg(),
+                                 allow_overwrite=True, target_path=target)
+    assert res.status == "fail"
+    assert res.preserved_existing is True
+    assert "test_b" in open(target, encoding="utf-8").read()    # original untouched
+
+
+def test_replace_locked_returns_fail(tmp_path, monkeypatch):
+    root, src = _verify_repo(tmp_path)
+    _patch_verify(monkeypatch, run_results=[(True, "ok")])
+    monkeypatch.setattr(tg.time, "sleep", lambda *_: None)
+    monkeypatch.setattr(tg.os, "replace",
+                        lambda *a, **k: (_ for _ in ()).throw(OSError("locked")))
+    res = generate_verified_test(src, root, "llm", _cfg())
+    assert res.status == "fail"
+    assert "locked" in res.report.lower()
