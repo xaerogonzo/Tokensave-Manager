@@ -1264,7 +1264,9 @@ class GitTabController:
         dlg.configure(bg=C["base"])
         dlg.resizable(True, True)
         dlg.minsize(560, 200)
-        dlg.transient(self._root)
+        # NO transient() → standalone window with native minimize/maximize buttons
+        # and its own taskbar entry (transient windows get only a close button on
+        # Windows). Mirrors the PR-draft dialog.
 
         # Header showing what we're diffing
         hdr_row = tk.Frame(dlg, bg=C["base"])
