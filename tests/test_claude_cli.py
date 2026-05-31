@@ -26,7 +26,11 @@ so proc.stdout is always a str. The _make_proc helper returns str accordingly.
 import subprocess
 from unittest.mock import MagicMock
 
-from helpers.claude_cli import call_claude_cli_print, spawn_claude_cli
+from helpers.claude_cli import (
+    call_claude_cli_print,
+    get_last_cli_error,
+    spawn_claude_cli,
+)
 
 
 # ── Helpers ───────────────────────────────────────────────────────────────────
@@ -175,3 +179,47 @@ def test_print_cwd_passed_to_subprocess(monkeypatch):
     monkeypatch.setattr("helpers.claude_cli.subprocess.run", fake_run)
     call_claude_cli_print("/usr/bin/claude", "prompt", cwd="/my/project")
     assert captured_kw.get("cwd") == "/my/project"
+
+
+# ── get_last_cli_error: the SPECIFIC failure cause (per-thread) ───────────────
+
+def test_cli_error_success_is_none(monkeypatch):
+    monkeypatch.setattr("helpers.claude_cli.subprocess.run",
+                        lambda *a, **kw: _make_proc(stdout="ok"))
+    assert call_claude_cli_print("/usr/bin/claude", "p") == "ok"
+    assert get_last_cli_error() is None
+
+
+def test_cli_error_empty_exe(monkeypatch):
+    assert call_claude_cli_print("", "p") is None
+    assert "no Claude CLI path" in (get_last_cli_error() or "")
+
+
+def test_cli_error_timeout(monkeypatch):
+    def raise_timeout(*a, **kw):
+        raise subprocess.TimeoutExpired(cmd="claude", timeout=7)
+    monkeypatch.setattr("helpers.claude_cli.subprocess.run", raise_timeout)
+    assert call_claude_cli_print("/usr/bin/claude", "p", timeout=7) is None
+    err = get_last_cli_error() or ""
+    assert "timed out" in err and "7" in err
+
+
+def test_cli_error_oserror_mentions_not_runnable(monkeypatch):
+    monkeypatch.setattr(
+        "helpers.claude_cli.subprocess.run",
+        lambda *a, **kw: (_ for _ in ()).throw(OSError("No such file")),
+    )
+    assert call_claude_cli_print("/usr/bin/claude", "p") is None
+    err = get_last_cli_error() or ""
+    assert "not runnable" in err or "not found" in err
+    assert "No such file" in err
+
+
+def test_cli_error_nonzero_exit_includes_stderr(monkeypatch):
+    monkeypatch.setattr(
+        "helpers.claude_cli.subprocess.run",
+        lambda *a, **kw: _make_proc(stdout="", returncode=1, stderr="not logged in"),
+    )
+    assert call_claude_cli_print("/usr/bin/claude", "p") is None
+    err = get_last_cli_error() or ""
+    assert "exited 1" in err and "not logged in" in err

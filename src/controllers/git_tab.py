@@ -2329,6 +2329,23 @@ class GitTabController:
             if dlg.winfo_exists():
                 dlg.after(0, lambda: status_var.set(text))
 
+        def _make_token_cb(idx: int):
+            """Per-row liveness: ⏳ (prefill, no tokens) → ✍ N (generating).
+
+            on_token fires on the worker thread, so marshal to Tk via dlg.after.
+            Throttled (every 5th token) so a long local run doesn't flood the
+            event loop. The final ✓/✗ glyph is set by _set_row after completion.
+            """
+            counter = {"n": 0}
+
+            def _cb(_delta: str) -> None:
+                counter["n"] += 1
+                n_tok = counter["n"]
+                if (n_tok == 1 or n_tok % 5 == 0) and dlg.winfo_exists():
+                    dlg.after(0, lambda n=n_tok: status_vars[idx].set(f"✍ {n}"))
+
+            return _cb
+
         def _run():
             n = len(selected)
             passed = failed = 0
@@ -2346,6 +2363,7 @@ class GitTabController:
                     template=getattr(sg, "template", None),
                     allow_overwrite=is_update,
                     target_path=(getattr(sg, "test_path", "") or None),
+                    on_token=_make_token_cb(idx),
                 )
                 if res.status == "cancelled":
                     break

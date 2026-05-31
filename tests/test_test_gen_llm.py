@@ -76,13 +76,15 @@ def _cfg():
 
 
 def _patch_dispatch(monkeypatch, replies):
-    """Make _dispatch_llm return successive *replies*; record call count."""
+    """Make _dispatch_llm return successive *replies* as (content, error) tuples;
+    record call count. A reply may be a bare string (→ (str, None)) or a tuple."""
     calls = {"n": 0}
 
-    def fake(cfg, system_prompt, user_prompt):
+    def fake(cfg, system_prompt, user_prompt, on_token=None):
         i = calls["n"]
         calls["n"] += 1
-        return replies[min(i, len(replies) - 1)]
+        reply = replies[min(i, len(replies) - 1)]
+        return reply if isinstance(reply, tuple) else (reply, None)
 
     monkeypatch.setattr(tg, "_dispatch_llm", fake)
     # also stub source read + example lookup so it's hermetic of the filesystem
@@ -131,11 +133,109 @@ def test_claude_cli_dispatch_uses_neutral_cwd(monkeypatch):
 
     monkeypatch.setattr("helpers.claude_cli.call_claude_cli_print", fake_print)
     cfg = SimpleNamespace(claude_cli_exe="/usr/bin/claude", claude_cli_model="")
-    out = tg._dispatch_claude_cli(cfg, "sys", "user", "/some/project/root")
+    out, err = tg._dispatch_claude_cli(cfg, "sys", "user", "/some/project/root")
     assert out == _VALID
+    assert err is None
     # Must NOT run inside the repo (that triggers agentic Write-tool behaviour).
     assert captured["cwd"] == os.path.expanduser("~")
     assert captured["cwd"] != "/some/project/root"
+
+
+def test_claude_cli_dispatch_surfaces_specific_error(monkeypatch):
+    """On None content, the SPECIFIC get_last_cli_error cause is bubbled up."""
+    monkeypatch.setattr("helpers.claude_cli.call_claude_cli_print",
+                        lambda **k: None)
+    monkeypatch.setattr("helpers.claude_cli.get_last_cli_error",
+                        lambda: "exited 1: not logged in")
+    cfg = SimpleNamespace(claude_cli_exe="/usr/bin/claude", claude_cli_model="")
+    out, err = tg._dispatch_claude_cli(cfg, "sys", "user", "/root")
+    assert out is None
+    assert err and "not logged in" in err
+
+
+def test_claude_cli_dispatch_falls_back_when_no_cause(monkeypatch):
+    monkeypatch.setattr("helpers.claude_cli.call_claude_cli_print",
+                        lambda **k: None)
+    monkeypatch.setattr("helpers.claude_cli.get_last_cli_error", lambda: None)
+    cfg = SimpleNamespace(claude_cli_exe="/usr/bin/claude", claude_cli_model="")
+    out, err = tg._dispatch_claude_cli(cfg, "sys", "user", "/root")
+    assert out is None
+    assert err and "no output" in err.lower()
+
+
+# ── _dispatch_llm: streaming, timeout, dynamic num_ctx, no shared mutation ──
+
+def _capture_call_llm(monkeypatch, *, ret="ok", last_error=None):
+    """Stub helpers.llm._call_llm + get_last_llm_error; capture the call kwargs."""
+    seen = {}
+
+    def fake_call_llm(**kwargs):
+        seen.update(kwargs)
+        seen["n"] = seen.get("n", 0) + 1
+        return ret
+
+    monkeypatch.setattr("helpers.llm._call_llm", fake_call_llm)
+    monkeypatch.setattr("helpers.llm.get_last_llm_error", lambda: last_error)
+    return seen
+
+
+def _llm_cfg(**extra):
+    base = {"provider": "ollama", "model": "m", "enabled": True}
+    base.update(extra)
+    return SimpleNamespace(raw={"commit_message_llm": base})
+
+
+def test_dispatch_llm_local_streams_long_timeout_and_num_ctx(monkeypatch):
+    seen = _capture_call_llm(monkeypatch)
+    sentinel = object()
+    content, err = tg._dispatch_llm(_llm_cfg(), "sys", "user", on_token=sentinel)
+    assert (content, err) == ("ok", None)
+    assert seen["on_token"] is sentinel                 # streaming wired through
+    assert seen["timeout"] == tg._LOCAL_TIMEOUT == 300   # long local timeout
+    nc = seen["cfg"]["num_ctx"]
+    assert tg._LOCAL_CTX_CEILING >= nc >= 4096
+    assert nc % 1024 == 0                                # rounded to a clean alloc
+
+
+def test_dispatch_llm_does_not_mutate_shared_config(monkeypatch):
+    """Finding A: num_ctx is injected on a COPY, never the live config dict."""
+    _capture_call_llm(monkeypatch)
+    cfg = _llm_cfg()
+    tg._dispatch_llm(cfg, "sys", "user")
+    assert "num_ctx" not in cfg.raw["commit_message_llm"]
+
+
+def test_dispatch_llm_preserves_explicit_num_ctx(monkeypatch):
+    seen = _capture_call_llm(monkeypatch)
+    tg._dispatch_llm(_llm_cfg(num_ctx=8192), "sys", "user")
+    assert seen["cfg"]["num_ctx"] == 8192               # user value untouched
+
+
+def test_dispatch_llm_cloud_no_num_ctx_short_timeout(monkeypatch):
+    seen = _capture_call_llm(monkeypatch)
+    cfg = SimpleNamespace(raw={"commit_message_llm": {
+        "provider": "anthropic", "model": "claude", "enabled": True}})
+    tg._dispatch_llm(cfg, "sys", "user")
+    assert "num_ctx" not in seen["cfg"]
+    assert seen["timeout"] == tg._CLOUD_TIMEOUT == 120
+
+
+def test_dispatch_llm_too_large_early_exits_without_calling(monkeypatch):
+    """Finding/R3 #1: an oversized prompt bails BEFORE burning a prefill."""
+    seen = _capture_call_llm(monkeypatch)
+    huge = "x" * (tg._LOCAL_CTX_CEILING * 3)             # forces needed > ceiling
+    content, err = tg._dispatch_llm(_llm_cfg(), huge, huge)
+    assert content is None
+    assert err and "too large" in err and "Claude CLI" in err
+    assert seen.get("n", 0) == 0                         # _call_llm never invoked
+
+
+def test_dispatch_llm_surfaces_real_error(monkeypatch):
+    """On None content, the dynamic get_last_llm_error string is returned verbatim."""
+    _capture_call_llm(monkeypatch, ret=None, last_error="Timed out after 300s — slow")
+    content, err = tg._dispatch_llm(_llm_cfg(), "sys", "user")
+    assert content is None
+    assert err == "Timed out after 300s — slow"         # no hardcoded literal
 
 
 # ── generate_verified_test (generate → run → repair → keep-if-passing) ───────
@@ -154,7 +254,7 @@ def _patch_verify(monkeypatch, *, gen=(_VALID, None), run_results=None,
     """Wire the verify pipeline to deterministic stand-ins."""
     monkeypatch.setattr(tg, "generate_ai_test_content", lambda *a, **k: gen)
     monkeypatch.setattr(tg, "_build_prompts", lambda *a, **k: ("sys", "user"))
-    monkeypatch.setattr(tg, "_dispatch", lambda *a, **k: repair_reply)
+    monkeypatch.setattr(tg, "_dispatch", lambda *a, **k: (repair_reply, None))
     monkeypatch.setattr("helpers.test_scaffold._test_filename_for",
                         lambda *a, **k: final_name)
     results = list(run_results or [(True, "ok")])

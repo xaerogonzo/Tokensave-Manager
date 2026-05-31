@@ -188,6 +188,7 @@ def generate_ai_test_content(
     max_source_chars: int = 8_000,
     template: "str | None" = None,
     existing_test: "str | None" = None,
+    on_token=None,
 ) -> "tuple[str | None, str | None]":
     """Generate test file content using an AI backend.
 
@@ -231,13 +232,15 @@ def generate_ai_test_content(
     if cancel_event and cancel_event.is_set():
         return None, "Cancelled."
 
-    def _run(up: str) -> "str | None":
-        return _dispatch(effective_backend, cfg, system_prompt, up, project_root)
+    def _run(up: str) -> "tuple[str | None, str | None]":
+        return _dispatch(effective_backend, cfg, system_prompt, up, project_root,
+                         on_token=on_token)
 
     # First attempt.
-    raw = _run(user_prompt)
+    raw, derr = _run(user_prompt)
     if raw is None:
-        return None, "AI backend returned no output — check your settings."
+        return None, (f"AI backend returned no output: {derr}" if derr
+                      else "AI backend returned no output — check your settings.")
     code = _extract_code(raw)
     if not code.strip():
         return None, "AI returned an empty response."
@@ -250,7 +253,7 @@ def generate_ai_test_content(
         if cancel_event and cancel_event.is_set():
             return None, "Cancelled."
         repair_up = user_prompt + "\n\n" + _REPAIR_PROMPT_TEMPLATE.format(error=err)
-        raw2 = _run(repair_up)
+        raw2, _ = _run(repair_up)
         if raw2:
             code2 = _extract_code(raw2)
             err2 = _looks_like_python(code2)
@@ -298,6 +301,7 @@ def generate_verified_test(
     template: "str | None" = None,
     allow_overwrite: bool = False,
     target_path: "str | None" = None,
+    on_token=None,
 ) -> VerifiedResult:
     """Generate a test, RUN it, repair once on failure, keep only if it passes.
 
@@ -338,7 +342,7 @@ def generate_verified_test(
 
     content, err = generate_ai_test_content(
         source_path, project_root, backend, cfg, cancel_event,
-        template=template, existing_test=existing_test)
+        template=template, existing_test=existing_test, on_token=on_token)
     if err or not content:
         return VerifiedResult(None, "error", err or "AI returned no content.")
     if not run:
@@ -403,7 +407,8 @@ def generate_verified_test(
                 return VerifiedResult(None, "cancelled", last_report)
             repair_up = user_prompt + "\n\n" + _RUNTIME_REPAIR_TEMPLATE.format(
                 report=(output or "")[-4000:], prior=content)
-            raw = _dispatch(effective_backend, cfg, system_prompt, repair_up, project_root)
+            raw, _ = _dispatch(effective_backend, cfg, system_prompt, repair_up,
+                               project_root, on_token=on_token)
             if not raw:
                 break
             fixed = _extract_code(raw)
@@ -476,12 +481,28 @@ def _test_function_ids(source: str) -> set:
 # ---------------------------------------------------------------------------
 
 
+# Generation knobs (named so the num_ctx guard and the clamp can't drift apart).
+_MAX_GEN_TOKENS = 2500       # max_tokens handed to the model for one test file
+_LOCAL_CTX_CEILING = 16384   # largest num_ctx we'll request from a local model
+_CTX_SLACK = 512             # headroom above prompt+output before the ceiling
+_CHARS_PER_TOKEN = 2.5       # conservative est (code is token-denser than prose)
+_LOCAL_TIMEOUT = 300         # per-read socket timeout for slow local models (s)
+_CLOUD_TIMEOUT = 120         # cloud APIs are fast — keep the short timeout (s)
+
+
 def _dispatch(effective_backend: str, cfg, system_prompt: str,
-              user_prompt: str, project_root: str) -> "str | None":
-    """Route one prompt to the resolved backend. Shared by generate + repair."""
+              user_prompt: str, project_root: str,
+              on_token=None) -> "tuple[str | None, str | None]":
+    """Route one prompt to the resolved backend. Shared by generate + repair.
+
+    Returns ``(content, error)``: ``(text, None)`` on success or
+    ``(None, why)`` on failure, so callers can surface the REAL cause (timeout,
+    too-large prompt, CLI auth) instead of a generic "check your settings".
+    ``on_token`` only reaches the streaming LLM path (the CLI is not streamed).
+    """
     if effective_backend == "claude_cli":
         return _dispatch_claude_cli(cfg, system_prompt, user_prompt, project_root)
-    return _dispatch_llm(cfg, system_prompt, user_prompt)
+    return _dispatch_llm(cfg, system_prompt, user_prompt, on_token=on_token)
 
 def _resolve_backend(backend: str, cfg) -> "str | None":
     """Return the concrete backend to use, or None if nothing is configured."""
@@ -504,7 +525,7 @@ def _resolve_backend(backend: str, cfg) -> "str | None":
 
 
 def _dispatch_claude_cli(cfg, system_prompt: str, user_prompt: str,
-                          project_root: str) -> "str | None":
+                          project_root: str) -> "tuple[str | None, str | None]":
     """Call Claude CLI in --print mode with the combined prompt.
 
     cwd is a NEUTRAL dir (~), NOT project_root: running `claude --print` inside
@@ -513,9 +534,12 @@ def _dispatch_claude_cli(cfg, system_prompt: str, user_prompt: str,
     permission (which it returns as prose) instead of printing the code. The
     source is already inlined in the prompt, so project context isn't needed.
     (Same rationale as commit-message generation — see call_claude_cli_print.)
+
+    Returns ``(content, error)``. On failure the error is the SPECIFIC cause from
+    ``get_last_cli_error`` (missing binary vs expired auth vs timeout), not a guess.
     """
-    from helpers.claude_cli import call_claude_cli_print
-    return call_claude_cli_print(
+    from helpers.claude_cli import call_claude_cli_print, get_last_cli_error
+    content = call_claude_cli_print(
         claude_exe=cfg.claude_cli_exe,
         prompt=user_prompt,
         system_prompt=system_prompt,
@@ -523,18 +547,66 @@ def _dispatch_claude_cli(cfg, system_prompt: str, user_prompt: str,
         model=getattr(cfg, "claude_cli_model", "") or "",
         cwd=os.path.expanduser("~"),
     )
+    if content is None:
+        cause = get_last_cli_error()
+        if cause:
+            return None, f"Claude CLI failed: {cause}"
+        return None, ("Claude CLI returned no output — verify the CLI path and "
+                      "that you're logged in")
+    return content, None
 
 
-def _dispatch_llm(cfg, system_prompt: str, user_prompt: str) -> "str | None":
-    """Call the configured LLM provider with the combined prompt."""
-    from helpers.llm import _call_llm
-    return _call_llm(
-        cfg=cfg.raw.get("commit_message_llm", {}),
+def _dispatch_llm(cfg, system_prompt: str, user_prompt: str,
+                  on_token=None) -> "tuple[str | None, str | None]":
+    """Call the configured LLM provider with the combined prompt.
+
+    Returns ``(content, error)``. LOCAL providers (Ollama / openai_compatible)
+    get the long ``_LOCAL_TIMEOUT`` per-read timeout, STREAM (so the socket stays
+    alive per-token), and a prompt-sized ``num_ctx`` injected so the model isn't
+    capped at Ollama's 4096 default. Cloud providers (anthropic / openai) keep the
+    short timeout, no ``num_ctx``, and no size ceiling. The streamed text is still
+    returned whole, so the contract is unchanged.
+    """
+    from helpers.llm import _call_llm, get_last_llm_error
+
+    # Shallow copy — NEVER mutate the live shared config dict: a leaked num_ctx
+    # would pollute commit-message generation and may be persisted on save.
+    llm_cfg = dict(cfg.raw.get("commit_message_llm", {}))
+    provider = (llm_cfg.get("provider") or "anthropic").lower()
+    is_local = provider in ("ollama", "openai_compatible")
+    timeout = _LOCAL_TIMEOUT if is_local else _CLOUD_TIMEOUT
+
+    if is_local and llm_cfg.get("num_ctx") is None:
+        # num_ctx is the COMBINED input+output window, so reserve the full
+        # _MAX_GEN_TOKENS response or generation truncates mid-test.
+        est = int((len(system_prompt) + len(user_prompt)) / _CHARS_PER_TOKEN)
+        needed = est + _MAX_GEN_TOKENS + _CTX_SLACK
+        if needed > _LOCAL_CTX_CEILING:
+            # Clamping here would silently starve the output → a guaranteed
+            # truncated test after a wasted multi-minute prefill. Bail BEFORE
+            # the call so no prefill is burned.
+            return None, (
+                f"source too large for local generation (needs ~{needed} ctx "
+                f"> {_LOCAL_CTX_CEILING}); use the Claude CLI backend for this file"
+            )
+        # Round UP to the nearest 1024 for a stable llama.cpp KV-cache allocation
+        # across sequential files (avoids VRAM re-fragmentation).
+        num_ctx = min(_LOCAL_CTX_CEILING, max(4096, -(-needed // 1024) * 1024))
+        llm_cfg["num_ctx"] = num_ctx
+
+    content = _call_llm(
+        cfg=llm_cfg,
         system_prompt=system_prompt,
         user_prompt=user_prompt,
-        max_tokens=2500,
-        timeout=120,
+        max_tokens=_MAX_GEN_TOKENS,
+        timeout=timeout,
+        on_token=on_token,
     )
+    if content is None:
+        # get_last_llm_error() is set by _call_llm on THIS thread — already a
+        # dynamic message (e.g. "Timed out after 300s …"); no hardcoded literal.
+        return None, get_last_llm_error()
+    return content, None
 
 
 # ---------------------------------------------------------------------------
