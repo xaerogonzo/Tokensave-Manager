@@ -68,3 +68,35 @@ def test_body_refresh_survives_missing_widget():
     # A destroyed/closed dialog (txt is None) must be a silent no-op, not a crash.
     GitTabController._apply_gap_progress_to_body(object(), {"txt": None, "prog": [False]},
                                                  ["src/helpers/foo.py"])
+
+
+# ── _gap_copy_claude_prompt (agentic handoff → clipboard) ────────────────────
+
+def test_gap_copy_claude_prompt_populates_clipboard(tk_root):
+    """Checked gaps → a Claude Code handoff prompt lands on the clipboard."""
+    sg = type("S", (), {})()
+    sg.source_path = "/p/src/helpers/foo.py"
+    sg.rel_path = "src/helpers/foo.py"
+    sg.template = "pure_helper"
+    var = tk.BooleanVar(master=tk_root, value=True)
+    status = tk.StringVar(master=tk_root)
+    tk_root.clipboard_clear()
+
+    GitTabController._gap_copy_claude_prompt(
+        object(), [sg], [var], "/p", status, tk_root)
+
+    clip = tk_root.clipboard_get()
+    assert "src/helpers/foo.py" in clip
+    assert "Only CREATE files under `tests/`" in clip
+    assert "Copied a Claude Code prompt for 1 file" in status.get()
+
+
+def test_gap_copy_claude_prompt_nothing_selected(tk_root):
+    sg = type("S", (), {})()
+    sg.source_path = "/p/src/helpers/foo.py"; sg.rel_path = "src/helpers/foo.py"
+    sg.template = "pure_helper"
+    var = tk.BooleanVar(master=tk_root, value=False)   # unchecked
+    status = tk.StringVar(master=tk_root)
+    GitTabController._gap_copy_claude_prompt(
+        object(), [sg], [var], "/p", status, tk_root)
+    assert "Nothing selected" in status.get()

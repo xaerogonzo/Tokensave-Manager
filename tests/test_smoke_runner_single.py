@@ -83,6 +83,7 @@ def test_passes_short_traceback_flags(monkeypatch):
     run_single_test_file(".", "tests/test_x.py")
     assert "--tb=short" in captured["cmd"]
     assert "--no-header" in captured["cmd"]
+    assert "-rfE" in captured["cmd"]        # guarantees the FAILED/ERROR summary block
     assert "tests/test_x.py" in captured["cmd"]
 
 

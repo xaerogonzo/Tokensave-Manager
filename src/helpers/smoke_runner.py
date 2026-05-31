@@ -143,7 +143,7 @@ def run_single_test_file(project_root: str, test_relpath: str,
     try:
         proc = subprocess.Popen(
             [sys.executable, "-m", "pytest", test_relpath,
-             "--tb=short", "--no-header"],
+             "--tb=short", "--no-header", "-rfE"],
             **popen_kw,
         )
     except OSError as exc:

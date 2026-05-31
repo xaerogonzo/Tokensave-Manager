@@ -595,3 +595,158 @@ def test_replace_locked_returns_fail(tmp_path, monkeypatch):
     res = generate_verified_test(src, root, "llm", _cfg())
     assert res.status == "fail"
     assert "locked" in res.report.lower()
+
+
+# ── per-test pruning: _failing_test_ids ──────────────────────────────────────
+
+def test_failing_ids_parses_class_and_func_and_param():
+    out = (
+        "=========================== short test summary info ===========================\n"
+        "FAILED tests/test_x.py::TestCls::test_a - AssertionError: boom\n"
+        "FAILED tests/test_x.py::test_b[3-4] - ValueError\n"
+        "ERROR tests/test_x.py::TestCls::test_c - fixture error\n"
+    )
+    ids, prunable = tg._failing_test_ids(out)
+    assert ids == {"TestCls.test_a", "test_b", "TestCls.test_c"}   # param bracket stripped
+    assert prunable is True
+
+
+def test_failing_ids_whole_file_error_not_prunable():
+    out = ("ERROR tests/test_x.py - NameError: name 'pytest' is not defined\n")
+    ids, prunable = tg._failing_test_ids(out)
+    assert prunable is False                                       # no ::id → can't prune
+
+
+def test_failing_ids_empty_when_no_failures():
+    ids, prunable = tg._failing_test_ids("== 5 passed in 0.1s ==")
+    assert ids == set() and prunable is True
+
+
+# ── per-test pruning: _prune_test_functions ──────────────────────────────────
+
+_PRUNE_SRC = (
+    '"""t."""\n'
+    'import pytest\n\n\n'
+    'def helper():\n    return 1\n\n\n'
+    'def test_a():\n    assert helper() == 1\n\n\n'
+    'def test_bad():\n    assert False\n\n\n'
+    'class TestX:\n'
+    '    def test_c(self):\n        assert True\n\n'
+    '    def test_d(self):\n        assert False\n'
+)
+
+
+def test_prune_drops_named_keeps_rest():
+    out = tg._prune_test_functions(_PRUNE_SRC, {"test_bad", "TestX.test_d"})
+    assert out is not None
+    assert "def test_bad" not in out
+    assert "def test_d" not in out
+    assert "def test_a" in out and "def helper" in out      # survivors + helper kept
+    assert "def test_c" in out                              # class retains passing method
+    assert tg._looks_like_python(out) is None               # still valid
+
+
+def test_prune_removes_whole_class_when_all_fail():
+    out = tg._prune_test_functions(_PRUNE_SRC, {"TestX.test_c", "TestX.test_d"})
+    assert "class TestX" not in out                         # all methods failed → drop class
+    assert "def test_a" in out
+
+
+def test_prune_returns_none_when_nothing_left():
+    src = '"""t."""\ndef test_a():\n    assert False\n'
+    assert tg._prune_test_functions(src, {"test_a"}) is None
+
+
+def test_prune_keeps_decorator_with_function():
+    src = ('"""t."""\nimport pytest\n\n\n'
+           '@pytest.mark.parametrize("x", [1, 2])\n'
+           'def test_p(x):\n    assert x\n\n\n'
+           'def test_ok():\n    assert True\n')
+    out = tg._prune_test_functions(src, {"test_p"})
+    assert "parametrize" not in out                         # decorator removed with func
+    assert "def test_ok" in out
+
+
+# ── _CLI_GEN_TIMEOUT ─────────────────────────────────────────────────────────
+
+def test_cli_dispatch_uses_long_timeout(monkeypatch):
+    captured = {}
+    def fake_print(**kwargs):
+        captured.update(kwargs)
+        return _VALID
+    monkeypatch.setattr("helpers.claude_cli.call_claude_cli_print", fake_print)
+    cfg = SimpleNamespace(claude_cli_exe="/usr/bin/claude", claude_cli_model="")
+    tg._dispatch_claude_cli(cfg, "sys", "user", "/root")
+    assert captured["timeout"] == tg._CLI_GEN_TIMEOUT == 240
+
+
+# ── prune integration through generate_verified_test ─────────────────────────
+
+_THREE = ('"""t."""\nimport pytest\n\n\ndef test_a():\n    assert True\n\n\n'
+          'def test_b():\n    assert True\n\n\ndef test_bad():\n    assert False\n')
+
+
+def _wire_prune(monkeypatch, *, fail_ids="test_bad", pass_on_call=3):
+    monkeypatch.setattr(tg, "_dispatch", lambda *a, **k: (_THREE, None))
+    monkeypatch.setattr(tg, "_build_prompts", lambda *a, **k: ("sys", "user"))
+    monkeypatch.setattr(tg, "_autofix_imports", lambda c, *a, **k: c)
+    monkeypatch.setattr("helpers.test_scaffold._test_filename_for",
+                        lambda *a, **k: "test_foo.py")
+    fail_out = ("=== short test summary info ===\n"
+                + "".join(f"FAILED tests/test__aigen_foo_x.py::{i} - X\n"
+                          for i in fail_ids.split(",")))
+    calls = {"n": 0}
+    def fake_run(project_root, test_relpath, timeout=20):
+        calls["n"] += 1
+        ok = calls["n"] >= pass_on_call
+        return (ok, "1 passed" if ok else fail_out)
+    monkeypatch.setattr("helpers.smoke_runner.run_single_test_file", fake_run)
+    return calls
+
+
+def test_verify_prunes_failing_keeps_passing(tmp_path, monkeypatch):
+    root, src = _verify_repo(tmp_path)
+    _wire_prune(monkeypatch, fail_ids="test_bad", pass_on_call=3)
+    res = generate_verified_test(src, root, "llm", _cfg())
+    assert res.status == "pass"
+    assert res.kept == 2 and res.total == 3                 # dropped 1 of 3
+    written = (tmp_path / "tests" / "test_foo.py").read_text(encoding="utf-8")
+    assert "def test_bad" not in written
+    assert "def test_a" in written and "def test_b" in written
+
+
+def test_verify_prune_below_floor_discards(tmp_path, monkeypatch):
+    root, src = _verify_repo(tmp_path)
+    # 2 of 3 fail → only 1 would survive (0.33 < 0.5 floor) → discard, nothing written
+    _wire_prune(monkeypatch, fail_ids="test_b,test_bad", pass_on_call=99)
+    res = generate_verified_test(src, root, "llm", _cfg())
+    assert res.status == "fail"
+    assert not (tmp_path / "tests" / "test_foo.py").exists()
+
+
+def test_verify_regenerate_is_not_pruned(tmp_path, monkeypatch):
+    """Pruning is new-file only; a failing regenerate keeps the original."""
+    root, src = _verify_repo(tmp_path)
+    target = _existing_test(tmp_path, "def test_keep():\n    assert 1\n")
+    _wire_prune(monkeypatch, fail_ids="test_bad", pass_on_call=99)
+    res = generate_verified_test(src, root, "llm", _cfg(),
+                                 allow_overwrite=True, target_path=target)
+    assert res.status == "fail"                             # not salvaged via pruning
+    assert "test_keep" in open(target, encoding="utf-8").read()   # original intact
+
+
+# ── build_claude_code_handoff_prompt ─────────────────────────────────────────
+
+def test_handoff_prompt_lists_files_and_directives():
+    from helpers.test_gen_llm import build_claude_code_handoff_prompt
+    sugg = [
+        SimpleNamespace(source_path="/p/src/helpers/foo.py",
+                        rel_path="src/helpers/foo.py", template="pure_helper"),
+        SimpleNamespace(source_path="/p/src/dialogs/bar.py",
+                        rel_path="src/dialogs/bar.py", template="dialog_tk"),
+    ]
+    out = build_claude_code_handoff_prompt(sugg, "/p")
+    assert "src/helpers/foo.py" in out and "src/dialogs/bar.py" in out
+    assert "pytest" in out                                  # run-and-fix directive
+    assert "Only CREATE files under `tests/`" in out
+    assert "tk_root" in out                                 # conventions embedded

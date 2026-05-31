@@ -2231,6 +2231,53 @@ class GitTabController:
             )
             cancel_btn.pack(side=tk.RIGHT, padx=(4, 0))
 
+            # Agentic escape hatch: copy a prompt to paste into Claude Code (which
+            # writes + verifies the tests itself), then ↻ Re-scan to pick them up.
+            copy_cc_btn = ttk.Button(
+                act_row, text="📋 Copy Claude Code prompt",
+                command=lambda: self._gap_copy_claude_prompt(
+                    panel_suggestions, check_vars, path, status_var, dlg),
+            )
+            copy_cc_btn.pack(side=tk.LEFT, padx=(0, 4))
+
+            def _do_rescan():
+                # Disable the action row for the worker's lifetime (no overlapping
+                # scans / row-model races); the rebuild replaces these widgets.
+                for _b in (stub_btn, ai_btn, fail_btn, cancel_btn,
+                           copy_cc_btn, rescan_btn):
+                    _b.configure(state=tk.DISABLED)
+                status_var.set("Re-scanning gaps…")
+
+                def _work():
+                    from helpers.test_gap_report import suggest_tests_for_diff
+                    try:
+                        fresh = suggest_tests_for_diff(path, self._cfg.git_exe, base)
+                    except Exception:
+                        fresh = []
+
+                    def _rebuild():
+                        if not panel.winfo_exists():
+                            return
+                        for w in panel.winfo_children():
+                            w.destroy()
+                        if fresh:
+                            _fill_panel(panel, fresh)
+                        else:
+                            tk.Label(
+                                panel,
+                                text="✓ No remaining coverage gaps on this branch.",
+                                bg=C["surface0"], fg=C["green"],
+                                font=("Segoe UI", 9),
+                            ).pack(padx=10, pady=10)
+                    if dlg.winfo_exists():
+                        dlg.after(0, _rebuild)
+
+                threading.Thread(target=_work, daemon=True).start()
+
+            rescan_btn = ttk.Button(
+                act_row, text="↻ Re-scan gaps", command=_do_rescan)
+            rescan_btn.pack(side=tk.LEFT, padx=(4, 0))
+
             if not ai_available:
                 ai_btn.configure(state=tk.DISABLED)
                 _Tooltip(ai_btn,
@@ -2243,6 +2290,29 @@ class GitTabController:
             _populate(suggestions)
         else:
             threading.Thread(target=_fetch, daemon=True).start()
+
+    def _gap_copy_claude_prompt(self, suggestions: list, check_vars: list,
+                                path: str, status_var: tk.StringVar, dlg) -> None:
+        """Copy a paste-into-Claude-Code prompt for the checked gaps.
+
+        Claude Code is agentic (writes → runs pytest → fixes to green), unlike the
+        manager's one-shot `--print` path — so we hand off and let the user re-scan.
+        """
+        from helpers.test_gen_llm import build_claude_code_handoff_prompt
+        selected = [sg for sg, v in zip(suggestions, check_vars) if v.get()]
+        if not selected:
+            status_var.set("Nothing selected — check the files you want first.")
+            return
+        prompt = build_claude_code_handoff_prompt(selected, path)
+        try:
+            dlg.clipboard_clear()
+            dlg.clipboard_append(prompt)
+        except tk.TclError:
+            status_var.set("Clipboard unavailable.")
+            return
+        status_var.set(
+            f"Copied a Claude Code prompt for {len(selected)} file(s) — paste it into "
+            "Claude Code, let it write + verify the tests, then click ↻ Re-scan gaps.")
 
     def _gap_generate_stubs(
         self, suggestions: list, check_vars: list, path: str,
@@ -2420,10 +2490,16 @@ class GitTabController:
                 if res.status == "pass":
                     passed += 1
                     written_paths.append(sg.rel_path)
-                    _set_row(idx, "✓")
+                    # Partial pass: per-test pruning kept some, dropped the rest.
+                    glyph = (f"✓ ({res.kept}/{res.total})"
+                             if res.kept and res.total and res.kept < res.total
+                             else "✓")
+                    _set_row(idx, glyph)
+                    if res.kept and res.kept < res.total:
+                        reports[sg.rel_path] = res.report      # show what was dropped
                     self._on_log(
                         f"  ✓ AI test {'updated' if is_update else 'written'} + "
-                        f"passing: {sg.rel_path}", C["green"])
+                        f"passing ({glyph}): {sg.rel_path}", C["green"])
                 else:
                     failed += 1
                     # Distinguish a failed regenerate (original preserved) from a
@@ -2449,12 +2525,17 @@ class GitTabController:
                 return
             stub_btn.configure(state=tk.NORMAL)
             ai_btn.configure(state=tk.NORMAL)
-            fail_btn.configure(state=(tk.NORMAL if failed else tk.DISABLED))
+            # Enable "View failures…" if anything failed OR a partial pass dropped
+            # some tests (those reports are stashed too).
+            has_reports = bool(getattr(self, "_last_ai_fail_reports", None))
+            fail_btn.configure(state=(tk.NORMAL if (failed or has_reports)
+                                      else tk.DISABLED))
             if cancel_event.is_set():
                 status_var.set(f"Cancelled — {passed} ✓ / {failed} ✗ so far.")
             else:
                 status_var.set(
-                    f"Done: {passed} ✓ / {failed} ✗ — only passing tests were written.")
+                    f"Done: {passed} ✓ / {failed} ✗ — passing (incl. pruned-partial) "
+                    "tests were written.")
             # Reflect closed gaps in the PR-body checklist (Draft PR dialog only).
             if on_tests_written and written_paths:
                 on_tests_written(written_paths)

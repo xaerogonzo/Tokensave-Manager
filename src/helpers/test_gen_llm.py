@@ -120,6 +120,21 @@ explicit import list — list every symbol you need).
 - Every fixture that uses `monkeypatch` MUST be declared with the default function \
 scope: write plain `@pytest.fixture` with no `scope=` argument (monkeypatch is \
 function-scoped, so a broader-scoped fixture using it fails at setup).
+- Assert what the API actually returns, taken from the source above — do not guess:
+    * Tk normalises `widget.cget("font")` to a STRING like "Arial 11", not a tuple. \
+Compare with `tkfont.Font(font=w.cget("font")).actual()` or the "family size" string, \
+never `== ("Arial", 11)`.
+    * Build a real widget/controller/dialog with the `tk_root` fixture (and a real \
+parent), NEVER a `Mock()` master — `tk.Frame(Mock())` raises "Mock has no attribute \
+'tk'". Tk construction needs a live Tk parent.
+    * Call functions with the EXACT parameter names from the source (e.g. \
+`timeout_s=`, not `timeout=`); read the signature above before calling.
+- Guard platform-specific code: only patch/assert POSIX-only calls \
+(`os.getpgid`, `os.killpg`, `os.setsid`) under `sys.platform != "win32"` (or \
+`@pytest.mark.skipif`); on Windows assert the `taskkill`/`CREATE_NO_WINDOW` path.
+- NEVER run a real `git`/network/subprocess in a fixture or test — mock at the import \
+site (`monkeypatch.setattr("module.under.test.subprocess.run", …)`); a real \
+`subprocess.run` in a fixture fails under the manager's windowed process.
 - MUST NOT (or the test is killed at a 20s timeout and discarded): call \
 `.mainloop()`; call `input()`; make a real network request; run a real \
 subprocess (git / pytest / ollama / claude); or call the real LLM. MOCK every \
@@ -172,6 +187,56 @@ _TRUNCATION_HINT = (
     "code). Produce a SHORTER but COMPLETE test file — use fewer test functions "
     "if needed, but the file MUST end cleanly with all strings and blocks closed."
 )
+
+# Pasted into an AGENTIC Claude Code session ("Copy Claude Code prompt"): unlike the
+# one-shot --print path, Claude Code writes the file, runs pytest, and iterates to
+# green itself — so we instruct it to do exactly that. Only {file_list} is filled.
+_CLAUDE_CODE_HANDOFF_TEMPLATE = """\
+Write pytest tests for the following source files in this project. For EACH file,
+create its `tests/test_*.py`, then RUN it and FIX any failures until it is green
+before moving to the next.
+
+Files needing tests:
+{file_list}
+
+Workflow for each file:
+1. Read the source file and a few existing `tests/test_*.py` + `tests/conftest.py`
+   to match the project's style and fixtures.
+2. Write the test file (focused, independent tests).
+3. Run it: `pytest -m "not tk" tests/<the_test_file> -q`. For a Tk/dialog source,
+   mark the module `pytestmark = pytest.mark.tk` and run `pytest -m tk tests/<file> -q`.
+4. If it fails, fix the test (or flag a genuine source bug) and re-run until all pass.
+
+Project conventions (follow exactly):
+- Tests live in `tests/`, named `test_<module>.py`; `src/` is on `sys.path` so import
+  as `from helpers.x import Y` / `from controllers.x import Y`.
+- Mock at the import site (`monkeypatch.setattr("module.under.test.subprocess.run", ...)`),
+  never globally; NEVER run real git/network/subprocess in a test or fixture.
+- Tk: use the `tk_root` fixture (never a bare `tk.Tk()` or a `Mock()` master);
+  mark Tk tests `pytestmark = pytest.mark.tk`; never call `.mainloop()`.
+- `widget.cget("font")` returns a normalized string ("Arial 11"), not a tuple.
+- Guard POSIX-only calls (`os.getpgid`/`killpg`) behind `sys.platform`/`skipif`.
+- Only CREATE files under `tests/`. Do NOT modify any source file.
+
+When done, list the test files you created and confirm they pass.
+"""
+
+
+def build_claude_code_handoff_prompt(suggestions, project_root: str) -> str:
+    """Build a paste-into-Claude-Code instruction to write + verify tests for
+    *suggestions* (SuggestedTest items). Pure — no LLM call, no I/O beyond deriving
+    the destination test filenames."""
+    from helpers.test_scaffold import _test_filename_for
+    rows = []
+    for sg in suggestions:
+        try:
+            tname = _test_filename_for(sg.source_path, project_root)
+        except Exception:
+            base = os.path.splitext(os.path.basename(sg.source_path))[0]
+            tname = f"test_{base}.py"
+        rel = getattr(sg, "rel_path", "") or os.path.basename(sg.source_path)
+        rows.append(f"- `{rel}` → `tests/{tname}`")
+    return _CLAUDE_CODE_HANDOFF_TEMPLATE.format(file_list="\n".join(rows))
 
 # Appended to the user prompt on a runtime-failure repair pass: the generated
 # test parsed fine but FAILED when actually run under pytest.
@@ -309,11 +374,15 @@ class VerifiedResult:
     preserved_existing — True when this was a REGENERATE that failed: the
     original test file was left untouched (so the UI says "kept original",
     not a bare ✗ that looks like data loss).
+    kept/total — for a PARTIAL pass (per-test pruning kept kept-of-total tests and
+    dropped the failing ones). Both 0 on a clean full pass (no pruning happened).
     """
     content: "str | None"
     status: str
     report: str = ""
     preserved_existing: bool = False
+    kept: int = 0
+    total: int = 0
 
 
 def generate_verified_test(
@@ -443,6 +512,16 @@ def generate_verified_test(
             # A repair that re-dropped an import gets re-fixed deterministically.
             content = _autofix_imports(fixed, source_path, project_root)
 
+        # Per-test pruning (new-file path only — regenerate's retention gate forbids
+        # dropping prior tests). Salvage the passing tests by removing the failing
+        # ones, then RE-VERIFY the remainder green before writing.
+        if not is_update:
+            pruned = _prune_after_failure(
+                content, last_report, project_root, tmp_path, tmp_rel,
+                final_path, allow_overwrite, smoke_runner, cancel_event)
+            if pruned is not None:
+                return pruned
+
         return VerifiedResult(content, "fail", last_report,
                               preserved_existing=is_update)   # discarded
     finally:
@@ -501,6 +580,140 @@ def _test_function_ids(source: str) -> set:
 
     _V().visit(tree)
     return ids
+
+
+# ---------------------------------------------------------------------------
+# Per-test pruning — salvage the passing tests when a minority fail
+# ---------------------------------------------------------------------------
+#
+# A one-shot generation often yields a mostly-passing suite with a few wrong
+# assertions. Rather than discard the whole file, drop just the failing test
+# functions and keep the rest (re-verified green before writing).
+
+
+def _failing_test_ids(pytest_output: str) -> "tuple[set, bool]":
+    """Parse the ``-rfE`` summary for failing test ids.
+
+    Returns ``(ids, prunable)``:
+      * ``ids`` — qualified ids in ``_test_function_ids`` shape (``Class.method`` or
+        ``test_func``), with any ``[param]`` suffix stripped so a parametrized
+        failure maps back to its def name.
+      * ``prunable`` — False if any FAILED/ERROR line is a whole-file collection
+        error (no ``::id``); such a file can't be salvaged by removing functions.
+    """
+    ids: set = set()
+    prunable = True
+    for raw in pytest_output.splitlines():
+        line = raw.strip()
+        if not (line.startswith("FAILED ") or line.startswith("ERROR ")):
+            continue
+        # "FAILED tests/x.py::Cls::method - reason"  /  "ERROR tests/x.py - reason"
+        token = line.split(" ", 1)[1].split(" ")[0]          # tests/x.py::Cls::method
+        parts = token.split("::")
+        if len(parts) < 2:
+            prunable = False                                  # whole-file error
+            continue
+        leaf = parts[-1].split("[", 1)[0]                     # strip parametrize bracket
+        qualified = f"{parts[-2]}.{leaf}" if len(parts) >= 3 else leaf
+        ids.add(qualified)
+    return ids, prunable
+
+
+def _prune_test_functions(code: str, failing_ids: set) -> "str | None":
+    """Remove the named ``test_*`` funcs/methods from *code*; keep everything else.
+
+    Uses the AST purely as a read-only line indexer (never ``ast.unparse`` — that
+    would reformat survivors). Spans start at the first decorator's line (so
+    ``@pytest.mark.parametrize``/``@pytest.fixture`` go with the function) and end at
+    ``end_lineno``. A class whose every test method is dropped is removed whole.
+    Spans are deleted high-to-low so earlier removals don't shift later indices.
+    Returns the pruned source, or ``None`` if it no longer parses or nothing remains.
+    """
+    if not failing_ids:
+        return code
+    try:
+        tree = ast.parse(code)
+    except SyntaxError:
+        return None
+
+    def _span(node) -> "tuple[int, int]":
+        start = node.lineno
+        for dec in getattr(node, "decorator_list", []):
+            start = min(start, dec.lineno)
+        return start, (node.end_lineno or node.lineno)
+
+    spans: "list[tuple[int, int]]" = []
+    _FN = (ast.FunctionDef, ast.AsyncFunctionDef)
+    for node in tree.body:
+        if isinstance(node, _FN) and node.name.startswith("test") \
+                and node.name in failing_ids:
+            spans.append(_span(node))
+        elif isinstance(node, ast.ClassDef):
+            methods = [n for n in node.body if isinstance(n, _FN)
+                       and n.name.startswith("test")]
+            drop = [m for m in methods if f"{node.name}.{m.name}" in failing_ids]
+            if methods and len(drop) == len(methods):
+                spans.append(_span(node))            # whole class — all tests fail
+            else:
+                spans.extend(_span(m) for m in drop)
+
+    if not spans:
+        return code
+    lines = code.splitlines(keepends=True)
+    for start, end in sorted(spans, key=lambda s: s[0], reverse=True):
+        del lines[start - 1:end]                     # 1-based inclusive → 0-based slice
+    pruned = "".join(lines)
+    try:
+        ast.parse(pruned)
+    except SyntaxError:
+        return None
+    return pruned if _test_function_ids(pruned) else None
+
+
+def _prune_after_failure(content, last_report, project_root, tmp_path, tmp_rel,
+                         final_path, allow_overwrite, smoke_runner,
+                         cancel_event) -> "VerifiedResult | None":
+    """Try to salvage a failing new-file generation by dropping the failing tests.
+
+    Returns a ``"pass"`` ``VerifiedResult`` (with kept/total + a ``[prune-verify]``
+    report) when the pruned remainder runs green and clears the survivor floor; else
+    ``None`` to let the caller fall through to a normal discard.
+    """
+    failing_ids, prunable = _failing_test_ids(last_report)
+    if not prunable or not failing_ids:
+        return None                                   # whole-file error / nothing to cut
+    total = len(_test_function_ids(content))
+    if not total:
+        return None
+    pruned = _prune_test_functions(content, failing_ids)
+    if not pruned:
+        return None
+    survivors = len(_test_function_ids(pruned))
+    if not survivors or survivors / total < _MIN_SURVIVORS_FRAC:
+        log.info("Pruning declined: only %d/%d tests would survive (floor %.0f%%).",
+                 survivors, total, _MIN_SURVIVORS_FRAC * 100)
+        return None
+    if cancel_event and cancel_event.is_set():
+        return None
+    with open(tmp_path, "w", encoding="utf-8", newline="\n") as fh:
+        fh.write(pruned)
+    passed, out = smoke_runner.run_single_test_file(project_root, tmp_rel)
+    if not passed:
+        # Isolate this from the original generation failure for debuggability.
+        log.warning("Prune-verify re-run did not pass; discarding.\n[prune-verify] %s",
+                    (out or "")[-1500:])
+        return None
+    if os.path.exists(final_path) and not allow_overwrite:
+        return None                                   # don't clobber an existing test
+    if not _safe_replace(tmp_path, final_path):
+        return None                                   # target locked
+    dropped = ", ".join(sorted(failing_ids))
+    log.info("Pruned %s: kept %d/%d, dropped: %s",
+             os.path.basename(final_path), survivors, total, dropped)
+    return VerifiedResult(
+        pruned, "pass",
+        f"[prune-verify] kept {survivors}/{total} tests; dropped: {dropped}",
+        kept=survivors, total=total)
 
 
 # ---------------------------------------------------------------------------
@@ -723,6 +936,8 @@ _CTX_SLACK = 512             # headroom above prompt+output before the ceiling
 _CHARS_PER_TOKEN = 2.5       # conservative est (code is token-denser than prose)
 _LOCAL_TIMEOUT = 300         # per-read socket timeout for slow local models (s)
 _CLOUD_TIMEOUT = 120         # cloud APIs are fast — keep the short timeout (s)
+_CLI_GEN_TIMEOUT = 240       # `claude --print` one-shot gen for a whole test file (s)
+_MIN_SURVIVORS_FRAC = 0.5    # keep a pruned-partial file only if ≥this frac survives
 
 
 def _dispatch(effective_backend: str, cfg, system_prompt: str,
@@ -778,7 +993,7 @@ def _dispatch_claude_cli(cfg, system_prompt: str, user_prompt: str,
         claude_exe=cfg.claude_cli_exe,
         prompt=user_prompt,
         system_prompt=system_prompt,
-        timeout=90,
+        timeout=_CLI_GEN_TIMEOUT,          # large controllers need >90s one-shot
         model=getattr(cfg, "claude_cli_model", "") or "",
         cwd=os.path.expanduser("~"),
     )
