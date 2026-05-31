@@ -361,7 +361,7 @@ A full git control panel for whichever project is selected in the Projects tab.
 | 🐙 Merge PR… | Lists open PRs via `gh pr list --json`. Pick one + a merge strategy (Merge / Squash / Rebase) + optional delete-source-branch. Single confirmation modal shows title, source/base branches, diff stats. On confirm: `gh pr merge <N> --merge\|--squash\|--rebase`, then auto-switches local to the default branch and pulls so you end up sitting on the freshly-merged state |
 | 📦 Release… | One-button GitHub release (see Release Wizard above) |
 | Draft PR… | Ask AI to draft a structured PR description. Right-click or Shift+click to choose Claude CLI (external terminal, uses your subscription) or **Ollama / API** (inline dialog, free with local models). Right-click also exposes **"Set PR base branch…"** to target any branch instead of auto-detected master/main |
-| 🧪 Test Gaps… | Diff this branch against its base and show which changed `src/*.py` files have no `tests/test_*.py`. One-click generate template stubs or AI-written tests for the flagged files. Useful without drafting a PR first |
+| 🧪 Test Gaps… | Diff this branch against its base and show which changed `src/*.py` files have no `tests/test_*.py`. One-click **template stubs** or **AI-written tests** (Auto / Claude CLI / Ollama) for the flagged files. AI tests are generated → run → repaired, then **re-verified against the full `pytest -m "not tk"` suite and rolled back if they break it** (only gate-safe tests are kept; passing-but-partial files show `✓ N/M`). Or **📋 Copy a Claude Code prompt** to hand the gaps to an agentic session and **↻ Re-scan** to pick up what it writes. Works without drafting a PR first |
 
 Every button has a hover tooltip with a plain-English explanation.
 
@@ -835,17 +835,20 @@ See [CHANGELOG.md](CHANGELOG.md) for the full history.
 
 ## Testing
 
-The manager ships with a pytest test suite covering both pure-logic helpers
-and the four newest dialogs (checks, tool manager, codegraph MCP picker,
-scrub history). Tests are zero-runtime-dependency for end users — only the
-dev workflow installs pytest.
+The manager ships with a pytest test suite covering pure-logic helpers, the AI
+test-generation / PR-draft pipeline, and the Tk dialogs + controllers. Tests are
+zero-runtime-dependency for end users — only the dev workflow installs pytest.
 
 ```bash
 pip install -r requirements-dev.txt
-python -m pytest                    # everything (~3-5 s on Windows)
-python -m pytest -m "not tk"        # pure-logic only — no display needed
-python -m pytest -m tk              # dialog tests only
+python -m pytest                    # everything
+python -m pytest -m "not tk"        # pure-logic only — no display needed (~10 s)
+python -m pytest -m tk              # dialog/controller tests only (needs a display)
 ```
+
+Tk-marked tests need a display: on Windows they run as-is; on Linux CI they run
+under `xvfb-run`. The CI gate is `pytest -m "not tk"` (the same gate the Test Gaps
+AI generator re-verifies generated tests against before keeping them).
 
 On Linux CI the dialog tests run under `xvfb-run -a` with `python3-tk`
 installed. The GitHub Actions workflow (`.github/workflows/ci.yml`) splits
