@@ -238,6 +238,169 @@ def test_dispatch_llm_surfaces_real_error(monkeypatch):
     assert err == "Timed out after 300s — slow"         # no hardcoded literal
 
 
+def test_max_gen_tokens_is_4000():
+    """Raised from 2500 to curb mid-file truncation (smoke_runner case)."""
+    assert tg._MAX_GEN_TOKENS == 4000
+
+
+# ── deterministic import auto-repair ────────────────────────────────────────
+
+def test_undefined_names_flags_used_but_unimported():
+    code = '"""d."""\npytestmark = pytest.mark.tk\ndef test_x():\n    subprocess.run([])\n'
+    und = tg._undefined_names(code)
+    assert "pytest" in und and "subprocess" in und
+
+
+def test_undefined_names_empty_for_clean_code():
+    assert tg._undefined_names(_VALID) == []
+
+
+def test_undefined_names_empty_on_syntax_error():
+    assert tg._undefined_names('"""d."""\ndef oops(\n') == []
+
+
+def test_module_dotted_src_layout(tmp_path):
+    src = tmp_path / "src" / "controllers"
+    src.mkdir(parents=True)
+    f = src / "projects_tab.py"
+    f.write_text("x = 1\n", encoding="utf-8")
+    assert tg._module_dotted(str(f), str(tmp_path)) == "controllers.projects_tab"
+
+
+def test_module_dotted_no_src_layout(tmp_path):
+    f = tmp_path / "helpers" / "git.py"
+    f.parent.mkdir(parents=True)
+    f.write_text("x = 1\n", encoding="utf-8")
+    assert tg._module_dotted(str(f), str(tmp_path)) == "helpers.git"
+
+
+def _autofix(code, tmp_path, *, rel="src/helpers/foo.py", source=""):
+    """Write a source file at *rel* with *source* body; run _autofix on *code*."""
+    sp = tmp_path / rel
+    sp.parent.mkdir(parents=True, exist_ok=True)
+    sp.write_text(source or "def f():\n    return 1\n", encoding="utf-8")
+    return tg._autofix_imports(code, str(sp), str(tmp_path))
+
+
+def test_autofix_injects_pytest_multiline_docstring(tmp_path):
+    code = ('"""Tests for app.\nSecond line.\nThird.\n"""\n'
+            'pytestmark = pytest.mark.tk\ndef test_x():\n    assert True\n')
+    out = _autofix(code, tmp_path)
+    assert "import pytest" in out
+    assert tg._undefined_names(out) == []                 # fully resolved
+    # import lands AFTER the full 4-line docstring (closing """ on line 4),
+    # before pytestmark
+    lines = out.splitlines()
+    assert lines[3] == '"""'                              # docstring closes here
+    assert lines[4] == "import pytest"
+    assert "pytestmark" in lines[5]
+
+
+def test_autofix_injects_local_class(tmp_path):
+    code = '"""d."""\ndef test_c():\n    assert ProjectsTabController\n'
+    out = _autofix(code, tmp_path, rel="src/controllers/projects_tab.py",
+                   source="class ProjectsTabController:\n    pass\n")
+    assert "from controllers.projects_tab import ProjectsTabController" in out
+    assert tg._undefined_names(out) == []
+
+
+def test_autofix_injects_subprocess(tmp_path):
+    code = '"""d."""\ndef test_s():\n    subprocess.run(["x"])\n'
+    out = _autofix(code, tmp_path)
+    assert "import subprocess" in out
+
+
+def test_autofix_clusters_typing_single_line(tmp_path):
+    code = '"""d."""\ndef test_t():\n    x: Optional[Dict] = None\n    assert x is None\n'
+    out = _autofix(code, tmp_path)
+    assert "from typing import Dict, Optional" in out      # ONE clustered line
+    assert tg._undefined_names(out) == []
+
+
+def test_autofix_module_ref_root(tmp_path):
+    code = ('"""d."""\ndef test_m():\n'
+            '    controllers.projects_tab.ProjectsTabController()\n')
+    out = _autofix(code, tmp_path, rel="src/controllers/projects_tab.py",
+                   source="class ProjectsTabController:\n    pass\n")
+    assert "import controllers.projects_tab" in out
+
+
+def test_autofix_module_ref_stem_binds_correctly(tmp_path):
+    # bare stem `projects_tab` flagged → `from controllers import projects_tab`
+    code = '"""d."""\ndef test_m():\n    projects_tab.helper()\n'
+    out = _autofix(code, tmp_path, rel="src/controllers/projects_tab.py",
+                   source="def helper():\n    return 1\n")
+    assert "from controllers import projects_tab" in out
+    assert "import controllers.projects_tab\n" not in out  # NOT the root form
+
+
+def test_autofix_local_first_shadowing(tmp_path):
+    """A source that defines its own Path wins over the stdlib map."""
+    code = '"""d."""\ndef test_p():\n    p = Path()\n    assert p\n'
+    out = _autofix(code, tmp_path, rel="src/helpers/weird.py",
+                   source="class Path:\n    pass\n")
+    assert "from helpers.weird import Path" in out
+    assert "from pathlib import Path" not in out
+
+
+def test_autofix_wraps_wide_imports(tmp_path):
+    code = ('"""d."""\ndef test_w():\n'
+            '    assert (A, B, C, D)\n')
+    out = _autofix(code, tmp_path, rel="src/helpers/big.py",
+                   source="class A:\n    pass\nclass B:\n    pass\n"
+                          "class C:\n    pass\nclass D:\n    pass\n")
+    assert "from helpers.big import (" in out             # parenthesised
+    assert out.count("    D,") == 1                        # trailing comma on last
+    assert tg._undefined_names(out) == []
+
+
+def test_autofix_preserves_crlf(tmp_path):
+    code = '"""d."""\r\npytestmark = pytest.mark.tk\r\ndef test_x():\r\n    assert True\r\n'
+    out = _autofix(code, tmp_path)
+    assert "import pytest" in out
+    assert "\r\n" in out
+    assert "\n" not in out.replace("\r\n", "")            # pure CRLF, no stray LF
+
+
+def test_autofix_idempotent(tmp_path):
+    code = '"""d."""\npytestmark = pytest.mark.tk\ndef test_x():\n    assert True\n'
+    once = _autofix(code, tmp_path)
+    twice = tg._autofix_imports(once, str(tmp_path / "src/helpers/foo.py"), str(tmp_path))
+    assert once == twice
+
+
+def test_autofix_empty_input_no_raise(tmp_path):
+    assert _autofix("", tmp_path) == ""
+    assert _autofix("   \n", tmp_path) == "   \n"
+
+
+def test_autofix_syntax_error_returns_unchanged(tmp_path):
+    bad = '"""d."""\ndef oops(\n'
+    assert _autofix(bad, tmp_path) == bad
+
+
+def test_autofix_skips_already_imported(tmp_path):
+    out = _autofix(_VALID, tmp_path)                       # already has import pytest
+    assert out.count("import pytest") == 1                 # no duplicate
+
+
+def test_verified_test_writes_import_complete_file(tmp_path, monkeypatch):
+    """Integration: an import-less candidate from the backend is written WITH the
+    injected imports (autofix runs inside the real generate_ai_test_content)."""
+    root, src = _verify_repo(tmp_path)                     # src = <tmp>/src/foo.py
+    importless = '"""t."""\ndef test_f():\n    assert f() == 1\n'   # uses f, no import
+    monkeypatch.setattr(tg, "_dispatch", lambda *a, **k: (importless, None))
+    monkeypatch.setattr("helpers.smoke_runner.run_single_test_file",
+                        lambda *a, **k: (True, "1 passed"))
+    monkeypatch.setattr("helpers.test_scaffold._test_filename_for",
+                        lambda *a, **k: "test_foo.py")
+    res = generate_verified_test(src, root, "llm", _cfg())
+    assert res.status == "pass"
+    written = (tmp_path / "tests" / "test_foo.py").read_text(encoding="utf-8")
+    assert "from foo import f" in written                  # symbol-under-test injected
+    assert tg._undefined_names(written) == []
+
+
 # ── generate_verified_test (generate → run → repair → keep-if-passing) ───────
 
 def _verify_repo(tmp_path):

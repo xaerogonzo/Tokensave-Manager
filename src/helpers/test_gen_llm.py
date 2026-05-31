@@ -110,6 +110,16 @@ creationflags=CREATE_NO_WINDOW to Popen/run/check_output, assert it in the \
 test: _, kwargs = mock.call_args; assert kwargs.get("creationflags") == \
 CREATE_NO_WINDOW
 - Keep tests focused and independent — no shared mutable state between tests.
+- IMPORTS (critical): the file MUST import every name it references. ALWAYS \
+`import pytest`. Import the module/class under test \
+(e.g. `from controllers.projects_tab import ProjectsTabController`). Import every \
+stdlib module you use (`subprocess`, `os`, …) and every typing name (`from typing \
+import Optional`). A reference to an unimported name makes the file invalid.
+- Import each name explicitly, one symbol per `from x import y` line (a clean, \
+explicit import list — list every symbol you need).
+- Every fixture that uses `monkeypatch` MUST be declared with the default function \
+scope: write plain `@pytest.fixture` with no `scope=` argument (monkeypatch is \
+function-scoped, so a broader-scoped fixture using it fails at setup).
 - MUST NOT (or the test is killed at a 20s timeout and discarded): call \
 `.mainloop()`; call `input()`; make a real network request; run a real \
 subprocess (git / pytest / ollama / claude); or call the real LLM. MOCK every \
@@ -153,6 +163,15 @@ Your previous reply was NOT valid Python and could not be parsed:
 Reply again with ONLY the corrected Python source of the test file — no prose,
 no markdown fences, no commentary, no tool use. Start with the module docstring.
 """
+
+# Appended to the repair prompt when the parse error looks like a truncation
+# (unterminated string / unexpected EOF) — i.e. the prior reply ran past the
+# token budget. Tell the model to produce a shorter, COMPLETE file.
+_TRUNCATION_HINT = (
+    "Your previous output was CUT OFF mid-file (it ended in the middle of the "
+    "code). Produce a SHORTER but COMPLETE test file — use fewer test functions "
+    "if needed, but the file MUST end cleanly with all strings and blocks closed."
+)
 
 # Appended to the user prompt on a runtime-failure repair pass: the generated
 # test parsed fine but FAILED when actually run under pytest.
@@ -253,18 +272,25 @@ def generate_ai_test_content(
         if cancel_event and cancel_event.is_set():
             return None, "Cancelled."
         repair_up = user_prompt + "\n\n" + _REPAIR_PROMPT_TEMPLATE.format(error=err)
+        # If the previous reply was cut off (output exceeded max_tokens), the
+        # parse error is an unterminated string / unexpected EOF — tell the model
+        # to produce a SHORTER complete file instead of re-truncating.
+        if any(s in err.lower() for s in ("unterminated", "eof", "was never closed")):
+            repair_up += "\n" + _TRUNCATION_HINT
         raw2, _ = _run(repair_up)
         if raw2:
             code2 = _extract_code(raw2)
             err2 = _looks_like_python(code2)
             if err2 is None and code2.strip():
-                return code2, None
+                return _autofix_imports(code2, source_path, project_root), None
             err, code = (err2 or err), (code2 or code)
         first_line = (code.strip().splitlines() or [""])[0][:80]
         return None, (
             f"AI did not return valid Python ({err}). "
             f"First line was: {first_line!r}"
         )
+
+    return _autofix_imports(code, source_path, project_root), None
 
     return code, None
 
@@ -414,7 +440,8 @@ def generate_verified_test(
             fixed = _extract_code(raw)
             if not fixed.strip() or _looks_like_python(fixed) is not None:
                 break  # repair produced non-Python → don't run garbage
-            content = fixed
+            # A repair that re-dropped an import gets re-fixed deterministically.
+            content = _autofix_imports(fixed, source_path, project_root)
 
         return VerifiedResult(content, "fail", last_report,
                               preserved_existing=is_update)   # discarded
@@ -477,12 +504,220 @@ def _test_function_ids(source: str) -> set:
 
 
 # ---------------------------------------------------------------------------
+# Deterministic import auto-repair
+# ---------------------------------------------------------------------------
+#
+# A local 14B model reliably DROPS imports it clearly needs — it emits
+# `pytestmark = pytest.mark.tk` without `import pytest`, references the class
+# under test without importing it, uses `subprocess`/`Dict` unimported. Those
+# are NameErrors that only surface at the 20s pytest gate (and a slow LLM repair
+# pass). We catch them statically (pyflakes, in-process) and inject the missing
+# imports deterministically BEFORE running — faster, and backend-agnostic.
+
+# Names we can resolve to a known import line. Grouped by emission style.
+_TYPING_NAMES = {
+    "List", "Dict", "Set", "Tuple", "Optional", "Union", "Any", "Callable",
+    "Type", "cast", "Iterable", "Iterator", "Sequence", "Mapping",
+}
+_MOCK_NAMES = {"MagicMock", "patch", "mock", "Mock", "call", "ANY", "PropertyMock"}
+_PLAIN_MODULES = {
+    "pytest", "subprocess", "os", "sys", "re", "json", "threading", "time",
+    "tempfile", "shutil", "uuid", "pathlib", "io", "textwrap", "itertools",
+}
+# name -> (module, symbol) for `from module import symbol`.
+_FROM_IMPORTS = {
+    "Path": ("pathlib", "Path"),
+    "SimpleNamespace": ("types", "SimpleNamespace"),
+    "dataclass": ("dataclasses", "dataclass"),
+    "CREATE_NO_WINDOW": ("constants", "CREATE_NO_WINDOW"),  # G-WIN rule
+}
+
+
+def _undefined_names(code: str) -> "list[str]":
+    """Names used but never bound, per pyflakes (deduped, source order).
+
+    Returns ``[]`` if the code doesn't parse (the syntax gate owns that) or if
+    pyflakes can't be imported (packaged build) — autofix then no-ops and the
+    pytest gate catches anything real.
+    """
+    try:
+        from pyflakes.checker import Checker
+    except ImportError:
+        return []
+    try:
+        tree = ast.parse(code)
+    except SyntaxError:
+        return []
+    out: "list[str]" = []
+    for m in Checker(tree, filename="t.py").messages:
+        if type(m).__name__ == "UndefinedName":
+            name = m.message_args[0]
+            if name not in out:
+                out.append(name)
+    return out
+
+
+def _module_dotted(source_path: str, project_root: str) -> str:
+    """Dotted import path of the source module, as tests import it.
+
+    `src/` is the import root (conftest puts it on sys.path), so
+    ``…/src/controllers/projects_tab.py`` → ``controllers.projects_tab``.
+    """
+    src_dir = os.path.join(project_root, "src")
+    base = src_dir if os.path.isdir(src_dir) else project_root
+    try:
+        rel = os.path.relpath(source_path, base)
+    except ValueError:
+        rel = os.path.basename(source_path)
+    return os.path.splitext(rel)[0].replace(os.sep, ".").replace("/", ".")
+
+
+def _module_symbols(source_path: str) -> "set[str]":
+    """Top-level class/function names defined in the source file."""
+    try:
+        with open(source_path, encoding="utf-8", errors="replace") as fh:
+            tree = ast.parse(fh.read())
+    except (OSError, SyntaxError):
+        return set()
+    return {
+        node.name for node in tree.body
+        if isinstance(node, (ast.ClassDef, ast.FunctionDef, ast.AsyncFunctionDef))
+    }
+
+
+def _bound_names(tree: ast.Module) -> "set[str]":
+    """Names already imported/bound at module level (so we never duplicate)."""
+    bound: "set[str]" = set()
+    for node in ast.walk(tree):
+        if isinstance(node, ast.Import):
+            for a in node.names:
+                bound.add((a.asname or a.name).split(".")[0])
+        elif isinstance(node, ast.ImportFrom):
+            for a in node.names:
+                bound.add(a.asname or a.name)
+    return bound
+
+
+def _emit_from(module: str, names: "list[str]", nl: str) -> str:
+    """One ``from module import …`` line; parenthesised + trailing comma if >3."""
+    names = sorted(set(names))
+    if len(names) > 3:
+        inner = "".join(f"    {n},{nl}" for n in names)
+        return f"from {module} import ({nl}{inner})"
+    return f"from {module} import " + ", ".join(names)
+
+
+def _autofix_imports(code: str, source_path: str, project_root: str) -> str:
+    """Inject imports for names pyflakes flags as undefined.
+
+    Local-first (the source file's own symbols win over the stdlib map, so a
+    source that defines its own ``Path``/``Any`` isn't hijacked), then a
+    module-reference fallback for dotted access, then the generic known-imports
+    map. Uses the AST purely as a read-only indexer to find the line AFTER the
+    docstring/__future__ block, then does a string splice (never ``ast.unparse``,
+    which would strip the model's formatting). Returns the original code on any
+    parse trouble — never hands back worse code.
+    """
+    undefined = _undefined_names(code)
+    if not undefined:
+        return code
+    try:
+        tree = ast.parse(code)
+    except SyntaxError:
+        return code
+
+    already = _bound_names(tree)
+    undefined = [n for n in undefined if n not in already]
+    if not undefined:
+        return code
+
+    dotted = _module_dotted(source_path, project_root)
+    top = dotted.split(".")[0]
+    stem = dotted.split(".")[-1]
+    parent = dotted.rsplit(".", 1)[0] if "." in dotted else ""
+    local_syms = _module_symbols(source_path)
+
+    local: "list[str]" = []          # symbols of the module under test
+    extra: "list[str]" = []          # module-reference fallback lines
+    typing_n: "list[str]" = []
+    mock_n: "list[str]" = []
+    plain: "list[str]" = []
+    froms: "dict[str, list[str]]" = {}
+
+    for name in undefined:
+        if name in local_syms:                          # 1. local-first
+            local.append(name)
+        elif name == top:                               # 2. module-ref fallback
+            line = f"import {dotted}"
+            if line not in extra:
+                extra.append(line)
+        elif name == stem and parent:
+            line = f"from {parent} import {stem}"
+            if line not in extra:
+                extra.append(line)
+        elif name == stem:                              # top-level module, no parent
+            line = f"import {stem}"
+            if line not in extra:
+                extra.append(line)
+        elif name in _TYPING_NAMES:                     # 3. known-imports map
+            typing_n.append(name)
+        elif name in _MOCK_NAMES:
+            mock_n.append(name)
+        elif name in _PLAIN_MODULES:
+            plain.append(f"import {name}")
+        elif name in _FROM_IMPORTS:
+            mod, sym = _FROM_IMPORTS[name]
+            froms.setdefault(mod, []).append(sym)
+        # else: leave for the pytest run → runtime-repair loop
+
+    nl = "\r\n" if "\r\n" in code else "\n"
+    blocks: "list[str]" = []
+    if local:
+        blocks.append(_emit_from(dotted, local, nl))
+    blocks.extend(extra)
+    if typing_n:
+        blocks.append(_emit_from("typing", typing_n, nl))
+    if mock_n:
+        blocks.append(_emit_from("unittest.mock", mock_n, nl))
+    blocks.extend(sorted(set(plain)))
+    for mod in sorted(froms):
+        blocks.append(_emit_from(mod, froms[mod], nl))
+    if not blocks:
+        return code
+
+    # Read-only AST indexing: insert AFTER the module docstring and any leading
+    # __future__ import. end_lineno is 1-based; splitlines() is 0-based, so the
+    # list insert index equals the 1-based line number (old line N+1 is index N).
+    idx = 0
+    if tree.body:
+        first = tree.body[0]
+        if (isinstance(first, ast.Expr)
+                and isinstance(getattr(first, "value", None), ast.Constant)
+                and isinstance(first.value.value, str)):
+            idx = first.end_lineno or 0
+        for node in tree.body:
+            if isinstance(node, ast.ImportFrom) and node.module == "__future__":
+                idx = max(idx, node.end_lineno or 0)
+
+    block_text = nl.join(blocks) + nl
+    lines = code.splitlines(keepends=True)
+    candidate = "".join(lines[:idx]) + block_text + "".join(lines[idx:])
+
+    try:
+        ast.parse(candidate)            # safety: never return un-parseable code
+    except SyntaxError:
+        return code
+    return candidate
+
+
+# ---------------------------------------------------------------------------
 # Backend dispatch
 # ---------------------------------------------------------------------------
 
 
 # Generation knobs (named so the num_ctx guard and the clamp can't drift apart).
-_MAX_GEN_TOKENS = 2500       # max_tokens handed to the model for one test file
+_MAX_GEN_TOKENS = 4000       # max_tokens handed to the model for one test file
+                             # (a ~200-line test exceeds 2500 → mid-file cutoff)
 _LOCAL_CTX_CEILING = 16384   # largest num_ctx we'll request from a local model
 _CTX_SLACK = 512             # headroom above prompt+output before the ceiling
 _CHARS_PER_TOKEN = 2.5       # conservative est (code is token-denser than prose)
