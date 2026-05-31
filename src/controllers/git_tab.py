@@ -1961,22 +1961,32 @@ class GitTabController:
         self._on_log(f"  ✓ PR draft ready ({elapsed}s)", C["green"])
 
         # Test-gap panel from the already-computed suggestions (no re-scan).
+        # Closing a gap in the panel flips its body checklist line to [x].
         if base and payload.get("suggestions"):
-            self._build_test_gap_panel(ctx["gap_frame"], path, base,
-                                       suggestions=payload["suggestions"])
+            self._build_test_gap_panel(
+                ctx["gap_frame"], path, base,
+                suggestions=payload["suggestions"],
+                on_tests_written=lambda paths: self._apply_gap_progress_to_body(
+                    ctx, paths))
 
     # ------------------------------------------------------------------
     # Test gap panel helpers (Feature 2)
     # ------------------------------------------------------------------
 
     def _build_test_gap_panel(self, dlg, path: str, base: str,
-                              suggestions: "list | None" = None) -> None:
+                              suggestions: "list | None" = None,
+                              on_tests_written=None) -> None:
         """Attach a collapsible 🧪 test-gap panel to *dlg* (Toplevel or Frame).
 
         If *suggestions* is provided (already computed by the caller), the panel
         fills synchronously with no extra coverage scan. Otherwise it runs
         ``suggest_tests_for_diff`` on a background thread and reveals the panel
         only if untested changed files are found.
+
+        *on_tests_written* — optional callback ``(rel_paths: list[str]) -> None``
+        invoked with the files that got a test written (AI ✓ or a fresh stub).
+        The Draft PR dialog passes this to flip the body's coverage-gaps checklist
+        to ``[x]``; the standalone window passes nothing (no-op).
         """
         import threading
 
@@ -2194,7 +2204,8 @@ class GitTabController:
                 act_row, text="📝 Generate stubs",
                 command=lambda: self._gap_generate_stubs(
                     panel_suggestions, check_vars, path,
-                    status_var, stub_btn, ai_btn, cancel_event, dlg),
+                    status_var, stub_btn, ai_btn, cancel_event, dlg,
+                    on_tests_written=on_tests_written),
             )
             stub_btn.pack(side=tk.RIGHT, padx=(4, 0))
 
@@ -2209,7 +2220,8 @@ class GitTabController:
                 command=lambda: self._gap_generate_ai(
                     panel_suggestions, check_vars, status_vars, path,
                     status_var, stub_btn, ai_btn, fail_btn, ai_enabled_var,
-                    cancel_event, dlg, backend_var),
+                    cancel_event, dlg, backend_var,
+                    on_tests_written=on_tests_written),
             )
             ai_btn.pack(side=tk.RIGHT, padx=(4, 0))
 
@@ -2236,6 +2248,7 @@ class GitTabController:
         self, suggestions: list, check_vars: list, path: str,
         status_var: tk.StringVar, stub_btn, ai_btn,
         cancel_event: "threading.Event", dlg: tk.Toplevel,
+        on_tests_written=None,
     ) -> None:
         """Generate template stubs for all checked entries."""
         import threading
@@ -2277,6 +2290,9 @@ class GitTabController:
             if skipped:
                 msg_parts.append(f"Skipped (already exist): {', '.join(skipped)}")
             status_var.set(" | ".join(msg_parts) or "Done.")
+            # A fresh stub file also closes the "no test file" gap.
+            if on_tests_written and ok:
+                on_tests_written(ok)
             # Refresh Test Manager coverage view if open and same project
             if (self._test_manager_ref is not None
                     and self._test_manager_ref.winfo_exists()):
@@ -2287,12 +2303,45 @@ class GitTabController:
 
         threading.Thread(target=_run, daemon=True).start()
 
+    def _apply_gap_progress_to_body(self, ctx: dict, rel_paths: list) -> None:
+        """Flip the Draft PR body's coverage-gap lines to [x] for *rel_paths*.
+
+        Called when the embedded panel writes a passing test / stub. Edits only the
+        matching ``- [ ]`` gap lines (see pr_draft._mark_gaps_addressed), guarded so
+        it counts as a manager insert (not a user edit → no dirty flag) and can never
+        disrupt the generation flow: a closed dialog, missing widget, or any glitch
+        is a silent no-op.
+        """
+        try:
+            txt = ctx.get("txt")
+            if txt is None or not txt.winfo_exists():
+                return
+            from helpers.pr_draft import _mark_gaps_addressed
+            current = txt.get("1.0", tk.END).rstrip("\n")
+            updated = _mark_gaps_addressed(current, rel_paths)
+            if updated == current:
+                return
+            yview = txt.yview()
+            ctx["prog"][0] = True          # mark as our insert, not a user edit
+            try:
+                txt.configure(state=tk.NORMAL)
+                txt.delete("1.0", tk.END)
+                txt.insert("1.0", updated)
+                txt.configure(state=tk.DISABLED)
+                txt.edit_modified(False)
+                txt.yview_moveto(yview[0])
+            finally:
+                ctx["prog"][0] = False
+        except Exception:
+            pass                            # never let a body refresh break generation
+
     def _gap_generate_ai(
         self, suggestions: list, check_vars: list, status_vars: list, path: str,
         status_var: tk.StringVar, stub_btn, ai_btn, fail_btn,
         ai_enabled_var: tk.BooleanVar,
         cancel_event: "threading.Event", dlg: tk.Toplevel,
         backend_var: "tk.StringVar | None" = None,
+        on_tests_written=None,
     ) -> None:
         """Generate + VERIFY a test per checked entry; keep only passing tests.
 
@@ -2350,6 +2399,7 @@ class GitTabController:
             n = len(selected)
             passed = failed = 0
             reports: dict = {}
+            written_paths: list = []     # rel_paths that now have a passing test
             for k, (idx, sg) in enumerate(selected, 1):
                 if cancel_event.is_set():
                     break
@@ -2369,6 +2419,7 @@ class GitTabController:
                     break
                 if res.status == "pass":
                     passed += 1
+                    written_paths.append(sg.rel_path)
                     _set_row(idx, "✓")
                     self._on_log(
                         f"  ✓ AI test {'updated' if is_update else 'written'} + "
@@ -2391,9 +2442,9 @@ class GitTabController:
                         C["yellow"])
             self._last_ai_fail_reports = reports
             if dlg.winfo_exists():
-                dlg.after(0, lambda: _done(passed, failed))
+                dlg.after(0, lambda: _done(passed, failed, written_paths))
 
-        def _done(passed: int, failed: int) -> None:
+        def _done(passed: int, failed: int, written_paths: list) -> None:
             if not dlg.winfo_exists():
                 return
             stub_btn.configure(state=tk.NORMAL)
@@ -2404,6 +2455,9 @@ class GitTabController:
             else:
                 status_var.set(
                     f"Done: {passed} ✓ / {failed} ✗ — only passing tests were written.")
+            # Reflect closed gaps in the PR-body checklist (Draft PR dialog only).
+            if on_tests_written and written_paths:
+                on_tests_written(written_paths)
             # Refresh Test Manager if still open and same project
             if (captured_root == self._git_path
                     and self._test_manager_ref is not None

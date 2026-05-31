@@ -425,3 +425,37 @@ def _inject_coverage_gaps(text: str, block: str) -> str:
     if idx != -1:
         return text[:idx] + block + "\n" + text[idx:]
     return text.rstrip() + "\n\n" + block
+
+
+def _mark_gaps_addressed(body: str, rel_paths) -> str:
+    """Flip ``- [ ]`` → ``- [x]`` for coverage-gap lines whose path was just tested.
+
+    Used when the user generates tests inside the Draft PR dialog's embedded panel:
+    the static ``### Coverage gaps`` checklist in the body would otherwise still show
+    a now-covered file as an open gap. We mark it addressed (``[x]``) rather than
+    delete the line — non-destructive and useful reviewer context.
+
+    Surgical and safe:
+      * matches ONLY lines shaped ``- [ ] `<path>` …`` (the renderer's format), so a
+        ``### Manual`` bullet that happens to mention the same path is left alone;
+      * paths are escaped exactly as :func:`_render_coverage_gaps` escapes them
+        (backtick → apostrophe) so an unusual filename still matches;
+      * idempotent — an already-``[x]`` line is unchanged;
+      * no-op for an empty list, an unmatched path, or a body with no gaps block.
+
+    Returns the (possibly unchanged) body.
+    """
+    if not body or not rel_paths:
+        return body
+    wanted = {(p or "").replace("`", "'") for p in rel_paths}
+    out = []
+    for line in body.split("\n"):
+        stripped = line.lstrip()
+        if stripped.startswith("- [ ] `"):
+            # Extract the backticked path token: ``- [ ] `<path>` — …``
+            rest = stripped[len("- [ ] `"):]
+            end = rest.find("`")
+            if end != -1 and rest[:end] in wanted:
+                line = line.replace("- [ ] ", "- [x] ", 1)
+        out.append(line)
+    return "\n".join(out)

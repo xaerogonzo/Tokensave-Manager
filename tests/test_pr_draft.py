@@ -12,6 +12,7 @@ from helpers.pr_draft import (
     _clean_local_artifacts,
     _inject_automated_block,
     _inject_coverage_gaps,
+    _mark_gaps_addressed,
     _render_coverage_gaps,
 )
 
@@ -208,3 +209,57 @@ def test_inject_gaps_preserves_manual_bullets():
     text = "### Manual\n- [ ] keep me"
     result = _inject_coverage_gaps(text, _GAPS)
     assert "- [ ] keep me" in result
+
+
+# ── _mark_gaps_addressed ──────────────────────────────────────────────────────
+
+_GAP_BLOCK = _render_coverage_gaps([
+    _FakeSuggestion("src/helpers/foo.py", "pure_helper"),
+    _FakeSuggestion("src/helpers/bar.py", "subprocess_helper"),
+])
+
+
+def test_mark_flips_matching_line_only():
+    out = _mark_gaps_addressed(_GAP_BLOCK, ["src/helpers/foo.py"])
+    assert "- [x] `src/helpers/foo.py`" in out
+    assert "- [ ] `src/helpers/bar.py`" in out          # untouched gap stays open
+
+
+def test_mark_empty_list_is_noop():
+    assert _mark_gaps_addressed(_GAP_BLOCK, []) == _GAP_BLOCK
+
+
+def test_mark_unknown_path_is_noop():
+    assert _mark_gaps_addressed(_GAP_BLOCK, ["src/helpers/nope.py"]) == _GAP_BLOCK
+
+
+def test_mark_is_idempotent():
+    once = _mark_gaps_addressed(_GAP_BLOCK, ["src/helpers/foo.py"])
+    twice = _mark_gaps_addressed(once, ["src/helpers/foo.py"])
+    assert once == twice
+    assert once.count("- [x] `src/helpers/foo.py`") == 1
+
+
+def test_mark_escapes_backticks_like_renderer():
+    # A path with a backtick is rendered with the backtick → apostrophe; the marker
+    # must apply the same escape to match.
+    block = _render_coverage_gaps([_FakeSuggestion("src/a`b.py", "pure_helper")])
+    out = _mark_gaps_addressed(block, ["src/a`b.py"])
+    assert "- [x] `src/a'b.py`" in out
+
+
+def test_mark_does_not_touch_manual_bullet_with_same_path():
+    body = (_GAP_BLOCK
+            + "\n### Manual (please verify before merge)\n"
+            + "- [ ] manually re-check `src/helpers/foo.py` behaviour\n")
+    out = _mark_gaps_addressed(body, ["src/helpers/foo.py"])
+    # the gap line flips...
+    assert "- [x] `src/helpers/foo.py` — no test yet" in out
+    # ...but the manual bullet (path not immediately after "- [ ] `") stays open
+    assert "- [ ] manually re-check `src/helpers/foo.py` behaviour" in out
+
+
+def test_mark_round_trip_with_renderer():
+    block = _render_coverage_gaps([_FakeSuggestion("src/helpers/foo.py", "pure_helper")])
+    out = _mark_gaps_addressed(block, ["src/helpers/foo.py"])
+    assert out == block.replace("- [ ] ", "- [x] ", 1)
