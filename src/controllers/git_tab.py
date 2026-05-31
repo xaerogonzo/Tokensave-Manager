@@ -131,6 +131,17 @@ def _extract_pr_title(text: str) -> str:
     return "PR description"
 
 
+def _recommended_test_selection(suggestions) -> "list[bool]":
+    """Per-suggestion recommended check state for the test-gap panel.
+
+    True for files worth an automated test (pure/subprocess helpers, via
+    ``SuggestedTest.requires_automation``); False for Tk-dialog / unclassified
+    files (low ROI — AI rarely produces passing GUI tests). Pure function so the
+    "✓ Recommend" selection logic is unit-testable without Tk.
+    """
+    return [bool(getattr(s, "requires_automation", False)) for s in suggestions]
+
+
 class GitTabController:
     """Owns the Git tab UI and all git operations.
 
@@ -2020,8 +2031,9 @@ class GitTabController:
             # forced; the buttons below write files only when clicked).
             tk.Label(
                 parent,
-                text=(f"{len(suggestions)} changed file(s) lack tests — select below "
-                      "and click 📝 Generate stubs or ✨ AI generate to close the gap."),
+                text=(f"{len(suggestions)} changed file(s) lack tests — click "
+                      "✓ Recommend (or pick files), then 📝 Generate stubs / "
+                      "✨ AI generate to close the gap."),
                 font=("Segoe UI", 8), bg=C["surface0"], fg=C["subtext"],
                 anchor="w", justify=tk.LEFT, wraplength=560,
             ).pack(fill=tk.X, padx=10, pady=(0, 2))
@@ -2059,10 +2071,10 @@ class GitTabController:
             check_vars: list[tk.BooleanVar] = []
             status_vars: list[tk.StringVar] = []
             for sg in suggestions:
-                # Pre-check only files worth an automated test (pure/subprocess
-                # helpers). dialog_tk/blank start unchecked — low ROI, and AI
-                # tends to produce non-passing Tk tests.
-                var = tk.BooleanVar(value=sg.requires_automation)
+                # Nothing pre-checked — the user opts in explicitly via the
+                # "✓ Recommend" quick-select (high-ROI pure/subprocess helpers)
+                # or by hand, rather than facing a wall of mystery-checked boxes.
+                var = tk.BooleanVar(value=False)
                 check_vars.append(var)
                 svar = tk.StringVar(value="")   # per-row ⏳ / ✓ / ✗
                 status_vars.append(svar)
@@ -2088,11 +2100,48 @@ class GitTabController:
                     font=("Segoe UI", 9),
                 ).pack(side=tk.LEFT, padx=(6, 0))
 
+            # Status line — shared by the quick-select row and the actions below.
+            status_var = tk.StringVar()
+
+            # Quick-select row — makes the "recommended" selection an explicit,
+            # explained action instead of silently pre-checking boxes. Mirrors the
+            # Git Commit dialog's Select All / None / Modified-Only pattern.
+            def _select_recommended():
+                rec = _recommended_test_selection(suggestions)
+                for v, r in zip(check_vars, rec):
+                    v.set(r)
+                n_rec = sum(rec)
+                n_skip = len(suggestions) - n_rec
+                status_var.set(
+                    f"Recommended {n_rec} high-ROI helper(s)"
+                    + (f" — skipped {n_skip} (Tk dialogs / unclassified; AI rarely "
+                       "writes passing GUI tests)." if n_skip else "."))
+
+            def _select_all():
+                for v in check_vars:
+                    v.set(True)
+                status_var.set(f"Selected all {len(check_vars)}.")
+
+            def _select_none():
+                for v in check_vars:
+                    v.set(False)
+                status_var.set("Selection cleared.")
+
+            qs_row = tk.Frame(parent, bg=C["surface0"])
+            qs_row.pack(fill=tk.X, padx=8, pady=(2, 0))
+            tk.Label(qs_row, text="Select:", bg=C["surface0"], fg=C["subtext"],
+                     font=("Segoe UI", 8)).pack(side=tk.LEFT, padx=(2, 4))
+            ttk.Button(qs_row, text="✓ Recommend",
+                       command=_select_recommended).pack(side=tk.LEFT, padx=(0, 4))
+            ttk.Button(qs_row, text="All",
+                       command=_select_all).pack(side=tk.LEFT, padx=(0, 4))
+            ttk.Button(qs_row, text="None",
+                       command=_select_none).pack(side=tk.LEFT, padx=(0, 4))
+
             # Action buttons
             act_row = tk.Frame(parent, bg=C["surface0"])
             act_row.pack(fill=tk.X, padx=8, pady=(4, 6))
 
-            status_var = tk.StringVar()
             status_lbl = tk.Label(
                 act_row,
                 textvariable=status_var,
