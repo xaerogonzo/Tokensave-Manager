@@ -62,6 +62,9 @@ class UpdatePollerController:
         self._current_version:        str | None = None
         self._available_version:      str | None = None
         self._last_integration_report: str       = ""
+        # The single live integration-check dialog. Re-runs (e.g. Apply Fixes)
+        # reuse/replace this window instead of stacking new Toplevels.
+        self._integration_dialog = None
 
     # ── Public API ────────────────────────────────────────────────────────────
 
@@ -216,24 +219,85 @@ class UpdatePollerController:
             output = "⚠ Timed out after 30 s (GitHub API calls may be slow)."
         except Exception as exc:
             output = f"⚠ Error running script: {exc}"
-        self._root.after(0, lambda o=output: self._show_integration_output(o))
+        # In fix mode, also compute a human-readable summary of what (if anything)
+        # changed so the user gets explicit feedback rather than a silent re-run.
+        summary = self._summarize_fix_output(output) if fix_mode else None
+        self._root.after(
+            0, lambda o=output, s=summary: self._show_integration_output(o, fix_summary=s))
 
-    def _show_integration_output(self, text: str) -> None:
+    @staticmethod
+    def _summarize_fix_output(output: str) -> str:
+        """Parse the --fix script output into a short 'what changed' summary.
+
+        The script prints lifecycle actions under
+        ``### Upstream issue lifecycle (--fix applied)`` as ``📄  Created …`` /
+        ``📦  Archived …`` lines. Absent section or no action lines means
+        nothing needed doing.
+        """
+        created, archived = [], []
+        for line in output.splitlines():
+            s = line.strip()
+            if s.startswith("📄") and "Created" in s:
+                created.append(s.lstrip("📄 ").strip())
+            elif s.startswith("📦") and "Archived" in s:
+                archived.append(s.lstrip("📦 ").strip())
+
+        if not created and not archived:
+            return (
+                "✓  Nothing to apply — the integration docs are already in sync.\n\n"
+                "No issue stubs were created and no resolved issues needed "
+                "archiving. Your working tree is unchanged."
+            )
+
+        parts = [f"✓  Applied {len(created) + len(archived)} change"
+                 f"{'s' if (len(created) + len(archived)) != 1 else ''}:\n"]
+        if created:
+            parts.append(f"\n📄  Created {len(created)} stub"
+                         f"{'s' if len(created) != 1 else ''}:")
+            parts += [f"   • {c}" for c in created]
+        if archived:
+            parts.append(f"\n📦  Archived {len(archived)} resolved issue"
+                         f"{'s' if len(archived) != 1 else ''}:")
+            parts += [f"   • {a}" for a in archived]
+        parts.append("\n\nReview the changes in the Git tab and commit them "
+                     "to keep the repo clean.")
+        return "\n".join(parts)
+
+    def _show_integration_output(self, text: str, fix_summary: "str | None" = None) -> None:
         """Main-thread: pop a scrollable read-only text dialog with the report.
 
         Features:
+        - Single window: a prior integration dialog is destroyed first, so
+          re-runs (Apply Fixes / Run Audit) replace it instead of stacking.
         - Clickable https:// URLs (unique tag per URL to avoid last-URL override)
         - "🔍 Run Audit ▼" Menubutton with Claude CLI / Local LLM / Copy for Chat
         - grab_set() overrides any open Settings modal
+        - fix_summary: when set (Apply Fixes path), a small modal afterwards
+          reports exactly what changed (or that nothing did).
         """
         self._last_integration_report = text
 
+        # Single-window: destroy any prior integration dialog so re-runs replace
+        # it rather than opening a second window on top.
+        prior = self._integration_dialog
+        if prior is not None:
+            try:
+                if prior.winfo_exists():
+                    prior.destroy()
+            except tk.TclError:
+                pass
+            self._integration_dialog = None
+
         dlg = tk.Toplevel(self._root)
+        self._integration_dialog = dlg
         dlg.title("Tokensave integration check")
         dlg.configure(bg=C["base"])
         dlg.resizable(True, True)
         dlg.geometry("720x480")
         dlg.transient(self._root)
+        # Clear the tracked reference when the user closes the window.
+        dlg.bind("<Destroy>", lambda e: setattr(self, "_integration_dialog", None)
+                 if e.widget is dlg else None, add="+")
 
         st = scrolledtext.ScrolledText(
             dlg, wrap=tk.WORD, font=("Consolas", 10),
@@ -295,6 +359,17 @@ class UpdatePollerController:
 
         dlg.grab_set()
         dlg.focus_set()
+
+        # Apply Fixes path: report exactly what changed in a small modal. Done
+        # after the main dialog is up + grabbed so it layers on top and returns
+        # focus to the report when dismissed.
+        if fix_summary is not None:
+            changed = fix_summary.startswith("✓  Applied")
+            dlg.after(0, lambda: (
+                messagebox.showinfo("Apply Fixes — result", fix_summary, parent=dlg)
+                if changed else
+                messagebox.showinfo("Apply Fixes — no changes", fix_summary, parent=dlg)
+            ))
 
     # ── LLM audit helpers ─────────────────────────────────────────────────────
 

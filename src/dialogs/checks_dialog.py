@@ -23,6 +23,7 @@ from tkinter import messagebox
 from typing import TYPE_CHECKING, Callable
 
 from constants import C
+from theme import themed_checkbutton
 from helpers.quality_checks import run_syntax_check, run_pyflakes_check
 from helpers.prepush_hook import (
     is_pre_push_hook_installed,
@@ -181,13 +182,12 @@ class ChecksDialog(tk.Toplevel):
             var = tk.BooleanVar(value=self._enabled[key])
             self._vars[key] = var
             suffix = "  (uses API tokens)" if key == "claude" else ""
-            cb = tk.Checkbutton(
+            cb = themed_checkbutton(
                 chk_frame,
                 text=label + suffix,
                 variable=var,
                 bg=C["base"],
                 fg=C["text"],
-                selectcolor=C["surface0"],
                 activebackground=C["base"],
                 activeforeground=C["text"],
                 font=("Segoe UI", 10),

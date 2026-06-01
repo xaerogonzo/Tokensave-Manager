@@ -12,6 +12,7 @@ import tkinter as tk
 from tkinter import ttk, messagebox
 
 from constants import C
+from theme import themed_checkbutton
 from helpers.shadow_links import DEFAULT_SHADOW_EXT_MAP
 
 
@@ -98,11 +99,11 @@ class ShadowLinksDialog(tk.Toplevel):
 
         # ── Options ──
         self._var_sync = tk.BooleanVar(value=True)
-        tk.Checkbutton(self, text="Run tokensave sync after generating links",
-                       variable=self._var_sync,
-                       bg=C["base"], fg=C["text"], selectcolor=C["surface0"],
-                       activebackground=C["base"], activeforeground=C["text"],
-                       font=("Segoe UI", 10)).pack(anchor=tk.W, **pad)
+        themed_checkbutton(self, text="Run tokensave sync after generating links",
+                           variable=self._var_sync,
+                           bg=C["base"], fg=C["text"],
+                           activebackground=C["base"], activeforeground=C["text"],
+                           font=("Segoe UI", 10)).pack(anchor=tk.W, **pad)
 
         # ── Buttons ──
         btn_row = tk.Frame(self, bg=C["base"])

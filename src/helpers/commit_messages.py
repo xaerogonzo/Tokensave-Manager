@@ -996,14 +996,13 @@ def _suggest_commit_message(repo_path: str = "", status_text: str = "",
     _diff  = ("diff",       lambda: _strat_diff(repo_path, files, git_exe) if git_exe else None)
     _fnames= ("filenames",  lambda: _strat_filenames(status_text))
 
-    if backend == "llm_first":
-        named_strategies = [_llm, _cli, _cl, _diff, _fnames]
-    elif backend == "claude_cli":
-        named_strategies = [_cli, _cl, _diff, _fnames]
-    elif backend == "llm":
-        named_strategies = [_llm, _cl, _diff, _fnames]
-    else:  # "auto" (default)
-        named_strategies = [_cli, _llm, _cl, _diff, _fnames]
+    _BACKEND_CHAINS: dict[str, list] = {
+        "auto":       [_cli, _llm, _cl, _diff, _fnames],
+        "llm_first":  [_llm, _cli, _cl, _diff, _fnames],
+        "claude_cli": [_cli, _cl, _diff, _fnames],
+        "llm":        [_llm, _cl, _diff, _fnames],
+    }
+    named_strategies = _BACKEND_CHAINS.get(backend, _BACKEND_CHAINS["auto"])
     for name, strategy in named_strategies:
         try:
             result = strategy()

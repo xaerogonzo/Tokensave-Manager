@@ -83,10 +83,43 @@ jobs:
         run: pip install -r requirements-dev.txt
       - name: Install Tk for headless dialog tests
         run: sudo apt-get update && sudo apt-get install -y python3-tk xvfb
-      - name: Pure-logic tests
-        run: python -m pytest -m "not tk" -v
-      - name: Tk dialog tests (under xvfb)
-        run: xvfb-run -a python -m pytest -m tk -v
+      - name: Pure-logic tests with coverage
+        id: pure-logic
+        run: python -m pytest -m "not tk" -v --cov=src
+      - name: Tk dialog tests (coverage append)
+        id: tk-dialog
+        run: xvfb-run -a python -m pytest -m tk -v --cov=src --cov-append --cov-fail-under=14
+      - name: Generate unified XML report
+        if: always()
+        run: python -m coverage xml --ignore-errors || true
+      - name: Coverage summary → PR step summary
+        if: always()
+        run: |
+          if [ "${{ steps.pure-logic.outcome }}" != "success" ] || \
+             [ "${{ steps.tk-dialog.outcome }}" != "success" ]; then
+            echo "### ⚠️ Coverage Report (Partial — test failures skipped some steps)" \
+              >> $GITHUB_STEP_SUMMARY
+          else
+            echo "### 📊 Coverage Report" >> $GITHUB_STEP_SUMMARY
+          fi
+          if [ -f .coverage ]; then
+            {
+              echo '```'
+              python -m coverage report --skip-empty
+              echo '```'
+            } >> $GITHUB_STEP_SUMMARY
+          else
+            echo "_No .coverage data found — pytest may have failed before writing it._" \
+              >> $GITHUB_STEP_SUMMARY
+          fi
+        continue-on-error: true
+      - name: Upload coverage artifact
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: coverage-report
+          path: coverage.xml
+          if-no-files-found: ignore     # don't mask the real failure if pytest crashed
 
   # ── Pytest suite on push to main/master (HARD gate, post-merge) ────────
   test-postmerge:

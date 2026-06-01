@@ -22,7 +22,7 @@ from tkinter import ttk
 from typing import Callable
 
 from constants import C
-from theme import bind_mousewheel
+from theme import bind_mousewheel, themed_checkbutton
 from helpers.refactor_scout import EVIDENCE_MAX_LINES, Finding, kind_label
 
 
@@ -261,10 +261,10 @@ class RefactorScoutDialog(tk.Toplevel):
         # Per-card selection checkbox (drives the batch actions)
         sel_var = tk.BooleanVar(value=False)
         self._selected[f.id] = sel_var
-        tk.Checkbutton(
+        themed_checkbutton(
             head, variable=sel_var,
             bg=C["mantle"], fg=C["text"],
-            activebackground=C["mantle"], selectcolor=C["surface1"],
+            activebackground=C["mantle"],
             bd=0, highlightthickness=0,
             command=self._refresh_selection_label,
         ).pack(side=tk.LEFT, padx=(0, 4))

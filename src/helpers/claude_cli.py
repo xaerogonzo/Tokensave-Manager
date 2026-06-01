@@ -24,8 +24,22 @@ from __future__ import annotations
 
 import subprocess
 import sys
+import threading
 
 from constants import CREATE_NO_WINDOW
+from helpers.runtime import log
+
+# Per-thread record of WHY the most recent call_claude_cli_print returned None
+# (timeout / missing-or-unrunnable binary / non-zero exit). Mirrors
+# helpers.llm._tls so callers can surface the real cause instead of guessing.
+# Must be read on the same thread that made the call.
+_tls = threading.local()
+
+
+def get_last_cli_error() -> "str | None":
+    """Return the specific failure from the most recent call_claude_cli_print on
+    THIS thread, or None if the last call succeeded / was never made here."""
+    return getattr(_tls, "last_error", None)
 
 
 def spawn_claude_cli(
@@ -110,7 +124,9 @@ def call_claude_cli_print(
     On non-zero exit, the first 400 chars of stderr are printed to
     sys.stderr so users can diagnose typo'd model IDs or auth issues.
     """
+    _tls.last_error = None
     if not claude_exe:
+        _tls.last_error = "no Claude CLI path configured"
         return None
     cmd = [claude_exe, "--print"]
     if model:
@@ -128,15 +144,22 @@ def call_claude_cli_print(
             cwd=cwd,
         )
     except subprocess.TimeoutExpired:
+        _tls.last_error = f"timed out after {timeout}s"
         return None
-    except OSError:
+    except OSError as e:
+        # Missing / non-executable binary, bad cwd, etc.
+        _tls.last_error = f"executable not found or not runnable: {e}"
         return None
     if proc.returncode != 0:
         err = (proc.stderr or "").strip()
-        # sys.stderr can be None under pythonw.exe / windowed Nuitka builds —
-        # guard the print so an unexpected runtime never crashes the worker.
-        if err and sys.stderr is not None:
-            print(f"[claude_cli] claude --print exited {proc.returncode}: {err[:400]}",
-                  file=sys.stderr)
+        _tls.last_error = f"exited {proc.returncode}: {err[:400]}" if err \
+            else f"exited {proc.returncode} (no stderr)"
+        # Log through the manager's logger — always captured even under
+        # pythonw.exe / windowed Nuitka builds where sys.stderr is None.
+        log.warning("claude --print exited %d: %s", proc.returncode, err[:400])
         return None
-    return (proc.stdout or "").strip() or None
+    out = (proc.stdout or "").strip()
+    if not out:
+        _tls.last_error = "returned empty output"
+        return None
+    return out

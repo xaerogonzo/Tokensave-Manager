@@ -107,6 +107,9 @@ class App(tk.Tk):
             self.geometry(saved_geom)
         self._current_proc = None
         self._stop_requested = False
+        # Private repo auto-sync concurrency guards (G8)
+        self._active_private_syncs: set = set()
+        self._pending_private_sync: set = set()
         # Version probe + update-check background loop.
         # _update_poller owns _tokensave_current_version and
         # _tokensave_available_version as properties; App._run() writes
@@ -131,6 +134,20 @@ class App(tk.Tk):
         self._tray_mgr.setup()
         self.protocol("WM_DELETE_WINDOW", self._tray_mgr.hide)
         self.after(300, self._check_config)
+
+    def report_callback_exception(self, exc, val, tb):
+        """Log unhandled exceptions raised inside Tk callbacks.
+
+        Tk's default handler writes to sys.stderr, which is None under
+        pythonw.exe / windowed Nuitka builds — so a crash inside a button
+        command or `after` callback vanishes silently (e.g. a dialog that
+        builds halfway then throws, leaving a blank window). Routing it through
+        the manager's logger means every such failure lands in manager.log with
+        a full traceback.
+        """
+        import traceback
+        log.error("Unhandled Tk callback exception:\n%s",
+                  "".join(traceback.format_exception(exc, val, tb)))
 
     # ── Tray ───────────────────────────────────────────────────────────────────
 
@@ -823,6 +840,16 @@ class App(tk.Tk):
         files_to_add = [fname for fname, xy in selected
                         if len(xy) >= 2 and xy[1] != ' ']
 
+        # Defensive guard: a pathspec commit (`git commit -- <paths>`) silently
+        # drops any staged deletion not in <paths>. Fold currently-staged
+        # deletions into the pathspec so they're never orphaned. (Ignored-file
+        # deletions are handled durably by the untrack flow's immediate commit,
+        # so they normally won't reach here.)
+        from helpers.git import _staged_deletions
+        for _d in _staged_deletions(path, self._cfg.git_exe):
+            if _d not in all_paths:
+                all_paths.append(_d)
+
         self._git._git_begin_op()
 
         def worker():
@@ -863,10 +890,47 @@ class App(tk.Tk):
                 for line in cout.strip().splitlines()[-4:]:
                     self.after(0, lambda l=line: self._log(f"  {l}", col))
                 self.after(0, self.refresh)
+                if crc == 0:
+                    # Auto-sync private repo if one is configured (G8: scheduled
+                    # on main thread so the dirty-bit logic runs thread-safely)
+                    self.after(0, lambda: self._start_private_sync(path, message))
             finally:
                 self.after(0, self._git._git_end_op)
 
         threading.Thread(target=worker, daemon=True).start()
+
+    def _start_private_sync(self, path: str, commit_msg: str = "") -> None:
+        """Schedule a private repo sync, queuing if one is already running (G8)."""
+        if path in self._active_private_syncs:
+            # Don't drop — mark as pending so it runs right after (G8 fix)
+            self._pending_private_sync.add(path)
+            return
+        cfg_entry = self._cfg.raw.get("private_repos", {}).get(path)
+        if not cfg_entry:
+            return
+        self._active_private_syncs.add(path)
+
+        def worker():
+            from helpers.private_repo import sync_private_repo
+            dest  = cfg_entry.get("dest", "")
+            files = cfg_entry.get("files", [])
+            sync_private_repo(
+                self._cfg.git_exe, path, dest, files,
+                on_log=self._log,
+                commit_msg=commit_msg,
+            )
+            # After finishing, check if another sync was queued (G8)
+            self.after(0, lambda: self._finish_private_sync(path))
+
+        threading.Thread(target=worker, daemon=True).start()
+
+    def _finish_private_sync(self, path: str) -> None:
+        """Called on main thread after a private sync thread completes (G8)."""
+        self._active_private_syncs.discard(path)
+        if path in self._pending_private_sync:
+            self._pending_private_sync.discard(path)
+            # Run the deferred sync (no commit msg — changes already committed)
+            self._start_private_sync(path, "")
 
     def cmd_settings(self):
         SettingsDialog(self, self._cfg, self._cfg.save, self._on_settings_saved)

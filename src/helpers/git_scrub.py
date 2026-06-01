@@ -494,6 +494,80 @@ def force_push(repo_path: str, git_exe: str, branch: str,
 
 # ── Scrub execution ───────────────────────────────────────────────────────────
 
+def _stream_filter_repo_proc(cmd, env, _log, cwd=None) -> int:
+    """Run a filter-repo command, stream its output via *_log*, return returncode.
+
+    ``cwd`` is optional: the primary invocation passes the repo via ``git -C``
+    in the command itself; the fallback invocation uses ``cwd=repo_path`` so
+    filter-repo auto-detects the repository root.
+    """
+    proc = subprocess.Popen(
+        cmd,
+        stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
+        text=True, encoding="utf-8", errors="replace",
+        creationflags=CREATE_NO_WINDOW,
+        cwd=cwd,
+        env=env,
+    )
+    if proc.stdout is not None:
+        for line in proc.stdout:
+            _log(line.rstrip())
+    proc.wait(timeout=600)
+    return proc.returncode
+
+
+def _run_scrub_fallback(repo_path: str, rel_file: str, env: dict, _log) -> int:
+    """Try importlib then PATH fallback when ``git filter-repo`` fails.
+
+    git for Windows has its own exec-path and often cannot find scripts
+    installed via ``pip --user`` even when they're on the Windows PATH.
+    Strategy order:
+
+    1. importlib — find ``git_filter_repo.py`` in site-packages and invoke it
+       via ``sys.executable``.  Zero PATH dependency; always works when the
+       package is installed.
+    2. ``shutil.which`` / ``_find_filter_repo_script()`` — invoke the .exe/.cmd
+       wrapper if importlib cannot locate the module.
+
+    Returns the subprocess returncode (0 = success, non-zero = failure,
+    1 if no fallback script could be found).
+    """
+    fallback_script = ""
+
+    # Strategy 1: importlib (most reliable on Windows pip --user installs)
+    try:
+        import importlib.util as _ilu
+        spec = _ilu.find_spec("git_filter_repo")
+        if spec and spec.origin and os.path.isfile(spec.origin):
+            fallback_script = spec.origin
+    except Exception:
+        pass
+
+    # Strategy 2: PATH / user-scripts probe
+    if not fallback_script:
+        fallback_script = _find_filter_repo_script()
+
+    if not fallback_script:
+        _log("[no standalone filter-repo script found; cannot retry]")
+        return 1
+
+    if fallback_script.lower().endswith(".py"):
+        direct_cmd = [sys.executable, fallback_script]
+    else:
+        direct_cmd = [fallback_script]
+    direct_cmd += ["--invert-paths", "--path", rel_file, "--force"]
+    _log(f"[git subcommand not found; retrying via: {fallback_script}]")
+
+    try:
+        return _stream_filter_repo_proc(direct_cmd, env, _log, cwd=repo_path)
+    except subprocess.TimeoutExpired:
+        _log("[scrub timed out after 10 min (standalone)]")
+        return 1
+    except (FileNotFoundError, OSError) as exc:
+        _log(f"standalone scrub error: {exc}")
+        return 1
+
+
 def run_scrub(repo_path: str, git_exe: str, rel_file: str,
               on_log=None) -> Tuple[bool, str]:
     """Erase ``rel_file`` from all of git history.
@@ -514,6 +588,7 @@ def run_scrub(repo_path: str, git_exe: str, rel_file: str,
     Otherwise filter-repo will error early.
     """
     log_chunks: List[str] = []
+
     def _log(msg: str) -> None:
         log_chunks.append(msg)
         if on_log is not None:
@@ -522,37 +597,20 @@ def run_scrub(repo_path: str, git_exe: str, rel_file: str,
             except Exception:
                 pass
 
-    # Build the subprocess environment with the pip --user Scripts dir prepended
-    # so git can find filter-repo even when the current process has a stale PATH
-    # snapshot (common after a fresh pip --user install this session).
+    # Build env with the pip --user Scripts dir prepended so git can find
+    # filter-repo even with a stale PATH snapshot from this session.
     env = os.environ.copy()
     scripts_dir = _user_scripts_dir()
     if scripts_dir:
         env["PATH"] = scripts_dir + os.pathsep + env.get("PATH", "")
 
-    # Primary: invoke as a git subcommand (git filter-repo --invert-paths …).
-    # Fallback: invoke the standalone script directly if git still can't find it
-    # (covers Windows pip --user paths that git's exec-path doesn't scan).
+    # Primary: git subcommand (git -C repo_path filter-repo …).
     args = [git_exe, "-C", repo_path, "filter-repo",
             "--invert-paths", "--path", rel_file, "--force"]
     _log(f"$ git filter-repo --invert-paths --path {rel_file} --force")
 
-    def _run_args(cmd):
-        proc = subprocess.Popen(
-            cmd,
-            stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
-            text=True, encoding="utf-8", errors="replace",
-            creationflags=CREATE_NO_WINDOW,
-            env=env,
-        )
-        if proc.stdout is not None:
-            for line in proc.stdout:
-                _log(line.rstrip())
-        proc.wait(timeout=600)
-        return proc.returncode
-
     try:
-        rc = _run_args(args)
+        rc = _stream_filter_repo_proc(args, env, _log)
     except subprocess.TimeoutExpired:
         _log("[scrub timed out after 10 min]")
         return False, "\n".join(log_chunks)
@@ -561,67 +619,7 @@ def run_scrub(repo_path: str, git_exe: str, rel_file: str,
         return False, "\n".join(log_chunks)
 
     if rc != 0:
-        # git subcommand failed — git for Windows has its own exec-path and
-        # often can't find scripts installed via pip --user even when they're
-        # on the Windows PATH.  Two fallback strategies in order:
-        #
-        # 1. importlib: find git_filter_repo.py in site-packages and invoke it
-        #    via sys.executable — zero PATH dependency, always works when the
-        #    package is installed.
-        # 2. shutil.which / _find_filter_repo_script(): invoke the .exe/.cmd
-        #    wrapper script directly if importlib can't locate the module.
-        #
-        # Both fallbacks run with cwd=repo_path so filter-repo auto-detects
-        # the repository (same behaviour as `git -C repo_path filter-repo`).
-
-        fallback_script: str = ""
-
-        # Strategy 1: importlib (most reliable on Windows pip --user installs)
-        try:
-            import importlib.util as _ilu
-            spec = _ilu.find_spec("git_filter_repo")
-            if spec and spec.origin and os.path.isfile(spec.origin):
-                fallback_script = spec.origin
-        except Exception:
-            pass
-
-        # Strategy 2: PATH / user-scripts probe
-        if not fallback_script:
-            fallback_script = _find_filter_repo_script()
-
-        if fallback_script:
-            # Determine the interpreter: if it's a .py file, run via Python.
-            # If it's a .exe/.cmd wrapper, execute it directly.
-            if fallback_script.lower().endswith(".py"):
-                direct_cmd = [sys.executable, fallback_script]
-            else:
-                direct_cmd = [fallback_script]
-            direct_cmd += ["--invert-paths", "--path", rel_file, "--force"]
-            _log(f"[git subcommand not found; retrying via: {fallback_script}]")
-
-            def _run_direct(cmd):
-                proc = subprocess.Popen(
-                    cmd,
-                    stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
-                    text=True, encoding="utf-8", errors="replace",
-                    creationflags=CREATE_NO_WINDOW,
-                    cwd=repo_path,   # filter-repo auto-detects the repo from cwd
-                    env=env,
-                )
-                if proc.stdout is not None:
-                    for line in proc.stdout:
-                        _log(line.rstrip())
-                proc.wait(timeout=600)
-                return proc.returncode
-
-            try:
-                rc = _run_direct(direct_cmd)
-            except subprocess.TimeoutExpired:
-                _log("[scrub timed out after 10 min (standalone)]")
-            except (FileNotFoundError, OSError) as exc:
-                _log(f"standalone scrub error: {exc}")
-        else:
-            _log("[no standalone filter-repo script found; cannot retry]")
+        rc = _run_scrub_fallback(repo_path, rel_file, env, _log)
 
     return rc == 0, "\n".join(log_chunks)
 

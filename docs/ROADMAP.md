@@ -81,6 +81,41 @@ See `memory/roadmap_backlog.md` for the authoritative deferred-items registry. H
 
 ---
 
+## Roadmap 7.5
+
+Theme: **PR Pipeline hardening + automated bug-finding pipeline.** Evolved Draft PR and Test Manager into a lightweight end-to-end workflow: branch diff → changed files without tests → AI-generated test stubs → tests go green. Shipped on branch `Roadmap-7.5-Audit` (PR #9 → Roadmap-7.5, 2026-05-27).
+
+### ✅ PR base branch override. Shipped v4.14 (2026-05-27).
+Per-project config key `raw["pr_base_branch_override"][path]` lets you target any branch (e.g. `Roadmap-7.5` instead of `master`) without changing git tracking config. `_resolve_pr_base` wraps all three PR paths. Right-click the Draft PR button → `"Set PR base branch…"` to set or clear. (`src/controllers/git_tab.py`, `src/helpers/pr_draft.py`)
+
+### ✅ Diff strategy fixed. Shipped v4.14 (2026-05-27).
+`generate_pr_draft` used to diff HEAD vs working tree (`_pending_diff`). Now uses `_branch_diff` — `git diff <merge-base>` (no trailing ref) — so committed + staged + unstaged changes all inform the PR body. Preserves pre-commit drafting: users can draft a PR before their final commit and still get the full diff context. (`src/helpers/pr_draft.py`)
+
+### ✅ Test gap detection module. Shipped v4.14 (2026-05-27).
+`suggest_tests_for_diff(project_root, git_exe, base)` in new `src/helpers/test_gap_report.py`. Runs `git diff --name-only base...HEAD`, cross-references `scan_coverage_gaps`, auto-detects scaffold template per file. Returns only changed files with no tests — not the whole coverage-gap list — so the signal is focused on *this PR*.
+
+### ✅ `🧪 Test Gaps…` standalone Git tab button. Shipped v4.14 (2026-05-27).
+Resolves the base branch, opens a dialog with the full gap panel (checkboxes, Generate stubs, AI generate, Cancel). Works without touching the PR draft dialog — essential for users who draft PRs via the Claude CLI path (which spawns an external terminal and doesn't show a dialog).
+
+### ✅ AI test generation in Scaffold tab. Shipped v4.14 (2026-05-27).
+New `src/helpers/test_gen_llm.py` — `generate_ai_test_content` with auto/claude_cli/llm dispatch. Backend radio row in the Scaffold tab (not Settings). `✨ AI Generate…` button generates real assertions; `📝 Generate Test File` writes them. Yellow discard-protection banner guards against accidentally wiping a loaded AI draft when changing the source/template selector. (`src/dialogs/test_manager.py`, `src/helpers/test_gen_llm.py`)
+
+### ✅ UX clarity fix. Shipped v4.14 (2026-05-27).
+Renamed `"Use API key (inline dialog)"` → `"Use Ollama / API (inline dialog)"`. The path was always provider-agnostic (Ollama, Anthropic, OpenAI-compat) but the label was steering users away from it.
+
+### ✅ Code-health audit (Roadmap-7.5-Audit branch). Shipped v4.14 (2026-05-27).
+Dead code removal and CC reduction across `doc_drafter.py`, `settings.py`, `commit_messages.py`, `scrub_history.py`, `git_scrub.py`. All changes verified with `python -m pyflakes src/` (zero warnings) and `pytest tests/ -m "not tk"` (301/301 pass). Full details in CHANGELOG.md v4.14 Fixed section.
+
+### The recommended workflow (post Roadmap-7.5)
+1. Make changes on a feature/audit branch.
+2. Click **🧪 Test Gaps…** on the Git tab → see only the changed files that need tests.
+3. Check the files you want covered → **📝 Generate stubs** (instant template) or **✨ AI Generate** (Ollama writes real assertions).
+4. **Run All** in Test Manager → confirm green.
+5. **Draft PR** → CLI path (uses Claude subscription, external terminal) OR right-click → **Use Ollama / API** (local, free, shows test-gap panel inline in the dialog).
+6. The PR body is generated from `git diff <merge-base>` → includes your uncommitted work if you haven't committed yet.
+
+---
+
 ## Roadmap 8
 
 **Direction**: Roadmap-7 made every doc-drafting / AI-assist surface

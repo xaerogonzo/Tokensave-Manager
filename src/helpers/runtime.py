@@ -18,8 +18,6 @@ import logging.handlers
 import math
 import os
 
-from PIL import Image, ImageDraw
-
 from constants import LOG_DIR, LOG_FILE
 
 
@@ -69,6 +67,7 @@ def _bring_existing_to_front():
 
 def _make_tray_icon():
     """Generate a 64×64 tray icon: dark circle with a white star."""
+    from PIL import Image, ImageDraw  # lazy — only needed in the live app, not tests
     size = 64
     img = Image.new("RGBA", (size, size), (0, 0, 0, 0))
     d = ImageDraw.Draw(img)

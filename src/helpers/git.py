@@ -40,6 +40,58 @@ def _is_git_repo(path: str, git_exe: str) -> bool:
         return False
 
 
+def _find_gitignored_on_disk(path: str, git_exe: str) -> list:
+    """Return rel paths of files that are gitignored but exist on disk.
+
+    Uses `git ls-files --others --ignored --exclude-standard` which lists
+    untracked files whose paths match the project's .gitignore rules.
+    Directories (trailing /) are excluded — only individual files are returned.
+    Returns [] on any failure (not a repo, git missing, etc.).
+    """
+    try:
+        proc = subprocess.run(
+            [git_exe, "-C", path,
+             "ls-files", "--others", "--ignored", "--exclude-standard"],
+            capture_output=True, text=True, timeout=10,
+            encoding="utf-8", errors="replace",
+            creationflags=CREATE_NO_WINDOW,
+        )
+    except (FileNotFoundError, subprocess.TimeoutExpired):
+        return []
+    if proc.returncode != 0:
+        return []
+    return [ln for ln in proc.stdout.splitlines()
+            if ln.strip() and not ln.endswith("/")]
+
+
+def _staged_deletions(path: str, git_exe: str) -> list:
+    """Return repo-relative paths currently staged for deletion.
+
+    Reads ``git diff --cached --name-only --diff-filter=D`` — files that have
+    been ``git rm`` / ``git rm --cached``'d but not yet committed. Returns []
+    on any failure (not a repo, git missing, timeout).
+
+    Used in two places:
+      * ``_find_tracked_but_ignored`` — to exclude in-progress untracks from
+        the stale-ignore warning so it doesn't loop.
+      * the commit flow — to reason about staged deletions that a pathspec
+        commit would otherwise leave dangling.
+    """
+    try:
+        proc = subprocess.run(
+            [git_exe, "-C", path,
+             "diff", "--cached", "--name-only", "--diff-filter=D"],
+            capture_output=True, text=True, timeout=10,
+            encoding="utf-8", errors="replace",
+            creationflags=CREATE_NO_WINDOW,
+        )
+    except (FileNotFoundError, subprocess.TimeoutExpired):
+        return []
+    if proc.returncode != 0:
+        return []
+    return [ln.strip() for ln in proc.stdout.splitlines() if ln.strip()]
+
+
 def _find_tracked_but_ignored(path: str, git_exe: str) -> list:
     """Return a list of paths that are TRACKED by git in `path` but ALSO
     match a pattern in `.gitignore`.
@@ -48,6 +100,11 @@ def _find_tracked_but_ignored(path: str, git_exe: str) -> list:
       -c  show cached (tracked) files
       -i  filter to those that are ignored
       --exclude-standard  use the project's actual .gitignore rules
+
+    Files that are already staged for deletion (``git rm --cached`` was
+    already run but not yet committed) are excluded from the result — the
+    user already did the right thing; re-prompting them on every commit
+    until they commit the deletion would be a confusing loop.
 
     Returns paths relative to the repo root, one per line, empty string
     filtered out. Returns [] if the call fails (not a repo, git missing,
@@ -70,7 +127,20 @@ def _find_tracked_but_ignored(path: str, git_exe: str) -> list:
         return []
     if proc.returncode != 0:
         return []
-    return [ln for ln in proc.stdout.splitlines() if ln.strip()]
+    stale = [ln for ln in proc.stdout.splitlines() if ln.strip()]
+    if not stale:
+        return []
+
+    # Filter out files already staged for deletion — `git rm --cached` was
+    # run but the commit hasn't landed yet. Re-prompting would create a loop
+    # where every commit attempt re-warns about a fix already in progress.
+    already_staged = {
+        d.replace("\\", "/") for d in _staged_deletions(path, git_exe)
+    }
+    if already_staged:
+        stale = [f for f in stale if f.replace("\\", "/") not in already_staged]
+
+    return stale
 
 
 def _is_local_git_repo(path: str) -> bool:

@@ -371,7 +371,22 @@ class ScrubHistoryDialog(tk.Toplevel):
         values.  Heavy work (filter-repo install, untrack-commit, scrub)
         runs in worker threads; this method only updates widget state.
         """
-        # Filter-repo gate
+        rel_file = (self._selected_file.get() or "").strip()
+        self._refresh_filter_repo_section()
+        self._refresh_workflow_section(rel_file)
+        self._refresh_affected_commits(rel_file)
+        if rel_file and self._preflight.get("git_exe_present"):
+            self._backup_branch_name = build_backup_branch_name()
+            self._backup_lbl.configure(
+                text=f"Backup branch (created before scrub): "
+                     f"{self._backup_branch_name}    "
+                     "(use `git reset --hard <branch>` to restore before "
+                     "force-push)")
+        confirm_ok = self._refresh_confirm_section(rel_file)
+        self._refresh_scrub_button(rel_file, confirm_ok)
+
+    def _refresh_filter_repo_section(self):
+        """Update the filter-repo installation status label and install button."""
         if self._preflight.get("filter_repo"):
             self._fr_status_lbl.configure(
                 text="✓ filter-repo is installed.",
@@ -384,8 +399,8 @@ class ScrubHistoryDialog(tk.Toplevel):
                 fg=C["red"])
             self._fr_install_btn.configure(state=tk.NORMAL)
 
-        # File picker → workflow preamble
-        rel_file = (self._selected_file.get() or "").strip()
+    def _refresh_workflow_section(self, rel_file: str):
+        """Update the workflow-preamble status and action button for *rel_file*."""
         if not rel_file:
             self._wf_status_lbl.configure(
                 text="(pick a file first)",
@@ -427,35 +442,24 @@ class ScrubHistoryDialog(tk.Toplevel):
                     fg=C["green"])
                 self._wf_action_btn.configure(state=tk.DISABLED)
 
-        # Affected commits
-        self._refresh_affected_commits(rel_file)
-
-        # Backup branch label
-        if rel_file and self._preflight.get("git_exe_present"):
-            self._backup_branch_name = build_backup_branch_name()
-            self._backup_lbl.configure(
-                text=f"Backup branch (created before scrub): "
-                     f"{self._backup_branch_name}    "
-                     "(use `git reset --hard <branch>` to restore before "
-                     "force-push)")
-
-        # Confirmation phrase
+    def _refresh_confirm_section(self, rel_file: str) -> bool:
+        """Update the confirmation-phrase hint; return True when phrase matches."""
         basename = os.path.basename(rel_file) if rel_file else ""
         typed = self._confirm_phrase.get().strip()
         if not basename:
             self._confirm_hint.configure(
                 text="(pick a file first)", fg=C["overlay0"])
-            confirm_ok = False
-        elif typed != basename:
+            return False
+        if typed != basename:
             self._confirm_hint.configure(
                 text=f"Type exactly: {basename}",
                 fg=C["overlay0"])
-            confirm_ok = False
-        else:
-            self._confirm_hint.configure(text="✓", fg=C["green"])
-            confirm_ok = True
+            return False
+        self._confirm_hint.configure(text="✓", fg=C["green"])
+        return True
 
-        # Scrub Now enablement
+    def _refresh_scrub_button(self, rel_file: str, confirm_ok: bool):
+        """Update Scrub Now enablement and Force Push button visibility."""
         ready = (
             self._preflight.get("filter_repo")
             and rel_file
@@ -465,7 +469,7 @@ class ScrubHistoryDialog(tk.Toplevel):
             and not self._scrub_in_flight
             and not self._already_scrubbed
         )
-        # Also require: file no longer tracked + working tree clean
+        # Also require: file no longer tracked + working tree clean.
         if ready and rel_file:
             try:
                 still_tracked = is_tracked_in_head(
@@ -478,11 +482,8 @@ class ScrubHistoryDialog(tk.Toplevel):
         self._scrub_btn.configure(state=tk.NORMAL if ready else tk.DISABLED)
 
         # Force Push button visibility — driven entirely by _already_scrubbed.
-        # Re-evaluated on every file change so picking a second already-scrubbed
-        # file re-enables the button even if a previous push already completed.
         if self._already_scrubbed:
             self._scrub_btn.configure(state=tk.DISABLED, text="✓ Scrubbed")
-            # Always reset to enabled — the file just changed, it's a fresh target.
             self._force_push_btn.configure(
                 state=tk.NORMAL, text="⬆  Force Push to GitHub")
             try:

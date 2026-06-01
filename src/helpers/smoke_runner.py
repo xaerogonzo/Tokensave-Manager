@@ -87,6 +87,122 @@ def run_smoke_tests(project_root: str) -> tuple[int, int, str]:
     return passed, total, combined
 
 
+def _kill_tree(proc) -> None:
+    """Kill *proc* and its entire child process tree (best-effort).
+
+    A misbehaving AI test can spawn children (e.g. one that calls the real
+    ``run_smoke_tests`` launches a child pytest, or ``spawn_claude_cli`` opens a
+    console). Killing only the parent on timeout would orphan them, leaving them
+    burning CPU until reboot. Windows: ``taskkill /F /T /PID`` walks the child
+    tree by PID. POSIX: the process was started in its own session, so
+    ``killpg`` takes out the whole group.
+    """
+    try:
+        if sys.platform == "win32":
+            subprocess.run(
+                ["taskkill", "/F", "/T", "/PID", str(proc.pid)],
+                capture_output=True, creationflags=_CREATE_NO_WINDOW)
+        else:
+            import signal
+            os.killpg(os.getpgid(proc.pid), signal.SIGKILL)
+    except Exception:
+        try:
+            proc.kill()
+        except Exception:
+            pass
+
+
+def run_single_test_file(project_root: str, test_relpath: str,
+                         timeout: int = 20) -> "tuple[bool, str]":
+    """Run ONE pytest file and return ``(passed, combined_output)``.
+
+    Used by the generate-then-verify loop: a freshly AI-generated test is run in
+    isolation; only tests that pass are kept.
+
+    ``passed`` is True ONLY when pytest exits 0 (ran AND all passed). pytest exits
+    non-zero on failures (1), no-tests-collected (5), and usage/marker errors (4) —
+    all correctly count as not-passing.
+
+    ``timeout`` is deliberately short (20s, decoupled from the LLM timeouts): a
+    unit test that infinite-loops, blocks, spawns a child, or starts a Tk
+    mainloop is caught fast. On timeout the WHOLE process tree is killed (see
+    ``_kill_tree``) so a child pytest/console isn't orphaned. ``--tb=short
+    --no-header`` keeps the traceback compact for the repair prompt.
+
+    Source-mode only: ``sys.executable -m pytest`` assumes a real Python
+    interpreter (same assumption as ``run_smoke_tests``). Under a frozen build it
+    returns ``(False, <error>)``, which the caller treats as a normal failure.
+    """
+    popen_kw = dict(
+        stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
+        text=True, encoding="utf-8", errors="replace",
+        cwd=project_root, creationflags=_CREATE_NO_WINDOW,
+    )
+    if sys.platform != "win32":
+        popen_kw["start_new_session"] = True       # own group → killpg on timeout
+    try:
+        proc = subprocess.Popen(
+            [sys.executable, "-m", "pytest", test_relpath,
+             "--tb=short", "--no-header", "-rfE"],
+            **popen_kw,
+        )
+    except OSError as exc:
+        return False, f"Failed to launch pytest: {exc}"
+
+    try:
+        out, _ = proc.communicate(timeout=timeout)
+    except subprocess.TimeoutExpired:
+        _kill_tree(proc)
+        try:
+            proc.communicate(timeout=5)            # reap so no zombie remains
+        except Exception:
+            pass
+        return False, (f"TIMEOUT after {timeout}s — the test likely has an "
+                       "infinite loop, a blocking call, spawns a child process, "
+                       "or starts a Tk mainloop.")
+    return proc.returncode == 0, (out or "")
+
+
+def run_gate(project_root: str, timeout: int = 180) -> "tuple[bool, str]":
+    """Run the project's `-m "not tk"` gate once: ``(all_passed, combined_output)``.
+
+    Used to RE-VERIFY freshly generated tests against the FULL suite, not just in
+    isolation — a test can pass alone yet fail amid the real suite (shared state,
+    test-ordering, or a test that itself invokes the test runner). `-m "not tk"`
+    (not a markerless run) so a hanging generated Tk test can't consume the whole
+    timeout and nuke the batch, and to match the CI gate. ``-rfE`` guarantees the
+    parseable ``FAILED/ERROR …::id`` summary block for owner attribution.
+
+    ``all_passed`` is True only on exit 0. On timeout the whole process tree is
+    killed. Frozen build / launch failure → ``(False, <error>)``.
+    """
+    popen_kw = dict(
+        stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
+        text=True, encoding="utf-8", errors="replace",
+        cwd=project_root, creationflags=_CREATE_NO_WINDOW,
+    )
+    if sys.platform != "win32":
+        popen_kw["start_new_session"] = True
+    try:
+        proc = subprocess.Popen(
+            [sys.executable, "-m", "pytest", "tests/", "-m", "not tk",
+             "-rfE", "--tb=line", "-q"],
+            **popen_kw,
+        )
+    except OSError as exc:
+        return False, f"Failed to launch pytest: {exc}"
+    try:
+        out, _ = proc.communicate(timeout=timeout)
+    except subprocess.TimeoutExpired:
+        _kill_tree(proc)
+        try:
+            proc.communicate(timeout=5)
+        except Exception:
+            pass
+        return False, f"TIMEOUT after {timeout}s running the full -m 'not tk' gate."
+    return proc.returncode == 0, (out or "")
+
+
 # ── V-E: cancellable background pytest runner ──────────────────────────────
 
 class PytestRun:

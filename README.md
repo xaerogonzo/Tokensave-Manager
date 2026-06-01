@@ -144,7 +144,7 @@ The manager's design philosophy: **never force a choice you don't want to make**
 - **Merge a branch INTO the current one** — `⇄ Merge…` picks a source branch (the destination is wherever you are right now). Uses `git merge --no-edit` so no editor pops up. Conflicts surface as a dialog with the resolve-and-commit or `git merge --abort` instructions; dirty-tree errors get their own dialog
 - **Remote-aware Delete Branch** — after a successful local delete, the manager checks `git branch -r` for `origin/<branch>`. If it exists, you get a prompt to also `git push origin --delete <branch>` so GitHub stays in sync. Works for both safe and force deletes
 - **Open PR on GitHub** — on a feature branch, opens the GitHub compare page directly in your browser. On master/main, walks you through the branch workflow step by step
-- **Draft PR description** — `Draft PR…` button asks an AI to draft a structured PR description from the current diff (Summary / Technical Implementation / Threat Model / Verification Steps). Primary click uses the Claude Code CLI if configured (opens a new terminal — your app stays unblocked); falls back to the API path (in-app dialog) otherwise. Right-click or Shift+click pops a menu to explicitly choose. The API-path dialog has a **PR title field** (auto-extracted from the generated text) and two buttons: **"Create PR on GitHub"** (runs `gh pr create` directly — no browser; logs the PR URL and offers to open it) and **"Open in Browser"** (pre-fills GitHub's New PR form via `gh pr create --web`). The Claude CLI path also runs `gh pr create` end-to-end and cleans up `PR_DRAFT.md` on success
+- **Draft PR description** — `Draft PR…` button asks an AI to draft a structured PR description (Summary / Technical Implementation / Threat Model / Verification Steps / Testing checklist). Primary click uses Claude Code CLI if configured (opens a new terminal — your app stays unblocked); falls back to Ollama / API path otherwise. Right-click or Shift+click shows an explicit-choice menu including **"Set PR base branch…"** (persists a per-project override so PRs can target `Roadmap-7.5` instead of `master`). The **Ollama / API** dialog is a **standalone, resizable window** (native min/max + its own taskbar entry) that **streams the draft live** as the model writes — a grounding badge ("✓ Grounded: tokensave + codegraph") and a status line (grounding → generating) show progress instead of a blank wait. It has a PR title field and **Copy / Create PR on GitHub / Open in Browser** buttons (pinned and always visible), plus a **🧪 test-gap panel** listing which changed files have no tests with one-click stub or AI-generate actions. Re-triggering Draft PR while a draft is open or edited asks before discarding it. The generated body includes a **Testing checklist** with a `### Coverage gaps` subsection (changed files lacking tests) on both the Ollama and Claude CLI paths. Diff strategy: `git diff <merge-base>` — includes committed + staged + unstaged work so the AI sees your full branch context even before the final commit; for local models the diff budget scales with the model's context window (`num_ctx`) so large branches aren't truncated to a sliver
 - **Set Remote** — step-by-step dialog for connecting a project to a GitHub repository
 - **GitHub Setup wizard** — full onboarding: set git identity, sign in / create account, create repo on GitHub, set remote, first push, create a release
 - **Commit prompts after manager actions** — when Ensure .gitignore / Shadow Links / Scaffold / Retrofit / 🧠 CodeGraph Init modifies files in a git project, a "Commit this change now?" dialog appears so the working tree never sits silently dirty. Uses a strict local-repo check (`os.path.exists(.git)` — supports git worktrees) so projects nested inside an unrelated parent repo don't get ghost prompts
@@ -360,6 +360,8 @@ A full git control panel for whichever project is selected in the Projects tab.
 | 🔗 Open PR | Open GitHub's compare page for the current branch; or explains branch workflow if on main |
 | 🐙 Merge PR… | Lists open PRs via `gh pr list --json`. Pick one + a merge strategy (Merge / Squash / Rebase) + optional delete-source-branch. Single confirmation modal shows title, source/base branches, diff stats. On confirm: `gh pr merge <N> --merge\|--squash\|--rebase`, then auto-switches local to the default branch and pulls so you end up sitting on the freshly-merged state |
 | 📦 Release… | One-button GitHub release (see Release Wizard above) |
+| Draft PR… | Ask AI to draft a structured PR description. Right-click or Shift+click to choose Claude CLI (external terminal, uses your subscription) or **Ollama / API** (inline dialog, free with local models). Right-click also exposes **"Set PR base branch…"** to target any branch instead of auto-detected master/main |
+| 🧪 Test Gaps… | Diff this branch against its base and show which changed `src/*.py` files have no `tests/test_*.py`. One-click **template stubs** or **AI-written tests** (Auto / Claude CLI / Ollama) for the flagged files. AI tests are generated → run → repaired, then **re-verified against the full `pytest -m "not tk"` suite and rolled back if they break it** (only gate-safe tests are kept; passing-but-partial files show `✓ N/M`). Or **📋 Copy a Claude Code prompt** to hand the gaps to an agentic session and **↻ Re-scan** to pick up what it writes. Works without drafting a PR first |
 
 Every button has a hover tooltip with a plain-English explanation.
 
@@ -833,17 +835,20 @@ See [CHANGELOG.md](CHANGELOG.md) for the full history.
 
 ## Testing
 
-The manager ships with a pytest test suite covering both pure-logic helpers
-and the four newest dialogs (checks, tool manager, codegraph MCP picker,
-scrub history). Tests are zero-runtime-dependency for end users — only the
-dev workflow installs pytest.
+The manager ships with a pytest test suite covering pure-logic helpers, the AI
+test-generation / PR-draft pipeline, and the Tk dialogs + controllers. Tests are
+zero-runtime-dependency for end users — only the dev workflow installs pytest.
 
 ```bash
 pip install -r requirements-dev.txt
-python -m pytest                    # everything (~3-5 s on Windows)
-python -m pytest -m "not tk"        # pure-logic only — no display needed
-python -m pytest -m tk              # dialog tests only
+python -m pytest                    # everything
+python -m pytest -m "not tk"        # pure-logic only — no display needed (~10 s)
+python -m pytest -m tk              # dialog/controller tests only (needs a display)
 ```
+
+Tk-marked tests need a display: on Windows they run as-is; on Linux CI they run
+under `xvfb-run`. The CI gate is `pytest -m "not tk"` (the same gate the Test Gaps
+AI generator re-verifies generated tests against before keeping them).
 
 On Linux CI the dialog tests run under `xvfb-run -a` with `python3-tk`
 installed. The GitHub Actions workflow (`.github/workflows/ci.yml`) splits

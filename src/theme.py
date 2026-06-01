@@ -91,3 +91,87 @@ def bind_mousewheel(canvas: tk.Canvas) -> None:
     canvas.bind("<Leave>", _deactivate)
     # Also activate when a child widget inside the canvas gets the cursor —
     # bind_all means the event propagates up, so no child-by-child wiring needed.
+
+
+# ── Custom checkbox indicator images ─────────────────────────────────────────
+# Cached at module level so they survive for the lifetime of the process
+# (PhotoImage objects are garbage-collected if not referenced).
+
+_CHK_OFF: "tk.PhotoImage | None" = None
+_CHK_ON:  "tk.PhotoImage | None" = None
+
+
+def _make_chk_images() -> tuple:
+    """Return (off_image, on_image) PhotoImage pair, building lazily on first call.
+
+    14×14 pixel images drawn with tk.PhotoImage.put() — no PIL dependency.
+      Off: surface1 fill + overlay0 border  (visible grey box on any bg)
+      On:  white fill + overlay0 border + base-colour checkmark pixels
+    """
+    global _CHK_OFF, _CHK_ON
+    if _CHK_OFF is not None:
+        return _CHK_OFF, _CHK_ON
+
+    S  = 14
+    bd = C["overlay0"]   # #6c7086 — border
+    of = C["surface1"]   # #45475a — unchecked fill
+    on = "white"         # checked fill
+    ck = C["base"]       # #1e1e2e — checkmark ink (max contrast on white)
+
+    def _build(fill: str, checkmark: bool) -> tk.PhotoImage:
+        rows = []
+        for y in range(S):
+            row = [
+                bd if (x == 0 or x == S - 1 or y == 0 or y == S - 1) else fill
+                for x in range(S)
+            ]
+            rows.append(row)
+        if checkmark:
+            # ✓ shape — 2-px wide strokes; clipped to inner 1..12 area
+            for x, y in [
+                # left downstroke (two columns)
+                (2, 8), (3, 9), (4, 10),
+                (3, 8), (4, 9), (5, 10),
+                # right upstroke (two columns)
+                (5, 9), (6, 8), (7, 7), (8, 6), (9, 5), (10, 4), (11, 3),
+                (6, 9), (7, 8), (8, 7), (9, 6), (10, 5), (11, 4), (12, 3),
+            ]:
+                if 0 < x < S - 1 and 0 < y < S - 1:
+                    rows[y][x] = ck
+        img = tk.PhotoImage(width=S, height=S)
+        for y, row in enumerate(rows):
+            img.put("{%s}" % " ".join(row), to=(0, y, S, y + 1))
+        return img
+
+    _CHK_OFF = _build(of, checkmark=False)
+    _CHK_ON  = _build(on, checkmark=True)
+    return _CHK_OFF, _CHK_ON
+
+
+def themed_checkbutton(parent: tk.Widget, **kw) -> tk.Checkbutton:
+    """tk.Checkbutton with custom PhotoImage indicator for dark-theme visibility.
+
+    Uses indicatoron=False + two PhotoImage objects so both states are
+    explicitly coloured:
+      • Unchecked — grey (#45475a) box with visible border
+      • Checked   — white box with dark checkmark
+
+    selectcolor is matched to the widget bg so the button background does not
+    flash when toggled — only the image swaps. All keyword args are forwarded
+    to tk.Checkbutton; any default can be overridden by the caller.
+    """
+    off_img, on_img = _make_chk_images()
+    bg = kw.get("bg", kw.get("background", C["surface0"]))
+    kw.pop("selectcolor", None)           # not meaningful with indicatoron=False
+    kw.setdefault("indicatoron",   False)
+    kw.setdefault("image",         off_img)
+    kw.setdefault("selectimage",   on_img)
+    kw.setdefault("selectcolor",   bg)    # prevent bg flash on toggle
+    kw.setdefault("compound",      tk.LEFT)
+    kw.setdefault("relief",        tk.FLAT)
+    kw.setdefault("overrelief",    tk.FLAT)
+    kw.setdefault("bd",            0)
+    kw.setdefault("padx",          2)
+    kw.setdefault("activebackground", bg)
+    kw.setdefault("activeforeground", C["text"])
+    return tk.Checkbutton(parent, **kw)

@@ -15,6 +15,7 @@ from __future__ import annotations
 
 import os
 import re
+import sys
 
 
 # ── Repo base dir (works under both python.exe and Nuitka --onefile) ─────────
@@ -58,8 +59,10 @@ MAX_DEPTH = 4
 # ── Windows subprocess flag ───────────────────────────────────────────────────
 # Hide the cmd.exe window when spawning subprocesses from a Tk app under
 # pythonw.exe — without this every git/tokensave invocation flashes a
-# black console.
-CREATE_NO_WINDOW = 0x08000000
+# black console. MUST be 0 off-Windows: a non-zero `creationflags` makes
+# subprocess raise "creationflags is only supported on Windows platforms"
+# (breaks the Linux CI test runner, which exercises the git/test-gap helpers).
+CREATE_NO_WINDOW = 0x08000000 if sys.platform == "win32" else 0
 
 
 # ── App refresh cadence ──────────────────────────────────────────────────────

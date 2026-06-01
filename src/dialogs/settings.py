@@ -35,7 +35,7 @@ from tkinter import ttk, filedialog, messagebox, simpledialog
 from typing import TYPE_CHECKING
 
 from constants import C, CREATE_NO_WINDOW
-from theme import bind_mousewheel
+from theme import bind_mousewheel, themed_checkbutton
 from helpers.detection import (
     _detect_git, _detect_gh, _detect_npm, _detect_codegraph, _detect_claude_cli,
     _root_path, _root_label,
@@ -777,14 +777,20 @@ class SettingsDialog(tk.Toplevel):
         ttk.Button(root_btns, text="Remove",     command=self._remove_root).pack(fill=tk.X)
 
     def _build_behavior_section(self, body, raw):
-        """Auto-commit toggle, MCP integration status, Ollama shortcut."""
-        # ── Auto-commit ───────────────────────────────────────────────────
+        """Auto-commit toggle, MCP, AI backend selection, and Ollama — router."""
+        self._build_git_toggles_section(body, raw)
+        self._build_mcp_section(body)
+        self._build_backend_selection_section(body, raw)
+        self._build_ollama_section(body, raw)
+
+    def _build_git_toggles_section(self, body, raw):
+        """Auto-commit after sync + pre-commit smoke-test hook."""
         ttk.Separator(body, orient="horizontal").pack(fill=tk.X, padx=20, pady=(12, 8))
         self._var_autocommit = tk.BooleanVar(value=bool(raw.get("auto_commit_after_sync", False)))
-        tk.Checkbutton(body,
+        themed_checkbutton(body,
             text="Auto-commit after sync  (git add -A + git commit)",
             variable=self._var_autocommit,
-            bg=C["base"], fg=C["text"], selectcolor=C["surface0"],
+            bg=C["base"], fg=C["text"],
             activebackground=C["base"], activeforeground=C["text"],
             font=("Segoe UI", 10)).pack(anchor=tk.W, padx=20, pady=(0, 2))
         tk.Label(body,
@@ -793,15 +799,14 @@ class SettingsDialog(tk.Toplevel):
             font=("Segoe UI", 8), bg=C["base"], fg=C["overlay0"],
             justify=tk.LEFT).pack(anchor=tk.W, padx=36, pady=(0, 8))
 
-        # ── Pre-commit smoke tests ────────────────────────────────────────
         from helpers.smoke_runner import is_hook_installed
         _active_project = (raw.get("projects") or [{}])[0].get("path") or ""
         _hook_active = is_hook_installed(_active_project) if _active_project else False
         self._var_precommit_hook = tk.BooleanVar(value=_hook_active)
-        tk.Checkbutton(body,
+        themed_checkbutton(body,
             text="Run smoke tests before commits  (pre-commit hook)",
             variable=self._var_precommit_hook,
-            bg=C["base"], fg=C["text"], selectcolor=C["surface0"],
+            bg=C["base"], fg=C["text"],
             activebackground=C["base"], activeforeground=C["text"],
             font=("Segoe UI", 10)).pack(anchor=tk.W, padx=20, pady=(0, 2))
         tk.Label(body,
@@ -810,7 +815,8 @@ class SettingsDialog(tk.Toplevel):
             font=("Segoe UI", 8), bg=C["base"], fg=C["overlay0"],
             justify=tk.LEFT).pack(anchor=tk.W, padx=36, pady=(0, 8))
 
-        # ── MCP integration ───────────────────────────────────────────────
+    def _build_mcp_section(self, body):
+        """MCP integration status row and wrapper health summary."""
         ttk.Separator(body, orient="horizontal").pack(fill=tk.X, padx=20, pady=(8, 8))
         tk.Label(body, text="MCP integration",
                  font=("Segoe UI", 10, "bold"),
@@ -847,7 +853,8 @@ class SettingsDialog(tk.Toplevel):
             font=("Segoe UI", 8), bg=C["base"], fg=C["overlay0"],
             justify=tk.LEFT).pack(anchor=tk.W, padx=36, pady=(0, 8))
 
-        # ── AI backend selection (grouped) ────────────────────────────────
+    def _build_backend_selection_section(self, body, raw):
+        """AI backend selection LabelFrame: Draft PR, commit message, grounding."""
         ttk.Separator(body, orient="horizontal").pack(fill=tk.X, padx=20, pady=(8, 8))
         lf = tk.LabelFrame(body, text="AI backend selection",
                            bg=C["base"], fg=C["subtext"],
@@ -995,7 +1002,8 @@ class SettingsDialog(tk.Toplevel):
             font=("Segoe UI", 8), bg=C["base"], fg=C["overlay0"],
             justify=tk.LEFT).pack(anchor=tk.W, padx=24, pady=(0, 8))
 
-        # ── Ollama ────────────────────────────────────────────────────────
+    def _build_ollama_section(self, body, raw):
+        """Ollama model manager shortcut, num_ctx spinbox, and warm-up toggle."""
         ttk.Separator(body, orient="horizontal").pack(fill=tk.X, padx=20, pady=(8, 8))
         tk.Label(body, text="Ollama", font=("Segoe UI", 10, "bold"),
                  bg=C["base"], fg=C["text"]).pack(anchor=tk.W, padx=20, pady=(0, 2))
@@ -1027,10 +1035,10 @@ class SettingsDialog(tk.Toplevel):
         # warm-up checkbox
         self._var_ollama_warmup = tk.BooleanVar(
             value=bool(raw.get("ollama_warmup", False)))
-        tk.Checkbutton(body,
+        themed_checkbutton(body,
             text="Warm up Ollama before first Generate (loads model into VRAM early)",
             variable=self._var_ollama_warmup,
-            bg=C["base"], fg=C["text"], selectcolor=C["surface0"],
+            bg=C["base"], fg=C["text"],
             activebackground=C["base"], activeforeground=C["text"],
             font=("Segoe UI", 9)).pack(anchor=tk.W, padx=20, pady=(0, 6))
 
@@ -1043,10 +1051,10 @@ class SettingsDialog(tk.Toplevel):
 
         llm_cfg = raw.get("commit_message_llm") or {}
         self._var_llm_enabled = tk.BooleanVar(value=bool(llm_cfg.get("enabled", False)))
-        tk.Checkbutton(body,
+        themed_checkbutton(body,
             text="Use AI to generate commit message suggestions",
             variable=self._var_llm_enabled,
-            bg=C["base"], fg=C["text"], selectcolor=C["surface0"],
+            bg=C["base"], fg=C["text"],
             activebackground=C["base"], activeforeground=C["text"],
             font=("Segoe UI", 10)).pack(anchor=tk.W, padx=20, pady=(0, 4))
 
@@ -1073,10 +1081,10 @@ class SettingsDialog(tk.Toplevel):
                  justify=tk.LEFT).pack(anchor=tk.W, padx=20, pady=(0, 4))
 
         self._var_ask_enabled = tk.BooleanVar(value=bool(ask_cfg.get("enabled", False)))
-        tk.Checkbutton(body,
+        themed_checkbutton(body,
             text="Enable AI in the Ask tab",
             variable=self._var_ask_enabled,
-            bg=C["base"], fg=C["text"], selectcolor=C["surface0"],
+            bg=C["base"], fg=C["text"],
             activebackground=C["base"], activeforeground=C["text"],
             font=("Segoe UI", 10)).pack(anchor=tk.W, padx=20, pady=(0, 4))
 
@@ -1261,10 +1269,10 @@ class SettingsDialog(tk.Toplevel):
         ttk.Entry(min_row, textvariable=self._var_llm_min_diff, width=6).pack(side=tk.LEFT)
 
         self._var_llm_for_sync = tk.BooleanVar(value=bool(llm_cfg.get("use_for_sync_autocommit", False)))
-        tk.Checkbutton(body,
+        themed_checkbutton(body,
             text="Also use AI for sync auto-commit messages (disables amend-stacking)",
             variable=self._var_llm_for_sync,
-            bg=C["base"], fg=C["text"], selectcolor=C["surface0"],
+            bg=C["base"], fg=C["text"],
             activebackground=C["base"], activeforeground=C["text"],
             font=("Segoe UI", 9)).pack(anchor=tk.W, padx=20, pady=(6, 2))
         tk.Label(body,

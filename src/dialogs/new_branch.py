@@ -12,6 +12,7 @@ import tkinter as tk
 from tkinter import ttk, messagebox
 
 from constants import C
+from theme import themed_checkbutton
 
 
 class NewBranchDialog(tk.Toplevel):
@@ -44,10 +45,10 @@ class NewBranchDialog(tk.Toplevel):
         name_entry.focus_set()
 
         self._switch_var = tk.BooleanVar(value=True)
-        tk.Checkbutton(self,
+        themed_checkbutton(self,
             text="Switch to this branch immediately",
             variable=self._switch_var,
-            bg=C["base"], fg=C["text"], selectcolor=C["surface0"],
+            bg=C["base"], fg=C["text"],
             activebackground=C["base"], activeforeground=C["text"],
             font=("Segoe UI", 10)).pack(anchor=tk.W, padx=20, pady=(0, 14))
 

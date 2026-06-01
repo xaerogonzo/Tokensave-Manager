@@ -13,6 +13,7 @@ import tkinter as tk
 from tkinter import ttk, messagebox
 
 from constants import C
+from theme import themed_checkbutton
 
 
 class MergePRDialog(tk.Toplevel):
@@ -121,10 +122,10 @@ class MergePRDialog(tk.Toplevel):
         """Delete-source-branch checkbox row."""
         opts_row = tk.Frame(self, bg=C["base"])
         opts_row.pack(fill=tk.X, padx=18, pady=(4, 2))
-        tk.Checkbutton(opts_row,
+        themed_checkbutton(opts_row,
             text="Also delete the source branch on GitHub after merge",
             variable=self._var_delete_branch,
-            bg=C["base"], fg=C["text"], selectcolor=C["surface0"],
+            bg=C["base"], fg=C["text"],
             activebackground=C["base"], activeforeground=C["text"],
             font=("Segoe UI", 9)).pack(side=tk.LEFT)
 

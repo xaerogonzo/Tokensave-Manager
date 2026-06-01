@@ -17,8 +17,53 @@ from __future__ import annotations
 import json
 import logging
 import os
+import threading
+import time
+import urllib.error
+import urllib.request
 
 log = logging.getLogger(__name__)
+
+_tls = threading.local()
+
+# base_urls already probed for Ollama version (one warning per URL per process).
+_ollama_ctx_warned: set = set()
+
+
+def _warn_if_old_ollama(base_url: str) -> None:
+    """One-time best-effort check that Ollama honours top-level ``num_ctx``.
+
+    Ollama added top-level ``num_ctx`` support for ``/v1/chat/completions`` in
+    PR #6137 (~v0.3.x). Older builds silently truncate context to 4096 tokens —
+    which would quietly defeat the larger PR-draft diff budget. Probe
+    ``GET {base_url}/api/version`` once per base_url and warn if it's old.
+    Never raises (not-Ollama / unreachable → silent).
+    """
+    if not base_url or base_url in _ollama_ctx_warned:
+        return
+    _ollama_ctx_warned.add(base_url)
+    try:
+        req = urllib.request.Request(base_url.rstrip("/") + "/api/version")
+        with urllib.request.urlopen(req, timeout=3) as resp:
+            ver = (json.loads(resp.read().decode("utf-8")) or {}).get("version", "")
+        parts = [int(x) for x in str(ver).split("-")[0].split(".")[:2]]
+    except Exception:
+        return  # not Ollama, unreachable, or unparseable — stay quiet
+    if len(parts) >= 2 and (parts[0], parts[1]) < (0, 3):
+        log.warning(
+            "Ollama %s may ignore top-level num_ctx (truncates context to 4096). "
+            "Upgrade Ollama, or set `PARAMETER num_ctx` in a Modelfile and run "
+            "`ollama create` to bake in a larger context.", ver,
+        )
+
+
+def get_last_llm_error() -> "str | None":
+    """Return the specific error from the most recent _call_llm call on THIS thread.
+
+    Thread-local: must be called on the same thread that called _call_llm.
+    Returns None if no error occurred or _call_llm was never called on this thread.
+    """
+    return getattr(_tls, "last_error", None)
 
 
 def _is_auth_error(text: str) -> bool:
@@ -215,11 +260,34 @@ def _stream_openai_response(resp, on_token) -> str:
     return "".join(pieces).strip()
 
 
+def _urlopen_retrying(req, timeout, retries: int = 2, backoff: float = 2.0):
+    """``urllib.request.urlopen`` with retry on transient HTTP 5xx.
+
+    The first chat request after a model is unloaded can return HTTP 500 while
+    the server loads the model + allocates its context window (reproducibly so
+    with Ollama cold-starts at large num_ctx); a brief retry lands once it's
+    warm. 4xx client errors (bad model name, etc.) are NOT retried. URLError /
+    timeouts propagate immediately. Returns the response (use as a context
+    manager); raises the last error if every attempt fails.
+    """
+    attempt = 0
+    while True:
+        try:
+            return urllib.request.urlopen(req, timeout=timeout)
+        except urllib.error.HTTPError as exc:
+            if exc.code >= 500 and attempt < retries:
+                log.warning("LLM HTTP %s — retrying (%d/%d) after cold-start/"
+                            "transient server error", exc.code, attempt + 1, retries)
+                time.sleep(backoff * (attempt + 1))
+                attempt += 1
+                continue
+            raise
+
+
 def _call_anthropic(api_key: str, model: str, system_prompt: str, user_prompt: str,
                     max_tokens: int, timeout: int, on_token) -> str | None:
     """Anthropic Messages API — streaming and non-streaming. Pure execution layer;
     validation and error handling live in the _call_llm dispatcher."""
-    import urllib.request
     payload = {
         "model": model or "claude-haiku-4-5",
         "max_tokens": max_tokens,
@@ -239,9 +307,9 @@ def _call_anthropic(api_key: str, model: str, system_prompt: str, user_prompt: s
         },
     )
     if on_token is not None:
-        with urllib.request.urlopen(req, timeout=timeout) as resp:
+        with _urlopen_retrying(req, timeout) as resp:
             return _stream_anthropic_response(resp, on_token) or None
-    with urllib.request.urlopen(req, timeout=timeout) as resp:
+    with _urlopen_retrying(req, timeout) as resp:
         data = json.loads(resp.read().decode("utf-8"))
     blocks = data.get("content") or []
     text = "".join(b.get("text", "") for b in blocks if b.get("type") == "text")
@@ -257,7 +325,6 @@ def _call_openai_compat(url: str, api_key: str, model: str,
                         num_ctx: int | None = None) -> str | None:
     """OpenAI Chat Completions — covers openai, openai_compatible, and ollama.
     Caller resolves the endpoint URL before dispatching here."""
-    import urllib.request
     payload = {
         "model": model or "gpt-4o-mini",
         "messages": [
@@ -274,6 +341,8 @@ def _call_openai_compat(url: str, api_key: str, model: str,
     if num_ctx is not None:
         # Ollama extension — silently ignored by non-Ollama OpenAI-compat servers
         payload["num_ctx"] = num_ctx
+        # Advisory: warn once if this Ollama build predates top-level num_ctx.
+        _warn_if_old_ollama(url.split("/v1/")[0])
     if on_token is not None:
         payload["stream"] = True
     headers = {"Content-Type": "application/json"}
@@ -285,9 +354,9 @@ def _call_openai_compat(url: str, api_key: str, model: str,
         headers=headers,
     )
     if on_token is not None:
-        with urllib.request.urlopen(req, timeout=timeout) as resp:
+        with _urlopen_retrying(req, timeout) as resp:
             return _stream_openai_response(resp, on_token) or None
-    with urllib.request.urlopen(req, timeout=timeout) as resp:
+    with _urlopen_retrying(req, timeout) as resp:
         data = json.loads(resp.read().decode("utf-8"))
     choices = data.get("choices") or []
     if not choices:
@@ -330,8 +399,6 @@ def _call_llm(cfg: dict, system_prompt: str, user_prompt: str,
     Callers that need to push deltas to a Tk UI must wrap it in a
     `self.after(0, ...)` schedule (see AICodeReviewDialog._start_review).
     """
-    import urllib.error
-
     if not cfg.get("enabled"):
         return None
 
@@ -354,6 +421,7 @@ def _call_llm(cfg: dict, system_prompt: str, user_prompt: str,
         if not base_url:
             base_url = "http://localhost:11434"
 
+    _tls.last_error = None
     try:
         if provider == "anthropic":
             if not api_key:
@@ -379,8 +447,27 @@ def _call_llm(cfg: dict, system_prompt: str, user_prompt: str,
                                        max_tokens, timeout, on_token,
                                        temperature=temperature, top_p=top_p,
                                        top_k=top_k, num_ctx=num_ctx)
-    except (urllib.error.URLError, urllib.error.HTTPError,
-            TimeoutError, json.JSONDecodeError, KeyError, OSError):
+    except urllib.error.HTTPError as exc:        # HTTPError is a URLError subclass — match first
+        if exc.code >= 500:
+            _tls.last_error = (
+                f"HTTP {exc.code} from {provider} (after retries) — the model "
+                f"likely failed to load (cold start / low memory). It often works "
+                f"on a second try once warm; otherwise lower num_ctx, or pre-load "
+                f"with `ollama run {model or '<model>'}`."
+            )
+        else:
+            _tls.last_error = f"HTTP {exc.code} from {provider}: {exc.reason}"
+        return None
+    except urllib.error.URLError as exc:
+        _tls.last_error = f"Connection failed ({exc.reason}) — is {provider} running?"
+        return None
+    except TimeoutError:
+        _tls.last_error = (
+            f"Timed out after {timeout}s — diff may be too large or {provider} is slow"
+        )
+        return None
+    except (json.JSONDecodeError, KeyError, OSError) as exc:
+        _tls.last_error = f"Unexpected error: {exc}"
         return None
 
     return None

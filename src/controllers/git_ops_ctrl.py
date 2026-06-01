@@ -24,11 +24,12 @@ from typing import TYPE_CHECKING, Callable
 import tkinter as tk
 
 from constants import C
-from helpers.git import _find_tracked_but_ignored, _is_git_repo, _is_local_git_repo
+from helpers.git import _find_tracked_but_ignored, _find_gitignored_on_disk, _is_git_repo, _is_local_git_repo
 from helpers.gitignore import _BASELINE_GITIGNORE
 from dialogs.ai_code_review import AICodeReviewDialog
 from dialogs.gitignore import GitignoreDialog
 from dialogs.untrack_ignored import UntrackIgnoredDialog
+from dialogs.private_repo_setup import PrivateRepoSetupDialog
 
 if TYPE_CHECKING:
     from state import ManagerConfig
@@ -172,18 +173,113 @@ class GitOpsController:
             return
         UntrackIgnoredDialog(self._root, path, files, on_confirm=self._do_untrack_ignored)
 
+    def cmd_create_private_repo(self, path: str) -> None:
+        """Open the wizard to create a local-only git repo for gitignored files."""
+        _NOISE_EXTS = (".pyc", ".pyo", ".pyd", ".log", ".db-wal", ".db-shm", ".db-wal2")
+        _NOISE_DIRS = (
+            "__pycache__", ".tokensave", ".codegraph", ".git",
+            "node_modules", ".venv", "venv", ".tox", ".mypy_cache",
+            ".pytest_cache", ".ruff_cache", ".eggs",
+        )
+        raw = _find_gitignored_on_disk(path, self._cfg.git_exe)
+
+        # Filter noise, sort by path depth (root files first — G3)
+        filtered = [
+            f for f in raw
+            if not any(f.endswith(ext) for ext in _NOISE_EXTS)
+            and not any(
+                part in _NOISE_DIRS
+                for part in f.replace("\\", "/").split("/")
+            )
+        ]
+        filtered.sort(key=lambda f: (f.replace("\\", "/").count("/"), f.lower()))
+
+        # Cap after filtering so root-level files are never cut off (G3/G13)
+        # The dialog shows the warning banner when capped.
+        gitignored = filtered  # dialog handles the cap and warning internally
+
+        PrivateRepoSetupDialog(
+            self._root, path, gitignored,
+            git_exe=self._cfg.git_exe,
+            on_log=self._on_log,
+            on_registered=lambda dest, files: self._register_private_repo(
+                path, dest, files),
+        )
+
+    def _register_private_repo(self, src_path: str, dest: str, files: list) -> None:
+        """Save private repo mapping to config (runs on main thread — G11)."""
+        self._cfg.raw.setdefault("private_repos", {})[src_path] = {
+            "dest":  dest,
+            "files": files,
+        }
+        self._cfg.save()
+        self._on_log(
+            "  ✓ Private repo registered — auto-sync enabled for future commits.",
+            C["green"])
+
+    def cmd_private_repo(self, path: str) -> None:
+        """Smart-route: manager dialog if configured, setup wizard otherwise."""
+        from dialogs.private_repo_mgr import PrivateRepoManagerDialog
+        entry = self._cfg.raw.get("private_repos", {}).get(path)
+        if entry:
+            PrivateRepoManagerDialog(
+                self._root, path, entry, self._cfg,
+                git_exe=self._cfg.git_exe,
+                on_log=self._on_log,
+                on_refresh=self._on_refresh,
+            )
+        else:
+            self.cmd_create_private_repo(path)
+
+    def cmd_sync_private_repo(self, path: str) -> None:
+        """On-demand sync: copy changed private files and commit to private repo."""
+        from helpers.private_repo import sync_private_repo
+        cfg_entry = self._cfg.raw.get("private_repos", {}).get(path)
+        if not cfg_entry:
+            from tkinter import messagebox
+            messagebox.showinfo(
+                "No private repo configured",
+                "No private local repo is linked to this project.\n\n"
+                "Right-click → 🔒 Create Private Local Repo… to set one up.",
+                parent=self._root)
+            return
+        dest  = cfg_entry.get("dest", "")
+        files = cfg_entry.get("files", [])
+        self._on_log(f"Syncing private repo for {os.path.basename(path)}…",
+                     C["peach"])
+
+        def worker():
+            sync_private_repo(
+                self._cfg.git_exe, path, dest, files,
+                on_log=self._on_log,
+                commit_msg="",
+            )
+            self._tab.after(0, self._on_refresh)
+
+        threading.Thread(target=worker, daemon=True).start()
+
     # ── Worker ────────────────────────────────────────────────────────────────
 
     def _do_untrack_ignored(self, path: str, files: list) -> None:
-        """Run `git rm --cached -- <files>` in a background thread."""
+        """Untrack ignored files and commit the removal immediately.
+
+        Stages ``git rm --cached -- <files>`` then commits straight away with
+        a plain (no-pathspec) commit. This is deliberate: a pathspec commit
+        (``git commit -- <file>``) CANNOT commit a staged deletion of a file
+        that still exists on disk and matches .gitignore — git's partial-commit
+        overlay skips it and reports "nothing to commit", silently orphaning the
+        deletion. A no-pathspec commit captures exactly what we just staged
+        (the rm) and nothing else, since this is a fresh, isolated operation.
+        """
         if not files:
             return
         name = os.path.basename(path)
-        self._on_log(
-            f"Untracking {len(files)} file{'s' if len(files) != 1 else ''} in {name}…",
-            C["peach"])
+        n = len(files)
+        plural = "s" if n != 1 else ""
+        self._on_log(f"Untracking {n} file{plural} in {name}…", C["peach"])
 
         def worker():
+            committed = False
             try:
                 out, rc = self._on_shell(
                     [self._cfg.git_exe, "-C", path, "rm", "-r", "--cached", "--"] + files,
@@ -194,20 +290,37 @@ class GitOpsController:
                 if rc != 0:
                     return
                 self._on_log(
-                    f"  ✓ Untracked {len(files)} file{'s' if len(files) != 1 else ''} — "
-                    "local copies preserved",
+                    f"  ✓ Untracked {n} file{plural} — local copies preserved",
                     C["green"])
+
+                # Commit the staged removal immediately (no pathspec — see
+                # docstring). This makes the untrack durable so it can't be
+                # orphaned by a later pathspec commit or an index reset.
+                msg = (f"chore: untrack {n} ignored file{plural} "
+                       "(kept locally; matched .gitignore)")
+                cout, crc = self._on_shell(
+                    [self._cfg.git_exe, "-C", path, "commit", "-m", msg], path)
+                if crc == 0:
+                    committed = True
+                    self._on_log(f"  ✓ Committed the untrack ({msg})", C["green"])
+                else:
+                    for line in cout.strip().splitlines()[-4:]:
+                        self._on_log(f"  {line}", C["yellow"])
+                    self._on_log(
+                        "  ⚠ Could not auto-commit — the removal is staged; "
+                        "commit it manually to make it durable.",
+                        C["yellow"])
             finally:
                 self._tab.after(0, self._on_refresh)
-                # skip_stale_check=True prevents an infinite loop: _open_commit_dialog
-                # would otherwise re-run the tracked-but-ignored check, find any files
-                # the user deliberately left tracked, and prompt for Untrack again.
-                # Any remaining stale files after this point are the user's conscious
-                # choice — we should open the commit dialog, not re-prompt.
-                self._tab.after(0, lambda: self._on_commit_offer(
-                    path,
-                    f"untrack {len(files)} ignored file{'s' if len(files) != 1 else ''}",
-                    skip_stale_check=True))
+                # Only offer a follow-up commit dialog if we did NOT already
+                # commit — otherwise there's nothing left from this operation.
+                # skip_stale_check=True prevents re-prompting for any files the
+                # user deliberately left tracked.
+                if not committed:
+                    self._tab.after(0, lambda: self._on_commit_offer(
+                        path,
+                        f"untrack {n} ignored file{plural}",
+                        skip_stale_check=True))
 
         threading.Thread(target=worker, daemon=True).start()
 
