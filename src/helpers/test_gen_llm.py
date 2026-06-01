@@ -414,33 +414,145 @@ def generate_verified_test(
     real file lock-safely — a failed regenerate leaves the original untouched.
 
     The temp file is always cleaned up in ``finally``. Caller writes nothing.
+
+    Implementation note: the three inner helpers below (``_resolve_paths``,
+    ``_read_existing``, ``_run_and_verify``) use lexical closures over the
+    outer parameters to avoid parameter explosion while keeping each phase
+    independently readable. They cannot be imported or patched in isolation —
+    exercise them by driving the outer function in tests.
     """
     if cancel_event and cancel_event.is_set():
         return VerifiedResult(None, "cancelled", "")
 
-    from helpers.test_scaffold import _test_filename_for
     tests_dir = os.path.join(project_root, "tests")
 
-    # Resolve the real destination: explicit (regenerate) or derived (new file).
-    if target_path:
-        final_path = (target_path if os.path.isabs(target_path)
-                      else os.path.join(project_root, target_path))
-    else:
-        final_path = os.path.join(tests_dir, _test_filename_for(source_path, project_root))
-    final_rel = os.path.relpath(final_path, project_root).replace(os.sep, "/")
+    # ── inner helpers (close over outer scope) ────────────────────────────────
 
-    # Regenerate: read the existing test so the model retains it, and capture its
-    # test ids for the retention gate.
-    is_update = bool(allow_overwrite and os.path.exists(final_path))
-    existing_test = None
-    old_ids: set = set()
-    if is_update:
+    def _resolve_paths() -> "tuple[str, str, bool]":
+        """Return (final_abs_path, final_rel_path, is_update)."""
+        from helpers.test_scaffold import _test_filename_for
+        if target_path:
+            fp = (target_path if os.path.isabs(target_path)
+                  else os.path.join(project_root, target_path))
+        else:
+            fp = os.path.join(tests_dir, _test_filename_for(source_path, project_root))
+        rel = os.path.relpath(fp, project_root).replace(os.sep, "/")
+        upd = bool(allow_overwrite and os.path.exists(fp))
+        return fp, rel, upd
+
+    def _read_existing(final_path: str, is_update: bool) -> "tuple[str | None, set]":
+        """Return (existing_test_text, old_test_ids). Both empty if not is_update."""
+        if not is_update:
+            return None, set()
         try:
             with open(final_path, encoding="utf-8", errors="replace") as fh:
-                existing_test = fh.read()
-            old_ids = _test_function_ids(existing_test)
+                text = fh.read()
+            return text, _test_function_ids(text)
         except OSError:
-            existing_test = None
+            return None, set()
+
+    def _run_and_verify(
+        content: str,
+        final_path: str,
+        final_rel: str,
+        is_update: bool,
+        old_ids: set,
+        existing_test: "str | None",
+    ) -> VerifiedResult:
+        """Write temp, run, repair once on failure, gate retention, move."""
+        from helpers import smoke_runner  # lazy — avoids import cycle
+
+        base_name = os.path.splitext(os.path.basename(source_path))[0]
+        tmp_name = f"test__aigen_{base_name}_{uuid.uuid4().hex[:8]}.py"
+        tmp_path = os.path.join(tests_dir, tmp_name)
+        tmp_rel = os.path.join("tests", tmp_name)
+
+        effective_backend = _resolve_backend(backend, cfg)
+        try:
+            system_prompt, user_prompt = _build_prompts(
+                source_path, project_root, 8_000,
+                template=template, existing_test=existing_test)
+        except Exception:
+            system_prompt = user_prompt = ""
+
+        current = content
+        last_report = ""
+        try:
+            os.makedirs(tests_dir, exist_ok=True)
+            attempts = max(1, max_runtime_repairs + 1)
+            for attempt in range(attempts):
+                if cancel_event and cancel_event.is_set():
+                    return VerifiedResult(None, "cancelled", last_report)
+                with open(tmp_path, "w", encoding="utf-8", newline="\n") as fh:
+                    fh.write(current)
+                passed, output = smoke_runner.run_single_test_file(project_root, tmp_rel)
+                last_report = output
+                if passed:
+                    # Retention gate — regenerate must not drop any prior test.
+                    if is_update and old_ids:
+                        missing = old_ids - _test_function_ids(current)
+                        if missing:
+                            return VerifiedResult(
+                                current, "fail",
+                                "Regenerated test DROPPED existing tests "
+                                f"({', '.join(sorted(missing))}). Kept the original "
+                                "to avoid losing coverage.",
+                                preserved_existing=True)
+                    # New-file collision (not a sanctioned overwrite) → keep existing.
+                    if os.path.exists(final_path) and not allow_overwrite:
+                        return VerifiedResult(
+                            current, "fail",
+                            f"{os.path.basename(final_path)} already exists; not overwriting.")
+                    if not _safe_replace(tmp_path, final_path):
+                        return VerifiedResult(
+                            current, "fail",
+                            f"{os.path.basename(final_path)} is locked by another "
+                            "process — close it and retry.",
+                            preserved_existing=is_update)
+                    return VerifiedResult(current, "pass", output,
+                                          written_path=final_rel,
+                                          is_tk=("pytest.mark.tk" in current))
+
+                # Failed. Stop if out of repair budget or can't re-dispatch.
+                if attempt >= attempts - 1 or effective_backend is None or not system_prompt:
+                    break
+                if cancel_event and cancel_event.is_set():
+                    return VerifiedResult(None, "cancelled", last_report)
+                repair_up = user_prompt + "\n\n" + _RUNTIME_REPAIR_TEMPLATE.format(
+                    report=(output or "")[-4000:], prior=current)
+                raw, _ = _dispatch(effective_backend, cfg, system_prompt, repair_up,
+                                   project_root, on_token=on_token)
+                if not raw:
+                    break
+                fixed = _extract_code(raw)
+                if not fixed.strip() or _looks_like_python(fixed) is not None:
+                    break  # repair produced non-Python → don't run garbage
+                # A repair that re-dropped an import gets re-fixed deterministically.
+                current = _autofix_imports(fixed, source_path, project_root)
+
+            # Per-test pruning (new-file path only — regenerate's retention gate
+            # forbids dropping prior tests). Salvage passing tests by removing the
+            # failing ones, then RE-VERIFY the remainder green before writing.
+            if not is_update:
+                pruned = _prune_after_failure(
+                    current, last_report, project_root, tmp_path, tmp_rel,
+                    final_path, allow_overwrite, smoke_runner, cancel_event)
+                if pruned is not None:
+                    return pruned
+
+            return VerifiedResult(current, "fail", last_report,
+                                  preserved_existing=is_update)  # discarded
+        finally:
+            try:
+                if os.path.exists(tmp_path):
+                    os.remove(tmp_path)
+            except OSError:
+                pass
+
+    # ── orchestrator ──────────────────────────────────────────────────────────
+
+    final_path, final_rel, is_update = _resolve_paths()
+    existing_test, old_ids = _read_existing(final_path, is_update)
 
     content, err = generate_ai_test_content(
         source_path, project_root, backend, cfg, cancel_event,
@@ -452,93 +564,8 @@ def generate_verified_test(
     if cancel_event and cancel_event.is_set():
         return VerifiedResult(None, "cancelled", "")
 
-    from helpers import smoke_runner          # lazy — avoids import cycle
-
-    base = os.path.splitext(os.path.basename(source_path))[0]
-    tmp_name = f"test__aigen_{base}_{uuid.uuid4().hex[:8]}.py"
-    tmp_path = os.path.join(tests_dir, tmp_name)
-    tmp_rel = os.path.join("tests", tmp_name)
-
-    effective_backend = _resolve_backend(backend, cfg)
-    try:
-        system_prompt, user_prompt = _build_prompts(
-            source_path, project_root, 8_000,
-            template=template, existing_test=existing_test)
-    except Exception:
-        system_prompt = user_prompt = ""
-
-    last_report = ""
-    try:
-        os.makedirs(tests_dir, exist_ok=True)
-        attempts = max(1, max_runtime_repairs + 1)
-        for attempt in range(attempts):
-            if cancel_event and cancel_event.is_set():
-                return VerifiedResult(None, "cancelled", last_report)
-            with open(tmp_path, "w", encoding="utf-8", newline="\n") as fh:
-                fh.write(content)
-            passed, output = smoke_runner.run_single_test_file(project_root, tmp_rel)
-            last_report = output
-            if passed:
-                # Retention gate — a regenerate must not drop any prior test.
-                if is_update and old_ids:
-                    missing = old_ids - _test_function_ids(content)
-                    if missing:
-                        return VerifiedResult(
-                            content, "fail",
-                            "Regenerated test DROPPED existing tests "
-                            f"({', '.join(sorted(missing))}). Kept the original "
-                            "to avoid losing coverage.",
-                            preserved_existing=True)
-                # New-file collision (not a sanctioned overwrite) → keep existing.
-                if os.path.exists(final_path) and not allow_overwrite:
-                    return VerifiedResult(
-                        content, "fail",
-                        f"{os.path.basename(final_path)} already exists; not overwriting.")
-                if not _safe_replace(tmp_path, final_path):
-                    return VerifiedResult(
-                        content, "fail",
-                        f"{os.path.basename(final_path)} is locked by another "
-                        "process — close it and retry.",
-                        preserved_existing=is_update)
-                return VerifiedResult(content, "pass", output,
-                                      written_path=final_rel,
-                                      is_tk=("pytest.mark.tk" in content))
-
-            # Failed. Stop if out of repair budget or can't re-dispatch.
-            if attempt >= attempts - 1 or effective_backend is None or not system_prompt:
-                break
-            if cancel_event and cancel_event.is_set():
-                return VerifiedResult(None, "cancelled", last_report)
-            repair_up = user_prompt + "\n\n" + _RUNTIME_REPAIR_TEMPLATE.format(
-                report=(output or "")[-4000:], prior=content)
-            raw, _ = _dispatch(effective_backend, cfg, system_prompt, repair_up,
-                               project_root, on_token=on_token)
-            if not raw:
-                break
-            fixed = _extract_code(raw)
-            if not fixed.strip() or _looks_like_python(fixed) is not None:
-                break  # repair produced non-Python → don't run garbage
-            # A repair that re-dropped an import gets re-fixed deterministically.
-            content = _autofix_imports(fixed, source_path, project_root)
-
-        # Per-test pruning (new-file path only — regenerate's retention gate forbids
-        # dropping prior tests). Salvage the passing tests by removing the failing
-        # ones, then RE-VERIFY the remainder green before writing.
-        if not is_update:
-            pruned = _prune_after_failure(
-                content, last_report, project_root, tmp_path, tmp_rel,
-                final_path, allow_overwrite, smoke_runner, cancel_event)
-            if pruned is not None:
-                return pruned
-
-        return VerifiedResult(content, "fail", last_report,
-                              preserved_existing=is_update)   # discarded
-    finally:
-        try:
-            if os.path.exists(tmp_path):
-                os.remove(tmp_path)
-        except OSError:
-            pass
+    return _run_and_verify(content, final_path, final_rel, is_update, old_ids,
+                           existing_test)
 
 
 def _safe_replace(src: str, dst: str, retries: int = 3, delay: float = 0.15) -> bool:

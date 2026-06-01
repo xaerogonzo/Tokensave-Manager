@@ -5,7 +5,7 @@ Completely decoupled from App/controllers.  Accepts only primitive args
 
 Public surface:
     sync_private_repo(git_exe, src_path, dest, tracked_files, on_log, commit_msg)
-        -> bool  (True = success or nothing-to-do, False = error)
+        -> PrivateRepoResult  (truthy on success, falsy on error; .reason explains)
 """
 
 from __future__ import annotations
@@ -13,8 +13,25 @@ from __future__ import annotations
 import os
 import shutil
 import subprocess
+from dataclasses import dataclass
 
 from constants import C, CREATE_NO_WINDOW
+
+
+@dataclass
+class PrivateRepoResult:
+    """Structured return from :func:`sync_private_repo`.
+
+    Truthy on success (``ok=True``), falsy on failure (``ok=False``).
+    ``.reason`` holds a human-readable failure description; empty on success.
+    Behaves as a drop-in for the former ``bool`` return via ``__bool__``.
+    """
+
+    ok: bool
+    reason: str = ""
+
+    def __bool__(self) -> bool:
+        return self.ok
 
 # Git identity injected into every commit made by the manager so the
 # operation never fails on machines without global user.name/email config.
@@ -34,7 +51,7 @@ def sync_private_repo(
     tracked_files: list,
     on_log,
     commit_msg: str = "",
-) -> bool:
+) -> PrivateRepoResult:
     """Copy tracked files from *src_path* to *dest*, then commit any changes.
 
     Mirror semantics:
@@ -42,9 +59,10 @@ def sync_private_repo(
       - File missing in src → remove from dest; prune empty parent dirs
         (never removes the repo root itself)
 
-    Returns True on success (including "nothing to commit"), False on any
-    git error.  *on_log(msg, colour)* is called for each notable event and
-    must be thread-safe (the caller is responsible for scheduling if needed).
+    Returns a :class:`PrivateRepoResult` — truthy on success (including
+    "nothing to commit"), falsy on any git error; ``.reason`` contains a
+    short description of the failure.  *on_log(msg, colour)* is also called
+    for each notable event and must be thread-safe.
     """
     # ── 1. Destination sanity check ──────────────────────────────────────────
     if not os.path.isdir(dest):
@@ -53,7 +71,7 @@ def sync_private_repo(
             "run 🔒 Create Private Local Repo… to set it up again.",
             C["red"],
         )
-        return False
+        return PrivateRepoResult(False, f"dest missing: {dest!r}")
 
     abs_dest = os.path.abspath(dest)
 
@@ -87,11 +105,11 @@ def sync_private_repo(
         )
     except (FileNotFoundError, subprocess.TimeoutExpired) as exc:
         on_log(f"  ✗ git status failed: {exc}", C["red"])
-        return False
+        return PrivateRepoResult(False, f"git status failed: {exc}")
 
     if not status_proc.stdout.strip():
         on_log("  Private repo already up to date.", C["overlay0"])
-        return True
+        return PrivateRepoResult(True)
 
     # ── 4. Stage ─────────────────────────────────────────────────────────────
     try:
@@ -104,11 +122,11 @@ def sync_private_repo(
         )
     except (FileNotFoundError, subprocess.TimeoutExpired) as exc:
         on_log(f"  ✗ git add failed: {exc}", C["red"])
-        return False
+        return PrivateRepoResult(False, f"git add failed: {exc}")
 
     if add_proc.returncode != 0:
         on_log(f"  ✗ git add: {add_proc.stderr.strip()}", C["red"])
-        return False
+        return PrivateRepoResult(False, f"git add rc={add_proc.returncode}: {add_proc.stderr.strip()}")
 
     # ── 5. Commit ─────────────────────────────────────────────────────────────
     proj_name = os.path.basename(src_path)
@@ -127,13 +145,13 @@ def sync_private_repo(
         )
     except (FileNotFoundError, subprocess.TimeoutExpired) as exc:
         on_log(f"  ✗ git commit failed: {exc}", C["red"])
-        return False
+        return PrivateRepoResult(False, f"git commit failed: {exc}")
 
     if commit_proc.returncode == 0:
         for line in commit_proc.stdout.strip().splitlines()[-3:]:
             on_log(f"  {line}", C["green"])
         on_log("  ✓ Private repo synced.", C["green"])
-        return True
+        return PrivateRepoResult(True)
     else:
         on_log(f"  ✗ git commit: {commit_proc.stderr.strip()}", C["red"])
-        return False
+        return PrivateRepoResult(False, f"git commit rc={commit_proc.returncode}: {commit_proc.stderr.strip()}")

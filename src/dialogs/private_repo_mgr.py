@@ -432,8 +432,10 @@ class PrivateRepoManagerDialog(tk.Toplevel):
         on_log = self._on_log
 
         def worker():
-            sync_private_repo(git_exe, src, dest, files,
-                              on_log=on_log, commit_msg="")
+            result = sync_private_repo(git_exe, src, dest, files,
+                                       on_log=on_log, commit_msg="")
+            if not result and result.reason:
+                on_log(f"  Detail: {result.reason}", "red")
             self.after(0, self._on_sync_complete, dest)
 
         threading.Thread(target=worker, daemon=True).start()

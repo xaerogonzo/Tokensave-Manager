@@ -249,11 +249,13 @@ class GitOpsController:
                      C["peach"])
 
         def worker():
-            sync_private_repo(
+            result = sync_private_repo(
                 self._cfg.git_exe, path, dest, files,
                 on_log=self._on_log,
                 commit_msg="",
             )
+            if not result and result.reason:
+                self._on_log(f"  Detail: {result.reason}", C["red"])
             self._tab.after(0, self._on_refresh)
 
         threading.Thread(target=worker, daemon=True).start()
