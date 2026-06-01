@@ -142,6 +142,66 @@ def _recommended_test_selection(suggestions) -> "list[bool]":
     return [bool(getattr(s, "requires_automation", False)) for s in suggestions]
 
 
+class _GapPanelCtx:
+    """Transient state shared between the test-gap panel sub-methods.
+
+    Stores all mutable widget references and data lists so the sub-methods
+    (``_gap_panel_header``, ``_gap_panel_suggestions``, ``_gap_panel_actions``)
+    remain portable — they can be moved to a ``TestGapCtrl`` sub-controller
+    in Phase C2 without hunting down scattered ``self.*`` attribute look-ups
+    on the parent controller.
+    """
+
+    __slots__ = (
+        # Immutable wiring — set at construction, never reassigned
+        "panel", "dlg", "path", "base", "on_tests_written",
+        # Data lists — grown by _add_rows inside _gap_panel_suggestions
+        "check_vars", "status_vars", "panel_suggestions",
+        # Widget vars created by _gap_panel_header
+        "ai_enabled_var", "backend_var",
+        # Shared state created by _gap_panel_actions
+        "status_var", "cancel_event",
+        # Action button refs (for bulk disable/enable in _do_rescan)
+        "stub_btn", "ai_btn", "fail_btn",
+        "cancel_btn", "copy_cc_btn", "rescan_btn",
+    )
+
+    def __init__(self, panel, dlg, path: str, base: str,
+                 on_tests_written) -> None:
+        self.panel = panel
+        self.dlg = dlg
+        self.path = path
+        self.base = base
+        self.on_tests_written = on_tests_written
+        # mutable data
+        self.check_vars: list = []
+        self.status_vars: list = []
+        self.panel_suggestions: list = []
+        # widget vars/buttons — set by sub-methods
+        self.ai_enabled_var = None
+        self.backend_var = None
+        self.status_var = None
+        self.cancel_event = None
+        self.stub_btn = None
+        self.ai_btn = None
+        self.fail_btn = None
+        self.cancel_btn = None
+        self.copy_cc_btn = None
+        self.rescan_btn = None
+
+    def reset_for_rebuild(self) -> None:
+        """Clear mutable lists and button refs before a Re-scan rebuild."""
+        self.check_vars.clear()
+        self.status_vars.clear()
+        self.panel_suggestions.clear()
+        self.ai_enabled_var = None
+        self.backend_var = None
+        self.status_var = None
+        self.cancel_event = None
+        self.stub_btn = self.ai_btn = self.fail_btn = None
+        self.cancel_btn = self.copy_cc_btn = self.rescan_btn = None
+
+
 class GitTabController:
     """Owns the Git tab UI and all git operations.
 
@@ -1978,7 +2038,7 @@ class GitTabController:
     def _build_test_gap_panel(self, dlg, path: str, base: str,
                               suggestions: "list | None" = None,
                               on_tests_written=None) -> None:
-        """Attach a collapsible 🧪 test-gap panel to *dlg* (Toplevel or Frame).
+        """Attach a 🧪 test-gap panel to *dlg* (Toplevel or Frame).
 
         If *suggestions* is provided (already computed by the caller), the panel
         fills synchronously with no extra coverage scan. Otherwise it runs
@@ -1989,309 +2049,342 @@ class GitTabController:
         invoked with the files that got a test written (AI ✓ or a fresh stub).
         The Draft PR dialog passes this to flip the body's coverage-gaps checklist
         to ``[x]``; the standalone window passes nothing (no-op).
+
+        All widget-building is delegated to ``_gap_fill_panel`` and its three
+        sub-methods; shared mutable state lives in a :class:`_GapPanelCtx`.
         """
         import threading
 
-        # Placeholder frame — packed after the button row; hidden until populated
         panel = tk.Frame(dlg, bg=C["surface0"], relief=tk.FLAT, bd=1)
+        ctx = _GapPanelCtx(panel=panel, dlg=dlg, path=path, base=base,
+                           on_tests_written=on_tests_written)
 
-        def _fetch():
-            from helpers.test_gap_report import suggest_tests_for_diff
-            try:
-                suggestions = suggest_tests_for_diff(path, self._cfg.git_exe, base)
-            except Exception:
-                suggestions = []
-            if dlg.winfo_exists():
-                dlg.after(0, lambda s=suggestions: _populate(s))
-
-        def _populate(suggestions: list) -> None:
-            if not dlg.winfo_exists() or not suggestions:
+        def _populate(suggs: list) -> None:
+            if not dlg.winfo_exists() or not suggs:
                 return
             panel.pack(fill=tk.BOTH, expand=True, padx=12, pady=(4, 8))
-            _fill_panel(panel, suggestions)
+            self._gap_fill_panel(panel, ctx, suggs)
 
-        def _fill_panel(parent: tk.Frame, suggestions: list) -> None:
-            """Build the panel widgets inside *parent*."""
-            # Header row
-            hdr = tk.Frame(parent, bg=C["surface0"])
-            hdr.pack(fill=tk.X, padx=8, pady=(6, 2))
-            tk.Label(
-                hdr,
-                text=f"🧪  {len(suggestions)} changed file(s) have no tests",
-                font=("Segoe UI", 9, "bold"),
-                bg=C["surface0"], fg=C["yellow"],
-            ).pack(side=tk.LEFT)
-
-            # AI master switch
-            ai_available = bool(
-                getattr(self._cfg, "claude_cli_exe", "") or
-                self._cfg.raw.get("commit_message_llm", {}).get("provider")
-            )
-            ai_enabled_var = tk.BooleanVar(value=ai_available)
-            ai_chk = themed_checkbutton(
-                hdr,
-                text="Enable AI generation",
-                variable=ai_enabled_var,
-                bg=C["surface0"], fg=C["subtext"],
-                activebackground=C["surface0"],
-                font=("Segoe UI", 9),
-                state=tk.NORMAL if ai_available else tk.DISABLED,
-            )
-            ai_chk.pack(side=tk.RIGHT)
-
-            # AI backend selector (persisted) — Auto / Claude CLI / Ollama. So the
-            # user can force Ollama instead of silently getting "auto" → Claude CLI.
-            _cli_ok = bool(getattr(self._cfg, "claude_cli_exe", ""))
-            _llm_ok = bool(self._cfg.raw.get("commit_message_llm", {}).get("provider"))
-            backend_var = tk.StringVar(value=(self._cfg.raw.get("test_gen_backend") or "auto"))
-            if backend_var.get() == "claude_cli" and not _cli_ok:
-                backend_var.set("auto")
-            elif backend_var.get() == "llm" and not _llm_ok:
-                backend_var.set("auto")
-            backend_var.trace_add(
-                "write", lambda *_a: self._cfg.raw.__setitem__(
-                    "test_gen_backend", backend_var.get()))
-            be_row = tk.Frame(parent, bg=C["surface0"])
-            be_row.pack(fill=tk.X, padx=10, pady=(2, 0))
-            tk.Label(be_row, text="AI backend:", bg=C["surface0"], fg=C["subtext"],
-                     font=("Segoe UI", 8)).pack(side=tk.LEFT, padx=(0, 4))
-            for _bval, _blabel, _ok in (
-                    ("auto", "Auto", _cli_ok or _llm_ok),
-                    ("claude_cli", "Claude CLI", _cli_ok),
-                    ("llm", "Ollama", _llm_ok)):
-                ttk.Radiobutton(
-                    be_row, text=_blabel, value=_bval, variable=backend_var,
-                    state=(tk.NORMAL if _ok else tk.DISABLED)).pack(side=tk.LEFT, padx=(0, 6))
-
-            # Proactive nudge — make the call-to-action explicit (nothing is
-            # forced; the buttons below write files only when clicked).
-            tk.Label(
-                parent,
-                text=(f"{len(suggestions)} changed file(s) lack tests — click "
-                      "✓ Recommend (or pick files), then 📝 Generate stubs / "
-                      "✨ AI generate to close the gap."),
-                font=("Segoe UI", 8), bg=C["surface0"], fg=C["subtext"],
-                anchor="w", justify=tk.LEFT, wraplength=560,
-            ).pack(fill=tk.X, padx=10, pady=(0, 2))
-
-            # Scrollable checkbox list
-            scroll_outer = tk.Frame(parent, bg=C["surface0"])
-            scroll_outer.pack(fill=tk.BOTH, expand=True, padx=16, pady=2)
-
-            canvas = tk.Canvas(scroll_outer, bg=C["surface0"],
-                               highlightthickness=0, height=160)
-            vsb = ttk.Scrollbar(scroll_outer, orient="vertical",
-                                command=canvas.yview)
-            canvas.configure(yscrollcommand=vsb.set)
-            vsb.pack(side=tk.RIGHT, fill=tk.Y)
-            canvas.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
-
-            list_frame = tk.Frame(canvas, bg=C["surface0"])
-            _cw = canvas.create_window((0, 0), window=list_frame, anchor="nw")
-
-            def _sync_scroll(event, _c=canvas):
-                _c.configure(scrollregion=_c.bbox("all"))
-
-            def _sync_width(event, _c=canvas, _id=_cw):
-                _c.itemconfig(_id, width=event.width)
-
-            list_frame.bind("<Configure>", _sync_scroll)
-            canvas.bind("<Configure>", _sync_width)
-
-            def _on_wheel(event, _c=canvas):
-                _c.yview_scroll(int(-1 * (event.delta / 120)), "units")
-
-            for _w in (canvas, list_frame):
-                _w.bind("<MouseWheel>", _on_wheel)
-
-            # Parallel lists, grown by _add_rows (so the action buttons, which
-            # capture these list objects, see appended update rows too). Nothing
-            # pre-checked — the user opts in via ✓ Recommend or by hand.
-            check_vars: list[tk.BooleanVar] = []
-            status_vars: list[tk.StringVar] = []
-            panel_suggestions: list = []
-
-            def _add_rows(sugg_list, is_update=False):
-                for sg in sugg_list:
-                    panel_suggestions.append(sg)
-                    var = tk.BooleanVar(value=False)
-                    check_vars.append(var)
-                    svar = tk.StringVar(value="")   # per-row ⏳ / ✓ / ✗
-                    status_vars.append(svar)
-                    row = tk.Frame(list_frame, bg=C["surface0"])
-                    row.pack(fill=tk.X, pady=1)
-                    themed_checkbutton(
-                        row, variable=var, text=sg.rel_path,
-                        bg=C["surface0"], fg=C["text"],
-                        activebackground=C["surface0"],
-                        font=("Consolas", 8), anchor="w",
-                    ).pack(side=tk.LEFT)
-                    _tag = (f"↻ regenerate ({sg.template})" if is_update
-                            else f"→ {sg.template}")
-                    tk.Label(row, text=_tag, bg=C["surface0"],
-                             fg=(C["sky"] if is_update else C["overlay0"]),
-                             font=("Segoe UI", 8)).pack(side=tk.LEFT, padx=(4, 0))
-                    tk.Label(row, textvariable=svar, bg=C["surface0"],
-                             fg=C["subtext"], font=("Segoe UI", 9)).pack(
-                                 side=tk.LEFT, padx=(6, 0))
-
-            _add_rows(suggestions, is_update=False)
-
-            # Also surface changed-but-tested files (regenerate candidates) on a
-            # thread so the initial panel isn't blocked. They render tagged ↻ and
-            # are opt-in (unchecked; Recommend does NOT auto-select them).
-            def _fetch_updates():
-                try:
-                    from helpers.test_gap_report import suggest_test_updates_for_diff
-                    ups = suggest_test_updates_for_diff(path, self._cfg.git_exe, base)
-                except Exception:
-                    ups = []
-                if ups and dlg.winfo_exists():
-                    dlg.after(0, lambda u=ups: _add_rows(u, is_update=True))
-            threading.Thread(target=_fetch_updates, daemon=True).start()
-
-            # Status line — shared by the quick-select row and the actions below.
-            status_var = tk.StringVar()
-
-            # Quick-select row — makes the "recommended" selection an explicit,
-            # explained action instead of silently pre-checking boxes. Mirrors the
-            # Git Commit dialog's Select All / None / Modified-Only pattern.
-            def _select_recommended():
-                # Recommend NEW high-ROI helpers; ↻ existing-test regenerations
-                # stay opt-in (the user checks those by hand — regenerate is riskier).
-                rec = [bool(sg.requires_automation and not sg.test_exists)
-                       for sg in panel_suggestions]
-                for v, r in zip(check_vars, rec):
-                    v.set(r)
-                status_var.set(
-                    f"Recommended {sum(rec)} new high-ROI helper(s). "
-                    "↻ existing-test regenerations are opt-in — check them by hand.")
-
-            def _select_all():
-                for v in check_vars:
-                    v.set(True)
-                status_var.set(f"Selected all {len(check_vars)}.")
-
-            def _select_none():
-                for v in check_vars:
-                    v.set(False)
-                status_var.set("Selection cleared.")
-
-            qs_row = tk.Frame(parent, bg=C["surface0"])
-            qs_row.pack(fill=tk.X, padx=8, pady=(2, 0))
-            tk.Label(qs_row, text="Select:", bg=C["surface0"], fg=C["subtext"],
-                     font=("Segoe UI", 8)).pack(side=tk.LEFT, padx=(2, 4))
-            ttk.Button(qs_row, text="✓ Recommend",
-                       command=_select_recommended).pack(side=tk.LEFT, padx=(0, 4))
-            ttk.Button(qs_row, text="All",
-                       command=_select_all).pack(side=tk.LEFT, padx=(0, 4))
-            ttk.Button(qs_row, text="None",
-                       command=_select_none).pack(side=tk.LEFT, padx=(0, 4))
-
-            # Action buttons
-            act_row = tk.Frame(parent, bg=C["surface0"])
-            act_row.pack(fill=tk.X, padx=8, pady=(4, 6))
-
-            status_lbl = tk.Label(
-                act_row,
-                textvariable=status_var,
-                bg=C["surface0"], fg=C["subtext"],
-                font=("Segoe UI", 8),
-            )
-            status_lbl.pack(side=tk.LEFT)
-
-            cancel_event = threading.Event()
-
-            stub_btn = ttk.Button(
-                act_row, text="📝 Generate stubs",
-                command=lambda: self._gap_generate_stubs(
-                    panel_suggestions, check_vars, path,
-                    status_var, stub_btn, ai_btn, cancel_event, dlg,
-                    on_tests_written=on_tests_written),
-            )
-            stub_btn.pack(side=tk.RIGHT, padx=(4, 0))
-
-            fail_btn = ttk.Button(
-                act_row, text="View failures…", state=tk.DISABLED,
-                command=lambda: self._show_ai_failures(dlg),
-            )
-            fail_btn.pack(side=tk.RIGHT, padx=(4, 0))
-
-            ai_btn = ttk.Button(
-                act_row, text="✨ AI generate selected",
-                command=lambda: self._gap_generate_ai(
-                    panel_suggestions, check_vars, status_vars, path,
-                    status_var, stub_btn, ai_btn, fail_btn, ai_enabled_var,
-                    cancel_event, dlg, backend_var,
-                    on_tests_written=on_tests_written),
-            )
-            ai_btn.pack(side=tk.RIGHT, padx=(4, 0))
-
-            cancel_btn = ttk.Button(
-                act_row, text="Cancel",
-                command=cancel_event.set,
-            )
-            cancel_btn.pack(side=tk.RIGHT, padx=(4, 0))
-
-            # Agentic escape hatch: copy a prompt to paste into Claude Code (which
-            # writes + verifies the tests itself), then ↻ Re-scan to pick them up.
-            copy_cc_btn = ttk.Button(
-                act_row, text="📋 Copy Claude Code prompt",
-                command=lambda: self._gap_copy_claude_prompt(
-                    panel_suggestions, check_vars, path, status_var, dlg),
-            )
-            copy_cc_btn.pack(side=tk.LEFT, padx=(0, 4))
-
-            def _do_rescan():
-                # Disable the action row for the worker's lifetime (no overlapping
-                # scans / row-model races); the rebuild replaces these widgets.
-                for _b in (stub_btn, ai_btn, fail_btn, cancel_btn,
-                           copy_cc_btn, rescan_btn):
-                    _b.configure(state=tk.DISABLED)
-                status_var.set("Re-scanning gaps…")
-
-                def _work():
-                    from helpers.test_gap_report import suggest_tests_for_diff
-                    try:
-                        fresh = suggest_tests_for_diff(path, self._cfg.git_exe, base)
-                    except Exception:
-                        fresh = []
-
-                    def _rebuild():
-                        if not panel.winfo_exists():
-                            return
-                        for w in panel.winfo_children():
-                            w.destroy()
-                        if fresh:
-                            _fill_panel(panel, fresh)
-                        else:
-                            tk.Label(
-                                panel,
-                                text="✓ No remaining coverage gaps on this branch.",
-                                bg=C["surface0"], fg=C["green"],
-                                font=("Segoe UI", 9),
-                            ).pack(padx=10, pady=10)
-                    if dlg.winfo_exists():
-                        dlg.after(0, _rebuild)
-
-                threading.Thread(target=_work, daemon=True).start()
-
-            rescan_btn = ttk.Button(
-                act_row, text="↻ Re-scan gaps", command=_do_rescan)
-            rescan_btn.pack(side=tk.LEFT, padx=(4, 0))
-
-            if not ai_available:
-                ai_btn.configure(state=tk.DISABLED)
-                _Tooltip(ai_btn,
-                    "Configure Claude Code CLI or an LLM provider in Settings "
-                    "to enable AI test generation.")
+        def _fetch() -> None:
+            from helpers.test_gap_report import suggest_tests_for_diff
+            try:
+                suggs = suggest_tests_for_diff(path, self._cfg.git_exe, base)
+            except Exception:
+                suggs = []
+            if dlg.winfo_exists():
+                dlg.after(0, lambda s=suggs: _populate(s))
 
         if suggestions is not None:
-            # Caller already computed the suggestions — fill synchronously, no
-            # second whole-tree coverage scan.
             _populate(suggestions)
         else:
             threading.Thread(target=_fetch, daemon=True).start()
+
+    def _gap_fill_panel(self, parent: tk.Frame, ctx: "_GapPanelCtx",
+                        suggestions: list) -> None:
+        """Build all gap-panel widgets inside *parent* using the three sub-builders.
+
+        Separated from ``_build_test_gap_panel`` so ``_do_rescan`` can call it
+        again on the same panel frame after clearing it, passing a fresh
+        suggestions list without recreating the ``_GapPanelCtx``.
+        """
+        self._gap_panel_header(parent, ctx, len(suggestions))
+        self._gap_panel_suggestions(parent, ctx, suggestions)
+        self._gap_panel_actions(parent, ctx)
+
+    def _gap_panel_header(self, parent: tk.Frame, ctx: "_GapPanelCtx",
+                          n_suggestions: int) -> None:
+        """Build the header row: count label, AI toggle, backend selector, nudge.
+
+        Stores ``ctx.ai_enabled_var`` and ``ctx.backend_var`` so the action
+        sub-method can read them.  Owns its own pack calls — nothing in the
+        coordinator post-configures layout details here.
+        """
+        # Header row
+        hdr = tk.Frame(parent, bg=C["surface0"])
+        hdr.pack(fill=tk.X, padx=8, pady=(6, 2))
+        tk.Label(
+            hdr,
+            text=f"🧪  {n_suggestions} changed file(s) have no tests",
+            font=("Segoe UI", 9, "bold"),
+            bg=C["surface0"], fg=C["yellow"],
+        ).pack(side=tk.LEFT)
+
+        # AI master switch
+        ai_available = bool(
+            getattr(self._cfg, "claude_cli_exe", "") or
+            self._cfg.raw.get("commit_message_llm", {}).get("provider")
+        )
+        ctx.ai_enabled_var = tk.BooleanVar(value=ai_available)
+        ai_chk = themed_checkbutton(
+            hdr,
+            text="Enable AI generation",
+            variable=ctx.ai_enabled_var,
+            bg=C["surface0"], fg=C["subtext"],
+            activebackground=C["surface0"],
+            font=("Segoe UI", 9),
+            state=tk.NORMAL if ai_available else tk.DISABLED,
+        )
+        ai_chk.pack(side=tk.RIGHT)
+
+        # AI backend selector (persisted) — Auto / Claude CLI / Ollama.
+        _cli_ok = bool(getattr(self._cfg, "claude_cli_exe", ""))
+        _llm_ok = bool(self._cfg.raw.get("commit_message_llm", {}).get("provider"))
+        ctx.backend_var = tk.StringVar(
+            value=(self._cfg.raw.get("test_gen_backend") or "auto"))
+        if ctx.backend_var.get() == "claude_cli" and not _cli_ok:
+            ctx.backend_var.set("auto")
+        elif ctx.backend_var.get() == "llm" and not _llm_ok:
+            ctx.backend_var.set("auto")
+        ctx.backend_var.trace_add(
+            "write", lambda *_a: self._cfg.raw.__setitem__(
+                "test_gen_backend", ctx.backend_var.get()))
+        be_row = tk.Frame(parent, bg=C["surface0"])
+        be_row.pack(fill=tk.X, padx=10, pady=(2, 0))
+        tk.Label(be_row, text="AI backend:", bg=C["surface0"], fg=C["subtext"],
+                 font=("Segoe UI", 8)).pack(side=tk.LEFT, padx=(0, 4))
+        for _bval, _blabel, _ok in (
+                ("auto", "Auto", _cli_ok or _llm_ok),
+                ("claude_cli", "Claude CLI", _cli_ok),
+                ("llm", "Ollama", _llm_ok)):
+            ttk.Radiobutton(
+                be_row, text=_blabel, value=_bval, variable=ctx.backend_var,
+                state=(tk.NORMAL if _ok else tk.DISABLED),
+            ).pack(side=tk.LEFT, padx=(0, 6))
+
+        # Nudge label
+        tk.Label(
+            parent,
+            text=(f"{n_suggestions} changed file(s) lack tests — click "
+                  "✓ Recommend (or pick files), then 📝 Generate stubs / "
+                  "✨ AI generate to close the gap."),
+            font=("Segoe UI", 8), bg=C["surface0"], fg=C["subtext"],
+            anchor="w", justify=tk.LEFT, wraplength=560,
+        ).pack(fill=tk.X, padx=10, pady=(0, 2))
+
+        # Store ai_available so _gap_panel_actions can apply the tooltip.
+        ctx._ai_available = ai_available  # type: ignore[attr-defined]
+
+    def _gap_panel_suggestions(self, parent: tk.Frame, ctx: "_GapPanelCtx",
+                               suggestions: list) -> None:
+        """Build the scrollable file-checkbox list and start the update fetch thread.
+
+        Populates ``ctx.check_vars``, ``ctx.status_vars``, and
+        ``ctx.panel_suggestions`` via the inner ``_add_rows`` helper.
+        The canvas + scrollbar bindings are fully self-contained here.
+        """
+        import threading
+
+        # Scrollable checkbox list
+        scroll_outer = tk.Frame(parent, bg=C["surface0"])
+        scroll_outer.pack(fill=tk.BOTH, expand=True, padx=16, pady=2)
+
+        canvas = tk.Canvas(scroll_outer, bg=C["surface0"],
+                           highlightthickness=0, height=160)
+        vsb = ttk.Scrollbar(scroll_outer, orient="vertical",
+                            command=canvas.yview)
+        canvas.configure(yscrollcommand=vsb.set)
+        vsb.pack(side=tk.RIGHT, fill=tk.Y)
+        canvas.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
+
+        list_frame = tk.Frame(canvas, bg=C["surface0"])
+        _cw = canvas.create_window((0, 0), window=list_frame, anchor="nw")
+
+        # Self-contained scroll bindings.
+        list_frame.bind("<Configure>",
+                        lambda e, _c=canvas: _c.configure(
+                            scrollregion=_c.bbox("all")))
+        canvas.bind("<Configure>",
+                    lambda e, _c=canvas, _id=_cw: _c.itemconfig(
+                        _id, width=e.width))
+        for _w in (canvas, list_frame):
+            _w.bind("<MouseWheel>",
+                    lambda e, _c=canvas: _c.yview_scroll(
+                        int(-1 * (e.delta / 120)), "units"))
+
+        # _add_rows appends to ctx lists so action buttons (built later)
+        # always see the live state, including rows added by the update thread.
+        def _add_rows(sugg_list: list, is_update: bool = False) -> None:
+            for sg in sugg_list:
+                ctx.panel_suggestions.append(sg)
+                var = tk.BooleanVar(value=False)
+                ctx.check_vars.append(var)
+                svar = tk.StringVar(value="")  # per-row status glyph
+                ctx.status_vars.append(svar)
+                row = tk.Frame(list_frame, bg=C["surface0"])
+                row.pack(fill=tk.X, pady=1)
+                themed_checkbutton(
+                    row, variable=var, text=sg.rel_path,
+                    bg=C["surface0"], fg=C["text"],
+                    activebackground=C["surface0"],
+                    font=("Consolas", 8), anchor="w",
+                ).pack(side=tk.LEFT)
+                _tag = (f"↻ regenerate ({sg.template})" if is_update
+                        else f"→ {sg.template}")
+                tk.Label(row, text=_tag, bg=C["surface0"],
+                         fg=(C["sky"] if is_update else C["overlay0"]),
+                         font=("Segoe UI", 8)).pack(side=tk.LEFT, padx=(4, 0))
+                tk.Label(row, textvariable=svar, bg=C["surface0"],
+                         fg=C["subtext"], font=("Segoe UI", 9)).pack(
+                             side=tk.LEFT, padx=(6, 0))
+
+        _add_rows(suggestions, is_update=False)
+
+        # Fetch changed-but-tested files on a thread (regenerate candidates).
+        def _fetch_updates() -> None:
+            try:
+                from helpers.test_gap_report import suggest_test_updates_for_diff
+                ups = suggest_test_updates_for_diff(
+                    ctx.path, self._cfg.git_exe, ctx.base)
+            except Exception:
+                ups = []
+            if ups and ctx.dlg.winfo_exists():
+                ctx.dlg.after(0, lambda u=ups: _add_rows(u, is_update=True))
+
+        threading.Thread(target=_fetch_updates, daemon=True).start()
+
+    def _gap_panel_actions(self, parent: tk.Frame,
+                           ctx: "_GapPanelCtx") -> None:
+        """Build the status line, quick-select row, and all action buttons.
+
+        Reads ctx.ai_enabled_var, ctx.backend_var, ctx.check_vars,
+        ctx.status_vars, and ctx.panel_suggestions (set by the preceding
+        sub-methods).  Stores every button reference into ctx so _do_rescan
+        can bulk-disable them without name look-ups.
+        """
+        import threading
+
+        # Shared status StringVar
+        ctx.status_var = tk.StringVar()
+
+        # Quick-select row
+        def _select_recommended() -> None:
+            rec = [bool(sg.requires_automation and not sg.test_exists)
+                   for sg in ctx.panel_suggestions]
+            for v, r in zip(ctx.check_vars, rec):
+                v.set(r)
+            ctx.status_var.set(
+                f"Recommended {sum(rec)} new high-ROI helper(s). "
+                "↻ existing-test regenerations are opt-in — check them by hand.")
+
+        def _select_all() -> None:
+            for v in ctx.check_vars:
+                v.set(True)
+            ctx.status_var.set(f"Selected all {len(ctx.check_vars)}.")
+
+        def _select_none() -> None:
+            for v in ctx.check_vars:
+                v.set(False)
+            ctx.status_var.set("Selection cleared.")
+
+        qs_row = tk.Frame(parent, bg=C["surface0"])
+        qs_row.pack(fill=tk.X, padx=8, pady=(2, 0))
+        tk.Label(qs_row, text="Select:", bg=C["surface0"], fg=C["subtext"],
+                 font=("Segoe UI", 8)).pack(side=tk.LEFT, padx=(2, 4))
+        ttk.Button(qs_row, text="✓ Recommend",
+                   command=_select_recommended).pack(side=tk.LEFT, padx=(0, 4))
+        ttk.Button(qs_row, text="All",
+                   command=_select_all).pack(side=tk.LEFT, padx=(0, 4))
+        ttk.Button(qs_row, text="None",
+                   command=_select_none).pack(side=tk.LEFT, padx=(0, 4))
+
+        # Action buttons
+        act_row = tk.Frame(parent, bg=C["surface0"])
+        act_row.pack(fill=tk.X, padx=8, pady=(4, 6))
+
+        tk.Label(act_row, textvariable=ctx.status_var,
+                 bg=C["surface0"], fg=C["subtext"],
+                 font=("Segoe UI", 8)).pack(side=tk.LEFT)
+
+        ctx.cancel_event = threading.Event()
+
+        ctx.stub_btn = ttk.Button(
+            act_row, text="📝 Generate stubs",
+            command=lambda: self._gap_generate_stubs(
+                ctx.panel_suggestions, ctx.check_vars, ctx.path,
+                ctx.status_var, ctx.stub_btn, ctx.ai_btn,
+                ctx.cancel_event, ctx.dlg,
+                on_tests_written=ctx.on_tests_written),
+        )
+        ctx.stub_btn.pack(side=tk.RIGHT, padx=(4, 0))
+
+        ctx.fail_btn = ttk.Button(
+            act_row, text="View failures…", state=tk.DISABLED,
+            command=lambda: self._show_ai_failures(ctx.dlg),
+        )
+        ctx.fail_btn.pack(side=tk.RIGHT, padx=(4, 0))
+
+        ctx.ai_btn = ttk.Button(
+            act_row, text="✨ AI generate selected",
+            command=lambda: self._gap_generate_ai(
+                ctx.panel_suggestions, ctx.check_vars, ctx.status_vars,
+                ctx.path, ctx.status_var, ctx.stub_btn, ctx.ai_btn,
+                ctx.fail_btn, ctx.ai_enabled_var, ctx.cancel_event,
+                ctx.dlg, ctx.backend_var,
+                on_tests_written=ctx.on_tests_written),
+        )
+        ctx.ai_btn.pack(side=tk.RIGHT, padx=(4, 0))
+
+        ctx.cancel_btn = ttk.Button(
+            act_row, text="Cancel",
+            command=ctx.cancel_event.set,
+        )
+        ctx.cancel_btn.pack(side=tk.RIGHT, padx=(4, 0))
+
+        ctx.copy_cc_btn = ttk.Button(
+            act_row, text="📋 Copy Claude Code prompt",
+            command=lambda: self._gap_copy_claude_prompt(
+                ctx.panel_suggestions, ctx.check_vars, ctx.path,
+                ctx.status_var, ctx.dlg),
+        )
+        ctx.copy_cc_btn.pack(side=tk.LEFT, padx=(0, 4))
+
+        # Re-scan: clears panel, resets ctx, rebuilds via _gap_fill_panel.
+        def _do_rescan() -> None:
+            for _b in (ctx.stub_btn, ctx.ai_btn, ctx.fail_btn,
+                       ctx.cancel_btn, ctx.copy_cc_btn, ctx.rescan_btn):
+                if _b is not None:
+                    _b.configure(state=tk.DISABLED)
+            ctx.status_var.set("Re-scanning gaps…")
+
+            def _work() -> None:
+                from helpers.test_gap_report import suggest_tests_for_diff
+                try:
+                    fresh = suggest_tests_for_diff(
+                        ctx.path, self._cfg.git_exe, ctx.base)
+                except Exception:
+                    fresh = []
+
+                def _rebuild() -> None:
+                    if not ctx.panel.winfo_exists():
+                        return
+                    for w in ctx.panel.winfo_children():
+                        w.destroy()
+                    ctx.reset_for_rebuild()
+                    if fresh:
+                        self._gap_fill_panel(ctx.panel, ctx, fresh)
+                    else:
+                        tk.Label(
+                            ctx.panel,
+                            text="✓ No remaining coverage gaps on this branch.",
+                            bg=C["surface0"], fg=C["green"],
+                            font=("Segoe UI", 9),
+                        ).pack(padx=10, pady=10)
+
+                if ctx.dlg.winfo_exists():
+                    ctx.dlg.after(0, _rebuild)
+
+            threading.Thread(target=_work, daemon=True).start()
+
+        ctx.rescan_btn = ttk.Button(
+            act_row, text="↻ Re-scan gaps", command=_do_rescan)
+        ctx.rescan_btn.pack(side=tk.LEFT, padx=(4, 0))
+
+        # Apply AI-unavailable state now that ai_btn exists.
+        if not getattr(ctx, "_ai_available", True):
+            ctx.ai_btn.configure(state=tk.DISABLED)
+            _Tooltip(ctx.ai_btn,
+                     "Configure Claude Code CLI or an LLM provider in Settings "
+                     "to enable AI test generation.")
 
     def _gap_copy_claude_prompt(self, suggestions: list, check_vars: list,
                                 path: str, status_var: tk.StringVar, dlg) -> None:
