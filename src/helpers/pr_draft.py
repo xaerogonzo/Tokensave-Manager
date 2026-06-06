@@ -177,6 +177,62 @@ def _branch_commit_log(repo_path: str, base: str, git_exe: str = "git",
     return "\n".join(lines)
 
 
+def _safe_grounding(fn, *args, **kwargs) -> str:
+    """Call *fn* with *args*/*kwargs*; return ``""`` on any exception.
+
+    Used by :func:`_build_grounding_section` to flatten the nested
+    ``try/except`` pattern that inflated the CC of
+    :func:`_build_pr_prompt_and_call`.
+    """
+    try:
+        return fn(*args, **kwargs) or ""
+    except Exception:
+        return ""
+
+
+def _build_grounding_section(cfg, diff_data: str, project_path: str,
+                             on_status) -> str:
+    """Build the grounding markdown section (tokensave + codegraph).
+
+    Calls ``on_status("grounding")`` before starting, then assembles the
+    tokensave roadmap-evidence block and the codegraph affected-symbol block.
+    Returns the formatted section header + body, or ``""`` if grounding is
+    disabled, unavailable, or fails.  Fail-open: all sub-failures are caught
+    by :func:`_safe_grounding` so the caller always receives a string.
+    """
+    if not cfg.enable_pr_grounding:
+        return ""
+    if on_status is not None:
+        try:
+            on_status("grounding")
+        except Exception:
+            pass
+    try:
+        from helpers.doc_grounding import (
+            build_grounding_block,
+            build_codegraph_block,
+            build_combined_grounding,
+        )
+        changed_files = _files_from_diff(diff_data)
+        ts_block = _safe_grounding(
+            build_grounding_block, project_path, "roadmap_evidence",
+            tokensave_exe=cfg.tokensave_exe)
+        if cfg.codegraph_exe:
+            _safe_grounding(
+                __import__("helpers.codegraph_freshness",
+                            fromlist=["ensure_fresh"]).ensure_fresh,
+                project_path, cfg.codegraph_exe)
+        cg_block = _safe_grounding(
+            build_codegraph_block, project_path, "roadmap_evidence",
+            changed_files=changed_files,
+            codegraph_exe=cfg.codegraph_exe or "")
+        combined = build_combined_grounding(ts_block, cg_block)
+        return (f"## Affected tests & symbols (auto-attached)\n\n{combined}\n\n"
+                if combined.strip() else "")
+    except Exception:
+        return ""
+
+
 def _build_pr_prompt_and_call(
     cfg,
     diff_data: str,
@@ -190,7 +246,9 @@ def _build_pr_prompt_and_call(
     """Assemble grounding, build the LLM prompt, call the LLM, post-process.
 
     Separated from :func:`generate_pr_draft` so the orchestrator stays thin
-    and this phase can be tested or stubbed independently.
+    and this phase can be tested or stubbed independently.  The grounding block
+    assembly is delegated to :func:`_build_grounding_section` to keep this
+    function's CC below 10.
 
     Args:
         cfg:              ManagerConfig (read at call time).
@@ -220,45 +278,9 @@ def _build_pr_prompt_and_call(
     )
 
     # v4.2 / v4.6: tokensave + codegraph grounding, gated per-feature.
-    grounding = ""
-    if cfg.enable_pr_grounding:
-        _status("grounding")
-        try:
-            from helpers.doc_grounding import (
-                build_grounding_block,
-                build_codegraph_block,
-                build_combined_grounding,
-            )
-            changed_files = _files_from_diff(diff_data)
-            try:
-                ts_block = build_grounding_block(
-                    project_path, "roadmap_evidence",
-                    tokensave_exe=cfg.tokensave_exe,
-                )
-            except Exception:
-                ts_block = ""
-            try:
-                if cfg.codegraph_exe:
-                    try:
-                        from helpers.codegraph_freshness import ensure_fresh
-                        ensure_fresh(project_path, cfg.codegraph_exe)
-                    except Exception:
-                        pass
-                cg_block = build_codegraph_block(
-                    project_path, "roadmap_evidence",
-                    changed_files=changed_files,
-                    codegraph_exe=cfg.codegraph_exe or "",
-                )
-            except Exception:
-                cg_block = ""
-            grounding = build_combined_grounding(ts_block, cg_block)
-        except Exception:
-            grounding = ""
-
-    grounding_section = (
-        f"## Affected tests & symbols (auto-attached)\n\n{grounding}\n\n"
-        if grounding else ""
-    )
+    # Grounding also fires on_status("grounding") internally.
+    grounding_section = _build_grounding_section(cfg, diff_data, project_path,
+                                                 on_status)
 
     # v4.13: pre-fill the Testing checklist's "Automated" subsection.
     automated_block = _render_automated_for_pr(project_path)

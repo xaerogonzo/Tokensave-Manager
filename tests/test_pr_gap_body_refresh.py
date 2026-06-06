@@ -1,9 +1,10 @@
 """tests/test_pr_gap_body_refresh.py — Draft PR body coverage-gap checkbox refresh.
 
-Covers the Tk glue `GitTabController._apply_gap_progress_to_body`: after the embedded
-panel writes a passing test, the body's `### Coverage gaps` line flips `- [ ]` → `- [x]`
-WITHOUT tripping the dirty flag (the edit is guarded by ctx["prog"]). The method does
-not reference `self`, so we call it unbound with a throwaway instance.
+Covers the Tk glue `TestGapCtrl._apply_gap_progress_to_body` (Phase C2 moved it
+from GitTabController): after the embedded panel writes a passing test, the body's
+`### Coverage gaps` line flips `- [ ]` → `- [x]` WITHOUT tripping the dirty flag
+(the edit is guarded by ctx["prog"]). The method does not reference `self`, so we
+call it unbound with a throwaway instance.
 
 Tk-marked: needs a real Text widget. Uses the session-scoped `tk_root` fixture.
 """
@@ -13,7 +14,7 @@ tk = pytest.importorskip("tkinter")
 
 pytestmark = pytest.mark.tk
 
-from controllers.git_tab import GitTabController
+from controllers.test_gap_ctrl import TestGapCtrl  # Phase C2 home of gap methods
 from helpers.pr_draft import _render_coverage_gaps
 
 
@@ -43,7 +44,7 @@ def test_body_gap_flips_to_x_without_dirty(tk_root):
     txt = _text_with_body(tk_root, body)
     ctx = {"txt": txt, "prog": [False]}
 
-    GitTabController._apply_gap_progress_to_body(object(), ctx, ["src/helpers/foo.py"])
+    TestGapCtrl._apply_gap_progress_to_body(object(), ctx, ["src/helpers/foo.py"])
 
     out = txt.get("1.0", tk.END)
     assert "- [x] `src/helpers/foo.py`" in out      # closed gap flipped
@@ -58,7 +59,7 @@ def test_body_refresh_noop_when_no_match(tk_root):
     txt = _text_with_body(tk_root, body)
     ctx = {"txt": txt, "prog": [False]}
 
-    GitTabController._apply_gap_progress_to_body(object(), ctx, ["src/helpers/other.py"])
+    TestGapCtrl._apply_gap_progress_to_body(object(), ctx, ["src/helpers/other.py"])
 
     assert "- [x]" not in txt.get("1.0", tk.END)
     txt.destroy()
@@ -66,7 +67,7 @@ def test_body_refresh_noop_when_no_match(tk_root):
 
 def test_body_refresh_survives_missing_widget():
     # A destroyed/closed dialog (txt is None) must be a silent no-op, not a crash.
-    GitTabController._apply_gap_progress_to_body(object(), {"txt": None, "prog": [False]},
+    TestGapCtrl._apply_gap_progress_to_body(object(), {"txt": None, "prog": [False]},
                                                  ["src/helpers/foo.py"])
 
 
@@ -82,7 +83,7 @@ def test_gap_copy_claude_prompt_populates_clipboard(tk_root):
     status = tk.StringVar(master=tk_root)
     tk_root.clipboard_clear()
 
-    GitTabController._gap_copy_claude_prompt(
+    TestGapCtrl._gap_copy_claude_prompt(
         object(), [sg], [var], "/p", status, tk_root)
 
     clip = tk_root.clipboard_get()
@@ -97,7 +98,7 @@ def test_gap_copy_claude_prompt_nothing_selected(tk_root):
     sg.template = "pure_helper"
     var = tk.BooleanVar(master=tk_root, value=False)   # unchecked
     status = tk.StringVar(master=tk_root)
-    GitTabController._gap_copy_claude_prompt(
+    TestGapCtrl._gap_copy_claude_prompt(
         object(), [sg], [var], "/p", status, tk_root)
     assert "Nothing selected" in status.get()
 
@@ -116,7 +117,7 @@ def _failures_window_text(tk_root, obj):
     """Open _show_ai_failures and return the ScrolledText's content (the Text is
     nested inside ScrolledText's internal Frame, so search descendants)."""
     before = set(tk_root.winfo_children())
-    GitTabController._show_ai_failures(obj, tk_root)
+    TestGapCtrl._show_ai_failures(obj, tk_root)
     wins = [w for w in tk_root.winfo_children()
             if w not in before and isinstance(w, tk.Toplevel)]
     assert wins, "no results window created"
