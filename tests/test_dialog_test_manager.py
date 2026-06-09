@@ -179,3 +179,94 @@ def test_sync_pr_checklist_delegates_to_helper(
                  return_value=cache)
     dialog._on_sync_pr_checklist()
     mock_sync.assert_called_once()
+
+
+def test_sync_pr_checklist_prefers_summary_over_sum(
+    tk_root, mock_config, tmp_path, mocker
+):
+    """Run All stamps every row with the suite totals; summing those rows
+    multiplies the real count by the file count (the 5648/5648 bug). The
+    summary block, when present, must win."""
+    cache = {
+        "ran_at": "2026-05-27",
+        "summary": {"passed": 353, "total": 353, "ran_at": "2026-05-27"},
+        "results": {
+            f"tests/test_{name}.py": {"passed": 353, "total": 353,
+                                       "status": "pass"}
+            for name in ("foo", "bar", "baz")
+        },
+    }
+    mock_sync = mocker.patch(
+        "helpers.pr_checklist.sync_pr_checklist",
+        return_value=(True, "synced"),
+    )
+    mocker.patch("dialogs.test_manager.messagebox.showinfo")
+    dialog = _build_dialog(tk_root, mock_config, tmp_path, mocker)
+    mocker.patch("dialogs.test_manager.load_last_run_results",
+                 return_value=cache)
+    dialog._on_sync_pr_checklist()
+    _args, _kwargs = mock_sync.call_args
+    payload = _args[2]
+    assert payload["passed"] == 353      # not 3 × 353 = 1059
+    assert payload["total"] == 353
+
+
+def test_sync_pr_checklist_legacy_cache_sums_per_file_rows(
+    tk_root, mock_config, tmp_path, mocker
+):
+    """Caches without a summary block (single-file runs / pre-fix caches)
+    still aggregate by summing the per-file rows."""
+    cache = {
+        "ran_at": "2026-05-27",
+        "results": {
+            "tests/test_foo.py": {"passed": 5, "total": 5, "status": "pass"},
+            "tests/test_bar.py": {"passed": 2, "total": 3, "status": "fail"},
+        },
+    }
+    mock_sync = mocker.patch(
+        "helpers.pr_checklist.sync_pr_checklist",
+        return_value=(True, "synced"),
+    )
+    mocker.patch("dialogs.test_manager.messagebox.showinfo")
+    dialog = _build_dialog(tk_root, mock_config, tmp_path, mocker)
+    mocker.patch("dialogs.test_manager.load_last_run_results",
+                 return_value=cache)
+    dialog._on_sync_pr_checklist()
+    _args, _kwargs = mock_sync.call_args
+    payload = _args[2]
+    assert payload["passed"] == 7
+    assert payload["total"] == 8
+
+
+# ── Tab 1 — last-run cache summary block ─────────────────────────────────
+
+def test_run_all_done_writes_suite_summary(
+    tk_root, mock_config, tmp_path, mocker
+):
+    """A whole-suite run records its true totals in cache['summary']."""
+    dialog = _build_dialog(tk_root, mock_config, tmp_path, mocker)
+    mocker.patch("dialogs.test_manager.load_last_run_results",
+                 return_value={})
+    mock_save = mocker.patch("dialogs.test_manager.save_last_run_results")
+    dialog._on_pytest_done("tests/", 353, 353, "", False, [])
+    saved = mock_save.call_args[0][1]
+    assert saved["summary"]["passed"] == 353
+    assert saved["summary"]["total"] == 353
+
+
+def test_single_file_done_drops_stale_summary(
+    tk_root, mock_config, tmp_path, mocker
+):
+    """A single-file run after a Run All invalidates the suite snapshot —
+    the per-file rows have changed, so the old summary no longer holds."""
+    stale = {
+        "summary": {"passed": 353, "total": 353, "ran_at": "2026-05-27"},
+        "results": {},
+    }
+    dialog = _build_dialog(tk_root, mock_config, tmp_path, mocker)
+    mocker.patch("dialogs.test_manager.load_last_run_results",
+                 return_value=stale)
+    mock_save = mocker.patch("dialogs.test_manager.save_last_run_results")
+    dialog._on_pytest_done("tests/test_foo.py", 5, 5, "", False, [])
+    saved = mock_save.call_args[0][1]
+    assert "summary" not in saved

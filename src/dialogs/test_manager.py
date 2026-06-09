@@ -399,6 +399,17 @@ class TestManagerDialog(tk.Toplevel):
                     "status": status_str, "passed": passed,
                     "total": total, "ran_at": ran_at,
                 }
+        # A whole-suite run is the only case where (passed, total) is the
+        # true suite count — store it so Sync PR Checklist doesn't have to
+        # sum the per-file rows (which Run All stamps with the SAME suite
+        # totals, inflating the sum N-fold). A later single-file run makes
+        # the snapshot stale, so drop it.
+        if "tests/" in affected:
+            cache["summary"] = {
+                "passed": passed, "total": total, "ran_at": ran_at,
+            }
+        else:
+            cache.pop("summary", None)
         cache["ran_at"] = ran_at
         save_last_run_results(self._project_root, cache)
         self._refresh_tab_run_view()
@@ -413,7 +424,8 @@ class TestManagerDialog(tk.Toplevel):
 
         gh_exe = (self._cfg.raw or {}).get("gh_exe") or "gh"
         cache  = load_last_run_results(self._project_root)
-        if not isinstance(cache, dict) or "results" not in cache:
+        if (not isinstance(cache, dict)
+                or not (cache.get("results") or cache.get("summary"))):
             messagebox.showinfo(
                 "No test results",
                 "Run the tests at least once before syncing the PR "
@@ -423,13 +435,25 @@ class TestManagerDialog(tk.Toplevel):
             )
             return
 
-        # Aggregate to (passed, total) for the checklist renderer.
-        results = cache["results"]
-        passed = sum(int(r.get("passed", 0)) for r in results.values()
-                       if isinstance(r, dict))
-        total  = sum(int(r.get("total", 0))  for r in results.values()
-                       if isinstance(r, dict))
-        ran_at = cache.get("ran_at", datetime.now().strftime("%Y-%m-%d %H:%M"))
+        # Prefer the whole-suite snapshot when present (written by Run All).
+        # Summing per-file rows after a Run All multiplies the suite total
+        # by the file count, since every row carries the same suite-wide
+        # numbers.
+        summary = cache.get("summary")
+        if isinstance(summary, dict):
+            passed = int(summary.get("passed", 0))
+            total  = int(summary.get("total", 0))
+            ran_at = summary.get("ran_at") or cache.get(
+                "ran_at", datetime.now().strftime("%Y-%m-%d %H:%M"))
+        else:
+            # Legacy / single-file runs: aggregate the per-file rows.
+            results = cache.get("results", {})
+            passed = sum(int(r.get("passed", 0)) for r in results.values()
+                           if isinstance(r, dict))
+            total  = sum(int(r.get("total", 0))  for r in results.values()
+                           if isinstance(r, dict))
+            ran_at = cache.get(
+                "ran_at", datetime.now().strftime("%Y-%m-%d %H:%M"))
 
         ok, msg = sync_pr_checklist(
             gh_exe, self._project_root,
