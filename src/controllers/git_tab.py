@@ -254,13 +254,62 @@ class GitTabController:
     def _build_git_tab(self):
         """Build the Git tab — shows live git state for the selected project."""
         self._build_git_header()
+        self._build_commit_request_banner()
         mid = tk.Frame(self._tab, bg=C["base"], padx=14, pady=10)
+        self._git_mid = mid
         mid.pack(fill=tk.X)
         mid.columnconfigure(0, weight=1, minsize=200)
         mid.columnconfigure(1, weight=1, minsize=200)
         self._build_git_status_pane(mid)
         self._build_git_action_bar()
         self._build_git_diff_pane()
+
+    def _build_commit_request_banner(self) -> None:
+        """Non-modal banner shown when an external tool (Claude Code chat)
+        has written a commit request for the selected project. Hidden by
+        default; _update_commit_request_banner packs it on demand."""
+        bar = tk.Frame(self._tab, bg=C["surface0"], padx=14, pady=6)
+        self._commit_req_banner = bar
+        self._commit_req_lbl = tk.Label(
+            bar, text="", bg=C["surface0"], fg=C["blue"],
+            font=("Segoe UI", 9), wraplength=560,
+            justify=tk.LEFT, anchor=tk.W)
+        self._commit_req_lbl.pack(side=tk.LEFT, fill=tk.X, expand=True)
+        ttk.Button(bar, text="📝 Review && Commit…",
+                   command=self._on_commit_request_review
+                   ).pack(side=tk.LEFT, padx=(8, 6))
+        ttk.Button(bar, text="✕ Dismiss",
+                   command=self._on_commit_request_dismiss
+                   ).pack(side=tk.LEFT)
+        # NOT packed — _update_commit_request_banner shows/hides it.
+
+    def _update_commit_request_banner(self, path: str, is_repo: bool) -> None:
+        """Show the banner when a pending commit request exists for *path*."""
+        from helpers.commit_request import load_commit_request
+        req = load_commit_request(path) if (path and is_repo) else None
+        if not req:
+            self._commit_req_banner.pack_forget()
+            return
+        detail = req["note"] or req["suggested_scope"] or ""
+        files_part = f"{len(req['files'])} file(s)"
+        text = f"🤝  Commit request from Claude Code — {files_part}"
+        if detail:
+            text += f":  {detail}"
+        self._commit_req_lbl.configure(text=text)
+        self._commit_req_banner.pack(fill=tk.X, before=self._git_mid)
+
+    def _on_commit_request_review(self) -> None:
+        """Open the normal commit dialog — it pre-seeds itself from the
+        pending request and consumes it on commit."""
+        if self._git_path:
+            self._on_commit(self._git_path)
+
+    def _on_commit_request_dismiss(self) -> None:
+        """Discard the pending request without committing."""
+        from helpers.commit_request import clear_commit_request
+        if self._git_path:
+            clear_commit_request(self._git_path)
+        self._commit_req_banner.pack_forget()
 
     def _build_git_header(self) -> None:
         hdr = tk.Frame(self._tab, bg=C["mantle"], padx=14, pady=8)
@@ -632,6 +681,8 @@ class GitTabController:
             release_ok = bool(is_repo and remote and shutil.which("gh"))
             for btn in self._git_release_btns:
                 btn.configure(state=tk.NORMAL if release_ok else tk.DISABLED)
+
+        self._update_commit_request_banner(path, is_repo)
 
         self._git_status_lb.configure(state=tk.NORMAL)
         self._git_status_lb.delete(0, tk.END)

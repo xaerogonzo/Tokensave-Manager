@@ -65,3 +65,47 @@ def test_suggest_with_llm_enabled_no_warning(tk_root, mock_config, mocker):
 
     dialog._fill_suggestion()
     mock_info.assert_not_called()
+
+
+# ── Commit-request handoff seeding ───────────────────────────────────────
+
+def _build_with_request(tk_root, mock_config, mocker, tmp_path, files):
+    from helpers.commit_request import write_commit_request
+    write_commit_request(str(tmp_path), files, note="from chat")
+    return GitCommitDialog(
+        tk_root, str(tmp_path), _STATUS, True,
+        callback=mocker.MagicMock(), cfg=mock_config,
+    )
+
+
+def test_request_prechecks_only_requested_files(
+    tk_root, mock_config, mocker, tmp_path
+):
+    dialog = _build_with_request(tk_root, mock_config, mocker, tmp_path,
+                                 ["src/app.py"])
+    checks = {fname: var.get() for var, fname, _xy in dialog._file_vars}
+    assert checks["src/app.py"] is True
+    assert checks["notes.txt"] is False
+
+
+def test_stale_request_is_ignored(tk_root, mock_config, mocker, tmp_path):
+    """A request naming files absent from the status leaves defaults alone."""
+    dialog = _build_with_request(tk_root, mock_config, mocker, tmp_path,
+                                 ["gone/away.py"])
+    assert dialog._commit_request is None
+    assert all(var.get() for var, _f, _xy in dialog._file_vars)
+
+
+def test_commit_consumes_request(tk_root, mock_config, mocker, tmp_path):
+    from helpers.commit_request import load_commit_request
+    dialog = _build_with_request(tk_root, mock_config, mocker, tmp_path,
+                                 ["src/app.py"])
+    dialog._msg_txt.insert("1.0", "fix(app): lazy-load pystray")
+    dialog._apply()
+    assert load_commit_request(str(tmp_path)) is None
+
+
+def test_no_request_means_no_seeding(tk_root, mock_config, mocker):
+    dialog = _build_dialog(tk_root, mock_config, mocker)
+    assert dialog._commit_request is None
+    assert all(var.get() for var, _f, _xy in dialog._file_vars)
