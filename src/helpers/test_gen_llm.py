@@ -978,16 +978,102 @@ def _emit_from(module: str, names: "list[str]", nl: str) -> str:
     return f"from {module} import " + ", ".join(names)
 
 
-def _autofix_imports(code: str, source_path: str, project_root: str) -> str:
-    """Inject imports for names pyflakes flags as undefined.
+@dataclass(frozen=True)
+class _ImportBuckets:
+    """Classified undefined names, ready for _render_import_blocks."""
+    local:    "list[str]"               # symbols of the module under test
+    extra:    "list[str]"               # module-reference fallback lines
+    typing_n: "list[str]"
+    mock_n:   "list[str]"
+    plain:    "list[str]"
+    froms:    "dict[str, list[str]]"
+
+
+def _classify_undefined(undefined: "list[str]", local_syms: "set[str]",
+                        dotted: str, top: str, stem: str,
+                        parent: str) -> _ImportBuckets:
+    """Sort undefined names into import buckets.
 
     Local-first (the source file's own symbols win over the stdlib map, so a
     source that defines its own ``Path``/``Any`` isn't hijacked), then a
-    module-reference fallback for dotted access, then the generic known-imports
-    map. Uses the AST purely as a read-only indexer to find the line AFTER the
-    docstring/__future__ block, then does a string splice (never ``ast.unparse``,
-    which would strip the model's formatting). Returns the original code on any
-    parse trouble — never hands back worse code.
+    module-reference fallback for dotted access, then the generic
+    known-imports map. Names matching nothing are left for the pytest run →
+    runtime-repair loop. ``extra`` is deduped once at the end
+    (order-preserving) instead of per-append.
+    """
+    local: "list[str]" = []
+    extra: "list[str]" = []
+    typing_n: "list[str]" = []
+    mock_n: "list[str]" = []
+    plain: "list[str]" = []
+    froms: "dict[str, list[str]]" = {}
+    for name in undefined:
+        if name in local_syms:                          # 1. local-first
+            local.append(name)
+        elif name == top:                               # 2. module-ref fallback
+            extra.append(f"import {dotted}")
+        elif name == stem and parent:
+            extra.append(f"from {parent} import {stem}")
+        elif name == stem:                              # top-level module, no parent
+            extra.append(f"import {stem}")
+        elif name in _TYPING_NAMES:                     # 3. known-imports map
+            typing_n.append(name)
+        elif name in _MOCK_NAMES:
+            mock_n.append(name)
+        elif name in _PLAIN_MODULES:
+            plain.append(f"import {name}")
+        elif name in _FROM_IMPORTS:
+            mod, sym = _FROM_IMPORTS[name]
+            froms.setdefault(mod, []).append(sym)
+    return _ImportBuckets(local, list(dict.fromkeys(extra)),
+                          typing_n, mock_n, plain, froms)
+
+
+def _render_import_blocks(b: _ImportBuckets, dotted: str,
+                          nl: str) -> "list[str]":
+    """Pure formatting: bucket contents → ordered import statement strings."""
+    blocks: "list[str]" = []
+    if b.local:
+        blocks.append(_emit_from(dotted, b.local, nl))
+    blocks.extend(b.extra)
+    if b.typing_n:
+        blocks.append(_emit_from("typing", b.typing_n, nl))
+    if b.mock_n:
+        blocks.append(_emit_from("unittest.mock", b.mock_n, nl))
+    blocks.extend(sorted(set(b.plain)))
+    for mod in sorted(b.froms):
+        blocks.append(_emit_from(mod, b.froms[mod], nl))
+    return blocks
+
+
+def _insert_index(tree: ast.Module) -> int:
+    """Line index AFTER the module docstring and any leading __future__ import.
+
+    Read-only AST indexing. end_lineno is 1-based; splitlines() is 0-based,
+    so the list insert index equals the 1-based line number (old line N+1 is
+    index N).
+    """
+    idx = 0
+    if tree.body:
+        first = tree.body[0]
+        if (isinstance(first, ast.Expr)
+                and isinstance(getattr(first, "value", None), ast.Constant)
+                and isinstance(first.value.value, str)):
+            idx = first.end_lineno or 0
+        for node in tree.body:
+            if isinstance(node, ast.ImportFrom) and node.module == "__future__":
+                idx = max(idx, node.end_lineno or 0)
+    return idx
+
+
+def _autofix_imports(code: str, source_path: str, project_root: str) -> str:
+    """Inject imports for names pyflakes flags as undefined.
+
+    Thin orchestrator: classify (_classify_undefined) → render
+    (_render_import_blocks) → splice at _insert_index. The splice is a
+    string operation (never ``ast.unparse``, which would strip the model's
+    formatting). Returns the original code on any parse trouble — never
+    hands back worse code.
     """
     undefined = _undefined_names(code)
     if not undefined:
@@ -1008,68 +1094,14 @@ def _autofix_imports(code: str, source_path: str, project_root: str) -> str:
     parent = dotted.rsplit(".", 1)[0] if "." in dotted else ""
     local_syms = _module_symbols(source_path)
 
-    local: "list[str]" = []          # symbols of the module under test
-    extra: "list[str]" = []          # module-reference fallback lines
-    typing_n: "list[str]" = []
-    mock_n: "list[str]" = []
-    plain: "list[str]" = []
-    froms: "dict[str, list[str]]" = {}
-
-    for name in undefined:
-        if name in local_syms:                          # 1. local-first
-            local.append(name)
-        elif name == top:                               # 2. module-ref fallback
-            line = f"import {dotted}"
-            if line not in extra:
-                extra.append(line)
-        elif name == stem and parent:
-            line = f"from {parent} import {stem}"
-            if line not in extra:
-                extra.append(line)
-        elif name == stem:                              # top-level module, no parent
-            line = f"import {stem}"
-            if line not in extra:
-                extra.append(line)
-        elif name in _TYPING_NAMES:                     # 3. known-imports map
-            typing_n.append(name)
-        elif name in _MOCK_NAMES:
-            mock_n.append(name)
-        elif name in _PLAIN_MODULES:
-            plain.append(f"import {name}")
-        elif name in _FROM_IMPORTS:
-            mod, sym = _FROM_IMPORTS[name]
-            froms.setdefault(mod, []).append(sym)
-        # else: leave for the pytest run → runtime-repair loop
-
+    buckets = _classify_undefined(undefined, local_syms,
+                                  dotted, top, stem, parent)
     nl = "\r\n" if "\r\n" in code else "\n"
-    blocks: "list[str]" = []
-    if local:
-        blocks.append(_emit_from(dotted, local, nl))
-    blocks.extend(extra)
-    if typing_n:
-        blocks.append(_emit_from("typing", typing_n, nl))
-    if mock_n:
-        blocks.append(_emit_from("unittest.mock", mock_n, nl))
-    blocks.extend(sorted(set(plain)))
-    for mod in sorted(froms):
-        blocks.append(_emit_from(mod, froms[mod], nl))
+    blocks = _render_import_blocks(buckets, dotted, nl)
     if not blocks:
         return code
 
-    # Read-only AST indexing: insert AFTER the module docstring and any leading
-    # __future__ import. end_lineno is 1-based; splitlines() is 0-based, so the
-    # list insert index equals the 1-based line number (old line N+1 is index N).
-    idx = 0
-    if tree.body:
-        first = tree.body[0]
-        if (isinstance(first, ast.Expr)
-                and isinstance(getattr(first, "value", None), ast.Constant)
-                and isinstance(first.value.value, str)):
-            idx = first.end_lineno or 0
-        for node in tree.body:
-            if isinstance(node, ast.ImportFrom) and node.module == "__future__":
-                idx = max(idx, node.end_lineno or 0)
-
+    idx = _insert_index(tree)
     block_text = nl.join(blocks) + nl
     lines = code.splitlines(keepends=True)
     candidate = "".join(lines[:idx]) + block_text + "".join(lines[idx:])
