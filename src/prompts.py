@@ -30,7 +30,7 @@ PROMPT_SNIPPETS: list[tuple[str, str]] = [
         "🧭  Codebase overview",
         "Give me a structural overview of this project. Run "
         "tokensave_context with 'overall architecture', then "
-        "tokensave_files for the directory layout, then tokensave_outline "
+        "tokensave_files for the directory layout, then tokensave_entities "
         "on the entry-point file. Produce: a 2-sentence elevator pitch, a "
         "list of the top-level modules with one-line purpose each, and a "
         "guided 5-step tour with file:line jumps that a new contributor "
@@ -49,6 +49,14 @@ PROMPT_SNIPPETS: list[tuple[str, str]] = [
         "symbol: list its signature (tokensave_signature) and one example "
         "call site (tokensave_callers, take the first result). Output a "
         "compact reference table — name | signature | example file:line."
+    ),
+    (
+        "🧭  Entity outline",
+        "Run tokensave_entities on [[file path]] for its structural "
+        "outline — every class, function, and method in declaration "
+        "order with file:line. Use it as the entry point for a guided "
+        "file tour: give a one-line purpose per top-level entity, then "
+        "flag the 2-3 worth reading first for a newcomer."
     ),
 
     # ─────────────────────────── 🔬 ANALYSIS / TRACING ────────────────────
@@ -82,6 +90,26 @@ PROMPT_SNIPPETS: list[tuple[str, str]] = [
         "it → tokensave_diff_context to see recent changes to it → "
         "git_diff if the change is uncommitted. Identify what changed, "
         "what broke, and propose a minimal fix with file:line."
+    ),
+    (
+        "🔬  Symbol git history",
+        "Trace how [[symbol name]] evolved over time. Step 1: "
+        "tokensave_blame for per-line authorship of the current body. "
+        "Step 2: tokensave_log for its commit history — it follows the "
+        "symbol across file renames via structural fingerprints, not just "
+        "a path match. Output a timeline (short sha + date | what changed "
+        "| file:line) and flag the commit that introduced the behaviour "
+        "you're investigating."
+    ),
+    (
+        "🔬  Annotation / decorator survey",
+        "Map decorator/annotation usage with tokensave_annotations. Call "
+        "it with no name for a histogram of the most-used annotations "
+        "across the project, then in site mode on [[annotation name]] to "
+        "list every (annotation, target) pair. Output a top-10 usage "
+        "table, then for [[annotation name]] every symbol it decorates "
+        "with file:line — handy for auditing @property, @pytest.mark.tk, "
+        "route handlers, etc."
     ),
 
     # ─────────────────────────── 📊 AUDITS ────────────────────────────────
@@ -137,6 +165,27 @@ PROMPT_SNIPPETS: list[tuple[str, str]] = [
         "  • tokensave_circular         (architectural debt)\n"
         "Output a Release Readiness Checklist with ✅/⚠/❌ per item. "
         "End with: 'Safe to release: yes/no, blockers: [...]'."
+    ),
+    (
+        "📊  Dependency manifest audit",
+        "Run tokensave_dependencies to introspect this project's package "
+        "manifest(s) — it auto-detects the ecosystem (Cargo.toml, "
+        "package.json, pyproject.toml, go.mod, …) and returns a uniform "
+        "shape, one block per ecosystem in a polyglot repo. Output: each "
+        "direct dependency with its declared version, any version_drift "
+        "across workspace members, and a flag on every unpinned / "
+        "wildcard ('*') range to tighten before release. Pass "
+        "include_lockfile=true for resolved versions."
+    ),
+    (
+        "📊  Test coverage rollup",
+        "Run tokensave_test_coverage in file mode on [[file path]] for a "
+        "per-symbol tested/untested classification — transitive call "
+        "expansion means a helper covered only through another function "
+        "still counts. Then run symbol mode on the highest-risk untested "
+        "entry to confirm no test reaches it. Output a ranked 'needs a "
+        "test' list (symbol | file:line | why it matters), capped at the "
+        "top 10."
     ),
 
     # ─────────────────────────── 🪦 FINDINGS / CLEANUP ────────────────────
@@ -227,6 +276,16 @@ PROMPT_SNIPPETS: list[tuple[str, str]] = [
         "CHANGELOG.md tone as reference: bolded lead-in sentence, "
         "em-dash, then prose. Cite file:line for any structural changes."
     ),
+    (
+        "🛠  Review a change set",
+        "Summarise everything that changed between [[from ref]] and "
+        "[[to ref]] using tokensave_diff — one envelope that orchestrates "
+        "changelog, commit_context, and diff_context. Output added / "
+        "removed / modified symbols grouped by file, each with a one-line "
+        "risk note, then a short 'what a reviewer should focus on' "
+        "summary. For an uncommitted working tree instead of a ref range, "
+        "use tokensave_diff_context."
+    ),
 
     # ─────────────────────────── 🔗 v6 NEW TOOLS ─────────────────────────
     (
@@ -278,9 +337,15 @@ PROMPT_SNIPPETS: list[tuple[str, str]] = [
         "files (CHANGELOG.md, docs/upstream-issues/, src/prompts.py).\n\n"
         "You are auditing a tokensave upgrade for TokenSave Manager.\n\n"
         "STEP 1 — What changed in tokensave?\n"
-        "  Call tokensave_changelog. List every new tool, removed tool,\n"
-        "  and CLI/schema change. Extract tool names exactly (word\n"
-        "  boundaries — tokensave_auth_login ≠ tokensave_auth).\n\n"
+        "  NOTE: tokensave_changelog diffs THIS project's git refs — it\n"
+        "  does NOT enumerate tokensave's own tool roster. Instead, read\n"
+        "  tokensave's upstream release notes for every version after the\n"
+        "  one you had installed:\n"
+        "    gh release view vX.Y.Z --repo aovestdipaperino/tokensave\n"
+        "  (or fetch CHANGELOG.md from that repo). List every new tool,\n"
+        "  removed tool, renamed tool, and CLI/schema change. Extract tool\n"
+        "  names exactly (word boundaries — tokensave_auth_login ≠\n"
+        "  tokensave_auth, and tokensave_diff ≠ tokensave_diff_context).\n\n"
         "STEP 2 — Snippet coverage\n"
         "  Read src/prompts.py. For each NEW tool from Step 1, search the\n"
         "  snippet bodies for that exact tool name. List any that have no\n"

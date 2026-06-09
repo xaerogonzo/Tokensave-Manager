@@ -37,15 +37,19 @@ SENTINEL_HOME    = "/__pytest_sentinel_home__/DO_NOT_USE"
 SENTINEL_APPDATA = "/__pytest_sentinel_appdata__/DO_NOT_USE"
 
 
-# Modules we skip — either they import Tk at module level (which fails
-# on Linux CI without DISPLAY) or they're entry-point scripts that
-# legitimately do startup work at import.
+# Modules we skip — entry-point scripts that legitimately do startup work at
+# import, or package __init__ files that re-export submodules.
+#
+# `app` and `agent_tools` are NO LONGER skipped: they used to be carved out for
+# "may pull in optional deps" reasons, but tests/test_no_thirdparty_module_imports.py
+# now guarantees src/ has zero module-level third-party imports (pystray is lazy),
+# so both import cleanly here. A module that still can't import in this headless
+# env is caught by the `except Exception` below and silently skipped — never a
+# false failure.
 _SKIP_MODULES = {
-    "app",                          # GUI entry, builds the root window
     "tokensave-wrapper",            # standalone script
     "precommit_review",             # standalone script
     "prepush_runner",               # standalone script
-    "agent_tools",                  # may pull in optional deps
     "dialogs",                      # package __init__, often imports all dialogs
     "controllers",                  # ditto
     "helpers",                      # ditto

@@ -30,6 +30,7 @@ import os
 import threading
 import time
 import tkinter as tk
+import weakref
 from tkinter import ttk, messagebox
 from typing import TYPE_CHECKING
 
@@ -258,6 +259,170 @@ def _suppressed_modified(state: dict):
         state["suppress_modified"] = False
 
 
+class _BackendResolver:
+    """Resolves which LLM config / display labels to use for a Generate click.
+
+    Extracted from :class:`DocDrafterDialog` (Phase C4). Pure compute — no Tk
+    widgets — so it can be unit-tested in isolation. Reads the live config and
+    the per-session backend-override label via the ``get_override`` callable.
+    """
+
+    def __init__(self, cfg, get_override: "Callable[[], str]") -> None:
+        self._cfg = cfg
+        self._get_override = get_override
+
+    def llm_cfg_resolved(self) -> dict:
+        """Resolve which LLM config dict to use for the next Generate click.
+
+        Honours the per-session backend override.  When the override is active,
+        builds a synthetic config by WHITELISTING only the fields the target
+        provider's dispatcher reads — avoids leaking an Anthropic api_key_env
+        into a forced Ollama call, etc.
+        """
+        raw = self._cfg.raw if isinstance(self._cfg.raw, dict) else {}
+        base = raw.get("ask_tab_llm") or raw.get("commit_message_llm") or {}
+        override = self._get_override()
+        if override == _BACKEND_OLLAMA:
+            base_provider = (base.get("provider") or "").lower()
+            base_url_safe = base.get("base_url") if base_provider in (
+                "ollama", "openai_compatible") else None
+            return {
+                "enabled":  True,
+                "provider": "ollama",
+                "model":    base.get("model") or "qwen2.5-coder:14b",
+                "base_url": base_url_safe or "http://localhost:11434",
+            }
+        if override == _BACKEND_CLAUDE_CLI:
+            return {
+                "enabled":  True,
+                "provider": "claude_cli",
+                "model":    self._cfg.claude_cli_model or "",
+            }
+        return base
+
+    def summary(self) -> str:
+        """One-line header summary of the resolved backend."""
+        cfg = self.llm_cfg_resolved()
+        prov = cfg.get("provider", "(none configured)")
+        model = cfg.get("model") or "(default)"
+        override = self._get_override()
+        if override != _BACKEND_DEFAULT:
+            return f"⚡ OVERRIDE → {prov} / {model}"
+        which = "ask_tab_llm" if (self._cfg.raw or {}).get("ask_tab_llm") \
+                else "commit_message_llm"
+        return f"Backend: {which} → {prov} / {model}"
+
+    def label_for_status(self) -> str:
+        """Short human-readable backend name for the 'Drafting on X' tick.
+
+        Reads the resolved LLM config at call time so a backend-override change
+        during generation reflects in the visible label.
+        """
+        try:
+            cfg = self.llm_cfg_resolved() or {}
+        except (AttributeError, RuntimeError):
+            return "LLM"
+        provider = (cfg.get("provider") or "").lower()
+        if provider == "claude_cli":
+            return "Claude CLI"
+        if provider == "ollama":
+            return "Ollama"
+        if provider == "anthropic":
+            return "Anthropic"
+        if provider == "openai":
+            return "OpenAI"
+        if provider == "openai_compatible":
+            base = (cfg.get("base_url") or "").lower()
+            return "Ollama" if "localhost" in base else "OpenAI-compat"
+        return provider or "LLM"
+
+
+class _DraftTicker:
+    """Per-second status-bar tick during a long Generate run.
+
+    Extracted from :class:`DocDrafterDialog` (Phase C4). Holds a
+    ``weakref.proxy`` to the owning dialog so the bidirectional
+    dialog↔ticker reference doesn't delay Tk resource cleanup. Operates on
+    the dialog's shared ``_tab_state`` dict and uses the dialog's Tk
+    ``after`` / ``winfo_exists`` / ``_set_status``.
+    """
+
+    # G6 (v4.4): hard timeout beyond dispatch_llm's 300 s limit; +10 s grace
+    # absorbs thread-scheduling lag. On trigger, the captured stop_event is
+    # signalled so the worker can break its loop.
+    _HARD_TIMEOUT = 310   # seconds; dispatch_llm timeout is 300
+
+    def __init__(self, dialog, tab_state: dict,
+                 backend: "_BackendResolver") -> None:
+        self._dlg     = weakref.proxy(dialog)
+        self._state   = tab_state
+        self._backend = backend
+
+    def start(self, key, stop_event) -> None:
+        """Start the per-second draft tick. Called from _on_generate_impl."""
+        state = self._state.setdefault(key, {})
+        state["draft_start_ts"] = time.monotonic()
+        state["draft_tick_stop_event"] = stop_event
+        try:
+            state["draft_tick_after"] = self._dlg.after(
+                1000, lambda k=key: self._tick(k))
+        except tk.TclError:
+            pass
+
+    def stop(self, key) -> None:
+        """Cancel the tick. Called from _on_generate_done / _on_generate_error."""
+        state = self._state.get(key) or {}
+        state["draft_start_ts"] = None
+        state["draft_tick_stop_event"] = None
+        after_id = state.pop("draft_tick_after", None)
+        if after_id is not None:
+            try:
+                self._dlg.after_cancel(after_id)
+            except tk.TclError:
+                pass
+
+    def _tick(self, key) -> None:
+        """Periodic status-bar tick; updates elapsed seconds, self-reschedules.
+
+        Self-cancels when: dialog destroyed, draft_start_ts cleared (completion),
+        stop_event identity changed (newer generation), or elapsed exceeds the
+        hard timeout (G6 v4.4).
+        """
+        try:
+            if not self._dlg.winfo_exists():
+                return
+        except (tk.TclError, ReferenceError):
+            return
+        state = self._state.get(key) or {}
+        start = state.get("draft_start_ts")
+        if not start:
+            return   # completed / cancelled
+        captured = state.get("draft_tick_stop_event")
+        if captured is not None and captured is not state.get("stop"):
+            return
+        elapsed = int(time.monotonic() - start)
+        if elapsed > self._HARD_TIMEOUT:
+            if captured is not None:
+                captured.set()
+            state["draft_start_ts"] = None
+            self._dlg._set_status(
+                key,
+                f"⚠ Drafting timed out after {elapsed}s — backend hung "
+                "(no Python exception). Stop signalled. Try again or "
+                "switch to a different backend.",
+                C["red"],
+            )
+            return
+        backend = self._backend.label_for_status()
+        self._dlg._set_status(key, f"Drafting on {backend} ({elapsed}s)…",
+                              C["overlay0"])
+        try:
+            state["draft_tick_after"] = self._dlg.after(
+                1000, lambda k=key: self._tick(k))
+        except tk.TclError:
+            pass
+
+
 class DocDrafterDialog(tk.Toplevel):
     """Tabbed doc-update drafter (CHANGELOG + README)."""
 
@@ -294,6 +459,13 @@ class DocDrafterDialog(tk.Toplevel):
         # _llm_cfg_resolved() reads this var on every Generate click;
         # _backend_summary() reflects it in the header label.
         self._backend_override_var = tk.StringVar(value=_BACKEND_DEFAULT)
+
+        # Phase C4: backend resolution + draft-tick animation extracted into
+        # cohesive helper objects to slim this dialog. Created before the header
+        # is built (it calls self._backend.summary()).
+        self._backend = _BackendResolver(
+            cfg, lambda: self._backend_override_var.get())
+        self._ticker = _DraftTicker(self, self._tab_state, self._backend)
 
         # C5: warm-up flag — ensure we only fire once per dialog session.
         self._warmup_done = False
@@ -374,7 +546,7 @@ class DocDrafterDialog(tk.Toplevel):
             "<<ComboboxSelected>>",
             lambda _e: self._on_backend_override_changed())
 
-        self._backend_var = tk.StringVar(value=self._backend_summary())
+        self._backend_var = tk.StringVar(value=self._backend.summary())
         self._backend_lbl = tk.Label(hdr, textvariable=self._backend_var,
                                        bg=C["base"], fg=C["overlay0"],
                                        font=("Segoe UI", 8))
@@ -384,11 +556,12 @@ class DocDrafterDialog(tk.Toplevel):
         """Dropdown handler — refresh the summary label + visual style.
 
         Does NOT touch any in-flight worker.  Workers snapshot their config
-        at Generate-click time via _llm_cfg_resolved(); changing the
-        dropdown while a worker is running only affects the NEXT click.
+        at Generate-click time via ``self._backend.llm_cfg_resolved()``;
+        changing the dropdown while a worker is running only affects the
+        NEXT click.
         """
         try:
-            self._backend_var.set(self._backend_summary())
+            self._backend_var.set(self._backend.summary())
             override = self._backend_override_var.get()
             if override == _BACKEND_DEFAULT:
                 # Restore the dim grey for the default config-driven backend.
@@ -398,53 +571,6 @@ class DocDrafterDialog(tk.Toplevel):
                 self._backend_lbl.configure(fg=C["peach"])
         except tk.TclError:
             pass
-
-    def _backend_summary(self):
-        cfg = self._llm_cfg_resolved()
-        prov = cfg.get("provider", "(none configured)")
-        model = cfg.get("model") or "(default)"
-        override = self._backend_override_var.get()
-        if override != _BACKEND_DEFAULT:
-            return f"⚡ OVERRIDE → {prov} / {model}"
-        which = "ask_tab_llm" if (self._cfg.raw or {}).get("ask_tab_llm") \
-                else "commit_message_llm"
-        return f"Backend: {which} → {prov} / {model}"
-
-    def _llm_cfg_resolved(self):
-        """Resolve which LLM config dict to use for the next Generate click.
-
-        Honours the per-session backend override dropdown.  When the
-        override is active, builds a synthetic config by WHITELISTING only
-        the fields the target provider's dispatcher reads — avoids leaking
-        an Anthropic api_key_env into a forced Ollama call, etc.
-        """
-        raw = self._cfg.raw if isinstance(self._cfg.raw, dict) else {}
-        base = raw.get("ask_tab_llm") or raw.get("commit_message_llm") or {}
-        override = self._backend_override_var.get()
-        if override == _BACKEND_OLLAMA:
-            # _call_llm openai_compatible path reads: provider, model,
-            # base_url, enabled, timeout_seconds.  Only INHERIT the base
-            # config's base_url if base was already an Ollama-compatible
-            # provider — otherwise an Anthropic / OpenAI base_url would
-            # silently get used for a forced Ollama call and fail.
-            base_provider = (base.get("provider") or "").lower()
-            base_url_safe = base.get("base_url") if base_provider in (
-                "ollama", "openai_compatible") else None
-            return {
-                "enabled":  True,
-                "provider": "ollama",
-                "model":    base.get("model") or "qwen2.5-coder:14b",
-                "base_url": base_url_safe or "http://localhost:11434",
-            }
-        if override == _BACKEND_CLAUDE_CLI:
-            # dispatch_llm claude_cli path reads provider + model from the
-            # config; exe path / cwd / timeout come from explicit args.
-            return {
-                "enabled":  True,
-                "provider": "claude_cli",
-                "model":    self._cfg.claude_cli_model or "",
-            }
-        return base
 
     def _refresh_range(self):
         """Resolve the selected range mode + update range_info + clear drafts.
@@ -847,7 +973,7 @@ class DocDrafterDialog(tk.Toplevel):
         raw = self._cfg.raw if isinstance(self._cfg.raw, dict) else {}
         if not raw.get("ollama_warmup", False):
             return
-        llm_cfg = self._llm_cfg_resolved()
+        llm_cfg = self._backend.llm_cfg_resolved()
         provider = (llm_cfg or {}).get("provider", "").lower()
         if provider not in ("ollama", "openai_compatible"):
             return
@@ -944,7 +1070,7 @@ class DocDrafterDialog(tk.Toplevel):
                 key, "Resolve a commit range first.")
             return
 
-        llm_cfg = self._llm_cfg_resolved()
+        llm_cfg = self._backend.llm_cfg_resolved()
         if not llm_cfg or not llm_cfg.get("provider"):
             self._show_generate_blocker(
                 key,
@@ -1029,7 +1155,7 @@ class DocDrafterDialog(tk.Toplevel):
 
         # v4 Fix 4c: start the elapsed-time tick. Self-cancels on
         # completion / dialog destruction / stop-event identity change.
-        self._start_draft_tick(key, stop_event)
+        self._ticker.start(key, stop_event)
 
         # Snapshot context for the worker.
         commits     = rd["commits"]
@@ -1228,7 +1354,7 @@ class DocDrafterDialog(tk.Toplevel):
             # v4: stop the draft tick + stop-event identity guard. If the
             # captured Event is no longer the current one, a newer
             # Generate has been started — drop this stale result.
-            self._stop_draft_tick(key)
+            self._ticker.stop(key)
             if (captured_stop_event is not None
                     and captured_stop_event is not self._tab_state.get(
                         key, {}).get("stop")):
@@ -1398,7 +1524,7 @@ class DocDrafterDialog(tk.Toplevel):
                 return
             # v4: stop the tick + stop-event identity guard against stale
             # error callbacks from a superseded generation.
-            self._stop_draft_tick(key)
+            self._ticker.stop(key)
             if (captured_stop_event is not None
                     and captured_stop_event is not self._tab_state.get(
                         key, {}).get("stop")):
@@ -1717,110 +1843,6 @@ class DocDrafterDialog(tk.Toplevel):
         except (tk.TclError, KeyError, RuntimeError):
             pass
 
-    # ── v4 Fix 4c: draft-tick (elapsed time during generation) ───────────
-
-    def _backend_label_for_status(self, key):
-        """Short human-readable backend name for the 'Drafting on X' tick.
-
-        Reads the resolved LLM config at tick time so a backend-override
-        change during generation reflects in the visible label.
-        """
-        try:
-            cfg = self._llm_cfg_resolved() or {}
-        except (AttributeError, RuntimeError):
-            return "LLM"
-        provider = (cfg.get("provider") or "").lower()
-        if provider == "claude_cli":
-            return "Claude CLI"
-        if provider == "ollama":
-            return "Ollama"
-        if provider == "anthropic":
-            return "Anthropic"
-        if provider == "openai":
-            return "OpenAI"
-        if provider == "openai_compatible":
-            base = (cfg.get("base_url") or "").lower()
-            return "Ollama" if "localhost" in base else "OpenAI-compat"
-        return provider or "LLM"
-
-    # G6 (v4.4): tick enforces this hard timeout beyond dispatch_llm's
-    # 300 s limit. The extra 10 s grace absorbs Python thread-scheduling
-    # lag. When triggered, the captured stop_event is signalled so the
-    # worker can break its iteration loop; a hard error message is
-    # surfaced in the status bar. Note: Python cannot forcibly kill a
-    # hung subprocess, so the OS-level Ollama process may remain running.
-    _DRAFT_TICK_HARD_TIMEOUT = 310   # seconds; dispatch_llm timeout is 300
-
-    def _draft_tick(self, key):
-        """Periodic status-bar tick during a long Generate run.
-
-        Updates the status text every second with elapsed seconds, e.g.
-        `"Drafting on Ollama (12s)…"`. Lets the user see the background
-        loop is alive even on 300 s agentic runs (without this, a 5-min
-        block looks like a hang). Self-cancels when:
-          - dialog destroyed (winfo_exists guard)
-          - draft_start_ts cleared (completion / error)
-          - stop_event identity changed (newer generation in flight)
-          - elapsed time exceeds _DRAFT_TICK_HARD_TIMEOUT (G6 v4.4)
-        """
-        try:
-            if not self.winfo_exists():
-                return
-        except tk.TclError:
-            return
-        state = self._tab_state.get(key) or {}
-        start = state.get("draft_start_ts")
-        if not start:
-            return   # completed / cancelled
-        # Stop-event identity guard against stale tick loops left over
-        # from a previous generation that was superseded.
-        captured = state.get("draft_tick_stop_event")
-        if captured is not None and captured is not state.get("stop"):
-            return
-        elapsed = int(time.monotonic() - start)
-        # G6: self-enforced hard timeout. If dispatch_llm's own 300 s
-        # limit didn't fire (OS-level Ollama hang), we unblock the UI
-        # and signal the stop_event so the worker can exit its loop.
-        if elapsed > self._DRAFT_TICK_HARD_TIMEOUT:
-            if captured is not None:
-                captured.set()
-            state["draft_start_ts"] = None
-            self._set_status(
-                key,
-                f"⚠ Drafting timed out after {elapsed}s — backend hung "
-                "(no Python exception). Stop signalled. Try again or "
-                "switch to a different backend.",
-                C["red"],
-            )
-            return
-        backend = self._backend_label_for_status(key)
-        self._set_status(key, f"Drafting on {backend} ({elapsed}s)…",
-                         C["overlay0"])
-        try:
-            state["draft_tick_after"] = self.after(
-                1000, lambda k=key: self._draft_tick(k))
-        except tk.TclError:
-            pass
-
-    def _start_draft_tick(self, key, stop_event):
-        """Start the per-second draft tick. Called from _on_generate."""
-        state = self._tab_state.setdefault(key, {})
-        state["draft_start_ts"] = time.monotonic()
-        state["draft_tick_stop_event"] = stop_event
-        try:
-            state["draft_tick_after"] = self.after(
-                1000, lambda k=key: self._draft_tick(k))
-        except tk.TclError:
-            pass
-
-    def _stop_draft_tick(self, key):
-        """Cancel the tick. Called from _on_generate_done / _on_generate_error."""
-        state = self._tab_state.get(key) or {}
-        state["draft_start_ts"] = None
-        state["draft_tick_stop_event"] = None
-        after_id = state.pop("draft_tick_after", None)
-        if after_id is not None:
-            try:
-                self.after_cancel(after_id)
-            except tk.TclError:
-                pass
+    # Backend resolution (_BackendResolver) and the draft-tick animation
+    # (_DraftTicker) were extracted to module-level helper classes in Phase C4.
+    # See self._backend and self._ticker, wired in __init__.
