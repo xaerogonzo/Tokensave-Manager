@@ -218,9 +218,20 @@ class GitignoreDialog(tk.Toplevel):
         stop_event = self._ai_suggest_stop
 
         def _worker():
-            exts, dirs = self._collect_project_files(self._path)
+            exts, dirs, source_note = self._collect_project_files(self._path)
             if stop_event.is_set():
                 return
+            # Novice gotcha #8: disclose which file listing fed the AI —
+            # gives a diagnostic path when suggestions come back poor.
+            def _show_source(note=source_note):
+                try:
+                    if self.winfo_exists() and not stop_event.is_set():
+                        self._ai_status_lbl.configure(
+                            text=f"Asking AI… (context: {note})",
+                            fg=C["overlay0"])
+                except (tk.TclError, RuntimeError):
+                    pass
+            self.after(0, _show_source)
             untracked_str = self._collect_untracked_files(
                 self._cfg.git_exe, self._path)
             if stop_event.is_set():
@@ -273,32 +284,41 @@ class GitignoreDialog(tk.Toplevel):
 
     @staticmethod
     def _collect_project_files(path: str) -> tuple:
-        """Return (exts, dirs) from CodeGraph DB, falling back to os.listdir."""
+        """Return (exts, dirs, source_note) — CodeGraph DB, falling back to
+        os.listdir. source_note names the data source so the UI can disclose
+        which listing fed the AI (suggestion quality differs a lot between
+        a full CodeGraph index and a top-level directory listing)."""
         db_path = os.path.join(path, ".codegraph", "codegraph.db")
         all_files: list = []
+        source_note = ""
         if os.path.isfile(db_path):
             try:
                 con = sqlite3.connect(f"file:{db_path}?mode=ro", uri=True)
                 rows = con.execute("SELECT path FROM files").fetchall()
                 con.close()
                 all_files = [r[0] for r in rows]
+                source_note = f"CodeGraph file listing ({len(all_files)} files)"
             except Exception:
                 try:
                     all_files = os.listdir(path)
                 except Exception:
                     all_files = []
+                source_note = ("top-level directory listing "
+                               "(fallback — CodeGraph index unreadable)")
         else:
             try:
                 all_files = os.listdir(path)
             except Exception:
                 all_files = []
+            source_note = ("top-level directory listing "
+                           "(fallback — CodeGraph not initialized)")
         exts = sorted({os.path.splitext(f)[1] for f in all_files
                        if os.path.splitext(f)[1]})
         dirs = sorted({
             f.replace("\\", "/").split("/")[0]
             for f in all_files if "/" in f.replace("\\", "/")
         })
-        return exts, dirs
+        return exts, dirs, source_note
 
     @staticmethod
     def _collect_untracked_files(git_exe: str, path: str) -> str:

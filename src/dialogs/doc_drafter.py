@@ -752,10 +752,12 @@ class DocDrafterDialog(tk.Toplevel):
         vsb.pack(side=tk.RIGHT, fill=tk.Y)
         txt.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
 
-        # Empty-state placeholder
+        # Empty-state placeholder. The "(no draft yet" prefix is load-bearing
+        # — _on_copy/_on_apply/_on_text_modified match it via startswith.
         txt.insert("1.0",
                    "(no draft yet — click Generate to draft from the "
-                   "selected commit range)")
+                   "selected commit range. You can edit the draft freely "
+                   "before clicking Apply.)")
         txt.tag_add("placeholder", "1.0", tk.END)
         txt.tag_configure("placeholder", foreground=C["overlay0"])
 
@@ -814,6 +816,14 @@ class DocDrafterDialog(tk.Toplevel):
             "Disable if Ollama drafts time out. "
             "(The always-on tokensave grounding block runs separately "
             "for all backends.)",
+        )
+        # Novice gotcha #4: the filled text area reads as an output pane —
+        # spell out that it's the literal, editable patch payload.
+        _Tooltip(
+            apply_btn,
+            "Patch the text above into the target file (via the Proposal "
+            "diff dialog). The text area is fully editable — edit freely "
+            "before applying; what you see is exactly what gets patched.",
         )
 
         status_var = tk.StringVar(value="")

@@ -162,8 +162,10 @@ class AISection:
         if _grounding_initial is None:
             _grounding_initial = True
         self._var_enable_llm_grounding = tk.BooleanVar(value=bool(_grounding_initial))
+        # Novice gotcha #9: "grounding" is AI-research jargon — the label
+        # says what it does; the tooltip keeps the mechanics.
         grounding_chk = ttk.Checkbutton(
-            lf, text="Enable tokensave + codegraph grounding for LLM features",
+            lf, text="Attach code context to AI requests (tokensave + codegraph)",
             variable=self._var_enable_llm_grounding,
         )
         grounding_chk.pack(anchor=tk.W, padx=12, pady=(0, 2))
@@ -268,7 +270,7 @@ class AISection:
         # num_ctx spinbox
         num_ctx_row = tk.Frame(body, bg=C["base"])
         num_ctx_row.pack(anchor=tk.W, padx=20, pady=(0, 4))
-        tk.Label(num_ctx_row, text="Context window (num_ctx):",
+        tk.Label(num_ctx_row, text="Context window (tokens):",
                  font=("Segoe UI", 9), bg=C["base"],
                  fg=C["subtext"]).pack(side=tk.LEFT)
         self._var_ollama_num_ctx = tk.IntVar(
@@ -276,9 +278,12 @@ class AISection:
         ttk.Spinbox(num_ctx_row, from_=512, to=131072, increment=512,
                     textvariable=self._var_ollama_num_ctx,
                     width=8).pack(side=tk.LEFT, padx=(8, 0))
-        tk.Label(num_ctx_row, text="  tokens  (0 = model default)",
-                 font=("Segoe UI", 8), bg=C["base"],
-                 fg=C["overlay0"]).pack(side=tk.LEFT)
+        tk.Label(body,
+            text="  How much text the model can process at once. 4096 tokens ≈ 3 pages.\n"
+                 "  For Doc Updates or AI Code Review on large files, try 8192–16384.\n"
+                 "  0 uses the model's own built-in default (often only 2048–4096).",
+            font=("Segoe UI", 8), bg=C["base"], fg=C["overlay0"],
+            justify=tk.LEFT).pack(anchor=tk.W, padx=36, pady=(0, 4))
 
         # warm-up checkbox
         self._var_ollama_warmup = tk.BooleanVar(
@@ -296,6 +301,12 @@ class AISection:
         tk.Label(body, text="AI commit messages",
                  font=("Segoe UI", 10, "bold"),
                  bg=C["base"], fg=C["text"]).pack(anchor=tk.W, padx=20, pady=(0, 2))
+        # Novice gotcha #1: two near-identical AI sections — state each one's
+        # scope right under the header so users configure the right one.
+        tk.Label(body,
+                 text="  Used by: Commit Suggest, Draft PR (API path), pre-commit review.",
+                 font=("Segoe UI", 8), bg=C["base"], fg=C["overlay0"],
+                 justify=tk.LEFT).pack(anchor=tk.W, padx=20, pady=(0, 4))
 
         llm_cfg = raw.get("commit_message_llm") or {}
         self._var_llm_enabled = tk.BooleanVar(value=bool(llm_cfg.get("enabled", False)))
@@ -323,8 +334,8 @@ class AISection:
                  font=("Segoe UI", 10, "bold"),
                  bg=C["base"], fg=C["text"]).pack(anchor=tk.W, padx=20, pady=(0, 2))
         tk.Label(body,
-                 text="  Configure the AI backend for the 🤖 Ask tab independently from\n"
-                      "  commit-message AI. Supports all providers plus Claude CLI.",
+                 text="  Used by: Ask tab, Doc Updates drafting, AI Code Review, Gitignore AI Suggest.\n"
+                      "  Configured independently from commit-message AI. Supports all providers plus Claude CLI.",
                  font=("Segoe UI", 8), bg=C["base"], fg=C["overlay0"],
                  justify=tk.LEFT).pack(anchor=tk.W, padx=20, pady=(0, 4))
 
