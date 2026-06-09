@@ -11,6 +11,7 @@ Tk-marked: needs a real Text widget. Uses the session-scoped `tk_root` fixture.
 import pytest
 
 tk = pytest.importorskip("tkinter")
+from tkinter import ttk
 
 pytestmark = pytest.mark.tk
 
@@ -145,3 +146,76 @@ def test_show_ai_failures_empty_state(tk_root):
     win, content = _failures_window_text(tk_root, obj)
     assert "No failures or dropped tests" in content
     win.destroy()
+
+
+# ── Full panel render: header + suggestions + actions all build ──────────────
+
+def _make_suggestion(rel_path="src/helpers/foo.py", template="pure_helper",
+                     requires_automation=True, test_exists=False):
+    sg = type("S", (), {})()
+    sg.rel_path = rel_path
+    sg.template = template
+    sg.requires_automation = requires_automation
+    sg.test_exists = test_exists
+    sg.source_path = "/proj/" + rel_path
+    sg.test_path = ""
+    return sg
+
+
+def test_gap_panel_builds_all_sections(tk_root, mock_config):
+    """Regression for the _GapPanelCtx __slots__ bug (Phase B1).
+
+    `_gap_panel_header` ended with `ctx._ai_available = ai_available`, but
+    `_ai_available` was missing from `_GapPanelCtx.__slots__` — so the
+    assignment raised AttributeError on the header's LAST line. The header
+    rendered fully (count label, backend radios, nudge) but the suggestions
+    list and the action-button row never built, leaving a half-drawn panel.
+
+    This drives a full synchronous render (suggestions passed in → no
+    background scan) and asserts all three sections are present.
+    """
+    ctrl = TestGapCtrl(
+        tab=tk_root, cfg=mock_config, on_log=lambda *a, **k: None,
+        get_path=lambda: "/proj", get_test_manager_ref=lambda: None)
+
+    dlg = tk.Frame(tk_root)
+    ctrl._build_test_gap_panel(
+        dlg, "/proj", "master", suggestions=[_make_suggestion()])
+
+    labels = [str(w.cget("text"))
+              for w in _descendants(dlg)
+              if isinstance(w, ttk.Button)]
+    # Actions section (the part that vanished when the header crashed).
+    assert any("AI generate" in lbl for lbl in labels), \
+        f"AI-generate button missing — panel built only partway: {labels}"
+    assert any("Generate stubs" in lbl for lbl in labels), \
+        f"Generate-stubs button missing: {labels}"
+    assert any("Recommend" in lbl for lbl in labels), \
+        f"quick-select row missing: {labels}"
+
+    # Suggestions section — the changed file's checkbox row rendered.
+    all_text = " ".join(
+        str(w.cget("text")) for w in _descendants(dlg)
+        if "text" in (w.keys() if hasattr(w, "keys") else []))
+    assert "foo.py" in all_text, "suggestion checkbox row missing"
+    dlg.destroy()
+
+
+def test_gap_panel_ai_disabled_when_no_backend(tk_root, mock_config):
+    """When no AI backend is configured, the panel still builds fully and the
+    AI-generate button is DISABLED (exercises the `_ai_available` False path)."""
+    # mock_config defaults: claude_cli_exe="" and no commit_message_llm provider.
+    ctrl = TestGapCtrl(
+        tab=tk_root, cfg=mock_config, on_log=lambda *a, **k: None,
+        get_path=lambda: "/proj", get_test_manager_ref=lambda: None)
+
+    dlg = tk.Frame(tk_root)
+    ctrl._build_test_gap_panel(
+        dlg, "/proj", "master", suggestions=[_make_suggestion()])
+
+    ai_btns = [w for w in _descendants(dlg)
+               if isinstance(w, ttk.Button)
+               and "AI generate" in str(w.cget("text"))]
+    assert ai_btns, "panel built only partway — AI button missing"
+    assert str(ai_btns[0].cget("state")) == "disabled"
+    dlg.destroy()

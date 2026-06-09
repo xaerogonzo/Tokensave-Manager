@@ -80,7 +80,7 @@ class _GapPanelCtx:
         # Data lists — grown by _add_rows inside _gap_panel_suggestions
         "check_vars", "status_vars", "panel_suggestions",
         # Widget vars created by _gap_panel_header
-        "ai_enabled_var", "backend_var",
+        "ai_enabled_var", "backend_var", "_ai_available",
         # Shared state created by _gap_panel_actions
         "status_var", "cancel_event",
         # Action button refs (for bulk disable/enable in _do_rescan)
@@ -102,6 +102,7 @@ class _GapPanelCtx:
         # widget vars/buttons — set by sub-methods
         self.ai_enabled_var = None
         self.backend_var = None
+        self._ai_available = True   # set by _gap_panel_header; read by _gap_panel_actions
         self.status_var = None
         self.cancel_event = None
         self.stub_btn = None
@@ -364,7 +365,7 @@ class TestGapCtrl:
         ).pack(fill=tk.X, padx=10, pady=(0, 2))
 
         # Store ai_available so _gap_panel_actions can apply the tooltip.
-        ctx._ai_available = ai_available  # type: ignore[attr-defined]
+        ctx._ai_available = ai_available
 
     def _gap_panel_suggestions(self, parent: tk.Frame, ctx: "_GapPanelCtx",
                                suggestions: list) -> None:
