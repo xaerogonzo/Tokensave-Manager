@@ -78,6 +78,9 @@ class GitCommitDialog(tk.Toplevel):
         # Async-suggestion infrastructure (see _populate_suggestion docstring).
         self._suggestion_token = 0
         self._user_has_edited  = False
+        # Novice gotcha #3: one explanatory popup per dialog when Suggest is
+        # clicked with no AI backend configured (heuristics still run).
+        self._warned_no_ai     = False
         # Per-session backend override — starts from the saved config setting
         # so the dropdown shows the current preference immediately.
         self._session_backend: str = (
@@ -328,6 +331,20 @@ class GitCommitDialog(tk.Toplevel):
         currently *selected* files only. Resets the user-edited flag so the
         async result is allowed to land — clicking 💡 Suggest is an explicit
         opt-in to overwrite whatever is in the field."""
+        # Novice gotcha #3: with no AI backend configured the orchestrator
+        # silently falls through to heuristics and the only signal is a tiny
+        # "via diff" badge. Say it plainly once, with the fix location, then
+        # proceed — the heuristic suggestion is still useful.
+        if not self._ai_configured() and not self._warned_no_ai:
+            self._warned_no_ai = True
+            messagebox.showinfo(
+                "No AI backend configured",
+                "Suggest will use heuristics (diff / filename based) for now.\n\n"
+                "For AI-generated commit messages, set one up in\n"
+                "Settings → AI backend selection → Commit message:\n"
+                "  •  Claude Code CLI (uses your subscription), or\n"
+                "  •  an LLM provider under 'AI commit messages'.",
+                parent=self)
         selected_lines = []
         for var, fname, xy in self._file_vars:
             if var.get():
@@ -336,6 +353,16 @@ class GitCommitDialog(tk.Toplevel):
         # User pressed Suggest — they want to overwrite. Re-arm.
         self._user_has_edited = False
         self._populate_suggestion(sub_status, source="suggest_button")
+
+    def _ai_configured(self) -> bool:
+        """True when at least one AI backend could actually produce a
+        suggestion: a Claude CLI exe path is set, or the commit-message LLM
+        is enabled in Settings."""
+        raw = self._cfg.raw or {}
+        llm_cfg = raw.get("commit_message_llm") or {}
+        has_llm = bool(llm_cfg.get("enabled"))
+        has_cli = bool((raw.get("claude_cli_exe") or "").strip())
+        return has_llm or has_cli
 
     def _populate_suggestion(self, status_text: str, source: str = "initial"):
         """Run the commit-message orchestrator and populate the message field.
