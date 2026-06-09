@@ -15,12 +15,20 @@ from __future__ import annotations
 import threading
 from typing import TYPE_CHECKING, Callable
 
-import pystray
-
 from helpers.runtime import _make_tray_icon, log
+
+# NB: `pystray` is intentionally NOT imported at module level. It is an
+# optional GUI-only dependency (not in requirements-dev.txt) and a top-level
+# import would abort pytest collection in CI for any test that transitively
+# imports this module via `app`. It is lazy-imported inside `setup()` — the
+# only method that uses it — mirroring the lazy `from PIL import …` in
+# helpers.runtime._make_tray_icon. See tests/test_no_thirdparty_module_imports.py.
 
 if TYPE_CHECKING:
     import tkinter as tk
+
+    import pystray   # type-only: resolves the "pystray.Icon" annotation below;
+                     # NOT imported at runtime (TYPE_CHECKING is False then).
     from state import ManagerConfig
 
 
@@ -41,6 +49,7 @@ class TrayManager:
 
     def setup(self) -> None:
         """Create the pystray icon and start its background thread."""
+        import pystray   # lazy — optional GUI dep; see module-level note
         menu = pystray.Menu(
             pystray.MenuItem("Show", self._show_from_tray, default=True),
             pystray.Menu.SEPARATOR,
