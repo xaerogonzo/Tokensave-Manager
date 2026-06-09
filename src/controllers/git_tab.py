@@ -140,6 +140,56 @@ def _recommended_test_selection(suggestions) -> "list[bool]":
     return [bool(getattr(s, "requires_automation", False)) for s in suggestions]
 
 
+def _update_header_labels(ctl, name, is_repo, branch, remote) -> None:
+    """Refresh the Git tab header (project, branch, remote labels).
+
+    Module-level (takes the controller) — split out of _git_update_ui
+    for complexity; same pattern as the help_topics_* renderers.
+    """
+    ctl._git_project_lbl.config(text=name)
+
+    if is_repo:
+        ctl._git_branch_lbl.config(text=f"Branch:  {branch}",
+                                   fg=C["text"])
+    else:
+        ctl._git_branch_lbl.config(
+            text="Not a git repository — right-click project → 🔧 Git Init",
+            fg=C["peach"])
+
+    if remote:
+        disp = remote.replace("https://", "").replace("http://", "")
+        disp = disp.rstrip("/")
+        if disp.endswith(".git"):
+            disp = disp[:-4]
+        ctl._git_remote_lbl.config(text=f"Remote:  {disp}",
+                                   fg=C["overlay0"])
+    else:
+        ctl._git_remote_lbl.config(text="Remote:  No remote set",
+                                   fg=C["overlay0"])
+
+
+def _update_button_states(ctl, is_repo, remote) -> None:
+    """Enable/disable the Git action-bar buttons for the current repo state.
+
+    All buttons are disabled while a git operation is in flight; otherwise
+    repo-gated, push/pull additionally remote-gated, and release/merge-PR
+    additionally gh-gated.
+    """
+    if ctl._git_op_in_flight:
+        groups = [(ctl._git_all_btns, False)]
+    else:
+        groups = [
+            (ctl._git_all_btns,       bool(is_repo)),
+            (ctl._git_push_pull_btns, bool(is_repo and remote)),
+            (ctl._git_release_btns,   bool(is_repo and remote
+                                           and shutil.which("gh"))),
+        ]
+    for btns, enabled in groups:
+        state = tk.NORMAL if enabled else tk.DISABLED
+        for btn in btns:
+            btn.configure(state=state)
+
+
 class GitTabController:
     """Owns the Git tab UI and all git operations.
 
@@ -254,7 +304,15 @@ class GitTabController:
     def _build_git_tab(self):
         """Build the Git tab — shows live git state for the selected project."""
         self._build_git_header()
-        self._build_commit_request_banner()
+        # Commit-request handoff banner (Roadmap-8): hidden by default,
+        # shown by its own update() during _git_update_ui refreshes.
+        from controllers.commit_request_banner import CommitRequestBanner
+        self._commit_req = CommitRequestBanner(
+            self._tab,
+            get_path=lambda: self._git_path,
+            on_commit=self._on_commit,
+            get_anchor=lambda: self._git_mid,
+        )
         mid = tk.Frame(self._tab, bg=C["base"], padx=14, pady=10)
         self._git_mid = mid
         mid.pack(fill=tk.X)
@@ -263,53 +321,6 @@ class GitTabController:
         self._build_git_status_pane(mid)
         self._build_git_action_bar()
         self._build_git_diff_pane()
-
-    def _build_commit_request_banner(self) -> None:
-        """Non-modal banner shown when an external tool (Claude Code chat)
-        has written a commit request for the selected project. Hidden by
-        default; _update_commit_request_banner packs it on demand."""
-        bar = tk.Frame(self._tab, bg=C["surface0"], padx=14, pady=6)
-        self._commit_req_banner = bar
-        self._commit_req_lbl = tk.Label(
-            bar, text="", bg=C["surface0"], fg=C["blue"],
-            font=("Segoe UI", 9), wraplength=560,
-            justify=tk.LEFT, anchor=tk.W)
-        self._commit_req_lbl.pack(side=tk.LEFT, fill=tk.X, expand=True)
-        ttk.Button(bar, text="📝 Review && Commit…",
-                   command=self._on_commit_request_review
-                   ).pack(side=tk.LEFT, padx=(8, 6))
-        ttk.Button(bar, text="✕ Dismiss",
-                   command=self._on_commit_request_dismiss
-                   ).pack(side=tk.LEFT)
-        # NOT packed — _update_commit_request_banner shows/hides it.
-
-    def _update_commit_request_banner(self, path: str, is_repo: bool) -> None:
-        """Show the banner when a pending commit request exists for *path*."""
-        from helpers.commit_request import load_commit_request
-        req = load_commit_request(path) if (path and is_repo) else None
-        if not req:
-            self._commit_req_banner.pack_forget()
-            return
-        detail = req["note"] or req["suggested_scope"] or ""
-        files_part = f"{len(req['files'])} file(s)"
-        text = f"🤝  Commit request from Claude Code — {files_part}"
-        if detail:
-            text += f":  {detail}"
-        self._commit_req_lbl.configure(text=text)
-        self._commit_req_banner.pack(fill=tk.X, before=self._git_mid)
-
-    def _on_commit_request_review(self) -> None:
-        """Open the normal commit dialog — it pre-seeds itself from the
-        pending request and consumes it on commit."""
-        if self._git_path:
-            self._on_commit(self._git_path)
-
-    def _on_commit_request_dismiss(self) -> None:
-        """Discard the pending request without committing."""
-        from helpers.commit_request import clear_commit_request
-        if self._git_path:
-            clear_commit_request(self._git_path)
-        self._commit_req_banner.pack_forget()
 
     def _build_git_header(self) -> None:
         hdr = tk.Frame(self._tab, bg=C["mantle"], padx=14, pady=8)
@@ -647,42 +658,9 @@ class GitTabController:
     def _git_update_ui(self, path, name, is_repo, branch, remote,
                        status_raw, log_text):
         """Main-thread update of all Git tab widgets."""
-        self._git_project_lbl.config(text=name)
-
-        if is_repo:
-            self._git_branch_lbl.config(text=f"Branch:  {branch}",
-                                         fg=C["text"])
-        else:
-            self._git_branch_lbl.config(
-                text="Not a git repository — right-click project → 🔧 Git Init",
-                fg=C["peach"])
-
-        if remote:
-            disp = remote.replace("https://", "").replace("http://", "")
-            disp = disp.rstrip("/")
-            if disp.endswith(".git"):
-                disp = disp[:-4]
-            self._git_remote_lbl.config(text=f"Remote:  {disp}",
-                                         fg=C["overlay0"])
-        else:
-            self._git_remote_lbl.config(text="Remote:  No remote set",
-                                         fg=C["overlay0"])
-
-        if self._git_op_in_flight:
-            for btn in self._git_all_btns:
-                btn.configure(state=tk.DISABLED)
-        else:
-            repo_state = tk.NORMAL if is_repo else tk.DISABLED
-            for btn in self._git_all_btns:
-                btn.configure(state=repo_state)
-            push_pull_state = tk.NORMAL if (is_repo and remote) else tk.DISABLED
-            for btn in self._git_push_pull_btns:
-                btn.configure(state=push_pull_state)
-            release_ok = bool(is_repo and remote and shutil.which("gh"))
-            for btn in self._git_release_btns:
-                btn.configure(state=tk.NORMAL if release_ok else tk.DISABLED)
-
-        self._update_commit_request_banner(path, is_repo)
+        _update_header_labels(self, name, is_repo, branch, remote)
+        _update_button_states(self, is_repo, remote)
+        self._commit_req.update(path, is_repo)
 
         self._git_status_lb.configure(state=tk.NORMAL)
         self._git_status_lb.delete(0, tk.END)
