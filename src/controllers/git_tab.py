@@ -397,10 +397,13 @@ class GitTabController:
                                   command=self.cmd_draft_pr)
         btn_test_gaps = ttk.Button(row2, text="🧪 Test Gaps…",
                                    command=self.cmd_show_test_gaps)
+        btn_claude_cli = ttk.Button(row2, text="🤖 Claude CLI",
+                                    command=self.cmd_open_claude_cli)
 
         for btn in (btn_push, btn_pull, btn_fetch, btn_commit, btn_undo,
                     btn_new, btn_switch, btn_merge, btn_del, btn_openpr,
-                    btn_mergepr, btn_release, btn_draft_pr, btn_test_gaps):
+                    btn_mergepr, btn_release, btn_draft_pr, btn_test_gaps,
+                    btn_claude_cli):
             btn.pack(side=tk.LEFT, padx=(0, 6))
 
         _Tooltip(btn_push,
@@ -496,11 +499,18 @@ class GitTabController:
             "From the panel you can generate template stubs or AI-written tests\n"
             "for the flagged files in one click.")
 
+        _Tooltip(btn_claude_cli,
+            "Open an interactive Claude Code session in this project.\n\n"
+            "Launches a new terminal window running `claude` with the\n"
+            "project as its working directory — no need to open a\n"
+            "terminal and cd there yourself.\n\n"
+            "Requires the Claude Code CLI path to be set in Settings.")
+
         self._git_all_btns       = [self._btn_set_remote, btn_push, btn_pull,
                                      btn_commit, btn_undo, btn_new,
                                      btn_switch, btn_merge, btn_del, btn_openpr,
                                      btn_mergepr, btn_release, btn_draft_pr,
-                                     btn_test_gaps]
+                                     btn_test_gaps, btn_claude_cli]
         self._git_push_pull_btns = [btn_push, btn_pull, btn_openpr]
         self._git_release_btns   = [btn_release, btn_mergepr]
 
@@ -1244,6 +1254,26 @@ class GitTabController:
                     "No AI configured",
                     "Configure a Claude Code CLI path or an Ollama / API provider in Settings to use Draft PR.",
                     parent=self._root)
+
+    def cmd_open_claude_cli(self):
+        """Open an interactive Claude Code CLI session in the selected project."""
+        path = self._git_path
+        if not path:
+            return
+        cli = self._cfg.claude_cli_exe
+        if not cli:
+            messagebox.showinfo(
+                "No CLI configured",
+                "No Claude Code CLI path is set.\n"
+                "Configure it in Settings → Git tools.",
+                parent=self._root)
+            return
+        from helpers.claude_cli import spawn_claude_cli_interactive
+        ok, err = spawn_claude_cli_interactive(
+            cli, path, model=self._cfg.claude_cli_model)
+        if not ok:
+            messagebox.showwarning(
+                "Could not open Claude CLI", err, parent=self._root)
 
     def cmd_show_test_gaps(self):
         """Open a standalone Test Gaps dialog for the current branch.
