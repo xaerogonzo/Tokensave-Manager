@@ -14,7 +14,16 @@ globals are read.
 
 from __future__ import annotations
 
+import json
 import os
+import uuid
+
+# Persisted per-project extension map (R9-SL1). Lives in the manager's
+# cache namespace next to last_test_run.json / commit_request.json.
+# Schema: {"ext_map": {src_pattern: dst_suffix}} — a dict wrapper so
+# future flags (e.g. SL2's "auto_shadow") can ride alongside.
+_SHADOW_MAP_DIRNAME  = ".tokensave-manager"
+_SHADOW_MAP_FILENAME = "shadow_map.json"
 
 
 # Default extension map: ZScript → C++, ACS → C, DECORATE lump → C++.
@@ -33,6 +42,74 @@ DEFAULT_SHADOW_EXT_MAP = {
 # below prevents walking into virtualenvs, build outputs, etc.
 _SHADOW_SKIP_DIRS = {".tokensave", ".git", "node_modules", "__pycache__",
                      ".venv", "venv", "target", "build", "dist", "out"}
+
+
+def supports_hardlinks(path: str) -> bool:
+    """Probe whether the volume holding *path* supports hardlinks (R9-SL4).
+
+    NTFS does; FAT32/exFAT and some network drives don't — there os.link
+    fails per-file and the user would only see opaque failure counts.
+    Creates a throwaway probe file + link in *path* and cleans both up.
+    Returns False on ANY OSError (no write access counts as unsupported —
+    generation would fail anyway).
+    """
+    probe = os.path.join(path, f".shadow_probe_{uuid.uuid4().hex[:8]}")
+    link = probe + ".lnk"
+    try:
+        with open(probe, "w", encoding="utf-8") as fh:
+            fh.write("probe")
+        os.link(probe, link)
+        return True
+    except OSError:
+        return False
+    finally:
+        for p in (link, probe):
+            try:
+                os.remove(p)
+            except OSError:
+                pass
+
+
+def shadow_map_path(project_root: str) -> str:
+    """Absolute path of the persisted shadow-map file for *project_root*."""
+    return os.path.join(project_root, _SHADOW_MAP_DIRNAME,
+                        _SHADOW_MAP_FILENAME)
+
+
+def load_shadow_map(project_root: str) -> "dict | None":
+    """Read the persisted ext_map, or None.
+
+    Validation is total: missing file, unparseable JSON, a non-dict
+    ext_map, or a map with no usable entries (str → '.suffix' pairs)
+    all read as None — callers fall back to DEFAULT_SHADOW_EXT_MAP.
+    """
+    try:
+        with open(shadow_map_path(project_root), encoding="utf-8") as fh:
+            data = json.load(fh)
+    except (OSError, json.JSONDecodeError, UnicodeDecodeError):
+        return None
+    if not isinstance(data, dict) or not isinstance(data.get("ext_map"), dict):
+        return None
+    ext_map = {
+        str(k).strip(): str(v).strip()
+        for k, v in data["ext_map"].items()
+        if str(k).strip() and str(v).strip().startswith(".")
+    }
+    return ext_map or None
+
+
+def save_shadow_map(project_root: str, ext_map: dict) -> str:
+    """Persist *ext_map* for the next dialog open. Returns the file path,
+    or "" when the write fails (persistence is a nicety — never block the
+    actual generation on it)."""
+    path = shadow_map_path(project_root)
+    try:
+        os.makedirs(os.path.dirname(path), exist_ok=True)
+        with open(path, "w", encoding="utf-8") as fh:
+            json.dump({"ext_map": ext_map}, fh, indent=2)
+        return path
+    except OSError:
+        return ""
 
 
 def generate_shadow_links(path: str, ext_map: dict) -> tuple:

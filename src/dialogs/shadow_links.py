@@ -13,7 +13,11 @@ from tkinter import ttk, messagebox
 
 from constants import C
 from theme import themed_checkbutton
-from helpers.shadow_links import DEFAULT_SHADOW_EXT_MAP
+from helpers.shadow_links import (
+    DEFAULT_SHADOW_EXT_MAP,
+    load_shadow_map,
+    save_shadow_map,
+)
 
 
 class ShadowLinksDialog(tk.Toplevel):
@@ -71,13 +75,19 @@ class ShadowLinksDialog(tk.Toplevel):
                                   padx=8, pady=6)
         self._map_text.pack(fill=tk.X)
 
-        # Populate with DEFAULT_SHADOW_EXT_MAP
-        for src_ext, tgt_suf in DEFAULT_SHADOW_EXT_MAP.items():
+        # R9-SL1: a previously saved per-project map wins over the default,
+        # so custom mappings survive dialog close → reopen.
+        saved_map = load_shadow_map(path)
+        initial_map = saved_map or DEFAULT_SHADOW_EXT_MAP
+        for src_ext, tgt_suf in initial_map.items():
             self._map_text.insert(tk.END, f"{src_ext} = {tgt_suf}\n")
 
+        hint = ("  .ext = .suffix  →  extension match  (e.g. .txt = .cpp for HyperV files)\n"
+                "  NAME = .suffix  →  exact filename, case-insensitive  (e.g. DECORATE = .cpp)")
+        if saved_map:
+            hint += "\n  ✔ Loaded this project's saved map (edits are re-saved on Apply)."
         tk.Label(self,
-            text="  .ext = .suffix  →  extension match  (e.g. .txt = .cpp for HyperV files)\n"
-                 "  NAME = .suffix  →  exact filename, case-insensitive  (e.g. DECORATE = .cpp)",
+            text=hint,
             font=("Segoe UI", 8), bg=C["base"], fg=C["overlay0"],
             justify=tk.LEFT).pack(anchor=tk.W, padx=20, pady=(0, 8))
 
@@ -86,7 +96,7 @@ class ShadowLinksDialog(tk.Toplevel):
             1 for r, _, fs in os.walk(path)
             for f in fs
             if any(f.endswith(src + tgt)
-                   for src, tgt in DEFAULT_SHADOW_EXT_MAP.items())
+                   for src, tgt in initial_map.items())
         )
         status_col = C["green"] if existing else C["overlay0"]
         status_txt = (f"✔  {existing} shadow file(s) already exist in this project."
@@ -148,6 +158,9 @@ class ShadowLinksDialog(tk.Toplevel):
             messagebox.showwarning("No mappings",
                 "Please define at least one extension mapping.", parent=self)
             return
+        # R9-SL1: persist for the next open. save_shadow_map never raises —
+        # a failed write must not block the actual generation.
+        save_shadow_map(self._path, ext_map)
         run_sync = self._var_sync.get()
         self.destroy()
         self._callback(self._path, ext_map, run_sync)

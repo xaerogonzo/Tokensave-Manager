@@ -22,7 +22,11 @@ import tkinter as tk
 
 from constants import C, _ANSI
 from helpers.runtime import log
-from helpers.shadow_links import generate_shadow_links, update_gitignore_for_shadows
+from helpers.shadow_links import (
+    generate_shadow_links,
+    supports_hardlinks,
+    update_gitignore_for_shadows,
+)
 from dialogs.shadow_links import ShadowLinksDialog
 
 if TYPE_CHECKING:
@@ -55,6 +59,18 @@ class ShadowLinksController:
     # ── Command ───────────────────────────────────────────────────────────────
 
     def cmd_shadow_links(self, path: str) -> None:
+        # R9-SL4: probe once up front. Without this, os.link fails per-file
+        # on FAT32/exFAT/network volumes and the user only sees opaque
+        # "0 created, N failed" counts after a full walk.
+        if not supports_hardlinks(path):
+            messagebox.showerror(
+                "Shadow Links unavailable",
+                "This volume doesn't support hardlinks (NTFS required).\n\n"
+                "Shadow links can't be created on FAT32/exFAT or most "
+                "network drives. Move the project to an NTFS volume to "
+                "use this feature.",
+                parent=self._root)
+            return
         ShadowLinksDialog(self._root, path, self._do_shadow_links)
 
     # ── Worker ────────────────────────────────────────────────────────────────
