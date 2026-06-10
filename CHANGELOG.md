@@ -3,6 +3,37 @@
 
 ## [Unreleased]
 
+### Added — v4.16 (Roadmap-8: handoffs, god-file splits, scout remediation, 2026-06-09)
+
+**Commit-request handoff (chat → manager commits)**
+- (git-tab) An external tool (typically a Claude Code chat session) can now PROPOSE a commit by writing `.tokensave-manager/commit_request.json` (`{files, suggested_scope, note, created_at}`). The Git tab shows a 🤝 banner with **Review & Commit** / **Dismiss**; the commit dialog pre-checks ONLY the requested files, shows the note, and consumes the request on commit. Stale requests (no matching files in `git status`) are ignored. Propose-only invariant holds — nothing commits without the user's click. (`src/helpers/commit_request.py`, `src/controllers/commit_request_banner.py`, `src/dialogs/git_commit.py`)
+- (git-tab) **🤖 Claude CLI button** — one-click interactive `claude` TUI in the selected project's directory via the new `spawn_claude_cli_interactive` (a dedicated variant: appending an empty instruction to the Windows cmd string would hand claude a blank one-shot prompt instead of entering interactive mode). (`src/helpers/claude_cli.py`, `src/controllers/git_tab.py`)
+
+**Shadow links — Roadmap-9 items SL1+SL4 landed early**
+- (shadow-links) **Per-project extension maps persist** — Apply saves the parsed map to `.tokensave-manager/shadow_map.json`; the dialog reloads it on open (with a ✔ hint) instead of always resetting to the defaults. Malformed files read as "no saved map"; a failed save never blocks generation. (`src/helpers/shadow_links.py`, `src/dialogs/shadow_links.py`)
+- (shadow-links) **NTFS preflight** — `supports_hardlinks()` probes the volume once up front; FAT32/exFAT/network drives get a clear "NTFS required" error instead of a full walk ending in opaque "0 created, N failed" counts. (`src/controllers/shadowlinks_ctrl.py`)
+
+**Novice-clarity batch (first-time-user audit findings #1–#4, #7–#9)**
+- (settings) Scope notes under both AI section headers (which features each config drives); `num_ctx` de-jargoned to "Context window (tokens)" with concrete sizing guidance; the grounding toggle relabeled "Attach code context to AI requests". (`src/dialogs/settings_ai.py`)
+- (git-commit) **Suggest with no AI configured now explains itself** — one info box per dialog naming the exact Settings path, then the heuristic suggestion proceeds as before. (`src/dialogs/git_commit.py`)
+- (doc-drafter) Placeholder + new Apply tooltip spell out that the draft pane is editable and is the literal patch payload. (ask-tab) The CLI-path status line shows "Context: CLAUDE.md loaded (N sections)" so the silent injection is visible. (gitignore) AI Suggest discloses which file listing fed the AI (CodeGraph index vs directory fallback).
+
+### Changed — v4.16 (god-file splits + refactor-scout remediation)
+
+- (settings) **SettingsDialog split** 1523 → 335 lines: `PathsSection` / `CodegraphSection` / `AISection` modules, each owning its widgets and its `save_into(raw)` slice of the Save contract (a section returning False aborts the save — the tokensave-exe validation gate is unchanged). First-ever test coverage on the dialog, written pre-split. (`src/dialogs/settings*.py`)
+- (help-tab) **22 topic renderers** moved to `help_topics_basics/git/tools` as module-level functions taking the controller; the controller (1417 → 528 lines) keeps dispatch, the Explain streamer, and 2-line delegates. (`src/controllers/help_tab.py`, `src/controllers/help_topics_*.py`)
+- (doc-drafter) **helpers/doc_drafter.py (2683 lines) split** into five family modules — git / prompts / dispatch / filters / apply — behind a re-export facade, so every import site and test is unchanged. AST-generated verbatim moves (`scripts/split_doc_drafter.py`); acyclic import graph; the Roadmap-7 pure `_compute_*` + IO-wrapper pattern intact. (`src/helpers/doc_drafter*.py`)
+- (doc-drafter) **Dialog shrunk 1858 → 1336 lines** (Doctor warns at 1500): `_BackendResolver`, `_DraftTicker`, backend-override labels, and the per-tab widget factory moved to `doc_drafter_support.py`; the dialog-local mirror-contract cluster deleted outright — AST-identical duplicates of the helpers copies AND provably shadowed (the consuming method already lazy-imported the helpers versions). (`src/dialogs/doc_drafter.py`)
+- (test-gen) `_autofix_imports` CC 28 → ~10: classify (`_ImportBuckets` frozen dataclass) → render → splice helpers, per the Opus investigate-session design. (`src/helpers/test_gen_llm.py`)
+- (git-tab) GitTabController back under the 40-method cap (43 → 39) via the banner extraction; `_git_update_ui` CC 22 → ~8 with data-driven button gating. (test-gap) `_gap_generate_ai` CC 26 → ~5 — the worker pipeline lifted to module level threading a frozen `_GapAiRun` context (inner closures fold their branches into the parent's CC). (`src/controllers/git_tab.py`, `src/controllers/test_gap_ctrl.py`)
+- (ci) `actions/checkout` → v5, `actions/setup-python` → v6 — the floating v4/v5 majors still declare node20; the Node-24 runtimes start at these majors. Zero deprecation annotations since. (`.github/workflows/ci.yml`)
+- (quality) tokensave quality signal 7927 → **8106** across the splits; suite **~923 → 986** tests.
+
+### Fixed — v4.16
+
+- (test-manager) **Sync PR Checklist no longer N-folds the suite count** (wrote 5648/5648 instead of 353/353): Run All stamps every per-file cache row with the same suite totals, so summing multiplied by the file count. A cache-level `summary` block now wins; per-file summing remains the legacy/single-file path, and a single-file run drops a stale summary. (`src/dialogs/test_manager.py`)
+- (tray) `pystray` lazy-loaded in `tray_manager.setup()` so pytest collection (and any dev-deps-only environment) survives importing `app`. (`src/helpers/tray_manager.py`)
+
 ### Added — v4.15 (Roadmap-7.5-Audit: streaming PR draft + coverage hardening, 2026-05-30)
 
 **Streaming PR-draft dialog (Ollama / API path)**
