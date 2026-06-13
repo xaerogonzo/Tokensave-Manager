@@ -71,7 +71,8 @@ class ShadowLinksController:
                 "use this feature.",
                 parent=self._root)
             return
-        ShadowLinksDialog(self._root, path, self._do_shadow_links)
+        ShadowLinksDialog(self._root, path, self._do_shadow_links,
+                          cfg=self._cfg)
 
     # ── Worker ────────────────────────────────────────────────────────────────
 

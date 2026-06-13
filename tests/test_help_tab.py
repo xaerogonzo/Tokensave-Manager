@@ -41,3 +41,15 @@ def test_every_section_renders_nonempty(tk_root, mock_config):
         fn()
         content = ctl._help_txt.get("1.0", "end").strip()
         assert content, f"help section {title!r} rendered empty"
+
+
+def test_shadow_links_blurb_is_accurate(tk_root, mock_config):
+    """R9-SL6: the Shadow Links help line must describe hardlink-based
+    extension indexing, NOT the old (wrong) 'symlink mirrors' wording."""
+    ctl = _build_controller(tk_root, mock_config)
+    section = dict(ctl._help_sections)["  Right-click Menu"]
+    section()
+    text = ctl._help_txt.get("1.0", "end").lower()
+    assert "shadow links" in text
+    assert "hardlink" in text and "index" in text
+    assert "symlink" not in text
