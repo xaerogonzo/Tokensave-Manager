@@ -3,6 +3,51 @@
 
 ## [Unreleased]
 
+## [2.2.0] — 2026-07-28
+
+### Added
+- (commit_messages) add pseudo-diff for untracked new files
+- (tokensave) v7.8.1 integration + shadow-links merge fix (R9-SL6+TS7)
+- (shadow_links) unindexed-type scanner + GZDoom lump defaults (R9-SL5+SL6)
+- (shadow_links) persist per-project ext maps + NTFS preflight (R9-SL1+SL4)
+- (git_tab) commit-request handoff — chat sessions propose, manager commits
+- (git_tab) add Claude CLI button for one-click interactive sessions
+- (prompts) add new entity outline and symbol history prompts
+- (git_tab) add test-gap panel context management
+
+### Fixed
+- (git_commit) explain Suggest's heuristic fallback when no AI is configured
+- (ux) six novice-clarity fixes across AI surfaces
+- (test_manager) stop Sync PR Checklist from N-folding the suite count
+- (tray_manager) lazy-load pystray for pytest collection
+- (test_gap_ctrl) add _ai_available to __slots__ and update tests
+
+### Changed
+- (pr_draft) use get_path() method instead of _git_path
+- untrack 1 ignored file (kept locally; matched .gitignore)
+- untrack 1 ignored file (kept locally; matched .gitignore)
+- (test_gap_ctrl) lift _gap_generate_ai pipeline to module level
+- (git_tab) extract commit-request banner + split _git_update_ui
+- (test_gen_llm) split _autofix_imports into classify/render/splice helpers
+- (doc_drafter) shrink the dialog below the Doctor oversize threshold
+- (help_tab) split the 22 topic renderers into topic modules
+- (doc_drafter) split the 2683-line helpers god-file into family modules
+- (settings) split SettingsDialog god-file into section modules
+- (ci) update GitHub Actions to latest versions
+- (test_pr_draft) add grounding helper tests
+- (tests) add tests
+- (git_tab) extract PR draft and test gap to sub-controllers
+- (helpers) extract phase helpers and structured errors
+
+### Docs
+- (release) document Tokensave v7.8.1 and Roadmap-8 completion
+- (changelog) add v4.16 Roadmap-8 section; test commit-request banner
+
+### Other
+- Merge branch 'master' of https://github.com/xaerogonzo/Tokensave-Manager
+- Merge pull request #12 from xaerogonzo/Roadmap-8
+- Merge pull request #11 from xaerogonzo/Pre-Roadmap-8-Audit
+
 ## [2.1.0] — 2026-07-28
 
 ### Added
