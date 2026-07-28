@@ -21,6 +21,8 @@ to parse a conventional-commit subject, import it from helpers.release.
 
 from __future__ import annotations
 
+import hashlib
+import json
 import os
 import re
 from dataclasses import dataclass
@@ -395,6 +397,75 @@ def _dominant_directory(files: list) -> str | None:
     return parts[-1] if parts else None
 
 
+# ── tokensave commit_context enrichment ──────────────────────────────────────
+
+_ctx_cache: dict = {}
+
+
+def _fetch_commit_context(tokensave_exe: str, repo_path: str, git_exe: str,
+                          diff_text: str) -> str:
+    """Run tokensave commit_context and format as compact markdown.
+
+    Returns "" on any failure. Result is cached by (head_sha, staged_diff_hash)
+    so repeated Suggest clicks don't re-invoke the subprocess.
+    Catches json.JSONDecodeError explicitly to guard against malformed output
+    after tokensave upgrades.
+    """
+    if not tokensave_exe or not repo_path or not git_exe:
+        return ""
+    try:
+        sha_proc = subprocess.run(
+            [git_exe, "-C", repo_path, "rev-parse", "HEAD"],
+            capture_output=True, text=True, timeout=5,
+            encoding="utf-8", errors="replace",
+            creationflags=CREATE_NO_WINDOW,
+        )
+        head_sha = sha_proc.stdout.strip() if sha_proc.returncode == 0 else ""
+    except Exception:
+        head_sha = ""
+    staged_diff_hash = hashlib.md5(diff_text.encode()).hexdigest()
+    cache_key = (head_sha, staged_diff_hash)
+    if cache_key in _ctx_cache:
+        return _ctx_cache[cache_key]
+    try:
+        proc = subprocess.run(
+            [tokensave_exe, "tool", "commit_context", "--staged-only"],
+            capture_output=True, text=True, timeout=10,
+            encoding="utf-8", errors="replace",
+            creationflags=CREATE_NO_WINDOW,
+        )
+        if proc.returncode != 0 or not proc.stdout.strip():
+            _ctx_cache[cache_key] = ""
+            return ""
+        data = json.loads(proc.stdout)
+    except json.JSONDecodeError:
+        _ctx_cache[cache_key] = ""
+        return ""
+    except Exception:
+        _ctx_cache[cache_key] = ""
+        return ""
+    lines: list[str] = []
+    symbols = data.get("changed_symbols") or []
+    if symbols:
+        lines.append("## Changed symbols")
+        for s in symbols:
+            name = s.get("name", "")
+            file_ = s.get("file", "")
+            lines.append(f"- {name}" + (f" ({file_})" if file_ else ""))
+    roles = data.get("file_roles") or {}
+    if roles:
+        lines.append("## File roles")
+        for f, role in roles.items():
+            lines.append(f"- {f}: {role}")
+    style = data.get("recent_commit_style") or []
+    if style:
+        lines.append("## Recent commit style")
+        lines.append(", ".join(style) if isinstance(style, list) else str(style))
+    result = "\n".join(lines)
+    _ctx_cache[cache_key] = result
+    return result
+
+
 # ── Git-touching helpers (take git_exe per Rule 1) ───────────────────────────
 
 def _recent_commit_subjects(repo_path: str, git_exe: str, n: int = 5) -> list:
@@ -422,6 +493,58 @@ def _find_changelog_file(repo_path: str) -> str | None:
     return None
 
 
+def _new_files_diff(repo_path: str, git_exe: str, max_chars: int = 8000) -> str:
+    """Build a unified-diff-style block for untracked new files.
+
+    Called when ``git diff HEAD`` returns empty (all pending changes are new,
+    untracked files not yet known to git).  Reads each file directly and
+    formats it as a ``+``-prefixed pseudo-diff so LLM strategies have content
+    to work with.  Capped at ``max_chars`` to avoid oversized prompts.
+    """
+    try:
+        ls = subprocess.run(
+            [git_exe, "-C", repo_path, "ls-files", "--others", "--exclude-standard"],
+            capture_output=True, text=True, timeout=5,
+            encoding="utf-8", errors="replace",
+            creationflags=CREATE_NO_WINDOW,
+        )
+    except (FileNotFoundError, subprocess.TimeoutExpired):
+        return ""
+    if ls.returncode != 0 or not ls.stdout.strip():
+        return ""
+
+    parts: list[str] = []
+    total = 0
+    for rel_path in ls.stdout.splitlines():
+        rel_path = rel_path.strip()
+        if not rel_path:
+            continue
+        abs_path = os.path.join(repo_path, rel_path)
+        try:
+            content = open(abs_path, encoding="utf-8", errors="replace").read()
+        except OSError:
+            continue
+        lines = content.splitlines()
+        header = (
+            f"diff --git a/{rel_path} b/{rel_path}\n"
+            f"new file mode 100644\n"
+            f"--- /dev/null\n"
+            f"+++ b/{rel_path}\n"
+            f"@@ -0,0 +1,{len(lines)} @@\n"
+        )
+        body = "".join(f"+{line}\n" for line in lines)
+        chunk = header + body
+        remaining = max_chars - total
+        if len(chunk) >= remaining:
+            if remaining > 200:
+                parts.append(chunk[:remaining] + "\n... (truncated)\n")
+            break
+        parts.append(chunk)
+        total += len(chunk)
+
+    return "".join(parts)
+
+
 def _pending_diff(repo_path: str, *paths: str, git_exe: str,
                   lines_of_context: int = 0) -> str:
     """Return the diff between HEAD and the working tree (staged + unstaged).
@@ -429,6 +552,10 @@ def _pending_diff(repo_path: str, *paths: str, git_exe: str,
     Used for commit-message suggestion BEFORE the GitCommitDialog actually
     stages files. ``git diff HEAD`` captures everything that would land in
     the commit if the user stages and commits all working-tree changes.
+
+    When HEAD and the working tree agree on all tracked files (e.g. all
+    pending changes are brand-new untracked files), falls back to
+    ``_new_files_diff`` so strategies still have content to analyse.
 
     Keyword-only ``git_exe`` keeps the optional ``*paths`` varargs working
     naturally — callers pass paths positionally and git_exe by name.
@@ -446,7 +573,10 @@ def _pending_diff(repo_path: str, *paths: str, git_exe: str,
         )
     except (FileNotFoundError, subprocess.TimeoutExpired):
         return ""
-    return proc.stdout if proc.returncode == 0 else ""
+    result = proc.stdout if proc.returncode == 0 else ""
+    if not result and not paths:
+        result = _new_files_diff(repo_path, git_exe)
+    return result
 
 
 def _parse_diff_bullet(line: str, section: str | None) -> "dict | None":
@@ -793,7 +923,8 @@ def _suggest_from_filenames(status_text: str) -> str:
 def _strat_claude_cli(repo_path: str, git_exe: str,
                       claude_cli_exe: str,
                       claude_cli_model: str = "",
-                      grounding: str = "") -> "tuple[str, str] | None":
+                      grounding: str = "",
+                      tokensave_exe: str = "") -> "tuple[str, str] | None":
     """Strategy: Claude CLI (claude --print). Returns (subject, body) or None.
 
     Reuses _build_llm_prompt from helpers.llm so Claude CLI produces the same
@@ -813,6 +944,9 @@ def _strat_claude_cli(repo_path: str, git_exe: str,
     if not diff:
         return None
     recent = _recent_commit_subjects(repo_path, git_exe, n=5)
+    ts_ctx = _fetch_commit_context(tokensave_exe, repo_path, git_exe, diff)
+    if ts_ctx:
+        diff = f"[Tokensave semantic context]\n{ts_ctx}\n\n[Git diff]\n{diff}"
     system, user = _build_llm_prompt(diff, recent, max_diff_chars=24000,
                                      grounding=grounding)
     # cwd=home: Claude Code loads <cwd>/CLAUDE.md as project context, which
@@ -837,7 +971,8 @@ def _strat_claude_cli(repo_path: str, git_exe: str,
 # ── LLM strategy + orchestrator entry point ──────────────────────────────────
 
 def _call_llm_for_commit_message(cfg: dict, repo_path: str, git_exe: str,
-                                 grounding: str = "") -> str | None:
+                                 grounding: str = "",
+                                 tokensave_exe: str = "") -> str | None:
     """Commit-message-specific LLM wrapper. Composes the prompt and calls _call_llm.
 
     Skipped when the diff is shorter than `min_diff_lines` — trivial commits
@@ -878,14 +1013,18 @@ def _call_llm_for_commit_message(cfg: dict, repo_path: str, git_exe: str,
         if not cfg.get("num_ctx"):
             cfg = {**cfg, "num_ctx": 8192}   # shadow; caller's dict is unchanged
 
-    recent    = _recent_commit_subjects(repo_path, git_exe, n=5)
+    recent = _recent_commit_subjects(repo_path, git_exe, n=5)
+    ts_ctx = _fetch_commit_context(tokensave_exe, repo_path, git_exe, diff)
+    if ts_ctx:
+        diff = f"[Tokensave semantic context]\n{ts_ctx}\n\n[Git diff]\n{diff}"
     system, user = _build_llm_prompt(diff, recent, max_chars, grounding=grounding)
     return _call_llm(cfg, system, user, max_tokens=1500)
 
 
 def _strat_llm(repo_path: str, has_source: bool,
                cfg: dict, git_exe: str,
-               grounding: str = "") -> "tuple[str, str] | None":
+               grounding: str = "",
+               tokensave_exe: str = "") -> "tuple[str, str] | None":
     """Strategy 0: LLM (opt-in). Returns (subject, body) or None.
 
     `cfg` is the full manager config dict (so we can read
@@ -897,7 +1036,8 @@ def _strat_llm(repo_path: str, has_source: bool,
     if not llm_cfg.get("enabled"):
         return None
     raw = _call_llm_for_commit_message(llm_cfg, repo_path, git_exe,
-                                       grounding=grounding)
+                                       grounding=grounding,
+                                       tokensave_exe=tokensave_exe)
     if not raw:
         return None
     head, _, tail = raw.partition("\n\n")
@@ -962,6 +1102,7 @@ def _suggest_commit_message(repo_path: str = "", status_text: str = "",
     claude_cli_exe   = cfg.get("claude_cli_exe", "")
     # raw.get returns None if the JSON key is `null`; coerce defensively.
     claude_cli_model = cfg.get("claude_cli_model") or ""
+    ts_exe           = (getattr(mc, "tokensave_exe", "") or "") if mc is not None else ""
 
     # v4.2: build the tokensave+codegraph grounding block ONCE if the
     # master switch is on. Both LLM-shaped strategies (`_strat_llm`,
@@ -990,8 +1131,8 @@ def _suggest_commit_message(repo_path: str = "", status_text: str = "",
             )
 
     # Build strategy chain from backend setting — no if/elif cascade.
-    _cli   = ("claude_cli", lambda: _strat_claude_cli(repo_path, git_exe, claude_cli_exe, claude_cli_model, grounding=grounding) if git_exe else None)
-    _llm   = ("llm",        lambda: _strat_llm(repo_path, has_source, cfg, git_exe, grounding=grounding) if git_exe else None)
+    _cli   = ("claude_cli", lambda: _strat_claude_cli(repo_path, git_exe, claude_cli_exe, claude_cli_model, grounding=grounding, tokensave_exe=ts_exe) if git_exe else None)
+    _llm   = ("llm",        lambda: _strat_llm(repo_path, has_source, cfg, git_exe, grounding=grounding, tokensave_exe=ts_exe) if git_exe else None)
     _cl    = ("changelog",  lambda: _strat_changelog(repo_path, files, git_exe) if git_exe else None)
     _diff  = ("diff",       lambda: _strat_diff(repo_path, files, git_exe) if git_exe else None)
     _fnames= ("filenames",  lambda: _strat_filenames(status_text))

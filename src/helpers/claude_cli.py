@@ -94,6 +94,55 @@ def spawn_claude_cli(
         return False, str(e)
 
 
+def spawn_claude_cli_interactive(
+    claude_exe: str,
+    project_path: str,
+    model: str = "",
+) -> tuple[bool, str]:
+    """Open a new terminal window running `claude` as an interactive TUI.
+
+    Unlike spawn_claude_cli, NO instruction is passed — claude starts at
+    its own prompt. This must be a separate function: appending an empty
+    instruction to the Windows cmd string would hand claude a trailing ""
+    argument, which it treats as a (blank) one-shot prompt instead of
+    entering interactive mode.
+
+    Args:
+        claude_exe:   Full path to claude or claude.cmd (from cfg.claude_cli_exe).
+        project_path: Working directory for the new process.
+        model:        Pinned model ID; empty string uses Claude CLI's default.
+
+    Returns:
+        (success: bool, error_message: str)
+    """
+    if not claude_exe:
+        return False, (
+            "Claude Code CLI is not configured. "
+            "Set the path in Settings → Claude Code CLI."
+        )
+
+    model_flag = f' --model "{model}"' if model else ""
+
+    try:
+        if sys.platform == "win32":
+            # Same ""outer"" wrapper as spawn_claude_cli, minus the
+            # instruction segment. /k keeps the window open after exit.
+            cmd_str = f'cmd.exe /k ""{claude_exe}"{model_flag}"'
+            subprocess.Popen(
+                cmd_str,
+                cwd=project_path,
+                creationflags=subprocess.CREATE_NEW_CONSOLE,
+            )
+        else:
+            argv = [claude_exe]
+            if model:
+                argv += ["--model", model]
+            subprocess.Popen(argv, cwd=project_path)
+        return True, ""
+    except Exception as e:
+        return False, str(e)
+
+
 def call_claude_cli_print(
     claude_exe: str,
     prompt: str,

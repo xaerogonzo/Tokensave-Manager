@@ -318,3 +318,103 @@ def test_branch_commit_log_empty_on_git_failure(monkeypatch):
     monkeypatch.setattr("helpers.pr_draft.subprocess.check_output",
                         lambda *a, **k: (_ for _ in ()).throw(OSError("no git")))
     assert _branch_commit_log("/repo", "master") == ""
+
+
+# ── _safe_grounding (B5 extraction) ──────────────────────────────────────────
+
+from types import SimpleNamespace
+from helpers.pr_draft import _safe_grounding, _build_grounding_section
+
+
+def test_safe_grounding_returns_fn_result():
+    assert _safe_grounding(lambda: "block text") == "block text"
+
+
+def test_safe_grounding_passes_args_and_kwargs():
+    assert _safe_grounding(lambda a, b=0: f"{a}-{b}", "x", b="y") == "x-y"
+
+
+def test_safe_grounding_none_becomes_empty_string():
+    # `fn(...) or ""` collapses a None/falsy return to "".
+    assert _safe_grounding(lambda: None) == ""
+    assert _safe_grounding(lambda: "") == ""
+
+
+def test_safe_grounding_swallows_exception():
+    def boom():
+        raise RuntimeError("grounding backend down")
+    assert _safe_grounding(boom) == ""
+
+
+# ── _build_grounding_section (B5 extraction) ─────────────────────────────────
+
+def _grounding_cfg(*, enabled=True, tokensave_exe="ts", codegraph_exe=""):
+    # codegraph_exe="" keeps the ensure_fresh branch (real subprocess) skipped.
+    return SimpleNamespace(enable_pr_grounding=enabled,
+                           tokensave_exe=tokensave_exe,
+                           codegraph_exe=codegraph_exe)
+
+
+def _patch_doc_grounding(monkeypatch, ts="TS", cg="CG", combine=None):
+    """Patch the three helpers.doc_grounding functions at their import site."""
+    monkeypatch.setattr("helpers.doc_grounding.build_grounding_block",
+                        lambda *a, **k: ts)
+    monkeypatch.setattr("helpers.doc_grounding.build_codegraph_block",
+                        lambda *a, **k: cg)
+    monkeypatch.setattr("helpers.doc_grounding.build_combined_grounding",
+                        combine or (lambda a, b: f"{a}{b}"))
+
+
+def test_grounding_section_disabled_returns_empty_and_skips_status():
+    calls = []
+    out = _build_grounding_section(_grounding_cfg(enabled=False), "diff", "/proj",
+                                   on_status=lambda p: calls.append(p))
+    assert out == ""
+    assert calls == []          # on_status NOT fired when grounding is disabled
+
+
+def test_grounding_section_fires_status_grounding(monkeypatch):
+    _patch_doc_grounding(monkeypatch)
+    calls = []
+    _build_grounding_section(_grounding_cfg(), "diff", "/proj",
+                             on_status=lambda p: calls.append(p))
+    assert calls == ["grounding"]
+
+
+def test_grounding_section_success_wraps_combined(monkeypatch):
+    _patch_doc_grounding(monkeypatch, ts="TSBLOCK", cg="CGBLOCK",
+                         combine=lambda a, b: f"{a}|{b}")
+    out = _build_grounding_section(_grounding_cfg(), "diff", "/proj", on_status=None)
+    assert out.startswith("## Affected tests & symbols (auto-attached)")
+    assert "TSBLOCK|CGBLOCK" in out
+
+
+def test_grounding_section_empty_combined_returns_empty(monkeypatch):
+    # Whitespace-only combined block → no section emitted.
+    _patch_doc_grounding(monkeypatch, ts="", cg="", combine=lambda a, b: "   ")
+    assert _build_grounding_section(_grounding_cfg(), "diff", "/proj",
+                                    on_status=None) == ""
+
+
+def test_grounding_section_status_exception_is_swallowed(monkeypatch):
+    _patch_doc_grounding(monkeypatch)
+
+    def bad_status(_p):
+        raise RuntimeError("UI gone")
+
+    # on_status raising must not abort the grounding build.
+    out = _build_grounding_section(_grounding_cfg(), "diff", "/proj",
+                                   on_status=bad_status)
+    assert out.startswith("## Affected tests & symbols")
+
+
+def test_grounding_section_build_failure_returns_empty(monkeypatch):
+    # An exception inside the grounding build → fail-open, returns "".
+    _patch_doc_grounding(monkeypatch)
+
+    def boom(_a, _b):
+        raise ValueError("combine failed")
+
+    monkeypatch.setattr("helpers.doc_grounding.build_combined_grounding", boom)
+    assert _build_grounding_section(_grounding_cfg(), "diff", "/proj",
+                                    on_status=None) == ""

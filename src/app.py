@@ -914,11 +914,13 @@ class App(tk.Tk):
             from helpers.private_repo import sync_private_repo
             dest  = cfg_entry.get("dest", "")
             files = cfg_entry.get("files", [])
-            sync_private_repo(
+            result = sync_private_repo(
                 self._cfg.git_exe, path, dest, files,
                 on_log=self._log,
                 commit_msg=commit_msg,
             )
+            if not result and result.reason:
+                self._log(f"  Detail: {result.reason}", "red")
             # After finishing, check if another sync was queued (G8)
             self.after(0, lambda: self._finish_private_sync(path))
 

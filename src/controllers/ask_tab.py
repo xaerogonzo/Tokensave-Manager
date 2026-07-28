@@ -570,10 +570,32 @@ class AskTabController:
         self._ask_thread = threading.Thread(target=_worker, daemon=True)
         self._ask_send_btn.configure(state=tk.DISABLED)
         self._ask_stop_btn.configure(state=tk.NORMAL)
+        # Novice gotcha #7: the CLI silently loads the project's CLAUDE.md
+        # via cwd — surface that so users know what context was injected
+        # (and can suspect a stale CLAUDE.md when answers go sideways).
         self._ask_status.configure(
-            text="Asking Claude CLI… (no tool access in this mode)",
+            text="Asking Claude CLI… (no tool access in this mode)"
+                 + self._claude_md_note(),
             fg=C["overlay0"])
         self._ask_thread.start()
+
+    def _claude_md_note(self) -> str:
+        """Status-bar suffix describing the project CLAUDE.md the CLI will load.
+
+        Returns e.g. "  Context: CLAUDE.md loaded (4 sections)." or "" when
+        the project has no CLAUDE.md (or it can't be read).
+        """
+        if not self._ask_path:
+            return ""
+        claude_md = os.path.join(self._ask_path, "CLAUDE.md")
+        try:
+            if not os.path.isfile(claude_md):
+                return ""
+            with open(claude_md, encoding="utf-8", errors="replace") as fh:
+                sections = sum(1 for line in fh if line.startswith("## "))
+            return f"  Context: CLAUDE.md loaded ({sections} sections)."
+        except OSError:
+            return ""
 
     def _ask_preflight(self) -> "dict | None":
         """Validate preconditions for sending. Returns llm_cfg dict on success,

@@ -19,8 +19,6 @@ Per Round 4 plan rules:
 from __future__ import annotations
 
 import os
-import threading
-import time
 import tkinter as tk
 from tkinter import messagebox, ttk
 from typing import TYPE_CHECKING
@@ -30,7 +28,6 @@ from helpers.detection import _root_label
 from helpers.git import (
     _format_git_status_cell,
     _is_local_git_repo,
-    _parse_git_status_v2,
 )
 from helpers.project_discovery import (
     fmt_age,
@@ -43,6 +40,8 @@ from controllers.fileops_ctrl import FileOpsController
 from controllers.git_ops_ctrl import GitOpsController
 from controllers.shadowlinks_ctrl import ShadowLinksController
 from controllers.ai_tasks_ctrl import AITasksController
+from controllers.project_sync_ctrl import ProjectSyncCtrl
+from controllers.command_bar_ctrl import CommandBarCtrl
 from dialogs.assign_category import AssignCategoryDialog
 
 if TYPE_CHECKING:
@@ -127,15 +126,14 @@ class ProjectsTabController:
         # Workers managed by THIS controller set/clear this attribute so that
         # App._auto_refresh can see whether the controller is busy.
         self.current_proc: object = None          # subprocess.Popen | None
-        self._git_status_refresh_cancel: bool = False
-        self._git_status_refresh_running: bool = False
+        # Git-status column refresh — delegated to ProjectSyncCtrl
+        self._git_status_refresh_cancel: bool = False   # kept for compat
+        self._git_status_refresh_running: bool = False  # kept for compat
 
         self._tree: ttk.Treeview | None = None
         self._ctx_menu: tk.Menu | None = None
         self._tab = tk.Frame(notebook, bg=C["base"])
         notebook.add(self._tab, text="  Projects  ")
-        self._build_projects_tab()
-        self._build_context_menu()
 
         self._codegraph = CodeGraphController(
             tab=self._tab,
@@ -206,6 +204,32 @@ class ProjectsTabController:
             on_commit_offer=self._offer_commit_after_change,
             on_seed_ask=self._on_seed_ask,
         )
+
+        self._git_status = ProjectSyncCtrl(
+            tab=self._tab,
+            cfg=cfg,
+            on_shell=on_shell,
+            get_tree=lambda: self._tree,
+        )
+
+        self._cmd_bar = CommandBarCtrl(
+            get_path=self._selected_path,
+            require_tokensave=self._require_tokensave,
+            sync=self._sync,
+            doctor=self._doctor,
+            codegraph=self._codegraph,
+            gitops=self._gitops,
+            fileops=self._fileops,
+            shadowlinks=self._shadowlinks,
+            scaffold=self._scaffold,
+            ai_tasks=self._ai_tasks,
+        )
+        # Tab UI + context menu are built last, after all sub-controllers and
+        # CommandBarCtrl exist, so the toolbar buttons and menu items can bind
+        # to self._cmd_bar.cmd_* directly. The sub-controllers only need
+        # self._tab (already created); ProjectSyncCtrl reads self._tree lazily.
+        self._build_projects_tab()
+        self._build_context_menu()
 
     # ── Convenience ───────────────────────────────────────────────────────────
 
@@ -311,11 +335,8 @@ class ProjectsTabController:
                                   tags=tags)
 
     def refresh_git_status_column(self, projects: list) -> None:
-        """Kick off background refresh of the Git status column.
-
-        Called by App.refresh() after rebuild_tree().
-        """
-        self._kick_off_git_status_refresh(projects)
+        """Delegate to ProjectSyncCtrl (Phase C3 extraction)."""
+        self._git_status.refresh(projects)
 
     # ── Internal helpers ──────────────────────────────────────────────────────
 
@@ -387,11 +408,11 @@ class ProjectsTabController:
 
         ttk.Button(btns, text="＋  Scaffold",
                    style="Action.TButton",
-                   command=self.cmd_scaffold).pack(side=tk.LEFT, padx=(0, 6))
+                   command=self._cmd_bar.cmd_scaffold).pack(side=tk.LEFT, padx=(0, 6))
         ttk.Button(btns, text="⚙  Retrofit Existing",
-                   command=self.cmd_retrofit).pack(side=tk.LEFT, padx=(0, 6))
+                   command=self._cmd_bar.cmd_retrofit).pack(side=tk.LEFT, padx=(0, 6))
         ttk.Button(btns, text="↺↺  Sync All",
-                   command=self.cmd_sync_all).pack(side=tk.LEFT)
+                   command=self._cmd_bar.cmd_sync_all).pack(side=tk.LEFT)
 
         ttk.Button(btns, text="⟳  Refresh",
                    command=self._on_refresh).pack(side=tk.RIGHT, padx=(0, 6))
@@ -463,42 +484,42 @@ class ProjectsTabController:
                     bg=C["surface0"], fg=C["text"],
                     activebackground=C["surface1"], activeforeground=C["text"],
                     relief=tk.FLAT, bd=0, font=("Segoe UI", 10))
-        m.add_command(label="★  Set as Active",  command=self.cmd_set_active)
-        m.add_command(label="↺  Sync",           command=self.cmd_sync)
-        m.add_command(label="📊  Status",         command=self.cmd_status)
-        m.add_command(label="⟳  Force Re-sync",  command=self.cmd_force_sync)
-        m.add_command(label="🔍  Doctor",         command=self.cmd_doctor)
+        m.add_command(label="★  Set as Active",  command=self._cmd_bar.cmd_set_active)
+        m.add_command(label="↺  Sync",           command=self._cmd_bar.cmd_sync)
+        m.add_command(label="📊  Status",         command=self._cmd_bar.cmd_status)
+        m.add_command(label="⟳  Force Re-sync",  command=self._cmd_bar.cmd_force_sync)
+        m.add_command(label="🔍  Doctor",         command=self._cmd_bar.cmd_doctor)
         m.add_separator()
-        m.add_command(label="🧠  CodeGraph Init",            command=self.cmd_codegraph_init)
-        m.add_command(label="🧠  CodeGraph Sync",            command=self.cmd_codegraph_sync)
-        m.add_command(label="🧠  CodeGraph Reindex (Full)…", command=self.cmd_codegraph_reindex)
-        m.add_command(label="🧠  CodeGraph Status",          command=self.cmd_codegraph_status)
-        m.add_command(label="🧠  Remove CodeGraph Index…",   command=self.cmd_codegraph_remove)
+        m.add_command(label="🧠  CodeGraph Init",            command=self._cmd_bar.cmd_codegraph_init)
+        m.add_command(label="🧠  CodeGraph Sync",            command=self._cmd_bar.cmd_codegraph_sync)
+        m.add_command(label="🧠  CodeGraph Reindex (Full)…", command=self._cmd_bar.cmd_codegraph_reindex)
+        m.add_command(label="🧠  CodeGraph Status",          command=self._cmd_bar.cmd_codegraph_status)
+        m.add_command(label="🧠  Remove CodeGraph Index…",   command=self._cmd_bar.cmd_codegraph_remove)
         m.add_separator()
-        m.add_command(label="📜  Git Log",        command=self.cmd_git_log)
-        m.add_command(label="📝  Git Commit…",        command=self.cmd_git_commit)
-        m.add_command(label="🔍  AI Code Review…",    command=self.cmd_ai_code_review)
-        m.add_command(label="🔧  Git Init",           command=self.cmd_git_init)
-        m.add_command(label="📋  Manage .gitignore…",      command=self.cmd_manage_gitignore)
-        m.add_command(label="🧹  Untrack Ignored Files…",  command=self.cmd_untrack_ignored)
-        m.add_command(label="🔒  Private Repo…",               command=self.cmd_private_repo)
-        m.add_command(label="🔍  Pre-commit AI Review hook…", command=self.cmd_precommit_hook)
+        m.add_command(label="📜  Git Log",        command=self._cmd_bar.cmd_git_log)
+        m.add_command(label="📝  Git Commit…",        command=self._cmd_bar.cmd_git_commit)
+        m.add_command(label="🔍  AI Code Review…",    command=self._cmd_bar.cmd_ai_code_review)
+        m.add_command(label="🔧  Git Init",           command=self._cmd_bar.cmd_git_init)
+        m.add_command(label="📋  Manage .gitignore…",      command=self._cmd_bar.cmd_manage_gitignore)
+        m.add_command(label="🧹  Untrack Ignored Files…",  command=self._cmd_bar.cmd_untrack_ignored)
+        m.add_command(label="🔒  Private Repo…",               command=self._cmd_bar.cmd_private_repo)
+        m.add_command(label="🔍  Pre-commit AI Review hook…", command=self._cmd_bar.cmd_precommit_hook)
         m.add_command(label="📝  Doc Updates… (CHANGELOG + README)", command=self.cmd_doc_updates)
         m.add_command(label="📋  Roadmap…",                 command=self.cmd_roadmap_manager)
-        m.add_command(label="🔬  Refactor scout…",         command=self.cmd_refactor_scout)
-        m.add_command(label="✓  Run checks…",              command=self.cmd_run_checks)
+        m.add_command(label="🔬  Refactor scout…",         command=self._cmd_bar.cmd_refactor_scout)
+        m.add_command(label="✓  Run checks…",              command=self._cmd_bar.cmd_run_checks)
         m.add_command(label="🔄  Integration check",        command=self.cmd_integration_check)
         m.add_separator()
-        m.add_command(label="📂  Open Folder",    command=self.cmd_open_folder)
-        m.add_command(label="✏   Open in Editor", command=self.cmd_open_editor)
-        m.add_command(label="⎘  Copy Path",       command=self.cmd_copy_path)
+        m.add_command(label="📂  Open Folder",    command=self._cmd_bar.cmd_open_folder)
+        m.add_command(label="✏   Open in Editor", command=self._cmd_bar.cmd_open_editor)
+        m.add_command(label="⎘  Copy Path",       command=self._cmd_bar.cmd_copy_path)
         m.add_separator()
-        m.add_command(label="⚙  Retrofit…",          command=self.cmd_retrofit_selected)
-        m.add_command(label="🔗  Shadow Links…",     command=self.cmd_shadow_links)
+        m.add_command(label="⚙  Retrofit…",          command=self._cmd_bar.cmd_retrofit_selected)
+        m.add_command(label="🔗  Shadow Links…",     command=self._cmd_bar.cmd_shadow_links)
         m.add_command(label="📁  Assign Category…", command=self.cmd_assign_category)
-        m.add_command(label="🗑  Remove Index…",     command=self.cmd_remove)
+        m.add_command(label="🗑  Remove Index…",     command=self._cmd_bar.cmd_remove)
         m.add_separator()
-        m.add_command(label="Auto-detect",        command=self.cmd_auto)
+        m.add_command(label="Auto-detect",        command=self._cmd_bar.cmd_auto)
         self._ctx_menu = m
 
     def _on_right_click(self, event) -> None:
@@ -583,167 +604,9 @@ class ProjectsTabController:
             values=("", path, "(indexing…)", "—", "—", "—"),
             tags=("pending",))
 
-    # ── Git status column refresh ─────────────────────────────────────────────
-
-    def _kick_off_git_status_refresh(self, projects: list) -> None:
-        """Background-walk every git project and update its Git column cell."""
-        if self._git_status_refresh_running:
-            self._git_status_refresh_cancel = True
-        self._git_status_refresh_cancel  = False
-        self._git_status_refresh_running = True
-
-        projects_snapshot = list(projects)
-
-        def worker():
-            try:
-                for p in projects_snapshot:
-                    if self._git_status_refresh_cancel:
-                        return
-                    if not p.get("has_git"):
-                        continue
-                    path = p["path"]
-                    idx_path = os.path.join(path, ".git", "index")
-                    try:
-                        idx_mtime = os.path.getmtime(idx_path)
-                    except OSError:
-                        idx_mtime = 0
-                    cached = p.get("git_status")
-                    cached_mtime = p.get("_git_idx_mtime", -1)
-                    if cached is not None and idx_mtime == cached_mtime:
-                        continue
-                    try:
-                        out, _rc = self._on_shell(
-                            [self._cfg.git_exe, "-C", path,
-                             "status", "--porcelain=v2", "--branch"],
-                            path)
-                        status = _parse_git_status_v2(out)
-                    except Exception:
-                        continue
-                    p["git_status"]     = status
-                    p["_git_idx_mtime"] = idx_mtime
-                    piid = f"proj:{path}"
-                    self._tab.after(0, self._update_git_status_cell, piid, status)
-                    time.sleep(0.05)
-            finally:
-                self._git_status_refresh_running = False
-
-        threading.Thread(target=worker, daemon=True).start()
-
-    def _update_git_status_cell(self, piid: str, status: dict) -> None:
-        """Main-thread: update a single row's Git column value + override tag."""
-        if not self._tree.exists(piid):
-            return
-        text, tag = _format_git_status_cell(status, has_git=True)
-        try:
-            self._tree.set(piid, "git", text)
-        except tk.TclError:
-            return
-        existing = list(self._tree.item(piid, "tags") or ())
-        existing = [t for t in existing if t not in self._GIT_STATUS_TAGS]
-        existing.append(tag)
-        self._tree.item(piid, tags=tuple(existing))
 
     # ── Sync / Status commands — delegate to SyncStatusController ───────────
 
-    def cmd_set_active(self) -> None:
-        if path := self._selected_path():
-            if self._require_tokensave(path):
-                self._sync.cmd_set_active(path)
-
-    def cmd_auto(self) -> None:
-        self._sync.cmd_auto()
-
-    def cmd_sync(self) -> None:
-        path = self._selected_path()
-        if path and self._require_tokensave(path):
-            self._sync.cmd_sync(path)
-
-    def cmd_sync_all(self) -> None:
-        self._sync.cmd_sync_all()
-
-    def cmd_status(self) -> None:
-        path = self._selected_path()
-        if path and self._require_tokensave(path):
-            self._sync.cmd_status(path)
-
-    def cmd_force_sync(self) -> None:
-        path = self._selected_path()
-        if path and self._require_tokensave(path):
-            self._sync.cmd_force_sync(path)
-
-    # ── Doctor command — delegates to DoctorController ───────────────────────
-
-    def cmd_doctor(self) -> None:
-        path = self._selected_path()
-        if not path:
-            return
-        if not self._require_tokensave(path):
-            return
-        self._doctor.cmd_doctor(path)
-
-    # ── CodeGraph commands ────────────────────────────────────────────────────
-
-    # ── CodeGraph commands — delegate to CodeGraphController ─────────────────
-
-    def cmd_codegraph_init(self) -> None:
-        if path := self._selected_path():
-            self._codegraph.cmd_init(path)
-
-    def cmd_codegraph_sync(self) -> None:
-        if path := self._selected_path():
-            self._codegraph.cmd_sync(path)
-
-    def cmd_codegraph_reindex(self) -> None:
-        if path := self._selected_path():
-            self._codegraph.cmd_reindex(path)
-
-    def cmd_codegraph_status(self) -> None:
-        if path := self._selected_path():
-            self._codegraph.cmd_status(path)
-
-    def cmd_codegraph_remove(self) -> None:
-        if path := self._selected_path():
-            self._codegraph.cmd_remove(path)
-
-    # ── Git commands (Projects-tab variants) ──────────────────────────────────
-
-    # ── Git-feature commands — delegate to GitOpsController ──────────────────
-
-    def cmd_git_log(self) -> None:
-        if path := self._selected_path():
-            self._gitops.cmd_git_log(path)
-
-    def cmd_git_commit(self) -> None:
-        if path := self._selected_path():
-            self._gitops.cmd_git_commit(path)
-
-    def cmd_ai_code_review(self) -> None:
-        if path := self._selected_path():
-            self._gitops.cmd_ai_code_review(path)
-
-    def cmd_git_init(self) -> None:
-        if path := self._selected_path():
-            self._gitops.cmd_git_init(path)
-
-    def cmd_manage_gitignore(self) -> None:
-        if path := self._selected_path():
-            self._gitops.cmd_manage_gitignore(path)
-
-    def cmd_precommit_hook(self) -> None:
-        if path := self._selected_path():
-            self._gitops.cmd_precommit_hook(path)
-
-    def cmd_untrack_ignored(self) -> None:
-        if path := self._selected_path():
-            self._gitops.cmd_untrack_ignored(path)
-
-    def cmd_private_repo(self) -> None:
-        if path := self._selected_path():
-            self._gitops.cmd_private_repo(path)
-
-    def cmd_draft_changelog(self) -> None:
-        if path := self._selected_path():
-            self._ai_tasks.cmd_draft_changelog(path)
 
     def cmd_doc_updates(self) -> None:
         """Right-click → 📝 Doc Updates… — open the tabbed doc-drafter dialog.
@@ -774,41 +637,12 @@ class ProjectsTabController:
         from dialogs.roadmap_mgr import RoadmapManagerDialog
         RoadmapManagerDialog(self._root, path, self._cfg)
 
-    def cmd_refactor_scout(self) -> None:
-        if path := self._selected_path():
-            self._ai_tasks.cmd_refactor_scout(path)
 
-    def cmd_run_checks(self) -> None:
-        if path := self._selected_path():
-            self._ai_tasks.cmd_run_checks(path)
 
     def cmd_integration_check(self) -> None:
         """Delegate to App.cmd_integration_check (project-independent)."""
         self._root.cmd_integration_check()
 
-    # ── File-ops commands — delegate to FileOpsController ────────────────────
-
-    def cmd_open_folder(self) -> None:
-        if path := self._selected_path():
-            self._fileops.cmd_open_folder(path)
-
-    def cmd_open_editor(self) -> None:
-        if path := self._selected_path():
-            self._fileops.cmd_open_editor(path)
-
-    def cmd_copy_path(self) -> None:
-        if path := self._selected_path():
-            self._fileops.cmd_copy_path(path)
-
-    def cmd_remove(self) -> None:
-        if path := self._selected_path():
-            self._fileops.cmd_remove(path)
-
-    # ── Shadow Links — delegate to ShadowLinksController ─────────────────────
-
-    def cmd_shadow_links(self) -> None:
-        if path := self._selected_path():
-            self._shadowlinks.cmd_shadow_links(path)
 
     # ── Category assignment ───────────────────────────────────────────────────
 
@@ -851,14 +685,3 @@ class ProjectsTabController:
         self._cfg.save()
         self._on_refresh()
 
-    # ── Scaffold / Retrofit commands — delegate to ScaffoldRetrofitController ──
-
-    def cmd_scaffold(self) -> None:
-        self._scaffold.cmd_scaffold()
-
-    def cmd_retrofit(self) -> None:
-        self._scaffold.cmd_retrofit()
-
-    def cmd_retrofit_selected(self) -> None:
-        if path := self._selected_path():
-            self._scaffold.cmd_retrofit_selected(path)

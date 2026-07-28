@@ -25,193 +25,29 @@ pattern as the gitignore AI-Suggest worker).
 
 from __future__ import annotations
 
-import contextlib
 import os
 import threading
-import time
 import tkinter as tk
 from tkinter import ttk, messagebox
 from typing import TYPE_CHECKING
 
 from constants import C
-import re
 
 
 
-# ── README mirror-contract helpers ──────────────────────────────────────────
-#
-# _mirror_contract_check + support constants/functions enforce that the AI
-# draft preserves existing sub-section bullets under REPLACE semantics.
-
-_STOP_WORDS = {
-    # articles / conjunctions
-    "the", "a", "an", "and", "or", "but", "if", "then", "than",
-    # prepositions (commonly bloat dedup denominator without semantic weight)
-    "of", "to", "in", "on", "at", "by", "as", "for", "with", "from", "into",
-    "via", "per", "between", "through", "across", "over", "under",
-    "after", "before", "during", "while", "when",
-    # copulas / pronouns
-    "be", "is", "are", "was", "were", "it", "its", "this", "that",
-    # adverbs that surface a lot in commit prose with no scope info
-    "also", "now", "still", "even", "just", "only",
-}
-
-
-# Phase 2.0 — literal template placeholder detector for README sub-section
-# headers.  Catches the leakage where a small model copies the prompt's
-# template literally instead of substituting real values.
-#
-# What MATCHES (rejected at apply-time with the candidate list in the error):
-#   - `Roadmap-<single ASCII letter>` where the letter is NOT followed by
-#     another letter or digit (so `Roadmap-N`, `Roadmap-X`, `Roadmap-Y`,
-#     `Roadmap-Z` match but `Roadmap-Native` and `Roadmap-N-API` do not)
-#   - `Roadmap-<angle-bracket placeholder>` (e.g. `Roadmap-<num>`)
-#   - Common placeholder words after `Roadmap-`: TODO, TBD, PLACEHOLDER,
-#     PENDING, NUM, NUMBER (case-insensitive)
-#   - The bare template marker `<sub-section header>` (from prompt example)
-#
-# What does NOT match:
-#   - Real numeric roadmaps: `Roadmap-6`, `Roadmap-77`, `Roadmap-123`
-#   - Multi-letter suffixes that may be legitimate: `Roadmap-Native`,
-#     `Roadmap-N-API-binding`, `Roadmap-Foo`
-#   - Non-Roadmap headers entirely
-#
-# Intentionally conservative — only flags patterns that NEVER appear in
-# legitimate human-written headers.  Avoids the regex whack-a-mole that
-# would come from trying to catch every shape a model could invent.
-_LITERAL_PLACEHOLDER_RE = re.compile(
-    r"\bRoadmap[-\s](?:"
-    r"[A-Za-z](?![A-Za-z0-9])"
-    r"|<[^>]+>"
-    r"|TODO\b|TBD\b|PLACEHOLDER\b|PENDING\b|NUM\b|NUMBER\b"
-    r")|<sub-section[^>]*>",
-    re.IGNORECASE,
-)
-
-
-def _token_set(bullet):
-    """Lowercase-tokenise + strip stop-words + drop short tokens.
-
-    Used by ``_is_duplicate``.  Length filter (>2 chars) discards noise like
-    digits, single letters, and one-char punctuation residue without losing
-    meaningful short tokens (gitignore semantics catches "AI", "PR", "UI",
-    "CLI" at length 2-3 — keep >2 threshold).
-    """
-    s = re.sub(r"[^\w\s]", " ", (bullet or "").lower())
-    return {t for t in s.split() if t not in _STOP_WORDS and len(t) > 2}
-
-
-# ── Mirror-contract safety net (Phase 1.9) ──────────────────────────────────
-#
-# README's `insert_readme_highlights_subsection` patcher uses REPLACE
-# semantics: when a matching sub-section already exists, the patcher
-# OVERWRITES it with the draft.  The model is told to mirror existing
-# bullets back as part of the output (Phase 1.6 design), but small
-# models occasionally break that contract — most dramatically when
-# Phase 1.8's granularity rules pushed qwen-14b so hard toward NEW
-# bullets that it dropped all existing ones.
-#
-# Phase 1.9 adds the LOAD-BEARING enforcement: before any README write,
-# verify the draft preserves enough existing bullets.  Prompt rules are
-# advisory; this gate is hard.
-
-# Floor for "this pair counts as preserved" after pre-scoring.  Looser
-# than the Phase 1.6 dedup threshold (0.65) because preservation needs
-# HIGH RECALL (catch rephrased mirrors) rather than HIGH PRECISION.
-# The min-intersection-size floor inside _preserve_score (≥ 2 shared
-# tokens) prevents single-word false matches that 0.40 alone would let
-# through.
-_PRESERVATION_THRESHOLD = 0.40
-
-
-def _preserve_score(a_set, b_set):
-    """Return preservation similarity (0..1) for two pre-tokenised bullets.
-
-    Combines Jaccard and overlap with a MIN-INTERSECTION-SIZE floor:
-    two bullets need to share ≥ 2 non-stop-word tokens before either
-    metric counts.  Without this, a 2-token existing bullet like
-    ``{"script", "cleanup"}`` would be falsely "preserved" by any long
-    draft that happens to contain "script" (overlap = 1/2 = 0.50 trips
-    any reasonable threshold despite zero semantic relation).
-
-    Returns 0.0 when the floor isn't met; otherwise ``max(jaccard,
-    overlap)``.  The score is used for highest-score-first matching in
-    `_mirror_contract_check` — the threshold is applied AFTER bipartite
-    assignment so no greedy ordering cascade can mask drift.
-    """
-    if not a_set or not b_set:
-        return 0.0
-    intersection = a_set & b_set
-    if len(intersection) < 2:
-        return 0.0                  # single-token overlap is noise
-    union = a_set | b_set
-    jaccard = len(intersection) / len(union)
-    overlap = len(intersection) / min(len(a_set), len(b_set))
-    return max(jaccard, overlap)
-
-
-def _mirror_contract_check(draft_bullets, existing_bullets,
-                           min_preservation=0.75):
-    """Verify a README draft preserves enough existing sub-section bullets.
-
-    Returns ``(ok, kept_count, missing_count, missing_examples)``.
-
-    Algorithm:
-      1. Pre-tokenise both lists ONCE (no per-comparison retokenisation).
-      2. Score all (existing, draft) pairs via `_preserve_score`.  Keep
-         only pairs scoring ≥ _PRESERVATION_THRESHOLD.
-      3. Sort kept pairs by descending score.
-      4. **Highest-score-first greedy bipartite**: walk sorted pairs;
-         each existing claims at MOST ONE draft; each draft serves at
-         MOST ONE existing.  Prevents a short existing bullet from
-         falsely claiming a long unrelated draft on a single shared
-         word.
-      5. **Quantization tolerance**: reject only when ``ratio <
-         min_preservation AND missing > 1``.  Single-drop is always
-         tolerated regardless of ratio (legitimate small-list pruning).
-
-    On empty ``existing_bullets`` (genuinely new sub-section) returns
-    ``(True, 0, 0, [])`` — there is no contract to enforce.
-    """
-    if not existing_bullets:
-        return True, 0, 0, []       # genuinely new sub-section
-
-    existing_compiled = [(eb, _token_set(eb)) for eb in existing_bullets]
-    draft_compiled   = [(db, _token_set(db)) for db in draft_bullets]
-
-    triples = []                    # (score, existing_idx, draft_idx)
-    for ei, (_, a) in enumerate(existing_compiled):
-        for di, (_, b) in enumerate(draft_compiled):
-            s = _preserve_score(a, b)
-            if s >= _PRESERVATION_THRESHOLD:
-                triples.append((s, ei, di))
-
-    triples.sort(key=lambda t: -t[0])
-    claimed_e, claimed_d = set(), set()
-    for _score, ei, di in triples:
-        if ei in claimed_e or di in claimed_d:
-            continue
-        claimed_e.add(ei)
-        claimed_d.add(di)
-
-    matched = len(claimed_e)
-    missing_list = [eb for ei, (eb, _) in enumerate(existing_compiled)
-                    if ei not in claimed_e]
-    missing = len(missing_list)
-    ratio = matched / len(existing_bullets)
-
-    if ratio < min_preservation and missing > 1:
-        missing_examples = [
-            (eb[:80] + "…" if len(eb) > 80 else eb)
-            for eb in missing_list
-        ][:3]
-        return False, matched, missing, missing_examples
-    return True, matched, missing, []
 
 
 from helpers.release import _classify_commits_for_changelog
 from helpers import doc_drafter as dd
 from helpers.doc_types import REGISTRY
+from dialogs.doc_drafter_support import (
+    _BACKEND_DEFAULT,
+    _BACKEND_OPTIONS,
+    _BackendResolver,
+    _DraftTicker,
+    _suppressed_modified,
+    build_tab,
+)
 
 if TYPE_CHECKING:
     from typing import Callable
@@ -225,38 +61,6 @@ _RANGE_MODES = [
     ("Since last release tag",   "since_last_tag"),
     ("Custom range…",            "custom"),
 ]
-
-# Per-session backend override values for the dialog header dropdown.
-# Picked per-draft, never persisted to Settings.  The override applies only
-# to the NEXT Generate click (_llm_cfg_resolved snapshots at Generate time;
-# mid-flight workers continue with their captured config).
-_BACKEND_DEFAULT     = "Default (ask_tab_llm)"
-_BACKEND_OLLAMA      = "Force Ollama"
-_BACKEND_CLAUDE_CLI  = "Force Claude CLI"
-_BACKEND_OPTIONS     = [_BACKEND_DEFAULT, _BACKEND_OLLAMA, _BACKEND_CLAUDE_CLI]
-
-
-@contextlib.contextmanager
-def _suppressed_modified(state: dict):
-    """v4.4 (Gemini #2): guarantee the suppress_modified flag clears.
-
-    Tk's ``<<Modified>>`` virtual event fires on programmatic
-    ``text.insert(...)`` too, which would otherwise clear the warning
-    banner the moment a draft lands. The dialog uses
-    ``state["suppress_modified"]`` to gate the handler. Without
-    ``try``/``finally``, any exception mid-insert (a TclError, a Unicode
-    glitch, a worker race) leaves the flag stuck True for the rest of
-    the session — the banner can never auto-clear again.
-
-    This context manager wraps every programmatic mutation site so the
-    flag is always reset, regardless of what happens inside the block.
-    """
-    state["suppress_modified"] = True
-    try:
-        yield
-    finally:
-        state["suppress_modified"] = False
-
 
 class DocDrafterDialog(tk.Toplevel):
     """Tabbed doc-update drafter (CHANGELOG + README)."""
@@ -294,6 +98,13 @@ class DocDrafterDialog(tk.Toplevel):
         # _llm_cfg_resolved() reads this var on every Generate click;
         # _backend_summary() reflects it in the header label.
         self._backend_override_var = tk.StringVar(value=_BACKEND_DEFAULT)
+
+        # Phase C4: backend resolution + draft-tick animation extracted into
+        # cohesive helper objects to slim this dialog. Created before the header
+        # is built (it calls self._backend.summary()).
+        self._backend = _BackendResolver(
+            cfg, lambda: self._backend_override_var.get())
+        self._ticker = _DraftTicker(self, self._tab_state, self._backend)
 
         # C5: warm-up flag — ensure we only fire once per dialog session.
         self._warmup_done = False
@@ -374,7 +185,7 @@ class DocDrafterDialog(tk.Toplevel):
             "<<ComboboxSelected>>",
             lambda _e: self._on_backend_override_changed())
 
-        self._backend_var = tk.StringVar(value=self._backend_summary())
+        self._backend_var = tk.StringVar(value=self._backend.summary())
         self._backend_lbl = tk.Label(hdr, textvariable=self._backend_var,
                                        bg=C["base"], fg=C["overlay0"],
                                        font=("Segoe UI", 8))
@@ -384,11 +195,12 @@ class DocDrafterDialog(tk.Toplevel):
         """Dropdown handler — refresh the summary label + visual style.
 
         Does NOT touch any in-flight worker.  Workers snapshot their config
-        at Generate-click time via _llm_cfg_resolved(); changing the
-        dropdown while a worker is running only affects the NEXT click.
+        at Generate-click time via ``self._backend.llm_cfg_resolved()``;
+        changing the dropdown while a worker is running only affects the
+        NEXT click.
         """
         try:
-            self._backend_var.set(self._backend_summary())
+            self._backend_var.set(self._backend.summary())
             override = self._backend_override_var.get()
             if override == _BACKEND_DEFAULT:
                 # Restore the dim grey for the default config-driven backend.
@@ -398,53 +210,6 @@ class DocDrafterDialog(tk.Toplevel):
                 self._backend_lbl.configure(fg=C["peach"])
         except tk.TclError:
             pass
-
-    def _backend_summary(self):
-        cfg = self._llm_cfg_resolved()
-        prov = cfg.get("provider", "(none configured)")
-        model = cfg.get("model") or "(default)"
-        override = self._backend_override_var.get()
-        if override != _BACKEND_DEFAULT:
-            return f"⚡ OVERRIDE → {prov} / {model}"
-        which = "ask_tab_llm" if (self._cfg.raw or {}).get("ask_tab_llm") \
-                else "commit_message_llm"
-        return f"Backend: {which} → {prov} / {model}"
-
-    def _llm_cfg_resolved(self):
-        """Resolve which LLM config dict to use for the next Generate click.
-
-        Honours the per-session backend override dropdown.  When the
-        override is active, builds a synthetic config by WHITELISTING only
-        the fields the target provider's dispatcher reads — avoids leaking
-        an Anthropic api_key_env into a forced Ollama call, etc.
-        """
-        raw = self._cfg.raw if isinstance(self._cfg.raw, dict) else {}
-        base = raw.get("ask_tab_llm") or raw.get("commit_message_llm") or {}
-        override = self._backend_override_var.get()
-        if override == _BACKEND_OLLAMA:
-            # _call_llm openai_compatible path reads: provider, model,
-            # base_url, enabled, timeout_seconds.  Only INHERIT the base
-            # config's base_url if base was already an Ollama-compatible
-            # provider — otherwise an Anthropic / OpenAI base_url would
-            # silently get used for a forced Ollama call and fail.
-            base_provider = (base.get("provider") or "").lower()
-            base_url_safe = base.get("base_url") if base_provider in (
-                "ollama", "openai_compatible") else None
-            return {
-                "enabled":  True,
-                "provider": "ollama",
-                "model":    base.get("model") or "qwen2.5-coder:14b",
-                "base_url": base_url_safe or "http://localhost:11434",
-            }
-        if override == _BACKEND_CLAUDE_CLI:
-            # dispatch_llm claude_cli path reads provider + model from the
-            # config; exe path / cwd / timeout come from explicit args.
-            return {
-                "enabled":  True,
-                "provider": "claude_cli",
-                "model":    self._cfg.claude_cli_model or "",
-            }
-        return base
 
     def _refresh_range(self):
         """Resolve the selected range mode + update range_info + clear drafts.
@@ -562,159 +327,8 @@ class DocDrafterDialog(tk.Toplevel):
         )
 
     def _build_tab(self, key, target_file, generate_label):
-        frame = tk.Frame(self._notebook, bg=C["base"], padx=8, pady=8)
-        self._notebook.add(frame, text=f"  {key.upper()}  ")
-
-        is_file_picker = (target_file == "")
-        target_var = None
-
-        if is_file_picker:
-            # File-picker row: combobox + refresh button
-            picker_row = tk.Frame(frame, bg=C["base"])
-            picker_row.pack(fill=tk.X, pady=(0, 4))
-            tk.Label(picker_row, text="Target file:",
-                     bg=C["base"], fg=C["overlay0"],
-                     font=("Consolas", 8)).pack(side=tk.LEFT)
-            target_var = tk.StringVar()
-            file_list = self._list_picker_files(key)
-            cb = ttk.Combobox(picker_row, textvariable=target_var,
-                              values=file_list, width=40, state="normal")
-            if file_list:
-                target_var.set(file_list[0])
-            cb.pack(side=tk.LEFT, padx=(6, 0))
-
-            def _refresh_picker(k=key, c=cb, v=target_var):
-                new_list = self._list_picker_files(k)
-                c["values"] = new_list
-                if new_list and not v.get():
-                    v.set(new_list[0])
-
-            ttk.Button(picker_row, text="↻",
-                       command=_refresh_picker).pack(side=tk.LEFT, padx=(4, 0))
-        else:
-            # Static target label
-            target_path = os.path.join(self._project_path, target_file)
-            tk.Label(frame,
-                     text=f"Target: {target_file}    ({target_path})",
-                     bg=C["base"], fg=C["overlay0"],
-                     font=("Consolas", 8)).pack(anchor=tk.W, pady=(0, 4))
-
-        # v4 Fix 2a: read-only warning banner above the text widget.
-        # Surfaces simulate-time title-rejection / mismatch warnings
-        # WITHOUT polluting the editable text payload — keeps the Apply
-        # button's data clean. pack_forget'd by default; the
-        # `_show_warning_banner` / `_hide_warning_banner` helpers
-        # toggle visibility.
-        warning_var = tk.StringVar(value="")
-        warning_lbl = tk.Label(
-            frame, textvariable=warning_var,
-            bg=C["base"], fg=C["red"], font=("Segoe UI", 9, "bold"),
-            wraplength=900, justify=tk.LEFT, anchor=tk.W,
-        )
-        # Not packed yet — visibility managed by _show_warning_banner.
-
-        # Editable text area for the draft
-        txt_wrap = tk.Frame(frame, bg=C["mantle"])
-        txt_wrap.pack(fill=tk.BOTH, expand=True)
-        txt = tk.Text(txt_wrap, font=("Consolas", 9),
-                      bg=C["mantle"], fg=C["text"],
-                      insertbackground=C["text"],
-                      relief=tk.FLAT, padx=6, pady=4, wrap=tk.WORD,
-                      height=20)
-        vsb = ttk.Scrollbar(txt_wrap, orient="vertical", command=txt.yview)
-        txt.configure(yscrollcommand=vsb.set)
-        vsb.pack(side=tk.RIGHT, fill=tk.Y)
-        txt.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
-
-        # Empty-state placeholder
-        txt.insert("1.0",
-                   "(no draft yet — click Generate to draft from the "
-                   "selected commit range)")
-        txt.tag_add("placeholder", "1.0", tk.END)
-        txt.tag_configure("placeholder", foreground=C["overlay0"])
-
-        # <<Modified>> binding — user-typed edits re-enable Apply if the
-        # buffer holds non-placeholder content.  Apply may have been hard-
-        # disabled by a previous "all filtered" generate result; without
-        # this binding the user couldn't rescue the situation by typing
-        # their own bullet.  Tk fires <<Modified>> once per flag toggle;
-        # _on_text_modified resets the flag so subsequent edits also fire.
-        txt.bind("<<Modified>>",
-                  lambda _e, k=key: self._on_text_modified(k))
-        # Clear the modified flag set by the programmatic insert above so
-        # the first USER edit (not our setup insert) fires the binding.
-        try:
-            txt.edit_modified(False)
-        except tk.TclError:
-            pass
-
-        # Buttons + status
-        btn_row = tk.Frame(frame, bg=C["base"])
-        btn_row.pack(fill=tk.X, pady=(6, 0))
-        gen_btn = ttk.Button(btn_row, text=f"🔄 {generate_label}",
-                             command=lambda k=key: self._on_generate(k))
-        gen_btn.pack(side=tk.LEFT)
-        copy_btn = ttk.Button(btn_row, text="📋 Copy",
-                              command=lambda k=key: self._on_copy(k))
-        copy_btn.pack(side=tk.LEFT, padx=(6, 0))
-        apply_btn = ttk.Button(btn_row, text="✓ Apply via Proposal",
-                               command=lambda k=key: self._on_apply(k))
-        apply_btn.pack(side=tk.LEFT, padx=(6, 0))
-
-        # C3: retry-with-feedback button — hidden until apply is rejected.
-        feedback_btn = ttk.Button(btn_row, text="🔁 Regenerate with feedback",
-                                  command=lambda k=key: self._on_regenerate_with_feedback(k))
-        # NOT packed yet — revealed by _on_apply_result on failure.
-
-        # B2: per-tab checkbox to enable agentic tokensave tool use.
-        ts_tools_var = tk.BooleanVar(value=True)
-        ts_tools_chk = ttk.Checkbutton(btn_row, text="🔍 Tokensave tools",
-                                        variable=ts_tools_var)
-        ts_tools_chk.pack(side=tk.RIGHT, padx=(6, 0))
-
-        # v4.1: tooltip explaining the Ollama-only asymmetry. The checkbox
-        # only routes to the agentic LocalAgent loop for ollama /
-        # openai_compatible providers — Claude CLI and Anthropic use
-        # single-shot completion regardless. The always-on tokensave
-        # GROUNDING block (separate from this checkbox) runs for every
-        # backend; the checkbox specifically enables runtime tool-use.
-        from theme import _Tooltip
-        _Tooltip(
-            ts_tools_chk,
-            "Enables an Ollama-only agentic loop where the local model "
-            "can call tokensave_search and tokensave_context as tools "
-            "mid-generation. Silently ignored for Claude CLI / Anthropic "
-            "/ OpenAI — those backends use single-shot completion. "
-            "Disable if Ollama drafts time out. "
-            "(The always-on tokensave grounding block runs separately "
-            "for all backends.)",
-        )
-
-        status_var = tk.StringVar(value="")
-        # wraplength keeps long filter messages from pushing buttons off-screen
-        # on narrow window sizes; status text wraps inside the row instead.
-        status_lbl = tk.Label(btn_row, textvariable=status_var,
-                              bg=C["base"], fg=C["overlay0"],
-                              font=("Segoe UI", 8),
-                              wraplength=420, justify=tk.LEFT)
-        status_lbl.pack(side=tk.LEFT, padx=(12, 0), fill=tk.X, expand=True)
-
-        self._tab_widgets[key] = {
-            "frame":          frame,
-            "text":           txt,
-            "txt_wrap":       txt_wrap,    # v4: pack-anchor for warning banner
-            "gen_btn":        gen_btn,
-            "apply_btn":      apply_btn,
-            "feedback_btn":   feedback_btn,
-            "ts_tools_var":   ts_tools_var,
-            "btn_row":        btn_row,
-            "status_var":     status_var,
-            "status_lbl":     status_lbl,
-            "warning_var":    warning_var,   # v4: simulate-time warnings
-            "warning_lbl":    warning_lbl,
-            "target":         target_file,
-            "target_var":     target_var,   # None for fixed-target DocTypes
-        }
+        """Delegate to doc_drafter_support.build_tab (Roadmap-8 split)."""
+        build_tab(self, key, target_file, generate_label)
 
     # ── File-picker helpers ────────────────────────────────────────────────
 
@@ -847,7 +461,7 @@ class DocDrafterDialog(tk.Toplevel):
         raw = self._cfg.raw if isinstance(self._cfg.raw, dict) else {}
         if not raw.get("ollama_warmup", False):
             return
-        llm_cfg = self._llm_cfg_resolved()
+        llm_cfg = self._backend.llm_cfg_resolved()
         provider = (llm_cfg or {}).get("provider", "").lower()
         if provider not in ("ollama", "openai_compatible"):
             return
@@ -944,7 +558,7 @@ class DocDrafterDialog(tk.Toplevel):
                 key, "Resolve a commit range first.")
             return
 
-        llm_cfg = self._llm_cfg_resolved()
+        llm_cfg = self._backend.llm_cfg_resolved()
         if not llm_cfg or not llm_cfg.get("provider"):
             self._show_generate_blocker(
                 key,
@@ -1029,7 +643,7 @@ class DocDrafterDialog(tk.Toplevel):
 
         # v4 Fix 4c: start the elapsed-time tick. Self-cancels on
         # completion / dialog destruction / stop-event identity change.
-        self._start_draft_tick(key, stop_event)
+        self._ticker.start(key, stop_event)
 
         # Snapshot context for the worker.
         commits     = rd["commits"]
@@ -1228,7 +842,7 @@ class DocDrafterDialog(tk.Toplevel):
             # v4: stop the draft tick + stop-event identity guard. If the
             # captured Event is no longer the current one, a newer
             # Generate has been started — drop this stale result.
-            self._stop_draft_tick(key)
+            self._ticker.stop(key)
             if (captured_stop_event is not None
                     and captured_stop_event is not self._tab_state.get(
                         key, {}).get("stop")):
@@ -1398,7 +1012,7 @@ class DocDrafterDialog(tk.Toplevel):
                 return
             # v4: stop the tick + stop-event identity guard against stale
             # error callbacks from a superseded generation.
-            self._stop_draft_tick(key)
+            self._ticker.stop(key)
             if (captured_stop_event is not None
                     and captured_stop_event is not self._tab_state.get(
                         key, {}).get("stop")):
@@ -1717,110 +1331,6 @@ class DocDrafterDialog(tk.Toplevel):
         except (tk.TclError, KeyError, RuntimeError):
             pass
 
-    # ── v4 Fix 4c: draft-tick (elapsed time during generation) ───────────
-
-    def _backend_label_for_status(self, key):
-        """Short human-readable backend name for the 'Drafting on X' tick.
-
-        Reads the resolved LLM config at tick time so a backend-override
-        change during generation reflects in the visible label.
-        """
-        try:
-            cfg = self._llm_cfg_resolved() or {}
-        except (AttributeError, RuntimeError):
-            return "LLM"
-        provider = (cfg.get("provider") or "").lower()
-        if provider == "claude_cli":
-            return "Claude CLI"
-        if provider == "ollama":
-            return "Ollama"
-        if provider == "anthropic":
-            return "Anthropic"
-        if provider == "openai":
-            return "OpenAI"
-        if provider == "openai_compatible":
-            base = (cfg.get("base_url") or "").lower()
-            return "Ollama" if "localhost" in base else "OpenAI-compat"
-        return provider or "LLM"
-
-    # G6 (v4.4): tick enforces this hard timeout beyond dispatch_llm's
-    # 300 s limit. The extra 10 s grace absorbs Python thread-scheduling
-    # lag. When triggered, the captured stop_event is signalled so the
-    # worker can break its iteration loop; a hard error message is
-    # surfaced in the status bar. Note: Python cannot forcibly kill a
-    # hung subprocess, so the OS-level Ollama process may remain running.
-    _DRAFT_TICK_HARD_TIMEOUT = 310   # seconds; dispatch_llm timeout is 300
-
-    def _draft_tick(self, key):
-        """Periodic status-bar tick during a long Generate run.
-
-        Updates the status text every second with elapsed seconds, e.g.
-        `"Drafting on Ollama (12s)…"`. Lets the user see the background
-        loop is alive even on 300 s agentic runs (without this, a 5-min
-        block looks like a hang). Self-cancels when:
-          - dialog destroyed (winfo_exists guard)
-          - draft_start_ts cleared (completion / error)
-          - stop_event identity changed (newer generation in flight)
-          - elapsed time exceeds _DRAFT_TICK_HARD_TIMEOUT (G6 v4.4)
-        """
-        try:
-            if not self.winfo_exists():
-                return
-        except tk.TclError:
-            return
-        state = self._tab_state.get(key) or {}
-        start = state.get("draft_start_ts")
-        if not start:
-            return   # completed / cancelled
-        # Stop-event identity guard against stale tick loops left over
-        # from a previous generation that was superseded.
-        captured = state.get("draft_tick_stop_event")
-        if captured is not None and captured is not state.get("stop"):
-            return
-        elapsed = int(time.monotonic() - start)
-        # G6: self-enforced hard timeout. If dispatch_llm's own 300 s
-        # limit didn't fire (OS-level Ollama hang), we unblock the UI
-        # and signal the stop_event so the worker can exit its loop.
-        if elapsed > self._DRAFT_TICK_HARD_TIMEOUT:
-            if captured is not None:
-                captured.set()
-            state["draft_start_ts"] = None
-            self._set_status(
-                key,
-                f"⚠ Drafting timed out after {elapsed}s — backend hung "
-                "(no Python exception). Stop signalled. Try again or "
-                "switch to a different backend.",
-                C["red"],
-            )
-            return
-        backend = self._backend_label_for_status(key)
-        self._set_status(key, f"Drafting on {backend} ({elapsed}s)…",
-                         C["overlay0"])
-        try:
-            state["draft_tick_after"] = self.after(
-                1000, lambda k=key: self._draft_tick(k))
-        except tk.TclError:
-            pass
-
-    def _start_draft_tick(self, key, stop_event):
-        """Start the per-second draft tick. Called from _on_generate."""
-        state = self._tab_state.setdefault(key, {})
-        state["draft_start_ts"] = time.monotonic()
-        state["draft_tick_stop_event"] = stop_event
-        try:
-            state["draft_tick_after"] = self.after(
-                1000, lambda k=key: self._draft_tick(k))
-        except tk.TclError:
-            pass
-
-    def _stop_draft_tick(self, key):
-        """Cancel the tick. Called from _on_generate_done / _on_generate_error."""
-        state = self._tab_state.get(key) or {}
-        state["draft_start_ts"] = None
-        state["draft_tick_stop_event"] = None
-        after_id = state.pop("draft_tick_after", None)
-        if after_id is not None:
-            try:
-                self.after_cancel(after_id)
-            except tk.TclError:
-                pass
+    # Backend resolution (_BackendResolver) and the draft-tick animation
+    # (_DraftTicker) were extracted to module-level helper classes in Phase C4.
+    # See self._backend and self._ticker, wired in __init__.

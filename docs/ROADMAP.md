@@ -140,10 +140,10 @@ per-item registry remains `memory/roadmap_backlog.md`.
 The Test Manager shipped in v4.13 but six specific gaps surfaced in the
 ship session. All are small, all reinforce the "novice-friendly" goal.
 
-- 🔮 **Step-0 sum-bug fix**: Sync PR Checklist over-counts when "Run
+- ✅ **Step-0 sum-bug fix**: Sync PR Checklist over-counts when "Run
   All" duplicated totals across every row (e.g. 5648/5648 instead of
-  353/353). Add a `summary: {passed, total, ran_at}` block to
-  `.tokensave-manager/last_test_run.json`. See backlog `[v4.13 chat]`.
+  353/353). A cache-level `summary` block now wins; per-file summing is
+  the legacy/single-file path. Shipped 2026-07-28. (`src/dialogs/test_manager.py`)
 - 🔮 **CI status indicator inside the manager**: poll `gh run list
   --branch master --limit 1 --json conclusion` and render a 🟢/🔴/🟡
   badge in the Test Manager status bar so users don't have to alt-tab
@@ -178,11 +178,11 @@ already exist and are dogfood-validated. The dialog itself is the new work.
 
 #### Theme C — Novice UX polish (small + audit)
 v4.3 audited only AI/grounding surfaces. Roadmap-8 finishes the job.
-- 🔮 **Ship-now batch (6 items from v4.3 audit)**: see
-  `memory/novice_gotchas_ai.md`. Settings AI section scope labels,
-  `num_ctx` guidance, doc-drafter "you can edit" hint, CLAUDE.md
-  load indicator, gitignore AI source log, rename "grounding" →
-  "Attach code context." 2-5 lines each.
+- ✅ **Ship-now batch (6 items from v4.3 audit)**: Settings AI section
+  scope labels + `num_ctx` de-jargoned to "Context window (tokens)" +
+  grounding toggle relabeled "Attach code context"; doc-drafter "you can
+  edit" placeholder/tooltip; ask-tab CLAUDE.md load indicator; gitignore
+  AI Suggest source disclosure. Shipped 2026-07-28. (`src/dialogs/settings_ai.py`, `src/dialogs/doc_drafter.py`, `src/controllers/ask_tab.py`, `src/dialogs/shadow_links.py`)
 - 🔮 **Full-UX audit across non-AI tabs** (Projects, Git, Doctor,
   Tasks): output → `memory/novice_gotchas_full.md` + triage list.
 - 🔮 **Full menu / dialog visual rework**: overflowing checkbox lists,
@@ -495,6 +495,17 @@ To be explicit about what we're NOT building:
 ## Status updates
 
 This file is updated whenever a stage ships or its design materially changes.
+
+**Last updated: 2026-07-28** — Roadmap-8 in progress on branch `Roadmap-8` (PR pending). Shipped so far:
+- Theme A Step-0 sum-bug: Sync PR Checklist no longer N-folds suite count
+- Theme C Ship-now batch: 6 novice-clarity fixes across AI surfaces (Settings scope notes, num_ctx label, grounding → "Attach code context", doc-drafter hint, ask-tab CLAUDE.md indicator, gitignore source disclosure)
+- god-file splits: SettingsDialog → PathsSection/CodegraphSection/AISection; help-tab 22 topic renderers → topic modules; doc_drafter helpers 2683 lines → 5 family modules; doc-drafter dialog 1858 → 1336 lines
+- Commit-request handoff: external tools (Claude Code) can propose commits via `.tokensave-manager/commit_request.json`; manager shows 🤝 banner
+- Shadow links SL1+SL4 (persist ext maps), SL5 (unindexed scanner), SL6 (GZDoom defaults), NTFS preflight — Roadmap-9 items landed early
+- Tokensave v7.8.1 integration: 5 new prompts snippets, commit_context enrichment in Suggest, help-tab project.json note
+- Bug fixes: pseudo-diff for all-new-file repos, Draft PR right-click menu (`_git_path` → `get_path()`)
+- 11 new test files (test_ask_tab, test_doc_drafter×7, test_help_topics×3, test_shadowlinks); suite ~986 → ~1010+
+- Quality signal 7927 → 8106; CI `actions/checkout` → v5
 
 **Last updated: 2026-05-27** — Roadmap-7 shipped via the cascade plan (rounds v3 → v4.13, 13 rounds on the `Roadmap-7` branch). Themes A–E all ✅. Highlights:
 - v3–v4 doc-drafter hardening + multi-section + alignment-aware generic short-circuit

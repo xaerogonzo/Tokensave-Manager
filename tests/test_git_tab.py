@@ -500,3 +500,50 @@ class TestGitTabControllerInit:
         )
 
         assert controller._root is tk_root
+
+class TestCmdOpenClaudeCli:
+    """cmd_open_claude_cli guards + delegation, tested unbound on a stub."""
+
+    @staticmethod
+    def _stub(git_path="/repo", cli_exe="/usr/bin/claude",
+              cli_model="claude-haiku"):
+        cfg = SimpleNamespace(claude_cli_exe=cli_exe,
+                              claude_cli_model=cli_model)
+        return SimpleNamespace(_git_path=git_path, _cfg=cfg, _root=None)
+
+    def test_no_project_selected_is_noop(self, mocker):
+        mock_spawn = mocker.patch(
+            "helpers.claude_cli.spawn_claude_cli_interactive")
+        mock_info = mocker.patch("controllers.git_tab.messagebox.showinfo")
+        GitTabController.cmd_open_claude_cli(self._stub(git_path=None))
+        mock_spawn.assert_not_called()
+        mock_info.assert_not_called()
+
+    def test_no_cli_configured_shows_info(self, mocker):
+        mock_spawn = mocker.patch(
+            "helpers.claude_cli.spawn_claude_cli_interactive")
+        mock_info = mocker.patch("controllers.git_tab.messagebox.showinfo")
+        GitTabController.cmd_open_claude_cli(self._stub(cli_exe=""))
+        mock_spawn.assert_not_called()
+        mock_info.assert_called_once()
+
+    def test_spawns_interactive_with_project_and_model(self, mocker):
+        mock_spawn = mocker.patch(
+            "helpers.claude_cli.spawn_claude_cli_interactive",
+            return_value=(True, ""))
+        mock_warn = mocker.patch(
+            "controllers.git_tab.messagebox.showwarning")
+        GitTabController.cmd_open_claude_cli(self._stub())
+        mock_spawn.assert_called_once_with(
+            "/usr/bin/claude", "/repo", model="claude-haiku")
+        mock_warn.assert_not_called()
+
+    def test_spawn_failure_shows_warning(self, mocker):
+        mocker.patch(
+            "helpers.claude_cli.spawn_claude_cli_interactive",
+            return_value=(False, "boom"))
+        mock_warn = mocker.patch(
+            "controllers.git_tab.messagebox.showwarning")
+        GitTabController.cmd_open_claude_cli(self._stub())
+        mock_warn.assert_called_once()
+        assert "boom" in mock_warn.call_args[0]

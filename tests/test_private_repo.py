@@ -20,7 +20,7 @@ def test_returns_false_if_dest_missing(monkeypatch, tmp_path):
 
     result = sync_private_repo("git", src_path, dest, [], on_log)
 
-    assert result is False
+    assert not result
     assert len(logs) == 1
     assert "Private repo missing" in logs[0][0]
 
@@ -152,7 +152,7 @@ def test_returns_true_if_nothing_to_commit(monkeypatch, tmp_path):
 
     result = sync_private_repo("git", src_path, dest, [], on_log)
 
-    assert result is True
+    assert result
     assert any("already up to date" in msg for msg, _ in logs)
 
 
@@ -175,7 +175,7 @@ def test_returns_false_if_git_status_fails_file_not_found(monkeypatch, tmp_path)
 
     result = sync_private_repo("git", src_path, dest, [], on_log)
 
-    assert result is False
+    assert not result
     assert any("git status failed" in msg for msg, _ in logs)
 
 
@@ -198,7 +198,7 @@ def test_returns_false_if_git_status_timeout(monkeypatch, tmp_path):
 
     result = sync_private_repo("git", src_path, dest, [], on_log)
 
-    assert result is False
+    assert not result
     assert any("git status failed" in msg for msg, _ in logs)
 
 
@@ -227,7 +227,7 @@ def test_returns_false_if_git_add_fails(monkeypatch, tmp_path):
 
     result = sync_private_repo("git", src_path, dest, [], on_log)
 
-    assert result is False
+    assert not result
     assert any("git add:" in msg for msg, _ in logs)
 
 
@@ -256,7 +256,7 @@ def test_returns_false_if_git_add_timeout(monkeypatch, tmp_path):
 
     result = sync_private_repo("git", src_path, dest, [], on_log)
 
-    assert result is False
+    assert not result
     assert any("git add failed" in msg for msg, _ in logs)
 
 
@@ -287,7 +287,7 @@ def test_returns_false_if_git_commit_fails(monkeypatch, tmp_path):
 
     result = sync_private_repo("git", src_path, dest, [], on_log)
 
-    assert result is False
+    assert not result
     assert any("git commit:" in msg for msg, _ in logs)
 
 
@@ -318,7 +318,7 @@ def test_returns_false_if_git_commit_timeout(monkeypatch, tmp_path):
 
     result = sync_private_repo("git", src_path, dest, [], on_log)
 
-    assert result is False
+    assert not result
     assert any("git commit failed" in msg for msg, _ in logs)
 
 
@@ -353,7 +353,7 @@ def test_successful_commit(monkeypatch, tmp_path):
 
     result = sync_private_repo("git", src_path, dest, [], on_log)
 
-    assert result is True
+    assert result
     assert any("Private repo synced" in msg for msg, _ in logs)
 
 

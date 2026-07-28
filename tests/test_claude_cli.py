@@ -30,6 +30,7 @@ from helpers.claude_cli import (
     call_claude_cli_print,
     get_last_cli_error,
     spawn_claude_cli,
+    spawn_claude_cli_interactive,
 )
 
 
@@ -101,6 +102,64 @@ def test_spawn_popen_oserror_returns_false(monkeypatch):
     )
     monkeypatch.setattr("helpers.claude_cli.sys.platform", "linux")
     ok, err = spawn_claude_cli("/bad/path/claude", "/path", "do x")
+    assert ok is False
+    assert "No such file" in err
+
+
+# ── spawn_claude_cli_interactive ──────────────────────────────────────────────
+
+def test_spawn_interactive_empty_exe_returns_false():
+    ok, err = spawn_claude_cli_interactive("", "/some/path")
+    assert ok is False
+    assert "not configured" in err
+
+
+def test_spawn_interactive_argv_has_no_instruction(monkeypatch):
+    """The whole point of the variant: no trailing instruction argument —
+    an empty "" arg would make claude run a blank one-shot prompt instead
+    of entering interactive mode."""
+    captured = []
+    monkeypatch.setattr(
+        "helpers.claude_cli.subprocess.Popen",
+        lambda argv, **kw: captured.append(argv) or MagicMock(),
+    )
+    monkeypatch.setattr("helpers.claude_cli.sys.platform", "linux")
+    ok, err = spawn_claude_cli_interactive("/usr/bin/claude", "/path")
+    assert ok is True
+    assert err == ""
+    assert captured[0] == ["/usr/bin/claude"]
+
+
+def test_spawn_interactive_includes_model_flag(monkeypatch):
+    captured = []
+    monkeypatch.setattr(
+        "helpers.claude_cli.subprocess.Popen",
+        lambda argv, **kw: captured.append(argv) or MagicMock(),
+    )
+    monkeypatch.setattr("helpers.claude_cli.sys.platform", "linux")
+    spawn_claude_cli_interactive("/usr/bin/claude", "/path",
+                                 model="claude-haiku")
+    assert captured[0] == ["/usr/bin/claude", "--model", "claude-haiku"]
+
+
+def test_spawn_interactive_uses_project_path_as_cwd(monkeypatch):
+    captured_kwargs = {}
+    monkeypatch.setattr(
+        "helpers.claude_cli.subprocess.Popen",
+        lambda argv, **kw: captured_kwargs.update(kw) or MagicMock(),
+    )
+    monkeypatch.setattr("helpers.claude_cli.sys.platform", "linux")
+    spawn_claude_cli_interactive("/usr/bin/claude", "/my/project")
+    assert captured_kwargs.get("cwd") == "/my/project"
+
+
+def test_spawn_interactive_popen_oserror_returns_false(monkeypatch):
+    monkeypatch.setattr(
+        "helpers.claude_cli.subprocess.Popen",
+        lambda *a, **kw: (_ for _ in ()).throw(OSError("No such file")),
+    )
+    monkeypatch.setattr("helpers.claude_cli.sys.platform", "linux")
+    ok, err = spawn_claude_cli_interactive("/bad/path/claude", "/path")
     assert ok is False
     assert "No such file" in err
 

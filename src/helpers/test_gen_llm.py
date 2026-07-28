@@ -391,6 +391,146 @@ class VerifiedResult:
     is_tk: bool = False         # written file is @pytest.mark.tk (skips the not-tk gate)
 
 
+@dataclass
+class _VerifyCtx:
+    """Frozen outer-scope parameters for one :func:`generate_verified_test` call.
+
+    Passed to the module-level :func:`_run_and_verify` helper so that function
+    has a clean, 7-argument signature while still accessing all 10 outer
+    parameters without a closure.  Being a module-level function (not a
+    closure) means tokensave attributes its own CC independently from the
+    orchestrator, which genuinely reduces the measured CC of
+    ``generate_verified_test``.
+    """
+    source_path:         str
+    project_root:        str
+    backend:             str
+    cfg:                 object            # ManagerConfig — avoid circular import
+    cancel_event:        "threading.Event | None"
+    template:            "str | None"
+    allow_overwrite:     bool
+    tests_dir:           str
+    max_runtime_repairs: int
+    on_token:            object            # Callable[[str], None] | None
+
+
+def _run_and_verify(
+    content: str,
+    final_path: str,
+    final_rel: str,
+    is_update: bool,
+    old_ids: set,
+    existing_test: "str | None",
+    ctx: _VerifyCtx,
+) -> VerifiedResult:
+    """Write temp file, run under pytest, repair once on failure, gate retention, move.
+
+    Extracted from :func:`generate_verified_test` as a module-level function so
+    its own cyclomatic complexity is tracked independently (tokensave was folding
+    its ~20 branches into the orchestrator's CC score when it was an inner closure).
+    The temp file is always cleaned up in the ``finally`` block.
+    """
+    from helpers import smoke_runner  # lazy — avoids import cycle
+
+    source_path     = ctx.source_path
+    project_root    = ctx.project_root
+    backend         = ctx.backend
+    cfg             = ctx.cfg
+    cancel_event    = ctx.cancel_event
+    template        = ctx.template
+    allow_overwrite = ctx.allow_overwrite
+    tests_dir       = ctx.tests_dir
+    max_repairs     = ctx.max_runtime_repairs
+    on_token        = ctx.on_token
+
+    base_name = os.path.splitext(os.path.basename(source_path))[0]
+    tmp_name  = f"test__aigen_{base_name}_{uuid.uuid4().hex[:8]}.py"
+    tmp_path  = os.path.join(tests_dir, tmp_name)
+    tmp_rel   = os.path.join("tests", tmp_name)
+
+    effective_backend = _resolve_backend(backend, cfg)
+    try:
+        system_prompt, user_prompt = _build_prompts(
+            source_path, project_root, 8_000,
+            template=template, existing_test=existing_test)
+    except Exception:
+        system_prompt = user_prompt = ""
+
+    current     = content
+    last_report = ""
+    try:
+        os.makedirs(tests_dir, exist_ok=True)
+        attempts = max(1, max_repairs + 1)
+        for attempt in range(attempts):
+            if cancel_event and cancel_event.is_set():
+                return VerifiedResult(None, "cancelled", last_report)
+            with open(tmp_path, "w", encoding="utf-8", newline="\n") as fh:
+                fh.write(current)
+            passed, output = smoke_runner.run_single_test_file(project_root, tmp_rel)
+            last_report = output
+            if passed:
+                # Retention gate — regenerate must not drop any prior test.
+                if is_update and old_ids:
+                    missing = old_ids - _test_function_ids(current)
+                    if missing:
+                        return VerifiedResult(
+                            current, "fail",
+                            "Regenerated test DROPPED existing tests "
+                            f"({', '.join(sorted(missing))}). Kept the original "
+                            "to avoid losing coverage.",
+                            preserved_existing=True)
+                # New-file collision (not a sanctioned overwrite) → keep existing.
+                if os.path.exists(final_path) and not allow_overwrite:
+                    return VerifiedResult(
+                        current, "fail",
+                        f"{os.path.basename(final_path)} already exists; not overwriting.")
+                if not _safe_replace(tmp_path, final_path):
+                    return VerifiedResult(
+                        current, "fail",
+                        f"{os.path.basename(final_path)} is locked by another "
+                        "process — close it and retry.",
+                        preserved_existing=is_update)
+                return VerifiedResult(current, "pass", output,
+                                      written_path=final_rel,
+                                      is_tk=("pytest.mark.tk" in current))
+
+            # Failed. Stop if out of repair budget or can't re-dispatch.
+            if attempt >= attempts - 1 or effective_backend is None or not system_prompt:
+                break
+            if cancel_event and cancel_event.is_set():
+                return VerifiedResult(None, "cancelled", last_report)
+            repair_up = user_prompt + "\n\n" + _RUNTIME_REPAIR_TEMPLATE.format(
+                report=(output or "")[-4000:], prior=current)
+            raw, _ = _dispatch(effective_backend, cfg, system_prompt, repair_up,
+                               project_root, on_token=on_token)
+            if not raw:
+                break
+            fixed = _extract_code(raw)
+            if not fixed.strip() or _looks_like_python(fixed) is not None:
+                break  # repair produced non-Python → don't run garbage
+            # A repair that re-dropped an import gets re-fixed deterministically.
+            current = _autofix_imports(fixed, source_path, project_root)
+
+        # Per-test pruning (new-file path only — regenerate's retention gate
+        # forbids dropping prior tests). Salvage passing tests by removing the
+        # failing ones, then RE-VERIFY the remainder green before writing.
+        if not is_update:
+            pruned = _prune_after_failure(
+                current, last_report, project_root, tmp_path, tmp_rel,
+                final_path, allow_overwrite, smoke_runner, cancel_event)
+            if pruned is not None:
+                return pruned
+
+        return VerifiedResult(current, "fail", last_report,
+                              preserved_existing=is_update)  # discarded
+    finally:
+        try:
+            if os.path.exists(tmp_path):
+                os.remove(tmp_path)
+        except OSError:
+            pass
+
+
 def generate_verified_test(
     source_path: str,
     project_root: str,
@@ -413,26 +553,27 @@ def generate_verified_test(
     coverage-retention gate (no prior ``test_*`` dropped) before overwriting the
     real file lock-safely — a failed regenerate leaves the original untouched.
 
-    The temp file is always cleaned up in ``finally``. Caller writes nothing.
+    The temp file is always cleaned up in :func:`_run_and_verify`. Caller writes
+    nothing. Heavy lifting is in the module-level :func:`_run_and_verify` function
+    (extracted so its CC is tracked independently by static-analysis tools).
     """
     if cancel_event and cancel_event.is_set():
         return VerifiedResult(None, "cancelled", "")
 
-    from helpers.test_scaffold import _test_filename_for
     tests_dir = os.path.join(project_root, "tests")
 
-    # Resolve the real destination: explicit (regenerate) or derived (new file).
+    # ── Resolve destination path (inlined — no nested function AST overhead) ──
+    from helpers.test_scaffold import _test_filename_for
     if target_path:
         final_path = (target_path if os.path.isabs(target_path)
                       else os.path.join(project_root, target_path))
     else:
         final_path = os.path.join(tests_dir, _test_filename_for(source_path, project_root))
     final_rel = os.path.relpath(final_path, project_root).replace(os.sep, "/")
-
-    # Regenerate: read the existing test so the model retains it, and capture its
-    # test ids for the retention gate.
     is_update = bool(allow_overwrite and os.path.exists(final_path))
-    existing_test = None
+
+    # ── Read existing test for the regenerate path ────────────────────────────
+    existing_test: "str | None" = None
     old_ids: set = set()
     if is_update:
         try:
@@ -442,6 +583,7 @@ def generate_verified_test(
         except OSError:
             existing_test = None
 
+    # ── Generate content ──────────────────────────────────────────────────────
     content, err = generate_ai_test_content(
         source_path, project_root, backend, cfg, cancel_event,
         template=template, existing_test=existing_test, on_token=on_token)
@@ -452,93 +594,15 @@ def generate_verified_test(
     if cancel_event and cancel_event.is_set():
         return VerifiedResult(None, "cancelled", "")
 
-    from helpers import smoke_runner          # lazy — avoids import cycle
-
-    base = os.path.splitext(os.path.basename(source_path))[0]
-    tmp_name = f"test__aigen_{base}_{uuid.uuid4().hex[:8]}.py"
-    tmp_path = os.path.join(tests_dir, tmp_name)
-    tmp_rel = os.path.join("tests", tmp_name)
-
-    effective_backend = _resolve_backend(backend, cfg)
-    try:
-        system_prompt, user_prompt = _build_prompts(
-            source_path, project_root, 8_000,
-            template=template, existing_test=existing_test)
-    except Exception:
-        system_prompt = user_prompt = ""
-
-    last_report = ""
-    try:
-        os.makedirs(tests_dir, exist_ok=True)
-        attempts = max(1, max_runtime_repairs + 1)
-        for attempt in range(attempts):
-            if cancel_event and cancel_event.is_set():
-                return VerifiedResult(None, "cancelled", last_report)
-            with open(tmp_path, "w", encoding="utf-8", newline="\n") as fh:
-                fh.write(content)
-            passed, output = smoke_runner.run_single_test_file(project_root, tmp_rel)
-            last_report = output
-            if passed:
-                # Retention gate — a regenerate must not drop any prior test.
-                if is_update and old_ids:
-                    missing = old_ids - _test_function_ids(content)
-                    if missing:
-                        return VerifiedResult(
-                            content, "fail",
-                            "Regenerated test DROPPED existing tests "
-                            f"({', '.join(sorted(missing))}). Kept the original "
-                            "to avoid losing coverage.",
-                            preserved_existing=True)
-                # New-file collision (not a sanctioned overwrite) → keep existing.
-                if os.path.exists(final_path) and not allow_overwrite:
-                    return VerifiedResult(
-                        content, "fail",
-                        f"{os.path.basename(final_path)} already exists; not overwriting.")
-                if not _safe_replace(tmp_path, final_path):
-                    return VerifiedResult(
-                        content, "fail",
-                        f"{os.path.basename(final_path)} is locked by another "
-                        "process — close it and retry.",
-                        preserved_existing=is_update)
-                return VerifiedResult(content, "pass", output,
-                                      written_path=final_rel,
-                                      is_tk=("pytest.mark.tk" in content))
-
-            # Failed. Stop if out of repair budget or can't re-dispatch.
-            if attempt >= attempts - 1 or effective_backend is None or not system_prompt:
-                break
-            if cancel_event and cancel_event.is_set():
-                return VerifiedResult(None, "cancelled", last_report)
-            repair_up = user_prompt + "\n\n" + _RUNTIME_REPAIR_TEMPLATE.format(
-                report=(output or "")[-4000:], prior=content)
-            raw, _ = _dispatch(effective_backend, cfg, system_prompt, repair_up,
-                               project_root, on_token=on_token)
-            if not raw:
-                break
-            fixed = _extract_code(raw)
-            if not fixed.strip() or _looks_like_python(fixed) is not None:
-                break  # repair produced non-Python → don't run garbage
-            # A repair that re-dropped an import gets re-fixed deterministically.
-            content = _autofix_imports(fixed, source_path, project_root)
-
-        # Per-test pruning (new-file path only — regenerate's retention gate forbids
-        # dropping prior tests). Salvage the passing tests by removing the failing
-        # ones, then RE-VERIFY the remainder green before writing.
-        if not is_update:
-            pruned = _prune_after_failure(
-                content, last_report, project_root, tmp_path, tmp_rel,
-                final_path, allow_overwrite, smoke_runner, cancel_event)
-            if pruned is not None:
-                return pruned
-
-        return VerifiedResult(content, "fail", last_report,
-                              preserved_existing=is_update)   # discarded
-    finally:
-        try:
-            if os.path.exists(tmp_path):
-                os.remove(tmp_path)
-        except OSError:
-            pass
+    ctx = _VerifyCtx(
+        source_path=source_path, project_root=project_root,
+        backend=backend, cfg=cfg, cancel_event=cancel_event,
+        template=template, allow_overwrite=allow_overwrite,
+        tests_dir=tests_dir, max_runtime_repairs=max_runtime_repairs,
+        on_token=on_token,
+    )
+    return _run_and_verify(content, final_path, final_rel, is_update, old_ids,
+                           existing_test, ctx)
 
 
 def _safe_replace(src: str, dst: str, retries: int = 3, delay: float = 0.15) -> bool:
@@ -914,16 +978,102 @@ def _emit_from(module: str, names: "list[str]", nl: str) -> str:
     return f"from {module} import " + ", ".join(names)
 
 
-def _autofix_imports(code: str, source_path: str, project_root: str) -> str:
-    """Inject imports for names pyflakes flags as undefined.
+@dataclass(frozen=True)
+class _ImportBuckets:
+    """Classified undefined names, ready for _render_import_blocks."""
+    local:    "list[str]"               # symbols of the module under test
+    extra:    "list[str]"               # module-reference fallback lines
+    typing_n: "list[str]"
+    mock_n:   "list[str]"
+    plain:    "list[str]"
+    froms:    "dict[str, list[str]]"
+
+
+def _classify_undefined(undefined: "list[str]", local_syms: "set[str]",
+                        dotted: str, top: str, stem: str,
+                        parent: str) -> _ImportBuckets:
+    """Sort undefined names into import buckets.
 
     Local-first (the source file's own symbols win over the stdlib map, so a
     source that defines its own ``Path``/``Any`` isn't hijacked), then a
-    module-reference fallback for dotted access, then the generic known-imports
-    map. Uses the AST purely as a read-only indexer to find the line AFTER the
-    docstring/__future__ block, then does a string splice (never ``ast.unparse``,
-    which would strip the model's formatting). Returns the original code on any
-    parse trouble — never hands back worse code.
+    module-reference fallback for dotted access, then the generic
+    known-imports map. Names matching nothing are left for the pytest run →
+    runtime-repair loop. ``extra`` is deduped once at the end
+    (order-preserving) instead of per-append.
+    """
+    local: "list[str]" = []
+    extra: "list[str]" = []
+    typing_n: "list[str]" = []
+    mock_n: "list[str]" = []
+    plain: "list[str]" = []
+    froms: "dict[str, list[str]]" = {}
+    for name in undefined:
+        if name in local_syms:                          # 1. local-first
+            local.append(name)
+        elif name == top:                               # 2. module-ref fallback
+            extra.append(f"import {dotted}")
+        elif name == stem and parent:
+            extra.append(f"from {parent} import {stem}")
+        elif name == stem:                              # top-level module, no parent
+            extra.append(f"import {stem}")
+        elif name in _TYPING_NAMES:                     # 3. known-imports map
+            typing_n.append(name)
+        elif name in _MOCK_NAMES:
+            mock_n.append(name)
+        elif name in _PLAIN_MODULES:
+            plain.append(f"import {name}")
+        elif name in _FROM_IMPORTS:
+            mod, sym = _FROM_IMPORTS[name]
+            froms.setdefault(mod, []).append(sym)
+    return _ImportBuckets(local, list(dict.fromkeys(extra)),
+                          typing_n, mock_n, plain, froms)
+
+
+def _render_import_blocks(b: _ImportBuckets, dotted: str,
+                          nl: str) -> "list[str]":
+    """Pure formatting: bucket contents → ordered import statement strings."""
+    blocks: "list[str]" = []
+    if b.local:
+        blocks.append(_emit_from(dotted, b.local, nl))
+    blocks.extend(b.extra)
+    if b.typing_n:
+        blocks.append(_emit_from("typing", b.typing_n, nl))
+    if b.mock_n:
+        blocks.append(_emit_from("unittest.mock", b.mock_n, nl))
+    blocks.extend(sorted(set(b.plain)))
+    for mod in sorted(b.froms):
+        blocks.append(_emit_from(mod, b.froms[mod], nl))
+    return blocks
+
+
+def _insert_index(tree: ast.Module) -> int:
+    """Line index AFTER the module docstring and any leading __future__ import.
+
+    Read-only AST indexing. end_lineno is 1-based; splitlines() is 0-based,
+    so the list insert index equals the 1-based line number (old line N+1 is
+    index N).
+    """
+    idx = 0
+    if tree.body:
+        first = tree.body[0]
+        if (isinstance(first, ast.Expr)
+                and isinstance(getattr(first, "value", None), ast.Constant)
+                and isinstance(first.value.value, str)):
+            idx = first.end_lineno or 0
+        for node in tree.body:
+            if isinstance(node, ast.ImportFrom) and node.module == "__future__":
+                idx = max(idx, node.end_lineno or 0)
+    return idx
+
+
+def _autofix_imports(code: str, source_path: str, project_root: str) -> str:
+    """Inject imports for names pyflakes flags as undefined.
+
+    Thin orchestrator: classify (_classify_undefined) → render
+    (_render_import_blocks) → splice at _insert_index. The splice is a
+    string operation (never ``ast.unparse``, which would strip the model's
+    formatting). Returns the original code on any parse trouble — never
+    hands back worse code.
     """
     undefined = _undefined_names(code)
     if not undefined:
@@ -944,68 +1094,14 @@ def _autofix_imports(code: str, source_path: str, project_root: str) -> str:
     parent = dotted.rsplit(".", 1)[0] if "." in dotted else ""
     local_syms = _module_symbols(source_path)
 
-    local: "list[str]" = []          # symbols of the module under test
-    extra: "list[str]" = []          # module-reference fallback lines
-    typing_n: "list[str]" = []
-    mock_n: "list[str]" = []
-    plain: "list[str]" = []
-    froms: "dict[str, list[str]]" = {}
-
-    for name in undefined:
-        if name in local_syms:                          # 1. local-first
-            local.append(name)
-        elif name == top:                               # 2. module-ref fallback
-            line = f"import {dotted}"
-            if line not in extra:
-                extra.append(line)
-        elif name == stem and parent:
-            line = f"from {parent} import {stem}"
-            if line not in extra:
-                extra.append(line)
-        elif name == stem:                              # top-level module, no parent
-            line = f"import {stem}"
-            if line not in extra:
-                extra.append(line)
-        elif name in _TYPING_NAMES:                     # 3. known-imports map
-            typing_n.append(name)
-        elif name in _MOCK_NAMES:
-            mock_n.append(name)
-        elif name in _PLAIN_MODULES:
-            plain.append(f"import {name}")
-        elif name in _FROM_IMPORTS:
-            mod, sym = _FROM_IMPORTS[name]
-            froms.setdefault(mod, []).append(sym)
-        # else: leave for the pytest run → runtime-repair loop
-
+    buckets = _classify_undefined(undefined, local_syms,
+                                  dotted, top, stem, parent)
     nl = "\r\n" if "\r\n" in code else "\n"
-    blocks: "list[str]" = []
-    if local:
-        blocks.append(_emit_from(dotted, local, nl))
-    blocks.extend(extra)
-    if typing_n:
-        blocks.append(_emit_from("typing", typing_n, nl))
-    if mock_n:
-        blocks.append(_emit_from("unittest.mock", mock_n, nl))
-    blocks.extend(sorted(set(plain)))
-    for mod in sorted(froms):
-        blocks.append(_emit_from(mod, froms[mod], nl))
+    blocks = _render_import_blocks(buckets, dotted, nl)
     if not blocks:
         return code
 
-    # Read-only AST indexing: insert AFTER the module docstring and any leading
-    # __future__ import. end_lineno is 1-based; splitlines() is 0-based, so the
-    # list insert index equals the 1-based line number (old line N+1 is index N).
-    idx = 0
-    if tree.body:
-        first = tree.body[0]
-        if (isinstance(first, ast.Expr)
-                and isinstance(getattr(first, "value", None), ast.Constant)
-                and isinstance(first.value.value, str)):
-            idx = first.end_lineno or 0
-        for node in tree.body:
-            if isinstance(node, ast.ImportFrom) and node.module == "__future__":
-                idx = max(idx, node.end_lineno or 0)
-
+    idx = _insert_index(tree)
     block_text = nl.join(blocks) + nl
     lines = code.splitlines(keepends=True)
     candidate = "".join(lines[:idx]) + block_text + "".join(lines[idx:])

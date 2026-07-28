@@ -39,8 +39,8 @@ jobs:
   check:
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4.2.2
-      - uses: actions/setup-python@v5.6.0
+      - uses: actions/checkout@v5
+      - uses: actions/setup-python@v6
         with:
           python-version: "3.11"
       - name: Syntax check
@@ -49,6 +49,10 @@ jobs:
         run: |
           pip install pyflakes --quiet
           python -m pyflakes src/
+      - name: No third-party module-level imports in src/
+        # Runs here (an import-free job) so it fires even when a bad top-level
+        # optional import would abort the main test suite's collection.
+        run: python tests/test_no_thirdparty_module_imports.py
 
   # ── Pytest suite on Roadmap-* branches (warn-only) ─────────────────────
   test-warn:
@@ -56,8 +60,8 @@ jobs:
     runs-on: ubuntu-latest
     continue-on-error: true   # warn-only: a red test doesn't fail the workflow
     steps:
-      - uses: actions/checkout@v4.2.2
-      - uses: actions/setup-python@v5.6.0
+      - uses: actions/checkout@v5
+      - uses: actions/setup-python@v6
         with:
           python-version: "3.11"
       - name: Install dev deps
@@ -75,8 +79,8 @@ jobs:
     runs-on: ubuntu-latest
     # No continue-on-error — a failing test BLOCKS the merge.
     steps:
-      - uses: actions/checkout@v4.2.2
-      - uses: actions/setup-python@v5.6.0
+      - uses: actions/checkout@v5
+      - uses: actions/setup-python@v6
         with:
           python-version: "3.11"
       - name: Install dev deps
@@ -127,8 +131,8 @@ jobs:
     runs-on: ubuntu-latest
     # No continue-on-error — bad merge resolutions must surface as red.
     steps:
-      - uses: actions/checkout@v4.2.2
-      - uses: actions/setup-python@v5.6.0
+      - uses: actions/checkout@v5
+      - uses: actions/setup-python@v6
         with:
           python-version: "3.11"
       - name: Install dev deps

@@ -177,9 +177,171 @@ def _branch_commit_log(repo_path: str, base: str, git_exe: str = "git",
     return "\n".join(lines)
 
 
+def _safe_grounding(fn, *args, **kwargs) -> str:
+    """Call *fn* with *args*/*kwargs*; return ``""`` on any exception.
+
+    Used by :func:`_build_grounding_section` to flatten the nested
+    ``try/except`` pattern that inflated the CC of
+    :func:`_build_pr_prompt_and_call`.
+    """
+    try:
+        return fn(*args, **kwargs) or ""
+    except Exception:
+        return ""
+
+
+def _build_grounding_section(cfg, diff_data: str, project_path: str,
+                             on_status) -> str:
+    """Build the grounding markdown section (tokensave + codegraph).
+
+    Calls ``on_status("grounding")`` before starting, then assembles the
+    tokensave roadmap-evidence block and the codegraph affected-symbol block.
+    Returns the formatted section header + body, or ``""`` if grounding is
+    disabled, unavailable, or fails.  Fail-open: all sub-failures are caught
+    by :func:`_safe_grounding` so the caller always receives a string.
+    """
+    if not cfg.enable_pr_grounding:
+        return ""
+    if on_status is not None:
+        try:
+            on_status("grounding")
+        except Exception:
+            pass
+    try:
+        from helpers.doc_grounding import (
+            build_grounding_block,
+            build_codegraph_block,
+            build_combined_grounding,
+        )
+        changed_files = _files_from_diff(diff_data)
+        ts_block = _safe_grounding(
+            build_grounding_block, project_path, "roadmap_evidence",
+            tokensave_exe=cfg.tokensave_exe)
+        if cfg.codegraph_exe:
+            _safe_grounding(
+                __import__("helpers.codegraph_freshness",
+                            fromlist=["ensure_fresh"]).ensure_fresh,
+                project_path, cfg.codegraph_exe)
+        cg_block = _safe_grounding(
+            build_codegraph_block, project_path, "roadmap_evidence",
+            changed_files=changed_files,
+            codegraph_exe=cfg.codegraph_exe or "")
+        combined = build_combined_grounding(ts_block, cg_block)
+        return (f"## Affected tests & symbols (auto-attached)\n\n{combined}\n\n"
+                if combined.strip() else "")
+    except Exception:
+        return ""
+
+
+def _build_pr_prompt_and_call(
+    cfg,
+    diff_data: str,
+    commit_log: str,
+    project_path: str,
+    *,
+    on_token=None,
+    on_status=None,
+    coverage_gaps_md: str = "",
+) -> "str | None":
+    """Assemble grounding, build the LLM prompt, call the LLM, post-process.
+
+    Separated from :func:`generate_pr_draft` so the orchestrator stays thin
+    and this phase can be tested or stubbed independently.  The grounding block
+    assembly is delegated to :func:`_build_grounding_section` to keep this
+    function's CC below 10.
+
+    Args:
+        cfg:              ManagerConfig (read at call time).
+        diff_data:        Pre-truncated git diff text.
+        commit_log:       Pre-rendered bulleted commit log (may be "").
+        project_path:     Absolute repo root (for grounding).
+        on_token:         Streaming token callback; forwarded to ``_call_llm``.
+        on_status:        Phase-boundary callback (``"grounding"``, ``"generating"``).
+        coverage_gaps_md: Pre-rendered coverage-gaps block spliced into checklist.
+
+    Returns:
+        Raw LLM markdown string, or None if no LLM is configured.
+    """
+    def _status(phase: str) -> None:
+        if on_status is not None:
+            try:
+                on_status(phase)
+            except Exception:
+                pass
+
+    llm_cfg = cfg.raw.get("commit_message_llm", {})
+    _provider = llm_cfg.get("provider", "")
+    is_local = (
+        _provider == "ollama"
+        or (_provider == "openai_compatible"
+            and "localhost" in (llm_cfg.get("base_url") or ""))
+    )
+
+    # v4.2 / v4.6: tokensave + codegraph grounding, gated per-feature.
+    # Grounding also fires on_status("grounding") internally.
+    grounding_section = _build_grounding_section(cfg, diff_data, project_path,
+                                                 on_status)
+
+    # v4.13: pre-fill the Testing checklist's "Automated" subsection.
+    automated_block = _render_automated_for_pr(project_path)
+    commit_section = (
+        f"--- commits on this branch (oldest first) ---\n\n{commit_log}\n\n"
+        if commit_log else ""
+    )
+
+    if is_local:
+        # Local path: don't double-feed automated_block; Python injects it later.
+        user_prompt = (
+            f"{grounding_section}"
+            f"{commit_section}"
+            f"Please draft a PR description based on these commits and this git diff.\n\n"
+            f"--- git diff ---\n\n{diff_data}"
+        )
+    else:
+        # Cloud path: instruct the LLM to copy automated_block verbatim.
+        user_prompt = (
+            f"{grounding_section}"
+            f"{commit_section}"
+            f"Please draft a comprehensive PR description based on these commits and "
+            f"this git diff.\n\n"
+            f"Pre-rendered '### Automated' subsection (copy verbatim into the "
+            f"'## Testing checklist' section):\n\n"
+            f"{automated_block}\n\n"
+            f"--- git diff ---\n\n{diff_data}"
+        )
+
+    if is_local and not llm_cfg.get("num_ctx"):
+        # Phase D: 16384 so a 14B-class local model can take a much larger diff.
+        llm_cfg = {**llm_cfg, "num_ctx": 16384}
+    max_tokens = 1500 if is_local else 3000
+    timeout    = 300  if is_local else 120
+    system     = _PR_SYSTEM_PROMPT_LOCAL if is_local else _PR_SYSTEM_PROMPT
+
+    _status("generating")
+    result = _call_llm(
+        cfg=llm_cfg,
+        system_prompt=system,
+        user_prompt=user_prompt,
+        max_tokens=max_tokens,
+        timeout=timeout,
+        on_token=on_token,
+    )
+
+    # Local: strip accidental code blocks, then inject automated checklist.
+    if is_local and result:
+        result = _clean_local_artifacts(result)
+        result = _inject_automated_block(result, automated_block)
+
+    # Both paths: splice coverage-gaps block (Automated < Gaps < Manual).
+    if result and coverage_gaps_md:
+        result = _inject_coverage_gaps(result, coverage_gaps_md)
+
+    return result
+
+
 def generate_pr_draft(cfg, project_path: str, base: str = "", *,
                       on_token=None, on_status=None,
-                      coverage_gaps_md: str = "") -> str | None:
+                      coverage_gaps_md: str = "") -> "str | None":
     """Compute local working-tree changes and ask the LLM to draft a PR description.
 
     Args:
@@ -201,12 +363,7 @@ def generate_pr_draft(cfg, project_path: str, base: str = "", *,
         Markdown string from the LLM, or an error/empty-diff message string.
         Returns None only if _call_llm itself returns None (no LLM configured).
     """
-    def _status(phase: str) -> None:
-        if on_status is not None:
-            try:
-                on_status(phase)
-            except Exception:
-                pass
+    # ── 1. Gather diff ────────────────────────────────────────────────────────
     if base:
         try:
             diff_data = _branch_diff(project_path, base, git_exe=cfg.git_exe)
@@ -217,148 +374,35 @@ def generate_pr_draft(cfg, project_path: str, base: str = "", *,
     if not diff_data or len(diff_data.strip()) < 50:
         return "Empty diff or changes too trivial to generate a structured PR description."
 
-    # Unified diff cap (Phase D): the old code hard-capped local providers at
-    # 8000 chars, so a 250 KB diff fed the model only ~3% of the changes — the
-    # main reason local drafts were far worse than Claude CLI. Now the local cap
-    # SCALES with the model's context window (num_ctx): with num_ctx=16384 tokens
-    # (~4 chars/token) we reserve ~45% for grounding + system prompt + output and
-    # allow the rest (~36 KB) for the diff. Cloud keeps a 24 KB default. An
-    # explicit `max_diff_chars` always wins.
+    # ── 2. Cap diff to provider context window ────────────────────────────────
+    # Local cap SCALES with num_ctx (~55% for content, ~4 chars/token).
+    # Cloud keeps a 24 KB default. An explicit max_diff_chars always wins.
     _p = cfg.raw.get("commit_message_llm", {})
-    _is_local_pre = (
+    _is_local = (
         _p.get("provider") == "ollama"
         or (_p.get("provider") == "openai_compatible"
             and "localhost" in (_p.get("base_url") or ""))
     )
     _explicit_cap = _p.get("max_diff_chars")
-    if _is_local_pre:
+    if _is_local:
         _num_ctx = int(_p.get("num_ctx") or 16384)
-        _scaled = max(8000, int(_num_ctx * 0.55) * 4)   # ~55% of ctx → chars
+        _scaled = max(8000, int(_num_ctx * 0.55) * 4)
         max_chars = int(_explicit_cap) if _explicit_cap else _scaled
     else:
         max_chars = int(_explicit_cap) if _explicit_cap else 24000
     if len(diff_data) > max_chars:
         diff_data = diff_data[:max_chars] + "\n[Diff truncated for context limits]"
 
-    # v4.2: build tokensave+codegraph grounding (roadmap_evidence recipe —
-    # codegraph triggers `codegraph affected --stdin` on the changed-files
-    # list, surfacing test-impact information for the PR description).
-    # v4.6: gated by enable_pr_grounding (per-feature, default ON) rather
-    # than the master toggle directly. Lets users opt out of grounding
-    # for PR drafting specifically without disabling it everywhere.
-    grounding = ""
-    if cfg.enable_pr_grounding:
-        _status("grounding")
-        try:
-            from helpers.doc_grounding import (
-                build_grounding_block,
-                build_codegraph_block,
-                build_combined_grounding,
-            )
-            changed_files = _files_from_diff(diff_data)
-            try:
-                ts_block = build_grounding_block(
-                    project_path, "roadmap_evidence",
-                    tokensave_exe=cfg.tokensave_exe,
-                )
-            except Exception:
-                ts_block = ""
-            try:
-                # v4.3: ensure fresh before grounding call.
-                if cfg.codegraph_exe:
-                    try:
-                        from helpers.codegraph_freshness import ensure_fresh
-                        ensure_fresh(project_path, cfg.codegraph_exe)
-                    except Exception:
-                        pass
-                cg_block = build_codegraph_block(
-                    project_path, "roadmap_evidence",
-                    changed_files=changed_files,
-                    codegraph_exe=cfg.codegraph_exe or "",
-                )
-            except Exception:
-                cg_block = ""
-            grounding = build_combined_grounding(ts_block, cg_block)
-        except Exception:
-            grounding = ""
-
-    grounding_section = (
-        f"## Affected tests & symbols (auto-attached)\n\n{grounding}\n\n"
-        if grounding else ""
-    )
-
-    # v4.13: pre-fill the Testing checklist's "Automated" subsection from
-    # the last-run cache.
-    automated_block = _render_automated_for_pr(project_path)
-
-    # Factual scaffold: the branch's real commit subjects (oldest first) anchor the
-    # feature list so the model enumerates changes that exist instead of inventing.
+    # ── 3. Commit log (factual scaffold for the LLM) ─────────────────────────
     commit_log = _branch_commit_log(project_path, base, git_exe=cfg.git_exe)
-    commit_section = (
-        f"--- commits on this branch (oldest first) ---\n\n{commit_log}\n\n"
-        if commit_log else ""
-    )
 
-    if _is_local_pre:
-        # Local path: don't double-feed automated_block; Python injects it later.
-        user_prompt = (
-            f"{grounding_section}"
-            f"{commit_section}"
-            f"Please draft a PR description based on these commits and this git diff.\n\n"
-            f"--- git diff ---\n\n{diff_data}"
-        )
-    else:
-        # Cloud path: instruct the LLM to copy automated_block verbatim.
-        user_prompt = (
-            f"{grounding_section}"
-            f"{commit_section}"
-            f"Please draft a comprehensive PR description based on these commits and "
-            f"this git diff.\n\n"
-            f"Pre-rendered '### Automated' subsection (copy verbatim into the "
-            f"'## Testing checklist' section):\n\n"
-            f"{automated_block}\n\n"
-            f"--- git diff ---\n\n{diff_data}"
-        )
-
-    llm_cfg = cfg.raw.get("commit_message_llm", {})
-    _provider = llm_cfg.get("provider", "")
-    _is_local = (
-        _provider == "ollama"
-        or (_provider == "openai_compatible"
-            and "localhost" in (llm_cfg.get("base_url") or ""))
-    )
-    if _is_local and not llm_cfg.get("num_ctx"):
-        # Phase D: 16384 (was 8192) so a 14B-class local model can take a much
-        # larger diff (the cap above scales to this). Streaming makes the longer
-        # generation tolerable. Override via commit_message_llm.num_ctx.
-        llm_cfg = {**llm_cfg, "num_ctx": 16384}
-    _max_tokens = 1500 if _is_local else 3000
-    _timeout    = 300  if _is_local else 120
-    _system     = _PR_SYSTEM_PROMPT_LOCAL if _is_local else _PR_SYSTEM_PROMPT
-
-    _status("generating")
-    result = _call_llm(
-        cfg=llm_cfg,
-        system_prompt=_system,
-        user_prompt=user_prompt,
-        max_tokens=_max_tokens,
-        timeout=_timeout,
+    # ── 4. Grounding + prompt + LLM call + post-processing ───────────────────
+    return _build_pr_prompt_and_call(
+        cfg, diff_data, commit_log, project_path,
         on_token=on_token,
+        on_status=on_status,
+        coverage_gaps_md=coverage_gaps_md,
     )
-
-    # Local providers: strip any accidental code blocks, then inject the
-    # automated checklist block programmatically (more reliable than asking
-    # the model to copy-paste it verbatim).
-    if _is_local and result:
-        result = _clean_local_artifacts(result)
-        result = _inject_automated_block(result, automated_block)
-
-    # Both paths: splice the coverage-gaps block (if provided) into the
-    # Testing checklist — ordering Automated < Coverage gaps < Manual.
-    if result and coverage_gaps_md:
-        result = _inject_coverage_gaps(result, coverage_gaps_md)
-
-    return result
 
 
 def _render_automated_for_pr(project_path: str) -> str:
