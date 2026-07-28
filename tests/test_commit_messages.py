@@ -1,11 +1,16 @@
 """Tests for helpers/commit_messages.py — smart commit-message generation."""
 
+import json
 import pytest
 from unittest.mock import Mock, patch, MagicMock
 from helpers.commit_messages import (
     _files_from_diff,
     _build_commit_grounding,
     _clean_prefix_scope,
+    _fetch_commit_context,
+    _new_files_diff,
+    _pending_diff,
+    _ctx_cache,
 )
 
 
@@ -203,3 +208,250 @@ class TestCleanPrefixScope:
         """Windows-style paths (if present) handled."""
         result = _clean_prefix_scope("fix(src\\controllers\\main.py):")
         assert isinstance(result, str)
+
+
+class TestFetchCommitContext:
+    """Tests for _fetch_commit_context — tokensave commit_context enrichment."""
+
+    def setup_method(self):
+        _ctx_cache.clear()
+
+    def _make_ctx_output(self, symbols=None, roles=None, style=None):
+        return json.dumps({
+            "changed_symbols": symbols or [],
+            "file_roles": roles or {},
+            "recent_commit_style": style or [],
+        })
+
+    def test_happy_path_formats_markdown(self, tmp_path):
+        ctx_json = self._make_ctx_output(
+            symbols=[{"name": "MyClass.save", "file": "foo.py"}],
+            roles={"foo.py": "persistence layer"},
+            style=["feat:", "fix:"],
+        )
+        with patch("subprocess.run") as mock_run:
+            def side_effect(cmd, **kw):
+                r = Mock()
+                if "rev-parse" in cmd:
+                    r.returncode = 0
+                    r.stdout = "abc123\n"
+                else:
+                    r.returncode = 0
+                    r.stdout = ctx_json
+                return r
+            mock_run.side_effect = side_effect
+            result = _fetch_commit_context("tokensave", str(tmp_path), "git", "diff text")
+        assert "## Changed symbols" in result
+        assert "MyClass.save (foo.py)" in result
+        assert "## File roles" in result
+        assert "persistence layer" in result
+        assert "## Recent commit style" in result
+        assert "feat:" in result
+
+    def test_no_tokensave_exe_returns_empty(self, tmp_path):
+        result = _fetch_commit_context("", str(tmp_path), "git", "diff")
+        assert result == ""
+
+    def test_malformed_json_returns_empty(self, tmp_path):
+        with patch("subprocess.run") as mock_run:
+            def side_effect(cmd, **kw):
+                r = Mock()
+                if "rev-parse" in cmd:
+                    r.returncode = 0; r.stdout = "sha1\n"
+                else:
+                    r.returncode = 0; r.stdout = "not-valid-json{"
+                return r
+            mock_run.side_effect = side_effect
+            result = _fetch_commit_context("tokensave", str(tmp_path), "git", "diff")
+        assert result == ""
+
+    def test_subprocess_failure_returns_empty(self, tmp_path):
+        with patch("subprocess.run") as mock_run:
+            def side_effect(cmd, **kw):
+                r = Mock()
+                if "rev-parse" in cmd:
+                    r.returncode = 0; r.stdout = "sha1\n"
+                else:
+                    r.returncode = 1; r.stdout = ""
+                return r
+            mock_run.side_effect = side_effect
+            result = _fetch_commit_context("tokensave", str(tmp_path), "git", "diff")
+        assert result == ""
+
+    def test_cache_hit_skips_second_subprocess_call(self, tmp_path):
+        ctx_json = self._make_ctx_output(symbols=[{"name": "Foo", "file": "x.py"}])
+        ctx_call_count = {"n": 0}
+        with patch("subprocess.run") as mock_run:
+            def side_effect(cmd, **kw):
+                r = Mock()
+                if "rev-parse" in cmd:
+                    r.returncode = 0; r.stdout = "sha1\n"
+                else:
+                    ctx_call_count["n"] += 1
+                    r.returncode = 0; r.stdout = ctx_json
+                return r
+            mock_run.side_effect = side_effect
+            _fetch_commit_context("tokensave", str(tmp_path), "git", "same diff")
+            _fetch_commit_context("tokensave", str(tmp_path), "git", "same diff")
+        # commit_context tool invoked once (first call); cache serves the second
+        assert ctx_call_count["n"] == 1
+
+
+class TestNewFilesDiff:
+    """Tests for _new_files_diff — pseudo-diff for untracked new files."""
+
+    def _git_ok(self, stdout=""):
+        r = Mock()
+        r.returncode = 0
+        r.stdout = stdout
+        return r
+
+    def _git_fail(self):
+        r = Mock()
+        r.returncode = 1
+        r.stdout = ""
+        return r
+
+    def test_empty_when_no_untracked_files(self, tmp_path, monkeypatch):
+        monkeypatch.setattr(
+            "helpers.commit_messages.subprocess.run",
+            lambda *a, **k: self._git_ok(""),
+        )
+        assert _new_files_diff(str(tmp_path), "git") == ""
+
+    def test_empty_when_ls_files_fails(self, tmp_path, monkeypatch):
+        monkeypatch.setattr(
+            "helpers.commit_messages.subprocess.run",
+            lambda *a, **k: self._git_fail(),
+        )
+        assert _new_files_diff(str(tmp_path), "git") == ""
+
+    def test_single_new_file_produces_diff_header(self, tmp_path, monkeypatch):
+        new_file = tmp_path / "hello.py"
+        new_file.write_text("print('hello')\n")
+        calls = []
+
+        def fake_run(cmd, **kw):
+            calls.append(cmd)
+            if "ls-files" in cmd:
+                return self._git_ok("hello.py\n")
+            return self._git_ok("")
+
+        monkeypatch.setattr("helpers.commit_messages.subprocess.run", fake_run)
+        result = _new_files_diff(str(tmp_path), "git")
+        assert "diff --git" in result
+        assert "hello.py" in result
+        assert "+++ b/hello.py" in result
+        assert "+print('hello')" in result
+
+    def test_multiple_new_files(self, tmp_path, monkeypatch):
+        (tmp_path / "a.py").write_text("x = 1\n")
+        (tmp_path / "b.py").write_text("y = 2\n")
+
+        def fake_run(cmd, **kw):
+            if "ls-files" in cmd:
+                return self._git_ok("a.py\nb.py\n")
+            return self._git_ok("")
+
+        monkeypatch.setattr("helpers.commit_messages.subprocess.run", fake_run)
+        result = _new_files_diff(str(tmp_path), "git")
+        assert "a.py" in result
+        assert "b.py" in result
+
+    def test_respects_max_chars_cap(self, tmp_path, monkeypatch):
+        (tmp_path / "big.py").write_text("x\n" * 5000)
+
+        def fake_run(cmd, **kw):
+            if "ls-files" in cmd:
+                return self._git_ok("big.py\n")
+            return self._git_ok("")
+
+        monkeypatch.setattr("helpers.commit_messages.subprocess.run", fake_run)
+        result = _new_files_diff(str(tmp_path), "git", max_chars=500)
+        assert len(result) <= 600  # cap + truncation marker overhead
+
+    def test_missing_file_skipped_gracefully(self, tmp_path, monkeypatch):
+        def fake_run(cmd, **kw):
+            if "ls-files" in cmd:
+                return self._git_ok("nonexistent.py\n")
+            return self._git_ok("")
+
+        monkeypatch.setattr("helpers.commit_messages.subprocess.run", fake_run)
+        result = _new_files_diff(str(tmp_path), "git")
+        assert result == ""
+
+    def test_subprocess_exception_returns_empty(self, tmp_path, monkeypatch):
+        monkeypatch.setattr(
+            "helpers.commit_messages.subprocess.run",
+            lambda *a, **k: (_ for _ in ()).throw(FileNotFoundError("git not found")),
+        )
+        assert _new_files_diff(str(tmp_path), "git") == ""
+
+
+class TestPendingDiffNewFileFallback:
+    """Tests that _pending_diff falls back to _new_files_diff for all-new-file commits."""
+
+    def test_falls_back_when_tracked_diff_empty(self, tmp_path, monkeypatch):
+        """When git diff HEAD returns empty, _new_files_diff is called."""
+        new_file = tmp_path / "new.py"
+        new_file.write_text("x = 1\n")
+        call_log = []
+
+        def fake_run(cmd, **kw):
+            call_log.append(cmd)
+            r = Mock()
+            if "ls-files" in cmd:
+                r.returncode = 0
+                r.stdout = "new.py\n"
+            elif "diff" in cmd and "HEAD" in cmd:
+                r.returncode = 0
+                r.stdout = ""  # no tracked changes
+            else:
+                r.returncode = 0
+                r.stdout = ""
+            return r
+
+        monkeypatch.setattr("helpers.commit_messages.subprocess.run", fake_run)
+        result = _pending_diff(str(tmp_path), git_exe="git")
+        assert "new.py" in result
+        assert "+++ b/new.py" in result
+
+    def test_no_fallback_when_tracked_diff_present(self, tmp_path, monkeypatch):
+        """When git diff HEAD has content, _new_files_diff is NOT called."""
+        ls_called = []
+
+        def fake_run(cmd, **kw):
+            r = Mock()
+            if "ls-files" in cmd:
+                ls_called.append(True)
+                r.returncode = 0
+                r.stdout = "existing.py\n"
+            else:
+                r.returncode = 0
+                r.stdout = "diff --git a/existing.py b/existing.py\n+x = 2\n"
+            return r
+
+        monkeypatch.setattr("helpers.commit_messages.subprocess.run", fake_run)
+        result = _pending_diff(str(tmp_path), git_exe="git")
+        assert "existing.py" in result
+        assert not ls_called  # new-files fallback must not have been invoked
+
+    def test_no_fallback_when_paths_specified(self, tmp_path, monkeypatch):
+        """When specific paths are passed, fallback is suppressed even if diff is empty."""
+        ls_called = []
+
+        def fake_run(cmd, **kw):
+            r = Mock()
+            if "ls-files" in cmd:
+                ls_called.append(True)
+                r.returncode = 0
+                r.stdout = "new.py\n"
+            else:
+                r.returncode = 0
+                r.stdout = ""
+            return r
+
+        monkeypatch.setattr("helpers.commit_messages.subprocess.run", fake_run)
+        result = _pending_diff(str(tmp_path), "some/path.py", git_exe="git")
+        assert result == ""
+        assert not ls_called

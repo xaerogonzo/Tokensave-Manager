@@ -13,6 +13,7 @@ from __future__ import annotations
 import os
 import threading
 import tkinter as tk
+from dataclasses import dataclass
 from tkinter import ttk
 from typing import TYPE_CHECKING
 
@@ -124,6 +125,177 @@ class _GapPanelCtx:
         self.stub_btn = self.ai_btn = self.fail_btn = None
         self.cancel_btn = self.copy_cc_btn = self.rescan_btn = None
 
+
+
+@dataclass(frozen=True)
+class _GapAiRun:
+    """Context for one AI-generate run.
+
+    Lifted out of ``_gap_generate_ai`` — inner closures fold their branches
+    into the parent's cyclomatic complexity (the ``generate_verified_test``
+    / ``_VerifyCtx`` lesson), so the worker pipeline lives at module level
+    and threads this frozen bundle instead of 12 loose parameters.
+    """
+    ctl:              "TestGapCtrl"
+    selected:         list                  # [(row_idx, suggestion), ...]
+    backend:          str
+    root:             str                   # project root at button-press time
+    cancel_event:     "threading.Event"
+    dlg:              tk.Toplevel
+    status_vars:      list
+    status_var:       tk.StringVar
+    stub_btn:         "Any"
+    ai_btn:           "Any"
+    fail_btn:         "Any"
+    on_tests_written: "Callable | None"
+
+    def set_row(self, idx: int, glyph: str) -> None:
+        if self.dlg.winfo_exists():
+            self.dlg.after(0, lambda: self.status_vars[idx].set(glyph))
+
+    def set_status(self, text: str) -> None:
+        if self.dlg.winfo_exists():
+            self.dlg.after(0, lambda: self.status_var.set(text))
+
+
+def _gap_ai_token_cb(run: _GapAiRun, idx: int):
+    """Per-row liveness: ⏳ (prefill, no tokens) → ✍ N (generating).
+
+    on_token fires on the worker thread, so marshal to Tk via dlg.after.
+    Throttled (every 5th token) so a long local run doesn't flood the
+    event loop. The final ✓/✗ glyph is set by set_row after completion.
+    """
+    counter = {"n": 0}
+
+    def _cb(_delta: str) -> None:
+        counter["n"] += 1
+        n_tok = counter["n"]
+        if (n_tok == 1 or n_tok % 5 == 0) and run.dlg.winfo_exists():
+            run.dlg.after(0, lambda n=n_tok: run.status_vars[idx].set(f"✍ {n}"))
+
+    return _cb
+
+
+def _gap_ai_generate_one(run: _GapAiRun, k: int, n: int, idx: int, sg):
+    """Generate + verify one suggestion; returns (result, is_update)."""
+    from helpers.test_gen_llm import generate_verified_test
+
+    is_update = bool(getattr(sg, "test_exists", False))
+    run.set_row(idx, "⏳")
+    run.set_status(f"Verifying {k}/{n}…  (generate → run → repair)")
+    res = generate_verified_test(
+        sg.source_path, run.root,
+        backend=run.backend, cfg=run.ctl._cfg,
+        cancel_event=run.cancel_event,
+        template=getattr(sg, "template", None),
+        allow_overwrite=is_update,
+        target_path=(getattr(sg, "test_path", "") or None),
+        on_token=_gap_ai_token_cb(run, idx),
+    )
+    return res, is_update
+
+
+def _gap_ai_record_result(run: _GapAiRun, idx: int, sg, res,
+                          is_update: bool, acc: dict) -> None:
+    """Fold one VerifiedResult into the run accumulator + row glyph + log."""
+    if res.status == "pass":
+        acc["passed"] += 1
+        acc["written_paths"].append(sg.rel_path)
+        acc["written"].append((idx, sg, res.written_path, res.is_tk))
+        # Partial pass: per-test pruning kept some, dropped the rest.
+        glyph = (f"✓ ({res.kept}/{res.total})"
+                 if res.kept and res.total and res.kept < res.total
+                 else "✓")
+        run.set_row(idx, glyph)
+        if res.kept and res.kept < res.total:
+            acc["partials"][sg.rel_path] = res.report   # written; what was dropped
+        run.ctl._on_log(
+            f"  ✓ AI test {'updated' if is_update else 'written'} + "
+            f"passing ({glyph}): {sg.rel_path}", C["green"])
+    else:
+        acc["failed"] += 1
+        # Distinguish a failed regenerate (original preserved) from a
+        # failed new-file generate (nothing written).
+        if res.preserved_existing:
+            run.set_row(idx, "↻✗")
+            acc["failures"][sg.rel_path] = (
+                "[Update failed] the regenerated test failed the runtime "
+                "gate (or dropped coverage); the original test file was "
+                "preserved on disk.\n\n" + (res.report or res.status))
+        else:
+            run.set_row(idx, "✗")
+            acc["failures"][sg.rel_path] = res.report or res.status
+        run.ctl._on_log(
+            f"  ✗ AI test discarded ({res.status}): {sg.rel_path}",
+            C["yellow"])
+
+
+def _gap_ai_worker(run: _GapAiRun) -> None:
+    """Background pipeline: generate each selection, re-verify, hand off to done."""
+    n = len(run.selected)
+    acc = {"passed": 0, "failed": 0,
+           "partials": {},          # WRITTEN but some tests dropped (✓ N/M)
+           "failures": {},          # DISCARDED (isolation fail / gate / error)
+           "written_paths": [],     # source rel_paths that now have a passing test
+           "written": []}           # (idx, sg, test_relpath, is_tk) for re-verify
+    for k, (idx, sg) in enumerate(run.selected, 1):
+        if run.cancel_event.is_set():
+            break
+        res, is_update = _gap_ai_generate_one(run, k, n, idx, sg)
+        if res.status == "cancelled":
+            break
+        _gap_ai_record_result(run, idx, sg, res, is_update, acc)
+
+    # Re-verify the written NON-tk files against the FULL -m "not tk" gate and
+    # roll back any that pass alone but fail in the real suite. (tk files are
+    # deselected by that gate; they were hang-checked by the 20s isolation run.)
+    gate_relevant = [w for w in acc["written"] if w[2] and not w[3]]
+    if gate_relevant and not run.cancel_event.is_set():
+        run.set_status("Re-verifying generated tests against the full suite…")
+        dp, df = run.ctl._gap_reverify_and_rollback(
+            gate_relevant, run.cancel_event, run.root,
+            acc["written_paths"], acc["partials"], acc["failures"],
+            run.set_row)
+        acc["passed"] += dp
+        acc["failed"] += df
+
+    run.ctl._last_ai_partials = acc["partials"]
+    run.ctl._last_ai_fail_reports = acc["failures"]
+    if run.dlg.winfo_exists():
+        run.dlg.after(0, lambda: _gap_ai_done(
+            run, acc["passed"], acc["failed"], acc["written_paths"]))
+
+
+def _gap_ai_done(run: _GapAiRun, passed: int, failed: int,
+                 written_paths: list) -> None:
+    """Main-thread completion: re-enable buttons, summarise, notify."""
+    if not run.dlg.winfo_exists():
+        return
+    run.stub_btn.configure(state=tk.NORMAL)
+    run.ai_btn.configure(state=tk.NORMAL)
+    # Enable "View failures…" if anything failed OR a partial pass dropped
+    # some tests (both are stashed for the viewer).
+    has_reports = bool(getattr(run.ctl, "_last_ai_fail_reports", None)
+                       or getattr(run.ctl, "_last_ai_partials", None))
+    run.fail_btn.configure(state=(tk.NORMAL if has_reports else tk.DISABLED))
+    if run.cancel_event.is_set():
+        run.status_var.set(f"Cancelled — {passed} ✓ / {failed} ✗ so far.")
+    else:
+        run.status_var.set(
+            f"Done: {passed} ✓ / {failed} ✗ — passing (incl. pruned-partial) "
+            "tests were written.")
+    # Reflect closed gaps in the PR-body checklist (Draft PR dialog only).
+    if run.on_tests_written and written_paths:
+        run.on_tests_written(written_paths)
+    # Refresh Test Manager if still open and same project
+    ctl = run.ctl
+    if (run.root == ctl._git_path
+            and ctl._test_manager_ref is not None
+            and ctl._test_manager_ref.winfo_exists()):
+        try:
+            ctl._test_manager_ref.refresh_coverage()
+        except Exception:
+            pass
 
 
 class TestGapCtrl:
@@ -687,9 +859,6 @@ class TestGapCtrl:
         only if it passes, else discard. Per-row ⏳/✓/✗ + a summary; discarded
         files' pytest output is stashed for the "View failures…" button.
         """
-        import threading
-        from helpers.test_gen_llm import generate_verified_test
-
         if not ai_enabled_var.get():
             status_var.set("AI generation is disabled.")
             return
@@ -701,138 +870,24 @@ class TestGapCtrl:
             return
 
         cancel_event.clear()           # fresh run (Event is reused across clicks)
-        backend = backend_var.get() if backend_var is not None else "auto"
-        stub_btn.configure(state=tk.DISABLED)
-        ai_btn.configure(state=tk.DISABLED)
-        fail_btn.configure(state=tk.DISABLED)
-        captured_root = path           # snapshot project root at button-press time
-
-        def _set_row(idx: int, glyph: str) -> None:
-            if dlg.winfo_exists():
-                dlg.after(0, lambda: status_vars[idx].set(glyph))
-
-        def _set_status(text: str) -> None:
-            if dlg.winfo_exists():
-                dlg.after(0, lambda: status_var.set(text))
-
-        def _make_token_cb(idx: int):
-            """Per-row liveness: ⏳ (prefill, no tokens) → ✍ N (generating).
-
-            on_token fires on the worker thread, so marshal to Tk via dlg.after.
-            Throttled (every 5th token) so a long local run doesn't flood the
-            event loop. The final ✓/✗ glyph is set by _set_row after completion.
-            """
-            counter = {"n": 0}
-
-            def _cb(_delta: str) -> None:
-                counter["n"] += 1
-                n_tok = counter["n"]
-                if (n_tok == 1 or n_tok % 5 == 0) and dlg.winfo_exists():
-                    dlg.after(0, lambda n=n_tok: status_vars[idx].set(f"✍ {n}"))
-
-            return _cb
-
-        def _run():
-            n = len(selected)
-            passed = failed = 0
-            partials: dict = {}          # WRITTEN but some tests dropped (✓ N/M)
-            failures: dict = {}          # DISCARDED (isolation fail / gate / error)
-            written_paths: list = []     # source rel_paths that now have a passing test
-            written: list = []           # (idx, sg, test_relpath, is_tk) for re-verify
-            for k, (idx, sg) in enumerate(selected, 1):
-                if cancel_event.is_set():
-                    break
-                is_update = bool(getattr(sg, "test_exists", False))
-                _set_row(idx, "⏳")
-                _set_status(f"Verifying {k}/{n}…  (generate → run → repair)")
-                res = generate_verified_test(
-                    sg.source_path, captured_root,
-                    backend=backend, cfg=self._cfg,
-                    cancel_event=cancel_event,
-                    template=getattr(sg, "template", None),
-                    allow_overwrite=is_update,
-                    target_path=(getattr(sg, "test_path", "") or None),
-                    on_token=_make_token_cb(idx),
-                )
-                if res.status == "cancelled":
-                    break
-                if res.status == "pass":
-                    passed += 1
-                    written_paths.append(sg.rel_path)
-                    written.append((idx, sg, res.written_path, res.is_tk))
-                    # Partial pass: per-test pruning kept some, dropped the rest.
-                    glyph = (f"✓ ({res.kept}/{res.total})"
-                             if res.kept and res.total and res.kept < res.total
-                             else "✓")
-                    _set_row(idx, glyph)
-                    if res.kept and res.kept < res.total:
-                        partials[sg.rel_path] = res.report     # written; what was dropped
-                    self._on_log(
-                        f"  ✓ AI test {'updated' if is_update else 'written'} + "
-                        f"passing ({glyph}): {sg.rel_path}", C["green"])
-                else:
-                    failed += 1
-                    # Distinguish a failed regenerate (original preserved) from a
-                    # failed new-file generate (nothing written).
-                    if res.preserved_existing:
-                        _set_row(idx, "↻✗")
-                        failures[sg.rel_path] = (
-                            "[Update failed] the regenerated test failed the runtime "
-                            "gate (or dropped coverage); the original test file was "
-                            "preserved on disk.\n\n" + (res.report or res.status))
-                    else:
-                        _set_row(idx, "✗")
-                        failures[sg.rel_path] = res.report or res.status
-                    self._on_log(
-                        f"  ✗ AI test discarded ({res.status}): {sg.rel_path}",
-                        C["yellow"])
-
-            # Re-verify the written NON-tk files against the FULL -m "not tk" gate and
-            # roll back any that pass alone but fail in the real suite. (tk files are
-            # deselected by that gate; they were hang-checked by the 20s isolation run.)
-            gate_relevant = [w for w in written if w[2] and not w[3]]
-            if gate_relevant and not cancel_event.is_set():
-                _set_status("Re-verifying generated tests against the full suite…")
-                dp, df = self._gap_reverify_and_rollback(
-                    gate_relevant, cancel_event, captured_root,
-                    written_paths, partials, failures, _set_row)
-                passed += dp
-                failed += df
-
-            self._last_ai_partials = partials
-            self._last_ai_fail_reports = failures
-            if dlg.winfo_exists():
-                dlg.after(0, lambda: _done(passed, failed, written_paths))
-
-        def _done(passed: int, failed: int, written_paths: list) -> None:
-            if not dlg.winfo_exists():
-                return
-            stub_btn.configure(state=tk.NORMAL)
-            ai_btn.configure(state=tk.NORMAL)
-            # Enable "View failures…" if anything failed OR a partial pass dropped
-            # some tests (both are stashed for the viewer).
-            has_reports = bool(getattr(self, "_last_ai_fail_reports", None)
-                               or getattr(self, "_last_ai_partials", None))
-            fail_btn.configure(state=(tk.NORMAL if has_reports else tk.DISABLED))
-            if cancel_event.is_set():
-                status_var.set(f"Cancelled — {passed} ✓ / {failed} ✗ so far.")
-            else:
-                status_var.set(
-                    f"Done: {passed} ✓ / {failed} ✗ — passing (incl. pruned-partial) "
-                    "tests were written.")
-            # Reflect closed gaps in the PR-body checklist (Draft PR dialog only).
-            if on_tests_written and written_paths:
-                on_tests_written(written_paths)
-            # Refresh Test Manager if still open and same project
-            if (captured_root == self._git_path
-                    and self._test_manager_ref is not None
-                    and self._test_manager_ref.winfo_exists()):
-                try:
-                    self._test_manager_ref.refresh_coverage()
-                except Exception:
-                    pass
-
-        threading.Thread(target=_run, daemon=True).start()
+        for btn in (stub_btn, ai_btn, fail_btn):
+            btn.configure(state=tk.DISABLED)
+        run = _GapAiRun(
+            ctl=self,
+            selected=selected,
+            backend=(backend_var.get() if backend_var is not None else "auto"),
+            root=path,                 # snapshot project root at button-press time
+            cancel_event=cancel_event,
+            dlg=dlg,
+            status_vars=status_vars,
+            status_var=status_var,
+            stub_btn=stub_btn,
+            ai_btn=ai_btn,
+            fail_btn=fail_btn,
+            on_tests_written=on_tests_written,
+        )
+        threading.Thread(target=lambda: _gap_ai_worker(run),
+                         daemon=True).start()
 
     def _gap_reverify_and_rollback(
         self,

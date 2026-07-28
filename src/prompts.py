@@ -118,7 +118,8 @@ PROMPT_SNIPPETS: list[tuple[str, str]] = [
         "Run a comprehensive code-health audit using ALL of these "
         "tokensave tools and produce one structured report:\n"
         "  • tokensave_health(details=true)  (overall + per-dimension sub-scores)\n"
-        "  • tokensave_complexity            (high-complexity functions)\n"
+        "  • tokensave_complexity            (cyclomatic complexity, cognitive "
+        "complexity, CRAP score, Halstead metrics, maintainability index)\n"
         "  • tokensave_god_class             (god classes / large files)\n"
         "  • tokensave_circular              (circular dependencies)\n"
         "  • tokensave_coupling              (high-coupling modules)\n"
@@ -130,10 +131,11 @@ PROMPT_SNIPPETS: list[tuple[str, str]] = [
         "  • tokensave_unsafe_patterns       (risky patterns)\n"
         "Format: 🔴 Critical / 🟡 Warning / 🔵 Info, each with file:line "
         "and a one-sentence suggested fix. End with a top-5 priority list. "
-        "Calibration caveat: for Python/Tk projects, dead-code and "
-        "unused-imports false-positive heavily on tkinter callbacks "
-        "(command=self._x) and attribute imports (constants.C) — grep-"
-        "verify each finding before recommending deletion."
+        "Calibration caveat: v7.3.0 fixed the major Python false-positive "
+        "sources (closures, dict/arg value references, nested functions). "
+        "Remaining risk: Tkinter dynamic dispatch (command=self._x) and "
+        "attribute-only imports (constants.C, C[\"key\"]) still produce false "
+        "positives — grep-verify each finding before recommending deletion."
     ),
     (
         "📊  Architecture report",
@@ -238,6 +240,9 @@ PROMPT_SNIPPETS: list[tuple[str, str]] = [
     (
         "🛠  Pre-commit checklist",
         "I'm about to commit. Run:\n"
+        "  • tokensave_commit_context   (semantic summary: changed symbols, "
+        "file roles, recent commit style — richer input for the commit "
+        "message than raw diff)\n"
         "  • tokensave_diff_context     (what's actually changed)\n"
         "  • tokensave_affected         (which tests would be affected)\n"
         "  • tokensave_impact           (downstream impact of changes)\n"
@@ -287,7 +292,7 @@ PROMPT_SNIPPETS: list[tuple[str, str]] = [
         "use tokensave_diff_context."
     ),
 
-    # ─────────────────────────── 🔗 v6 NEW TOOLS ─────────────────────────
+    # ─────────────────────────── 🔗 v6-v7 NEW TOOLS ──────────────────────
     (
         "🔗  Call chain between two symbols",
         "Find the shortest directed call chain from [[source symbol]] "
@@ -328,6 +333,86 @@ PROMPT_SNIPPETS: list[tuple[str, str]] = [
         "and a risk rating (Low / Medium / High) for changing this file."
     ),
 
+    (
+        "🧠  Session memory",
+        "Track quality improvements across a session and persist durable "
+        "decisions that survive context resets.\n\n"
+        "  1. tokensave_session_start  — save a health baseline before "
+        "starting work.\n"
+        "  2. Work normally; at the end run tokensave_session_end for a "
+        "before/after quality_signal diff showing what improved or "
+        "degraded.\n"
+        "  3. For any design or architecture choice worth preserving, call "
+        "tokensave_record_decision (text, reason, tags, files) — decisions "
+        "are stored in the per-project DB and survive context resets.\n"
+        "  4. In a future session, tokensave_session_recall [[optional "
+        "query]] does FTS search across decision text and reason (omit the "
+        "query for recency-ordered recall) — no need to re-explain choices "
+        "already made.\n\n"
+        "Output: before/after metric delta + decisions matching the query."
+    ),
+    (
+        "📖  Companion docs lookup",
+        "Check whether a file has companion documentation before reading "
+        "its code.\n\n"
+        "  1. tokensave_entities [[file path]] — each entry now reports "
+        "has_doc (bool) and doc_path. One doc file can cover many "
+        "implementation files (many-to-many via an applies_to glob), so "
+        "the doc may answer questions about several related files at once.\n"
+        "  2. If has_doc is true: tokensave_doc [[file path]] returns the "
+        "doc content, every file it covers, and a drift signal — doc_stale: "
+        "true when code was committed after the doc was last updated.\n"
+        "  3. Read the code only if the doc doesn't fully answer the "
+        "question, or if doc_stale is true (doc may be out of date).\n\n"
+        "Output: doc summary + stale warning if drift detected. Note: "
+        "tokensave_doc is available when the project has a docs_dir "
+        "configured or sidecar *.readme.md files alongside the code."
+    ),
+    (
+        "🎯  Test risk ranking",
+        "Find where the next test will do the most good.\n\n"
+        "Risk = (cyclomatic + 1) × (fan_in + 1) × untested_multiplier — "
+        "symbols that are complex, heavily called, and uncovered score "
+        "highest.\n\n"
+        "  1. tokensave_test_risk [[file or omit for whole project]] — "
+        "top N by risk score.\n"
+        "  2. For each top entry: tokensave_node to read the body, "
+        "tokensave_callers to confirm real fan-in, tokensave_test_coverage "
+        "to check whether any test transitively reaches it.\n"
+        "  3. Draft a test scenario for the top entry.\n\n"
+        "Output: ranked table — symbol | file:line | risk score | why it "
+        "matters | suggested test scenario. Cap at top 10."
+    ),
+    (
+        "🔬  Find implementations of a method",
+        "Find every type that defines a method named [[method name]] using "
+        "tokensave_implementations method=[[method name]]. Useful for "
+        "patterns like save_into, _apply, _build_*, render where many "
+        "types share the same interface. For each match:\n\n"
+        "  1. tokensave_node — read the body.\n"
+        "  2. tokensave_callers — see which callers drive it.\n"
+        "  3. Flag diverging implementations: different return types, "
+        "missing error handling, or significantly different logic.\n\n"
+        "Output: table — type | file:line | signature — then a 'consistency "
+        "verdict' noting any implementations that deviate from the majority "
+        "pattern."
+    ),
+    (
+        "🌿  Branch code-graph comparison",
+        "Compare the code graphs of two branches — structural changes "
+        "beyond what git diff shows.\n\n"
+        "  1. tokensave_branch_diff base=[[base branch]] "
+        "head=[[feature branch]] — symbols added, removed, and changed "
+        "(signature differs).\n"
+        "  2. tokensave_impact on changed symbols to estimate blast "
+        "radius.\n"
+        "  3. tokensave_affected to surface which tests are now "
+        "implicated.\n\n"
+        "Output: three groups (Added / Removed / Changed) with file:line "
+        "and a one-line risk note per entry; flag any public-API change "
+        "that has callers outside the changed files."
+    ),
+
     # ─────────────────────── 🔄 UPGRADE INTEGRATION ──────────────────────────
     (
         "🔄  Integration audit (after upgrade)",
@@ -358,8 +443,15 @@ PROMPT_SNIPPETS: list[tuple[str, str]] = [
         "  lines lack 'STATUS: FIXED', 'STATUS: SHIPPED', or\n"
         "  'STATUS: MOOT': check if the changelog change resolves it and\n"
         "  propose the correct STATUS line to add.\n\n"
+        "STEP 4.5 — Infrastructure changes (v7.2 + v7.6)\n"
+        "  • v7.6.0: tokensave now writes rules to ~/.claude/rules/tokensave.md\n"
+        "    instead of appending to CLAUDE.md. Verify the managed file exists;\n"
+        "    confirm CLAUDE.md no longer contains a tokensave marker block.\n"
+        "    Any upstream-issues doc about CLAUDE.md rule injection → STATUS: MOOT.\n"
+        "  • v7.2.0: .tokensave/project.json lets users index extensionless files\n"
+        "    with a language override — an alternative to shadow links.\n\n"
         "STEP 5 — Manager integration code\n"
-        "  Read helpers/daemon_cost.py, ai_tasks_ctrl.py, agent_tools.py.\n"
+        "  Read helpers/daemon_cost.py, agent_tools.py.\n"
         "  Flag any function that wraps a tokensave CLI command or MCP\n"
         "  tool that was removed or renamed in Step 1.\n\n"
         "STEP 6 — Output a structured action list:\n"

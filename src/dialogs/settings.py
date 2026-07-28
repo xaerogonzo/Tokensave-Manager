@@ -1,24 +1,27 @@
 """SettingsDialog — edit manager-config.json through the GUI.
 
-Six sections in a scrollable canvas:
-  1. Paths            — tokensave_exe, template_dir, editor_cmd
-  2. Git tools        — git_exe + GitHub CLI (gh) install/detect
-  3. CodeGraph        — codegraph executable path + npm install
-  4. Search roots     — Treeview of (label, path) categories
-  5. Behavior         — auto-commit toggle + MCP integration + Draft PR backend + Ollama
-  6. AI commit msgs   — provider/model/key/preset/options
+Six sections in a scrollable canvas, composed from section modules
+(Roadmap-8 god-file split — each owns its widgets, vars, and its slice
+of the Save contract via ``save_into(raw)``):
+
+  1. Paths + Git tools — dialogs/settings_paths.py   (PathsSection)
+  2. CodeGraph         — dialogs/settings_codegraph.py (CodegraphSection)
+  3. Search roots      — here (Treeview of label/path categories)
+  4. Behavior toggles  — here (auto-commit, pre-commit hook, MCP row)
+  5. AI sections       — dialogs/settings_ai.py      (AISection)
 
 The Save handler is the canonical cfg-mutation path. It mutates
-`self._cfg.raw[key]` in place, calls the existing `save_fn` callback
-(which persists to disk + writes the on-saved hook for the legacy
-global rebind), then fires `callback()` so the App can also
+`self._cfg.raw[key]` in place (each section writes its own keys; a
+section returning False aborts the save), calls the existing `save_fn`
+callback (which persists to disk + writes the on-saved hook for the
+legacy global rebind), then fires `callback()` so the App can also
 `_state.refresh_derived()` and re-bind any module-level globals that
 still exist during the Phase C transition window.
 
 Cross-dialog deps (lazy-imported per plan Rule 6 to avoid any future
 module-load cycle):
   • MCPConfigDialog (button: 🔌 Manage MCP wiring…)
-  • OllamaModelManagerDialog (button: 🦙 Manage Ollama Models…)
+  • ToolManagerDialog (buttons in the Paths + CodeGraph sections)
 
 Reads `self._cfg.git_exe` at execution time (Rule 3 — no snapshot
 caches). The `cfg.get(...)` and `cfg[...] = ...` patterns from the
@@ -28,44 +31,20 @@ original become `cfg.raw.get(...)` and `cfg.raw[...] = ...` here.
 from __future__ import annotations
 
 import os
-import subprocess
-import threading
 import tkinter as tk
-from tkinter import ttk, filedialog, messagebox, simpledialog
+from tkinter import ttk, filedialog, simpledialog
 from typing import TYPE_CHECKING
 
-from constants import C, CREATE_NO_WINDOW
+from constants import C
 from theme import bind_mousewheel, themed_checkbutton
-from helpers.detection import (
-    _detect_git, _detect_gh, _detect_npm, _detect_codegraph, _detect_claude_cli,
-    _root_path, _root_label,
-)
+from helpers.detection import _root_path, _root_label
 from helpers.mcp import _mcp_configs, _classify_mcp_entry
+from dialogs.settings_paths import PathsSection
+from dialogs.settings_codegraph import CodegraphSection
+from dialogs.settings_ai import AISection
 
 if TYPE_CHECKING:
     from state import ManagerConfig
-
-
-def _probe_loaded_model(base_url: str) -> str:
-    """Query the /v1/models endpoint and return the first non-embedding model id.
-
-    Used by the AI-preset buttons to auto-fill the Model field when the local
-    server is reachable. Returns "" on any network or parse failure.
-    """
-    import urllib.request, urllib.error, json as _json
-    try:
-        req = urllib.request.Request(base_url.rstrip("/") + "/v1/models")
-        with urllib.request.urlopen(req, timeout=2) as resp:
-            data = _json.loads(resp.read().decode("utf-8"))
-    except (urllib.error.URLError, urllib.error.HTTPError,
-            TimeoutError, OSError, _json.JSONDecodeError):
-        return ""
-    for m in (data.get("data") or []):
-        mid = m.get("id", "")
-        lid = mid.lower()
-        if mid and "embed" not in lid and "rerank" not in lid and "whisper" not in lid:
-            return mid
-    return ""
 
 
 class SettingsDialog(tk.Toplevel):
@@ -120,13 +99,17 @@ class SettingsDialog(tk.Toplevel):
                      justify=tk.LEFT, padx=14, pady=8,
                      wraplength=440).pack(fill=tk.X, pady=(0, 4))
 
-        self._build_paths_section(body, raw)
-        self._build_git_tools_section(body, raw)
-        self._build_codegraph_section(body, raw)
+        # Sections in original visual order. Each section owns its vars and
+        # writes them back via save_into(raw) in _save.
+        self._paths = PathsSection(
+            self, body, cfg, open_tool_manager=self._open_tool_manager)
+        self._codegraph = CodegraphSection(
+            self, body, cfg, open_tool_manager=self._open_tool_manager)
         self._build_roots_section(body, raw)
-        self._build_behavior_section(body, raw)
-        self._build_ai_section(body, raw)
-        self._build_ask_ai_section(body, raw)
+        self._build_git_toggles_section(body, raw)
+        self._build_mcp_section(body)
+        self._ai = AISection(self, body, cfg)
+        self._sections = [self._paths, self._codegraph, self._ai]
 
         # ── Save/Cancel — anchored outside the scroll area ────────────────
         btn_row = tk.Frame(self, bg=C["base"])
@@ -134,619 +117,6 @@ class SettingsDialog(tk.Toplevel):
         ttk.Button(btn_row, text="Save", style="Primary.TButton",
                    command=self._save).pack(side=tk.LEFT, padx=(0, 8))
         ttk.Button(btn_row, text="Cancel", command=self.destroy).pack(side=tk.LEFT)
-
-    def _build_paths_section(self, body, raw):
-        """Tokensave exe, upgrade row, template dir, editor command."""
-        def field_row(label, key, is_file=False, is_dir=False, note=""):
-            tk.Label(body, text=label, bg=C["base"], fg=C["subtext"],
-                     font=("Segoe UI", 9)).pack(anchor=tk.W, padx=20, pady=(10, 0))
-            row = tk.Frame(body, bg=C["base"])
-            row.pack(fill=tk.X, padx=20, pady=(2, 0))
-            var = tk.StringVar(value=raw.get(key, ""))
-            entry = ttk.Entry(row, textvariable=var, width=52)
-            entry.pack(side=tk.LEFT, padx=(0, 6))
-            def browse(v=var, f=is_file, d=is_dir):
-                if f:
-                    p = filedialog.askopenfilename(
-                        title=f"Select {label}", filetypes=[("Executable", "*.exe"), ("All", "*.*")],
-                        initialfile=v.get(), parent=self)
-                elif d:
-                    p = filedialog.askdirectory(title=f"Select {label}", parent=self)
-                else:
-                    return
-                if p:
-                    v.set(p)
-            ttk.Button(row, text="Browse", command=browse).pack(side=tk.LEFT)
-            if note:
-                tk.Label(row, text=note, bg=C["base"], fg=C["overlay0"],
-                         font=("Segoe UI", 8)).pack(side=tk.LEFT, padx=(8, 0))
-            return var
-
-        self._exe_var = field_row("tokensave.exe  —  path to the tokensave binary",
-                                  "tokensave_exe", is_file=True)
-
-        # Upgrade tokensave row — ALWAYS shown (idempotent; reports "already
-        # on latest" when no update is available). Promoted style when the app
-        # has cached an available version from an "Update available" sync line.
-        upgrade_row = tk.Frame(body, bg=C["base"])
-        upgrade_row.pack(fill=tk.X, padx=20, pady=(6, 0))
-        host = self.master
-        cur_ver = getattr(host, "_tokensave_current_version", None)
-        new_ver = getattr(host, "_tokensave_available_version", None)
-        cur_str = f"v{cur_ver}" if cur_ver else "version unknown"
-        if new_ver:
-            btn_label = f"🔄  Upgrade tokensave to v{new_ver}"
-            btn_style = "Primary.TButton"
-            hint = (f"  Current: {cur_str} → available: v{new_ver}.  "
-                    "Replaces the binary; restart Claude after upgrading.")
-            hint_fg = C["green"]
-        else:
-            btn_label = "🔄  Upgrade tokensave"
-            btn_style = "TButton"
-            hint = (f"  Current: {cur_str}.  Runs `tokensave upgrade` — "
-                    "no-op if you're already on the latest release. "
-                    "Restart Claude after a successful upgrade.")
-            hint_fg = C["overlay0"]
-        ttk.Button(upgrade_row, text=btn_label, style=btn_style,
-                   command=host.cmd_upgrade_tokensave).pack(side=tk.LEFT)
-        ttk.Button(upgrade_row, text="🔍  Check integration",
-                   command=host.cmd_integration_check).pack(side=tk.LEFT, padx=(8, 0))
-        # v4.8: shortcut into the new Tool Manager dialog
-        ttk.Button(upgrade_row, text="🛠️  Open Tool Manager…",
-                   command=self._open_tool_manager).pack(side=tk.LEFT, padx=(8, 0))
-        tk.Label(body, text=hint, bg=C["base"], fg=hint_fg,
-                 font=("Segoe UI", 8), justify=tk.LEFT,
-                 anchor=tk.W).pack(fill=tk.X, padx=20, pady=(0, 4))
-
-        self._tmpl_var = field_row(
-            "Template directory  —  folder containing claude-md-template.md and project-baseline.md",
-            "template_dir", is_dir=True, note="(leave blank to auto-detect)")
-        self._editor_var = field_row(
-            "Editor command  —  launched by 'Open in Editor' (e.g. code, code --new-window, notepad)",
-            "editor_cmd", note="(flags supported)")
-
-    def _build_git_tools_section(self, body, raw):
-        """Git executable path + Claude Code CLI + GitHub CLI install/detect."""
-        # ── Git executable ────────────────────────────────────────────────
-        ttk.Separator(body, orient="horizontal").pack(fill=tk.X, padx=20, pady=(12, 8))
-        tk.Label(body, text="Git executable  —  path to git.exe",
-                 bg=C["base"], fg=C["subtext"],
-                 font=("Segoe UI", 9)).pack(anchor=tk.W, padx=20)
-        git_row = tk.Frame(body, bg=C["base"])
-        git_row.pack(fill=tk.X, padx=20, pady=(4, 0))
-        self._git_exe_var = tk.StringVar(value=raw.get("git_exe", ""))
-        ttk.Entry(git_row, textvariable=self._git_exe_var, width=44).pack(side=tk.LEFT, padx=(0, 6))
-        def _browse_git():
-            p = filedialog.askopenfilename(
-                title="Select git.exe",
-                filetypes=[("Executable", "*.exe"), ("All", "*.*")],
-                initialdir=r"C:\Program Files\Git\cmd", parent=self)
-            if p:
-                self._git_exe_var.set(p)
-                self._verify_git(p)
-        def _autodetect_git():
-            found = _detect_git()
-            self._git_exe_var.set(found)
-            self._verify_git(found)
-        ttk.Button(git_row, text="Browse…", command=_browse_git).pack(side=tk.LEFT, padx=(0, 6))
-        ttk.Button(git_row, text="Auto-detect", command=_autodetect_git).pack(side=tk.LEFT, padx=(0, 6))
-        self._git_status_lbl = tk.Label(git_row, text="", bg=C["base"],
-                                        font=("Segoe UI", 8), fg=C["overlay0"])
-        self._git_status_lbl.pack(side=tk.LEFT, padx=(6, 0))
-        tk.Label(body, text="  Leave blank to auto-detect from PATH or common install locations.",
-                 font=("Segoe UI", 8), bg=C["base"], fg=C["overlay0"]).pack(
-                 anchor=tk.W, padx=20, pady=(2, 0))
-        # Verify against the saved-or-live git_exe.
-        self.after(100, lambda: self._verify_git(raw.get("git_exe") or self._cfg.git_exe))
-
-        self._build_claude_cli_row(body, raw)
-        self._build_github_cli_row(body)
-
-    def _build_claude_cli_row(self, body, raw):
-        """Claude Code CLI path + Install button sub-section."""
-        ttk.Separator(body, orient="horizontal").pack(fill=tk.X, padx=20, pady=(12, 8))
-        tk.Label(body,
-                 text="Claude Code CLI  —  path to claude.cmd (npm install -g @anthropic-ai/claude-code)",
-                 bg=C["base"], fg=C["subtext"],
-                 font=("Segoe UI", 9)).pack(anchor=tk.W, padx=20)
-        cli_row = tk.Frame(body, bg=C["base"])
-        cli_row.pack(fill=tk.X, padx=20, pady=(4, 0))
-        self._claude_cli_var = tk.StringVar(value=raw.get("claude_cli_exe", ""))
-        ttk.Entry(cli_row, textvariable=self._claude_cli_var, width=44).pack(
-            side=tk.LEFT, padx=(0, 6))
-
-        def _browse_claude():
-            p = filedialog.askopenfilename(
-                title="Select claude.cmd or claude",
-                filetypes=[("All files", "*.*")],
-                initialdir=os.path.expandvars(r"%APPDATA%\npm"),
-                parent=self)
-            if p:
-                self._claude_cli_var.set(p)
-
-        def _autodetect_claude():
-            found = _detect_claude_cli()
-            if found:
-                self._claude_cli_var.set(found)
-                self._claude_cli_status.configure(text=f"Found: {found}", fg=C["green"])
-                self._claude_install_btn.configure(state=tk.DISABLED)
-            else:
-                self._claude_cli_status.configure(text="Not found.", fg=C["red"])
-                self._claude_install_btn.configure(state=tk.NORMAL)
-
-        def _install_claude():
-            # -NoExit keeps the window open so the user can see output and follow prompts.
-            try:
-                subprocess.Popen(
-                    ["powershell", "-NoExit", "-Command",
-                     "npm install -g @anthropic-ai/claude-code"],
-                    creationflags=subprocess.CREATE_NEW_CONSOLE,
-                )
-                self._claude_cli_status.configure(
-                    text="PowerShell opened — run it, then click Auto-detect when done.",
-                    fg=C["peach"])
-            except Exception as ex:
-                self._claude_cli_status.configure(
-                    text=f"Could not open PowerShell: {ex}", fg=C["red"])
-
-        ttk.Button(cli_row, text="Browse…",     command=_browse_claude).pack(side=tk.LEFT, padx=(0, 6))
-        ttk.Button(cli_row, text="Auto-detect", command=_autodetect_claude).pack(side=tk.LEFT, padx=(0, 6))
-        self._claude_install_btn = ttk.Button(cli_row, text="Install…", command=_install_claude)
-        self._claude_install_btn.pack(side=tk.LEFT, padx=(0, 6))
-        self._claude_cli_status = tk.Label(cli_row, text="", bg=C["base"],
-                                           font=("Segoe UI", 8), fg=C["overlay0"])
-        self._claude_cli_status.pack(side=tk.LEFT, padx=(6, 0))
-        tk.Label(body,
-                 text="  If auto-detect fails, paste the full path (e.g. %APPDATA%\\npm\\claude.cmd).",
-                 font=("Segoe UI", 8), bg=C["base"], fg=C["overlay0"]).pack(
-                 anchor=tk.W, padx=20, pady=(2, 0))
-        if raw.get("claude_cli_exe"):
-            self._claude_install_btn.configure(state=tk.DISABLED)
-
-        # Model dropdown — applies to manager-spawned `claude --print` calls only.
-        # Defensive: cfg.claude_cli_model already guards against None; do the
-        # same here in case the raw dict has the key with a None value.
-        cur_model = raw.get("claude_cli_model")
-        if cur_model is None:
-            cur_model = "claude-haiku-4-5-20251001"
-        self._var_claude_cli_model = tk.StringVar(value=cur_model)
-        model_row = tk.Frame(body, bg=C["base"])
-        model_row.pack(fill=tk.X, padx=20, pady=(4, 0))
-        tk.Label(model_row, text="Model:", width=8, anchor=tk.W,
-                 font=("Segoe UI", 9), bg=C["base"], fg=C["subtext"]).pack(side=tk.LEFT)
-        ttk.Combobox(model_row, textvariable=self._var_claude_cli_model,
-            values=[
-                "claude-haiku-4-5-20251001",
-                "claude-sonnet-4-6",
-                "claude-opus-4-7",
-                "",
-            ],
-            state="normal", width=32).pack(side=tk.LEFT)
-        tk.Label(body,
-            text="  Model used by the manager's automated calls (pre-commit review, commit-message\n"
-                 "  Suggest, Draft PR via CLI). Haiku = fast (3–5 s) and cheap. Opus = slow but deeper.\n"
-                 "  Empty = use whatever ~/.claude/settings.json defaults to. Does NOT affect interactive\n"
-                 "  'claude' sessions you launch from the terminal or Reference tab.",
-            font=("Segoe UI", 8), bg=C["base"], fg=C["overlay0"]).pack(
-            anchor=tk.W, padx=20, pady=(2, 0))
-
-    def _build_github_cli_row(self, body):
-        """GitHub CLI (gh) detect + install sub-section."""
-        ttk.Separator(body, orient="horizontal").pack(fill=tk.X, padx=20, pady=(12, 8))
-        tk.Label(body, text="GitHub CLI (gh)  —  enables 'Open PR on GitHub' and release creation",
-                 bg=C["base"], fg=C["subtext"],
-                 font=("Segoe UI", 9)).pack(anchor=tk.W, padx=20)
-        gh_row = tk.Frame(body, bg=C["base"])
-        gh_row.pack(fill=tk.X, padx=20, pady=(4, 0))
-        self._gh_status_lbl = tk.Label(gh_row, text="Checking…",
-                                       bg=C["base"], fg=C["overlay0"], font=("Segoe UI", 8))
-        self._gh_status_lbl.pack(side=tk.LEFT, padx=(0, 12))
-
-        def _check_gh_status():
-            found = _detect_gh()
-            if found:
-                self._gh_status_lbl.config(text=f"✓  {found}", fg=C["green"])
-                self._gh_install_btn.configure(state=tk.DISABLED)
-            else:
-                self._gh_status_lbl.config(text="✗  not installed", fg=C["red"])
-                self._gh_install_btn.configure(state=tk.NORMAL)
-
-        def _install_gh():
-            self._gh_status_lbl.config(
-                text="Installing…  (this may take a minute, a UAC prompt may appear)",
-                fg=C["peach"])
-            self._gh_install_btn.configure(state=tk.DISABLED)
-            def worker():
-                try:
-                    result = subprocess.run(
-                        ["winget", "install", "--id", "GitHub.cli",
-                         "--silent", "--accept-package-agreements",
-                         "--accept-source-agreements"],
-                        capture_output=True, text=True, timeout=180,
-                        creationflags=CREATE_NO_WINDOW)
-                    if result.returncode == 0:
-                        self.after(0, lambda: self._gh_status_lbl.config(
-                            text="✓  Installed!  Restart TokenSave Manager to use gh features.",
-                            fg=C["green"]))
-                    else:
-                        err = (result.stdout + result.stderr).strip()[-120:]
-                        self.after(0, lambda: self._gh_status_lbl.config(
-                            text=f"✗  Install failed (code {result.returncode}): {err}",
-                            fg=C["red"]))
-                        self.after(0, lambda: self._gh_install_btn.configure(state=tk.NORMAL))
-                except Exception as ex:
-                    err_msg = str(ex)
-                    self.after(0, lambda m=err_msg: self._gh_status_lbl.config(
-                        text=f"✗  Error: {m}", fg=C["red"]))
-                    self.after(0, lambda: self._gh_install_btn.configure(state=tk.NORMAL))
-            threading.Thread(target=worker, daemon=True).start()
-
-        self._gh_install_btn = ttk.Button(gh_row, text="Install via winget", command=_install_gh)
-        self._gh_install_btn.pack(side=tk.LEFT, padx=(0, 6))
-        ttk.Button(gh_row, text="Check again", command=_check_gh_status).pack(side=tk.LEFT)
-        tk.Label(body,
-                 text="  Once installed, use the Git tab's '🔗 Open PR' button to create pull requests on GitHub.",
-                 font=("Segoe UI", 8), bg=C["base"], fg=C["overlay0"]).pack(
-                 anchor=tk.W, padx=20, pady=(2, 0))
-        self.after(150, _check_gh_status)
-
-    def _build_codegraph_section(self, body, raw):
-        """CodeGraph executable path, install via npm, status check."""
-        ttk.Separator(body, orient="horizontal").pack(fill=tk.X, padx=20, pady=(12, 8))
-        self._cg_section = tk.Frame(body, bg=C["base"])
-        self._cg_section.pack(fill=tk.X)
-        cg_header = tk.Frame(self._cg_section, bg=C["base"])
-        cg_header.pack(fill=tk.X, padx=20)
-        tk.Label(cg_header,
-                 text="CodeGraph (codegraph)  —  optional alternative code-graph tool",
-                 bg=C["base"], fg=C["subtext"],
-                 font=("Segoe UI", 9)).pack(side=tk.LEFT)
-        # v4.8: discovery shortcut into the new Tool Manager dialog
-        ttk.Button(cg_header, text="🛠️  Open Tool Manager…",
-                   command=self._open_tool_manager).pack(side=tk.RIGHT)
-
-        # Path entry + Browse/Auto-detect buttons
-        cg_path_row = tk.Frame(self._cg_section, bg=C["base"])
-        cg_path_row.pack(fill=tk.X, padx=20, pady=(4, 0))
-        self._cg_exe_var = tk.StringVar(value=raw.get("codegraph_exe", ""))
-        self._cg_exe_entry = ttk.Entry(cg_path_row, textvariable=self._cg_exe_var, width=44)
-        self._cg_exe_entry.pack(side=tk.LEFT, padx=(0, 6))
-        ttk.Button(cg_path_row, text="Browse…",      command=self._cg_browse).pack(side=tk.LEFT, padx=(0, 6))
-        ttk.Button(cg_path_row, text="Auto-detect",  command=self._cg_autodetect).pack(side=tk.LEFT, padx=(0, 6))
-
-        # Status label
-        cg_install_row = tk.Frame(self._cg_section, bg=C["base"])
-        cg_install_row.pack(fill=tk.X, padx=20, pady=(6, 0))
-        self._cg_status_lbl = tk.Label(cg_install_row, text="Checking…",
-                                       bg=C["base"], fg=C["overlay0"],
-                                       font=("Segoe UI", 8), justify=tk.LEFT,
-                                       wraplength=420, anchor=tk.W)
-        self._cg_status_lbl.pack(side=tk.LEFT, padx=(0, 12), fill=tk.X, expand=True)
-
-        # Install / Check-again buttons
-        cg_btn_row = tk.Frame(self._cg_section, bg=C["base"])
-        cg_btn_row.pack(fill=tk.X, padx=20, pady=(4, 0))
-        # v4.7: relabeled — disambiguates from the new MCP-config buttons below
-        self._cg_install_btn = ttk.Button(cg_btn_row, text="Install binary (npm)", command=self._cg_install)
-        self._cg_install_btn.pack(side=tk.LEFT, padx=(0, 6))
-        ttk.Button(cg_btn_row, text="Check again", command=self._cg_check_status).pack(side=tk.LEFT, padx=(0, 6))
-        if not _detect_npm():
-            self._cg_install_btn.configure(state=tk.DISABLED)
-
-        # v4.7: MCP-config buttons.  Step 2 of the codegraph setup flow.
-        # Step 1 is installing the binary (above); Step 2 is wiring it as
-        # an MCP server for whichever AI agents the user uses.
-        cg_mcp_row = tk.Frame(self._cg_section, bg=C["base"])
-        cg_mcp_row.pack(fill=tk.X, padx=20, pady=(6, 0))
-        self._cg_mcp_auto_btn = ttk.Button(
-            cg_mcp_row, text="🔌  Configure MCP (auto)",
-            command=self._cg_mcp_configure_auto,
-        )
-        self._cg_mcp_auto_btn.pack(side=tk.LEFT, padx=(0, 6))
-        self._cg_mcp_picker_btn = ttk.Button(
-            cg_mcp_row, text="⚙  Configure MCP — pick agents…",
-            command=self._cg_mcp_open_picker,
-        )
-        self._cg_mcp_picker_btn.pack(side=tk.LEFT, padx=(0, 6))
-        self._cg_mcp_uninstall_btn = ttk.Button(
-            cg_mcp_row, text="🧹  Uninstall MCP",
-            command=self._cg_mcp_uninstall,
-        )
-        self._cg_mcp_uninstall_btn.pack(side=tk.LEFT, padx=(0, 6))
-
-        # Non-modal restart-required info bar — hidden by default, shown
-        # after a successful Configure MCP (auto) run.
-        self._cg_mcp_restart_bar = tk.Label(
-            self._cg_section,
-            text="",  # populated when shown
-            bg=C["surface0"], fg=C["blue"],
-            font=("Segoe UI", 8),
-            wraplength=520, justify=tk.LEFT,
-            padx=10, pady=6,
-        )
-        # NOT packed yet — _cg_show_restart_bar packs it on demand.
-
-        tk.Label(self._cg_section,
-                 text="  Step 1: install the binary.  Step 2: wire it as an MCP server for the agents you use.\n"
-                      "  Per-project actions live in the right-click menu (🧠 CodeGraph …).",
-                 font=("Segoe UI", 8), bg=C["base"], fg=C["overlay0"],
-                 justify=tk.LEFT).pack(anchor=tk.W, padx=20, pady=(4, 0))
-        self.after(200, self._cg_check_status)
-
-    # ── CodeGraph section helpers ────────────────────────────────────────────
-
-    def _cg_browse(self):
-        """Browse for the codegraph executable."""
-        p = filedialog.askopenfilename(
-            title="Select codegraph executable",
-            filetypes=[("Executable", "*.cmd;*.exe;*.bat"), ("All", "*.*")],
-            initialdir=os.path.expandvars(r"%APPDATA%\npm"), parent=self)
-        if p:
-            self._cg_exe_var.set(p)
-            self._verify_codegraph(p)
-
-    def _cg_autodetect(self):
-        """Auto-detect the codegraph executable from PATH."""
-        found = _detect_codegraph()
-        if found:
-            self._cg_exe_var.set(found)
-            self._verify_codegraph(found)
-        else:
-            self._cg_status_lbl.config(text="✗  not installed", fg=C["red"])
-
-    def _cg_check_status(self):
-        """Detect codegraph on PATH and update the status label + install button.
-
-        v4.7: also reports MCP wiring state for Claude Code via
-        ``helpers/mcp.py:_claude_code_mcp_has_codegraph``.  The status label
-        renders two lines when the binary is present — one for the binary,
-        one for the MCP wiring.  Buttons enable/disable based on both
-        states (e.g. "Uninstall MCP" only enables when MCP is currently
-        wired).
-        """
-        found = _detect_codegraph()
-        if found:
-            # v4.7: dual-line status — binary + MCP wiring
-            try:
-                from helpers.mcp import _claude_code_mcp_has_codegraph
-                mcp_wired, mcp_key = _claude_code_mcp_has_codegraph()
-            except Exception:
-                mcp_wired, mcp_key = False, ""
-            mcp_line = (
-                f"✓  MCP wired for Claude Code (mcpServers.{mcp_key})"
-                if mcp_wired else
-                "✗  MCP not wired for Claude Code"
-            )
-            mcp_colour = C["green"] if mcp_wired else C["red"]
-            # Use a multi-line label: foreground colour reflects the
-            # OVERALL state (green only when both binary + MCP are good).
-            overall = C["green"] if mcp_wired else C["yellow"]
-            self._cg_status_lbl.config(
-                text=f"✓  {found}\n{mcp_line}",
-                fg=overall)
-            self._cg_install_btn.configure(state=tk.DISABLED)
-            # MCP buttons gated on binary presence + per-button state
-            self._cg_mcp_auto_btn.configure(state=tk.NORMAL)
-            self._cg_mcp_picker_btn.configure(state=tk.NORMAL)
-            self._cg_mcp_uninstall_btn.configure(
-                state=tk.NORMAL if mcp_wired else tk.DISABLED)
-            # Mute the colour cue: the per-line text now carries the signal
-            _ = mcp_colour
-            if not self._cg_exe_var.get():
-                self._cg_exe_var.set(found)
-        else:
-            self._cg_status_lbl.config(text="✗  not installed", fg=C["red"])
-            # No binary → all MCP buttons disabled
-            self._cg_mcp_auto_btn.configure(state=tk.DISABLED)
-            self._cg_mcp_picker_btn.configure(state=tk.DISABLED)
-            self._cg_mcp_uninstall_btn.configure(state=tk.DISABLED)
-            state = tk.NORMAL if _detect_npm() else tk.DISABLED
-            self._cg_install_btn.configure(state=state)
-
-    def _cg_on_install_done(self, ok: bool, msg: str):
-        """Main-thread callback: update UI after the npm install worker finishes."""
-        if ok:
-            path = _detect_codegraph()
-            if path:
-                self._cg_exe_var.set(path)
-                self._cg_status_lbl.config(text=f"✓  Installed — {path}", fg=C["green"])
-            else:
-                self._cg_status_lbl.config(
-                    text="✓  Installed.  Click 'Check again' to confirm.", fg=C["green"])
-            self._cg_install_btn.configure(state=tk.NORMAL)
-        else:
-            self._cg_status_lbl.config(text=msg, fg=C["red"])
-            self._cg_install_btn.configure(state=tk.NORMAL)
-            if "\n" in msg:
-                messagebox.showerror("CodeGraph install failed", msg, parent=self)
-
-    def _cg_install(self):
-        """Install codegraph via npm in a background thread."""
-        npm = _detect_npm()
-        if not npm:
-            self._cg_status_lbl.config(
-                text="✗  npm not found — install Node.js 18+ first (https://nodejs.org)",
-                fg=C["red"])
-            return
-        self._cg_install_btn.configure(state=tk.DISABLED)
-        self._cg_status_lbl.config(
-            text="Installing…  (this may take a couple of minutes)", fg=C["yellow"])
-
-        def worker():
-            try:
-                result = subprocess.run(
-                    [npm, "install", "-g", "@colbymchenry/codegraph"],
-                    capture_output=True, text=True, timeout=300,
-                    creationflags=CREATE_NO_WINDOW, encoding="utf-8", errors="replace")
-            except subprocess.TimeoutExpired:
-                self.after(0, self._cg_on_install_done, False, "Install timed out after 5 minutes.")
-                return
-            except FileNotFoundError as e:
-                self.after(0, self._cg_on_install_done, False, f"npm not found: {e}")
-                return
-            if result.returncode == 0:
-                self.after(0, self._cg_on_install_done, True, "✓ Installed successfully.")
-            else:
-                err_text = (result.stderr or result.stdout or "").strip()
-                hint = ""
-                if "EPERM" in err_text or "EACCES" in err_text:
-                    hint = ("\n\nThis usually happens when Node.js was "
-                            "installed system-wide. Either run TokenSave "
-                            "Manager as administrator OR reinstall "
-                            "Node.js as a per-user install (the Node "
-                            "installer offers this option).")
-                tail = "\n".join(err_text.splitlines()[-8:]) or "(no output)"
-                self.after(0, self._cg_on_install_done, False,
-                           f"✗  Install failed (exit {result.returncode}):\n\n{tail}{hint}")
-
-        threading.Thread(target=worker, daemon=True).start()
-
-    # ── v4.7: CodeGraph MCP configure / uninstall handlers ────────────────────
-
-    def _cg_show_restart_bar(self, message: str) -> None:
-        """Show the non-modal restart-required info bar after a successful
-        Configure MCP run.  Re-shows on every install (idempotent pack)."""
-        self._cg_mcp_restart_bar.configure(text=message)
-        try:
-            # Pack just below the MCP button row if not already packed.
-            # Catches the case where it was already shown earlier in the session.
-            info = self._cg_mcp_restart_bar.pack_info()
-            if not info:  # never packed
-                raise tk.TclError("not packed")
-        except tk.TclError:
-            self._cg_mcp_restart_bar.pack(
-                fill=tk.X, padx=20, pady=(6, 0))
-
-    def _cg_mcp_configure_auto(self) -> None:
-        """🔌 Configure MCP (auto) — runs `codegraph install --yes`.
-
-        Auto-detects installed agents and wires them all.  Logs progress to
-        the status label (subprocess output is short).  On success, surfaces
-        a non-modal restart-required info bar; on failure, the status label
-        shows the error tail.
-        """
-        exe = self._cg_exe_var.get().strip() or _detect_codegraph()
-        if not exe or not os.path.isfile(exe):
-            messagebox.showerror(
-                "CodeGraph binary not found",
-                "The codegraph executable is not configured. "
-                "Install it first via 'Install binary (npm)'.",
-                parent=self)
-            return
-        self._cg_mcp_auto_btn.configure(state=tk.DISABLED)
-        self._cg_mcp_picker_btn.configure(state=tk.DISABLED)
-        self._cg_mcp_uninstall_btn.configure(state=tk.DISABLED)
-        self._cg_status_lbl.config(
-            text="Configuring MCP…  (codegraph install --yes)",
-            fg=C["yellow"])
-
-        def worker():
-            try:
-                result = subprocess.run(
-                    [exe, "install", "--yes"],
-                    capture_output=True, text=True, timeout=120,
-                    creationflags=CREATE_NO_WINDOW,
-                    encoding="utf-8", errors="replace")
-            except subprocess.TimeoutExpired:
-                self.after(0, self._cg_mcp_done, False,
-                           "Configure MCP timed out after 120 s.")
-                return
-            except (FileNotFoundError, OSError) as e:
-                self.after(0, self._cg_mcp_done, False,
-                           f"Could not launch codegraph: {e}")
-                return
-            ok = result.returncode == 0
-            log = (result.stdout or "") + (result.stderr or "")
-            self.after(0, self._cg_mcp_done, ok, log)
-
-        threading.Thread(target=worker, daemon=True).start()
-
-    def _cg_mcp_done(self, ok: bool, log: str) -> None:
-        """Main-thread callback for both Configure MCP (auto) and Uninstall MCP."""
-        # Refresh status row — this re-enables buttons based on current state.
-        self._cg_check_status()
-        if ok:
-            tail = "\n".join((log or "").splitlines()[-6:])
-            self._cg_show_restart_bar(
-                "✓  MCP server wired. Restart Claude Code (and any other "
-                "agents you wired) for the new codegraph_* tools to appear "
-                "in their sessions."
-            )
-            # Brief status banner in the status label too — fades back to
-            # the regular detail line on the next Check again click.
-            self._cg_status_lbl.config(
-                text=self._cg_status_lbl.cget("text") + "\n(just updated)",
-                fg=C["green"])
-            _ = tail
-        else:
-            tail = "\n".join((log or "").splitlines()[-8:]) or "(no output)"
-            messagebox.showerror(
-                "CodeGraph MCP — install failed",
-                f"codegraph install failed:\n\n{tail}",
-                parent=self)
-
-    def _cg_mcp_open_picker(self) -> None:
-        """⚙ Configure MCP — pick agents… — opens the picker dialog."""
-        exe = self._cg_exe_var.get().strip() or _detect_codegraph()
-        if not exe or not os.path.isfile(exe):
-            messagebox.showerror(
-                "CodeGraph binary not found",
-                "The codegraph executable is not configured. "
-                "Install it first via 'Install binary (npm)'.",
-                parent=self)
-            return
-        # Lazy import — avoids any module-load cycle and keeps the
-        # picker out of the main import graph until first use.
-        from dialogs.codegraph_mcp_picker import CodegraphMCPPickerDialog
-        CodegraphMCPPickerDialog(self, self._cfg,
-                                 on_done=self._cg_check_status)
-
-    def _cg_mcp_uninstall(self) -> None:
-        """🧹 Uninstall MCP — strip codegraph from all wired agents."""
-        exe = self._cg_exe_var.get().strip() or _detect_codegraph()
-        if not exe or not os.path.isfile(exe):
-            messagebox.showerror(
-                "CodeGraph binary not found",
-                "The codegraph executable is not configured.",
-                parent=self)
-            return
-        if not messagebox.askyesno(
-                "Uninstall CodeGraph from AI agents?",
-                "Remove CodeGraph from your AI agents' MCP servers? "
-                "They'll lose access to codegraph_* tools until you "
-                "re-configure.\n\n"
-                "This does NOT delete the binary or any project "
-                "indexes — only the MCP registrations in Claude Code "
-                "(and any other agents that have it wired).",
-                parent=self, default="no"):
-            return
-        self._cg_mcp_auto_btn.configure(state=tk.DISABLED)
-        self._cg_mcp_picker_btn.configure(state=tk.DISABLED)
-        self._cg_mcp_uninstall_btn.configure(state=tk.DISABLED)
-        self._cg_status_lbl.config(
-            text="Uninstalling MCP…  (codegraph uninstall)",
-            fg=C["yellow"])
-
-        def worker():
-            try:
-                result = subprocess.run(
-                    [exe, "uninstall"],
-                    capture_output=True, text=True, timeout=60,
-                    creationflags=CREATE_NO_WINDOW,
-                    encoding="utf-8", errors="replace")
-            except subprocess.TimeoutExpired:
-                self.after(0, self._cg_mcp_done, False,
-                           "codegraph uninstall timed out after 60 s.")
-                return
-            except (FileNotFoundError, OSError) as e:
-                self.after(0, self._cg_mcp_done, False,
-                           f"Could not launch codegraph: {e}")
-                return
-            ok = result.returncode == 0
-            log = (result.stdout or "") + (result.stderr or "")
-            self.after(0, self._cg_mcp_done, ok, log)
-
-        threading.Thread(target=worker, daemon=True).start()
 
     def _build_roots_section(self, body, raw):
         """Search roots two-column Treeview (label + path)."""
@@ -775,13 +145,6 @@ class SettingsDialog(tk.Toplevel):
         ttk.Button(root_btns, text="+ Add",      command=self._add_root).pack(fill=tk.X, pady=(0, 4))
         ttk.Button(root_btns, text="Edit Label", command=self._edit_root_label).pack(fill=tk.X, pady=(0, 4))
         ttk.Button(root_btns, text="Remove",     command=self._remove_root).pack(fill=tk.X)
-
-    def _build_behavior_section(self, body, raw):
-        """Auto-commit toggle, MCP, AI backend selection, and Ollama — router."""
-        self._build_git_toggles_section(body, raw)
-        self._build_mcp_section(body)
-        self._build_backend_selection_section(body, raw)
-        self._build_ollama_section(body, raw)
 
     def _build_git_toggles_section(self, body, raw):
         """Auto-commit after sync + pre-commit smoke-test hook."""
@@ -853,435 +216,6 @@ class SettingsDialog(tk.Toplevel):
             font=("Segoe UI", 8), bg=C["base"], fg=C["overlay0"],
             justify=tk.LEFT).pack(anchor=tk.W, padx=36, pady=(0, 8))
 
-    def _build_backend_selection_section(self, body, raw):
-        """AI backend selection LabelFrame: Draft PR, commit message, grounding."""
-        ttk.Separator(body, orient="horizontal").pack(fill=tk.X, padx=20, pady=(8, 8))
-        lf = tk.LabelFrame(body, text="AI backend selection",
-                           bg=C["base"], fg=C["subtext"],
-                           font=("Segoe UI", 9, "bold"),
-                           relief=tk.GROOVE, bd=1)
-        lf.pack(fill=tk.X, padx=20, pady=(0, 8))
-
-        # Draft PR
-        tk.Label(lf, text="Draft PR",
-                 font=("Segoe UI", 9, "bold"),
-                 bg=C["base"], fg=C["text"]).pack(anchor=tk.W, padx=12, pady=(6, 2))
-        self._var_draft_pr_backend = tk.StringVar(
-            value=raw.get("draft_pr_backend") or "auto")
-        pr_row = tk.Frame(lf, bg=C["base"])
-        pr_row.pack(anchor=tk.W, padx=12, pady=(0, 2))
-        for val, label in [("auto", "Auto"), ("claude_cli", "Claude Code CLI"), ("llm", "API key")]:
-            ttk.Radiobutton(pr_row, text=label, value=val,
-                            variable=self._var_draft_pr_backend).pack(side=tk.LEFT, padx=(0, 14))
-        tk.Label(lf,
-            text="  Auto: prefers Claude Code CLI if configured, falls back to API key.",
-            font=("Segoe UI", 8), bg=C["base"], fg=C["overlay0"],
-            justify=tk.LEFT).pack(anchor=tk.W, padx=24, pady=(0, 6))
-
-        ttk.Separator(lf, orient="horizontal").pack(fill=tk.X, padx=8, pady=(0, 6))
-
-        # Commit message
-        tk.Label(lf, text="Commit message (Suggest button)",
-                 font=("Segoe UI", 9, "bold"),
-                 bg=C["base"], fg=C["text"]).pack(anchor=tk.W, padx=12, pady=(0, 2))
-        self._var_commit_msg_backend = tk.StringVar(
-            value=raw.get("commit_message_backend") or "auto")
-        cm_row = tk.Frame(lf, bg=C["base"])
-        cm_row.pack(anchor=tk.W, padx=12, pady=(0, 2))
-        for val, label in [
-            ("auto",       "Claude CLI → LLM"),
-            ("llm_first",  "LLM → Claude CLI"),
-            ("claude_cli", "Claude CLI only"),
-            ("llm",        "LLM only"),
-        ]:
-            ttk.Radiobutton(cm_row, text=label, value=val,
-                            variable=self._var_commit_msg_backend).pack(
-                            side=tk.LEFT, padx=(0, 14))
-        tk.Label(lf,
-            text="  Claude CLI uses your subscription (no API credits). LLM uses the provider in the AI section below.",
-            font=("Segoe UI", 8), bg=C["base"], fg=C["overlay0"],
-            justify=tk.LEFT).pack(anchor=tk.W, padx=24, pady=(0, 8))
-
-        ttk.Separator(lf, orient="horizontal").pack(fill=tk.X, padx=8, pady=(0, 6))
-
-        # Code-graph grounding (v4.2) — master toggle for tokensave/codegraph
-        # context injection across commit-message, PR, code-review, doc-drafter.
-        tk.Label(lf, text="Code-graph grounding",
-                 font=("Segoe UI", 9, "bold"),
-                 bg=C["base"], fg=C["text"]).pack(anchor=tk.W, padx=12, pady=(0, 2))
-        # Default ON — matches ManagerConfig.enable_llm_grounding default.
-        _grounding_initial = raw.get("enable_llm_grounding")
-        if _grounding_initial is None:
-            _grounding_initial = True
-        self._var_enable_llm_grounding = tk.BooleanVar(value=bool(_grounding_initial))
-        grounding_chk = ttk.Checkbutton(
-            lf, text="Enable tokensave + codegraph grounding for LLM features",
-            variable=self._var_enable_llm_grounding,
-        )
-        grounding_chk.pack(anchor=tk.W, padx=12, pady=(0, 2))
-        try:
-            from theme import _Tooltip
-            _Tooltip(
-                grounding_chk,
-                "When on, the manager injects tokensave + codegraph context "
-                "into commit-message drafts, PR drafts, AI code review, the "
-                "Ask tab's Claude CLI path, and the doc drafter. Silently "
-                "skipped when neither tool is indexed for the current "
-                "project. Turn off if grounding produces noisy output.",
-            )
-        except Exception:
-            pass
-        tk.Label(lf,
-            text="  Adds structural facts (callers, callees, affected tests) to the prompt.",
-            font=("Segoe UI", 8), bg=C["base"], fg=C["overlay0"],
-            justify=tk.LEFT).pack(anchor=tk.W, padx=24, pady=(0, 8))
-
-        # v4.6: per-feature opt-IN for commit messages. Default OFF because
-        # live testing showed grounding hurts commit-message quality on big
-        # multi-file diffs (small models copy recent commit subjects verbatim).
-        _commit_grounding_initial = raw.get("enable_commit_grounding")
-        if _commit_grounding_initial is None:
-            _commit_grounding_initial = False
-        self._var_enable_commit_grounding = tk.BooleanVar(
-            value=bool(_commit_grounding_initial))
-        commit_grounding_chk = ttk.Checkbutton(
-            lf,
-            text="    └─ Also use grounding for commit messages (opt-in)",
-            variable=self._var_enable_commit_grounding,
-        )
-        commit_grounding_chk.pack(anchor=tk.W, padx=12, pady=(0, 2))
-        try:
-            from theme import _Tooltip
-            _Tooltip(
-                commit_grounding_chk,
-                "Off by default. Commit messages are summaries of the staged "
-                "diff — adding repository context tends to confuse small "
-                "models (qwen2.5-coder copies recent commit subjects "
-                "verbatim) and pushes the prompt past Claude CLI's output "
-                "budget. Turn ON to experiment; revert if the Suggest button "
-                "produces poor results.",
-            )
-        except Exception:
-            pass
-        tk.Label(lf,
-            text="    Recommended OFF — small models copy recent subjects when overwhelmed.",
-            font=("Segoe UI", 8), bg=C["base"], fg=C["overlay0"],
-            justify=tk.LEFT).pack(anchor=tk.W, padx=24, pady=(0, 8))
-
-        # v4.6: per-feature opt-in for Draft PR grounding. Defaults to ON
-        # because PRs benefit a lot from test-impact + symbol-reference
-        # context, and the backends that draft them (Claude CLI, cloud
-        # APIs) handle the extra prompt weight well.
-        _pr_grounding_initial = raw.get("enable_pr_grounding")
-        if _pr_grounding_initial is None:
-            _pr_grounding_initial = True
-        self._var_enable_pr_grounding = tk.BooleanVar(
-            value=bool(_pr_grounding_initial))
-        pr_grounding_chk = ttk.Checkbutton(
-            lf,
-            text="    └─ Also use grounding for Draft PR (recommended)",
-            variable=self._var_enable_pr_grounding,
-        )
-        pr_grounding_chk.pack(anchor=tk.W, padx=12, pady=(0, 2))
-        try:
-            from theme import _Tooltip
-            _Tooltip(
-                pr_grounding_chk,
-                "ON by default. PR descriptions benefit strongly from "
-                "test-impact mapping (codegraph affected --stdin) and "
-                "symbol-reference context. Claude CLI and cloud APIs "
-                "handle the extra prompt weight comfortably. Manager "
-                "pre-builds the grounding for the CLI path AND nudges "
-                "the CLI to use its own MCP tools if codegraph/"
-                "tokensave are wired into Claude Code's MCP config.",
-            )
-        except Exception:
-            pass
-        tk.Label(lf,
-            text="    Adds test-impact + symbol-reference context to the PR draft.",
-            font=("Segoe UI", 8), bg=C["base"], fg=C["overlay0"],
-            justify=tk.LEFT).pack(anchor=tk.W, padx=24, pady=(0, 8))
-
-    def _build_ollama_section(self, body, raw):
-        """Ollama model manager shortcut, num_ctx spinbox, and warm-up toggle."""
-        ttk.Separator(body, orient="horizontal").pack(fill=tk.X, padx=20, pady=(8, 8))
-        tk.Label(body, text="Ollama", font=("Segoe UI", 10, "bold"),
-                 bg=C["base"], fg=C["text"]).pack(anchor=tk.W, padx=20, pady=(0, 2))
-        ollama_row = tk.Frame(body, bg=C["base"])
-        ollama_row.pack(anchor=tk.W, padx=20, pady=(0, 4))
-        ttk.Button(ollama_row, text="🦙  Manage Ollama Models…",
-                   command=self._open_ollama_manager).pack(side=tk.LEFT)
-        tk.Label(body,
-            text="  Browse installed models, pull new ones, see context windows.\n"
-                 "  Uses Ollama's native REST API at the base URL configured below.",
-            font=("Segoe UI", 8), bg=C["base"], fg=C["overlay0"],
-            justify=tk.LEFT).pack(anchor=tk.W, padx=36, pady=(0, 8))
-
-        # num_ctx spinbox
-        num_ctx_row = tk.Frame(body, bg=C["base"])
-        num_ctx_row.pack(anchor=tk.W, padx=20, pady=(0, 4))
-        tk.Label(num_ctx_row, text="Context window (num_ctx):",
-                 font=("Segoe UI", 9), bg=C["base"],
-                 fg=C["subtext"]).pack(side=tk.LEFT)
-        self._var_ollama_num_ctx = tk.IntVar(
-            value=int(raw.get("ollama_num_ctx", 4096)))
-        ttk.Spinbox(num_ctx_row, from_=512, to=131072, increment=512,
-                    textvariable=self._var_ollama_num_ctx,
-                    width=8).pack(side=tk.LEFT, padx=(8, 0))
-        tk.Label(num_ctx_row, text="  tokens  (0 = model default)",
-                 font=("Segoe UI", 8), bg=C["base"],
-                 fg=C["overlay0"]).pack(side=tk.LEFT)
-
-        # warm-up checkbox
-        self._var_ollama_warmup = tk.BooleanVar(
-            value=bool(raw.get("ollama_warmup", False)))
-        themed_checkbutton(body,
-            text="Warm up Ollama before first Generate (loads model into VRAM early)",
-            variable=self._var_ollama_warmup,
-            bg=C["base"], fg=C["text"],
-            activebackground=C["base"], activeforeground=C["text"],
-            font=("Segoe UI", 9)).pack(anchor=tk.W, padx=20, pady=(0, 6))
-
-    def _build_ai_section(self, body, raw):
-        """AI commit messages — provider, model, key env, presets, options."""
-        ttk.Separator(body, orient="horizontal").pack(fill=tk.X, padx=20, pady=(8, 8))
-        tk.Label(body, text="AI commit messages",
-                 font=("Segoe UI", 10, "bold"),
-                 bg=C["base"], fg=C["text"]).pack(anchor=tk.W, padx=20, pady=(0, 2))
-
-        llm_cfg = raw.get("commit_message_llm") or {}
-        self._var_llm_enabled = tk.BooleanVar(value=bool(llm_cfg.get("enabled", False)))
-        themed_checkbutton(body,
-            text="Use AI to generate commit message suggestions",
-            variable=self._var_llm_enabled,
-            bg=C["base"], fg=C["text"],
-            activebackground=C["base"], activeforeground=C["text"],
-            font=("Segoe UI", 10)).pack(anchor=tk.W, padx=20, pady=(0, 4))
-
-        self._build_ai_provider_grid(body, llm_cfg)
-        self._build_ai_presets(body)
-        self._build_ai_options(body, llm_cfg)
-
-    def _build_ask_ai_section(self, body, raw):
-        """Ask Tab AI — provider, model, key env, base URL (separate from commit-msg LLM).
-
-        Falls back to commit_message_llm values on first run so existing users
-        see no change; once the user saves, ask_tab_llm is written independently.
-        """
-        ask_cfg = raw.get("ask_tab_llm") or raw.get("commit_message_llm") or {}
-
-        ttk.Separator(body, orient="horizontal").pack(fill=tk.X, padx=20, pady=(8, 8))
-        tk.Label(body, text="Ask Tab AI",
-                 font=("Segoe UI", 10, "bold"),
-                 bg=C["base"], fg=C["text"]).pack(anchor=tk.W, padx=20, pady=(0, 2))
-        tk.Label(body,
-                 text="  Configure the AI backend for the 🤖 Ask tab independently from\n"
-                      "  commit-message AI. Supports all providers plus Claude CLI.",
-                 font=("Segoe UI", 8), bg=C["base"], fg=C["overlay0"],
-                 justify=tk.LEFT).pack(anchor=tk.W, padx=20, pady=(0, 4))
-
-        self._var_ask_enabled = tk.BooleanVar(value=bool(ask_cfg.get("enabled", False)))
-        themed_checkbutton(body,
-            text="Enable AI in the Ask tab",
-            variable=self._var_ask_enabled,
-            bg=C["base"], fg=C["text"],
-            activebackground=C["base"], activeforeground=C["text"],
-            font=("Segoe UI", 10)).pack(anchor=tk.W, padx=20, pady=(0, 4))
-
-        ask_grid = tk.Frame(body, bg=C["base"])
-        ask_grid.pack(fill=tk.X, padx=36, pady=(0, 6))
-
-        def _row(label_txt, widget):
-            row = tk.Frame(ask_grid, bg=C["base"])
-            row.pack(fill=tk.X, pady=2)
-            tk.Label(row, text=label_txt, width=18, anchor=tk.W,
-                     font=("Segoe UI", 9), bg=C["base"],
-                     fg=C["subtext"]).pack(side=tk.LEFT)
-            widget.pack(side=tk.LEFT, fill=tk.X, expand=True)
-
-        self._var_ask_provider = tk.StringVar(
-            value=ask_cfg.get("provider", "ollama"))
-        provider_box = ttk.Combobox(ask_grid, textvariable=self._var_ask_provider,
-            values=["claude_cli", "ollama", "anthropic", "openai", "openai_compatible"],
-            state="readonly", width=22)
-        _row("Provider:", provider_box)
-
-        self._var_ask_model = tk.StringVar(value=ask_cfg.get("model", ""))
-        _row("Model:", ttk.Entry(ask_grid, textvariable=self._var_ask_model))
-
-        self._var_ask_keyenv = tk.StringVar(
-            value=ask_cfg.get("api_key_env", "ANTHROPIC_API_KEY"))
-        self._ask_keyenv_entry = ttk.Entry(ask_grid, textvariable=self._var_ask_keyenv)
-        _row("API key env var:", self._ask_keyenv_entry)
-
-        self._var_ask_base_url = tk.StringVar(value=ask_cfg.get("base_url", ""))
-        self._ask_base_url_entry = ttk.Entry(ask_grid, textvariable=self._var_ask_base_url)
-        _row("Base URL:", self._ask_base_url_entry)
-
-        # Reactive: disable key/URL fields when claude_cli is selected (it uses
-        # system-level auth; key env / base URL are irrelevant).
-        def _on_ask_provider_changed(*_):
-            is_cli = self._var_ask_provider.get() == "claude_cli"
-            state = tk.DISABLED if is_cli else tk.NORMAL
-            self._ask_keyenv_entry.configure(state=state)
-            self._ask_base_url_entry.configure(state=state)
-        self._var_ask_provider.trace_add("write", _on_ask_provider_changed)
-        _on_ask_provider_changed()  # apply on initial render
-
-        tk.Label(body,
-            text="  Set provider to 'claude_cli' to use the Claude CLI binary configured\n"
-                 "  in the Paths section above. No API key needed — uses your local auth.\n"
-                 "  Other providers use the same format as AI commit messages.",
-            font=("Segoe UI", 8), bg=C["base"], fg=C["overlay0"],
-            justify=tk.LEFT).pack(anchor=tk.W, padx=36, pady=(0, 8))
-
-    # ── AI-section sub-builders ──────────────────────────────────────────────
-
-    def _build_ai_provider_grid(self, body, llm_cfg):
-        """Provider / model / key / base-URL 4-row grid."""
-        llm_grid = tk.Frame(body, bg=C["base"])
-        llm_grid.pack(fill=tk.X, padx=36, pady=(0, 6))
-
-        def _row(label_txt, widget):
-            row = tk.Frame(llm_grid, bg=C["base"])
-            row.pack(fill=tk.X, pady=2)
-            tk.Label(row, text=label_txt, width=18, anchor=tk.W,
-                     font=("Segoe UI", 9), bg=C["base"],
-                     fg=C["subtext"]).pack(side=tk.LEFT)
-            widget.pack(side=tk.LEFT, fill=tk.X, expand=True)
-
-        self._var_llm_provider = tk.StringVar(value=llm_cfg.get("provider", "anthropic"))
-        provider_box = ttk.Combobox(llm_grid, textvariable=self._var_llm_provider,
-            values=["ollama", "anthropic", "openai", "openai_compatible"],
-            state="readonly", width=22)
-        _row("Provider:", provider_box)
-
-        self._var_llm_model = tk.StringVar(value=llm_cfg.get("model", "claude-haiku-4-5"))
-        _row("Model:", ttk.Entry(llm_grid, textvariable=self._var_llm_model))
-
-        self._var_llm_keyenv = tk.StringVar(value=llm_cfg.get("api_key_env", "ANTHROPIC_API_KEY"))
-        _row("API key env var:", ttk.Entry(llm_grid, textvariable=self._var_llm_keyenv))
-
-        self._var_llm_base_url = tk.StringVar(value=llm_cfg.get("base_url", ""))
-        _row("Base URL:", ttk.Entry(llm_grid, textvariable=self._var_llm_base_url))
-
-    def _build_ai_presets(self, body):
-        """Anthropic / LM Studio / Ollama quick-preset buttons + feedback label."""
-        preset_row = tk.Frame(body, bg=C["base"])
-        preset_row.pack(anchor=tk.W, padx=36, pady=(0, 4))
-        tk.Label(preset_row, text="Quick presets:", font=("Segoe UI", 9),
-                 bg=C["base"], fg=C["subtext"]).pack(side=tk.LEFT, padx=(0, 8))
-
-        # Hint label must exist BEFORE the preset callbacks reference it.
-        self._llm_preset_hint = tk.Label(body, text="", font=("Segoe UI", 8),
-                                         bg=C["base"], fg=C["overlay0"],
-                                         justify=tk.LEFT, wraplength=620, anchor=tk.W)
-        self._llm_preset_hint.pack(anchor=tk.W, padx=36, pady=(2, 0), fill=tk.X)
-
-        def _apply_lm_studio():
-            self._var_llm_provider.set("openai_compatible")
-            base = "http://localhost:1234"
-            self._var_llm_base_url.set(base)
-            self._var_llm_keyenv.set("")
-            self._llm_preset_hint.configure(text="⏳  Checking LM Studio server…", fg=C["overlay0"])
-
-            def _probe():
-                detected = _probe_loaded_model(base)
-                def _apply():
-                    if not self.winfo_exists():
-                        return
-                    if detected:
-                        self._var_llm_model.set(detected)
-                        self._llm_preset_hint.configure(text=f"✓  Using loaded model: {detected}", fg=C["green"])
-                    else:
-                        self._llm_preset_hint.configure(
-                            text="⚠  LM Studio server not reachable at http://localhost:1234 — "
-                                 "start the Local Server in LM Studio's '</>' panel and load a model, "
-                                 "then click this preset again.", fg=C["peach"])
-                self.after(0, _apply)
-            import threading as _threading
-            _threading.Thread(target=_probe, daemon=True).start()
-
-        def _apply_ollama():
-            self._var_llm_provider.set("ollama")
-            base = "http://localhost:11434"
-            self._var_llm_base_url.set(base)
-            self._var_llm_keyenv.set("")
-            self._llm_preset_hint.configure(text="⏳  Checking Ollama server…", fg=C["overlay0"])
-
-            def _probe():
-                detected = _probe_loaded_model(base)
-                def _apply():
-                    if not self.winfo_exists():
-                        return
-                    if detected:
-                        self._var_llm_model.set(detected)
-                        self._llm_preset_hint.configure(text=f"✓  Using Ollama model: {detected}", fg=C["green"])
-                    else:
-                        if not self._var_llm_model.get() or "claude" in self._var_llm_model.get():
-                            self._var_llm_model.set("qwen2.5-coder:14b")
-                        self._llm_preset_hint.configure(
-                            text="⚠  Ollama not reachable at http://localhost:11434 — "
-                                 "make sure the Ollama service is running and run "
-                                 "`ollama pull qwen2.5-coder:14b` (or any chat model), "
-                                 "then click this preset again.", fg=C["peach"])
-                self.after(0, _apply)
-            import threading as _threading
-            _threading.Thread(target=_probe, daemon=True).start()
-
-        def _apply_anthropic():
-            self._var_llm_provider.set("anthropic")
-            self._var_llm_base_url.set("")
-            self._var_llm_keyenv.set("ANTHROPIC_API_KEY")
-            if not self._var_llm_model.get() or "/" in self._var_llm_model.get():
-                self._var_llm_model.set("claude-haiku-4-5")
-            self._llm_preset_hint.configure(
-                text="ℹ  Set the ANTHROPIC_API_KEY environment variable (get a "
-                     "key at console.anthropic.com).  Haiku is cheapest "
-                     "(~$0.0005/commit); Sonnet/Opus are higher-fidelity.", fg=C["blue"])
-
-        ttk.Button(preset_row, text="Anthropic", command=_apply_anthropic).pack(side=tk.LEFT, padx=(0, 4))
-        ttk.Button(preset_row, text="LM Studio", command=_apply_lm_studio).pack(side=tk.LEFT, padx=(0, 4))
-        ttk.Button(preset_row, text="Ollama",    command=_apply_ollama).pack(side=tk.LEFT)
-
-        # Persistent gotcha note — both Ollama and LM Studio load models into
-        # RAM/VRAM independently. Running them at the same time can starve the
-        # second loader (the error message blames "system memory" without
-        # hinting that another inference daemon is holding the difference).
-        tk.Label(body,
-                 text=("ⓘ  Running Ollama and LM Studio at the same time can "
-                       "break model loading — both reserve RAM/VRAM "
-                       "independently. If a load fails with \"more system "
-                       "memory\" while the other tool is running, unload one "
-                       "first (LM Studio → Eject;  `ollama stop <model>`)."),
-                 font=("Segoe UI", 8), bg=C["base"], fg=C["overlay0"],
-                 justify=tk.LEFT, wraplength=620, anchor=tk.W
-                 ).pack(anchor=tk.W, padx=36, pady=(4, 0), fill=tk.X)
-
-    def _build_ai_options(self, body, llm_cfg):
-        """Min-diff-lines spinner, sync auto-commit toggle, disclaimer."""
-        min_row = tk.Frame(body, bg=C["base"])
-        min_row.pack(anchor=tk.W, padx=36, pady=(2, 0))
-        self._var_llm_min_diff = tk.StringVar(value=str(llm_cfg.get("min_diff_lines", 10)))
-        tk.Label(min_row, text="Min diff lines (smaller commits skip AI):",
-                 font=("Segoe UI", 9), bg=C["base"],
-                 fg=C["subtext"]).pack(side=tk.LEFT, padx=(0, 6))
-        ttk.Entry(min_row, textvariable=self._var_llm_min_diff, width=6).pack(side=tk.LEFT)
-
-        self._var_llm_for_sync = tk.BooleanVar(value=bool(llm_cfg.get("use_for_sync_autocommit", False)))
-        themed_checkbutton(body,
-            text="Also use AI for sync auto-commit messages (disables amend-stacking)",
-            variable=self._var_llm_for_sync,
-            bg=C["base"], fg=C["text"],
-            activebackground=C["base"], activeforeground=C["text"],
-            font=("Segoe UI", 9)).pack(anchor=tk.W, padx=20, pady=(6, 2))
-        tk.Label(body,
-            text="  AI runs only when toggled ON. Silent fallback on any error\n"
-                 "  (missing key, network failure, timeout). Anthropic Claude Haiku\n"
-                 "  costs ~$0.0005 per commit.",
-            font=("Segoe UI", 8), bg=C["base"], fg=C["overlay0"],
-            justify=tk.LEFT).pack(anchor=tk.W, padx=36, pady=(0, 8))
-
     # ── Cross-dialog launchers (lazy-imported per Rule 6) ───────────────────
 
     def _open_mcp_configurator(self):
@@ -1306,37 +240,7 @@ class SettingsDialog(tk.Toplevel):
         from dialogs.tool_manager import ToolManagerDialog
         ToolManagerDialog(self, self._cfg)
 
-    def _open_ollama_manager(self):
-        """Launch the Ollama Model Manager dialog.
-
-        Uses whatever base URL is currently typed in the AI commit messages
-        section (so editing the URL takes effect without saving Settings
-        first). Falls back to http://localhost:11434 if blank. When the
-        user clicks "Use for AI features" on a model in the dialog, the
-        callback updates the provider/model/base-url fields in this very
-        Settings dialog — they still have to click Save to persist.
-
-        Lazy import (Rule 6) for the same reason as _open_mcp_configurator.
-        """
-        from dialogs.ollama_model_mgr import OllamaModelManagerDialog
-        base_url = self._var_llm_base_url.get().strip() \
-                   or "http://localhost:11434"
-
-        def _on_use(model_name: str, server_url: str):
-            self._var_llm_provider.set("ollama")
-            self._var_llm_model.set(model_name)
-            self._var_llm_base_url.set(server_url)
-            self._var_llm_keyenv.set("")
-            # Auto-enable AI features when the user explicitly picks a model.
-            self._var_llm_enabled.set(True)
-            if hasattr(self, "_llm_preset_hint"):
-                self._llm_preset_hint.configure(
-                    text=f"✓  Using Ollama model: {model_name}.  "
-                         f"Click Save to persist.",
-                    fg=C["green"])
-
-        OllamaModelManagerDialog(
-            self, base_url=base_url, on_use_for_ai=_on_use)
+    # ── Search-roots row handlers ────────────────────────────────────────
 
     def _add_root(self):
         p = filedialog.askdirectory(title="Add search root", parent=self)
@@ -1369,69 +273,22 @@ class SettingsDialog(tk.Toplevel):
         if sel:
             self._roots_tv.delete(sel[0])
 
-    def _verify_git(self, exe_path: str):
-        """Run 'git --version' with the given path and update the status label."""
-        if not exe_path:
-            self._git_status_lbl.config(text="(will auto-detect on save)", fg=C["overlay0"])
-            return
-        try:
-            result = subprocess.run(
-                [exe_path, "--version"],
-                capture_output=True, text=True, timeout=5,
-                creationflags=CREATE_NO_WINDOW)
-            version = result.stdout.strip() or result.stderr.strip()
-            if result.returncode == 0:
-                self._git_status_lbl.config(text=f"✓  {version}", fg=C["green"])
-            else:
-                self._git_status_lbl.config(text="✗  not found", fg=C["red"])
-        except Exception:
-            self._git_status_lbl.config(text="✗  not found", fg=C["red"])
-
-    def _verify_codegraph(self, exe_path: str):
-        """Run 'codegraph --version' with the given path; update status label."""
-        if not exe_path:
-            self._cg_status_lbl.config(text="(will auto-detect on save)",
-                                        fg=C["overlay0"])
-            return
-        try:
-            result = subprocess.run(
-                [exe_path, "--version"],
-                capture_output=True, text=True, timeout=10,
-                creationflags=CREATE_NO_WINDOW)
-            version = (result.stdout or result.stderr).strip()
-            if result.returncode == 0:
-                self._cg_status_lbl.config(text=f"✓  {version or 'OK'}",
-                                            fg=C["green"])
-                self._cg_install_btn.configure(state=tk.DISABLED)
-            else:
-                self._cg_status_lbl.config(text="✗  not found at that path",
-                                            fg=C["red"])
-        except Exception:
-            self._cg_status_lbl.config(text="✗  not found at that path",
-                                        fg=C["red"])
-
     def _scroll_to_codegraph(self):
-        """Pull the CodeGraph section into view + focus its path entry.
-
-        SettingsDialog is non-scrollable (resizable=False, no canvas wrapper),
-        so all sections are always rendered. focus_set on the path entry is
-        enough — no yview math needed. Wrapped in try/except so any future
-        layout change that introduces scrolling fails gracefully rather than
-        crashing the install-nudge flow.
-        """
-        try:
-            self._cg_exe_entry.focus_set()
-        except (AttributeError, tk.TclError):
-            pass
+        """Pull the CodeGraph section into view (delegates to the section)."""
+        self._codegraph.focus_path_entry()
 
     def _save(self):
         """Persist the dialog's pending changes via the cfg-mutation contract.
 
         The flow:
-          1. Mutate self._cfg.raw[key] = value for each edited field
-          2. Call self._save_fn(self._cfg.raw) — writes to disk via
+          1. Each section writes its fields via save_into(raw); a section
+             returning False (e.g. tokensave exe path doesn't exist)
+             aborts the save with the dialog left open
+          2. Dialog-level fields (search roots, behavior toggles, the
+             pre-commit hook install/uninstall side effect) are written here
+          3. Call self._save_fn(self._cfg.raw) — writes to disk via
              helpers.config._save_config
-          3. Call self._callback() — App._on_settings_saved, which
+          4. Call self._callback() — App._on_settings_saved, which
              refreshes _state.refresh_derived() AND re-binds the
              legacy module globals (TOKENSAVE, GIT_EXE, etc.) so any
              remaining global reader sees the new values
@@ -1440,17 +297,11 @@ class SettingsDialog(tk.Toplevel):
         surface), NEVER assign a derived @property — those would
         raise AttributeError on assignment.
         """
-        exe = self._exe_var.get().strip()
-        if exe and not os.path.isfile(exe):
-            messagebox.showwarning("Not found",
-                f"tokensave.exe not found at:\n{exe}", parent=self)
-            return
         raw = self._cfg.raw
-        raw["tokensave_exe"] = exe
-        raw["template_dir"]  = self._tmpl_var.get().strip()
-        raw["editor_cmd"]    = self._editor_var.get().strip() or "code"
-        # python_exe is intentionally not exposed in the UI (used by the .bat
-        # launcher only); preserve whatever value is already in the config.
+        for section in self._sections:
+            if not section.save_into(raw):
+                return
+
         raw["search_roots"] = [
             {"path": self._roots_tv.set(iid, "path"),
              "label": self._roots_tv.set(iid, "label")}
@@ -1479,45 +330,6 @@ class SettingsDialog(tk.Toplevel):
                     _mb.showwarning("Smoke-test hook", _msg, parent=self)
                     self._var_precommit_hook.set(True)
 
-        raw["draft_pr_backend"]        = self._var_draft_pr_backend.get()
-        raw["commit_message_backend"]  = self._var_commit_msg_backend.get()
-        raw["enable_llm_grounding"]    = bool(self._var_enable_llm_grounding.get())
-        raw["enable_commit_grounding"] = bool(self._var_enable_commit_grounding.get())
-        raw["enable_pr_grounding"]     = bool(self._var_enable_pr_grounding.get())
-        # Persist AI commit-message settings (preserves any unknown keys
-        # the user may have added manually via JSON edit).
-        existing_llm = raw.get("commit_message_llm") or {}
-        try:
-            min_diff_lines = int(self._var_llm_min_diff.get())
-        except ValueError:
-            min_diff_lines = 10
-        existing_llm.update({
-            "enabled":     self._var_llm_enabled.get(),
-            "provider":    self._var_llm_provider.get().strip() or "anthropic",
-            "model":       self._var_llm_model.get().strip(),
-            "api_key_env": self._var_llm_keyenv.get().strip(),
-            "base_url":    self._var_llm_base_url.get().strip(),
-            "min_diff_lines": max(0, min_diff_lines),
-            "use_for_sync_autocommit": self._var_llm_for_sync.get(),
-        })
-        # Fill in defaults that other helpers expect
-        existing_llm.setdefault("max_diff_chars", 24000)
-        existing_llm.setdefault("timeout_seconds", 90)
-        raw["commit_message_llm"] = existing_llm
-        # Ask Tab AI config — written independently from commit_message_llm.
-        raw["ask_tab_llm"] = {
-            "enabled":     self._var_ask_enabled.get(),
-            "provider":    self._var_ask_provider.get(),
-            "model":       self._var_ask_model.get().strip(),
-            "api_key_env": self._var_ask_keyenv.get().strip(),
-            "base_url":    self._var_ask_base_url.get().strip(),
-        }
-        raw["ollama_num_ctx"]   = self._var_ollama_num_ctx.get()
-        raw["ollama_warmup"]    = self._var_ollama_warmup.get()
-        raw["git_exe"]        = self._git_exe_var.get().strip()
-        raw["codegraph_exe"]  = self._cg_exe_var.get().strip()
-        raw["claude_cli_exe"]   = self._claude_cli_var.get().strip()
-        raw["claude_cli_model"] = self._var_claude_cli_model.get().strip()
         self._save_fn()
         self.destroy()
         self._callback()

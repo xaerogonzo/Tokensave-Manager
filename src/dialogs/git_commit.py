@@ -28,6 +28,7 @@ from typing import TYPE_CHECKING
 from constants import C
 from theme import bind_mousewheel, themed_checkbutton
 from helpers.commit_messages import CommitSuggestion, _suggest_commit_message
+from helpers.commit_request import clear_commit_request, load_commit_request
 from helpers.runtime import log
 
 if TYPE_CHECKING:
@@ -75,9 +76,20 @@ class GitCommitDialog(tk.Toplevel):
         self._status_raw = status_text
         self._cfg        = cfg
         self._files      = self._parse_status(status_text, is_repo)
+        # Pending commit request from an external tool (Claude Code chat).
+        # Only treated as active when at least one requested file is
+        # actually in the working-tree status — stale requests are ignored.
+        self._commit_request = load_commit_request(path)
+        if self._commit_request:
+            present = {f.replace("\\", "/") for _xy, f in self._files}
+            if not present & set(self._commit_request["files"]):
+                self._commit_request = None
         # Async-suggestion infrastructure (see _populate_suggestion docstring).
         self._suggestion_token = 0
         self._user_has_edited  = False
+        # Novice gotcha #3: one explanatory popup per dialog when Suggest is
+        # clicked with no AI backend configured (heuristics still run).
+        self._warned_no_ai     = False
         # Per-session backend override — starts from the saved config setting
         # so the dropdown shows the current preference immediately.
         self._session_backend: str = (
@@ -182,6 +194,28 @@ class GitCommitDialog(tk.Toplevel):
             return
         for xy, fname in self._files:
             self._add_file_row(xy, fname)
+        self._seed_from_commit_request()
+
+    def _seed_from_commit_request(self) -> None:
+        """Pre-check ONLY the files named by a pending commit request and
+        surface its note. Propose-only: the user still reviews, edits the
+        selection/message, and clicks Commit themselves."""
+        if not self._commit_request:
+            return
+        wanted = set(self._commit_request["files"])
+        for var, fname, _xy in self._file_vars:
+            var.set(fname.replace("\\", "/") in wanted)
+        note = self._commit_request["note"]
+        stamp = self._commit_request["created_at"]
+        detail = note or f"{len(wanted)} file(s) proposed"
+        if stamp:
+            detail += f"   ({stamp})"
+        tk.Label(self,
+                 text=f"🤝  Commit request from Claude Code:  {detail}",
+                 bg=C["surface0"], fg=C["blue"],
+                 font=("Segoe UI", 9), padx=10, pady=6,
+                 wraplength=520, justify=tk.LEFT,
+                 ).pack(fill=tk.X, padx=20, pady=(0, 6))
 
     def _add_file_row(self, xy: str, fname: str) -> None:
         """Render one checkbox + colour-coded status badge + filename row."""
@@ -328,6 +362,20 @@ class GitCommitDialog(tk.Toplevel):
         currently *selected* files only. Resets the user-edited flag so the
         async result is allowed to land — clicking 💡 Suggest is an explicit
         opt-in to overwrite whatever is in the field."""
+        # Novice gotcha #3: with no AI backend configured the orchestrator
+        # silently falls through to heuristics and the only signal is a tiny
+        # "via diff" badge. Say it plainly once, with the fix location, then
+        # proceed — the heuristic suggestion is still useful.
+        if not self._ai_configured() and not self._warned_no_ai:
+            self._warned_no_ai = True
+            messagebox.showinfo(
+                "No AI backend configured",
+                "Suggest will use heuristics (diff / filename based) for now.\n\n"
+                "For AI-generated commit messages, set one up in\n"
+                "Settings → AI backend selection → Commit message:\n"
+                "  •  Claude Code CLI (uses your subscription), or\n"
+                "  •  an LLM provider under 'AI commit messages'.",
+                parent=self)
         selected_lines = []
         for var, fname, xy in self._file_vars:
             if var.get():
@@ -336,6 +384,16 @@ class GitCommitDialog(tk.Toplevel):
         # User pressed Suggest — they want to overwrite. Re-arm.
         self._user_has_edited = False
         self._populate_suggestion(sub_status, source="suggest_button")
+
+    def _ai_configured(self) -> bool:
+        """True when at least one AI backend could actually produce a
+        suggestion: a Claude CLI exe path is set, or the commit-message LLM
+        is enabled in Settings."""
+        raw = self._cfg.raw or {}
+        llm_cfg = raw.get("commit_message_llm") or {}
+        has_llm = bool(llm_cfg.get("enabled"))
+        has_cli = bool((raw.get("claude_cli_exe") or "").strip())
+        return has_llm or has_cli
 
     def _populate_suggestion(self, status_text: str, source: str = "initial"):
         """Run the commit-message orchestrator and populate the message field.
@@ -496,5 +554,9 @@ class GitCommitDialog(tk.Toplevel):
                 "Tick at least one file to include in this commit.",
                 parent=self)
             return
+        # A seeded dialog consumes its commit request — the user has acted
+        # on the proposal (even if they adjusted files/message first).
+        if self._commit_request:
+            clear_commit_request(self._path)
         self.destroy()
         self._callback(self._path, message, selected)
