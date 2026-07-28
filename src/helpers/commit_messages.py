@@ -493,6 +493,58 @@ def _find_changelog_file(repo_path: str) -> str | None:
     return None
 
 
+def _new_files_diff(repo_path: str, git_exe: str, max_chars: int = 8000) -> str:
+    """Build a unified-diff-style block for untracked new files.
+
+    Called when ``git diff HEAD`` returns empty (all pending changes are new,
+    untracked files not yet known to git).  Reads each file directly and
+    formats it as a ``+``-prefixed pseudo-diff so LLM strategies have content
+    to work with.  Capped at ``max_chars`` to avoid oversized prompts.
+    """
+    try:
+        ls = subprocess.run(
+            [git_exe, "-C", repo_path, "ls-files", "--others", "--exclude-standard"],
+            capture_output=True, text=True, timeout=5,
+            encoding="utf-8", errors="replace",
+            creationflags=CREATE_NO_WINDOW,
+        )
+    except (FileNotFoundError, subprocess.TimeoutExpired):
+        return ""
+    if ls.returncode != 0 or not ls.stdout.strip():
+        return ""
+
+    parts: list[str] = []
+    total = 0
+    for rel_path in ls.stdout.splitlines():
+        rel_path = rel_path.strip()
+        if not rel_path:
+            continue
+        abs_path = os.path.join(repo_path, rel_path)
+        try:
+            content = open(abs_path, encoding="utf-8", errors="replace").read()
+        except OSError:
+            continue
+        lines = content.splitlines()
+        header = (
+            f"diff --git a/{rel_path} b/{rel_path}\n"
+            f"new file mode 100644\n"
+            f"--- /dev/null\n"
+            f"+++ b/{rel_path}\n"
+            f"@@ -0,0 +1,{len(lines)} @@\n"
+        )
+        body = "".join(f"+{line}\n" for line in lines)
+        chunk = header + body
+        remaining = max_chars - total
+        if len(chunk) >= remaining:
+            if remaining > 200:
+                parts.append(chunk[:remaining] + "\n... (truncated)\n")
+            break
+        parts.append(chunk)
+        total += len(chunk)
+
+    return "".join(parts)
+
+
 def _pending_diff(repo_path: str, *paths: str, git_exe: str,
                   lines_of_context: int = 0) -> str:
     """Return the diff between HEAD and the working tree (staged + unstaged).
@@ -500,6 +552,10 @@ def _pending_diff(repo_path: str, *paths: str, git_exe: str,
     Used for commit-message suggestion BEFORE the GitCommitDialog actually
     stages files. ``git diff HEAD`` captures everything that would land in
     the commit if the user stages and commits all working-tree changes.
+
+    When HEAD and the working tree agree on all tracked files (e.g. all
+    pending changes are brand-new untracked files), falls back to
+    ``_new_files_diff`` so strategies still have content to analyse.
 
     Keyword-only ``git_exe`` keeps the optional ``*paths`` varargs working
     naturally — callers pass paths positionally and git_exe by name.
@@ -517,7 +573,10 @@ def _pending_diff(repo_path: str, *paths: str, git_exe: str,
         )
     except (FileNotFoundError, subprocess.TimeoutExpired):
         return ""
-    return proc.stdout if proc.returncode == 0 else ""
+    result = proc.stdout if proc.returncode == 0 else ""
+    if not result and not paths:
+        result = _new_files_diff(repo_path, git_exe)
+    return result
 
 
 def _parse_diff_bullet(line: str, section: str | None) -> "dict | None":
