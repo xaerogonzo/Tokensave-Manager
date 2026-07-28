@@ -142,7 +142,7 @@ class PRDraftCtrl:
 
     def _show_draft_pr_menu(self, event, btn):
         """Show an override menu for right-click / Shift+click on Draft PR."""
-        path = self._git_path
+        path = self.get_path()
         if not path:
             return
         menu = tk.Menu(self._tab, tearoff=0)
