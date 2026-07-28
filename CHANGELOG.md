@@ -3,6 +3,143 @@
 
 ## [Unreleased]
 
+## [2.1.0] — 2026-07-28
+
+### Added
+- (test-gap) native minimize/maximize on the standalone Test Gaps window
+- (test-gap) per-test pruning + Claude Code handoff
+- (test-gap) mark coverage gaps closed when tests written
+- (test-gen) deterministic import auto-repair + prompt hardening
+- (test-gen) error visibility, token streaming, smart num_ctx
+- (test-gen) backend selector, fewer hangs, regenerate-on-change
+- (test-gap) explicit "Recommend" quick-select instead of silent auto-check
+- (test-gen) generate-then-verify AI tests — keep only what passes
+- (git_tab) Phase C — CLI-path coverage gaps + test-gap window + nudge
+- (git_tab) Phase B — streaming standalone PR-draft dialog
+- (pr_draft) Phase D — scale Ollama diff budget to context window
+- (pr_draft) Phase A — streaming/status callbacks + coverage-gap helpers
+- (integration-check) single window + Apply-Fixes change summary
+- (theme) custom PhotoImage checkbox indicators for dark-theme visibility
+- (theme) add themed_checkbutton helper
+- (ci) add coverage reporting and artifact upload
+- (git_tab) add automated testing checklist to PR context
+- (git_tab) add dynamic wait hint for PR draft generation
+- (git_tab) add LLM error handling and diagnostics
+- (pr_draft) enhance diff generation for no-console environments
+- (pr_draft) enhance diff generation for no-console environments
+- (git_tab) add error handling for PR draft generation
+- (git_tab) add PR base branch override and test-gap panel
+- (git_tab) add PR base branch override and test-gap panel
+- (git_tab) add PR base branch override and test-gap panel
+- (private_repo) consolidate commands and improve git workflow
+- (private_repo) add concurrency guard and on-demand sync
+- (private_repo_setup) add file row with unchecked state
+- (git_ops_ctrl) add command to create private local repo
+- (test-manager) v4.13 — 4-tab Test Manager + PR checklist sync
+- (tests) v4.12 — pytest suite + CI gating + lazy path constants
+- (checks) add CI workflow generation and pre-push hook toggle
+- (ux) dialog chrome, scroll wheel, scrub-history auto-restore remote
+- (app) add skip_stale_check option to commit dialog
+- (scrub_history) enhance Force Push button visibility logic
+- (scrub_history) add Force Push button to Scrub History dialog
+- (smoke_tests) add UI integration for smoke test suite
+- Tool Manager — install/update/uninstall for codegraph + tokensave (v4.8)
+- (codegraph) manager-driven MCP install/uninstall + agent picker (v4.7)
+- (draft-pr) wire grounding into CLI path + per-feature toggle (v4.6)
+- Roadmap-7 wrap + privacy feature + markdown sweep (cascade v4-v4.5)
+- (doc-drafter) add warning banner and mismatch detection
+- (doc-drafter) add multi-section simulation and CCD memory discovery
+- (doc-drafter) add STOP marker and anti-fabrication guardrails
+- (doc-drafter) add per-tab commit range refresh and error handling
+- (update_poller) enhance LLM call timeout and prompt details
+- add --fix mode to integration check for upstream issue lifecycle
+- add GitHub-tracked issues and interactive LLM audit dialog
+- (doc-drafter) add per-DocType anchor paths for commit ranges
+- (src/helpers/doc_drafter.py) add function to strip preamble and
+- (projects-tab) add roadmap manager dialog command
+- (doc-drafter) enable agentic tokensave tool integration
+- (doc-drafter) add feedback-driven regeneration and warm-up support
+- (doc-drafter) integrate tokensave grounding injection
+- (doc-drafter) simulate post-apply state for honest diffs
+- (doc-drafter) add literal template placeholder detection and
+- (doc-drafter) add mirror-contract safety and metadata stripping
+- (doc-drafter) enhance bullet filtering and README prompt structure
+- (doc-drafter) add backend override dropdown and per-session
+- (doc-drafter) add README mode deduplication and placeholder
+- (doc-drafter) add noop-bullet filtering and draft sanitisation
+- (doc-drafter) add bullet-quality filters for truncation and
+- (doc-drafter) add grouped-bullets parser and dispatcher for
+- (doc-drafter) add automated CHANGELOG and README updates via AI
+- (gitignore-dialog) add AI Suggest button and session log feature
+- (AskTabController) add Claude CLI support and update settings
+- (AskTabController) add session log feature and update help tab
+- (AskTabController) add project path validation and update system
+- implement Ask tab streaming and refactor for code health
+
+### Fixed
+- (test) spy on -topmost call instead of WM readback (headless CI)
+- (constants) guard CREATE_NO_WINDOW to 0 off-Windows (Linux CI green)
+- (test-gen) prompt rule — never mock the theme dict C (it is a complete palette)
+- (test-gap) gate-verify generated tests against the full suite + relabel results
+- (pr-draft) anti-fabrication guardrails + commit-log scaffold (local model)
+- (test-gen) send Claude CLI system prompt via stdin, not argv
+- (llm) retry transient HTTP 5xx (Ollama cold-start 500)
+- (test_gen_llm) never write AI prose/permission-requests as test files
+- (git_tab) blank PR-draft window — tuple pady in Frame constructor
+- (git_tab) legible PR-draft wait + worker diagnostics
+- (pr_draft) decode git diff as UTF-8 in _branch_diff (fixes bogus empty-diff)
+- (git) make untrack durable; guard pathspec commits from orphaning deletions
+- (git) exclude files staged for deletion from stale-ignore list
+- (git_scrub) use --force instead of --force-with-lease for push
+- (draft-pr) write grounding to temp file, not via command line (v4.6.1)
+- (commit-msg) visibility + per-feature toggle for grounding (v4.6)
+- (CHANGELOG.md) add detailed commit descriptions and update README
+- (doc-drafter) set default value of ts_tools_var to True
+- (projects-tab) remove draft CHANGELOG entry command
+- (ai-tasks) pass git executable to version functions
+- (doc-drafter) narrow doc pathspec to prevent masking code commits
+
+### Changed
+- drop AI-generated test_app.py (low value, CI-skipped, fragile)
+- add AI-generated projects_tab coverage (gate-verified)
+- add AI-generated coverage for 6 modules (gate-verified)
+- add git_ops_ctrl coverage (AI-generated, verified passing)
+- add update_poller coverage (AI-generated, verified passing)
+- (codegraph) untrack daemon.pid runtime state (machine-local)
+- (git) untrack .coverage (already gitignored)
+- update CI to enforce coverage threshold
+- (runtime) move PIL imports to function scope
+- (doc_drafter) extract worker method, remove filter funcs
+- (private_repo) remove unused constant and update log message
+- (git_ops_ctrl) filter out noise files from gitignored list
+- untrack build scripts from git index
+- update .gitignore with AI-suggested patterns
+- update .gitignore with AI-suggested patterns
+- (prepush_runner) update check descriptions and default states
+- add 123-case logic smoke test suite (tests/smoke_test.py)
+- (doc-drafter) consolidate to DocType registry pattern
+- extract helpers to simplify complex methods
+- extract tray management and split changelog drafting
+
+### Docs
+- changelog + README sweep for the test-gen reliability work
+- changelog + README sweep for v4.15 (Roadmap-7.5-Audit)
+- (test_gen_llm) update test scaffolding guidelines and examples
+- (roadmap) restructure Roadmap-8 into themed priority tiers
+- (untrack_ignored) update dialog text for clarity
+- v4.8 markdown sweep — CHANGELOG/ROADMAP/README/ARCHITECTURE
+- update AGENT_BACKENDS.md
+- update CHANGELOG and README for recent refactoring and features
+- add Roadmap 7 theme outline and implementation order
+- (doc-drafter) add Phase 2.1 changelog and feature summary
+- (doc-drafter) document append-only CHANGELOG and README patchers
+
+### Other
+- Merge pull request #10 from xaerogonzo/Roadmap-7.5-Audit
+- Add tests for claude_cli + runtime helpers; gitignore coverage artefacts
+- Merge pull request #8 from xaerogonzo/Roadmap-7
+- Merge pull request #6 from xaerogonzo/Roadmap-6
+
 ### Added — v4.15 (Roadmap-7.5-Audit: streaming PR draft + coverage hardening, 2026-05-30)
 
 **Streaming PR-draft dialog (Ollama / API path)**
