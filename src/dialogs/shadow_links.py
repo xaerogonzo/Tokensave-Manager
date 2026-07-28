@@ -85,15 +85,24 @@ class ShadowLinksDialog(tk.Toplevel):
 
         # R9-SL1: a previously saved per-project map wins over the default,
         # so custom mappings survive dialog close → reopen.
+        # Merge: defaults provide the base; saved-map entries override conflicts
+        # so user customisations are preserved.  New defaults added in later
+        # releases (e.g. SL6 GZDoom lumps) are automatically surfaced for
+        # projects whose saved map pre-dates them.
         saved_map = load_shadow_map(path)
-        initial_map = saved_map or DEFAULT_SHADOW_EXT_MAP
+        initial_map = {**DEFAULT_SHADOW_EXT_MAP, **(saved_map or {})}
         for src_ext, tgt_suf in initial_map.items():
             self._map_text.insert(tk.END, f"{src_ext} = {tgt_suf}\n")
 
         hint = ("  .ext = .suffix  →  extension match  (e.g. .txt = .cpp for HyperV files)\n"
                 "  NAME = .suffix  →  exact filename, case-insensitive  (e.g. DECORATE = .cpp)")
         if saved_map:
-            hint += "\n  ✔ Loaded this project's saved map (edits are re-saved on Apply)."
+            new_defaults = [k for k in DEFAULT_SHADOW_EXT_MAP if k not in saved_map]
+            if new_defaults:
+                hint += (f"\n  ✔ Loaded this project's saved map "
+                         f"+ {len(new_defaults)} new default(s) merged in.")
+            else:
+                hint += "\n  ✔ Loaded this project's saved map (edits are re-saved on Apply)."
         tk.Label(self,
             text=hint,
             font=("Segoe UI", 8), bg=C["base"], fg=C["overlay0"],

@@ -114,7 +114,7 @@ def context_menu(ctl):
 
         h2("Setup & organisation")
         ins("  ⚙  Retrofit…          ", "body"); ins("Open the Retrofit dialog pre-filled with this project\n", "dim")
-        ins("  🔗  Shadow Links…     ", "body"); ins("Hardlink non-standard file types under a known extension so tokensave can index them\n", "dim")
+        ins("  🔗  Shadow Links…     ", "body"); ins("Hardlink non-standard file types under a known extension so tokensave can index them. New in v7.2+: .tokensave/project.json can index extensionless files directly (with a language override), avoiding shadow links in many projects.\n", "dim")
         ins("  📁  Assign Category…  ", "body"); ins("Override this project's group label and sub-category\n", "dim")
         ins("  🗑  Remove Index…     ", "body"); ins("Delete .tokensave/ from this folder (project files untouched)\n", "dim")
         ins("  Auto-detect           ", "body"); ins("Clear the pin — wrapper picks the most-recently-synced project\n", "dim")

@@ -1,11 +1,14 @@
 """Tests for helpers/commit_messages.py — smart commit-message generation."""
 
+import json
 import pytest
 from unittest.mock import Mock, patch, MagicMock
 from helpers.commit_messages import (
     _files_from_diff,
     _build_commit_grounding,
     _clean_prefix_scope,
+    _fetch_commit_context,
+    _ctx_cache,
 )
 
 
@@ -203,3 +206,90 @@ class TestCleanPrefixScope:
         """Windows-style paths (if present) handled."""
         result = _clean_prefix_scope("fix(src\\controllers\\main.py):")
         assert isinstance(result, str)
+
+
+class TestFetchCommitContext:
+    """Tests for _fetch_commit_context — tokensave commit_context enrichment."""
+
+    def setup_method(self):
+        _ctx_cache.clear()
+
+    def _make_ctx_output(self, symbols=None, roles=None, style=None):
+        return json.dumps({
+            "changed_symbols": symbols or [],
+            "file_roles": roles or {},
+            "recent_commit_style": style or [],
+        })
+
+    def test_happy_path_formats_markdown(self, tmp_path):
+        ctx_json = self._make_ctx_output(
+            symbols=[{"name": "MyClass.save", "file": "foo.py"}],
+            roles={"foo.py": "persistence layer"},
+            style=["feat:", "fix:"],
+        )
+        with patch("subprocess.run") as mock_run:
+            def side_effect(cmd, **kw):
+                r = Mock()
+                if "rev-parse" in cmd:
+                    r.returncode = 0
+                    r.stdout = "abc123\n"
+                else:
+                    r.returncode = 0
+                    r.stdout = ctx_json
+                return r
+            mock_run.side_effect = side_effect
+            result = _fetch_commit_context("tokensave", str(tmp_path), "git", "diff text")
+        assert "## Changed symbols" in result
+        assert "MyClass.save (foo.py)" in result
+        assert "## File roles" in result
+        assert "persistence layer" in result
+        assert "## Recent commit style" in result
+        assert "feat:" in result
+
+    def test_no_tokensave_exe_returns_empty(self, tmp_path):
+        result = _fetch_commit_context("", str(tmp_path), "git", "diff")
+        assert result == ""
+
+    def test_malformed_json_returns_empty(self, tmp_path):
+        with patch("subprocess.run") as mock_run:
+            def side_effect(cmd, **kw):
+                r = Mock()
+                if "rev-parse" in cmd:
+                    r.returncode = 0; r.stdout = "sha1\n"
+                else:
+                    r.returncode = 0; r.stdout = "not-valid-json{"
+                return r
+            mock_run.side_effect = side_effect
+            result = _fetch_commit_context("tokensave", str(tmp_path), "git", "diff")
+        assert result == ""
+
+    def test_subprocess_failure_returns_empty(self, tmp_path):
+        with patch("subprocess.run") as mock_run:
+            def side_effect(cmd, **kw):
+                r = Mock()
+                if "rev-parse" in cmd:
+                    r.returncode = 0; r.stdout = "sha1\n"
+                else:
+                    r.returncode = 1; r.stdout = ""
+                return r
+            mock_run.side_effect = side_effect
+            result = _fetch_commit_context("tokensave", str(tmp_path), "git", "diff")
+        assert result == ""
+
+    def test_cache_hit_skips_second_subprocess_call(self, tmp_path):
+        ctx_json = self._make_ctx_output(symbols=[{"name": "Foo", "file": "x.py"}])
+        ctx_call_count = {"n": 0}
+        with patch("subprocess.run") as mock_run:
+            def side_effect(cmd, **kw):
+                r = Mock()
+                if "rev-parse" in cmd:
+                    r.returncode = 0; r.stdout = "sha1\n"
+                else:
+                    ctx_call_count["n"] += 1
+                    r.returncode = 0; r.stdout = ctx_json
+                return r
+            mock_run.side_effect = side_effect
+            _fetch_commit_context("tokensave", str(tmp_path), "git", "same diff")
+            _fetch_commit_context("tokensave", str(tmp_path), "git", "same diff")
+        # commit_context tool invoked once (first call); cache serves the second
+        assert ctx_call_count["n"] == 1

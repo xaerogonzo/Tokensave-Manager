@@ -32,11 +32,13 @@ def test_dialog_defaults_when_no_saved_map(tk_root, tmp_path, mocker):
 
 
 def test_dialog_loads_saved_map_over_default(tk_root, tmp_path, mocker):
+    # Saved entry is preserved; new defaults (e.g. .zsc) are merged in
+    # for keys not already in the saved map.
     save_shadow_map(str(tmp_path), {".gd": ".py"})
     dialog = ShadowLinksDialog(tk_root, str(tmp_path), mocker.MagicMock())
     content = dialog._map_text.get("1.0", tk.END)
-    assert ".gd = .py" in content
-    assert ".zsc" not in content           # default fully replaced
+    assert ".gd = .py" in content          # saved entry kept
+    assert ".zsc = .cpp" in content        # default merged in (wasn't in saved map)
     dialog.destroy()
 
 
