@@ -484,8 +484,10 @@ class GitignoreDialog(tk.Toplevel):
         custom_entry.bind("<Return>", lambda e: self._add_custom())
         ttk.Button(custom_wrap, text="+ Add",
                    command=self._add_custom).pack(side=tk.LEFT)
-        ttk.Button(custom_wrap, text="Browse...",
+        ttk.Button(custom_wrap, text="Browse file...",
                    command=self._browse_add).pack(side=tk.LEFT, padx=(6, 0))
+        ttk.Button(custom_wrap, text="📁 Add folder...",
+                   command=self._add_folder).pack(side=tk.LEFT, padx=(6, 0))
 
         self._custom_hint = tk.Label(self, text="", bg=C["base"],
                                      fg=C["overlay0"], font=("Segoe UI", 8))
@@ -774,6 +776,12 @@ class GitignoreDialog(tk.Toplevel):
         self.after(0, lambda fs=files: self._populate_untracked(fs))
 
     def _populate_untracked(self, files: list):
+        """Render untracked files, grouping any that share a top-level
+        directory into a single "📁 dirname/ (N files)" row. This turns a
+        freshly-created build folder like dist/ — which git ls-files reports
+        as dozens of individual file paths — into one row with a single
+        [+] that ignores the whole folder, instead of burning the 40-row
+        cap on that folder's contents alone."""
         if not self.winfo_exists():
             return
         self._untracked_status.destroy()
@@ -786,7 +794,28 @@ class GitignoreDialog(tk.Toplevel):
             ).pack(anchor=tk.W, padx=4, pady=4)
             return
 
-        for filepath in files[:40]:   # cap rows at 40 to avoid UI overload
+        norm = [f.replace("\\", "/") for f in files]
+        dir_counts: dict = {}
+        loose_files: list = []
+        for f in norm:
+            if "/" in f:
+                top = f.split("/", 1)[0]
+                dir_counts[top] = dir_counts.get(top, 0) + 1
+            else:
+                loose_files.append(f)
+
+        entries = []   # (display_text, pattern)
+        for dirname in sorted(dir_counts):
+            count = dir_counts[dirname]
+            entries.append((
+                f"📁 {dirname}/  ({count} untracked file{'s' if count != 1 else ''})",
+                f"{dirname}/",
+            ))
+        for filepath in loose_files:
+            entries.append((filepath, filepath))
+
+        MAX_ROWS = 40
+        for display, pattern in entries[:MAX_ROWS]:
             row = tk.Frame(self._untracked_body, bg=C["mantle"])
             row.pack(fill=tk.X, padx=4, pady=1)
 
@@ -795,7 +824,7 @@ class GitignoreDialog(tk.Toplevel):
                                cursor="hand2", padx=6)
             btn_lbl.pack(side=tk.LEFT)
 
-            file_lbl = tk.Label(row, text=filepath, bg=C["mantle"],
+            file_lbl = tk.Label(row, text=display, bg=C["mantle"],
                                 fg=C["text"], font=self._normal_font,
                                 anchor=tk.W)
             file_lbl.pack(side=tk.LEFT, fill=tk.X, expand=True)
@@ -803,24 +832,20 @@ class GitignoreDialog(tk.Toplevel):
             # Early binding via default keyword args — prevents late-binding trap
             btn_lbl.bind(
                 "<Button-1>",
-                lambda _e, f=filepath, b=btn_lbl, l=file_lbl:
-                    self._add_from_panel(f, b, l),
+                lambda _e, p=pattern, b=btn_lbl, l=file_lbl:
+                    self._add_from_panel(p, b, l),
             )
 
-        if len(files) > 40:
+        if len(entries) > MAX_ROWS:
             tk.Label(
                 self._untracked_body,
-                text=f"  … and {len(files) - 40} more (use custom entry)",
+                text=f"  … and {len(entries) - MAX_ROWS} more (use custom entry)",
                 bg=C["mantle"], fg=C["overlay0"],
                 font=("Segoe UI", 8, "italic"),
             ).pack(anchor=tk.W, padx=4, pady=2)
 
-    def _add_from_panel(self, filepath: str, btn_lbl: tk.Label, file_lbl: tk.Label):
-        """Add filepath as a gitignore pattern and visually strike through the row."""
-        # Convert to forward-slash and use dirname/ for directories
-        pattern = filepath.replace("\\", "/")
-        if os.path.isdir(os.path.join(self._path, filepath)):
-            pattern = pattern.rstrip("/") + "/"
+    def _add_from_panel(self, pattern: str, btn_lbl: tk.Label, file_lbl: tk.Label):
+        """Add pattern as a gitignore entry and visually strike through the row."""
         self._custom_var.set(pattern)
         self._add_custom()
         # Visual strike-through — no subprocess re-run needed
@@ -873,6 +898,45 @@ class GitignoreDialog(tk.Toplevel):
         if os.path.isdir(picked):
             pattern = pattern.rstrip("/") + "/"
 
+        self._custom_var.set(pattern)
+        self._add_custom()
+
+    def _add_folder(self):
+        """Open a folder picker directly and add the whole folder as a pattern.
+
+        Distinct from _browse_add (file picker with an askdirectory fallback
+        on cancel) — this is the direct one-click path for "ignore this
+        entire folder" (e.g. a build output dir like dist/) without having
+        to cancel a file dialog first.
+        """
+        picked = filedialog.askdirectory(
+            title="Select a folder to add to .gitignore",
+            initialdir=self._path,
+            parent=self,
+        )
+        if not picked:
+            return
+
+        picked = os.path.normpath(picked)
+        try:
+            rel = os.path.relpath(picked, self._path)
+        except ValueError:
+            messagebox.showwarning(
+                "Folder outside project",
+                "The selected folder must be on the same drive as the project.",
+                parent=self,
+            )
+            return
+
+        if rel == "." or rel.startswith(".."):
+            messagebox.showwarning(
+                "Folder outside project",
+                "The selected folder must be inside the project directory.",
+                parent=self,
+            )
+            return
+
+        pattern = rel.replace("\\", "/").rstrip("/") + "/"
         self._custom_var.set(pattern)
         self._add_custom()
 
