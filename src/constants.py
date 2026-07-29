@@ -112,4 +112,5 @@ C = {
     "lavender": "#b4befe",
     "sky":      "#89dceb",
     "peach":    "#fab387",
+    "mauve":    "#cba6f7",
 }

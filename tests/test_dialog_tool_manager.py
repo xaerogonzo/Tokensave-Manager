@@ -375,3 +375,79 @@ def test_codegraph_update_calls_update_helper(
     dialog._update_codegraph()
     wait_for(lambda: mock_update.called, timeout_s=3.0)
     mock_update.assert_called_once()
+
+
+# ── Agent-wiring buttons (tokensave row only) ────────────────────────────
+
+def _bare_dialog(tk_root, mock_config, mocker):
+    """Dialog with both tools absent — enough to exercise the row plumbing."""
+    mocker.patch("dialogs.tool_manager._detect_codegraph", return_value="")
+    mocker.patch("dialogs.tool_manager._detect_npm", return_value="")
+    mocker.patch("dialogs.tool_manager._claude_code_mcp_has_codegraph",
+                 return_value=(False, ""))
+    mocker.patch.object(ToolManagerDialog, "_tokensave_mcp_wired",
+                        return_value=False)
+    return ToolManagerDialog(tk_root, mock_config)
+
+
+def test_wiring_buttons_exist_on_tokensave_row_only(tk_root, mock_config,
+                                                    mocker):
+    """Codegraph keeps its own picker in Settings — no buttons on its row."""
+    dialog = _bare_dialog(tk_root, mock_config, mocker)
+    assert "wire_btn" in dialog._tool_widgets["tokensave"]
+    assert "refresh_btn" in dialog._tool_widgets["tokensave"]
+    assert "wire_btn" not in dialog._tool_widgets["codegraph"]
+    assert "refresh_btn" not in dialog._tool_widgets["codegraph"]
+
+
+def test_set_row_busy_survives_row_without_wiring_buttons(tk_root, mock_config,
+                                                          mocker):
+    """REGRESSION: the shared button loops must not KeyError on codegraph.
+
+    _tool_widgets now holds different keys per row. Any loop that indexes
+    button keys blindly blows up here.
+    """
+    dialog = _bare_dialog(tk_root, mock_config, mocker)
+    for tool_id in ("codegraph", "tokensave"):
+        dialog._set_row_busy(tool_id, True, "Refresh")
+        dialog._set_row_busy(tool_id, False)
+    dialog._refresh_state()   # also loops button keys
+
+
+def test_refresh_agents_aborts_when_binary_missing(tk_root, mock_config,
+                                                   mocker):
+    mock_config.raw["tokensave_exe"] = ""
+    dialog = _bare_dialog(tk_root, mock_config, mocker)
+    err = mocker.patch("dialogs.tool_manager.messagebox.showerror")
+    run = mocker.patch("dialogs.tool_manager.subprocess.run")
+    dialog._on_refresh_agents()
+    err.assert_called_once()
+    run.assert_not_called()
+
+
+def test_refresh_agents_runs_bare_reinstall(tk_root, mock_config, mocker,
+                                            patch_after, wait_for, tmp_path):
+    """`reinstall` takes no --agent: it refreshes everything already wired."""
+    ts_exe = tmp_path / "tokensave.exe"
+    ts_exe.write_bytes(b"")
+    mock_config.raw["tokensave_exe"] = str(ts_exe)
+    dialog = _bare_dialog(tk_root, mock_config, mocker)
+    patch_after(dialog)
+    mocker.patch("dialogs.tool_manager.messagebox.askyesno", return_value=True)
+    run = mocker.patch("dialogs.tool_manager.subprocess.run",
+                       return_value=_proc(0, stdout="ok"))
+    dialog._on_refresh_agents()
+    wait_for(lambda: run.called, timeout_s=3.0)
+    assert run.call_args.args[0] == [str(ts_exe), "reinstall"]
+
+
+def test_refresh_agents_declined_runs_nothing(tk_root, mock_config, mocker,
+                                              tmp_path):
+    ts_exe = tmp_path / "tokensave.exe"
+    ts_exe.write_bytes(b"")
+    mock_config.raw["tokensave_exe"] = str(ts_exe)
+    dialog = _bare_dialog(tk_root, mock_config, mocker)
+    mocker.patch("dialogs.tool_manager.messagebox.askyesno", return_value=False)
+    run = mocker.patch("dialogs.tool_manager.subprocess.run")
+    dialog._on_refresh_agents()
+    run.assert_not_called()

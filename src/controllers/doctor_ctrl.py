@@ -51,6 +51,34 @@ _LAYOUT_NAME_RE = re.compile(r"^_?(build|populate|render|layout)(_.*)?$")
 # grouped imports, formatter reordering, __future__ blocks).
 _EXEMPT_RE = re.compile(r"#\s*anti-monolith:\s*exempt\s*[—-]\s*(\S.*\S)")
 
+# doctor emits `run `tokensave install --agent <id>`` on any integration it
+# considers unconfigured. Agent ids are lowercase alnum + hyphen (e.g. roo-code).
+_INSTALL_NAG_RE = re.compile(r"tokensave install\s+--agent\s+([a-z0-9-]+)")
+
+
+def _extract_install_nags(lines: list) -> tuple:
+    """Parse doctor output into (actionable_agents, other_count).
+
+    doctor checks all 20 integrations and nags about every one it hasn't
+    configured — on a typical machine that's ~18 agents the user has never
+    heard of. Offering all of them would be pure noise, so only agents whose
+    config actually exists on this machine are returned as actionable; the
+    rest are reduced to a count for a one-line mention.
+
+    Deliberately does NOT treat doctor's ✘-vs-! severity as the signal:
+    upstream marks some optional integrations (OpenCode, Kiro) as ✘ even
+    when the accompanying text says "if you use it", so severity alone
+    would resurface exactly the noise this filters out.
+    """
+    from helpers.mcp import _tokensave_agent_installed
+    seen: list = []
+    for line in lines:
+        m = _INSTALL_NAG_RE.search(line)
+        if m and m.group(1) not in seen:
+            seen.append(m.group(1))
+    actionable = [a for a in seen if _tokensave_agent_installed(a)]
+    return actionable, len(seen) - len(actionable)
+
 
 class DoctorController:
     """Runs `tokensave doctor`, parses stale entries, and offers to purge them."""
@@ -119,8 +147,12 @@ class DoctorController:
                     self._on_log(f"Exited with code {proc.returncode}", C["red"])
                     log.warning(f"DONE exit={proc.returncode}  [{elapsed:.1f}s]")
                 stale = self._extract_stale_paths(output_lines)
-                if stale and proc.returncode == 0:
-                    self._tab.after(0, self._offer_purge, path, stale)
+                nagged, other_n = _extract_install_nags(output_lines)
+                if proc.returncode == 0 and (stale or nagged):
+                    # Single dispatcher — never schedule two modals
+                    # independently, or they stack on top of each other.
+                    self._tab.after(0, self._offer_followups,
+                                    path, stale, nagged, other_n)
                 # Roadmap-2: monolith audit always runs after doctor finishes
                 self._run_monolith_audit(path)
             except Exception as e:
@@ -194,6 +226,45 @@ class DoctorController:
         threading.Thread(target=worker, daemon=True, name="doctor-purge").start()
 
     # ── Main-thread dialogs ───────────────────────────────────────────────────
+
+    def _offer_followups(self, path: str, stale: list, nagged: list,
+                         other_n: int) -> None:
+        """Run the post-doctor prompts strictly in sequence.
+
+        `messagebox` is modal, so scheduling both offers as independent
+        `after(0, …)` callbacks would queue a second dialog behind the first.
+        Chaining them here keeps it to one prompt at a time.
+        """
+        if stale:
+            self._offer_purge(path, stale)
+        if nagged or other_n:
+            self._offer_agent_wiring(nagged, other_n)
+
+    def _offer_agent_wiring(self, nagged: list, other_n: int) -> None:
+        """Offer to open the agent picker for doctor's `install` nags."""
+        if nagged:
+            bullets = "\n".join(f"  • {a}" for a in nagged)
+            msg = (
+                "tokensave doctor suggests wiring these agents — which are "
+                f"installed on this machine:\n\n{bullets}\n\n"
+            )
+        else:
+            msg = ""
+        if other_n:
+            msg += (
+                f"doctor also mentioned {other_n} other agent"
+                f"{'s' if other_n != 1 else ''} that "
+                f"{'are' if other_n != 1 else 'is'} not installed here — "
+                "those are safe to ignore unless you actually use them.\n\n"
+            )
+        msg += "Open the agent picker now?"
+        if not messagebox.askyesno(
+                "Wire tokensave into agents?", msg, parent=self._root):
+            self._on_log("  (agent wiring skipped)", C["overlay0"])
+            return
+        # Lazy import (Rule 6) — controller → dialog only on the yes path.
+        from dialogs.tokensave_mcp_picker import TokensaveMCPPickerDialog
+        TokensaveMCPPickerDialog(self._root, self._cfg, preselect=nagged)
 
     def _offer_purge(self, path: str, stale_paths: list[str]) -> None:
         n = len(stale_paths)

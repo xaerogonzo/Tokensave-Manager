@@ -480,3 +480,124 @@ def _codegraph_agent_installed(agent_id: str) -> bool:
         return True
     parent = os.path.dirname(path)
     return os.path.isdir(parent) if parent else False
+
+
+# ── tokensave agent integration ────────────────────────────────────────────────
+
+# tokensave install --agent IDs, verified live from `tokensave install --help`
+# (v7.8.1).  Unlike codegraph's `--target=<csv>`, tokensave accepts exactly ONE
+# --agent per invocation — callers must loop.  Order here is the order the
+# picker renders in; "claude" first because it's the common case.
+_TOKENSAVE_AGENTS: tuple = (
+    ("claude",      "Claude Code"),
+    ("copilot",     "GitHub Copilot"),
+    ("cursor",      "Cursor"),
+    ("codex",       "Codex CLI"),
+    ("gemini",      "Gemini CLI"),
+    ("qwen",        "Qwen Code"),
+    ("opencode",    "OpenCode"),
+    ("droid",       "Factory Droid"),
+    ("zed",         "Zed"),
+    ("cline",       "Cline"),
+    ("roo-code",    "Roo Code"),
+    ("antigravity", "Antigravity"),
+    ("kilo",        "Kilo CLI"),
+    ("kiro",        "Kiro"),
+    ("kimi",        "Kimi CLI"),
+    ("vibe",        "Mistral Vibe"),
+    ("grok",        "Grok Build"),
+    ("pi",          "Pi"),
+    ("plank",       "Plank"),
+    ("auggie",      "AugmentCode"),
+)
+
+# Config-path recipes per agent: ((base, *segments), ...).
+#
+# `base` is "home" (→ os.path.expanduser("~")) or "appdata" (→ %APPDATA%).
+# The first recipe is canonical (what we display); later ones are alternates
+# consulted only for detection — e.g. Copilot registers in both VS Code's
+# mcp.json and ~/.copilot/mcp-config.json.
+#
+# Paths transcribed from `tokensave doctor`'s own output, which prints the
+# destination it checks for every integration — authoritative, and cheaper
+# than shelling out per agent.
+#
+# Kept as a table rather than an if-chain: 20 branches would blow the
+# cyclomatic-complexity cap in BASIC_INSTRUCTIONS Rule A.
+_TOKENSAVE_AGENT_PATHS: dict = {
+    "claude":      ((["home"], ".claude.json"),),
+    "copilot":     ((["appdata"], "Code", "User", "mcp.json"),
+                    (["home"], ".copilot", "mcp-config.json")),
+    "cursor":      ((["home"], ".cursor", "mcp.json"),),
+    "codex":       ((["home"], ".codex", "config.toml"),),
+    "gemini":      ((["home"], ".gemini", "settings.json"),),
+    "qwen":        ((["home"], ".qwen", "settings.json"),),
+    "opencode":    ((["home"], ".config", "opencode", "opencode.json"),),
+    "droid":       ((["home"], ".factory", "mcp.json"),),
+    "zed":         ((["home"], ".config", "zed", "settings.json"),),
+    "cline":       ((["appdata"], "Code", "User", "globalStorage",
+                     "saoudrizwan.claude-dev", "settings",
+                     "cline_mcp_settings.json"),),
+    "roo-code":    ((["appdata"], "Code", "User", "globalStorage",
+                     "rooveterinaryinc.roo-cline", "settings",
+                     "cline_mcp_settings.json"),),
+    "antigravity": ((["home"], ".gemini", "antigravity", "mcp_config.json"),),
+    "kilo":        ((["home"], ".config", "kilo", "kilo.jsonc"),),
+    "kiro":        ((["home"], ".kiro", "settings", "mcp.json"),),
+    "kimi":        ((["home"], ".kimi", "mcp.json"),),
+    "vibe":        ((["home"], ".vibe", "config.toml"),),
+    "grok":        ((["home"], ".grok", "config.toml"),),
+    "pi":          ((["home"], ".pi", "agent", "mcp.json"),),
+    "plank":       ((["home"], ".plank", ".mcp.json"),),
+    "auggie":      ((["home"], ".augment", "settings.json"),),
+}
+
+
+def _tokensave_agent_path_candidates(agent_id: str) -> list:
+    """All config paths tokensave might use for an agent, canonical first.
+
+    Roots are resolved *inside* the call, never at module scope, so the
+    ``fake_home`` fixture's $USERPROFILE / $APPDATA redirects apply — see
+    ``tests/test_no_import_time_path_resolution.py`` (G-L).
+    """
+    recipes = _TOKENSAVE_AGENT_PATHS.get(agent_id) or ()
+    out: list = []
+    for base, *segments in recipes:
+        root = (os.environ.get("APPDATA", "") if base[0] == "appdata"
+                else os.path.expanduser("~"))
+        if root:
+            out.append(os.path.join(root, *segments))
+    return out
+
+
+def _tokensave_agent_destination_path(agent_id: str) -> str:
+    """Config path tokensave would write to for an agent ('' if unknown).
+
+    Prefers whichever candidate already exists so the picker shows the file
+    actually in play (Copilot has two); otherwise falls back to canonical.
+    """
+    candidates = _tokensave_agent_path_candidates(agent_id)
+    for path in candidates:
+        if os.path.exists(path):
+            return path
+    return candidates[0] if candidates else ""
+
+
+def _tokensave_agent_installed(agent_id: str) -> bool:
+    """Return True if the agent appears to be present on this machine.
+
+    A config *directory* counts as present (the agent has run at least once
+    and will pick up an MCP entry we add).  Deliberately stricter than
+    ``_codegraph_agent_installed`` for configs that live directly in the home
+    directory: ``~`` always exists, so parent-dir existence there would report
+    every such agent as installed.  Those require the file itself.
+    """
+    home = os.path.expanduser("~")
+    for path in _tokensave_agent_path_candidates(agent_id):
+        if os.path.exists(path):
+            return True
+        parent = os.path.dirname(path)
+        if parent and os.path.normcase(parent) != os.path.normcase(home):
+            if os.path.isdir(parent):
+                return True
+    return False

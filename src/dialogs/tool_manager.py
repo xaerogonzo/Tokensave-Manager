@@ -63,6 +63,21 @@ if TYPE_CHECKING:
 
 _TOKENSAVE_VERSION_RE = re.compile(r"(\d+\.\d+\.\d+(?:\.\d+)?)")
 
+# Every action-button key a row MAY have. wire_btn / refresh_btn are present
+# on the tokensave row only, so callers iterate this and check membership
+# rather than indexing blindly.
+_BTN_KEYS: tuple = (
+    "install_btn", "update_btn", "uninstall_btn", "wire_btn", "refresh_btn",
+)
+
+_BTN_DEFAULT_TEXT: dict = {
+    "install_btn":   "Install",
+    "update_btn":    "Update",
+    "uninstall_btn": "Uninstall",
+    "wire_btn":      "🔌  Wire into agents…",
+    "refresh_btn":   "♻  Refresh agent config",
+}
+
 
 def _tokensave_version(exe: str) -> str:
     """Quick `tokensave --version` probe; '' on any error."""
@@ -222,6 +237,22 @@ class ToolManagerDialog(tk.Toplevel):
             "uninstall_btn": uninstall_btn,
         }
 
+        # Agent-wiring buttons are tokensave-only — codegraph keeps its own
+        # picker in Settings.  This makes _tool_widgets hold DIFFERENT keys
+        # per row, so every loop over button keys must tolerate absence
+        # (see _set_row_busy / _apply_row_state).
+        if tool_id == "tokensave":
+            wire_btn = ttk.Button(
+                btn_row, text="🔌  Wire into agents…",
+                command=self._on_wire_agents)
+            wire_btn.pack(side=tk.LEFT, padx=(0, 6))
+            refresh_btn = ttk.Button(
+                btn_row, text="♻  Refresh agent config",
+                command=self._on_refresh_agents)
+            refresh_btn.pack(side=tk.LEFT, padx=(0, 6))
+            self._tool_widgets[tool_id]["wire_btn"] = wire_btn
+            self._tool_widgets[tool_id]["refresh_btn"] = refresh_btn
+
     def _centre_on_parent(self, parent) -> None:
         self.update_idletasks()
         w, h = 720, 640
@@ -323,6 +354,11 @@ class ToolManagerDialog(tk.Toplevel):
             state=tk.NORMAL if (installed and not busy) else tk.DISABLED)
         widgets["uninstall_btn"].configure(
             state=tk.NORMAL if (installed and not busy) else tk.DISABLED)
+        # Agent wiring needs the binary present, same rule as update/uninstall.
+        for k in ("wire_btn", "refresh_btn"):
+            if k in widgets:
+                widgets[k].configure(
+                    state=tk.NORMAL if (installed and not busy) else tk.DISABLED)
 
     def _set_row_busy(self, tool_id: str, busy: bool, label: str = "") -> None:
         """G-G: synchronously disable all action buttons + optionally retitle.
@@ -332,20 +368,34 @@ class ToolManagerDialog(tk.Toplevel):
         calls this with busy=False on completion (success or exception).
         """
         self._row_busy[tool_id] = busy
-        widgets = self._tool_widgets[tool_id]
-        for k in ("install_btn", "update_btn", "uninstall_btn"):
-            widgets[k].configure(state=tk.DISABLED if busy else tk.NORMAL)
+        buttons = self._row_buttons(tool_id)
+        state = tk.DISABLED if busy else tk.NORMAL
+        for _key, btn in buttons:
+            btn.configure(state=state)
         if busy and label:
-            # Re-title the active button to make the in-flight action obvious.
-            # (Best-effort — purely cosmetic.)
-            for k in ("install_btn", "update_btn", "uninstall_btn"):
-                if k.startswith(label.lower().rstrip("…")[:3]):
-                    widgets[k].configure(text=f"{label}…")
-                    break
+            self._retitle_active_button(buttons, label)
         elif not busy:
-            widgets["install_btn"].configure(text="Install")
-            widgets["update_btn"].configure(text="Update")
-            widgets["uninstall_btn"].configure(text="Uninstall")
+            for key, btn in buttons:
+                btn.configure(text=_BTN_DEFAULT_TEXT[key])
+
+    def _row_buttons(self, tool_id: str) -> list:
+        """(key, widget) pairs for the action buttons this row actually has.
+
+        wire_btn / refresh_btn exist on the tokensave row only, so callers
+        must never index button keys blindly — going through here is what
+        keeps the codegraph row from raising KeyError.
+        """
+        widgets = self._tool_widgets[tool_id]
+        return [(k, widgets[k]) for k in _BTN_KEYS if k in widgets]
+
+    @staticmethod
+    def _retitle_active_button(buttons: list, label: str) -> None:
+        """Rename the in-flight button to '<label>…' (cosmetic, best-effort)."""
+        prefix = label.lower().rstrip("…")[:3]
+        for key, btn in buttons:
+            if key.startswith(prefix):
+                btn.configure(text=f"{label}…")
+                return
 
     # ── Log helpers ───────────────────────────────────────────────────────────
 
@@ -510,6 +560,73 @@ class ToolManagerDialog(tk.Toplevel):
                 self._log_threadsafe("✓ Uninstall complete.")
             finally:
                 self.after(0, lambda: self._set_row_busy("codegraph", False))
+                self.after(0, self._refresh_state)
+
+        threading.Thread(target=_worker, daemon=True).start()
+
+    # ── Agent wiring (tokensave only) ─────────────────────────────────────────
+
+    def _on_wire_agents(self) -> None:
+        """Open the per-agent picker for `tokensave install --agent <id>`."""
+        ts_exe = self._cfg.tokensave_exe
+        if not ts_exe or not os.path.isfile(ts_exe):
+            messagebox.showerror("Not installed",
+                                 "tokensave is not currently installed.",
+                                 parent=self)
+            return
+        # Lazy import (Rule 6) — keeps dialog-to-dialog imports off the
+        # module load graph.
+        from dialogs.tokensave_mcp_picker import TokensaveMCPPickerDialog
+        TokensaveMCPPickerDialog(self, self._cfg, on_done=self._refresh_state)
+
+    def _on_refresh_agents(self) -> None:
+        """Run bare `tokensave reinstall` — refreshes every already-wired agent.
+
+        This is the one-click repair for stale agent config (e.g. hook entries
+        left in an outdated shape by an older tokensave). It only touches
+        agents that are ALREADY installed, so it can't wire up something new.
+        """
+        ts_exe = self._cfg.tokensave_exe
+        if not ts_exe or not os.path.isfile(ts_exe):
+            messagebox.showerror("Not installed",
+                                 "tokensave is not currently installed.",
+                                 parent=self)
+            return
+        if not messagebox.askyesno(
+                "Refresh agent config?",
+                "Run `tokensave reinstall` to refresh settings for every "
+                "agent tokensave is already wired into?\n\n"
+                "This rewrites MCP entries, hooks, and tool permissions in "
+                "those agents' config files to the current shape. It will not "
+                "add any agent that isn't already set up.",
+                parent=self, default="no"):
+            return
+
+        self._set_row_busy("tokensave", True, "Refresh")
+        self._log("--- tokensave: reinstall (refresh wired agents) ---")
+
+        def _worker():
+            try:
+                r = subprocess.run(
+                    [ts_exe, "reinstall"],
+                    capture_output=True, text=True, timeout=120,
+                    creationflags=CREATE_NO_WINDOW,
+                    encoding="utf-8", errors="replace")
+                out = ((r.stdout or "") + (r.stderr or "")).strip()
+                for line in out.splitlines():
+                    if line.strip():
+                        self._log_threadsafe(f"  {line.rstrip()}")
+                if r.returncode == 0:
+                    self._log_threadsafe("✓ Agent config refreshed.")
+                else:
+                    self._log_threadsafe(
+                        f"✗ reinstall failed (rc={r.returncode}).")
+            except subprocess.TimeoutExpired:
+                self._log_threadsafe("✗ reinstall timed out after 120s.")
+            except (OSError, FileNotFoundError) as exc:
+                self._log_threadsafe(f"✗ Could not launch tokensave: {exc}")
+            finally:
+                self.after(0, lambda: self._set_row_busy("tokensave", False))
                 self.after(0, self._refresh_state)
 
         threading.Thread(target=_worker, daemon=True).start()
