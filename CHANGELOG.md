@@ -3,6 +3,18 @@
 
 ## [Unreleased]
 
+## [2.2.1] — 2026-07-28
+
+### Added
+- (gitignore) add folder button and group untracked files
+
+### Changed
+- add dist folder to .gitignore
+- (state) normalize template path in ManagerConfig
+
+### Other
+- delete
+
 ## [2.2.0] — 2026-07-28
 
 ### Added
