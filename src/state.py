@@ -168,7 +168,8 @@ class ManagerConfig:
     @property
     def baseline_include_line(self) -> str:
         """The `@<path>\\project-baseline.md` include line written into BASIC_INSTRUCTIONS.md."""
-        return f"@{self.template_dir}\\project-baseline.md"
+        path = os.path.join(self.template_dir, "project-baseline.md")
+        return f"@{os.path.normpath(path)}"
 
     # ── Cached properties (cache values from refresh_derived) ─────────────
 
