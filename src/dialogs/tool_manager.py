@@ -63,11 +63,12 @@ if TYPE_CHECKING:
 
 _TOKENSAVE_VERSION_RE = re.compile(r"(\d+\.\d+\.\d+(?:\.\d+)?)")
 
-# Every action-button key a row MAY have. wire_btn / refresh_btn are present
-# on the tokensave row only, so callers iterate this and check membership
-# rather than indexing blindly.
+# Every action-button key a row MAY have. wire_btn / refresh_btn are
+# tokensave-only, daemons_btn is codegraph-only — callers iterate this and
+# check membership rather than indexing blindly.
 _BTN_KEYS: tuple = (
     "install_btn", "update_btn", "uninstall_btn", "wire_btn", "refresh_btn",
+    "daemons_btn",
 )
 
 _BTN_DEFAULT_TEXT: dict = {
@@ -76,6 +77,7 @@ _BTN_DEFAULT_TEXT: dict = {
     "uninstall_btn": "Uninstall",
     "wire_btn":      "🔌  Wire into agents…",
     "refresh_btn":   "♻  Refresh agent config",
+    "daemons_btn":   "🔌  Manage daemons…",
 }
 
 
@@ -237,10 +239,10 @@ class ToolManagerDialog(tk.Toplevel):
             "uninstall_btn": uninstall_btn,
         }
 
-        # Agent-wiring buttons are tokensave-only — codegraph keeps its own
-        # picker in Settings.  This makes _tool_widgets hold DIFFERENT keys
-        # per row, so every loop over button keys must tolerate absence
-        # (see _set_row_busy / _apply_row_state).
+        # Per-tool extra buttons — agent wiring is tokensave-only, daemon
+        # management is codegraph-only. This makes _tool_widgets hold
+        # DIFFERENT keys per row, so every loop over button keys must
+        # tolerate absence (see _set_row_busy / _apply_row_state / _row_buttons).
         if tool_id == "tokensave":
             wire_btn = ttk.Button(
                 btn_row, text="🔌  Wire into agents…",
@@ -252,6 +254,12 @@ class ToolManagerDialog(tk.Toplevel):
             refresh_btn.pack(side=tk.LEFT, padx=(0, 6))
             self._tool_widgets[tool_id]["wire_btn"] = wire_btn
             self._tool_widgets[tool_id]["refresh_btn"] = refresh_btn
+        elif tool_id == "codegraph":
+            daemons_btn = ttk.Button(
+                btn_row, text="🔌  Manage daemons…",
+                command=self._on_manage_codegraph_daemons)
+            daemons_btn.pack(side=tk.LEFT, padx=(0, 6))
+            self._tool_widgets[tool_id]["daemons_btn"] = daemons_btn
 
     def _centre_on_parent(self, parent) -> None:
         self.update_idletasks()
@@ -354,8 +362,9 @@ class ToolManagerDialog(tk.Toplevel):
             state=tk.NORMAL if (installed and not busy) else tk.DISABLED)
         widgets["uninstall_btn"].configure(
             state=tk.NORMAL if (installed and not busy) else tk.DISABLED)
-        # Agent wiring needs the binary present, same rule as update/uninstall.
-        for k in ("wire_btn", "refresh_btn"):
+        # Agent wiring / daemon management need the binary present, same
+        # rule as update/uninstall.
+        for k in ("wire_btn", "refresh_btn", "daemons_btn"):
             if k in widgets:
                 widgets[k].configure(
                     state=tk.NORMAL if (installed and not busy) else tk.DISABLED)
@@ -433,6 +442,26 @@ class ToolManagerDialog(tk.Toplevel):
             self._uninstall_tokensave()
         elif tool_id == "codegraph":
             self._uninstall_codegraph()
+
+    # ── Daemon management (codegraph only) ──────────────────────────────────
+
+    def _on_manage_codegraph_daemons(self) -> None:
+        """Open the daemon list/stop dialog.
+
+        Daemon listing is GLOBAL (every project's daemon, not just a selected
+        one), so — unlike the codegraph lifecycle actions below — this needs
+        no path argument and no project-selection precondition.
+        """
+        cg_exe = self._cfg.codegraph_exe
+        if not cg_exe or not os.path.isfile(cg_exe):
+            messagebox.showerror("Not installed",
+                                 "codegraph is not currently installed.",
+                                 parent=self)
+            return
+        # Lazy import (Rule 6) — dialog-to-dialog imports stay off the
+        # module load graph until actually needed.
+        from dialogs.codegraph_daemon_manager import CodegraphDaemonManagerDialog
+        CodegraphDaemonManagerDialog(self, self._cfg)
 
     # ── Codegraph lifecycle ───────────────────────────────────────────────────
 

@@ -451,3 +451,50 @@ def test_refresh_agents_declined_runs_nothing(tk_root, mock_config, mocker,
     run = mocker.patch("dialogs.tool_manager.subprocess.run")
     dialog._on_refresh_agents()
     run.assert_not_called()
+
+
+# ── Daemon-management button (codegraph row only) ────────────────────────
+
+def test_daemons_button_exists_on_codegraph_row_only(tk_root, mock_config,
+                                                     mocker):
+    """Codegraph gets daemon management; tokensave gets agent wiring —
+    neither row should pick up the other's buttons."""
+    dialog = _bare_dialog(tk_root, mock_config, mocker)
+    assert "daemons_btn" in dialog._tool_widgets["codegraph"]
+    assert "daemons_btn" not in dialog._tool_widgets["tokensave"]
+    assert "wire_btn" not in dialog._tool_widgets["codegraph"]
+
+
+def test_set_row_busy_survives_three_different_button_sets(tk_root,
+                                                           mock_config,
+                                                           mocker):
+    """REGRESSION: install/update/uninstall + wire/refresh (tokensave) +
+    daemons (codegraph) are three different key sets on _tool_widgets now.
+    Any loop indexing button keys blindly blows up here."""
+    dialog = _bare_dialog(tk_root, mock_config, mocker)
+    for tool_id in ("codegraph", "tokensave"):
+        dialog._set_row_busy(tool_id, True, "Refresh")
+        dialog._set_row_busy(tool_id, False)
+    dialog._refresh_state()
+
+
+def test_manage_daemons_aborts_when_binary_missing(tk_root, mock_config,
+                                                   mocker):
+    mock_config.raw["codegraph_exe"] = ""
+    dialog = _bare_dialog(tk_root, mock_config, mocker)
+    err = mocker.patch("dialogs.tool_manager.messagebox.showerror")
+    dialog._on_manage_codegraph_daemons()
+    err.assert_called_once()
+
+
+def test_manage_daemons_opens_dialog_when_binary_present(tk_root,
+                                                         mock_config, mocker,
+                                                         tmp_path):
+    cg_exe = tmp_path / "codegraph.cmd"
+    cg_exe.write_bytes(b"")
+    mock_config.raw["codegraph_exe"] = str(cg_exe)
+    dialog = _bare_dialog(tk_root, mock_config, mocker)
+    opened = mocker.patch(
+        "dialogs.codegraph_daemon_manager.CodegraphDaemonManagerDialog")
+    dialog._on_manage_codegraph_daemons()
+    opened.assert_called_once_with(dialog, dialog._cfg)
