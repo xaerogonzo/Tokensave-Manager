@@ -1,9 +1,15 @@
 # Upstream issue — worktree index resolution silently answers from the wrong checkout
 
 **Repo:** https://github.com/aovestdipaperino/tokensave
-**Suggested title:** `tokensave_*` MCP tools should refuse (or `init` should error non-zero) rather than silently detect+ignore a worktree mismatch
+**Suggested title:** Project-path resolution: worktree mismatch answered silently, plus `.` and case-variant drive letters registered as distinct projects
 **Type:** Bug / footgun — correctness
 **Status:** Draft — review and strip any proprietary code before filing.
+
+> Four related asks, all rooted in how a project path is resolved and then
+> recorded in the global DB. Sections 1–2 are the original correctness
+> problem; 3–4 are global-DB hygiene bugs found while working on it. They
+> could be filed separately, but they share a root cause (paths are used
+> as-provided rather than canonicalised) so they are grouped here.
 
 ---
 
@@ -44,7 +50,7 @@ rather than falling back. The upward search only fires when no path is given
 at all, i.e. when the invoking process's cwd is trusted implicitly (exactly
 the shape of a bare `tokensave.exe serve` MCP registration with no `-p`).
 
-## Two independent asks
+## Four independent asks
 
 ### 1. `init`'s no-op behavior on an existing index is inconsistent and easy to trust wrongly
 
@@ -82,6 +88,56 @@ tokensave (agent rules that say "always check tokensave before reading
 files," for instance) inherits the wrong-tree answer with no signal
 anything is off.
 
+### 3. A literal `.` is registered as a project name in the global DB
+
+Running any indexing command with `.` as the path argument from inside a
+project registers the **literal string `.`** as a project in the global DB,
+rather than resolving it to an absolute path first:
+
+```
+$ cd <some project> && tokensave status .
+...
+$ tokensave list -a
+Found 14 tokensave project(s):
+  ...
+  .                                            43.3 MB           — tokens
+```
+
+That row is permanently ambiguous — it records a size but no recoverable
+identity, since `.` means something different from every directory. It also
+can't be cleaned up: `doctor`'s stale-purge only removes rows whose
+`.tokensave/` is *gone*, and this one resolves to a real indexed directory
+from wherever `doctor` happens to run, so it's never considered stale.
+
+**Suggested fix:** canonicalise the path argument (`realpath`/`canonicalize`)
+before it's written to the global DB. `.` and `./` and `../<name>` should all
+land on the same absolute row as an explicit absolute path would.
+
+### 4. Case-variant Windows drive letters create duplicate global-DB rows
+
+On Windows, `d:\foo` and `D:\foo` are the same directory, but tokensave
+records them as two separate projects with independently-accumulated token
+counts:
+
+```
+  d:\Claude Co worker\Token Save Manager Source     43.3 MB    14.4M tokens
+  D:\Claude Co worker\Token Save Manager Source     43.3 MB    12.2M tokens
+  D:\Random Projects\KicomAI_Project                11.0 MB   107.4k tokens
+  d:\Random Projects\KicomAI_Project                11.0 MB   107.4k tokens
+```
+
+Confirmed identical directories — `os.path.samefile()` returns `True` for the
+pair, and `os.path.normcase()` makes them equal. Note the *differing* token
+counts on the first pair (14.4M vs 12.2M): reported savings are being split
+across the duplicates rather than accumulated on one project, so the
+`tokensave gain` / worldwide-counter totals under-report per project and the
+`list -a` disk-usage total double-counts.
+
+Same root cause and same fix as #3: normalise the path (on Windows,
+case-fold the drive letter at minimum — `normcase`-equivalent) before using
+it as the global-DB key. A migration that merges existing case-variant rows
+would be a nice-to-have; even just preventing new ones would stop the drift.
+
 ## Why it matters
 
 Any wrapper or agent-rule that treats tokensave as the trusted source of
@@ -96,6 +152,11 @@ worse than having no index at all, because the tool never signals uncertainty
 - Windows 11
 - Claude Code worktree at `<repo>/.claude/worktrees/<name>`, no `.tokensave/`
   of its own, MCP server registered globally with no `-p`/`--root`
+- Asks #3 and #4 are Windows-observed; #3 (`.` as a project name) looks
+  platform-independent, #4 (drive-letter case) is Windows-specific but the
+  same class of bug could appear anywhere paths are keyed without
+  canonicalisation (e.g. symlinked or trailing-slash variants on POSIX —
+  not verified).
 
 ## Author note
 

@@ -150,24 +150,8 @@ class DoctorController:
                 else:
                     self._on_log(f"Exited with code {proc.returncode}", C["red"])
                     log.warning(f"DONE exit={proc.returncode}  [{elapsed:.1f}s]")
-                stale = self._extract_stale_paths(output_lines)
-                nagged, other_n = _extract_install_nags(output_lines)
-                # Worktree health is orthogonal to whether `tokensave doctor`
-                # itself succeeded — it's a git-level check, not parsed from
-                # doctor's output — so it runs regardless of proc.returncode.
-                orphans = find_orphaned_worktrees_for_project(
-                    path, self._cfg.git_exe)
-                for o in orphans:
-                    self._on_log(
-                        f"  ⚠ worktree '{o['branch'] or o['head']}' at "
-                        f"{o['worktree_path']} has no tokensave index of "
-                        "its own — a session started there would silently "
-                        "get answers about a different checkout.", C["peach"])
-                if proc.returncode == 0 and (stale or nagged or orphans):
-                    # Single dispatcher — never schedule two modals
-                    # independently, or they stack on top of each other.
-                    self._tab.after(0, self._offer_followups,
-                                    path, stale, nagged, other_n, orphans)
+                self._analyse_doctor_output(
+                    path, output_lines, proc.returncode)
                 # Roadmap-2: monolith audit always runs after doctor finishes
                 self._run_monolith_audit(path)
             except Exception as e:
@@ -179,11 +163,46 @@ class DoctorController:
 
         threading.Thread(target=worker, daemon=True, name="doctor-worker").start()
 
-    def _run_purge(self, path: str) -> None:
-        """Re-run `tokensave doctor` with `y` piped to confirm the purge prompt."""
+    def _analyse_doctor_output(self, path: str, output_lines: list,
+                               returncode: int) -> None:
+        """Parse doctor's output, check worktree health, schedule follow-ups.
+
+        Runs on the doctor worker thread; the only UI work it does directly
+        is thread-safe ``_on_log`` calls. Dialogs go through a single
+        ``after(0, _offer_followups, …)`` dispatch.
+        """
+        stale = self._extract_stale_paths(output_lines)
+        nagged, other_n = _extract_install_nags(output_lines)
+        # Worktree health is orthogonal to whether `tokensave doctor` itself
+        # succeeded — it's a git-level check, not parsed from doctor's
+        # output — so it runs regardless of returncode.
+        orphans = find_orphaned_worktrees_for_project(path, self._cfg.git_exe)
+        for o in orphans:
+            self._on_log(
+                f"  ⚠ worktree '{o['branch'] or o['head']}' at "
+                f"{o['worktree_path']} has no tokensave index of "
+                "its own — a session started there would silently "
+                "get answers about a different checkout.", C["peach"])
+        if returncode == 0 and (stale or nagged or orphans):
+            # Single dispatcher — never schedule the offers independently,
+            # or they stack on top of each other.
+            self._tab.after(0, self._offer_followups,
+                            path, stale, nagged, other_n, orphans)
+
+    def _run_purge(self, path: str,
+                   on_done: "Callable[[], None] | None" = None) -> None:
+        """Re-run `tokensave doctor` with `y` piped to confirm the purge prompt.
+
+        ``on_done`` is dispatched EXACTLY ONCE when this branch is done —
+        either directly, or handed to ``_offer_in_cmd`` when the piped purge
+        didn't take and one more prompt is needed. The ``finally`` guard
+        covers the exception path so a crash here can't strand the rest of
+        the follow-up sequence.
+        """
         label = "doctor (purge)"
 
         def worker():
+            handed_off = False
             self._on_log(f"$ tokensave doctor  [{label}]", C["blue"])
             self._tab.after(0, self._on_set_running, True, label)
             captured: list[str] = []
@@ -219,43 +238,71 @@ class DoctorController:
                     "Done." if proc.returncode == 0
                     else f"Exited with code {proc.returncode}",
                     C["green"] if proc.returncode == 0 else C["red"])
-                still_stale = self._extract_stale_paths(captured)
-                if still_stale:
-                    self._on_log(
-                        f"  ⚠ Purge didn't take — tokensave still "
-                        f"reports {len(still_stale)} stale entr"
-                        f"{'y' if len(still_stale) == 1 else 'ies'}. "
-                        "tokensave doctor needs a real terminal "
-                        "(piped stdin doesn't trigger the prompt).",
-                        C["peach"])
-                    self._tab.after(0, self._offer_in_cmd, path, len(still_stale))
-                else:
-                    self._on_log("  ✓ Stale entries purged.", C["green"])
+                handed_off = self._after_purge(
+                    path, self._extract_stale_paths(captured), on_done)
             except Exception as e:
                 self._on_log(f"Error: {e}", C["red"])
                 log.exception("EXCEPTION in doctor purge")
             finally:
                 self._on_set_proc(None)
                 self._tab.after(0, self._on_set_running, False, "")
+                if on_done and not handed_off:
+                    self._tab.after(0, on_done)
 
         threading.Thread(target=worker, daemon=True, name="doctor-purge").start()
+
+    def _after_purge(self, path: str, still_stale: list,
+                     on_done: "Callable[[], None] | None") -> bool:
+        """Log the purge outcome. Returns True if ``on_done`` was handed to
+        the follow-up prompt — the caller must then NOT fire it itself, or
+        the rest of the sequence would run while that prompt is still open.
+        """
+        if not still_stale:
+            self._on_log("  ✓ Stale entries purged.", C["green"])
+            return False
+        self._on_log(
+            f"  ⚠ Purge didn't take — tokensave still "
+            f"reports {len(still_stale)} stale entr"
+            f"{'y' if len(still_stale) == 1 else 'ies'}. "
+            "tokensave doctor needs a real terminal "
+            "(piped stdin doesn't trigger the prompt).",
+            C["peach"])
+        self._tab.after(0, self._offer_in_cmd, path, len(still_stale), on_done)
+        return True
 
     # ── Main-thread dialogs ───────────────────────────────────────────────────
 
     def _offer_followups(self, path: str, stale: list, nagged: list,
                          other_n: int, orphans: "list | None" = None) -> None:
-        """Run the post-doctor prompts strictly in sequence.
+        """Run the post-doctor prompts strictly one at a time.
 
-        `messagebox` is modal, so scheduling each offer as an independent
-        `after(0, …)` callback would queue several dialogs behind each other.
-        Chaining them here keeps it to one prompt at a time.
+        Calling these back-to-back is NOT enough to prevent stacking: a
+        blocking ``askyesno`` returns as soon as it's dismissed, but
+        ``_offer_purge`` may then spawn a BACKGROUND worker that later needs
+        its own prompt ("open Doctor in a terminal?"). That second prompt
+        lands whenever the worker finishes — on top of whatever dialog the
+        sequencer has since opened. So the purge branch is chained through an
+        explicit continuation rather than just called first.
+
+        Order is deliberate:
+          1. Stale-purge — async, may prompt again later; everything waits on
+             the whole chain, not just on the first dialog closing.
+          2. Worktree repair — blocking askyesno; its repair worker only
+             logs, never prompts, so nothing has to wait on it.
+          3. Agent wiring LAST — it opens a persistent ``grab_set()``
+             Toplevel (the picker) that STAYS up. Any askyesno scheduled
+             after it would render over a live modal.
         """
+        def _then_worktrees() -> None:
+            if orphans:
+                self._offer_worktree_repair(path, orphans)
+            if nagged or other_n:
+                self._offer_agent_wiring(nagged, other_n)
+
         if stale:
-            self._offer_purge(path, stale)
-        if nagged or other_n:
-            self._offer_agent_wiring(nagged, other_n)
-        if orphans:
-            self._offer_worktree_repair(path, orphans)
+            self._offer_purge(path, stale, on_done=_then_worktrees)
+        else:
+            _then_worktrees()
 
     def _offer_worktree_repair(self, path: str, orphans: list) -> None:
         """Offer to init/sync-force every worktree missing its own index.
@@ -341,7 +388,14 @@ class DoctorController:
         from dialogs.tokensave_mcp_picker import TokensaveMCPPickerDialog
         TokensaveMCPPickerDialog(self._root, self._cfg, preselect=nagged)
 
-    def _offer_purge(self, path: str, stale_paths: list[str]) -> None:
+    def _offer_purge(self, path: str, stale_paths: list[str],
+                     on_done: "Callable[[], None] | None" = None) -> None:
+        """Offer the stale-entry purge.
+
+        ``on_done`` fires once this ENTIRE branch is finished — including the
+        background purge worker and its own follow-up prompt — so the caller
+        can safely open the next dialog only after everything here settles.
+        """
         n = len(stale_paths)
         bullets = "\n".join(f"  • {p}" for p in stale_paths)
         msg = (
@@ -357,10 +411,21 @@ class DoctorController:
         if not messagebox.askyesno("Purge stale tokensave projects?", msg,
                                    parent=self._root):
             self._on_log("  (purge skipped — stale entries left in place)", C["overlay0"])
+            if on_done:
+                on_done()
             return
-        self._run_purge(path)
+        self._run_purge(path, on_done=on_done)
 
-    def _offer_in_cmd(self, path: str, n_stale: int) -> None:
+    def _offer_in_cmd(self, path: str, n_stale: int,
+                      on_done: "Callable[[], None] | None" = None) -> None:
+        """Last link in the purge chain — always releases ``on_done``."""
+        try:
+            self._offer_in_cmd_inner(path, n_stale)
+        finally:
+            if on_done:
+                on_done()
+
+    def _offer_in_cmd_inner(self, path: str, n_stale: int) -> None:
         plural = "entry" if n_stale == 1 else "entries"
         if not messagebox.askyesno(
                 "Open Doctor in a new terminal?",
