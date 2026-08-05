@@ -244,3 +244,23 @@ def test_offer_in_cmd_releases_chain_even_when_launch_fails(
     called = []
     ctl._offer_in_cmd("/p", 2, on_done=lambda: called.append(1))
     assert called == [1]
+
+
+# ── other_n alone must never raise a modal ────────────────────────────────
+
+def test_no_actionable_agents_means_no_agent_dialog(tk_root, mock_config,
+                                                    mocker):
+    """REGRESSION: `other_n` is informational (agents not installed here, or
+    already wired). It was raising a modal on every doctor run with nothing
+    the user could act on."""
+    ctl, _ = _ctrl(tk_root, mock_config)
+    agents = mocker.patch.object(ctl, "_offer_agent_wiring")
+    ctl._offer_followups("/p", [], [], 18, orphans=[])
+    agents.assert_not_called()
+
+
+def test_actionable_agents_still_prompt(tk_root, mock_config, mocker):
+    ctl, _ = _ctrl(tk_root, mock_config)
+    agents = mocker.patch.object(ctl, "_offer_agent_wiring")
+    ctl._offer_followups("/p", [], ["cursor"], 18, orphans=[])
+    agents.assert_called_once_with(["cursor"], 18)

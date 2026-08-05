@@ -601,3 +601,34 @@ def _tokensave_agent_installed(agent_id: str) -> bool:
             if os.path.isdir(parent):
                 return True
     return False
+
+
+def _tokensave_agent_wired(agent_id: str) -> bool:
+    """Return True if the agent's config ALREADY references tokensave.
+
+    "Installed" and "wired" are different questions, and conflating them
+    produces a nag that can never be satisfied. Several agents ship multiple
+    surfaces under one ``--agent`` id — Copilot covers VS Code, VS Code
+    Insiders, the CLI, and JetBrains — and ``tokensave doctor`` emits a
+    ``run `tokensave install --agent copilot``` line for EACH surface it
+    can't find, including ones the user doesn't have installed. Filtering on
+    "is this agent installed?" alone therefore keeps offering to wire an
+    agent that is already fully wired everywhere it exists, on every single
+    doctor run.
+
+    Substring match on the raw file rather than per-format parsing: these
+    configs are JSON, JSONC (comments break ``json.load``) and TOML, and the
+    question is only ever "does tokensave appear here at all". Erring toward
+    "wired" is the safe direction — the cost is a missed prompt the user can
+    still reach from Tool Manager, versus a prompt that reappears forever.
+    """
+    for path in _tokensave_agent_path_candidates(agent_id):
+        if not os.path.isfile(path):
+            continue
+        try:
+            with open(path, encoding="utf-8", errors="replace") as fh:
+                if "tokensave" in fh.read().lower():
+                    return True
+        except OSError:
+            continue
+    return False

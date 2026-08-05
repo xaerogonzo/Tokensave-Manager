@@ -63,24 +63,34 @@ _INSTALL_NAG_RE = re.compile(r"tokensave install\s+--agent\s+([a-z0-9-]+)")
 def _extract_install_nags(lines: list) -> tuple:
     """Parse doctor output into (actionable_agents, other_count).
 
-    doctor checks all 20 integrations and nags about every one it hasn't
-    configured — on a typical machine that's ~18 agents the user has never
-    heard of. Offering all of them would be pure noise, so only agents whose
-    config actually exists on this machine are returned as actionable; the
-    rest are reduced to a count for a one-line mention.
+    An agent is actionable only when it is BOTH installed on this machine
+    AND not already wired. Both halves matter:
+
+    * installed — doctor checks all 20 integrations and nags about every one
+      it can't find, which on a typical machine is ~18 agents the user has
+      never heard of.
+    * not already wired — several agents cover multiple surfaces under one
+      ``--agent`` id (Copilot spans VS Code, Insiders, the CLI, JetBrains),
+      and doctor emits a separate nag per missing surface. Checking only
+      "installed" meant a fully-wired Copilot got re-offered on EVERY doctor
+      run, because the nags were about Insiders/JetBrains — surfaces the
+      user doesn't have and that re-running install cannot create. A prompt
+      that reappears no matter how many times you accept it is worse than
+      no prompt.
 
     Deliberately does NOT treat doctor's ✘-vs-! severity as the signal:
     upstream marks some optional integrations (OpenCode, Kiro) as ✘ even
     when the accompanying text says "if you use it", so severity alone
     would resurface exactly the noise this filters out.
     """
-    from helpers.mcp import _tokensave_agent_installed
+    from helpers.mcp import _tokensave_agent_installed, _tokensave_agent_wired
     seen: list = []
     for line in lines:
         m = _INSTALL_NAG_RE.search(line)
         if m and m.group(1) not in seen:
             seen.append(m.group(1))
-    actionable = [a for a in seen if _tokensave_agent_installed(a)]
+    actionable = [a for a in seen
+                  if _tokensave_agent_installed(a) and not _tokensave_agent_wired(a)]
     return actionable, len(seen) - len(actionable)
 
 
@@ -183,6 +193,14 @@ class DoctorController:
                 f"{o['worktree_path']} has no tokensave index of "
                 "its own — a session started there would silently "
                 "get answers about a different checkout.", C["peach"])
+        if other_n:
+            # Informational only — never worth a modal. These are agents
+            # that are either not installed here or already wired.
+            self._on_log(
+                f"  ({other_n} agent integration"
+                f"{'s' if other_n != 1 else ''} mentioned by doctor "
+                "need no action — not installed here, or already wired.)",
+                C["overlay0"])
         if returncode == 0 and (stale or nagged or orphans):
             # Single dispatcher — never schedule the offers independently,
             # or they stack on top of each other.
@@ -296,7 +314,10 @@ class DoctorController:
         def _then_worktrees() -> None:
             if orphans:
                 self._offer_worktree_repair(path, orphans)
-            if nagged or other_n:
+            # Only prompt when there is something the user can actually DO.
+            # `other_n` alone is informational (already logged by
+            # _analyse_doctor_output) and must never raise a modal.
+            if nagged:
                 self._offer_agent_wiring(nagged, other_n)
 
         if stale:

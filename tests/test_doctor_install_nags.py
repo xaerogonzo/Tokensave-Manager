@@ -90,3 +90,45 @@ def test_severity_is_not_the_filter(mocker):
     ])
     assert actionable == []
     assert other == 1
+
+
+# ── Already-wired agents must stop nagging (permanence) ───────────────────
+
+def test_already_wired_agent_is_not_actionable(mocker):
+    """REGRESSION: an agent that is installed AND already wired must drop out.
+
+    Copilot spans several surfaces under one --agent id (VS Code, Insiders,
+    CLI, JetBrains) and doctor nags per missing surface. Filtering on
+    "installed" alone re-offered a fully-wired Copilot on EVERY doctor run,
+    because the nags were about surfaces that don't exist here and that
+    re-running install cannot create.
+    """
+    mocker.patch("helpers.mcp._tokensave_agent_installed", return_value=True)
+    mocker.patch("helpers.mcp._tokensave_agent_wired", return_value=True)
+    actionable, other = _extract_install_nags([
+        "! Insiders mcp.json not found - run `tokensave install --agent copilot`",
+    ])
+    assert actionable == []
+    assert other == 1
+
+
+def test_installed_but_unwired_agent_is_actionable(mocker):
+    """The genuine case must still surface — this is the whole feature."""
+    mocker.patch("helpers.mcp._tokensave_agent_installed", return_value=True)
+    mocker.patch("helpers.mcp._tokensave_agent_wired", return_value=False)
+    actionable, other = _extract_install_nags([
+        "! cursor/mcp.json not found - run `tokensave install --agent cursor`",
+    ])
+    assert actionable == ["cursor"]
+    assert other == 0
+
+
+def test_wired_check_short_circuits_uninstalled_agents(mocker):
+    """Not installed => not actionable regardless of wired state."""
+    mocker.patch("helpers.mcp._tokensave_agent_installed", return_value=False)
+    mocker.patch("helpers.mcp._tokensave_agent_wired", return_value=False)
+    actionable, other = _extract_install_nags([
+        "! run `tokensave install --agent kiro`",
+    ])
+    assert actionable == []
+    assert other == 1
