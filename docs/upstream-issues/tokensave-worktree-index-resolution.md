@@ -1,9 +1,15 @@
 # Upstream issue — worktree index resolution silently answers from the wrong checkout
 
 **Repo:** https://github.com/aovestdipaperino/tokensave
-**Suggested title:** Project-path resolution: worktree mismatch answered silently, plus `.` and case-variant drive letters registered as distinct projects
+**Title:** Project-path resolution: worktree mismatch answered silently, plus `.` and case-variant drive letters registered as distinct projects
 **Type:** Bug / footgun — correctness
-**Status:** Draft — review and strip any proprietary code before filing.
+**Status:** ✅ FILED 2026-08-05 — https://github.com/aovestdipaperino/tokensave/issues/372
+
+> The filed version is this document with paths anonymised
+> (`D:\Projects\MyProject`, `D:\Work\ProjectA`, `D:\Projects\ProjectB`) —
+> real project names and directory layout were stripped before submission.
+> Sizes and token counts went out verbatim, since they're the evidence for
+> asks #3 and #4. This local copy keeps the real paths for our own reference.
 
 > Four related asks, all rooted in how a project path is resolved and then
 > recorded in the global DB. Sections 1–2 are the original correctness
@@ -160,6 +166,5 @@ worse than having no index at all, because the tool never signals uncertainty
 
 ## Author note
 
-Filed by a TokenSave Manager user. Strip any proprietary code paths from
-repros before submitting — the details above are file paths and public
-symbol names from the reporter's own projects only.
+Filed from TokenSave Manager. Paths were anonymised before submission (see
+the status note at the top); everything else went out as written here.
