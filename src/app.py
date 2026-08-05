@@ -56,6 +56,7 @@ from helpers.commit_messages import _suggest_commit_message
 from helpers.git import _find_tracked_but_ignored, _is_git_repo, _is_local_git_repo
 from helpers.mcp import _mcp_configs, _classify_mcp_entry
 from helpers.project_discovery import find_projects, get_pinned
+from helpers.worktree_health import find_orphaned_worktrees
 from helpers.runtime import (
     _acquire_instance_lock,
     _bring_existing_to_front,
@@ -134,6 +135,9 @@ class App(tk.Tk):
         self._tray_mgr.setup()
         self.protocol("WM_DELETE_WINDOW", self._tray_mgr.hide)
         self.after(300, self._check_config)
+        # Staggered after _check_config so the two startup checks' log
+        # lines don't interleave mid-write.
+        self.after(1200, self._check_worktree_health)
 
     def report_callback_exception(self, exc, val, tb):
         """Log unhandled exceptions raised inside Tk callbacks.
@@ -473,6 +477,32 @@ class App(tk.Tk):
         # Open the configurator after a short delay so the main window has
         # finished laying out — feels less like an interruption.
         self.after(800, lambda: MCPConfigDialog(self, self._cfg))
+
+    def _check_worktree_health(self):
+        """Log (never dialog) any git worktree with no tokensave index of its
+        own — see helpers/worktree_health.py for why this matters: without
+        one, tokensave answers questions asked there using a SIBLING
+        checkout's index instead, confidently and about the wrong branch.
+
+        Deliberately quiet — unlike _check_config, this never opens a dialog
+        at launch. Real repair is a deliberate action via Doctor (🔍 Doctor →
+        one click repairs every orphaned worktree for that project); this
+        sweep exists so an orphaned worktree is never silently sitting there
+        unnoticed between Doctor runs.
+        """
+        orphans = find_orphaned_worktrees(
+            getattr(self, "projects", None) or [], self._cfg.git_exe)
+        if not orphans:
+            return
+        self._log(
+            f"⚠ {len(orphans)} git worktree"
+            f"{'s' if len(orphans) != 1 else ''} found with no tokensave "
+            "index of its own — run 🔍 Doctor on the parent project to "
+            "repair:", C["peach"])
+        for o in orphans:
+            self._log(
+                f"    {o['project_name']}: '{o['branch'] or o['head']}' "
+                f"at {o['worktree_path']}", C["overlay0"])
 
     def _auto_refresh(self):
         ctrl_idle = (not hasattr(self, "_projects") or self._projects.current_proc is None)

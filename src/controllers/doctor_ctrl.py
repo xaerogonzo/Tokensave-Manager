@@ -27,6 +27,10 @@ from tkinter import messagebox
 
 from constants import C, CREATE_NO_WINDOW, _ANSI
 from helpers.runtime import log
+from helpers.worktree_health import (
+    find_orphaned_worktrees_for_project,
+    repair_worktree_index,
+)
 
 import time
 
@@ -148,11 +152,22 @@ class DoctorController:
                     log.warning(f"DONE exit={proc.returncode}  [{elapsed:.1f}s]")
                 stale = self._extract_stale_paths(output_lines)
                 nagged, other_n = _extract_install_nags(output_lines)
-                if proc.returncode == 0 and (stale or nagged):
+                # Worktree health is orthogonal to whether `tokensave doctor`
+                # itself succeeded — it's a git-level check, not parsed from
+                # doctor's output — so it runs regardless of proc.returncode.
+                orphans = find_orphaned_worktrees_for_project(
+                    path, self._cfg.git_exe)
+                for o in orphans:
+                    self._on_log(
+                        f"  ⚠ worktree '{o['branch'] or o['head']}' at "
+                        f"{o['worktree_path']} has no tokensave index of "
+                        "its own — a session started there would silently "
+                        "get answers about a different checkout.", C["peach"])
+                if proc.returncode == 0 and (stale or nagged or orphans):
                     # Single dispatcher — never schedule two modals
                     # independently, or they stack on top of each other.
                     self._tab.after(0, self._offer_followups,
-                                    path, stale, nagged, other_n)
+                                    path, stale, nagged, other_n, orphans)
                 # Roadmap-2: monolith audit always runs after doctor finishes
                 self._run_monolith_audit(path)
             except Exception as e:
@@ -228,17 +243,77 @@ class DoctorController:
     # ── Main-thread dialogs ───────────────────────────────────────────────────
 
     def _offer_followups(self, path: str, stale: list, nagged: list,
-                         other_n: int) -> None:
+                         other_n: int, orphans: "list | None" = None) -> None:
         """Run the post-doctor prompts strictly in sequence.
 
-        `messagebox` is modal, so scheduling both offers as independent
-        `after(0, …)` callbacks would queue a second dialog behind the first.
+        `messagebox` is modal, so scheduling each offer as an independent
+        `after(0, …)` callback would queue several dialogs behind each other.
         Chaining them here keeps it to one prompt at a time.
         """
         if stale:
             self._offer_purge(path, stale)
         if nagged or other_n:
             self._offer_agent_wiring(nagged, other_n)
+        if orphans:
+            self._offer_worktree_repair(path, orphans)
+
+    def _offer_worktree_repair(self, path: str, orphans: list) -> None:
+        """Offer to init/sync-force every worktree missing its own index.
+
+        Not routed through `tokensave branch` — branch tracking copies
+        within ONE checkout and syncs from that checkout's own files; it has
+        no visibility into another directory's working tree, which is
+        exactly the problem here.
+        """
+        n = len(orphans)
+        bullets = "\n".join(
+            f"  • {o['branch'] or o['head']}  —  {o['worktree_path']}"
+            for o in orphans)
+        if not messagebox.askyesno(
+                "Give worktrees their own tokensave index?",
+                f"Found {n} git worktree{'s' if n != 1 else ''} of "
+                f"{os.path.basename(path)} with no `.tokensave/` of its own:"
+                f"\n\n{bullets}\n\n"
+                "Without one, tokensave answers questions asked there using "
+                "this checkout's index instead — confidently, and about the "
+                "wrong branch.\n\n"
+                f"Initialise {'them' if n != 1 else 'it'} now? Takes a few "
+                "seconds per worktree.",
+                parent=self._root):
+            self._on_log("  (worktree repair skipped)", C["overlay0"])
+            return
+        self._run_worktree_repair(orphans)
+
+    def _run_worktree_repair(self, orphans: list) -> None:
+        def worker():
+            any_ok = False
+            for o in orphans:
+                wt = o["worktree_path"]
+                self._on_log(f"$ tokensave init/sync  [{wt}]", C["blue"])
+                ok, action, detail = repair_worktree_index(
+                    self._cfg.tokensave_exe, wt)
+                if ok:
+                    any_ok = True
+                    verb = "initialized" if action == "init" \
+                        else "rebuilt (sync --force)"
+                    self._on_log(f"  ✓ {verb}", C["green"])
+                else:
+                    self._on_log(f"  ✗ failed ({action or 'init'}): {detail}",
+                                 C["red"])
+            if any_ok:
+                # Unconditional — a repair here never takes effect in an
+                # ALREADY-RUNNING session. The MCP server resolves its
+                # project once at startup, not per tool call, so a session
+                # that's been serving the wrong tree keeps doing so until
+                # it's restarted.
+                self._on_log(
+                    "  ⚠ Any Claude Code session already running inside "
+                    "these worktrees won't see the new index until it's "
+                    "restarted — the MCP server resolves its project at "
+                    "startup, not per call.", C["peach"])
+
+        threading.Thread(target=worker, daemon=True,
+                         name="doctor-worktree-repair").start()
 
     def _offer_agent_wiring(self, nagged: list, other_n: int) -> None:
         """Offer to open the agent picker for doctor's `install` nags."""

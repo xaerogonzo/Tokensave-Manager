@@ -173,3 +173,58 @@ def test_cmd_upgrade_tokensave_delegates():
     stub = SimpleNamespace(_update_poller=poller)
     App.cmd_upgrade_tokensave(stub)
     poller.cmd_upgrade.assert_called_once_with()
+
+
+# ── _check_worktree_health ────────────────────────────────────────────────
+
+def test_check_worktree_health_logs_each_orphan():
+    logged = []
+    cfg = mock.MagicMock()
+    cfg.git_exe = "git"
+    stub = SimpleNamespace(
+        projects=[{"path": "/proj", "name": "proj", "has_git": True}],
+        _cfg=cfg,
+        _log=lambda m, c=None: logged.append(m))
+    orphans = [{"worktree_path": "/proj/wt1", "branch": "feature1",
+               "head": "abc12345", "project_path": "/proj",
+               "project_name": "proj"}]
+    with mock.patch("app.find_orphaned_worktrees", return_value=orphans):
+        App._check_worktree_health(stub)
+    assert any("1 git worktree" in m for m in logged)
+    assert any("feature1" in m and "/proj/wt1" in m for m in logged)
+
+
+def test_check_worktree_health_silent_when_clean():
+    logged = []
+    cfg = mock.MagicMock()
+    cfg.git_exe = "git"
+    stub = SimpleNamespace(projects=[], _cfg=cfg,
+                           _log=lambda m, c=None: logged.append(m))
+    with mock.patch("app.find_orphaned_worktrees", return_value=[]):
+        App._check_worktree_health(stub)
+    assert logged == []
+
+
+def test_check_worktree_health_never_opens_a_dialog():
+    """Detect-only at startup — Doctor is the action surface, not this."""
+    cfg = mock.MagicMock()
+    cfg.git_exe = "git"
+    stub = SimpleNamespace(
+        projects=[{"path": "/proj", "name": "proj", "has_git": True}],
+        _cfg=cfg, _log=lambda m, c=None: None)
+    orphans = [{"worktree_path": "/proj/wt1", "branch": "b",
+               "head": "1234", "project_path": "/proj", "project_name": "proj"}]
+    with mock.patch("app.find_orphaned_worktrees", return_value=orphans), \
+         mock.patch("app.messagebox") as mb:
+        App._check_worktree_health(stub)
+    mb.askyesno.assert_not_called()
+
+
+def test_check_worktree_health_handles_missing_projects_attr():
+    """App.projects doesn't exist until the first refresh() — tolerate it."""
+    cfg = mock.MagicMock()
+    cfg.git_exe = "git"
+    stub = SimpleNamespace(_cfg=cfg, _log=lambda m, c=None: None)
+    with mock.patch("app.find_orphaned_worktrees", return_value=[]) as f:
+        App._check_worktree_health(stub)
+    f.assert_called_once_with([], "git")
