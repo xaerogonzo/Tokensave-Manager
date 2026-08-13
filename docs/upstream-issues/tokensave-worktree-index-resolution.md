@@ -3,7 +3,40 @@
 **Repo:** https://github.com/aovestdipaperino/tokensave
 **Title:** Project-path resolution: worktree mismatch answered silently, plus `.` and case-variant drive letters registered as distinct projects
 **Type:** Bug / footgun — correctness
-**Status:** ✅ FILED 2026-08-05 — https://github.com/aovestdipaperino/tokensave/issues/372
+STATUS: PARTIALLY FIXED in tokensave v7.9.0 (sections 3 and 4 only)
+**Filed:** ✅ 2026-08-05 — https://github.com/aovestdipaperino/tokensave/issues/372 (still OPEN)
+
+## Resolution status per section (updated 2026-08-12, tokensave v7.9.0)
+
+| Section | Ask | Status in v7.9.0 |
+|---|---|---|
+| 1 | `init`'s already-initialized exit signal is ambiguous | ❌ Unchanged |
+| 2 | Opt-in strict mode for the worktree-mismatch case | ❌ Unchanged |
+| 3 | A literal `.` is registered as a project name | ✅ Fixed |
+| 4 | Case-variant Windows drive letters duplicate rows | ✅ Fixed |
+
+Sections 3 and 4 were fixed by canonicalising project paths at the global-DB
+boundary. Every key written to or read from `~/.tokensave/global.db` —
+`projects.path` and `savings_ledger.project_path` alike — now goes through
+`global_db::normalize_project_key`, which resolves the path on disk (collapsing
+`.`, `./`, `../name`, symlinks and trailing separators), strips Windows `\\?\`
+verbatim prefixes, and upper-cases the drive letter so `d:\...` and `D:\...`
+land on one row. A one-time migration merges existing duplicate spellings by
+summing `tokens_saved`, re-points ledger rows at the canonical key, and drops
+rows keyed by a relative path. A companion fix makes `tokensave init .` resolve
+the relative argument instead of persisting `.` as the project key.
+
+Upstream states plainly: *"This addresses sections 3 and 4 of #372; the
+worktree-mismatch strict mode (section 2) and `init`'s already-initialized exit
+signal (section 1) are unchanged."* Issue #372 therefore remains OPEN, and the
+original correctness problem this document is named for — a session inside a
+worktree getting confident answers from a different checkout — still stands.
+
+Related but not a fix for section 2: v7.9.0 also made the PreToolUse hook
+discover its project by walking ancestors rather than requiring
+`.tokensave/tokensave.db` in the hook process's own working directory. That
+makes the guardrail *activate* in more places; it does not make a mismatched
+tool call refuse to answer.
 
 > The filed version is this document with paths anonymised
 > (`D:\Projects\MyProject`, `D:\Work\ProjectA`, `D:\Projects\ProjectB`) —

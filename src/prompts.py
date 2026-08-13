@@ -58,6 +58,23 @@ PROMPT_SNIPPETS: list[tuple[str, str]] = [
         "file tour: give a one-line purpose per top-level entity, then "
         "flag the 2-3 worth reading first for a newcomer."
     ),
+    (
+        "🧭  Find non-code artifacts",
+        "Locate specs, fixtures, schemas, and configs with tokensave_files "
+        "kind=artifact. Since v7.9.0 the index tracks .feature / .json / "
+        ".yaml / .sql / .toml / .proto / .graphql / .md by path — they carry "
+        "no symbols, so they answer 'where is it?', not 'what calls it?'.\n\n"
+        "  1. tokensave_files kind=artifact pattern=[[glob, e.g. "
+        "**/*.feature]] — the artifact inventory.\n"
+        "  2. tokensave_files kind=code on the same directory to pair each "
+        "artifact with the code sitting beside it.\n"
+        "  3. tokensave_search on a distinctive string from the artifact (a "
+        "key name, a scenario title) to find its readers.\n\n"
+        "Output: artifact path | size | the code file most likely to consume "
+        "it. This is the supported route for path-shaped discovery — Glob, "
+        "find -name, and fd --extension are redirected here by the "
+        "PreToolUse hook."
+    ),
 
     # ─────────────────────────── 🔬 ANALYSIS / TRACING ────────────────────
     (
@@ -121,7 +138,10 @@ PROMPT_SNIPPETS: list[tuple[str, str]] = [
         "  • tokensave_complexity            (cyclomatic complexity, cognitive "
         "complexity, CRAP score, Halstead metrics, maintainability index)\n"
         "  • tokensave_god_class             (god classes / large files)\n"
-        "  • tokensave_circular              (circular dependencies)\n"
+        "  • tokensave_circular              (circular dependencies, symbol-level)\n"
+        "  • tokensave_imports               (module-level import cycles — the "
+        "right unit for planning a decomposition; circular counts call edges, so "
+        "one 'from mod_b import X' yields zero or fifty depending on usage)\n"
         "  • tokensave_coupling              (high-coupling modules)\n"
         "  • tokensave_redundancy            (AST-level functional duplicates)\n"
         "  • tokensave_dead_code             (unused code)\n"
@@ -132,10 +152,14 @@ PROMPT_SNIPPETS: list[tuple[str, str]] = [
         "Format: 🔴 Critical / 🟡 Warning / 🔵 Info, each with file:line "
         "and a one-sentence suggested fix. End with a top-5 priority list. "
         "Calibration caveat: v7.3.0 fixed the major Python false-positive "
-        "sources (closures, dict/arg value references, nested functions). "
-        "Remaining risk: Tkinter dynamic dispatch (command=self._x) and "
-        "attribute-only imports (constants.C, C[\"key\"]) still produce false "
-        "positives — grep-verify each finding before recommending deletion."
+        "sources (closures, dict/arg value references, nested functions), and "
+        "v7.9.0 closed two more — imports written inside function bodies are "
+        "now indexed, and calls made outside a function body (module-level "
+        "statements, const initializers) now count as uses. Remaining risk is "
+        "narrower than it used to be: Tkinter dynamic dispatch "
+        "(command=self._x) and attribute-only imports (constants.C, "
+        "C[\"key\"]) still produce false positives — grep-verify those two "
+        "classes before recommending deletion."
     ),
     (
         "📊  Architecture report",
@@ -164,7 +188,8 @@ PROMPT_SNIPPETS: list[tuple[str, str]] = [
         "  • tokensave_changelog        (CHANGELOG draft from commits)\n"
         "  • tokensave_health           (overall metrics)\n"
         "  • tokensave_dead_code        (cruft that shouldn't ship)\n"
-        "  • tokensave_circular         (architectural debt)\n"
+        "  • tokensave_circular         (architectural debt, symbol-level)\n"
+        "  • tokensave_imports          (module-level import cycles)\n"
         "Output a Release Readiness Checklist with ✅/⚠/❌ per item. "
         "End with: 'Safe to release: yes/no, blockers: [...]'."
     ),
@@ -194,11 +219,15 @@ PROMPT_SNIPPETS: list[tuple[str, str]] = [
     (
         "🪦  Find dead code",
         "Run tokensave_dead_code and tokensave_unused_imports. For each "
-        "finding, run tokensave_callers to double-check — many static-"
-        "analysis 'dead' hits are reflection / dynamic dispatch / Tk "
-        "callbacks the indexer can't trace. Output two groups: 'Safe "
-        "to delete (verified zero callers)' and 'Verify before deleting "
-        "(might be called dynamically)' with file:line for each."
+        "finding, run tokensave_callers to double-check. v7.9.0 cut the "
+        "false-positive rate sharply — calls made outside a function body "
+        "(module-level statements, const initializers) now count as uses, "
+        "and function-body imports are indexed — so a 'dead' hit is more "
+        "likely to be genuinely dead than it was. What the indexer still "
+        "can't trace: reflection and Tk dynamic dispatch (command=self._x). "
+        "Output two groups: 'Safe to delete (verified zero callers)' and "
+        "'Verify before deleting (might be called dynamically)' with "
+        "file:line for each."
     ),
     (
         "🪦  List TODOs / FIXMEs",
@@ -331,6 +360,43 @@ PROMPT_SNIPPETS: list[tuple[str, str]] = [
         "Output: dependency fan-in count, list of dependent files "
         "grouped by layer (same module / sibling module / top-level), "
         "and a risk rating (Low / Medium / High) for changing this file."
+    ),
+    (
+        "🔗  Module import graph & cycle cuts",
+        "Plan a decomposition with tokensave_imports — module-level "
+        "dependencies, which is the right unit for the job. "
+        "tokensave_circular works on symbol edges, so one 'from mod_b import "
+        "X' yields zero call edges or fifty depending on how X is used.\n\n"
+        "  1. tokensave_imports — every module dependency, each with the "
+        "import statement's file:line. Imports inside function bodies come "
+        "back flagged 'lazy'.\n"
+        "  2. Locate the cycle containing [[module name]].\n"
+        "  3. Re-run with the cut simulation on a candidate dependency — it "
+        "recomputes the components as if that one edge were gone, which is "
+        "what separates a cut that actually breaks the cycle from one that "
+        "leaves everything still mutually reachable.\n"
+        "  4. tokensave_impact on the symbols crossing the cut for blast "
+        "radius.\n\n"
+        "Output: cycle members, ranked cut candidates (dependency | "
+        "file:line | components after the cut), and the one edge to break "
+        "first."
+    ),
+    (
+        "🌐  Query a sibling checkout",
+        "Answer a question spanning two repos without leaving this session. "
+        "Semantic tokensave tools take graph_root (plus an optional "
+        "graph_branch) to read another initialized project read-only — it "
+        "never initializes, syncs, or changes the served default.\n\n"
+        "  1. tokensave_status — initialized siblings beside this root are "
+        "named there, and in otherwise-empty search/context results.\n"
+        "  2. tokensave_search graph_root=[[sibling project path]] for "
+        "[[symbol name]] — an empty result now means absent, not "
+        "unreachable.\n"
+        "  3. tokensave_context graph_root=[[sibling project path]] for the "
+        "surrounding code.\n\n"
+        "Output: which repo the symbol lives in (repo + file:line), its "
+        "contract, and how the two sides are coupled. Node IDs come back "
+        "graph-namespaced, so follow-up traversal stays on the right graph."
     ),
 
     (
