@@ -23,7 +23,9 @@ from __future__ import annotations
 
 import json
 import os
+import pathlib
 import re
+import sqlite3
 import subprocess
 
 from constants import CREATE_NO_WINDOW
@@ -491,39 +493,50 @@ def _run_codegraph_affected(exe: str, project_path: str,
 
 
 def _count_tokensave_files(project_path: str) -> int:
-    """Return the file count from the tokensave index, or 0 if unavailable.
+    """Return the count of indexed CODE files in the tokensave index, or 0.
 
     Used by the codegraph health check to detect cross-tool divergence
     (codegraph indexed < 30% of what tokensave sees → likely stale).
-    Cheap — reads the SQLite file count via the tokensave CLI status.
+
+    Reads ``.tokensave/tokensave.db`` directly rather than parsing
+    ``tokensave status``. Two reasons, both found the hard way:
+
+      * ``status`` renders an ANSI-styled box table (``│ Files   241 │``),
+        and the escape sequences between the label and the number defeat a
+        ``Files\\s*:?\\s*(\\d+)`` match. The old parse silently returned 0,
+        which the caller reads as "no signal", so this check had quietly
+        stopped running altogether.
+      * Since tokensave v7.9.0 (schema v16) the ``files`` table carries a
+        ``kind`` column, and non-code artifacts (.json/.yaml/.md/.feature…)
+        are indexed by path. codegraph only ever indexes source, so
+        counting artifacts inflates the denominator and drags the ratio
+        toward a false "broken" verdict.
+
+    Falls back to counting every row on a pre-v16 DB with no ``kind``
+    column. Fail-open throughout: any error returns 0, which the caller
+    treats as "no cross-tool signal available".
     """
-    ts_dir = os.path.join(project_path, ".tokensave")
-    if not os.path.isdir(ts_dir):
+    db_path = os.path.join(project_path, ".tokensave", "tokensave.db")
+    if not os.path.isfile(db_path):
         return 0
-    # Glob common tokensave-binary names; fall back to PATH.
-    candidates = [
-        os.path.join(os.path.dirname(project_path), "tokensave.exe"),
-        "tokensave.exe",
-        "tokensave",
-    ]
-    exe = next((c for c in candidates if os.path.isfile(c)), "")
-    if not exe:
-        return 0
+    con = None
     try:
-        r = subprocess.run(
-            [exe, "status"],
-            cwd=project_path,
-            capture_output=True, text=True, timeout=5,
-            creationflags=CREATE_NO_WINDOW,
-            encoding="utf-8", errors="replace",
-        )
-    except (FileNotFoundError, subprocess.TimeoutExpired):
+        # Read-only URI: the MCP server holds this DB open in WAL mode, and
+        # this helper must never create or mutate the user's index.
+        uri = pathlib.Path(os.path.abspath(db_path)).as_uri() + "?mode=ro"
+        con = sqlite3.connect(uri, uri=True, timeout=2)
+        cols = {row[1] for row in con.execute("PRAGMA table_info(files)")}
+        if not cols:
+            return 0
+        sql = ("SELECT COUNT(*) FROM files WHERE kind = 'code'"
+               if "kind" in cols else "SELECT COUNT(*) FROM files")
+        row = con.execute(sql).fetchone()
+        return int(row[0]) if row else 0
+    except (sqlite3.Error, OSError, ValueError):
         return 0
-    if r.returncode != 0:
-        return 0
-    # tokensave status output includes "Files: N" or "File count: N".
-    m = re.search(r"(?:[Ff]ile.*[Cc]ount|Files?)\s*:?\s*(\d+)", r.stdout or "")
-    return int(m.group(1)) if m else 0
+    finally:
+        if con is not None:
+            con.close()
 
 
 def _newest_source_file_mtime(project_path: str) -> float:
