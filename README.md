@@ -109,6 +109,7 @@ The manager's design philosophy: **never force a choice you don't want to make**
   - **CG** — ✓ if CodeGraph has indexed this project, — otherwise
   - **Git** — ✓ clean, ● uncommitted changes, ↑N commits ahead, ↓N behind, ●↑N mixed
 - **Auto-refresh** — project list silently re-scans every 60 seconds; skips if a sync is running. Git statuses are computed asynchronously with `.git/index` mtime caching so unchanged projects skip the subprocess call
+- **🧹 Housekeeping** — right-click a project to clean up what `tokensave doctor` reports but can't finish on its own: stale entries in the global DB, and redundant `*.bak` files left by tokensave's own config rewrites. Nothing is reported as done until it has been **re-checked** — tokensave only offers its purge prompt on a real terminal, so the manager hands off, then verifies the result and tells you which of *verified / partially purged / no change / could not verify* actually happened. Each stale entry shows why it's stale and warns when purging is likely to be undone by the next `tokensave cost`. Only byte-identical backup duplicates are ever selectable, and each is re-hashed immediately before deletion
 - **System tray** — close or minimise sends the manager to the tray; right-click to Show or Quit
 - **Single-instance lock** — launching a second copy focuses the existing window
 

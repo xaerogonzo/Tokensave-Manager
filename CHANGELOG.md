@@ -3,6 +3,21 @@
 
 ## [Unreleased]
 
+### Added
+- (housekeeping) 🧹 Housekeeping dialog — cleans up what `tokensave doctor` reports but can't finish non-interactively: stale global-DB entries and redundant `*.bak` files. Verification-based: the purge hands off to a real terminal and the manager re-scans to report `verified` / `partial` / `no_change` / `unverified` rather than assuming a launched terminal means success
+- (prompts) tokensave v7.9.0 snippet coverage — `tokensave_imports`, `tokensave_files kind=artifact`, and `graph_root`/`graph_branch` sibling-checkout queries
+- (docs) `WINDOWS_CONPTY_FINDINGS.md` — why driving tokensave's TTY prompt via a pseudoconsole was implemented and abandoned, with the full diagnostic
+
+### Fixed
+- (tests) `test_no_import_time_path_resolution` now runs in a subprocess — it re-imported all of `src/` in-process, corrupting `sys.modules` so monkeypatches silently missed and a real Tk modal blocked the run. This was the true cause of the long-standing `test_shadowlinks.py` "failures"; suite went from >10min with 5 failures to ~19s with none
+- (claude_tasks) `encode_project_path` now replaces `.` and `_` like Claude Code does, so paths containing either resolve to the correct `~/.claude/projects/` directory
+- (doctor) stale-entry parser requires a count, so the healthy-system line `✔ No stale projects in global DB` no longer opens the block and misread later bullets
+- (doctor) caps audit skips `.claude/`, which was double-counting every violation via `.claude/worktrees/` (253/442 → 127/229)
+- (grounding) tokensave file count reads `.tokensave/tokensave.db` directly and counts code files only — the `tokensave status` parse had silently returned 0 since the output became an ANSI table
+
+### Removed
+- (conpty) the Windows pseudoconsole transport (517 lines). It never attached successfully on any testable machine, and the purge path never depended on it — verification does. Diagnostic preserved in docs
+
 ## [2.2.1] — 2026-07-28
 
 ### Added

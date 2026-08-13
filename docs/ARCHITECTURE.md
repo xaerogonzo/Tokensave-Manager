@@ -62,7 +62,7 @@ Token Save Manager Source/
 │   │                              to backend, parses severity, exits 0 (warn) or 1
 │   │                              (block per threshold). Fail-open on every error.
 │   │
-│   ├── helpers/                   23 modules of pure / IO helpers — no UI deps.
+│   ├── helpers/                   55 modules of pure / IO helpers — no UI deps.
 │   │   ├── config.py              _load_config, _save_config, _migrate_config
 │   │   ├── detection.py           _detect_git/_gh/_npm/_codegraph/_claude_cli,
 │   │   │                          _root_path/_label, _version_lt
@@ -74,6 +74,12 @@ Token Save Manager Source/
 │   │   │                          _BASELINE_GITIGNORE, _GITIGNORE_TEMPLATES
 │   │   ├── shadow_links.py        generate/remove_shadow_links, update_gitignore_for_shadows,
 │   │   │                          DEFAULT_SHADOW_EXT_MAP
+│   │   ├── housekeeping.py        PURE detection for the Housekeeping surface:
+│   │   │                          parse_stale_entries / classify_stale_entries /
+│   │   │                          resolve_entry_source (reads global.db READ-ONLY;
+│   │   │                          returns 'unknown' rather than guessing) +
+│   │   │                          find_redundant_backups / revalidate_backup.
+│   │   │                          No subprocess, no Tk.
 │   │   ├── scaffold.py            _scaffold_git_hook + _AUTO_COMMIT_HELPER script body
 │   │   ├── mcp.py                 _classify_mcp_entry, _apply_mcp_fix, _resolve_desktop_cfg_path,
 │   │   │                          _wrapper_path, _canonical_mcp_entry, _is_claude_running,
@@ -277,6 +283,9 @@ Token Save Manager Source/
 │   │   ├── scaffold.py            ScaffoldDialog
 │   │   ├── snippet_edit.py        SnippetEditDialog
 │   │   ├── shadow_links.py        ShadowLinksDialog
+│   │   ├── housekeeping.py        HousekeepingDialog — stale tokensave entries +
+│   │   │                          redundant *.bak cleanup. Presentation only;
+│   │   │                          never claims an outcome it hasn't re-scanned.
 │   │   ├── set_remote.py          SetRemoteDialog
 │   │   ├── merge_pr.py            MergePRDialog
 │   │   ├── new_branch.py          NewBranchDialog
@@ -398,10 +407,20 @@ Token Save Manager Source/
 │       │                          background thread and shows output in a
 │       │                          scrolledtext Toplevel dialog)
 │       ├── codegraph_ctrl.py      CodeGraphController (init/sync/status/remove)
-│       ├── doctor_ctrl.py         DoctorController (tokensave doctor + purge + P0
-│       │                          monolith audit: file/method/class/complexity caps via
-│       │                          AST walk + non-Python line-count check; exposes
-│       │                          count_methods_in_class for verification scripts)
+│       ├── doctor_ctrl.py         DoctorController — the SINGLE authority on running
+│       │                          `tokensave doctor` (one env helper, one subprocess
+│       │                          shape). scan_stale / purge_stale / verify_purge /
+│       │                          open_purge_terminal, plus the P0 monolith audit
+│       │                          (file/method/class/complexity caps via AST walk +
+│       │                          non-Python line-count check; exposes
+│       │                          count_methods_in_class for verification scripts).
+│       │                          NB doctor writes its report to STDERR and colours
+│       │                          regardless of NO_COLOR — callers must merge and
+│       │                          strip ANSI themselves.
+│       ├── housekeeping_ctrl.py   HousekeepingController — async orchestration for the
+│       │                          Housekeeping dialog. Delegates every doctor run to
+│       │                          DoctorController; asks helpers/housekeeping.py for
+│       │                          findings. Never shells out itself.
 │       ├── scaffold_ctrl.py       ScaffoldRetrofitController
 │       ├── sync_ctrl.py           SyncStatusController (sync, sync_all, force_sync)
 │       ├── fileops_ctrl.py        FileOpsController (open folder/editor, copy path)
@@ -830,7 +849,7 @@ Contents of the zip are 1:1 whatever `dist/` holds after the build, which is con
 | `App._probe_tokensave_version()` | At App startup: runs `tokensave --version` on a daemon thread, parses the version string, stores in `self._tokensave_current_version`. Also kicks off `_check_tokensave_updates` for the initial check. |
 | `App._tokensave_update_poll_loop()` | Daemon thread that calls `_check_tokensave_updates` once per `tokensave_update_poll_hours` (default 1.0, floor 0.25). Polls GitHub's releases API for the latest tag, compares with installed via `_version_lt`, populates `_tokensave_available_version` if newer. Logs a peach hint on fresh-discovery transitions (skips re-confirms). |
 | `App._check_tokensave_updates()` | Single-shot check: hits `api.github.com/repos/aovestdipaperino/tokensave/releases/latest`, extracts tag, compares with `_tokensave_current_version`. Silent on offline/rate-limited. |
-| `App._extract_doctor_stale_paths(output_lines)` | Pure parser for `tokensave doctor`'s `! N stale project(s) in global DB` warning. Returns the list of bulleted paths (accepts `•`, `*`, `-` bullets). Used by the Doctor button's purge-offer flow. |
+| `helpers.housekeeping.parse_stale_entries(transcript)` | **Canonical** parser for `tokensave doctor`'s `! N stale project(s) in global DB` block (accepts `•`, `*`, `-` bullets). Opening the block requires a **count** — the healthy-system line `✔ No stale projects in global DB` contains both "stale project" and "global DB", so a substring test enters the block on a clean run and misreads later bullets. Used by both the Doctor purge-offer flow and the Housekeeping dialog; the older `DoctorController._extract_stale_paths` copy was removed so the two cannot drift. |
 | `App._offer_doctor_purge(path, stale_paths)` | Pops a confirmation modal listing stale entries; on yes, calls `_run_doctor_purge` which re-invokes doctor with `y\ny\ny\ny\ny\n` piped to stdin. The piped-stdin approach often fails (tokensave's prompt uses `is_terminal()` — a real TTY check). Auto-detection: a third silent run checks whether stale entries are still present; if so, offers a follow-up `_offer_doctor_in_cmd` dialog that spawns `cmd.exe /k ""<tokensave>" doctor"` in a NEW console window (CREATE_NEW_CONSOLE flag) where the user can answer the TTY prompt for real. |
 
 ### Dialog classes added in this cycle ([Unreleased])

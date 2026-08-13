@@ -253,6 +253,32 @@ indirection — bypassing the wrapper entirely.
 
 ## Other gotchas discovered along the way
 
+### `tokensave doctor` writes its report to STDERR, and colours regardless
+
+Measured on v7.9.0. Two consequences for anything capturing it:
+
+- `capture_output=True` gives an **empty stdout**, which reads as "nothing to
+  report" rather than as an error. Merge with `stderr=subprocess.STDOUT`.
+- `NO_COLOR=1` and `TERM=dumb` are ignored — strip ANSI yourself. The
+  `_count_tokensave_files` helper in `helpers/doc_grounding.py` silently
+  returned 0 for months because it regex-matched `Files:` against what had
+  become an ANSI-styled box table; it now reads the SQLite file directly.
+
+`DoctorController.doctor_env` + `scan_stale` are the one blessed way to invoke
+it — don't add a second call site with its own subprocess shape.
+
+### You cannot drive tokensave's interactive prompts from the Manager
+
+It only prompts when `isatty()` is true. A Windows pseudoconsole (ConPTY) was
+implemented to work around this and **abandoned** — the child attaches but its
+std handles still resolve to the inherited console. Full diagnostic, and the
+eight hypotheses ruled out by experiment, in
+[`WINDOWS_CONPTY_FINDINGS.md`](WINDOWS_CONPTY_FINDINGS.md). Read that before
+attempting it again. The shipped answer is to hand off to a real terminal and
+then **verify by re-scanning**, which is a better contract anyway: a terminal
+that opened, or even exited cleanly, proves nothing about what the user did in
+it.
+
 ### Claude Desktop has TWO config systems
 
 - **Legacy**: `claude_desktop_config.json` with a top-level `mcpServers`
