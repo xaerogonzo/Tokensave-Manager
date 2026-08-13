@@ -351,3 +351,51 @@ def test_config_save_method(controller, mock_config):
     assert hasattr(controller._cfg, "save")
     controller._cfg.save()
     assert controller._cfg._saved is True
+
+# ── Housekeeping wiring ───────────────────────────────────────────────────────
+
+def _menu_labels(menu):
+    """Every command label in a tk.Menu, skipping separators."""
+    out = []
+    for i in range(menu.index("end") + 1):
+        if menu.type(i) == "separator":
+            continue
+        out.append(menu.entrycget(i, "label"))
+    return out
+
+
+def test_context_menu_has_housekeeping_entry(controller):
+    """The Housekeeping command is reachable from the Projects context menu.
+
+    Guards the wiring rather than the dialog: the controller can be perfectly
+    correct and still be unreachable if nobody adds the menu entry, which is
+    invisible until someone right-clicks.
+    """
+    labels = _menu_labels(controller._ctx_menu)
+    assert any("Housekeeping" in lbl for lbl in labels), labels
+    # It should sit with Doctor — same family of maintenance actions.
+    doctor_at = next(i for i, l in enumerate(labels) if "Doctor" in l)
+    house_at = next(i for i, l in enumerate(labels) if "Housekeeping" in l)
+    assert house_at == doctor_at + 1
+
+
+def test_housekeeping_menu_entry_invokes_the_controller(controller, monkeypatch,
+                                                        tmp_path):
+    """Clicking the entry actually reaches HousekeepingController.
+
+    Invokes the real menu entry so a mis-wired `command=` is caught, not just
+    a missing label.
+    """
+    opened = []
+    monkeypatch.setattr(controller._housekeeping, "cmd_housekeeping",
+                        lambda path: opened.append(path))
+    monkeypatch.setattr(controller._cmd_bar, "get_path", lambda: str(tmp_path))
+    monkeypatch.setattr(controller._cmd_bar, "require_tokensave",
+                        lambda path: True)
+
+    idx = next(i for i in range(controller._ctx_menu.index("end") + 1)
+               if controller._ctx_menu.type(i) != "separator"
+               and "Housekeeping" in controller._ctx_menu.entrycget(i, "label"))
+    controller._ctx_menu.invoke(idx)
+
+    assert opened == [str(tmp_path)]
