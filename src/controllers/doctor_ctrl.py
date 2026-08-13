@@ -27,7 +27,7 @@ import tkinter as tk
 from tkinter import messagebox
 
 from constants import C, CREATE_NO_WINDOW, _ANSI
-from helpers import conpty, housekeeping
+from helpers import housekeeping
 from helpers.runtime import log
 from helpers.worktree_health import (
     find_orphaned_worktrees_for_project,
@@ -103,9 +103,6 @@ class PurgeResult:
 
     SUCCESS = "success"
     HANDED_OFF = "handed_off"
-    UNAVAILABLE = "unavailable"
-    UNEXPECTED_PROMPT = "unexpected_prompt"
-    TIMEOUT = "timeout"
     PROCESS_ERROR = "process_error"
     VERIFICATION_FAILED = "verification_failed"
     CANCELLED = "cancelled"
@@ -130,26 +127,9 @@ VERIFY_LABELS = {
 }
 
 
-# The prompt this controller is willing to answer. Deliberately narrow *in
-# combination with* conpty's shape detection: conpty only offers text that is
-# structurally a prompt (a bracketed y/N choice, or output stopped mid-line),
-# and this pattern then requires it to be about purging stale entries. Any other
-# prompt — however innocuous — comes back as UNEXPECTED_PROMPT with zero answers
-# sent, because answering an unrecognised question on the user's behalf is the
-# one failure mode with no undo.
-_PURGE_PROMPT_RE = r"purge|stale"
-
 # One human sentence per non-success status. Keeps `_after_purge` free of a
 # branching wall and keeps the wording in one place.
 _PURGE_EXPLANATIONS = {
-    PurgeResult.UNAVAILABLE:
-        "This system has no pseudoconsole support, so the purge prompt "
-        "can't be answered automatically.",
-    PurgeResult.UNEXPECTED_PROMPT:
-        "tokensave asked something we don't recognise, so nothing was "
-        "answered — finish this in a terminal where you can read it.",
-    PurgeResult.TIMEOUT:
-        "tokensave didn't finish in time; nothing was confirmed.",
     PurgeResult.PROCESS_ERROR:
         "tokensave doctor could not be run.",
     PurgeResult.VERIFICATION_FAILED:
@@ -358,22 +338,24 @@ class DoctorController:
 
     def purge_stale(self, path: str,
                     baseline: "list | None" = None) -> PurgeResult:
-        """Begin a purge. Blocking, but may finish in a terminal the user drives.
+        """Begin a purge. Finishes in a terminal the user drives.
 
         Flow::
 
-            baseline scan (reused, never re-run)
-                  ↓
-            can ConPTY actually attach?  ──no──►  handed_off  (cmd.exe)
-                  │yes
-            answer the prompt directly   ──────►  verify
+            baseline scan (reused, never re-run)  ->  handed_off  ->  verify
+
+        tokensave only offers its purge prompt when ``isatty()`` is true, so the
+        Manager cannot answer it in-process. Driving a pseudoconsole was
+        implemented and abandoned — see docs/WINDOWS_CONPTY_FINDINGS.md — and it
+        would only have removed a manual step, not made the outcome any more
+        trustworthy. `verify_purge` is what settles that either way.
 
         ``baseline`` lets the caller pass a scan it already performed, so the
         purge does not run ``tokensave doctor`` a second time for no reason.
         Whatever list is used here is also the comparison point for
         `verify_purge` — one scan, two jobs.
 
-        A ``handed_off`` return is not a failure. It means the operation is now
+        A ``handed_off`` return is NOT a failure. It means the operation is now
         in the user's terminal and its outcome is genuinely unknown until
         `verify_purge` says otherwise.
         """
@@ -391,42 +373,7 @@ class DoctorController:
                                stale_after=[],
                                verification_status=VERIFY_VERIFIED)
 
-        # `can_attach` probes rather than assumes: `is_available` only proves
-        # the API exists, and on at least one Windows build every call succeeds
-        # while the child's output never reaches the pseudoconsole. Gate on the
-        # measured answer so a future fix enables this path by itself.
-        if not conpty.can_attach():
-            return PurgeResult(PurgeResult.HANDED_OFF, stale_before=before)
-
-        # Upper bound only. We do NOT claim to know whether tokensave asks once
-        # in aggregate or once per entry — the scan caps how many answers are
-        # permissible, and the prompts that actually arrive decide how many are
-        # sent. Under-answering degrades to a timeout and the terminal handoff,
-        # which is the safe direction to be wrong in.
-        policy = conpty.PromptPolicy(
-            prompt_id="stale_purge", prompt_regex=_PURGE_PROMPT_RE,
-            answer="y\r", max_answers=max(1, len(before)))
-
-        res = conpty.run_interactive(
-            [self._cfg.tokensave_exe, "doctor"], path, [policy], timeout_s=120.0)
-
-        status_map = {
-            conpty.ConPtyStatus.UNAVAILABLE: PurgeResult.UNAVAILABLE,
-            conpty.ConPtyStatus.UNEXPECTED_PROMPT: PurgeResult.UNEXPECTED_PROMPT,
-            conpty.ConPtyStatus.TIMEOUT: PurgeResult.TIMEOUT,
-            conpty.ConPtyStatus.PROCESS_ERROR: PurgeResult.PROCESS_ERROR,
-        }
-        if res.status is not conpty.ConPtyStatus.COMPLETED:
-            return PurgeResult(
-                status_map.get(res.status, PurgeResult.PROCESS_ERROR),
-                exit_code=res.exit_code, answers_sent=res.total_answers,
-                transcript=res.transcript, stale_before=before, error=res.error)
-
-        verified = self.verify_purge(path, before)
-        verified.exit_code = res.exit_code
-        verified.answers_sent = res.total_answers
-        verified.transcript = res.transcript
-        return verified
+        return PurgeResult(PurgeResult.HANDED_OFF, stale_before=before)
 
     def verify_purge(self, path: str, stale_before: list) -> PurgeResult:
         """Re-scan and report what actually happened. Blocking.
