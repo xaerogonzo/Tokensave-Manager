@@ -618,6 +618,12 @@ _AUDIT_SKIP_DIRS = frozenset({
     "__pycache__", ".git", ".tokensave", ".codegraph",
     ".venv", "venv", "node_modules", "dist", "build",
     ".build", ".onefile-build",
+    # `.claude/worktrees/<name>/` holds full checkouts of this same repo, so
+    # walking into it audits a second copy of every file and reports each
+    # violation twice (442 files / 253 violations instead of ~221 / ~126).
+    # Skipped as a whole for the same reason as .git and .tokensave: it is
+    # agent-owned state, not project source.
+    ".claude",
 })
 
 # Non-Python source / prose extensions that get a line-count-only audit.
