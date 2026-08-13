@@ -22,8 +22,23 @@ def _claude_projects_dir() -> str:
 
 
 def encode_project_path(path: str) -> str:
-    """Encode a filesystem path the same way Claude Code does for ~/.claude/projects/ dirs."""
-    return re.sub(r"[^\w.]", "-", path)
+    """Encode a filesystem path the same way Claude Code does for ~/.claude/projects/ dirs.
+
+    Every character outside ``[A-Za-z0-9]`` becomes ``-``, **including ``.`` and
+    ``_``**. Verified against all 23 real directories in ``~/.claude/projects``:
+    ``D:\\Random Projects\\KicomAI_Project`` lands on
+    ``D--Random-Projects-KicomAI-Project`` (underscore replaced), and a worktree
+    at ``…\\OpenChem Studio\\.claude\\worktrees\\<name>`` on
+    ``…-OpenChem-Studio--claude-worktrees-<name>`` (dot replaced). Not one of
+    those directories contains a ``.`` or a ``_``.
+
+    The earlier ``[^\\w.]`` pattern preserved both, so any path containing a dot
+    or underscore encoded to a directory name that does not exist. That made
+    `decode_project_path` fall through to the raw encoded string for those
+    projects, and would have mis-reported session-log presence for exactly the
+    ``.claude/worktrees/…`` paths that matter most.
+    """
+    return re.sub(r"[^A-Za-z0-9]", "-", path)
 
 
 def decode_project_path(encoded: str, known_paths: list[str]) -> str:
