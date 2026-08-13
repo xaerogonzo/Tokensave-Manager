@@ -58,6 +58,7 @@ class CommandBarCtrl:
         shadowlinks,
         scaffold,
         ai_tasks,
+        housekeeping=None,
     ) -> None:
         self.get_path          = get_path
         self.require_tokensave = require_tokensave
@@ -69,6 +70,7 @@ class CommandBarCtrl:
         self._shadowlinks      = shadowlinks
         self._scaffold         = scaffold
         self._ai_tasks         = ai_tasks
+        self._housekeeping     = housekeeping
 
     # ── Sync / Status commands ────────────────────────────────────────────────
 
@@ -107,6 +109,15 @@ class CommandBarCtrl:
         if not self.require_tokensave(path):
             return
         self._doctor.cmd_doctor(path)
+
+    def cmd_housekeeping(self) -> None:
+        path = self.get_path()
+        if not path:
+            return
+        if not self.require_tokensave(path):
+            return
+        if self._housekeeping is not None:
+            self._housekeeping.cmd_housekeeping(path)
 
     # ── CodeGraph commands ────────────────────────────────────────────────────
 

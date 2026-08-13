@@ -34,6 +34,7 @@ from helpers.project_discovery import (
 )
 from controllers.codegraph_ctrl import CodeGraphController
 from controllers.doctor_ctrl import DoctorController
+from controllers.housekeeping_ctrl import HousekeepingController
 from controllers.scaffold_ctrl import ScaffoldRetrofitController
 from controllers.sync_ctrl import SyncStatusController
 from controllers.fileops_ctrl import FileOpsController
@@ -205,6 +206,15 @@ class ProjectsTabController:
             on_seed_ask=self._on_seed_ask,
         )
 
+        # Constructed after DoctorController: housekeeping delegates every
+        # tokensave-doctor invocation to it rather than shelling out itself.
+        self._housekeeping = HousekeepingController(
+            root=self._tab.winfo_toplevel(),
+            cfg=cfg,
+            doctor=self._doctor,
+            on_log=on_log,
+        )
+
         self._git_status = ProjectSyncCtrl(
             tab=self._tab,
             cfg=cfg,
@@ -223,6 +233,7 @@ class ProjectsTabController:
             shadowlinks=self._shadowlinks,
             scaffold=self._scaffold,
             ai_tasks=self._ai_tasks,
+            housekeeping=self._housekeeping,
         )
         # Tab UI + context menu are built last, after all sub-controllers and
         # CommandBarCtrl exist, so the toolbar buttons and menu items can bind
@@ -489,6 +500,7 @@ class ProjectsTabController:
         m.add_command(label="📊  Status",         command=self._cmd_bar.cmd_status)
         m.add_command(label="⟳  Force Re-sync",  command=self._cmd_bar.cmd_force_sync)
         m.add_command(label="🔍  Doctor",         command=self._cmd_bar.cmd_doctor)
+        m.add_command(label="🧹  Housekeeping…",  command=self._cmd_bar.cmd_housekeeping)
         m.add_separator()
         m.add_command(label="🧠  CodeGraph Init",            command=self._cmd_bar.cmd_codegraph_init)
         m.add_command(label="🧠  CodeGraph Sync",            command=self._cmd_bar.cmd_codegraph_sync)

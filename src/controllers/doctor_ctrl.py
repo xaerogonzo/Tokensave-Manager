@@ -20,12 +20,14 @@ import os
 import re
 import subprocess
 import threading
+from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, Callable
 
 import tkinter as tk
 from tkinter import messagebox
 
 from constants import C, CREATE_NO_WINDOW, _ANSI
+from helpers import conpty, housekeeping
 from helpers.runtime import log
 from helpers.worktree_health import (
     find_orphaned_worktrees_for_project,
@@ -36,6 +38,125 @@ import time
 
 if TYPE_CHECKING:
     from state import ManagerConfig
+
+
+# ── Doctor subprocess contract ────────────────────────────────────────────────
+# ONE definition of how `tokensave doctor` is invoked, shared by the streaming
+# run, the housekeeping scan, and the ConPTY purge. Two subtly different
+# invocations of the same command is the drift this exists to prevent: without
+# it the streaming path could get clean text while the scan path got raw ANSI.
+
+def doctor_env() -> dict:
+    """Environment for every `tokensave doctor` invocation.
+
+    ``NO_COLOR`` + ``TERM=dumb`` are set as a best effort, but measured against
+    v7.9.0 doctor ignores both and emits ANSI regardless — so every caller must
+    strip escapes itself rather than trusting the environment. They stay because
+    they cost nothing and a future version may honour them.
+
+    Note also that doctor writes its entire report to **stderr**, not stdout.
+    Any caller capturing output must merge the two (``stderr=STDOUT``) or it
+    will get an empty transcript and read it as "nothing to report".
+    """
+    env = os.environ.copy()
+    env["NO_COLOR"] = "1"
+    env["TERM"] = "dumb"
+    return env
+
+
+@dataclass
+class DoctorScanResult:
+    """Outcome of a non-interactive doctor run used purely to observe state.
+
+    ``ok=False`` means "we don't know", which callers must render differently
+    from "nothing to clean" — an empty entry list from a failed scan would
+    otherwise read as a clean bill of health.
+    """
+    ok: bool
+    transcript: str = ""
+    exit_code: "int | None" = None
+    error: str = ""
+
+
+@dataclass
+class PurgeResult:
+    """Machine-readable outcome of a purge attempt.
+
+    Replaces the old convention of inferring success by re-parsing log text.
+
+    ``handed_off`` is a **first-class outcome, not an error**: it means the
+    operation was correctly delegated to a terminal the user drives, and the
+    result is not yet known. The Manager must never report success merely
+    because cmd.exe launched or because the terminal process exited — only a
+    post-operation scan settles that, which is what `verification_status`
+    carries. ``cancelled`` stays distinct from ``process_error`` so backing out
+    never reads as a transport failure.
+    """
+    status: str                       # see the constants below
+    exit_code: "int | None" = None
+    answers_sent: int = 0
+    transcript: str = ""
+    stale_before: list = field(default_factory=list)
+    stale_after: list = field(default_factory=list)
+    verification_status: str = ""     # one of the VERIFY_* values, once known
+    error: str = ""
+
+    SUCCESS = "success"
+    HANDED_OFF = "handed_off"
+    UNAVAILABLE = "unavailable"
+    UNEXPECTED_PROMPT = "unexpected_prompt"
+    TIMEOUT = "timeout"
+    PROCESS_ERROR = "process_error"
+    VERIFICATION_FAILED = "verification_failed"
+    CANCELLED = "cancelled"
+
+    @property
+    def succeeded(self) -> bool:
+        return self.status == PurgeResult.SUCCESS
+
+
+# Verification vocabulary. The post-operation scan — not the mechanism — is
+# what determines the outcome, so these are the values that actually matter.
+VERIFY_VERIFIED = "verified"        # nothing left
+VERIFY_PARTIAL = "partial"          # fewer than before, but not zero
+VERIFY_NO_CHANGE = "no_change"      # exactly as many as before
+VERIFY_UNVERIFIED = "unverified"    # the scan itself failed — outcome unknown
+
+VERIFY_LABELS = {
+    VERIFY_VERIFIED:   "✓ Purge verified — no stale entries remain",
+    VERIFY_PARTIAL:    "⚠ Partially purged — {n} remaining",
+    VERIFY_NO_CHANGE:  "⚠ No change detected — {n} still reported",
+    VERIFY_UNVERIFIED: "? Outcome could not be verified",
+}
+
+
+# The prompt this controller is willing to answer. Deliberately narrow *in
+# combination with* conpty's shape detection: conpty only offers text that is
+# structurally a prompt (a bracketed y/N choice, or output stopped mid-line),
+# and this pattern then requires it to be about purging stale entries. Any other
+# prompt — however innocuous — comes back as UNEXPECTED_PROMPT with zero answers
+# sent, because answering an unrecognised question on the user's behalf is the
+# one failure mode with no undo.
+_PURGE_PROMPT_RE = r"purge|stale"
+
+# One human sentence per non-success status. Keeps `_after_purge` free of a
+# branching wall and keeps the wording in one place.
+_PURGE_EXPLANATIONS = {
+    PurgeResult.UNAVAILABLE:
+        "This system has no pseudoconsole support, so the purge prompt "
+        "can't be answered automatically.",
+    PurgeResult.UNEXPECTED_PROMPT:
+        "tokensave asked something we don't recognise, so nothing was "
+        "answered — finish this in a terminal where you can read it.",
+    PurgeResult.TIMEOUT:
+        "tokensave didn't finish in time; nothing was confirmed.",
+    PurgeResult.PROCESS_ERROR:
+        "tokensave doctor could not be run.",
+    PurgeResult.VERIFICATION_FAILED:
+        "The purge ran but stale entries are still reported afterwards.",
+    PurgeResult.CANCELLED:
+        "Purge cancelled.",
+}
 
 
 # ── Monolith-audit constants (canonical thresholds — see BASIC_INSTRUCTIONS Rule A) ──
@@ -181,7 +302,7 @@ class DoctorController:
         is thread-safe ``_on_log`` calls. Dialogs go through a single
         ``after(0, _offer_followups, …)`` dispatch.
         """
-        stale = self._extract_stale_paths(output_lines)
+        stale = [e.path for e in housekeeping.parse_stale_entries(output_lines)]
         nagged, other_n = _extract_install_nags(output_lines)
         # Worktree health is orthogonal to whether `tokensave doctor` itself
         # succeeded — it's a git-level check, not parsed from doctor's
@@ -207,15 +328,161 @@ class DoctorController:
             self._tab.after(0, self._offer_followups,
                             path, stale, nagged, other_n, orphans)
 
-    def _run_purge(self, path: str,
-                   on_done: "Callable[[], None] | None" = None) -> None:
-        """Re-run `tokensave doctor` with `y` piped to confirm the purge prompt.
+    def scan_stale(self, path: str, timeout: float = 120.0) -> DoctorScanResult:
+        """Run doctor non-interactively and capture the transcript. Blocking.
 
-        ``on_done`` is dispatched EXACTLY ONCE when this branch is done —
-        either directly, or handed to ``_offer_in_cmd`` when the piped purge
-        didn't take and one more prompt is needed. The ``finally`` guard
-        covers the exception path so a crash here can't strand the rest of
-        the follow-up sequence.
+        Used by the housekeeping surface to observe state without touching it.
+        A timeout or launch failure returns ``ok=False`` rather than an empty
+        transcript, so the caller can distinguish "nothing to clean" from
+        "we couldn't find out".
+        """
+        try:
+            r = subprocess.run(
+                [self._cfg.tokensave_exe, "doctor"],
+                cwd=path,
+                stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
+                text=True, encoding="utf-8", errors="replace",
+                env=doctor_env(), creationflags=CREATE_NO_WINDOW,
+                timeout=timeout,
+            )
+        except FileNotFoundError:
+            return DoctorScanResult(False, error="tokensave executable not found")
+        except subprocess.TimeoutExpired:
+            return DoctorScanResult(
+                False, error=f"tokensave doctor timed out after {timeout:.0f}s")
+        except OSError as e:
+            return DoctorScanResult(False, error=str(e))
+        return DoctorScanResult(
+            True, transcript=_ANSI.sub("", r.stdout or ""),
+            exit_code=r.returncode)
+
+    def purge_stale(self, path: str,
+                    baseline: "list | None" = None) -> PurgeResult:
+        """Begin a purge. Blocking, but may finish in a terminal the user drives.
+
+        Flow::
+
+            baseline scan (reused, never re-run)
+                  ↓
+            can ConPTY actually attach?  ──no──►  handed_off  (cmd.exe)
+                  │yes
+            answer the prompt directly   ──────►  verify
+
+        ``baseline`` lets the caller pass a scan it already performed, so the
+        purge does not run ``tokensave doctor`` a second time for no reason.
+        Whatever list is used here is also the comparison point for
+        `verify_purge` — one scan, two jobs.
+
+        A ``handed_off`` return is not a failure. It means the operation is now
+        in the user's terminal and its outcome is genuinely unknown until
+        `verify_purge` says otherwise.
+        """
+        if baseline is None:
+            before_scan = self.scan_stale(path)
+            if not before_scan.ok:
+                return PurgeResult(PurgeResult.PROCESS_ERROR,
+                                   error=before_scan.error)
+            before = housekeeping.parse_stale_entries(before_scan.transcript)
+        else:
+            before = list(baseline)
+
+        if not before:
+            return PurgeResult(PurgeResult.SUCCESS, stale_before=[],
+                               stale_after=[],
+                               verification_status=VERIFY_VERIFIED)
+
+        # `can_attach` probes rather than assumes: `is_available` only proves
+        # the API exists, and on at least one Windows build every call succeeds
+        # while the child's output never reaches the pseudoconsole. Gate on the
+        # measured answer so a future fix enables this path by itself.
+        if not conpty.can_attach():
+            return PurgeResult(PurgeResult.HANDED_OFF, stale_before=before)
+
+        # Upper bound only. We do NOT claim to know whether tokensave asks once
+        # in aggregate or once per entry — the scan caps how many answers are
+        # permissible, and the prompts that actually arrive decide how many are
+        # sent. Under-answering degrades to a timeout and the terminal handoff,
+        # which is the safe direction to be wrong in.
+        policy = conpty.PromptPolicy(
+            prompt_id="stale_purge", prompt_regex=_PURGE_PROMPT_RE,
+            answer="y\r", max_answers=max(1, len(before)))
+
+        res = conpty.run_interactive(
+            [self._cfg.tokensave_exe, "doctor"], path, [policy], timeout_s=120.0)
+
+        status_map = {
+            conpty.ConPtyStatus.UNAVAILABLE: PurgeResult.UNAVAILABLE,
+            conpty.ConPtyStatus.UNEXPECTED_PROMPT: PurgeResult.UNEXPECTED_PROMPT,
+            conpty.ConPtyStatus.TIMEOUT: PurgeResult.TIMEOUT,
+            conpty.ConPtyStatus.PROCESS_ERROR: PurgeResult.PROCESS_ERROR,
+        }
+        if res.status is not conpty.ConPtyStatus.COMPLETED:
+            return PurgeResult(
+                status_map.get(res.status, PurgeResult.PROCESS_ERROR),
+                exit_code=res.exit_code, answers_sent=res.total_answers,
+                transcript=res.transcript, stale_before=before, error=res.error)
+
+        verified = self.verify_purge(path, before)
+        verified.exit_code = res.exit_code
+        verified.answers_sent = res.total_answers
+        verified.transcript = res.transcript
+        return verified
+
+    def verify_purge(self, path: str, stale_before: list) -> PurgeResult:
+        """Re-scan and report what actually happened. Blocking.
+
+        This is the authoritative step. The Manager never concludes anything
+        from the fact that a terminal opened or exited — only from comparing a
+        fresh scan against the baseline. A scan that fails yields
+        ``unverified``, which is deliberately NOT the same as "no change".
+        """
+        after_scan = self.scan_stale(path)
+        if not after_scan.ok:
+            return PurgeResult(
+                PurgeResult.VERIFICATION_FAILED, stale_before=stale_before,
+                verification_status=VERIFY_UNVERIFIED, error=after_scan.error)
+
+        after = housekeeping.parse_stale_entries(after_scan.transcript)
+        if not after:
+            vstatus = VERIFY_VERIFIED
+        elif len(after) < len(stale_before):
+            vstatus = VERIFY_PARTIAL
+        else:
+            vstatus = VERIFY_NO_CHANGE
+
+        return PurgeResult(
+            PurgeResult.SUCCESS if vstatus == VERIFY_VERIFIED
+            else PurgeResult.VERIFICATION_FAILED,
+            stale_before=stale_before, stale_after=after,
+            verification_status=vstatus)
+
+    def open_purge_terminal(self, path: str) -> None:
+        """Open a real terminal running `tokensave doctor` for the user to confirm in.
+
+        The one thing this does NOT do is imply an outcome. Launching a terminal
+        proves nothing about what the user then does in it — `verify_purge` is
+        the only thing that settles that. Kept here rather than in the dialog so
+        both entry points (the Doctor follow-up chain and Housekeeping) open the
+        terminal exactly the same way.
+        """
+        cmd_line = f'cmd.exe /k ""{self._cfg.tokensave_exe}" doctor"'
+        subprocess.Popen(cmd_line, cwd=path,
+                         creationflags=subprocess.CREATE_NEW_CONSOLE)
+
+    @staticmethod
+    def verification_label(result: PurgeResult) -> str:
+        """Human sentence for a verification outcome."""
+        template = VERIFY_LABELS.get(result.verification_status, "")
+        return template.format(n=len(result.stale_after)) if template else ""
+
+    def _run_purge(self, path: str, baseline: "list | None" = None,
+                   on_done: "Callable[[], None] | None" = None) -> None:
+        """Purge, then report what actually changed.
+
+        ``on_done`` is dispatched EXACTLY ONCE when this branch is done — either
+        directly, or handed to ``_offer_in_cmd`` when the purge moves to a
+        terminal. The ``finally`` guard covers the exception path so a crash
+        here can't strand the rest of the follow-up sequence.
         """
         label = "doctor (purge)"
 
@@ -223,41 +490,9 @@ class DoctorController:
             handed_off = False
             self._on_log(f"$ tokensave doctor  [{label}]", C["blue"])
             self._tab.after(0, self._on_set_running, True, label)
-            captured: list[str] = []
             try:
-                env = os.environ.copy()
-                env["NO_COLOR"] = "1"
-                env["TERM"] = "dumb"
-                proc = subprocess.Popen(
-                    [self._cfg.tokensave_exe, "doctor"],
-                    cwd=path,
-                    stdin=subprocess.PIPE,
-                    stdout=subprocess.PIPE,
-                    stderr=subprocess.STDOUT,
-                    text=True, encoding="utf-8", errors="replace",
-                    env=env,
-                    creationflags=CREATE_NO_WINDOW,
-                )
-                self._on_set_proc(proc)
-                try:
-                    proc.stdin.write("y\ny\ny\ny\ny\n")
-                    proc.stdin.flush()
-                    proc.stdin.close()
-                except (OSError, BrokenPipeError):
-                    pass
-                for line in proc.stdout:
-                    stripped = _ANSI.sub("", line).rstrip()
-                    if not stripped:
-                        continue
-                    captured.append(stripped)
-                    self._on_log(stripped)
-                proc.wait()
-                self._on_log(
-                    "Done." if proc.returncode == 0
-                    else f"Exited with code {proc.returncode}",
-                    C["green"] if proc.returncode == 0 else C["red"])
-                handed_off = self._after_purge(
-                    path, self._extract_stale_paths(captured), on_done)
+                result = self.purge_stale(path, baseline=baseline)
+                handed_off = self._after_purge(path, result, on_done)
             except Exception as e:
                 self._on_log(f"Error: {e}", C["red"])
                 log.exception("EXCEPTION in doctor purge")
@@ -269,23 +504,42 @@ class DoctorController:
 
         threading.Thread(target=worker, daemon=True, name="doctor-purge").start()
 
-    def _after_purge(self, path: str, still_stale: list,
+    def _after_purge(self, path: str, result: PurgeResult,
                      on_done: "Callable[[], None] | None") -> bool:
-        """Log the purge outcome. Returns True if ``on_done`` was handed to
-        the follow-up prompt — the caller must then NOT fire it itself, or
-        the rest of the sequence would run while that prompt is still open.
+        """Render a `PurgeResult` into the log. Returns True if ``on_done`` was
+        handed to the follow-up prompt — the caller must then NOT fire it
+        itself, or the rest of the sequence would run while that prompt is
+        still open.
         """
-        if not still_stale:
-            self._on_log("  ✓ Stale entries purged.", C["green"])
+        if result.succeeded:
+            n = len(result.stale_before)
+            if n:
+                self._on_log(
+                    f"  ✓ Stale entries purged ({n} removed).", C["green"])
+            else:
+                self._on_log("  ✓ No stale entries to purge.", C["green"])
             return False
-        self._on_log(
-            f"  ⚠ Purge didn't take — tokensave still "
-            f"reports {len(still_stale)} stale entr"
-            f"{'y' if len(still_stale) == 1 else 'ies'}. "
-            "tokensave doctor needs a real terminal "
-            "(piped stdin doesn't trigger the prompt).",
-            C["peach"])
-        self._tab.after(0, self._offer_in_cmd, path, len(still_stale), on_done)
+
+        # A handoff is not a failure — it's the operation moving somewhere the
+        # user drives it. Say so plainly, and do NOT imply anything about the
+        # result: only the verification scan settles that.
+        if result.status == PurgeResult.HANDED_OFF:
+            self._on_log(
+                "  → tokensave needs a real terminal for its purge prompt; "
+                "opening one. Nothing has changed yet.", C["sky"])
+        else:
+            self._on_log(
+                f"  ⚠ {_PURGE_EXPLANATIONS.get(result.status, result.status)}",
+                C["peach"])
+            label = self.verification_label(result)
+            if label:
+                self._on_log(f"    {label}", C["peach"])
+        if result.error:
+            self._on_log(f"    {result.error}", C["overlay0"])
+
+        remaining = len(result.stale_after or result.stale_before)
+        self._tab.after(0, self._offer_in_cmd, path, remaining,
+                        result.stale_before, on_done)
         return True
 
     # ── Main-thread dialogs ───────────────────────────────────────────────────
@@ -425,9 +679,10 @@ class DoctorController:
             f"{bullets}\n\n"
             "These projects were registered but their `.tokensave/` "
             "folders are gone — most likely deleted folders.\n\n"
-            "Purge them now?  The manager will re-run `tokensave "
-            "doctor` with `y` piped to confirm the interactive "
-            "purge prompt."
+            "Purge them now?  tokensave only offers its purge prompt on a "
+            "real terminal, so this may open one for you to confirm in. "
+            "Either way the manager re-checks afterwards and reports what "
+            "actually changed."
         )
         if not messagebox.askyesno("Purge stale tokensave projects?", msg,
                                    parent=self._root):
@@ -435,23 +690,28 @@ class DoctorController:
             if on_done:
                 on_done()
             return
-        self._run_purge(path, on_done=on_done)
+        # Reuse what doctor already told us instead of scanning again — this
+        # chain has just run doctor, and its result is still accurate.
+        baseline = [housekeeping.StaleEntry(path=p) for p in stale_paths]
+        self._run_purge(path, baseline=baseline, on_done=on_done)
 
     def _offer_in_cmd(self, path: str, n_stale: int,
+                      stale_before: "list | None" = None,
                       on_done: "Callable[[], None] | None" = None) -> None:
         """Last link in the purge chain — always releases ``on_done``."""
         try:
-            self._offer_in_cmd_inner(path, n_stale)
+            self._offer_in_cmd_inner(path, n_stale, stale_before or [])
         finally:
             if on_done:
                 on_done()
 
-    def _offer_in_cmd_inner(self, path: str, n_stale: int) -> None:
+    def _offer_in_cmd_inner(self, path: str, n_stale: int,
+                            stale_before: list) -> None:
         plural = "entry" if n_stale == 1 else "entries"
         if not messagebox.askyesno(
                 "Open Doctor in a new terminal?",
-                f"The piped-stdin purge didn't work — tokensave needs "
-                f"a real terminal for its interactive 'y/n' prompt.\n\n"
+                f"The automatic purge didn't complete, so nothing has "
+                f"been changed.\n\n"
                 f"Open a new cmd.exe window with `tokensave doctor` "
                 f"running there?  You'll see the {n_stale} stale "
                 f"{plural} listed and tokensave will ask you to "
@@ -464,17 +724,43 @@ class DoctorController:
                 C["overlay0"])
             return
         try:
-            cmd_line = f'cmd.exe /k ""{self._cfg.tokensave_exe}" doctor"'
-            subprocess.Popen(
-                cmd_line,
-                cwd=path,
-                creationflags=subprocess.CREATE_NEW_CONSOLE)
+            self.open_purge_terminal(path)
             self._on_log(
                 "  Opened cmd.exe — type 'y' at the prompt to purge, "
                 "then close the window.",
                 C["sky"])
+            # Deliberately NOT reported as done: a launched terminal proves
+            # nothing about the outcome. Verify by re-scanning once the user
+            # says they've finished.
+            self._tab.after(0, self._offer_verify, path, stale_before)
         except OSError as e:
             self._on_log(f"  ✗ Could not launch cmd.exe: {e}", C["red"])
+
+    def _offer_verify(self, path: str, stale_before: list) -> None:
+        """Ask whether the terminal purge is finished, then check for real."""
+        if not messagebox.askyesno(
+                "Verify cleanup?",
+                "Once you've confirmed the purge in the terminal window, the "
+                "manager can re-check and tell you what actually changed.\n\n"
+                "Verify now?  (You can also do this any time from "
+                "🧹 Housekeeping.)",
+                parent=self._root):
+            self._on_log(
+                "  (not verified — outcome unknown until you re-check)",
+                C["overlay0"])
+            return
+
+        def worker():
+            result = self.verify_purge(path, stale_before)
+            label = self.verification_label(result)
+            colour = (C["green"] if result.verification_status == VERIFY_VERIFIED
+                      else C["peach"])
+            self._on_log(f"  {label}", colour)
+            if result.error:
+                self._on_log(f"    {result.error}", C["overlay0"])
+
+        threading.Thread(target=worker, daemon=True,
+                         name="doctor-verify").start()
 
     # ── Monolith audit ────────────────────────────────────────────────────────
 
@@ -517,28 +803,9 @@ class DoctorController:
         for note in exempt_notes:
             self._on_log(note, C["overlay0"])
 
-    # ── Output parser ─────────────────────────────────────────────────────────
-
-    @staticmethod
-    def _extract_stale_paths(output_lines: list[str]) -> list[str]:
-        """Parse tokensave doctor's stdout for the stale-entries section."""
-        bullet_re = re.compile(r"^\s*[•*\-]\s+(.+?)\s*$")
-        in_block = False
-        paths: list[str] = []
-        for line in output_lines:
-            if "stale project" in line and "global DB" in line:
-                in_block = True
-                continue
-            if not in_block:
-                continue
-            if "Re-run" in line and "tokensave doctor" in line:
-                break
-            m = bullet_re.match(line)
-            if m:
-                paths.append(m.group(1).strip())
-            elif paths and not line.startswith((" ", "\t")):
-                break
-        return paths
+    # Output parsing lives in `helpers.housekeeping.parse_stale_entries` — the
+    # single canonical parser for doctor's stale block. A local copy used to
+    # live here; two parsers for one output section is exactly how they drift.
 
 
 # ── Module-level audit helpers (AST-based; canonical semantics — Rule A) ──
