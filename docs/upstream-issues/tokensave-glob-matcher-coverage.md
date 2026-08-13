@@ -1,13 +1,15 @@
 <!--
-STATUS: DRAFT — not yet filed upstream (found 2026-08-12, tokensave v7.9.0)
+STATUS: FILED 2026-08-12 — https://github.com/aovestdipaperino/tokensave/issues/389
+Found against tokensave v7.9.0. Still OPEN upstream; issue 389 is registered
+in docs/tracked-issues.json, so the integration check reports its state.
 
-Draft issue body for tokensave upstream. This file is not the issue itself —
-it's the source-of-truth draft so we can iterate before publishing. Once
-filed, add the issue number to docs/tracked-issues.json and replace the
-STATUS line above with the filed URL, the way
-tokensave-worktree-index-resolution.md does.
+This file is the source-of-truth draft the filed issue was built from. What
+went out is this document minus this comment block, the `# ` title line
+(which became the issue title), and the redundant **Repo:** line. Paths were
+already generic, so no anonymisation pass was needed.
 
-Paths below are already generic — no anonymisation pass needed before filing.
+When it is fixed upstream, change the STATUS line above to
+"STATUS: FIXED in tokensave vX.Y.Z" so the checker stops flagging it.
 -->
 
 # `hook-pre-tool-use` implements Glob coverage (#294) but the Claude Code installer writes a matcher that excludes `Glob`
@@ -24,7 +26,8 @@ the classifier machinery. What did not land is the **matcher** — the regex of
 tool names Claude Code uses to decide which calls to route through a
 `PreToolUse` hook at all.
 
-`tokensave install --agent claude` writes:
+The `PreToolUse` entry in `~/.claude/settings.json` on a v7.9.0 install
+reads:
 
 ```json
 "PreToolUse": [
@@ -65,9 +68,15 @@ to eliminate for `find`/`fd`.
 
 On a machine with tokensave v7.9.0 and Claude Code:
 
-1. `tokensave install --agent claude` (or `tokensave doctor`).
+1. Run `tokensave doctor`. It reports `✔ PreToolUse hook installed`.
 2. Inspect `~/.claude/settings.json` → `hooks.PreToolUse[0].matcher`.
-3. Observed: `Agent|Grep|Bash`. Expected: a value including `Glob`.
+3. Observed: `Agent|Grep|Bash`, unchanged by doctor. Expected: a value
+   including `Glob`.
+
+The install path was deliberately not re-run here, to avoid clobbering the
+local workaround below. The binary evidence indicates it writes the same
+value — the only pipe-separated matcher literal naming these tools is
+`Agent|Grep|Bash`.
 
 Confirming the handler exists but the matcher does not reach it — the only
 pipe-separated matcher literal in the binary that mentions these tools is
