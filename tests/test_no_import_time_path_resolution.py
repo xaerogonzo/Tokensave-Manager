@@ -27,6 +27,7 @@ from __future__ import annotations
 
 import importlib
 import os
+import subprocess
 import sys
 from pathlib import Path
 
@@ -84,22 +85,14 @@ def _iter_src_modules():
         yield modname, py
 
 
-def test_no_module_level_path_resolution(monkeypatch):
-    """No module under src/ captures a user-path at import time.
+def _scan_for_offenders():
+    """Import every src module and return (offenders, import_errors).
 
-    Catches the G-J regression: a developer adds e.g.
-    ``_CFG = os.path.expanduser("~/.claude.json")`` at module scope,
-    which invisibly breaks the ``fake_home`` fixture for all dialog
-    tests.
+    Assumes the sentinel env vars are ALREADY set in this process — which is
+    why the test runs it in a subprocess rather than calling it directly.
     """
-    monkeypatch.setenv("HOME",         SENTINEL_HOME)
-    monkeypatch.setenv("USERPROFILE",  SENTINEL_HOME)
-    monkeypatch.setenv("APPDATA",      SENTINEL_APPDATA)
-    monkeypatch.setenv("LOCALAPPDATA", SENTINEL_APPDATA)
-
     offenders: list[str] = []
     import_errors: list[str] = []
-
     for modname, _path in _iter_src_modules():
         # Force a re-import so the sentinel env takes effect for any
         # module-level resolution (modules already cached in sys.modules
@@ -127,37 +120,86 @@ def test_no_module_level_path_resolution(monkeypatch):
                 SENTINEL_HOME in val or SENTINEL_APPDATA in val
             ):
                 offenders.append(f"  {modname}.{attr} = {val!r}")
+    return offenders, import_errors
 
-    assert not offenders, (
-        "The following module-level variables captured a user-path at\n"
-        "IMPORT TIME. Move the path resolution into a function body so\n"
-        "it re-evaluates each call (this is what makes the fake_home\n"
-        "fixture in tests/conftest.py work):\n\n"
-        + "\n".join(offenders)
+
+def test_no_module_level_path_resolution():
+    """No module under src/ captures a user-path at import time.
+
+    Catches the G-J regression: a developer adds e.g.
+    ``_CFG = os.path.expanduser("~/.claude.json")`` at module scope, which
+    invisibly breaks the ``fake_home`` fixture for all dialog tests.
+
+    **Runs in a SUBPROCESS, deliberately.** The scan has to pop every module
+    under ``src/`` out of ``sys.modules`` and re-import it so the sentinel env
+    is in effect at import time. Doing that in the shared pytest process
+    corrupts it for everything that runs afterwards: a test module that
+    already did ``from x import Thing`` holds a class whose ``__globals__``
+    belong to the pre-swap module, so a later
+    ``monkeypatch.setattr("x.attr", ...)`` can silently miss. For Tk code that
+    means a real modal dialog opening in a headless run and blocking forever
+    — which is exactly what this did to ``tests/test_shadowlinks.py``: it
+    passed 8/8 alone, failed and hung in the full suite, and took the whole
+    run from ~15s to >10min.
+
+    Restoring ``sys.modules`` afterwards was tried and is NOT sufficient
+    (verified: identity comes back correct and the failures persist), so the
+    only reliable answer is to not do it in this process at all. A subprocess
+    also gives the sentinel env vars a clean home rather than monkeypatching
+    them around a live interpreter.
+    """
+    env = dict(os.environ)
+    env.update(HOME=SENTINEL_HOME, USERPROFILE=SENTINEL_HOME,
+               APPDATA=SENTINEL_APPDATA, LOCALAPPDATA=SENTINEL_APPDATA)
+    r = subprocess.run([sys.executable, str(Path(__file__).resolve())],
+                       capture_output=True, text=True, encoding="utf-8",
+                       errors="replace", env=env, timeout=300)
+    assert r.returncode == 0, (
+        "The following module-level variables captured a user-path at "
+        "IMPORT TIME. Move the path resolution into a function body so it "
+        "re-evaluates each call (this is what makes the fake_home fixture "
+        "in tests/conftest.py work):\n\n"
+        + (r.stdout or "") + (r.stderr or "")
         + "\n\nSee the refactor in src/helpers/claude_tasks.py "
           "(_claude_projects_dir) for the canonical pattern."
     )
 
 
 @pytest.mark.skip(reason="diagnostic — run manually if you suspect import errors")
-def test_diagnostic_print_import_errors(capsys, monkeypatch):
+def test_diagnostic_print_import_errors(capsys):
     """Diagnostic helper — prints which modules failed to import.
 
-    Skipped by default. Run via ``pytest -k diagnostic --no-skip`` (or
-    edit the @pytest.mark.skip) if you suspect modules are being
+    Skipped by default; drop the marker if you suspect modules are being
     silently skipped above.
-    """
-    monkeypatch.setenv("HOME",         SENTINEL_HOME)
-    monkeypatch.setenv("USERPROFILE",  SENTINEL_HOME)
-    monkeypatch.setenv("APPDATA",      SENTINEL_APPDATA)
-    monkeypatch.setenv("LOCALAPPDATA", SENTINEL_APPDATA)
 
-    errors = []
-    for modname, _path in _iter_src_modules():
-        sys.modules.pop(modname, None)
-        try:
-            importlib.import_module(modname)
-        except Exception as e:
-            errors.append(f"  {modname}: {type(e).__name__}: {e}")
-    if errors:
-        print("\nModules that failed to import:\n" + "\n".join(errors))
+    Goes through the same subprocess as the real check. It used to re-import
+    every src module in-process, which meant un-skipping it would quietly
+    reintroduce exactly the interpreter corruption the main test was moved out
+    of process to avoid.
+    """
+    env = dict(os.environ)
+    env.update(HOME=SENTINEL_HOME, USERPROFILE=SENTINEL_HOME,
+               APPDATA=SENTINEL_APPDATA, LOCALAPPDATA=SENTINEL_APPDATA,
+               TSM_REPORT_IMPORT_ERRORS="1")
+    r = subprocess.run([sys.executable, str(Path(__file__).resolve())],
+                       capture_output=True, text=True, encoding="utf-8",
+                       errors="replace", env=env, timeout=300)
+    with capsys.disabled():
+        print(r.stdout or "(no output)")
+
+
+# ── Subprocess entry point ────────────────────────────────────────────────────
+# Run by `test_no_module_level_path_resolution` with sentinel env vars already
+# in place. Kept dual-mode (like tests/test_no_thirdparty_module_imports.py) so
+# it can also be run by hand:  python tests/test_no_import_time_path_resolution.py
+if __name__ == "__main__":
+    sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "src"))
+    found, errs = _scan_for_offenders()
+    if os.environ.get("TSM_REPORT_IMPORT_ERRORS") and errs:
+        print("Modules that failed to import:\n  " + "\n  ".join(errs))
+    if found:
+        print("\n".join(found))
+        sys.exit(1)
+    print(f"OK: no module-level path resolution in src/ "
+          f"({len(errs)} module(s) skipped as unimportable here).")
+    sys.exit(0)
