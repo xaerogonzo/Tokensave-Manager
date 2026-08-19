@@ -156,13 +156,17 @@ def _job_steps_block(yaml: str) -> str:
     return yaml[idx:] if idx != -1 else yaml
 
 
-def test_doctor_step_never_included(tmp_path):
-    """Doctor step is CI-incompatible (Tk import at module level).
+def test_doctor_step_is_included_but_advisory(tmp_path):
+    """Doctor now runs in CI, and must never gate the build.
 
-    Even when explicitly enabled in checks_enabled, the generator must
-    silently omit it from the workflow's JOB STEPS. (The YAML header
-    comment legitimately mentions Doctor as an explanation of why it's
-    excluded — that's documentation, not a step.)
+    It used to be omitted because controllers/doctor_ctrl imports Tk at
+    module scope, which fails on ubuntu-latest. The rules moved to the
+    stdlib-only helpers/doctor_rules, so that reason is gone.
+
+    It stays advisory on purpose: the caps describe an aspiration, and this
+    repo alone carries 100+ existing violations. A gating step would paint
+    every project red on the day it is generated, and a red badge nobody can
+    fix is a badge nobody reads.
     """
     _ok, _msg, content = _generate(tmp_path, {
         "syntax":   True,
@@ -171,9 +175,26 @@ def test_doctor_step_never_included(tmp_path):
         "claude":   True,
     })
     steps = _job_steps_block(content)
-    assert "- name: Doctor" not in steps
+    assert "- name: Doctor audit (advisory)" in steps
+    assert "continue-on-error: true" in steps
+    assert "_audit_project_tree" in steps
+    # It reaches for the Tk-free module, never the controller.
+    assert "helpers.doctor_rules" in steps
     assert "doctor_ctrl" not in steps
-    assert "_audit_project_tree" not in steps
+
+
+def test_doctor_step_can_be_turned_off(tmp_path):
+    _ok, _msg, content = _generate(tmp_path, {
+        "syntax": True, "pyflakes": True, "doctor": False, "claude": True})
+    assert "- name: Doctor audit" not in _job_steps_block(content)
+
+
+def test_claude_step_is_still_omitted(tmp_path):
+    """Unchanged: Claude review needs interactive auth CI cannot provide."""
+    _ok, _msg, content = _generate(tmp_path, {
+        "syntax": True, "pyflakes": True, "doctor": True, "claude": True})
+    steps = _job_steps_block(content)
+    assert "- name: Claude" not in steps
 
 
 def test_claude_step_never_included(tmp_path):

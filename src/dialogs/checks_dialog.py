@@ -75,10 +75,14 @@ def _check_pyflakes(path: str) -> tuple[bool, str]:
 def _check_doctor(path: str, cfg: "ManagerConfig") -> tuple[bool, str]:
     """Call _audit_project_tree directly (pure function). Returns (passed, summary)."""
     try:
-        from controllers.doctor_ctrl import _audit_project_tree
+        from helpers.doctor_rules import _audit_project_tree
         raw = cfg.raw if isinstance(cfg.raw, dict) else {}
         skip_rel = set(raw.get("doctor_skip_paths") or [])
-        violations, _exempts, files_scanned = _audit_project_tree(path, skip_rel)
+        # Per-directory cap tiers, e.g. looser thresholds for scripts/ so the
+        # directory is audited rather than blanket-skipped.
+        overrides = raw.get("doctor_path_overrides") or {}
+        violations, _exempts, files_scanned = _audit_project_tree(
+            path, skip_rel, overrides)
         count = len(violations)
         if count == 0:
             return True, f"passed — {files_scanned} files scanned, 0 violations"

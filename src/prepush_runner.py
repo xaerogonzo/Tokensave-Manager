@@ -94,19 +94,39 @@ def _run_checks(project_path: str, checks_enabled: dict) -> list[tuple[str, bool
     return results
 
 
+def _doctor_overrides(project_path: str) -> dict:
+    """Per-directory cap tiers from manager-config.json, or {}.
+
+    Read straight from disk rather than through ManagerConfig: this runs
+    inside a git hook, where importing the manager's config stack would drag
+    in far more than a pre-push check should need. Any failure yields {},
+    which is exactly the previous behaviour.
+    """
+    import json
+    cfg_path = os.path.join(project_path, "manager-config.json")
+    try:
+        with open(cfg_path, encoding="utf-8") as fh:
+            raw = json.load(fh)
+    except (OSError, ValueError):
+        return {}
+    overrides = raw.get("doctor_path_overrides") if isinstance(raw, dict) else None
+    return overrides if isinstance(overrides, dict) else {}
+
+
 def _run_doctor(project_path: str) -> tuple[str, bool, str]:
     """Run the doctor audit. Fail-open if doctor module is unavailable."""
     try:
-        from controllers.doctor_ctrl import _audit_project_tree
+        from helpers.doctor_rules import _audit_project_tree
     except ImportError as e:
-        # doctor_ctrl imports Tk at module level — on non-Windows or
-        # headless Linux this import will fail. Fail-open gracefully.
+        # doctor_rules is stdlib-only and Tk-free, so this should not
+        # fail — but a hook must never block a push on its own import
+        # error, so keep failing open.
         return "doctor", True, f"skipped (unavailable: {e})"
     try:
         # cfg-driven skip paths aren't critical here — use empty set if
         # cfg unavailable; the hook already loaded cfg for checks_enabled.
         violations, _exempts, files_scanned = _audit_project_tree(
-            project_path, set())
+            project_path, set(), _doctor_overrides(project_path))
         count = len(violations)
         if count == 0:
             return "doctor", True, f"passed — {files_scanned} files, 0 violations"
