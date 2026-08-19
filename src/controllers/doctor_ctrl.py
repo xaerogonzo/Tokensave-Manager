@@ -29,6 +29,10 @@ from tkinter import messagebox
 from constants import C, CREATE_NO_WINDOW, _ANSI
 from helpers import housekeeping
 from helpers.runtime import log
+from helpers.tokensave_config import (
+    read_strict_tree,
+    should_recommend_enabling,
+)
 from helpers.worktree_health import (
     find_orphaned_worktrees_for_project,
     repair_worktree_index,
@@ -274,6 +278,31 @@ class DoctorController:
 
         threading.Thread(target=worker, daemon=True, name="doctor-worker").start()
 
+    def _report_strict_tree(self, path: str, risk_present: bool) -> None:
+        """Log the project's strict_tree state (upstream #372 section 2).
+
+        Quiet by design. A malformed config is always worth a warning, and an
+        unreadable one is reported as unknown — never as "off", which would be
+        asserting a fact we do not have. But a merely disabled setting only
+        earns a line when *risk_present* says the wrong-tree failure is
+        actually reachable here, because upstream ships it off deliberately
+        and a per-run reminder on every project is noise.
+        """
+        state = read_strict_tree(path)
+        if state.is_defect:
+            self._on_log(f"  ⚠ tokensave strict_tree: {state.detail}",
+                         C["peach"])
+        elif not state.is_known:
+            self._on_log(f"  ? tokensave strict_tree: {state.detail}",
+                         C["overlay0"])
+        elif should_recommend_enabling(state, risk_present):
+            self._on_log(
+                "  ⚠ tokensave strict_tree is off while this project has "
+                "worktrees without their own index — the exact case where a "
+                "query is answered from the wrong checkout and looks normal. "
+                'Set "strict_tree": true in .tokensave/config.json to make '
+                "those refuse instead.", C["peach"])
+
     def _analyse_doctor_output(self, path: str, output_lines: list,
                                returncode: int) -> None:
         """Parse doctor's output, check worktree health, schedule follow-ups.
@@ -294,6 +323,7 @@ class DoctorController:
                 f"{o['worktree_path']} has no tokensave index of "
                 "its own — a session started there would silently "
                 "get answers about a different checkout.", C["peach"])
+        self._report_strict_tree(path, risk_present=bool(orphans))
         if other_n:
             # Informational only — never worth a modal. These are agents
             # that are either not installed here or already wired.
