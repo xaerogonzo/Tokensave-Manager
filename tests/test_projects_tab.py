@@ -356,12 +356,32 @@ def test_config_save_method(controller, mock_config):
 # ── Housekeeping wiring ───────────────────────────────────────────────────────
 
 def _menu_labels(menu):
-    """Every command label in a tk.Menu, skipping separators."""
+    """Every command label in a tk.Menu, DESCENDING into cascades.
+
+    The context menu was regrouped into submenus in Roadmap-9, so a
+    top-level-only walk would report perfectly-wired commands as missing.
+    Cascade labels themselves are omitted — callers ask about commands.
+    """
+    return [lbl for _m, _i, lbl in _menu_entries(menu)]
+
+
+def _menu_entries(menu):
+    """(owning_menu, index, label) for every command, cascades included."""
     out = []
-    for i in range(menu.index("end") + 1):
-        if menu.type(i) == "separator":
+    end = menu.index("end")
+    if end is None:
+        return out
+    for i in range(end + 1):
+        kind = menu.type(i)
+        if kind == "separator":
             continue
-        out.append(menu.entrycget(i, "label"))
+        if kind == "cascade":
+            child_name = menu.entrycget(i, "menu")
+            child = menu.nametowidget(child_name) if child_name else None
+            if child is not None:
+                out.extend(_menu_entries(child))
+            continue
+        out.append((menu, i, menu.entrycget(i, "label")))
     return out
 
 
@@ -394,10 +414,9 @@ def test_housekeeping_menu_entry_invokes_the_controller(controller, monkeypatch,
     monkeypatch.setattr(controller._cmd_bar, "require_tokensave",
                         lambda path: True)
 
-    idx = next(i for i in range(controller._ctx_menu.index("end") + 1)
-               if controller._ctx_menu.type(i) != "separator"
-               and "Housekeeping" in controller._ctx_menu.entrycget(i, "label"))
-    controller._ctx_menu.invoke(idx)
+    owner, idx, _lbl = next(
+        e for e in _menu_entries(controller._ctx_menu) if "Housekeeping" in e[2])
+    owner.invoke(idx)
 
     assert opened == [str(tmp_path)]
 
@@ -496,3 +515,92 @@ class TestMultiSelectBatch:
         ctrl = self._ctrl()
         ctrl._open_cross_project_search(["/only-one"])
         assert opened == []
+
+
+# ── Novice-UX batch (Roadmap-9 Phase 4.2) ────────────────────────────────
+
+class TestContextMenuGrouping:
+    """38 flat commands ran past the bottom of a laptop screen.
+
+    Grouping is presentation only — the guarantee that matters is that no
+    command was lost or rewired on the way into a cascade.
+    """
+
+    @staticmethod
+    def _menu_calls():
+        import ast
+        import pathlib
+        src = pathlib.Path("src/controllers/projects_tab.py").read_text(
+            encoding="utf-8")
+        fn = next(n for n in ast.walk(ast.parse(src))
+                  if isinstance(n, ast.FunctionDef)
+                  and n.name == "_build_context_menu")
+        cmds, cascades = [], []
+        for node in ast.walk(fn):
+            if not (isinstance(node, ast.Call)
+                    and isinstance(node.func, ast.Attribute)):
+                continue
+            if node.func.attr == "add_command":
+                for kw in node.keywords:
+                    if kw.arg == "command":
+                        cmds.append(ast.unparse(kw.value))
+            elif node.func.attr == "add_cascade":
+                for kw in node.keywords:
+                    if kw.arg == "label":
+                        cascades.append(ast.literal_eval(kw.value))
+        return cmds, cascades
+
+    def test_every_command_is_wired_exactly_once(self):
+        cmds, _ = self._menu_calls()
+        dupes = [c for c in set(cmds) if cmds.count(c) > 1]
+        assert dupes == [], f"command wired twice: {dupes}"
+        assert len(cmds) == 32, f"expected 32 commands, found {len(cmds)}"
+
+    def test_the_everyday_actions_stay_one_click_away(self):
+        """Burying Sync in a submenu would make the common case worse."""
+        src = open("src/controllers/projects_tab.py", encoding="utf-8").read()
+        body = src[src.index("def _build_context_menu"):
+                   src.index("def _on_right_click")]
+        top = body[:body.index("add_cascade")]
+        for label in ("Set as Active", "Sync", "Status"):
+            assert label in top, f"{label!r} was pushed into a submenu"
+
+    def test_destructive_entries_live_under_maintenance(self):
+        """Remove Index sitting beside Status is how it gets misclicked."""
+        src = open("src/controllers/projects_tab.py", encoding="utf-8").read()
+        body = src[src.index("def _build_context_menu"):
+                   src.index("def _on_right_click")]
+        maint = body[body.index("maint_m = self._submenu"):]
+        assert "Remove Index" in maint
+
+    def test_there_are_cascades_at_all(self):
+        _, cascades = self._menu_calls()
+        assert len(cascades) >= 5, cascades
+
+
+class TestColumnLegibility:
+    """The Projects tab explained none of its own glyph columns."""
+
+    def _source(self):
+        return open("src/controllers/projects_tab.py", encoding="utf-8").read()
+
+    def test_the_git_glyphs_have_a_legend(self):
+        """Colour was the only thing separating ahead from behind."""
+        src = self._source()
+        for token in ("✓ clean", "● uncommitted", "↑n", "↓n"):
+            assert token in src, f"legend missing {token!r}"
+
+    def test_dim_rows_explain_themselves_and_name_the_remedy(self):
+        src = self._source()
+        assert "Dimmed row" in src
+        assert "Retrofit" in src, "the legend must name the fix, not just the state"
+
+    def test_cg_column_is_not_a_two_letter_mystery(self):
+        src = self._source()
+        assert 'text="CodeGraph"' in src
+        assert 'text="CG"' not in src
+
+    def test_the_retrofit_button_says_what_it_does(self):
+        src = self._source()
+        assert "Add tokensave to a project" in src
+        assert "Retrofit Existing" not in src

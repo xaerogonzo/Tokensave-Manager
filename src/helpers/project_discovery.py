@@ -146,13 +146,25 @@ def clear_pinned():
 # ── Misc display helpers ─────────────────────────────────────────────────────
 
 def fmt_age(mtime):
-    """Human-readable age relative to now (e.g. '3h ago', 'Mar 14')."""
+    """Human-readable age relative to now (e.g. '3h ago', 'Mar 14', 'May 2024').
+
+    Dates outside the current year carry the YEAR rather than the day. The
+    Projects tab uses this to show when each index was last synced, and
+    spotting a stale one is the whole point of the column — but the old
+    ``"%b %d"`` format made "May 13 this year" and "May 13 three years ago"
+    render identically, which hid exactly the projects worth noticing. The
+    day is the less useful half once something is that old, so it is what
+    gets dropped.
+    """
     diff = datetime.now().timestamp() - mtime
     if diff < 60:         return "just now"
     if diff < 3600:       return f"{int(diff / 60)}m ago"
     if diff < 86400:      return f"{int(diff / 3600)}h ago"
     if diff < 86400 * 7:  return f"{int(diff / 86400)}d ago"
-    return datetime.fromtimestamp(mtime).strftime("%b %d")
+    when = datetime.fromtimestamp(mtime)
+    if when.year == datetime.now().year:
+        return when.strftime("%b %d")
+    return when.strftime("%b %Y")
 
 
 def load_basic_instructions_template(template_path: str, baseline_include_line: str) -> str:

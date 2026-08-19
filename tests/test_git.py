@@ -505,3 +505,52 @@ class TestCurrentBranch:
         with mock.patch.object(git.subprocess, "run",
                                return_value=self._proc("   ")):
             assert git._current_branch("/p", "git") is None
+
+
+class TestFmtAgeKeepsTheYear:
+    """Last Synced dropped the year, hiding the stale projects it exists to show.
+
+    `"%b %d"` rendered "May 13 this year" and "May 13 three years ago"
+    identically — on a column whose purpose is spotting a stale index, that
+    is the one distinction that matters.
+    """
+
+    @staticmethod
+    def _ts(**delta):
+        from datetime import datetime, timedelta
+        return (datetime.now() - timedelta(**delta)).timestamp()
+
+    def test_recent_stays_relative(self):
+        from helpers.project_discovery import fmt_age
+        assert fmt_age(self._ts(seconds=30)) == "just now"
+        assert fmt_age(self._ts(minutes=20)) == "20m ago"
+        assert fmt_age(self._ts(hours=5)) == "5h ago"
+        assert fmt_age(self._ts(days=3)) == "3d ago"
+
+    def test_this_year_shows_month_and_day(self):
+        from datetime import datetime
+        from helpers.project_discovery import fmt_age
+        ts = self._ts(days=60)
+        out = fmt_age(ts)
+        if datetime.fromtimestamp(ts).year == datetime.now().year:
+            assert out[-4:].strip().isdigit() is False or len(out) <= 6
+            assert str(datetime.now().year) not in out
+
+    def test_a_previous_year_carries_the_year(self):
+        from datetime import datetime
+        from helpers.project_discovery import fmt_age
+        ts = self._ts(days=800)
+        out = fmt_age(ts)
+        expected_year = str(datetime.fromtimestamp(ts).year)
+        assert expected_year in out, (
+            f"{out!r} does not say which year — a two-year-old index is "
+            f"indistinguishable from a two-month-old one")
+
+    def test_two_dates_two_years_apart_do_not_render_alike(self):
+        """The exact collision the old format produced."""
+        from datetime import datetime
+        from helpers.project_discovery import fmt_age
+        now = datetime.now()
+        a = now.replace(year=now.year - 1, month=5, day=13).timestamp()
+        b = now.replace(year=now.year - 3, month=5, day=13).timestamp()
+        assert fmt_age(a) != fmt_age(b)
