@@ -446,3 +446,23 @@ def test_tab2_does_not_show_zero_for_an_unmeasured_file(
     cell = dlg._cov_tv.item("src/x.py", "values")[1]
     assert "0%" not in cell
     assert "?" in cell
+
+
+def test_the_ci_badge_explains_its_state_set():
+    """⚪ and ⚫ are the two a user would otherwise read as failure."""
+    import pathlib
+    src = pathlib.Path("src/dialogs/test_manager.py").read_text(
+        encoding="utf-8")
+    assert "_Tooltip(self._ci_lbl" in src
+    assert "no result yet" in src
+    assert "NOT the same as a failure" in src, \
+        "the unavailable state must say it is not a failure"
+
+
+def test_sync_pr_checklist_says_what_it_will_not_touch():
+    """It writes to a live PR body; the reassurance is the point."""
+    import pathlib
+    src = pathlib.Path("src/dialogs/test_manager.py").read_text(
+        encoding="utf-8")
+    assert "_Tooltip(self._sync_pr_btn" in src
+    assert "left" in src and "untouched" in src

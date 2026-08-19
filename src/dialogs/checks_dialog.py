@@ -23,7 +23,7 @@ from tkinter import messagebox
 from typing import TYPE_CHECKING, Callable
 
 from constants import C
-from theme import themed_checkbutton
+from theme import _Tooltip, themed_checkbutton
 from helpers.quality_checks import run_syntax_check, run_pyflakes_check
 from helpers.prepush_hook import (
     is_pre_push_hook_installed,
@@ -266,12 +266,25 @@ class ChecksDialog(tk.Toplevel):
             padx=10,
             pady=3,
         )
-        tk.Button(
+        _gen_btn = tk.Button(
             ci_frame,
             text="📋 Generate GitHub Actions",
             command=self._on_generate_workflow,
             **_btn_kw,
-        ).pack(side=tk.LEFT, padx=(0, 8))
+        )
+        _gen_btn.pack(side=tk.LEFT, padx=(0, 8))
+        _Tooltip(_gen_btn,
+                 "Writes .github/workflows/quality-checks.yml so the checks"
+                 + "\n" +
+                 "ticked above also run on GitHub for every push and PR."
+                 + "\n\n" +
+                 "Safe alongside an existing ci.yml — it is a separate file,"
+                 + "\n" +
+                 "and re-generating overwrites only its own."
+                 + "\n\n" +
+                 "The Doctor step it writes is ADVISORY: it reports findings"
+                 + "\n" +
+                 "to the job summary and never fails the build.")
 
         hook_label = (
             "Remove pre-push hook" if self._hook_installed
@@ -284,6 +297,18 @@ class ChecksDialog(tk.Toplevel):
             **_btn_kw,
         )
         self._hook_btn.pack(side=tk.LEFT)
+        _Tooltip(self._hook_btn,
+                 "Installs .git/hooks/pre-push, which runs the deterministic"
+                 + "\n" +
+                 "checks (syntax + pyflakes) before every push."
+                 + "\n\n" +
+                 "Doctor and the AI review are NOT run by the hook — they are"
+                 + "\n" +
+                 "advisory, and a push should not be blocked on an opinion."
+                 + "\n\n" +
+                 "A blocked push can always be overridden with:"
+                 + "\n" +
+                 "    git push --no-verify")
 
         self._ci_status_lbl = tk.Label(
             ci_frame, text="", bg=C["base"], fg=C["subtext"],

@@ -38,6 +38,7 @@ from tkinter import messagebox, ttk
 from typing import TYPE_CHECKING, Optional
 
 from constants import C
+from theme import _Tooltip
 from helpers.coverage_scan import (
     format_cell,
     load_coverage,
@@ -172,6 +173,14 @@ class TestManagerDialog(tk.Toplevel):
             actions, text="🔁 Sync PR Checklist",
             command=self._on_sync_pr_checklist)
         self._sync_pr_btn.pack(side=tk.RIGHT)
+        _Tooltip(self._sync_pr_btn,
+                 "Writes the latest test results into the open PR's"
+                 + "\n" +
+                 "testing checklist — the manager-marked section only."
+                 + "\n\n" +
+                 "Anything you wrote elsewhere in the PR body is left"
+                 + "\n" +
+                 "untouched. Needs an open PR for this branch.")
 
         # CI badge for the CURRENT branch — deliberately not master, which is
         # the one branch whose status is irrelevant while you work elsewhere.
@@ -182,6 +191,20 @@ class TestManagerDialog(tk.Toplevel):
             fg=C["overlay0"], font=("Segoe UI", 9), cursor="hand2")
         self._ci_lbl.pack(side=tk.RIGHT, padx=(0, 12))
         self._ci_lbl.bind("<Button-1>", self._on_ci_click)
+        _Tooltip(self._ci_lbl,
+                 "GitHub Actions status for the branch you are ON — not"
+                 + "\n" +
+                 "master, whose status is irrelevant while you work here."
+                 + "\n\n" +
+                 "🟢 passing    🟡 still running"
+                 + "\n" +
+                 "🔴 failed     ⚪ no result yet (new branch, or every job"
+                 + "\n" +
+                 "                 was skipped — which is normal here)"
+                 + "\n" +
+                 "⚫ could not ask gh — NOT the same as a failure"
+                 + "\n\n" +
+                 "Click to open the run on GitHub.")
 
         # Status line.
         self._status_var = tk.StringVar(value="Ready.")

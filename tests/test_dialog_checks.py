@@ -277,3 +277,24 @@ def test_on_close_cancels_in_flight_checks(
     assert not dialog._cancelled.is_set()
     dialog._on_close()
     assert dialog._cancelled.is_set()
+
+
+# ── Tooltip coverage (Roadmap-9 Phase 4.2 / audit F5) ────────────────────
+
+def test_the_ci_controls_explain_their_consequences():
+    """These two buttons write files and install a git hook.
+
+    The audit's point was not "add tooltips" but that the silent surfaces
+    were the ones with the least obvious consequences — a hook that blocks
+    pushes, and a workflow file added to the repo.
+    """
+    import pathlib
+    src = pathlib.Path("src/dialogs/checks_dialog.py").read_text(
+        encoding="utf-8")
+    assert "_Tooltip(_gen_btn" in src
+    assert "_Tooltip(self._hook_btn" in src
+    # The hook tooltip must name the escape hatch — a blocked push with no
+    # stated override is where people start disabling hooks wholesale.
+    assert "--no-verify" in src
+    # And be honest that Doctor is not part of the gate.
+    assert "advisory" in src.lower()
