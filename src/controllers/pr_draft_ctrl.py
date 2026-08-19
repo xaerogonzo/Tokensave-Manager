@@ -789,6 +789,12 @@ class PRDraftCtrl:
         happened.
         """
         import tempfile
+        from helpers.pr_body_refresh import has_region, wrap_region
+        # Mark the manager-owned span so "Refresh PR body" can later rewrite
+        # exactly this much and leave anything the user adds on GitHub alone.
+        # HTML comments, so they are invisible in the rendered body.
+        if not has_region(body_text):
+            body_text = wrap_region(body_text)
         try:
             with tempfile.NamedTemporaryFile(
                     mode="w", encoding="utf-8", suffix=".md",
