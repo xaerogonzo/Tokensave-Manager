@@ -38,6 +38,11 @@ from tkinter import messagebox, ttk
 from typing import TYPE_CHECKING, Optional
 
 from constants import C
+from helpers.coverage_scan import (
+    format_cell,
+    load_coverage,
+    needs_attention,
+)
 from helpers.gh_ci_status import get_latest_run_status
 from helpers.git import _current_branch
 from helpers.test_discovery import (
@@ -602,15 +607,21 @@ class TestManagerDialog(tk.Toplevel):
         frame = tk.Frame(parent, bg=C["base"])
         frame.pack(fill=tk.BOTH, expand=True, padx=8, pady=(0, 8))
         self._cov_tv = ttk.Treeview(
-            frame, columns=("status",), show="tree headings",
+            frame, columns=("status", "coverage"), show="tree headings",
             selectmode="browse", height=18,
         )
         self._cov_tv.heading("#0", text="Source file")
         self._cov_tv.heading("status", text="Has tests?")
-        self._cov_tv.column("#0", width=460, anchor=tk.W)
-        self._cov_tv.column("status", width=140, anchor=tk.W)
+        self._cov_tv.heading("coverage", text="Coverage")
+        self._cov_tv.column("#0", width=400, anchor=tk.W)
+        self._cov_tv.column("status", width=120, anchor=tk.W)
+        self._cov_tv.column("coverage", width=120, anchor=tk.W)
         # Tag for untested rows.
         self._cov_tv.tag_configure("untested", foreground=C["yellow"])
+        # Measured-but-thin: a file with tests whose lines are mostly unrun.
+        # Distinct from "untested" because the fix is different — extend the
+        # existing tests rather than write the first one.
+        self._cov_tv.tag_configure("thin", foreground=C["peach"])
         cov_vsb = ttk.Scrollbar(frame, orient="vertical",
                                   command=self._cov_tv.yview)
         self._cov_tv.configure(yscrollcommand=cov_vsb.set)
@@ -620,19 +631,37 @@ class TestManagerDialog(tk.Toplevel):
     def _refresh_tab_coverage(self) -> None:
         self._cov_tv.delete(*self._cov_tv.get_children())
         self._coverage = scan_coverage_gaps(self._project_root)
+        measured = load_coverage(self._project_root)
         tested = sum(1 for r in self._coverage if r.has_tests)
         total  = len(self._coverage)
         pct    = (100 * tested // total) if total else 0
-        self._cov_summary_var.set(
-            f"{tested} / {total} src/ files have tests  ({pct}% by filename heuristic)"
-        )
+
+        # Never present measured numbers without saying when they came from —
+        # a bare percentage reads as current however stale it is.
+        if measured:
+            self._cov_summary_var.set(
+                f"{tested} / {total} src/ files have a test file "
+                f"({pct}% by filename)  ·  measured coverage from "
+                f"{measured.meta.age_label()}")
+        else:
+            self._cov_summary_var.set(
+                f"{tested} / {total} src/ files have tests  "
+                f"({pct}% by filename heuristic — no measured data yet)")
+
         for row in self._coverage:
             status = "✓ tested" if row.has_tests else "✗ no tests"
-            tag = "" if row.has_tests else "untested"
+            pct_val = measured.pct_for(row.rel_path)
+            cov_cell = format_cell(pct_val, row.has_tests)
+            if not row.has_tests:
+                tag = "untested"
+            elif needs_attention(pct_val):
+                tag = "thin"
+            else:
+                tag = ""
             self._cov_tv.insert(
                 "", tk.END, iid=row.rel_path,
                 text=row.rel_path,
-                values=(status,),
+                values=(status, cov_cell),
                 tags=(tag,) if tag else (),
             )
 

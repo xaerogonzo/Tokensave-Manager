@@ -379,3 +379,70 @@ def test_unavailable_is_not_styled_as_failure(
     unavailable_fg = dlg._ci_lbl.cget("fg")
     dlg._apply_ci_status(CIStatus("failed", branch="main"), "CI failed")
     assert dlg._ci_lbl.cget("fg") != unavailable_fg
+
+
+# ── Tab 2 measured coverage (Roadmap-9 Phase 2.5) ────────────────────────
+
+def test_tab2_shows_no_measured_data_when_cache_is_absent(
+        tk_root, mock_config, tmp_path, mocker):
+    """Without a run, the summary must SAY it is a heuristic rather than
+    presenting the filename guess as a coverage figure."""
+    dlg = _build_dialog(tk_root, mock_config, tmp_path, mocker)
+    dlg._refresh_tab_coverage()
+    assert "no measured data yet" in dlg._cov_summary_var.get()
+
+
+def test_tab2_dates_measured_numbers(
+        tk_root, mock_config, tmp_path, mocker):
+    """A percentage without an age reads as current however stale it is."""
+    import time as _time
+    from helpers.coverage_scan import CoverageMeta, CoverageResult
+    dlg = _build_dialog(tk_root, mock_config, tmp_path, mocker)
+    mocker.patch(
+        "dialogs.test_manager.load_coverage",
+        return_value=CoverageResult(
+            percents={"src/a.py": 80.0},
+            meta=CoverageMeta(generated_at=_time.time() - 600,
+                              branch="Roadmap-9")))
+    dlg._refresh_tab_coverage()
+    assert "10 min ago" in dlg._cov_summary_var.get()
+
+
+def test_tab2_marks_a_thin_file_differently_from_an_untested_one(
+        tk_root, mock_config, tmp_path, mocker):
+    """A file with tests but 12% coverage needs its tests EXTENDED; a file
+    with none needs its first test. Same colour would merge the two."""
+    from helpers.coverage_scan import CoverageResult
+    from helpers.test_discovery import CoverageRow
+    rows = [
+        CoverageRow(source_path="/p/src/thin.py", rel_path="src/thin.py",
+                    test_path="/p/tests/test_thin.py", has_tests=True),
+        CoverageRow(source_path="/p/src/none.py", rel_path="src/none.py",
+                    test_path="", has_tests=False),
+    ]
+    dlg = _build_dialog(tk_root, mock_config, tmp_path, mocker)
+    # AFTER construction: the shared fixture stubs scan_coverage_gaps to []
+    # and would otherwise win.
+    mocker.patch("dialogs.test_manager.scan_coverage_gaps", return_value=rows)
+    mocker.patch("dialogs.test_manager.load_coverage",
+                 return_value=CoverageResult(percents={"src/thin.py": 12.0}))
+    dlg._refresh_tab_coverage()
+    assert dlg._cov_tv.item("src/thin.py", "tags") == ("thin",)
+    assert dlg._cov_tv.item("src/none.py", "tags") == ("untested",)
+
+
+def test_tab2_does_not_show_zero_for_an_unmeasured_file(
+        tk_root, mock_config, tmp_path, mocker):
+    """"Not measured" must not render as "0% covered"."""
+    from helpers.coverage_scan import CoverageResult
+    from helpers.test_discovery import CoverageRow
+    rows = [CoverageRow(source_path="/p/src/x.py", rel_path="src/x.py",
+                        test_path="/p/tests/test_x.py", has_tests=True)]
+    dlg = _build_dialog(tk_root, mock_config, tmp_path, mocker)
+    mocker.patch("dialogs.test_manager.scan_coverage_gaps", return_value=rows)
+    mocker.patch("dialogs.test_manager.load_coverage",
+                 return_value=CoverageResult(percents={}))
+    dlg._refresh_tab_coverage()
+    cell = dlg._cov_tv.item("src/x.py", "values")[1]
+    assert "0%" not in cell
+    assert "?" in cell
