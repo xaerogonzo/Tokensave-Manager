@@ -28,13 +28,18 @@ purely UI orchestration.
 from __future__ import annotations
 
 import os
+import queue
+import threading
 import time
+import webbrowser
 import tkinter as tk
 from datetime import datetime
 from tkinter import messagebox, ttk
 from typing import TYPE_CHECKING, Optional
 
 from constants import C
+from helpers.gh_ci_status import get_latest_run_status
+from helpers.git import _current_branch
 from helpers.test_discovery import (
     CoverageRow,
     StaleSignal,
@@ -110,6 +115,9 @@ class TestManagerDialog(tk.Toplevel):
         self._refresh_tab_coverage()
         self._refresh_tab_stale()
         self._refresh_tab_scaffold()
+        self._ci_after_id = None
+        self._start_ci_polling()
+        self.bind("<Destroy>", self._on_destroy_ci, add="+")
 
     # ── UI construction ──────────────────────────────────────────────────
 
@@ -159,6 +167,16 @@ class TestManagerDialog(tk.Toplevel):
             actions, text="🔁 Sync PR Checklist",
             command=self._on_sync_pr_checklist)
         self._sync_pr_btn.pack(side=tk.RIGHT)
+
+        # CI badge for the CURRENT branch — deliberately not master, which is
+        # the one branch whose status is irrelevant while you work elsewhere.
+        self._ci_status = None
+        self._ci_var = tk.StringVar(value="… CI")
+        self._ci_lbl = tk.Label(
+            actions, textvariable=self._ci_var, bg=C["base"],
+            fg=C["overlay0"], font=("Segoe UI", 9), cursor="hand2")
+        self._ci_lbl.pack(side=tk.RIGHT, padx=(0, 12))
+        self._ci_lbl.bind("<Button-1>", self._on_ci_click)
 
         # Status line.
         self._status_var = tk.StringVar(value="Ready.")
@@ -417,6 +435,105 @@ class TestManagerDialog(tk.Toplevel):
         # Reset run-state.
         self._run_handle = None
         self._set_running(False)
+
+    def _on_destroy_ci(self, evt=None) -> None:
+        """Cancel the pending CI refresh when the dialog goes away."""
+        if evt is not None and evt.widget is not self:
+            return                      # child widget destroyed, not us
+        for attr in ("_ci_after_id", "_ci_drain_id"):
+            after_id = getattr(self, attr, None)
+            if after_id:
+                try:
+                    self.after_cancel(after_id)
+                except tk.TclError:
+                    pass
+                setattr(self, attr, None)
+
+    # ── CI badge ──────────────────────────────────────────────────────────
+    #
+    # The `gh` query runs on a worker thread, but the result comes back
+    # through a Queue drained by a main-thread `after` poller — NOT via
+    # `self.after(0, ...)` called from the worker. That shortcut raises
+    # "main thread is not in main loop" whenever the main thread happens not
+    # to be inside Tcl at that moment, which is timing-dependent and so fails
+    # intermittently rather than obviously. Same shape as
+    # GitTabController._poll_log_queue.
+
+    _CI_REFRESH_MS = 60_000
+    _CI_DRAIN_MS   = 150
+
+    def _start_ci_polling(self) -> None:
+        self._ci_queue = queue.Queue()
+        self._drain_ci_queue()
+        self._refresh_ci_badge()
+        self._schedule_ci_refresh()
+
+    def _schedule_ci_refresh(self) -> None:
+        try:
+            self._ci_after_id = self.after(
+                self._CI_REFRESH_MS, self._on_ci_tick)
+        except tk.TclError:
+            self._ci_after_id = None
+
+    def _on_ci_tick(self) -> None:
+        if not self.winfo_exists():
+            return
+        self._refresh_ci_badge()
+        self._schedule_ci_refresh()
+
+    def _drain_ci_queue(self) -> None:
+        """Main-thread pump: apply whatever the worker has posted."""
+        if not self.winfo_exists():
+            return
+        try:
+            while True:
+                status, label = self._ci_queue.get_nowait()
+                self._apply_ci_status(status, label)
+        except queue.Empty:
+            pass
+        try:
+            self._ci_drain_id = self.after(
+                self._CI_DRAIN_MS, self._drain_ci_queue)
+        except tk.TclError:
+            self._ci_drain_id = None
+
+    def _refresh_ci_badge(self) -> None:
+        branch = _current_branch(self._project_root, self._cfg.git_exe or "git")
+        if not branch:
+            # Detached HEAD or not a repo: nothing to query, and saying so
+            # beats querying with an empty branch and rendering the answer.
+            self._apply_ci_status(None, "⚫ CI: no branch")
+            return
+        gh_exe = (self._cfg.raw or {}).get("gh_exe") or "gh"
+        q = self._ci_queue
+
+        def worker() -> None:
+            status = get_latest_run_status(gh_exe, self._project_root, branch)
+            q.put((status, status.label()))
+
+        threading.Thread(target=worker, daemon=True,
+                         name="ci-status").start()
+
+    def _apply_ci_status(self, status, label: str) -> None:
+        if not self.winfo_exists():
+            return
+        self._ci_status = status
+        self._ci_var.set(label)
+        colour = C["overlay0"]
+        if status is not None:
+            colour = {
+                "success": C["green"],
+                "failed":  C["red"],
+                "running": C["yellow"],
+            }.get(status.state, C["overlay0"])
+        self._ci_lbl.configure(fg=colour)
+
+    def _on_ci_click(self, _evt=None) -> None:
+        """Open the run — only when there is one. A no-op click is fine."""
+        status = self._ci_status
+        if status is None or not status.is_clickable:
+            return
+        webbrowser.open(status.url)
 
     def _on_sync_pr_checklist(self) -> None:
         """Sync the open PR's testing checklist from the last-run cache."""

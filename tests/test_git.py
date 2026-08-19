@@ -460,3 +460,48 @@ class TestFormatGitStatusCell:
         result = git._format_git_status_cell(status, has_git=True)
         assert isinstance(result, tuple)
         assert len(result) == 2
+
+# ── _current_branch (Roadmap-9: CI badge branch resolution) ────────────────────
+
+class TestCurrentBranch:
+    """The CI badge asks which branch to poll; a wrong answer shows the wrong
+    branch's build status, which is worse than showing none."""
+
+    @staticmethod
+    def _proc(out="", rc=0):
+        return SimpleNamespace(returncode=rc, stdout=out, stderr="")
+
+    def test_returns_the_branch_name(self):
+        with mock.patch.object(git.subprocess, "run",
+                               return_value=self._proc("Roadmap-9\n")):
+            assert git._current_branch("/p", "git") == "Roadmap-9"
+
+    def test_surrounding_whitespace_is_stripped(self):
+        with mock.patch.object(git.subprocess, "run",
+                               return_value=self._proc("  Roadmap-9  ")):
+            assert git._current_branch("/p", "git") == "Roadmap-9"
+
+    def test_detached_head_is_none_not_the_string_HEAD(self):
+        """`rev-parse --abbrev-ref` prints the literal "HEAD" when detached.
+
+        Returning it would make the badge query a branch named HEAD and report
+        "no CI result for HEAD" — nonsense dressed as a fact.
+        """
+        with mock.patch.object(git.subprocess, "run",
+                               return_value=self._proc("HEAD")):
+            assert git._current_branch("/p", "git") is None
+
+    def test_non_repo_is_none(self):
+        with mock.patch.object(git.subprocess, "run",
+                               return_value=self._proc("", rc=128)):
+            assert git._current_branch("/p", "git") is None
+
+    def test_missing_git_is_none_not_an_exception(self):
+        with mock.patch.object(git.subprocess, "run",
+                               side_effect=FileNotFoundError):
+            assert git._current_branch("/p", "git") is None
+
+    def test_empty_output_is_none(self):
+        with mock.patch.object(git.subprocess, "run",
+                               return_value=self._proc("   ")):
+            assert git._current_branch("/p", "git") is None
