@@ -80,6 +80,35 @@ def test_new_v63_tool_has_a_snippet(tool):
         f"no snippet references {tool}"
 
 
+@pytest.mark.parametrize("tool", [
+    "tokensave_ambiguous_calls",
+])
+def test_new_v710_tool_has_a_snippet(tool):
+    assert re.search(rf"\b{re.escape(tool)}\b", _all_bodies()), \
+        f"no snippet references {tool}"
+
+
+def test_ambiguous_calls_snippet_teaches_the_branch_not_just_the_name():
+    """The v7.10 tool is only useful as a conditional.
+
+    A bare mention would leave the model with a 47th tool name and no rule
+    for when to reach for it. The snippet has to state the branch that
+    makes it matter: no callers does NOT imply dead, because a scoring tie
+    now suppresses the edge entirely.
+    """
+    snippet = next(
+        (b for t, b in PROMPT_SNIPPETS if "tokensave_ambiguous_calls" in b),
+        None)
+    assert snippet is not None
+    low = snippet.lower()
+    # names the competing conclusion it exists to prevent
+    assert "dead" in low
+    # tells the reader an edge is missing rather than the symbol unused
+    assert "tie" in low or "candidates" in low
+    # pairs with the callers check rather than replacing it
+    assert "tokensave_callers" in snippet
+
+
 def test_tokensave_diff_is_standalone_not_just_diff_context():
     # Guards the word-boundary intent above: there must be a real `tokensave_diff`
     # token, not only occurrences of `tokensave_diff_context`.

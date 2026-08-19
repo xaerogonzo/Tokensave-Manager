@@ -222,12 +222,30 @@ PROMPT_SNIPPETS: list[tuple[str, str]] = [
         "finding, run tokensave_callers to double-check. v7.9.0 cut the "
         "false-positive rate sharply — calls made outside a function body "
         "(module-level statements, const initializers) now count as uses, "
-        "and function-body imports are indexed — so a 'dead' hit is more "
-        "likely to be genuinely dead than it was. What the indexer still "
-        "can't trace: reflection and Tk dynamic dispatch (command=self._x). "
+        "and function-body imports are indexed — and v7.10.0 cut it again "
+        "by excluding symbols named as ambiguity candidates, so a 'dead' "
+        "hit is more likely to be genuinely dead than it was. What the "
+        "indexer still can't trace: reflection and Tk dynamic dispatch "
+        "(command=self._x). "
         "Output two groups: 'Safe to delete (verified zero callers)' and "
         "'Verify before deleting (might be called dynamically)' with "
         "file:line for each."
+    ),
+    (
+        "🪦  Ambiguous, or actually dead?",
+        "Use this before deleting anything tokensave_dead_code flagged, or "
+        "when a symbol you can see being called reports no callers. Since "
+        "v7.10.0 the resolver refuses to guess: when several candidates tie "
+        "on score it emits NO call edge and records the tie in "
+        "ambiguous_calls instead. So a missing caller can mean 'the graph "
+        "could not tell which same-named target this hits', not 'nothing "
+        "calls it'. Run tokensave_ambiguous_calls and check whether "
+        "[[symbol]] appears among the candidates. If it does, the call site "
+        "is real — open it and read which overload it actually reaches. "
+        "Treat a symbol as dead ONLY when it is absent from BOTH "
+        "tokensave_callers and the ambiguity candidates. Output: symbol | "
+        "file:line | verdict (dead / ambiguous) | for ambiguous, the "
+        "competing candidates and which one the call site really means."
     ),
     (
         "🪦  List TODOs / FIXMEs",
