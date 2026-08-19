@@ -226,6 +226,18 @@ class _DraftTicker:
             pass
 
 
+# Display names for the notebook tab strip. Tk notebooks do not scroll their
+# tabs — once the strip is wider than the dialog, the overflowing tabs are
+# simply unreachable rather than merely cramped. With every key rendered as
+# `key.upper()` the strip needed ~760px while the dialog's own minsize is 720,
+# so TOKENSAVE_GUIDE could not be clicked at the smallest supported size.
+# Only the two longest need shortening; the rest read better in full.
+_TAB_LABELS = {
+    "docs_generic":    "DOCS",
+    "tokensave_guide": "GUIDE",
+}
+
+
 def build_tab(dlg, key, target_file, generate_label) -> None:
     """Construct one notebook tab for *dlg* and register its widgets.
 
@@ -234,7 +246,7 @@ def build_tab(dlg, key, target_file, generate_label) -> None:
     which the buttons/bindings reference through ``dlg``.
     """
     frame = tk.Frame(dlg._notebook, bg=C["base"], padx=8, pady=8)
-    dlg._notebook.add(frame, text=f"  {key.upper()}  ")
+    dlg._notebook.add(frame, text=f"  {_TAB_LABELS.get(key, key.upper())}  ")
 
     is_file_picker = (target_file == "")
     target_var = None

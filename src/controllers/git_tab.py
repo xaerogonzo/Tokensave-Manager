@@ -464,13 +464,13 @@ class GitTabController:
                                  command=self._branch_mgmt.cmd_git_new_branch)
         btn_switch  = ttk.Button(row2, text="🔀  Switch Branch…",
                                  command=self._branch_mgmt.cmd_git_switch_branch)
-        btn_merge   = ttk.Button(row2, text="⇄  Merge…",
+        btn_merge   = ttk.Button(row2, text="⇄  Merge branch…",
                                  command=self._branch_mgmt.cmd_git_merge)
         btn_del     = ttk.Button(row2, text="🗑  Delete Branch…",
                                  command=self._branch_mgmt.cmd_git_delete_branch)
         btn_openpr  = ttk.Button(row2, text="🔗  Open PR",
                                  command=self.cmd_git_open_pr)
-        btn_mergepr = ttk.Button(row2, text="🐙  Merge PR…",
+        btn_mergepr = ttk.Button(row2, text="🐙  Merge Pull Request…",
                                  command=self.cmd_git_merge_pr)
         btn_release = ttk.Button(row2, text="📦  Release…",
                                  command=self.cmd_git_release)
