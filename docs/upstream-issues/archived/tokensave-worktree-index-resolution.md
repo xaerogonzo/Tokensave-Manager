@@ -3,7 +3,7 @@
 **Repo:** https://github.com/aovestdipaperino/tokensave
 **Title:** Project-path resolution: worktree mismatch answered silently, plus `.` and case-variant drive letters registered as distinct projects
 **Type:** Bug / footgun — correctness
-STATUS: PARTIALLY FIXED in tokensave v7.9.0 (sections 3 and 4 only)
+STATUS: CLOSED — verified via GitHub API 2026-08-19
 **Filed:** ✅ 2026-08-05 — https://github.com/aovestdipaperino/tokensave/issues/372 (still OPEN)
 
 ## Resolution status per section (updated 2026-08-12, tokensave v7.9.0)
