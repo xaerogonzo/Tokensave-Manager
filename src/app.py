@@ -56,6 +56,11 @@ from helpers.commit_messages import _suggest_commit_message
 from helpers.git import _find_tracked_but_ignored, _is_git_repo, _is_local_git_repo
 from helpers.mcp import _mcp_configs, _classify_mcp_entry
 from helpers.project_discovery import find_projects, get_pinned
+from helpers.source_watch import (
+    changed_files,
+    describe_changes,
+    snapshot_sources,
+)
 from helpers.worktree_health import find_orphaned_worktrees
 from helpers.runtime import (
     _acquire_instance_lock,
@@ -138,6 +143,47 @@ class App(tk.Tk):
         # Staggered after _check_config so the two startup checks' log
         # lines don't interleave mid-write.
         self.after(1200, self._check_worktree_health)
+        # Snapshot our own source so an edit made while the manager runs can
+        # surface as a banner instead of as "my change did nothing".
+        self._src_root = os.path.dirname(os.path.abspath(__file__))
+        self._src_baseline = snapshot_sources(self._src_root)
+        self._src_banner_dismissed = False
+        self.after(self._SRC_CHECK_MS, self._check_source_changed)
+
+    # ── Manager-source change detection ──────────────────────────────────
+    #
+    # Python does not reload modules, so after editing src/ the running
+    # manager keeps executing what it imported at startup. The symptom is
+    # never a crash — a feature just behaves like its old self, and the
+    # natural conclusion is that the edit did not work.
+
+    _SRC_CHECK_MS = 60_000
+
+    def _check_source_changed(self) -> None:
+        try:
+            current = snapshot_sources(self._src_root)
+            changed = changed_files(self._src_baseline, current)
+            if changed and not self._src_banner_dismissed:
+                self._show_source_banner(changed)
+        finally:
+            self.after(self._SRC_CHECK_MS, self._check_source_changed)
+
+    def _show_source_banner(self, changed: list) -> None:
+        what = describe_changes(changed, self._src_root)
+        self._src_banner_lbl.configure(
+            text=f"⚠  Manager source changed since startup ({what}) — "
+                 f"restart to load the new code.")
+        if not self._src_banner.winfo_ismapped():
+            self._src_banner.pack(fill=tk.X, side=tk.TOP, before=self.nb)
+
+    def _dismiss_source_banner(self) -> None:
+        """Hide it, and stay hidden.
+
+        Re-raising on every subsequent edit would nag through exactly the
+        editing session where the user has already decided to restart later.
+        """
+        self._src_banner_dismissed = True
+        self._src_banner.pack_forget()
 
     def report_callback_exception(self, exc, val, tb):
         """Log unhandled exceptions raised inside Tk callbacks.
@@ -255,6 +301,19 @@ class App(tk.Tk):
 
         log_frame = tk.Frame(self, bg=C["base"], padx=14, pady=8)
         log_frame.pack(fill=tk.X, side=tk.BOTTOM)
+
+        # ── "source changed, restart" banner ──
+        # Packed before the notebook so it appears above the tabs, and stays
+        # hidden (pack_forget) until there is something to say.
+        self._src_banner = tk.Frame(self, bg=C["peach"])
+        self._src_banner_lbl = tk.Label(
+            self._src_banner, text="", bg=C["peach"], fg=C["crust"],
+            font=("Segoe UI", 9, "bold"), anchor=tk.W, padx=10, pady=4)
+        self._src_banner_lbl.pack(side=tk.LEFT, fill=tk.X, expand=True)
+        tk.Button(self._src_banner, text="Dismiss", relief=tk.FLAT,
+                  bg=C["peach"], fg=C["crust"], bd=0, padx=10,
+                  cursor="hand2",
+                  command=self._dismiss_source_banner).pack(side=tk.RIGHT)
 
         # ── Notebook ──
         self.nb = ttk.Notebook(self)
