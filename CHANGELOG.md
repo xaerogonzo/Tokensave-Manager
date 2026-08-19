@@ -4,6 +4,11 @@
 ## [Unreleased]
 
 ### Added
+- (projects) Right-click menu regrouped from 38 flat commands into six cascades (Index / CodeGraph / Git / AI & docs / Open / Maintenance), with Set as Active, Sync and Status kept one click away. Destructive entries no longer sit beside read-only ones. Verified presentation-only: the command set is byte-identical before and after
+- (projects) Legend under the tree for the Git column's glyphs, which previously distinguished "to push" from "to pull" by colour alone — invisible to a colour-blind user and unlabelled for everyone else. It also explains that a dimmed row means "no tokensave index yet" and names the remedy
+- (projects) "CG" column is now "CodeGraph"; "Retrofit Existing" is now "Add tokensave to a project"
+- (ui) Tooltips on the controls with the least obvious consequences: the pre-push hook button (which can block a push — the tooltip names `--no-verify`), Generate GitHub Actions (which writes a file into the repo), the CI badge (⚪/⚫ are the states most easily misread as failure), and Sync PR Checklist (which writes into a live PR body)
+- (git) "Merge…" and "Merge PR…" are now "Merge branch…" and "Merge Pull Request…" — they differed by two characters despite one being local and the other rewriting local master from the remote
 - (projects) Multi-select in the Projects tree (ctrl/shift) with its own context menu — sync, force re-sync and a log-only status run across every selected project sequentially, instead of Set-as-Active-then-operate once per project. A separate menu on purpose: showing single-project commands over a multi-selection would invite clicking one and having it act on exactly one project, silently. Doctor is excluded because it schedules follow-up dialogs that would stack per project
 - (search) "🔍 Search across these projects…" — one query over several indexed projects, fanning out per project because tokensave's v7.10 federation is MCP-only. Results interleave by **rank, not score**: BM25 scores are per-database and uncalibrated between them (measured: 19.3 vs 11.2 for equally good matches), so sorting the union by score would claim one project is more relevant than another on evidence that does not exist
 - (doctor) `doctor_path_overrides` — per-directory cap tiers, so `scripts/` can be audited with looser thresholds instead of blanket-skipped. Longest matching prefix wins; malformed JSON falls back to the defaults rather than taking the audit down
@@ -21,6 +26,8 @@
 - (docs) `WINDOWS_CONPTY_FINDINGS.md` — why driving tokensave's TTY prompt via a pseudoconsole was implemented and abandoned, with the full diagnostic
 
 ### Fixed
+- (projects) `fmt_age` dropped the year, so "May 13 this year" and "May 13 three years ago" rendered identically in Last Synced — on the one column whose purpose is spotting a stale index. Dates outside the current year now carry the year
+- (doc-drafter) The notebook tab strip needed ~760px against the dialog's own 720px minimum width, and Tk does not scroll tab strips, so the last tab was unreachable at the smallest supported size. The two longest labels are shortened; a test pins the width budget against the declared minsize
 - (settings) The pre-commit hook help text said it runs `tests/smoke_test.py`; the hook has run the whole `tests/` suite since v4.12
 - (integration-check) `_find_issue_doc` now recognises issues cited by URL or as `issue NNN` without a hash. Previously `--fix` would have written an auto-generated stub over a hand-written analysis, and a resolved issue's doc could never be archived. The script also rebound `sys.stdout` at import time, which made it untestable under pytest
 - (coverage) `parse_coverage_json` no longer raises `AttributeError` when the report is a bare JSON list instead of an object
