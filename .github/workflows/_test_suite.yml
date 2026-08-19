@@ -1,0 +1,108 @@
+# Reusable test-suite workflow.
+#
+# The three test jobs in ci.yml (test-warn / test-gate / test-postmerge) ran
+# near-identical steps that had to be edited in lockstep. They now call this
+# and differ only by input.
+#
+# The goal is NOT to make the callers identical — they are legitimately
+# different — but to make the difference explicit and in one place:
+#
+#   test-warn       warn-only, no coverage
+#   test-gate       hard gate, coverage + floor + XML artifact + PR summary
+#   test-postmerge  hard gate, no coverage
+#
+# Why `continue_on_error` is an INPUT rather than `continue-on-error:` on the
+# calling job: a job that calls a reusable workflow may only use `with`,
+# `secrets`, `name`, `needs`, `if`, `permissions`, `strategy` and
+# `concurrency`. `continue-on-error` is not among them, so warn-only has to be
+# applied to the steps in here. The net effect is the same — a failing test
+# does not fail the workflow — though the step is marked failed rather than
+# the job being marked successful.
+#
+# The coverage and non-coverage variants are separate `if`-gated steps rather
+# than one step with a conditional argument, so every command stays
+# byte-identical to what these jobs ran before the refactor.
+
+name: Test suite (reusable)
+
+on:
+  workflow_call:
+    inputs:
+      coverage:
+        description: "Collect coverage, enforce the floor, publish the report."
+        type: boolean
+        default: false
+      coverage_fail_under:
+        description: "Minimum total coverage %. Only used when coverage is true."
+        type: number
+        default: 14
+      continue_on_error:
+        description: "Warn-only: report failures without failing the workflow."
+        type: boolean
+        default: false
+
+jobs:
+  tests:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+      - uses: actions/setup-python@v6
+        with:
+          python-version: "3.11"
+      - name: Install dev deps
+        run: pip install -r requirements-dev.txt
+      - name: Install Tk for headless dialog tests
+        run: sudo apt-get update && sudo apt-get install -y python3-tk xvfb
+
+      # ── Without coverage (test-warn, test-postmerge) ────────────────────
+      - name: Pure-logic tests
+        if: ${{ !inputs.coverage }}
+        continue-on-error: ${{ inputs.continue_on_error }}
+        run: python -m pytest -m "not tk" -v
+      - name: Tk dialog tests (under xvfb)
+        if: ${{ !inputs.coverage }}
+        continue-on-error: ${{ inputs.continue_on_error }}
+        run: xvfb-run -a python -m pytest -m tk -v
+
+      # ── With coverage (test-gate) ───────────────────────────────────────
+      - name: Pure-logic tests with coverage
+        id: pure-logic
+        if: ${{ inputs.coverage }}
+        continue-on-error: ${{ inputs.continue_on_error }}
+        run: python -m pytest -m "not tk" -v --cov=src
+      - name: Tk dialog tests (coverage append)
+        id: tk-dialog
+        if: ${{ inputs.coverage }}
+        continue-on-error: ${{ inputs.continue_on_error }}
+        run: xvfb-run -a python -m pytest -m tk -v --cov=src --cov-append --cov-fail-under=${{ inputs.coverage_fail_under }}
+      - name: Generate unified XML report
+        if: ${{ inputs.coverage && always() }}
+        run: python -m coverage xml --ignore-errors || true
+      - name: Coverage summary → PR step summary
+        if: ${{ inputs.coverage && always() }}
+        continue-on-error: true
+        run: |
+          if [ "${{ steps.pure-logic.outcome }}" != "success" ] || \
+             [ "${{ steps.tk-dialog.outcome }}" != "success" ]; then
+            echo "### ⚠️ Coverage Report (Partial — test failures skipped some steps)" \
+              >> $GITHUB_STEP_SUMMARY
+          else
+            echo "### 📊 Coverage Report" >> $GITHUB_STEP_SUMMARY
+          fi
+          if [ -f .coverage ]; then
+            {
+              echo '```'
+              python -m coverage report --skip-empty
+              echo '```'
+            } >> $GITHUB_STEP_SUMMARY
+          else
+            echo "_No .coverage data found — pytest may have failed before writing it._" \
+              >> $GITHUB_STEP_SUMMARY
+          fi
+      - name: Upload coverage artifact
+        if: ${{ inputs.coverage && always() }}
+        uses: actions/upload-artifact@v4
+        with:
+          name: coverage-report
+          path: coverage.xml
+          if-no-files-found: ignore     # don't mask the real failure if pytest crashed

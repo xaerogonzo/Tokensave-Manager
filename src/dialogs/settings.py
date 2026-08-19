@@ -173,7 +173,7 @@ class SettingsDialog(tk.Toplevel):
             activebackground=C["base"], activeforeground=C["text"],
             font=("Segoe UI", 10)).pack(anchor=tk.W, padx=20, pady=(0, 2))
         tk.Label(body,
-            text="  Installs a .git/hooks/pre-commit script that runs tests/smoke_test.py\n"
+            text="  Installs a .git/hooks/pre-commit script that runs the tests/ suite\n"
                  "  before every commit.  Only affects the active project's git repo.",
             font=("Segoe UI", 8), bg=C["base"], fg=C["overlay0"],
             justify=tk.LEFT).pack(anchor=tk.W, padx=36, pady=(0, 8))

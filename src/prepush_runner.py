@@ -211,13 +211,14 @@ def main() -> int:
 
 
 def _stderr_is_tty() -> bool:
-    """Best-effort isatty() probe. G-K helper, isolated for testability."""
-    try:
-        return bool(sys.stderr.isatty())
-    except (AttributeError, OSError, ValueError):
-        # If stderr has been replaced with something exotic (e.g. an
-        # io.StringIO from pytest's capture), treat as non-TTY.
-        return False
+    """Best-effort isatty() probe.
+
+    Thin alias over helpers.runner_io.stderr_is_tty, which the pre-commit
+    hook shares. Kept as a module-level name because the existing tests
+    monkeypatch it here.
+    """
+    from helpers.runner_io import stderr_is_tty
+    return stderr_is_tty()
 
 
 if __name__ == "__main__":

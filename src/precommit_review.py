@@ -142,6 +142,22 @@ def main() -> int:
         _stderr(f"BLOCKED — {h} high / {m} medium finding(s) "
                 f"(threshold: {threshold}).")
         _stderr("Override with:  git commit --no-verify")
+
+        # GUI git clients swallow hook stderr, so a commit blocked here
+        # looks like an unexplained refusal. Same fallback the pre-push
+        # runner uses, with commit-appropriate wording: this is a review
+        # opinion the user can override in one command, not a broken build,
+        # so the box says what was found and how to proceed rather than
+        # reading like a failure.
+        from helpers.runner_io import maybe_show_hook_dialog
+        maybe_show_hook_dialog(
+            "Commit paused by AI review",
+            f"The pre-commit review found {h} high and {m} medium "
+            f"finding(s), above your '{threshold}' threshold."
+            + chr(10) + chr(10) +
+            "The details are in the hook output. To commit anyway:"
+            + chr(10) +
+            "    git commit --no-verify")
         return 1
     return 0
 
