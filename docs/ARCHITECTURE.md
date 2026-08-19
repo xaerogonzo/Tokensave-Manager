@@ -320,12 +320,6 @@ Token Save Manager Source/
 │   │   │                          snapshotted before scrub and auto-restored if
 │   │   │                          filter-repo deletes it (three-fallback chain:
 │   │   │                          same-session URL → preflight dict → askstring).
-│   │   ├── smoke_tests.py         v4.9 SmokeTestsDialog — legacy lightweight runner.
-│   │   │                          Still works (kept as a quick-fire UI) but the v4.13
-│   │   │                          TestManagerDialog is the recommended surface for new
-│   │   │                          users. v4.13 V-E: migrated `_worker` to use the
-│   │   │                          shared `helpers.smoke_runner.run_pytest_in_background`
-│   │   │                          helper so both dialogs share the same plumbing.
 │   │   ├── test_manager.py        v4.13 TestManagerDialog — opens from Help tab
 │   │   │                          "🧪 Test Manager…" button (replaces v4.12's "Run
 │   │   │                          Smoke Tests" button). 4-tab notebook covering the
@@ -502,7 +496,7 @@ Token Save Manager Source/
 │  Run all:    pip install -r requirements-dev.txt && python -m pytest
 │  Pure-only:  python -m pytest -m "not tk"
 │  Tk-only:    python -m pytest -m tk           (Linux: xvfb-run -a python -m pytest -m tk)
-│  In-app:     Help tab → "🧪 Run Smoke Tests" (subprocess-launched, streamed UI)
+│  In-app:     Help tab → "🧪 Test Manager…" (subprocess-launched, streamed UI)
 │
 ├── logs/
 │   └── manager.log                Rotating log (500 KB x 5 backups)

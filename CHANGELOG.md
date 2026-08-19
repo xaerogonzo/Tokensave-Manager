@@ -44,6 +44,7 @@
 - (tests) `tests/smoke_test.py` (909 lines, five unrelated subsystems) split into `test_doc_drafter_quality`, `test_doc_grounding`, `test_install_tokensave` and `test_mcp`. 118 tests relocated unchanged; 5 dropped as a strict subset of cases already in `test_commit_messages.py`
 
 ### Removed
+- (dialogs) `dialogs/smoke_tests.py` — the v4.9 `SmokeTestsDialog`. The v4.13 Test Manager took over its Help-tab button and nothing has constructed it since; it had also gone stale, still offering to run the `tests/smoke_test.py` that Roadmap-9 split apart. The shared `helpers/smoke_runner.run_pytest_in_background` plumbing it once justified stays — the Test Manager is now its only caller
 - (conpty) the Windows pseudoconsole transport (517 lines). It never attached successfully on any testable machine, and the purge path never depended on it — verification does. Diagnostic preserved in docs
 
 ## [2.2.1] — 2026-07-28
