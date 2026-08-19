@@ -4,6 +4,11 @@
 ## [Unreleased]
 
 ### Added
+- (projects) Multi-select in the Projects tree (ctrl/shift) with its own context menu — sync, force re-sync and a log-only status run across every selected project sequentially, instead of Set-as-Active-then-operate once per project. A separate menu on purpose: showing single-project commands over a multi-selection would invite clicking one and having it act on exactly one project, silently. Doctor is excluded because it schedules follow-up dialogs that would stack per project
+- (search) "🔍 Search across these projects…" — one query over several indexed projects, fanning out per project because tokensave's v7.10 federation is MCP-only. Results interleave by **rank, not score**: BM25 scores are per-database and uncalibrated between them (measured: 19.3 vs 11.2 for equally good matches), so sorting the union by score would claim one project is more relevant than another on evidence that does not exist
+- (doctor) `doctor_path_overrides` — per-directory cap tiers, so `scripts/` can be audited with looser thresholds instead of blanket-skipped. Longest matching prefix wins; malformed JSON falls back to the defaults rather than taking the audit down
+- (ci) Doctor now runs in CI as an **advisory** step, reporting its count and first 25 findings to the job summary. It never gates: the caps are an aspiration and a gating step would paint any project with a backlog red on day one
+
 - (test-manager) CI status badge in Tab 1 for the **current** branch, not `master` — a badge showing master's green while your own branch is red is worse than none. Distinguishes running (an in-flight run reports a null conclusion), no-result (a new branch, or a wholly skipped run — this repo's four CI jobs are `if:`-gated, so skips are routine), and unavailable ("could not ask `gh`") from a genuine failure. Click opens the run
 - (app) "Manager source changed since startup — restart to load the new code" banner. Python does not reload modules, so an edit to `src/` leaves the running manager on its old code and the symptom is a feature that behaves like its old self. Fingerprints `(mtime_ns, size)` rather than mtime alone, and excludes editor noise in one place so it cannot cry wolf
 - (test-manager) Tab 2 shows measured pytest-cov percentages instead of only the filename heuristic, with a Coverage column and provenance — the cache records when, on which branch and commit, and by what command, so the summary reads "measured coverage from 10 min ago" rather than presenting stale numbers as current. A file with tests but thin coverage is marked differently from one with no tests: the next action differs. The 50% warning threshold is a UX signal, explicitly **not** the `--cov-fail-under=14` CI gate
@@ -16,6 +21,7 @@
 - (docs) `WINDOWS_CONPTY_FINDINGS.md` — why driving tokensave's TTY prompt via a pseudoconsole was implemented and abandoned, with the full diagnostic
 
 ### Fixed
+- (settings) The pre-commit hook help text said it runs `tests/smoke_test.py`; the hook has run the whole `tests/` suite since v4.12
 - (integration-check) `_find_issue_doc` now recognises issues cited by URL or as `issue NNN` without a hash. Previously `--fix` would have written an auto-generated stub over a hand-written analysis, and a resolved issue's doc could never be archived. The script also rebound `sys.stdout` at import time, which made it untestable under pytest
 - (coverage) `parse_coverage_json` no longer raises `AttributeError` when the report is a bare JSON list instead of an object
 - (tests) `test_no_import_time_path_resolution` now runs in a subprocess — it re-imported all of `src/` in-process, corrupting `sys.modules` so monkeypatches silently missed and a real Tk modal blocked the run. This was the true cause of the long-standing `test_shadowlinks.py` "failures"; suite went from >10min with 5 failures to ~19s with none
@@ -23,6 +29,12 @@
 - (doctor) stale-entry parser requires a count, so the healthy-system line `✔ No stale projects in global DB` no longer opens the block and misread later bullets
 - (doctor) caps audit skips `.claude/`, which was double-counting every violation via `.claude/worktrees/` (253/442 → 127/229)
 - (grounding) tokensave file count reads `.tokensave/tokensave.db` directly and counts code files only — the `tokensave status` parse had silently returned 0 since the output became an ANSI table
+
+### Changed
+- (doctor) Audit rules moved from the Tk-importing `controllers/doctor_ctrl` into stdlib-only `helpers/doctor_rules.py`, which is what finally lets them run on a headless CI runner; the controller drops 1032 → 796 lines. Behaviour parity was proven against a pre-move baseline (247 files, 124 violations, byte-identical) before any threshold change
+- (ci) The three near-identical test jobs now call a shared `_test_suite.yml` and differ only by input (`coverage`, `coverage_fail_under`, `continue_on_error`). Verified behaviour-preserving: identical trigger predicates, identical `on:` block, untouched `check` job, all 8 commands preserved. Note a job calling a reusable workflow cannot set `continue-on-error`, so warn-only became an input applied at step level
+- (hooks) The GUI-client stderr fallback moved to `helpers/runner_io.py` and the pre-commit hook now has it too — GUI git clients swallow hook stderr, so a blocked commit previously read as an unexplained refusal. The pre-commit wording is advisory rather than alarmist: it is a review opinion overridable with `--no-verify`, not a broken build
+- (tests) `tests/smoke_test.py` (909 lines, five unrelated subsystems) split into `test_doc_drafter_quality`, `test_doc_grounding`, `test_install_tokensave` and `test_mcp`. 118 tests relocated unchanged; 5 dropped as a strict subset of cases already in `test_commit_messages.py`
 
 ### Removed
 - (conpty) the Windows pseudoconsole transport (517 lines). It never attached successfully on any testable machine, and the purge path never depended on it — verification does. Diagnostic preserved in docs
