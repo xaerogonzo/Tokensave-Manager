@@ -25,7 +25,7 @@ from typing import TYPE_CHECKING, Callable
 import tkinter as tk
 from tkinter import messagebox
 
-from constants import C, CREATE_NO_WINDOW, _ANSI
+from constants import CREATE_NEW_CONSOLE, C, CREATE_NO_WINDOW, _ANSI
 from helpers import housekeeping
 from helpers.runtime import log
 from helpers.tokensave_config import (
@@ -434,7 +434,7 @@ class DoctorController:
         """
         cmd_line = f'cmd.exe /k ""{self._cfg.tokensave_exe}" doctor"'
         subprocess.Popen(cmd_line, cwd=path,
-                         creationflags=subprocess.CREATE_NEW_CONSOLE)
+                         creationflags=CREATE_NEW_CONSOLE)
 
     @staticmethod
     def verification_label(result: PurgeResult) -> str:

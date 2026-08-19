@@ -22,7 +22,7 @@ import tkinter as tk
 from tkinter import ttk, filedialog, messagebox
 from typing import TYPE_CHECKING
 
-from constants import C, CREATE_NO_WINDOW
+from constants import CREATE_NEW_CONSOLE, C, CREATE_NO_WINDOW
 from helpers.detection import _detect_git, _detect_gh, _detect_claude_cli
 
 if TYPE_CHECKING:
@@ -209,7 +209,7 @@ class PathsSection:
                 subprocess.Popen(
                     ["powershell", "-NoExit", "-Command",
                      "npm install -g @anthropic-ai/claude-code"],
-                    creationflags=subprocess.CREATE_NEW_CONSOLE,
+                    creationflags=CREATE_NEW_CONSOLE,
                 )
                 self._claude_cli_status.configure(
                     text="PowerShell opened — run it, then click Auto-detect when done.",

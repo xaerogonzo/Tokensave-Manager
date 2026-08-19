@@ -45,10 +45,10 @@ exit $?
 """.format(marker=_HOOK_MARKER)
 
 # --- subprocess creation flag (Windows: hide the console window) ----------
-try:
-    _CREATE_NO_WINDOW = subprocess.CREATE_NO_WINDOW  # type: ignore[attr-defined]
-except AttributeError:
-    _CREATE_NO_WINDOW = 0
+# Uses the platform-guarded constant rather than a local try/except, so there
+# is exactly one way to reach these flags and the structural guard in
+# tests/test_no_windows_only_subprocess_flags.py can stay strict.
+from constants import CREATE_NO_WINDOW as _CREATE_NO_WINDOW  # noqa: E402
 
 
 # ── Public helpers ─────────────────────────────────────────────────────────

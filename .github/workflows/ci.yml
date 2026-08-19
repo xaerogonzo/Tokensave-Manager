@@ -58,6 +58,11 @@ jobs:
         # Runs here (an import-free job) so it fires even when a bad top-level
         # optional import would abort the main test suite's collection.
         run: python tests/test_no_thirdparty_module_imports.py
+      - name: No Windows-only subprocess flags in src/
+        # Same reasoning: these raise AttributeError on the Linux runner, and
+        # catching that here reports the actual cause rather than a confusing
+        # failure buried in whichever test happened to touch the code path.
+        run: python tests/test_no_windows_only_subprocess_flags.py
 
   # ── Pytest suite on Roadmap-* branches (warn-only) ─────────────────────
   test-warn:

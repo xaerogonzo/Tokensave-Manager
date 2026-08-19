@@ -64,6 +64,14 @@ MAX_DEPTH = 4
 # (breaks the Linux CI test runner, which exercises the git/test-gap helpers).
 CREATE_NO_WINDOW = 0x08000000 if sys.platform == "win32" else 0
 
+# The opposite flag: spawn a REAL console window, used where the point is to
+# give a child process an interactive TTY (tokensave's purge prompt, the
+# Claude CLI hand-off). Same rule and the same reason as above — referencing
+# `subprocess.CREATE_NEW_CONSOLE` directly raises AttributeError off-Windows,
+# because the constant does not exist there at all. That is not hypothetical:
+# it took the Linux CI test-gate red for five commits on master.
+CREATE_NEW_CONSOLE = 0x00000010 if sys.platform == "win32" else 0
+
 
 # ── App refresh cadence ──────────────────────────────────────────────────────
 AUTO_REFRESH_MS = 60_000   # auto-refresh project list every 60 s
