@@ -17,10 +17,12 @@ the v4.12 "🧪 Run Smoke Tests" button). Four tabs:
                          rendered test file; click Generate to write
                          tests/test_<basename>.py with placeholder tests.
 
-All threading uses helpers/smoke_runner.run_pytest_in_background (V-E)
-so this dialog and the legacy SmokeTestsDialog share the same worker
-+ subprocess plumbing. Cancellation is wired through the PytestRun
-handle (V-G).
+All threading uses helpers/smoke_runner.run_pytest_in_background (V-E).
+That helper was extracted so this dialog and the then-still-present
+SmokeTestsDialog could share one worker + subprocess path; that dialog went
+unreferenced once this one replaced it and was deleted in Roadmap-9, leaving
+this the only caller. Cancellation is wired through the PytestRun handle
+(V-G).
 
 Subprocess+filesystem helpers all live in helpers/* — this file is
 purely UI orchestration.
@@ -232,7 +234,8 @@ class TestManagerDialog(tk.Toplevel):
         self._out_txt.configure(yscrollcommand=out_vsb.set)
         out_vsb.pack(side=tk.RIGHT, fill=tk.Y)
         self._out_txt.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
-        # Tag colours mirror the legacy smoke_tests dialog.
+        # Tag colours for the streamed pytest output, carried over from
+        # the smoke-tests dialog this tab replaced.
         self._out_txt.tag_configure("pass", foreground=C["green"])
         self._out_txt.tag_configure("fail", foreground=C["red"])
         self._out_txt.tag_configure("dim",  foreground=C["overlay0"])
