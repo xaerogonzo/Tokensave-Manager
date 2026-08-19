@@ -37,8 +37,8 @@ For dialog tests, the typical fixture combo is::
         ...
 
 For pure-logic tests, no fixtures from this file are needed — pytest
-discovers the existing ``unittest.TestCase`` classes in
-``tests/smoke_test.py`` and the new ``test_*.py`` modules automatically.
+discovers the ``test_*.py`` modules automatically, including the
+``unittest.TestCase`` classes that several of them still use.
 """
 from __future__ import annotations
 

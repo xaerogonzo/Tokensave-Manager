@@ -224,15 +224,15 @@ opportunistically when touching the relevant code.
 - 🔮 `mcp_config._render_block` CC reduction
 - 🔮 `commit_messages.py` / `llm.py` complexity sweep
 - 🔮 Unified sub-section parser, hidden subsection-ID anchors
-- 🔮 Doctor audit — per-directory severity tiers (looser caps for `scripts/`)
-- 🔮 Doctor audit CI integration (extract `_audit_project_tree` from Tk context)
+- ✅ Doctor audit — per-directory severity tiers (looser caps for `scripts/`). Shipped Roadmap-9.
+- ✅ Doctor audit CI integration (extract `_audit_project_tree` from Tk context). Advisory, non-gating, in the generated workflow. Shipped Roadmap-9.
 - 🔮 `ai_tasks_ctrl.py` CHANGELOG drafter consolidation
 - 🔮 `update_poller.py` codegraph health ingestion
-- 🔮 Full dialog test coverage — remaining 11 dialogs (v4.12 covered 4)
-- 🔮 `pytest-cov` minimum-threshold gate
-- 🔮 Workflow-call refactor for the three near-identical CI test jobs
-- 🔮 Split `tests/smoke_test.py` into per-module files (Phase 1b)
-- 🔮 GUI git-client stderr fallback for the pre-COMMIT hook (G-K parity)
+- 🔮 Full dialog test coverage — 22 of 38 dialogs untested (v4.12 covered 4)
+- ✅ `pytest-cov` minimum-threshold gate. Shipped v4.15.
+- ✅ Workflow-call refactor for the three near-identical CI test jobs. Shipped Roadmap-9 Phase 3.
+- ✅ Split `tests/smoke_test.py` into per-subsystem files. Shipped Roadmap-9 Phase 3.
+- ✅ GUI git-client stderr fallback for the pre-COMMIT hook (G-K parity). Shipped Roadmap-9 Phase 3.
 
 ---
 

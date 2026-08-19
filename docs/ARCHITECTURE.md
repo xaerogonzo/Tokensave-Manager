@@ -466,15 +466,22 @@ Token Save Manager Source/
 │
 ├── tests/                         v4.12 pytest test suite — wired into CI as a
 │   │                              first-class gate (`.github/workflows/ci.yml`).
-│   │                              Existing smoke_test.py runs unchanged; new
-│   │                              per-module + per-dialog files added.
+│   │                              One file per module or dialog; no catch-all
+│   │                              suite (Roadmap-9 Phase 3 split the last one).
 │   ├── conftest.py                Shared fixtures: `tk_root` (session-scoped Tk
 │   │                              root, sidesteps Windows init.tcl flakiness),
 │   │                              `wait_for` (G-G/G-M event-loop-driving poll),
 │   │                              `patch_after` (G-A/G-H AfterHarness for
 │   │                              recursive after() loops), `fake_home` (G-F
 │   │                              per-test HOME/APPDATA redirect), `mock_config`.
-│   ├── smoke_test.py              v4.9 logic-layer suite — 123 tests, 14 classes.
+│   ├── test_doc_drafter_quality.py 74 tests — truncation, prose-vs-markup,
+│   │                              wrapped bullets, alignment scoring.
+│   ├── test_doc_grounding.py      10 tests — dedup-first order + per-source cap.
+│   ├── test_install_tokensave.py  26 tests — download/unpack + Zip-Slip guard.
+│   ├── test_mcp.py                8 tests — agent MCP wiring detection.
+│   ├── test_ci_yaml_semantics.py  14 tests — which CI job gates vs warns.
+│   ├── test_runner_io.py          12 tests — hook GUI fallback when stderr
+│   │                              is swallowed (never fails the hook).
 │   ├── test_no_import_time_path_resolution.py
 │   │                              G-L pre-flight: imports every src/ module with
 │   │                              sentinel env vars; fails if any module captured
