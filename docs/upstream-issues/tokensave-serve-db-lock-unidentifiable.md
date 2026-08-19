@@ -1,5 +1,5 @@
 <!--
-STATUS: DRAFT — not filed. Review before submitting.
+STATUS: FILED 2026-08-19 — https://github.com/aovestdipaperino/tokensave/issues/421
 Found against tokensave 7.x on Windows 11 while cleaning up the git worktrees
 Claude Code creates per task.
 
@@ -18,7 +18,7 @@ Re-check before filing.
 **Repo:** https://github.com/aovestdipaperino/tokensave
 **Suggested title:** `tokensave serve` holds an exclusive lock on `.tokensave/tokensave.db` and provides no way to tell which project a running server serves
 **Type:** Bug / missing capability — platform (Windows), regression in scope from v6.0.0
-**Status:** Draft — review and strip any proprietary code before filing.
+**Status:** Filed 2026-08-19 as issue 421.
 
 ---
 
@@ -39,6 +39,7 @@ carry no project in their command line:
 
 ```
 PID 44224: tokensave.exe serve -p "D:\Projects\<other-project>"
+PID 39308: tokensave.exe serve -p "D:\Projects\<other-project>"
 PID 18012: tokensave.exe serve
 PID 46000: tokensave.exe serve
 PID 35836: tokensave.exe serve
