@@ -14,6 +14,7 @@ from controllers.git_tab import (
     _detect_base_branch,
     _extract_pr_title,
     _recommended_test_selection,
+    _build_merge_cmd,
 )
 
 pytestmark = pytest.mark.tk
@@ -547,3 +548,60 @@ class TestCmdOpenClaudeCli:
         GitTabController.cmd_open_claude_cli(self._stub())
         mock_warn.assert_called_once()
         assert "boom" in mock_warn.call_args[0]
+
+
+class TestMergeBodyFromChangelog:
+    """`_do_merge_pr` with the opt-in CHANGELOG body (Roadmap-9 Phase 2.3).
+
+    The value is in the argv: these bullets carry backticks, ampersands and
+    equals signs, so the body must travel as a separate argv element and
+    never be interpolated into a shell string.
+    """
+
+    _CL = ("# Changelog\n\n## [Unreleased]\n\n### Fixed\n"
+           "- uses `--cov-fail-under=14` & handles # and = now\n")
+
+    def _write_changelog(self, tmp_path, text=None):
+        (tmp_path / "CHANGELOG.md").write_text(
+            text if text is not None else self._CL, encoding="utf-8")
+        return str(tmp_path)
+
+    def test_reads_and_renders_the_unreleased_block(self, tmp_path):
+        path = self._write_changelog(tmp_path)
+        body = GitTabController._changelog_merge_body(path)
+        assert body.startswith("Fixed:")
+        assert "`--cov-fail-under=14`" in body
+        assert "&" in body and "#" in body
+
+    def test_missing_changelog_yields_empty_not_an_error(self, tmp_path):
+        assert GitTabController._changelog_merge_body(str(tmp_path)) == ""
+
+    def test_empty_unreleased_yields_empty(self, tmp_path):
+        path = self._write_changelog(
+            tmp_path, "# Changelog\n\n## [Unreleased]\n\n## [1.0] — x\n- old\n")
+        assert GitTabController._changelog_merge_body(path) == ""
+
+    # ── argv shape (pure builder) ─────────────────────────────────────
+
+    def test_opt_out_adds_no_subject_or_body(self):
+        cmd = _build_merge_cmd(12, "merge", False, "PR title", "")
+        assert cmd == ["gh", "pr", "merge", "12", "--merge"]
+        assert "--body" not in cmd and "--subject" not in cmd
+
+    def test_body_travels_as_its_own_argv_element(self):
+        body = "Fixed:" + chr(10) + "- uses `--cov-fail-under=14` & handles # and ="
+        cmd = _build_merge_cmd(12, "squash", False, "PR title", body)
+        assert cmd[cmd.index("--body") + 1] == body,             "the body must be one argv element, never shell-interpolated"
+        assert cmd[cmd.index("--subject") + 1] == "PR title"
+
+    def test_delete_branch_flag_is_independent_of_the_body(self):
+        body = "Fixed:" + chr(10) + "- x"
+        cmd = _build_merge_cmd(7, "merge", True, "t", body)
+        assert "--delete-branch" in cmd
+        assert "--body" in cmd
+
+    def test_empty_body_never_writes_a_blank_over_the_default(self):
+        """An empty CHANGELOG must fall through to GitHub's own message."""
+        for strategy in ("merge", "squash", "rebase"):
+            cmd = _build_merge_cmd(1, strategy, False, "t", "")
+            assert "--body" not in cmd
