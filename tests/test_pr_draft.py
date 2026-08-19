@@ -418,3 +418,89 @@ def test_grounding_section_build_failure_returns_empty(monkeypatch):
     monkeypatch.setattr("helpers.doc_grounding.build_combined_grounding", boom)
     assert _build_grounding_section(_grounding_cfg(), "diff", "/proj",
                                     on_status=None) == ""
+
+
+# ── Refresh PR body menu command (Roadmap-9 Phase 2.2) ──────────────────
+
+class TestRefreshPRBodyCommand:
+    """The menu entry that drives helpers.pr_body_refresh.
+
+    Guards the two refusals that must happen BEFORE any draft is generated,
+    so the user is not made to wait on an LLM call for a request that was
+    never going to be writable.
+    """
+
+    def _ctrl(self, mocker, tab=None):
+        from controllers.pr_draft_ctrl import PRDraftCtrl
+        ctrl = object.__new__(PRDraftCtrl)
+        ctrl._cfg = SimpleNamespace(raw={"gh_exe": "gh"}, git_exe="git")
+        ctrl._tab = tab or SimpleNamespace(after=lambda ms, fn: fn())
+        ctrl._on_log = lambda *a, **k: None
+        ctrl._resolve_pr_base = lambda p: "master"
+        return ctrl
+
+    def test_no_open_pr_informs_and_generates_nothing(self, mocker):
+        from controllers import pr_draft_ctrl as mod
+        info = mocker.patch.object(mod.messagebox, "showinfo")
+        mocker.patch("helpers.pr_checklist.get_open_pr", return_value=None)
+        gen = mocker.patch("helpers.pr_draft.generate_pr_draft")
+        thread = mocker.patch.object(mod.threading, "Thread")
+
+        self._ctrl(mocker)._cmd_refresh_pr_body("/proj")
+
+        assert info.called
+        gen.assert_not_called()
+        thread.assert_not_called()
+
+    def test_body_without_a_region_refuses_before_generating(self, mocker):
+        """Refusing after a slow LLM call would waste the user's time."""
+        from controllers import pr_draft_ctrl as mod
+        info = mocker.patch.object(mod.messagebox, "showinfo")
+        mocker.patch("helpers.pr_checklist.get_open_pr",
+                     return_value={"number": 3, "body": "hand written only"})
+        gen = mocker.patch("helpers.pr_draft.generate_pr_draft")
+        thread = mocker.patch.object(mod.threading, "Thread")
+
+        self._ctrl(mocker)._cmd_refresh_pr_body("/proj")
+
+        assert info.called
+        assert "manager-managed section" in info.call_args[0][1]
+        gen.assert_not_called()
+        thread.assert_not_called()
+
+    def test_a_body_with_a_region_starts_generation(self, mocker):
+        from controllers import pr_draft_ctrl as mod
+        from helpers.pr_body_refresh import wrap_region
+        mocker.patch("helpers.pr_checklist.get_open_pr",
+                     return_value={"number": 3,
+                                   "body": wrap_region("old summary")})
+        thread = mocker.patch.object(mod.threading, "Thread")
+
+        self._ctrl(mocker)._cmd_refresh_pr_body("/proj")
+
+        assert thread.called, "generation was never started"
+
+    def test_accepting_the_proposal_routes_through_the_guarded_write(
+            self, mocker):
+        """The dialog must not write directly — the staleness re-check lives
+        inside refresh_pr_body."""
+        from controllers import pr_draft_ctrl as mod
+        from helpers.pr_body_refresh import RefreshResult, wrap_region
+        captured = {}
+
+        def fake_dialog(parent, proposal, on_accept):
+            captured["proposal"] = proposal
+            on_accept("brand new body")
+
+        mocker.patch("dialogs.proposal.ProposalDialog", fake_dialog)
+        guarded = mocker.patch(
+            "helpers.pr_body_refresh.refresh_pr_body",
+            return_value=RefreshResult("ok", "PR #3 body refreshed."))
+
+        ctrl = self._ctrl(mocker)
+        ctrl._present_pr_body_refresh(
+            "/proj", "gh", wrap_region("old"), 3, "brand new body", "")
+
+        guarded.assert_called_once()
+        assert guarded.call_args[0][3] == "brand new body"
+        assert "manager-managed section only" in captured["proposal"].filepath
