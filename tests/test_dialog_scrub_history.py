@@ -15,8 +15,6 @@ from __future__ import annotations
 
 from types import SimpleNamespace
 
-import threading
-
 import pytest
 
 tk = pytest.importorskip("tkinter")
@@ -148,25 +146,23 @@ def test_scrub_now_aborts_if_backup_fails(
     mock_scrub = mocker.patch("dialogs.scrub_history.run_scrub")
 
     dialog = ScrubHistoryDialog(tk_root, str(tmp_path), mock_config)
-    patch_after(dialog)
+    harness = patch_after(dialog)
     dialog._selected_file.set("secrets.json")
     dialog._backup_branch_name = "backup/before-scrub-1700000000"
 
-    baseline_threads = threading.active_count()
-    dialog._on_scrub_now()
-
-    # Wait for the worker to actually EXIT, rather than sleeping a guessed
-    # duration. The fixed 0.2s sleep this replaces was enough on a Windows
-    # dev box but not on the Linux CI runner, where the worker was still
-    # alive at teardown and tripped tk_root's thread-leak check.
+    # The worker's LAST act before its abort `return` is scheduling _done,
+    # so waiting for that callback to reach the harness proves it took the
+    # abort path and is about to exit.
     #
-    # Thread count is the right signal here, not dialog state: patch_after
-    # captures the worker's `after(0, _done)` instead of running it, so
-    # _scrub_in_flight deliberately never clears. What matters for both the
-    # assertion and the leak check is that the worker reached its abort
-    # `return`.
-    wait_for(lambda: threading.active_count() <= baseline_threads,
-             timeout_s=5.0)
+    # Two earlier attempts were wrong and are worth not repeating: waiting on
+    # `_scrub_in_flight` hangs, because patch_after captures the _done
+    # callback rather than running it, so the flag never clears; and waiting
+    # on threading.active_count() is a global measure that other tests'
+    # threads perturb, which timed out on the Linux runner.
+    before = len(harness._queue)
+    dialog._on_scrub_now()
+    wait_for(lambda: len(harness._queue) > before, timeout_s=10.0)
+
     mock_scrub.assert_not_called()
 
 
