@@ -261,6 +261,17 @@ class ProjectsTabController:
             return iid[5:]
         return None
 
+    def get_selected_paths(self) -> list:
+        """Every selected project path, in tree order.
+
+        Category rows and the placeholder rows are skipped, so a shift-select
+        spanning a group header yields only the real projects inside it.
+        """
+        if self._tree is None:
+            return []
+        return [iid[5:] for iid in self._tree.selection()
+                if iid.startswith("proj:")]
+
     def cancel_ai_proposals(self) -> None:
         """Forward shutdown cancellation to AITasksController."""
         self._ai_tasks.cancel_all_proposals()
@@ -448,7 +459,10 @@ class ProjectsTabController:
             tree_wrap,
             columns=("active", "path", "synced", "cg", "git", "scaffold"),
             show="tree headings",
-            selectmode="browse",
+            # "extended" enables ctrl/shift multi-select so maintenance ops
+        # can run across several projects at once. Single-select
+        # behaviour is unchanged for every command that needs one path.
+        selectmode="extended",
         )
         self._tree.heading("#0",       text="Project")
         self._tree.heading("active",   text="")
@@ -538,10 +552,65 @@ class ProjectsTabController:
         row = self._tree.identify_row(event.y)
         if not row:
             return
-        self._tree.selection_set(row)
+        # Preserve an existing multi-selection when right-clicking inside it.
+        # Unconditionally calling selection_set() here would collapse the
+        # selection to one row, making multi-select unusable via the menu.
+        if row not in self._tree.selection():
+            self._tree.selection_set(row)
         if not row.startswith("proj:"):
             return
+        paths = self.get_selected_paths()
+        if len(paths) > 1:
+            # A separate menu, deliberately: showing single-project commands
+            # over a 3-project selection would invite clicking "Git Commit…"
+            # and having it act on exactly one of them, silently.
+            self._show_batch_menu(event, paths)
+            return
         self._ctx_menu.tk_popup(event.x_root, event.y_root)
+
+    def _open_cross_project_search(self, paths: list) -> None:
+        """Open the multi-project search over the current selection.
+
+        Lives here rather than in CommandBarCtrl, which is deliberately a pure
+        delegate with no Tk import — opening a dialog needs a parent window.
+        """
+        from dialogs.cross_project_search import CrossProjectSearchDialog
+        if len(paths) < 2:
+            return          # one project is what the Ask tab is already for
+        CrossProjectSearchDialog(self._root, paths, self._cfg)
+
+    def _show_batch_menu(self, event, paths: list) -> None:
+        """Context menu for a multi-project selection.
+
+        Only operations that stream to the log and open nothing are offered.
+        Status uses the log-only variant — the single-project command shows a
+        popup, and one popup per project is not a feature. Doctor is absent on
+        purpose: it schedules follow-up dialogs that would stack per project.
+        """
+        n = len(paths)
+        m = tk.Menu(self._root, tearoff=0,
+                    bg=C["surface0"], fg=C["text"],
+                    activebackground=C["surface1"], activeforeground=C["text"],
+                    relief=tk.FLAT, bd=0, font=("Segoe UI", 10))
+        m.add_command(label=f"{n} projects selected", state=tk.DISABLED)
+        m.add_separator()
+        m.add_command(label=f"↺  Sync all {n}",
+                      command=lambda: self._cmd_bar.cmd_batch(paths, "sync"))
+        m.add_command(label=f"⟳  Force Re-sync all {n}…",
+                      command=lambda: self._cmd_bar.cmd_batch(paths, "force"))
+        m.add_command(label=f"📊  Status of all {n}",
+                      command=lambda: self._cmd_bar.cmd_batch(paths, "status"))
+        m.add_separator()
+        m.add_command(label="🔍  Search across these projects…",
+                      command=lambda: self._open_cross_project_search(paths))
+        m.add_separator()
+        m.add_command(label="Clear selection",
+                      command=lambda: self._tree.selection_remove(
+                          *self._tree.selection()))
+        try:
+            m.tk_popup(event.x_root, event.y_root)
+        finally:
+            m.grab_release()
 
     def _on_tree_select(self, event=None) -> None:
         """Internal handler for <<TreeviewSelect>> — fires the project-select callback.

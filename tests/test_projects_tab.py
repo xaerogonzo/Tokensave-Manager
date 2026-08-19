@@ -7,6 +7,7 @@ import time
 import tkinter as tk
 from tkinter import ttk
 from unittest import mock
+from types import SimpleNamespace
 from typing import Any
 
 tk = pytest.importorskip("tkinter")
@@ -399,3 +400,99 @@ def test_housekeeping_menu_entry_invokes_the_controller(controller, monkeypatch,
     controller._ctx_menu.invoke(idx)
 
     assert opened == [str(tmp_path)]
+
+
+# ── Multi-select batch operations (Roadmap-9) ────────────────────────────
+
+class TestMultiSelectBatch:
+    """Selecting several projects and acting on all of them at once.
+
+    The friction being removed: "Set as Active" then operate, once per
+    project, for every maintenance pass across a multi-project workspace.
+    """
+
+    def _ctrl(self):
+        """A bare controller with just the tree attribute the accessors use."""
+        ctrl = object.__new__(ProjectsTabController)
+        return ctrl
+
+    def test_get_selected_paths_returns_every_project_row(self):
+        ctrl = self._ctrl()
+        ctrl._tree = SimpleNamespace(
+            selection=lambda: ("proj:/a", "proj:/b", "proj:/c"))
+        assert ctrl.get_selected_paths() == ["/a", "/b", "/c"]
+
+    def test_get_selected_paths_skips_category_headers(self):
+        """A shift-select spanning a group header must not yield the header."""
+        ctrl = self._ctrl()
+        ctrl._tree = SimpleNamespace(
+            selection=lambda: ("cat:My Projects", "proj:/a", "proj:/b"))
+        assert ctrl.get_selected_paths() == ["/a", "/b"]
+
+    def test_get_selected_paths_is_empty_without_a_tree(self):
+        ctrl = self._ctrl()
+        ctrl._tree = None
+        assert ctrl.get_selected_paths() == []
+
+    def test_singular_accessor_still_returns_one_path(self):
+        """Every existing single-project command depends on this."""
+        ctrl = self._ctrl()
+        ctrl._tree = SimpleNamespace(selection=lambda: ("proj:/a", "proj:/b"))
+        assert ctrl.get_selected_path() == "/a"
+
+    def test_right_click_inside_a_selection_preserves_it(self):
+        """Collapsing to the clicked row would make the batch menu unusable."""
+        ctrl = self._ctrl()
+        set_calls = []
+        ctrl._tree = SimpleNamespace(
+            identify_row=lambda y: "proj:/b",
+            selection=lambda: ("proj:/a", "proj:/b", "proj:/c"),
+            selection_set=lambda *a: set_calls.append(a))
+        shown = []
+        ctrl._show_batch_menu = lambda evt, paths: shown.append(paths)
+        ctrl._ctx_menu = SimpleNamespace(
+            tk_popup=lambda *a: shown.append("single-menu"))
+
+        ctrl._on_right_click(SimpleNamespace(y=10, x_root=0, y_root=0))
+
+        assert set_calls == [], "selection was collapsed on right-click"
+        assert shown == [["/a", "/b", "/c"]]
+
+    def test_right_click_outside_the_selection_selects_that_row(self):
+        ctrl = self._ctrl()
+        set_calls = []
+        ctrl._tree = SimpleNamespace(
+            identify_row=lambda y: "proj:/z",
+            selection=lambda: ("proj:/a", "proj:/b"),
+            selection_set=lambda *a: set_calls.append(a))
+        shown = []
+        ctrl._show_batch_menu = lambda evt, paths: shown.append(paths)
+        ctrl._ctx_menu = SimpleNamespace(
+            tk_popup=lambda *a: shown.append("single-menu"))
+
+        ctrl._on_right_click(SimpleNamespace(y=10, x_root=0, y_root=0))
+        assert set_calls == [("proj:/z",)]
+
+    def test_single_selection_uses_the_ordinary_menu(self):
+        """One project must keep the full command menu, not the batch one."""
+        ctrl = self._ctrl()
+        ctrl._tree = SimpleNamespace(
+            identify_row=lambda y: "proj:/a",
+            selection=lambda: ("proj:/a",),
+            selection_set=lambda *a: None)
+        shown = []
+        ctrl._show_batch_menu = lambda evt, paths: shown.append("batch")
+        ctrl._ctx_menu = SimpleNamespace(
+            tk_popup=lambda *a: shown.append("single-menu"))
+
+        ctrl._on_right_click(SimpleNamespace(y=10, x_root=0, y_root=0))
+        assert shown == ["single-menu"]
+
+    def test_cross_project_search_needs_two_projects(self, monkeypatch):
+        opened = []
+        monkeypatch.setattr(
+            "dialogs.cross_project_search.CrossProjectSearchDialog",
+            lambda parent, paths, cfg: opened.append(paths))
+        ctrl = self._ctrl()
+        ctrl._open_cross_project_search(["/only-one"])
+        assert opened == []
