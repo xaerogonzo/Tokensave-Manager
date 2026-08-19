@@ -15,6 +15,8 @@ from __future__ import annotations
 
 from types import SimpleNamespace
 
+import threading
+
 import pytest
 
 tk = pytest.importorskip("tkinter")
@@ -149,10 +151,22 @@ def test_scrub_now_aborts_if_backup_fails(
     patch_after(dialog)
     dialog._selected_file.set("secrets.json")
     dialog._backup_branch_name = "backup/before-scrub-1700000000"
+
+    baseline_threads = threading.active_count()
     dialog._on_scrub_now()
 
-    # Wait a little so the worker has time to abort.
-    import time as _t; _t.sleep(0.2)
+    # Wait for the worker to actually EXIT, rather than sleeping a guessed
+    # duration. The fixed 0.2s sleep this replaces was enough on a Windows
+    # dev box but not on the Linux CI runner, where the worker was still
+    # alive at teardown and tripped tk_root's thread-leak check.
+    #
+    # Thread count is the right signal here, not dialog state: patch_after
+    # captures the worker's `after(0, _done)` instead of running it, so
+    # _scrub_in_flight deliberately never clears. What matters for both the
+    # assertion and the leak check is that the worker reached its abort
+    # `return`.
+    wait_for(lambda: threading.active_count() <= baseline_threads,
+             timeout_s=5.0)
     mock_scrub.assert_not_called()
 
 
