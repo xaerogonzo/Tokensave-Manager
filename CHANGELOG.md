@@ -26,6 +26,7 @@
 - (docs) `WINDOWS_CONPTY_FINDINGS.md` — why driving tokensave's TTY prompt via a pseudoconsole was implemented and abandoned, with the full diagnostic
 
 ### Fixed
+- (scrub-history) Every background worker in the Scrub History dialog called `self.after()` directly — a cross-thread Tk call that usually works on Windows, and on Linux does not raise but BLOCKS. Workers now post to a queue drained by a main-thread pump, so none of them touches Tk. Also bounded a worker that posted a prompt and then waited on `q.get()` with no timeout, which wedged the thread in silence if the prompt never ran
 - (projects) `fmt_age` dropped the year, so "May 13 this year" and "May 13 three years ago" rendered identically in Last Synced — on the one column whose purpose is spotting a stale index. Dates outside the current year now carry the year
 - (doc-drafter) The notebook tab strip needed ~760px against the dialog's own 720px minimum width, and Tk does not scroll tab strips, so the last tab was unreachable at the smallest supported size. The two longest labels are shortened; a test pins the width budget against the declared minsize
 - (settings) The pre-commit hook help text said it runs `tests/smoke_test.py`; the hook has run the whole `tests/` suite since v4.12
