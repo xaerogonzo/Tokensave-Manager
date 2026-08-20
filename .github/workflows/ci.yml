@@ -63,6 +63,11 @@ jobs:
         # catching that here reports the actual cause rather than a confusing
         # failure buried in whichever test happened to touch the code path.
         run: python tests/test_no_windows_only_subprocess_flags.py
+      - name: No cross-thread Tk calls in src/
+        # A worker calling self.after() does not raise on Linux, it
+        # BLOCKS with no log line. Ratcheted: known offenders may not
+        # grow and no new file may join them.
+        run: python tests/test_no_cross_thread_tk.py
 
   # ── Pytest suite on Roadmap-* branches (warn-only) ─────────────────────
   test-warn:

@@ -137,19 +137,6 @@ def test_scrub_now_runs_backup_then_filter_repo(
     assert call_order == ["backup", "filter_repo"]
 
 
-@pytest.mark.skipif(
-    sys.platform != "win32",
-    reason=(
-        "Deadlocks on the Linux CI runner and the cause is in the dialog, "
-        "not this test. A CI diagnostic showed the scrub worker alive after "
-        "10s having called create_backup_branch once, scheduled NOTHING, and "
-        "raised nothing — it blocks on its first self.after(...). Sleeping, "
-        "polling tk_root.update(), and joining the thread were all tried and "
-        "all failed. Pre-existing: master's test-gate has been red since "
-        "0536f89. Tracked as a follow-up to fix ScrubHistoryDialog's "
-        "threading rather than papered over here."
-    ),
-)
 def test_scrub_now_aborts_if_backup_fails(
     tk_root, mock_config, mocker, patch_after, wait_for, tmp_path
 ):
@@ -167,28 +154,14 @@ def test_scrub_now_aborts_if_backup_fails(
     dialog._selected_file.set("secrets.json")
     dialog._backup_branch_name = "backup/before-scrub-1700000000"
 
-    # JOIN the worker rather than sleeping a guessed duration or polling the
-    # event loop. Both alternatives were tried on CI and both were wrong:
-    #
-    #   * the original `time.sleep(0.2)` was enough on a Windows dev box and
-    #     not on the ubuntu runner, leaving the worker alive at teardown and
-    #     tripping tk_root's thread-leak check;
-    #   * polling with `tk_root.update()` made it far worse — a CI diagnostic
-    #     showed the worker alive after 10s having scheduled nothing, with no
-    #     exception. The main thread spinning in update() holds the Tcl
-    #     interpreter lock, and the worker's next `self.after(...)` blocks on
-    #     it. Driving the loop starves the very thread being waited on.
-    #
-    # Joining leaves the main thread idle, so the worker gets the lock and
-    # finishes, and it is deterministic rather than timing-dependent.
+    # The worker posts to the dialog's UI queue and returns; it no longer
+    # calls self.after(), which is what used to block it on Linux. So it
+    # simply finishes, and joining it is deterministic.
     before = {t.ident for t in threading.enumerate()}
     dialog._on_scrub_now()
-
-    workers = [t for t in threading.enumerate() if t.ident not in before]
-    for worker in workers:
+    for worker in [t for t in threading.enumerate() if t.ident not in before]:
         worker.join(timeout=15.0)
-        assert not worker.is_alive(), (
-            f"scrub worker {worker.name} did not finish within 15s")
+        assert not worker.is_alive(), f"{worker.name} did not finish"
 
     mock_scrub.assert_not_called()
 
