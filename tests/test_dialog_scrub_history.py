@@ -15,6 +15,8 @@ from __future__ import annotations
 
 from types import SimpleNamespace
 
+import threading
+
 import pytest
 
 tk = pytest.importorskip("tkinter")
@@ -141,70 +143,37 @@ def test_scrub_now_aborts_if_backup_fails(
                  return_value=_preflight_ok())
     mocker.patch("dialogs.scrub_history.messagebox.askyesno",
                  return_value=True)
-    mock_backup = mocker.patch("dialogs.scrub_history.create_backup_branch",
-                               return_value=(False, "branch creation failed"))
+    mocker.patch("dialogs.scrub_history.create_backup_branch",
+                 return_value=(False, "branch creation failed"))
     mock_scrub = mocker.patch("dialogs.scrub_history.run_scrub")
 
     dialog = ScrubHistoryDialog(tk_root, str(tmp_path), mock_config)
-    harness = patch_after(dialog)
+    patch_after(dialog)
     dialog._selected_file.set("secrets.json")
     dialog._backup_branch_name = "backup/before-scrub-1700000000"
 
-    # TEMPORARY DIAGNOSTIC (Roadmap-9). This test fails only on the Linux CI
-    # runner, and three hypotheses about why were all wrong: waiting on
-    # _scrub_in_flight (patch_after captures the callback so it never
-    # clears), waiting on threading.active_count() (a global other tests
-    # perturb), and waiting on the harness queue. Rather than guess a fourth
-    # time, collect the real state and put it in the failure message.
-    # Revert once it has pointed at the cause.
-    import threading as _th
-    import time as _time
-    import traceback as _tb
+    # JOIN the worker rather than sleeping a guessed duration or polling the
+    # event loop. Both alternatives were tried on CI and both were wrong:
+    #
+    #   * the original `time.sleep(0.2)` was enough on a Windows dev box and
+    #     not on the ubuntu runner, leaving the worker alive at teardown and
+    #     tripping tk_root's thread-leak check;
+    #   * polling with `tk_root.update()` made it far worse — a CI diagnostic
+    #     showed the worker alive after 10s having scheduled nothing, with no
+    #     exception. The main thread spinning in update() holds the Tcl
+    #     interpreter lock, and the worker's next `self.after(...)` blocks on
+    #     it. Driving the loop starves the very thread being waited on.
+    #
+    # Joining leaves the main thread idle, so the worker gets the lock and
+    # finishes, and it is deterministic rather than timing-dependent.
+    before = {t.ident for t in threading.enumerate()}
+    dialog._on_scrub_now()
 
-    worker_errors = []
-    prev_hook = _th.excepthook
-
-    def _capture(args):
-        # A daemon worker's exception is swallowed by default, so an early
-        # crash looks identical to "never scheduled anything".
-        worker_errors.append("".join(_tb.format_exception(
-            args.exc_type, args.exc_value, args.exc_traceback)))
-        prev_hook(args)
-
-    _th.excepthook = _capture
-    try:
-        before = len(harness._queue)
-        threads_before = sorted(t.name for t in _th.enumerate())
-        dialog._on_scrub_now()
-
-        deadline = _time.monotonic() + 10.0
-        while _time.monotonic() < deadline:
-            tk_root.update()
-            if len(harness._queue) > before:
-                break
-            _time.sleep(0.02)
-    finally:
-        _th.excepthook = prev_hook
-
-    if len(harness._queue) <= before:
-        alive = sorted(
-            "{0}(daemon={1},alive={2})".format(t.name, t.daemon, t.is_alive())
-            for t in _th.enumerate())
-        queued = [getattr(cb, "__name__", repr(cb))[:40]
-                  for _dl, _sq, cb, _ar in harness._queue]
-        raise AssertionError(chr(10).join([
-            "DIAGNOSTIC - the worker scheduled nothing.",
-            "  scrub_in_flight   : {0}".format(
-                getattr(dialog, "_scrub_in_flight", "<missing>")),
-            "  queue before/after: {0}/{1}".format(before, len(harness._queue)),
-            "  queue contents    : {0}".format(queued),
-            "  backup mock calls : {0}".format(mock_backup.call_count),
-            "  scrub mock calls  : {0}".format(mock_scrub.call_count),
-            "  threads before    : {0}".format(threads_before),
-            "  threads now       : {0}".format(alive),
-            "  dialog exists     : {0}".format(dialog.winfo_exists()),
-            "  worker exceptions : {0}".format(worker_errors or ["none"]),
-        ]))
+    workers = [t for t in threading.enumerate() if t.ident not in before]
+    for worker in workers:
+        worker.join(timeout=15.0)
+        assert not worker.is_alive(), (
+            f"scrub worker {worker.name} did not finish within 15s")
 
     mock_scrub.assert_not_called()
 
