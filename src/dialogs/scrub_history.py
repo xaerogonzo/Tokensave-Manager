@@ -40,7 +40,7 @@ from tkinter import filedialog, messagebox, ttk
 from typing import TYPE_CHECKING
 
 from constants import C
-from theme import bind_mousewheel
+from theme import UiPumpMixin, bind_mousewheel
 from helpers.git import _find_tracked_but_ignored
 from helpers.git_scrub import (
     build_backup_branch_name,
@@ -61,7 +61,7 @@ if TYPE_CHECKING:
     from state import ManagerConfig
 
 
-class ScrubHistoryDialog(tk.Toplevel):
+class ScrubHistoryDialog(UiPumpMixin, tk.Toplevel):
     """Erase a single file from ALL git history with layered safety nets.
 
     Constructed from ``GitignoreDialog`` after the user clicks "⚙ Advanced".
@@ -97,11 +97,9 @@ class ScrubHistoryDialog(tk.Toplevel):
         # nothing, which is the worst shape a bug can take: no error, no log
         # line, no way to tell what it was waiting for.
         #
-        # Workers now hand callables to this queue and a main-thread pump
-        # runs them, so no worker touches Tk at all. Same pattern as
-        # GitTabController._poll_log_queue.
-        self._ui_queue: queue.Queue = queue.Queue()
-        self._pump_id = None
+        # Workers now hand callables to UiPumpMixin's queue and a
+        # main-thread pump runs them, so no worker touches Tk at all. Same
+        # pattern as GitTabController._poll_log_queue.
 
         # Build sections — Save-style: bottom bar FIRST so it's always visible.
         self._build_destructive_banner()
@@ -119,7 +117,6 @@ class ScrubHistoryDialog(tk.Toplevel):
 
         # Workers post to _ui_queue; nothing runs it until this starts.
         self._start_ui_pump()
-        self.bind("<Destroy>", self._stop_ui_pump, add="+")
 
     # ── Section builders ──────────────────────────────────────────────────────
 
@@ -868,7 +865,6 @@ class ScrubHistoryDialog(tk.Toplevel):
                 url = self._preflight.get("remote_url", "")
             if not url:
                 # Last resort: ask via main thread, block worker until answered
-                import queue
                 q: queue.Queue = queue.Queue()
                 from tkinter.simpledialog import askstring
                 def _ask():
@@ -937,52 +933,6 @@ class ScrubHistoryDialog(tk.Toplevel):
         self._log_txt.configure(state=tk.NORMAL)
         self._log_txt.delete("1.0", tk.END)
         self._log_txt.configure(state=tk.DISABLED)
-
-    # ── Worker -> UI plumbing ────────────────────────────────────────────
-
-    _PUMP_MS = 50
-
-    def _post(self, fn) -> None:
-        """Run *fn* on the main thread. Safe to call from any thread.
-
-        The one rule for every worker in this dialog: never touch Tk, post
-        instead.
-        """
-        self._ui_queue.put(fn)
-
-    def _start_ui_pump(self) -> None:
-        self._pump()
-
-    def _pump(self) -> None:
-        """Drain whatever the workers have posted. Main thread only."""
-        try:
-            if not self.winfo_exists():
-                return
-        except tk.TclError:
-            return
-        try:
-            while True:
-                fn = self._ui_queue.get_nowait()
-                try:
-                    fn()
-                except tk.TclError:
-                    pass          # widget went away between post and run
-        except queue.Empty:
-            pass
-        try:
-            self._pump_id = self.after(self._PUMP_MS, self._pump)
-        except tk.TclError:
-            self._pump_id = None
-
-    def _stop_ui_pump(self, evt=None) -> None:
-        if evt is not None and getattr(evt, "widget", None) is not self:
-            return
-        if self._pump_id:
-            try:
-                self.after_cancel(self._pump_id)
-            except tk.TclError:
-                pass
-            self._pump_id = None
 
     def _log_append(self, line: str):
         try:

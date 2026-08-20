@@ -438,7 +438,11 @@ def test_refresh_agents_runs_bare_reinstall(tk_root, mock_config, mocker,
                        return_value=_proc(0, stdout="ok"))
     dialog._on_refresh_agents()
     wait_for(lambda: run.called, timeout_s=3.0)
-    assert run.call_args.args[0] == [str(ts_exe), "reinstall"]
+    # Assert on the reinstall invocation itself, not on the LAST call. The
+    # worker posts _refresh_state through the UI pump, and since the pump
+    # really runs it, a `--version` probe lands after the reinstall.
+    argvs = [c.args[0] for c in run.call_args_list]
+    assert [str(ts_exe), "reinstall"] in argvs, argvs
 
 
 def test_refresh_agents_declined_runs_nothing(tk_root, mock_config, mocker,

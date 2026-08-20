@@ -28,7 +28,6 @@ from __future__ import annotations
 import os
 import subprocess
 import sys
-import queue
 import threading
 import time
 import tkinter as tk
@@ -70,6 +69,7 @@ from helpers.runtime import (
 )
 from helpers.tray_manager import TrayManager
 from state import ManagerConfig
+from theme import UiPumpMixin
 
 
 # ── Prompt snippets (Reference tab) ─────────────────────────────────────────
@@ -95,7 +95,7 @@ def _geometry_on_screen(root: "tk.Tk", geom: str) -> bool:
     return x < sw and y < sh and x > -600 and y > -520
 
 
-class App(tk.Tk):
+class App(UiPumpMixin, tk.Tk):
     def __init__(self):
         super().__init__()
         self.title("TokenSave Manager")
@@ -140,8 +140,6 @@ class App(tk.Tk):
         # simply BLOCKS with no error and no log line. Workers post here
         # and the pump runs it on the Tk thread. Started before _build so
         # nothing can post into a queue that is not being drained.
-        self._ui_queue: queue.Queue = queue.Queue()
-        self._ui_pump_id = None
         self._style()
         self._build()
         self._start_ui_pump()
@@ -195,41 +193,6 @@ class App(tk.Tk):
         """
         self._src_banner_dismissed = True
         self._src_banner.pack_forget()
-
-    # ── Worker -> UI plumbing ────────────────────────────────────────────
-
-    _UI_PUMP_MS = 50
-
-    def _post(self, fn, *args) -> None:
-        """Run *fn(*args)* on the Tk thread. Safe from any thread.
-
-        The one rule for every worker in this file: never touch Tk, post.
-        """
-        self._ui_queue.put((fn, args))
-
-    def _start_ui_pump(self) -> None:
-        self._ui_pump()
-
-    def _ui_pump(self) -> None:
-        """Drain whatever the workers posted. Tk thread only."""
-        try:
-            if not self.winfo_exists():
-                return
-        except tk.TclError:
-            return
-        try:
-            while True:
-                fn, args = self._ui_queue.get_nowait()
-                try:
-                    fn(*args)
-                except tk.TclError:
-                    pass          # widget went away between post and run
-        except queue.Empty:
-            pass
-        try:
-            self._ui_pump_id = self.after(self._UI_PUMP_MS, self._ui_pump)
-        except tk.TclError:
-            self._ui_pump_id = None
 
     def report_callback_exception(self, exc, val, tb):
         """Log unhandled exceptions raised inside Tk callbacks.

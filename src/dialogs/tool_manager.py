@@ -20,8 +20,8 @@ Cascading uninstall (G-D non-fatal at MCP step):
 
 Concurrency (G-G): every action handler synchronously calls
 ``_set_row_busy(tool_id, True)`` BEFORE spawning the worker thread, and
-the worker's ``finally`` always restores button state via
-``self.after(0, …)``.
+the worker's ``finally`` always restores button state by posting through
+``UiPumpMixin._post`` — never by touching Tk from the worker itself.
 
 Discovery surfaces:
   * Settings → tokensave section: '🛠️ Open Tool Manager…' button
@@ -56,6 +56,7 @@ from helpers.install_tokensave import (
     releases_human_url,
 )
 from helpers.mcp import _claude_code_mcp_has_codegraph
+from theme import UiPumpMixin
 
 if TYPE_CHECKING:
     from state import ManagerConfig
@@ -114,7 +115,7 @@ def _persist_cfg_clear(cfg, key: str) -> None:
         pass
 
 
-class ToolManagerDialog(tk.Toplevel):
+class ToolManagerDialog(UiPumpMixin, tk.Toplevel):
     """Install / Update / Uninstall lifecycle dialog for tokensave + codegraph."""
 
     def __init__(self, parent, cfg: "ManagerConfig") -> None:
@@ -141,6 +142,9 @@ class ToolManagerDialog(tk.Toplevel):
             fill=tk.X, padx=18, pady=(8, 8))
         self._build_tool_row("codegraph", "CodeGraph",
                              "Alternative code-graph tool")
+
+        # Workers post to _ui_queue; nothing runs it until this starts.
+        self._start_ui_pump()
 
         self._refresh_state()
         self._centre_on_parent(parent)
@@ -418,10 +422,13 @@ class ToolManagerDialog(tk.Toplevel):
             pass
 
     def _log_threadsafe(self, line: str) -> None:
-        try:
-            self.after(0, lambda l=line: self._log(l))
-        except tk.TclError:
-            pass
+        """Log from a worker thread.
+
+        Passed to the install helpers as their ``on_log`` callback, so it runs
+        on the worker — the AST guard cannot see that, since the call is
+        indirect, which is exactly why it goes through the queue too.
+        """
+        self._post(self._log, line)
 
     # ── Action dispatchers ────────────────────────────────────────────────────
 
@@ -500,8 +507,8 @@ class ToolManagerDialog(tk.Toplevel):
                     self._log_threadsafe(
                         "✗ codegraph install failed — see output above.")
             finally:
-                self.after(0, lambda: self._set_row_busy("codegraph", False))
-                self.after(0, self._refresh_state)
+                self._post(self._set_row_busy, "codegraph", False)
+                self._post(self._refresh_state)
 
         threading.Thread(target=_worker, daemon=True).start()
 
@@ -520,8 +527,8 @@ class ToolManagerDialog(tk.Toplevel):
                 if not ok:
                     self._log_threadsafe("✗ Update failed.")
             finally:
-                self.after(0, lambda: self._set_row_busy("codegraph", False))
-                self.after(0, self._refresh_state)
+                self._post(self._set_row_busy, "codegraph", False)
+                self._post(self._refresh_state)
 
         threading.Thread(target=_worker, daemon=True).start()
 
@@ -588,8 +595,8 @@ class ToolManagerDialog(tk.Toplevel):
                 _persist_cfg_clear(self._cfg, "codegraph_exe")
                 self._log_threadsafe("✓ Uninstall complete.")
             finally:
-                self.after(0, lambda: self._set_row_busy("codegraph", False))
-                self.after(0, self._refresh_state)
+                self._post(self._set_row_busy, "codegraph", False)
+                self._post(self._refresh_state)
 
         threading.Thread(target=_worker, daemon=True).start()
 
@@ -655,8 +662,8 @@ class ToolManagerDialog(tk.Toplevel):
             except (OSError, FileNotFoundError) as exc:
                 self._log_threadsafe(f"✗ Could not launch tokensave: {exc}")
             finally:
-                self.after(0, lambda: self._set_row_busy("tokensave", False))
-                self.after(0, self._refresh_state)
+                self._post(self._set_row_busy, "tokensave", False)
+                self._post(self._refresh_state)
 
         threading.Thread(target=_worker, daemon=True).start()
 
@@ -682,7 +689,7 @@ class ToolManagerDialog(tk.Toplevel):
                 else:
                     # G-E friendly rate-limit message
                     if result == "rate_limit":
-                        self.after(0, lambda: messagebox.showwarning(
+                        self._post(lambda: messagebox.showwarning(
                             "GitHub rate limit",
                             "GitHub is rate-limiting this IP "
                             "(anonymous 60 requests/hour).\n\n"
@@ -690,7 +697,7 @@ class ToolManagerDialog(tk.Toplevel):
                             f"  {releases_human_url()}",
                             parent=self))
                     elif result == "zip_slip":
-                        self.after(0, lambda: messagebox.showerror(
+                        self._post(lambda: messagebox.showerror(
                             "Refused to extract archive",
                             "The downloaded archive contained a "
                             "suspicious member (parent traversal or "
@@ -700,7 +707,7 @@ class ToolManagerDialog(tk.Toplevel):
                             "attack.",
                             parent=self))
                     elif result == "not_a_zip":
-                        self.after(0, lambda: messagebox.showwarning(
+                        self._post(lambda: messagebox.showwarning(
                             "Bad download",
                             "Downloaded file is not a valid zip "
                             "(possibly a transient GitHub error). "
@@ -710,8 +717,8 @@ class ToolManagerDialog(tk.Toplevel):
                         self._log_threadsafe(
                             f"✗ Install failed: {result}")
             finally:
-                self.after(0, lambda: self._set_row_busy("tokensave", False))
-                self.after(0, self._refresh_state)
+                self._post(self._set_row_busy, "tokensave", False)
+                self._post(self._refresh_state)
 
         threading.Thread(target=_worker, daemon=True).start()
 
@@ -751,8 +758,8 @@ class ToolManagerDialog(tk.Toplevel):
                 if not ok:
                     self._log_threadsafe("✗ Upgrade failed.")
             finally:
-                self.after(0, lambda: self._set_row_busy("tokensave", False))
-                self.after(0, self._refresh_state)
+                self._post(self._set_row_busy, "tokensave", False)
+                self._post(self._refresh_state)
 
         threading.Thread(target=_worker, daemon=True).start()
 
@@ -826,7 +833,7 @@ class ToolManagerDialog(tk.Toplevel):
                 _persist_cfg_clear(self._cfg, "tokensave_exe")
                 self._log_threadsafe("✓ Uninstall complete.")
             finally:
-                self.after(0, lambda: self._set_row_busy("tokensave", False))
-                self.after(0, self._refresh_state)
+                self._post(self._set_row_busy, "tokensave", False)
+                self._post(self._refresh_state)
 
         threading.Thread(target=_worker, daemon=True).start()

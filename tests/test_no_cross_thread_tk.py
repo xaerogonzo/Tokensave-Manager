@@ -17,8 +17,10 @@ same reason two issues went upstream to tokensave this round. A failure you
 cannot see is worse than one that shouts.
 
 The rule: a worker hands a callable to a queue, and a main-thread pump runs
-it. See `ScrubHistoryDialog._post` / `_pump`,
-`GitTabController._poll_log_queue`, and `TestManagerDialog._drain_ci_queue`.
+it. `theme.UiPumpMixin` is the shared implementation — mix it in, call
+`_start_ui_pump()` once the widgets exist, and have workers call `_post()`.
+`GitTabController._poll_log_queue` and `TestManagerDialog._drain_ci_queue`
+are the older hand-rolled equivalents.
 
 Dual-mode: runs under pytest, and standalone for the import-free CI job.
 """
@@ -47,11 +49,11 @@ _WORKER_NAMES = {"_worker", "worker"}
 # fixed, no file may get worse, and nothing new may join the list.
 #
 # Measured 2026-08-20. Lower a number as its dialog is converted; delete the
-# entry when it reaches zero. `test_the_baseline_is_not_stale` enforces that
-# — app.py was converted the same day and its entry is gone accordingly.
+# entry when it reaches zero. `test_the_baseline_is_not_stale` enforces that —
+# app.py, tool_manager.py and ollama_model_mgr.py were converted the same day
+# and their entries are gone accordingly, taking the list from 61 sites in 12
+# files down to 22 in 9.
 _KNOWN_OFFENDERS = {
-    "src/dialogs/tool_manager.py":             17,
-    "src/dialogs/ollama_model_mgr.py":         11,
     "src/dialogs/private_repo_mgr.py":          4,
     "src/dialogs/codegraph_daemon_manager.py":  3,
     "src/dialogs/codegraph_mcp_picker.py":      3,
@@ -143,29 +145,86 @@ def test_the_baseline_is_not_stale():
         + repr(stale))
 
 
-# ── the dialog this was written for ───────────────────────────────────────
+# ── the converted windows ─────────────────────────────────────
 
-def test_the_scrub_dialog_is_clean():
-    """It was converted; it stays converted."""
-    assert "src/dialogs/scrub_history.py" not in _counts_by_file()
-    assert "src/dialogs/scrub_history.py" not in _KNOWN_OFFENDERS
+# Each of these had worker-thread Tk calls and now routes them through
+# `theme.UiPumpMixin`. Naming them means a conversion cannot be quietly
+# undone: the ratchet alone would stay green if someone dropped the mixin,
+# because it only counts `self.after(...)` calls that actually came back.
+_CONVERTED = (
+    "app.py",
+    "dialogs/scrub_history.py",
+    "dialogs/tool_manager.py",
+    "dialogs/ollama_model_mgr.py",
+)
 
 
-def test_the_scrub_dialog_has_the_queue_and_pump():
-    src = (_SRC / "dialogs" / "scrub_history.py").read_text(encoding="utf-8")
-    for token in ("self._ui_queue", "def _post", "def _pump",
-                  "def _stop_ui_pump"):
-        assert token in src, f"scrub_history lost {token}"
+def _mixin_classes(tree) -> dict:
+    """Classes naming UiPumpMixin as a base -> the `self.x()` names they call."""
+    out = {}
+    for node in ast.walk(tree):
+        if not isinstance(node, ast.ClassDef):
+            continue
+        if not any(isinstance(b, ast.Name) and b.id == "UiPumpMixin"
+                   for b in node.bases):
+            continue
+        out[node.name] = {
+            c.func.attr for c in ast.walk(node)
+            if isinstance(c, ast.Call)
+            and isinstance(c.func, ast.Attribute)
+            and isinstance(c.func.value, ast.Name)
+            and c.func.value.id == "self"
+        }
+    return out
 
 
-def test_the_app_window_has_the_queue_and_pump():
-    """app.py was the largest offender (11 sites) and is the main window, so
-    a worker blocking there wedges the whole UI rather than one dialog."""
-    src = (_SRC / "app.py").read_text(encoding="utf-8")
-    for token in ("self._ui_queue", "def _post", "def _ui_pump",
-                  "def _start_ui_pump"):
-        assert token in src, f"app.py lost {token}"
-    assert "src/app.py" not in _counts_by_file()
+def test_the_converted_windows_stay_clean():
+    """They were converted; they stay converted."""
+    counts = _counts_by_file()
+    for rel in _CONVERTED:
+        path = f"src/{rel}"
+        assert path not in counts, f"{rel} regressed: {counts[path]} site(s)"
+        assert path not in _KNOWN_OFFENDERS, f"{rel} is back on the baseline"
+
+
+def test_the_converted_windows_use_the_shared_mixin():
+    for rel in _CONVERTED:
+        tree = ast.parse((_SRC / rel).read_text(encoding="utf-8"))
+        assert _mixin_classes(tree), (
+            f"{rel} no longer mixes in UiPumpMixin, so its workers have "
+            "nowhere safe to post")
+
+
+def test_every_mixin_user_starts_its_pump():
+    """The failure this catches is invisible by construction.
+
+    `_post` needs the queue that `_start_ui_pump` creates. A class that mixes
+    the mixin in but never starts it raises AttributeError on its FIRST post
+    — on a worker thread, where nothing is watching — and the window then
+    simply never updates. Same silent shape as the bug being fixed.
+    """
+    missing = []
+    for path in sorted(_SRC.rglob("*.py")):
+        if "__pycache__" in path.parts:
+            continue
+        try:
+            tree = ast.parse(path.read_text(encoding="utf-8", errors="replace"))
+        except SyntaxError:
+            continue
+        for cls, calls in _mixin_classes(tree).items():
+            if "_start_ui_pump" not in calls:
+                missing.append(f"{path.relative_to(_ROOT).as_posix()}:{cls}")
+    assert missing == [], (
+        "these mix in UiPumpMixin but never call self._start_ui_pump(), so "
+        "the first _post() raises AttributeError on a worker thread where "
+        "nothing reports it: " + repr(missing))
+
+
+def test_the_mixin_itself_is_intact():
+    src = (_SRC / "theme.py").read_text(encoding="utf-8")
+    for token in ("class UiPumpMixin", "def _start_ui_pump", "def _post",
+                  "def _ui_pump", "def _stop_ui_pump"):
+        assert token in src, f"theme.py lost {token}"
 
 
 # ── the guard can actually fail ───────────────────────────────────────────
