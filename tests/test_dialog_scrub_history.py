@@ -141,8 +141,8 @@ def test_scrub_now_aborts_if_backup_fails(
                  return_value=_preflight_ok())
     mocker.patch("dialogs.scrub_history.messagebox.askyesno",
                  return_value=True)
-    mocker.patch("dialogs.scrub_history.create_backup_branch",
-                 return_value=(False, "branch creation failed"))
+    mock_backup = mocker.patch("dialogs.scrub_history.create_backup_branch",
+                               return_value=(False, "branch creation failed"))
     mock_scrub = mocker.patch("dialogs.scrub_history.run_scrub")
 
     dialog = ScrubHistoryDialog(tk_root, str(tmp_path), mock_config)
@@ -150,21 +150,63 @@ def test_scrub_now_aborts_if_backup_fails(
     dialog._selected_file.set("secrets.json")
     dialog._backup_branch_name = "backup/before-scrub-1700000000"
 
-    # The worker's LAST act before its abort `return` is scheduling _done,
-    # so waiting for that callback to reach the harness proves it took the
-    # abort path and is about to exit.
-    #
-    # Two earlier attempts were wrong and are worth not repeating: waiting on
-    # `_scrub_in_flight` hangs, because patch_after captures the _done
-    # callback rather than running it, so the flag never clears; and waiting
-    # on threading.active_count() is a global measure that other tests'
-    # threads perturb, which timed out on the Linux runner.
-    before = len(harness._queue)
-    dialog._on_scrub_now()
-    wait_for(lambda: len(harness._queue) > before, timeout_s=10.0)
+    # TEMPORARY DIAGNOSTIC (Roadmap-9). This test fails only on the Linux CI
+    # runner, and three hypotheses about why were all wrong: waiting on
+    # _scrub_in_flight (patch_after captures the callback so it never
+    # clears), waiting on threading.active_count() (a global other tests
+    # perturb), and waiting on the harness queue. Rather than guess a fourth
+    # time, collect the real state and put it in the failure message.
+    # Revert once it has pointed at the cause.
+    import threading as _th
+    import time as _time
+    import traceback as _tb
+
+    worker_errors = []
+    prev_hook = _th.excepthook
+
+    def _capture(args):
+        # A daemon worker's exception is swallowed by default, so an early
+        # crash looks identical to "never scheduled anything".
+        worker_errors.append("".join(_tb.format_exception(
+            args.exc_type, args.exc_value, args.exc_traceback)))
+        prev_hook(args)
+
+    _th.excepthook = _capture
+    try:
+        before = len(harness._queue)
+        threads_before = sorted(t.name for t in _th.enumerate())
+        dialog._on_scrub_now()
+
+        deadline = _time.monotonic() + 10.0
+        while _time.monotonic() < deadline:
+            tk_root.update()
+            if len(harness._queue) > before:
+                break
+            _time.sleep(0.02)
+    finally:
+        _th.excepthook = prev_hook
+
+    if len(harness._queue) <= before:
+        alive = sorted(
+            "{0}(daemon={1},alive={2})".format(t.name, t.daemon, t.is_alive())
+            for t in _th.enumerate())
+        queued = [getattr(cb, "__name__", repr(cb))[:40]
+                  for _dl, _sq, cb, _ar in harness._queue]
+        raise AssertionError(chr(10).join([
+            "DIAGNOSTIC - the worker scheduled nothing.",
+            "  scrub_in_flight   : {0}".format(
+                getattr(dialog, "_scrub_in_flight", "<missing>")),
+            "  queue before/after: {0}/{1}".format(before, len(harness._queue)),
+            "  queue contents    : {0}".format(queued),
+            "  backup mock calls : {0}".format(mock_backup.call_count),
+            "  scrub mock calls  : {0}".format(mock_scrub.call_count),
+            "  threads before    : {0}".format(threads_before),
+            "  threads now       : {0}".format(alive),
+            "  dialog exists     : {0}".format(dialog.winfo_exists()),
+            "  worker exceptions : {0}".format(worker_errors or ["none"]),
+        ]))
 
     mock_scrub.assert_not_called()
-
 
 # ── _on_install_filter_repo ──────────────────────────────────────────────
 
