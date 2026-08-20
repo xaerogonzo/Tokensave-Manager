@@ -1,7 +1,8 @@
 <!--
-STATUS: FILED 2026-08-12 — https://github.com/aovestdipaperino/tokensave/issues/389
-Found against tokensave v7.9.0. Still OPEN upstream; issue 389 is registered
-in docs/tracked-issues.json, so the integration check reports its state.
+STATUS: CLOSED — verified via GitHub API 2026-08-19
+Found against tokensave v7.9.0, FIXED in v7.10.0 — see the Resolution section
+at the foot of this file for what was verified locally. Issue 389 stays
+registered in docs/tracked-issues.json as a record.
 
 This file is the source-of-truth draft the filed issue was built from. What
 went out is this document minus this comment block, the `# ` title line
@@ -126,3 +127,26 @@ documented.
 
 Found from TokenSave Manager while auditing the v7.8.1 → v7.9.0 upgrade for
 snippet and integration coverage.
+
+## Resolution — verified locally 2026-08-19 against tokensave v7.10.0
+
+Fixed upstream; #389 is CLOSED and v7.10.0's release notes list it under
+Fixed. Confirmed on this machine, with one nuance worth keeping:
+
+- Before: the installed matcher read `Agent|Grep|Bash` — i.e. the workaround
+  below was no longer applied, so Glob coverage was unreachable again.
+- Running `tokensave doctor` repaired it in place to `Agent|Grep|Bash|Glob`.
+  A `diff` of `~/.claude/settings.json` before and after showed that matcher
+  string as the ONLY change; nothing else in the hooks, permissions, or MCP
+  blocks moved.
+
+**The nuance:** upgrading the binary is not sufficient. An earlier v7.10.0
+invocation had already rewritten `~/.claude/settings.json` byte-identically
+(see the sibling doc for issue #419) WITHOUT correcting the matcher, so a
+passive settings refresh leaves an existing install stale. It takes an
+explicit `doctor` / `install` run to pick the fix up. Anyone upgrading from
+≤7.9.0 and assuming the upgrade alone restored Glob coverage would be wrong.
+
+The hand-edit in **Workaround** above is therefore obsolete — `doctor` now
+does it, and writes the alternation in the order `Agent|Grep|Bash|Glob`
+(functionally identical to the workaround's `Agent|Glob|Grep|Bash`).

@@ -34,6 +34,7 @@ from helpers.llm import _is_auth_error
 from dialogs.set_remote import SetRemoteDialog
 from dialogs.github_setup import GitHubSetupDialog
 from dialogs.merge_pr import MergePRDialog
+from helpers.merge_body import build_merge_body
 from dialogs.release_wizard import ReleaseWizardDialog
 
 if TYPE_CHECKING:
@@ -188,6 +189,26 @@ def _update_button_states(ctl, is_repo, remote) -> None:
         state = tk.NORMAL if enabled else tk.DISABLED
         for btn in btns:
             btn.configure(state=state)
+
+
+def _build_merge_cmd(pr_number: int, strategy: str, delete_branch: bool,
+                     pr_title: str, body: str) -> list:
+    """argv for `gh pr merge`. Pure, so the shape is testable.
+
+    *body* travels as its own argv element and is never interpolated into a
+    shell string: CHANGELOG bullets routinely carry backticks, ampersands and
+    equals signs, which is exactly what breaks naive quoting.
+
+    An empty *body* means "say nothing extra" — GitHub's default title-only
+    commit is used rather than a blank body written over it.
+    """
+    cmd = ["gh", "pr", "merge", str(pr_number), f"--{strategy}"]
+    if delete_branch:
+        cmd.append("--delete-branch")
+    if body:
+        # --subject keeps the PR title as the summary line.
+        cmd += ["--subject", pr_title, "--body", body]
+    return cmd
 
 
 class GitTabController:
@@ -443,13 +464,13 @@ class GitTabController:
                                  command=self._branch_mgmt.cmd_git_new_branch)
         btn_switch  = ttk.Button(row2, text="🔀  Switch Branch…",
                                  command=self._branch_mgmt.cmd_git_switch_branch)
-        btn_merge   = ttk.Button(row2, text="⇄  Merge…",
+        btn_merge   = ttk.Button(row2, text="⇄  Merge branch…",
                                  command=self._branch_mgmt.cmd_git_merge)
         btn_del     = ttk.Button(row2, text="🗑  Delete Branch…",
                                  command=self._branch_mgmt.cmd_git_delete_branch)
         btn_openpr  = ttk.Button(row2, text="🔗  Open PR",
                                  command=self.cmd_git_open_pr)
-        btn_mergepr = ttk.Button(row2, text="🐙  Merge PR…",
+        btn_mergepr = ttk.Button(row2, text="🐙  Merge Pull Request…",
                                  command=self.cmd_git_merge_pr)
         btn_release = ttk.Button(row2, text="📦  Release…",
                                  command=self.cmd_git_release)
@@ -1016,14 +1037,38 @@ class GitTabController:
         """Open the MergePRDialog with the fetched PR list."""
         MergePRDialog(self._root, path, prs, self._do_merge_pr)
 
+    @staticmethod
+    def _changelog_merge_body(path: str) -> str:
+        """Read CHANGELOG.md and render its [Unreleased] block, or "".
+
+        Any read failure resolves to "" so the merge proceeds with GitHub's
+        default body — a missing CHANGELOG must not block a merge.
+        """
+        cl = os.path.join(path, "CHANGELOG.md")
+        try:
+            with open(cl, encoding="utf-8") as fh:
+                return build_merge_body(fh.read())
+        except (OSError, UnicodeDecodeError):
+            return ""
+
     def _do_merge_pr(self, path: str, pr_number: int, strategy: str,
-                     delete_branch: bool, pr_title: str):
-        """Run `gh pr merge <N> --<strategy>` and stream output."""
+                     delete_branch: bool, pr_title: str,
+                     changelog_body: bool = False):
+        """Run `gh pr merge <N> --<strategy>` and stream output.
+
+        With *changelog_body*, the CHANGELOG's [Unreleased] block becomes the
+        merge-commit body instead of GitHub's title-only default. Opt-in from
+        the dialog — see helpers/merge_body for why it must not be automatic.
+        """
         name = os.path.basename(path)
         flag = f"--{strategy}"
-        cmd = ["gh", "pr", "merge", str(pr_number), flag]
-        if delete_branch:
-            cmd.append("--delete-branch")
+        body = self._changelog_merge_body(path) if changelog_body else ""
+        if changelog_body and not body:
+            self._on_log(
+                "  ⚠ CHANGELOG has no [Unreleased] content — "
+                "merging with GitHub's default body instead.", C["peach"])
+        cmd = _build_merge_cmd(pr_number, strategy, delete_branch,
+                               pr_title, body)
         self._on_log(
             f"$ gh pr merge {pr_number} {flag}"
             f"{' --delete-branch' if delete_branch else ''}  [{name}]",

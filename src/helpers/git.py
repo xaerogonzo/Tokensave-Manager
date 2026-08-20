@@ -284,3 +284,27 @@ def _git_push_with_tags(path: str, git_exe: str) -> tuple:
         return (f"Error invoking git: {exc}", 1)
     out = (proc.stdout or "") + (proc.stderr or "")
     return (out, proc.returncode)
+
+
+def _current_branch(path: str, git_exe: str) -> "str | None":
+    """Return the checked-out branch name, or None.
+
+    None covers every case where there is no branch to name: not a repo,
+    git missing, or a detached HEAD (where `--abbrev-ref HEAD` prints the
+    literal "HEAD"). Callers that want to display something must supply
+    their own fallback rather than treating None as a branch called HEAD.
+    """
+    try:
+        proc = subprocess.run(
+            [git_exe, "-C", path, "rev-parse", "--abbrev-ref", "HEAD"],
+            capture_output=True, text=True,
+            creationflags=CREATE_NO_WINDOW,
+        )
+    except (FileNotFoundError, OSError):
+        return None
+    if proc.returncode != 0:
+        return None
+    name = (proc.stdout or "").strip()
+    if not name or name == "HEAD":
+        return None
+    return name

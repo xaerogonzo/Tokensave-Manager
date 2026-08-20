@@ -17,10 +17,12 @@ the v4.12 "🧪 Run Smoke Tests" button). Four tabs:
                          rendered test file; click Generate to write
                          tests/test_<basename>.py with placeholder tests.
 
-All threading uses helpers/smoke_runner.run_pytest_in_background (V-E)
-so this dialog and the legacy SmokeTestsDialog share the same worker
-+ subprocess plumbing. Cancellation is wired through the PytestRun
-handle (V-G).
+All threading uses helpers/smoke_runner.run_pytest_in_background (V-E).
+That helper was extracted so this dialog and the then-still-present
+SmokeTestsDialog could share one worker + subprocess path; that dialog went
+unreferenced once this one replaced it and was deleted in Roadmap-9, leaving
+this the only caller. Cancellation is wired through the PytestRun handle
+(V-G).
 
 Subprocess+filesystem helpers all live in helpers/* — this file is
 purely UI orchestration.
@@ -28,13 +30,24 @@ purely UI orchestration.
 from __future__ import annotations
 
 import os
+import queue
+import threading
 import time
+import webbrowser
 import tkinter as tk
 from datetime import datetime
 from tkinter import messagebox, ttk
 from typing import TYPE_CHECKING, Optional
 
 from constants import C
+from theme import UiPumpMixin, _Tooltip
+from helpers.coverage_scan import (
+    format_cell,
+    load_coverage,
+    needs_attention,
+)
+from helpers.gh_ci_status import get_latest_run_status
+from helpers.git import _current_branch
 from helpers.test_discovery import (
     CoverageRow,
     StaleSignal,
@@ -67,7 +80,7 @@ _TEMPLATE_LABELS: dict[str, str] = {
 }
 
 
-class TestManagerDialog(tk.Toplevel):
+class TestManagerDialog(UiPumpMixin, tk.Toplevel):
     """Top-level dialog with the four test-lifecycle tabs."""
 
     # Tell pytest NOT to try collecting this class as a test class — it
@@ -76,6 +89,8 @@ class TestManagerDialog(tk.Toplevel):
 
     def __init__(self, parent, project_root: str, cfg: "ManagerConfig") -> None:
         super().__init__(parent)
+        # Start the worker -> UI channel before anything can post to it.
+        self._start_ui_pump()
         self._parent       = parent
         self._project_root = project_root
         self._cfg          = cfg
@@ -110,6 +125,9 @@ class TestManagerDialog(tk.Toplevel):
         self._refresh_tab_coverage()
         self._refresh_tab_stale()
         self._refresh_tab_scaffold()
+        self._ci_after_id = None
+        self._start_ci_polling()
+        self.bind("<Destroy>", self._on_destroy_ci, add="+")
 
     # ── UI construction ──────────────────────────────────────────────────
 
@@ -159,6 +177,38 @@ class TestManagerDialog(tk.Toplevel):
             actions, text="🔁 Sync PR Checklist",
             command=self._on_sync_pr_checklist)
         self._sync_pr_btn.pack(side=tk.RIGHT)
+        _Tooltip(self._sync_pr_btn,
+                 "Writes the latest test results into the open PR's"
+                 + "\n" +
+                 "testing checklist — the manager-marked section only."
+                 + "\n\n" +
+                 "Anything you wrote elsewhere in the PR body is left"
+                 + "\n" +
+                 "untouched. Needs an open PR for this branch.")
+
+        # CI badge for the CURRENT branch — deliberately not master, which is
+        # the one branch whose status is irrelevant while you work elsewhere.
+        self._ci_status = None
+        self._ci_var = tk.StringVar(value="… CI")
+        self._ci_lbl = tk.Label(
+            actions, textvariable=self._ci_var, bg=C["base"],
+            fg=C["overlay0"], font=("Segoe UI", 9), cursor="hand2")
+        self._ci_lbl.pack(side=tk.RIGHT, padx=(0, 12))
+        self._ci_lbl.bind("<Button-1>", self._on_ci_click)
+        _Tooltip(self._ci_lbl,
+                 "GitHub Actions status for the branch you are ON — not"
+                 + "\n" +
+                 "master, whose status is irrelevant while you work here."
+                 + "\n\n" +
+                 "🟢 passing    🟡 still running"
+                 + "\n" +
+                 "🔴 failed     ⚪ no result yet (new branch, or every job"
+                 + "\n" +
+                 "                 was skipped — which is normal here)"
+                 + "\n" +
+                 "⚫ could not ask gh — NOT the same as a failure"
+                 + "\n\n" +
+                 "Click to open the run on GitHub.")
 
         # Status line.
         self._status_var = tk.StringVar(value="Ready.")
@@ -209,7 +259,8 @@ class TestManagerDialog(tk.Toplevel):
         self._out_txt.configure(yscrollcommand=out_vsb.set)
         out_vsb.pack(side=tk.RIGHT, fill=tk.Y)
         self._out_txt.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
-        # Tag colours mirror the legacy smoke_tests dialog.
+        # Tag colours for the streamed pytest output, carried over from
+        # the smoke-tests dialog this tab replaced.
         self._out_txt.tag_configure("pass", foreground=C["green"])
         self._out_txt.tag_configure("fail", foreground=C["red"])
         self._out_txt.tag_configure("dim",  foreground=C["overlay0"])
@@ -317,7 +368,7 @@ class TestManagerDialog(tk.Toplevel):
 
         def _cb(passed: int, total: int, output: str, cancelled: bool) -> None:
             try:
-                self.after(0, lambda: self._on_pytest_done(
+                self._post(lambda: self._on_pytest_done(
                     target, passed, total, output, cancelled,
                     extra_args or []))
             except tk.TclError:
@@ -418,6 +469,105 @@ class TestManagerDialog(tk.Toplevel):
         self._run_handle = None
         self._set_running(False)
 
+    def _on_destroy_ci(self, evt=None) -> None:
+        """Cancel the pending CI refresh when the dialog goes away."""
+        if evt is not None and evt.widget is not self:
+            return                      # child widget destroyed, not us
+        for attr in ("_ci_after_id", "_ci_drain_id"):
+            after_id = getattr(self, attr, None)
+            if after_id:
+                try:
+                    self.after_cancel(after_id)
+                except tk.TclError:
+                    pass
+                setattr(self, attr, None)
+
+    # ── CI badge ──────────────────────────────────────────────────────────
+    #
+    # The `gh` query runs on a worker thread, but the result comes back
+    # through a Queue drained by a main-thread `after` poller — NOT via
+    # `self._post(...)` called from the worker. That shortcut raises
+    # "main thread is not in main loop" whenever the main thread happens not
+    # to be inside Tcl at that moment, which is timing-dependent and so fails
+    # intermittently rather than obviously. Same shape as
+    # GitTabController._poll_log_queue.
+
+    _CI_REFRESH_MS = 60_000
+    _CI_DRAIN_MS   = 150
+
+    def _start_ci_polling(self) -> None:
+        self._ci_queue = queue.Queue()
+        self._drain_ci_queue()
+        self._refresh_ci_badge()
+        self._schedule_ci_refresh()
+
+    def _schedule_ci_refresh(self) -> None:
+        try:
+            self._ci_after_id = self.after(
+                self._CI_REFRESH_MS, self._on_ci_tick)
+        except tk.TclError:
+            self._ci_after_id = None
+
+    def _on_ci_tick(self) -> None:
+        if not self.winfo_exists():
+            return
+        self._refresh_ci_badge()
+        self._schedule_ci_refresh()
+
+    def _drain_ci_queue(self) -> None:
+        """Main-thread pump: apply whatever the worker has posted."""
+        if not self.winfo_exists():
+            return
+        try:
+            while True:
+                status, label = self._ci_queue.get_nowait()
+                self._apply_ci_status(status, label)
+        except queue.Empty:
+            pass
+        try:
+            self._ci_drain_id = self.after(
+                self._CI_DRAIN_MS, self._drain_ci_queue)
+        except tk.TclError:
+            self._ci_drain_id = None
+
+    def _refresh_ci_badge(self) -> None:
+        branch = _current_branch(self._project_root, self._cfg.git_exe or "git")
+        if not branch:
+            # Detached HEAD or not a repo: nothing to query, and saying so
+            # beats querying with an empty branch and rendering the answer.
+            self._apply_ci_status(None, "⚫ CI: no branch")
+            return
+        gh_exe = (self._cfg.raw or {}).get("gh_exe") or "gh"
+        q = self._ci_queue
+
+        def worker() -> None:
+            status = get_latest_run_status(gh_exe, self._project_root, branch)
+            q.put((status, status.label()))
+
+        threading.Thread(target=worker, daemon=True,
+                         name="ci-status").start()
+
+    def _apply_ci_status(self, status, label: str) -> None:
+        if not self.winfo_exists():
+            return
+        self._ci_status = status
+        self._ci_var.set(label)
+        colour = C["overlay0"]
+        if status is not None:
+            colour = {
+                "success": C["green"],
+                "failed":  C["red"],
+                "running": C["yellow"],
+            }.get(status.state, C["overlay0"])
+        self._ci_lbl.configure(fg=colour)
+
+    def _on_ci_click(self, _evt=None) -> None:
+        """Open the run — only when there is one. A no-op click is fine."""
+        status = self._ci_status
+        if status is None or not status.is_clickable:
+            return
+        webbrowser.open(status.url)
+
     def _on_sync_pr_checklist(self) -> None:
         """Sync the open PR's testing checklist from the last-run cache."""
         from helpers.pr_checklist import sync_pr_checklist
@@ -485,15 +635,21 @@ class TestManagerDialog(tk.Toplevel):
         frame = tk.Frame(parent, bg=C["base"])
         frame.pack(fill=tk.BOTH, expand=True, padx=8, pady=(0, 8))
         self._cov_tv = ttk.Treeview(
-            frame, columns=("status",), show="tree headings",
+            frame, columns=("status", "coverage"), show="tree headings",
             selectmode="browse", height=18,
         )
         self._cov_tv.heading("#0", text="Source file")
         self._cov_tv.heading("status", text="Has tests?")
-        self._cov_tv.column("#0", width=460, anchor=tk.W)
-        self._cov_tv.column("status", width=140, anchor=tk.W)
+        self._cov_tv.heading("coverage", text="Coverage")
+        self._cov_tv.column("#0", width=400, anchor=tk.W)
+        self._cov_tv.column("status", width=120, anchor=tk.W)
+        self._cov_tv.column("coverage", width=120, anchor=tk.W)
         # Tag for untested rows.
         self._cov_tv.tag_configure("untested", foreground=C["yellow"])
+        # Measured-but-thin: a file with tests whose lines are mostly unrun.
+        # Distinct from "untested" because the fix is different — extend the
+        # existing tests rather than write the first one.
+        self._cov_tv.tag_configure("thin", foreground=C["peach"])
         cov_vsb = ttk.Scrollbar(frame, orient="vertical",
                                   command=self._cov_tv.yview)
         self._cov_tv.configure(yscrollcommand=cov_vsb.set)
@@ -503,19 +659,37 @@ class TestManagerDialog(tk.Toplevel):
     def _refresh_tab_coverage(self) -> None:
         self._cov_tv.delete(*self._cov_tv.get_children())
         self._coverage = scan_coverage_gaps(self._project_root)
+        measured = load_coverage(self._project_root)
         tested = sum(1 for r in self._coverage if r.has_tests)
         total  = len(self._coverage)
         pct    = (100 * tested // total) if total else 0
-        self._cov_summary_var.set(
-            f"{tested} / {total} src/ files have tests  ({pct}% by filename heuristic)"
-        )
+
+        # Never present measured numbers without saying when they came from —
+        # a bare percentage reads as current however stale it is.
+        if measured:
+            self._cov_summary_var.set(
+                f"{tested} / {total} src/ files have a test file "
+                f"({pct}% by filename)  ·  measured coverage from "
+                f"{measured.meta.age_label()}")
+        else:
+            self._cov_summary_var.set(
+                f"{tested} / {total} src/ files have tests  "
+                f"({pct}% by filename heuristic — no measured data yet)")
+
         for row in self._coverage:
             status = "✓ tested" if row.has_tests else "✗ no tests"
-            tag = "" if row.has_tests else "untested"
+            pct_val = measured.pct_for(row.rel_path)
+            cov_cell = format_cell(pct_val, row.has_tests)
+            if not row.has_tests:
+                tag = "untested"
+            elif needs_attention(pct_val):
+                tag = "thin"
+            else:
+                tag = ""
             self._cov_tv.insert(
                 "", tk.END, iid=row.rel_path,
                 text=row.rel_path,
-                values=(status,),
+                values=(status, cov_cell),
                 tags=(tag,) if tag else (),
             )
 
@@ -797,7 +971,7 @@ class TestManagerDialog(tk.Toplevel):
                 cancel_event=cancel_event,
             )
             if self.winfo_exists():
-                self.after(0, lambda c=content, e=err: _done(c, e))
+                self._post(lambda c=content, e=err: _done(c, e))
 
         def _done(content: "str | None", err: "str | None") -> None:
             if not self.winfo_exists():

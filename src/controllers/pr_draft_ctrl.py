@@ -158,10 +158,102 @@ class PRDraftCtrl:
         menu.add_separator()
         menu.add_command(label=base_label,
                          command=lambda: self._cmd_set_pr_base(path))
+        menu.add_separator()
+        menu.add_command(label="🔁 Refresh PR body from a new draft…",
+                         command=lambda: self._cmd_refresh_pr_body(path))
         try:
             menu.tk_popup(event.x_root, event.y_root)
         finally:
             menu.grab_release()
+
+    def _cmd_refresh_pr_body(self, path: str) -> None:
+        """Regenerate the manager-owned region of the open PR's body.
+
+        Generation runs on a worker; the diff and the write happen on the Tk
+        thread. The staleness check lives in refresh_pr_body, which re-reads
+        the PR immediately before writing — so the gap between this preview
+        and the write is checked rather than assumed.
+        """
+        from helpers.pr_body_refresh import extract_region
+        from helpers.pr_checklist import get_open_pr
+        from helpers.pr_draft import generate_pr_draft
+
+        gh_exe = (self._cfg.raw or {}).get("gh_exe") or "gh"
+        pr = get_open_pr(gh_exe, path)
+        if pr is None:
+            messagebox.showinfo(
+                "Refresh PR body",
+                "No open PR was found for this branch.\n\n"
+                "Push the branch and open a PR first — Draft PR can "
+                "create one for you.", parent=self._tab)
+            return
+
+        original_body = pr.get("body") or ""
+        if extract_region(original_body) is None:
+            messagebox.showinfo(
+                "Refresh PR body",
+                "This PR body has no manager-managed section, so there is "
+                "nothing to refresh without overwriting text somebody wrote "
+                "by hand.\n\n"
+                "Bodies created by Draft PR carry that section; this one "
+                "predates it or was written manually.", parent=self._tab)
+            return
+
+        pr_number = pr.get("number") or 0
+        base = self._resolve_pr_base(path)
+        self._on_log("  Generating a fresh PR draft…", C["blue"])
+
+        def worker():
+            err = ""
+            draft = None
+            try:
+                draft = generate_pr_draft(self._cfg, path, base or "")
+            except Exception as exc:                       # noqa: BLE001
+                err = str(exc)
+            if not draft and not err:
+                err = "the model returned nothing"
+            self._tab.after(
+                0, lambda: self._present_pr_body_refresh(
+                    path, gh_exe, original_body, pr_number, draft, err))
+
+        threading.Thread(target=worker, daemon=True,
+                         name="pr-body-refresh").start()
+
+    def _present_pr_body_refresh(self, path, gh_exe, original_body,
+                                 pr_number, draft, err) -> None:
+        """Show the region diff; write only if the user accepts."""
+        from dialogs.proposal import ProposalDialog, WriteProposal
+        from helpers.pr_body_refresh import extract_region, refresh_pr_body
+
+        if not draft:
+            messagebox.showerror(
+                "Refresh PR body",
+                f"Could not generate a draft: {err}", parent=self._tab)
+            return
+
+        current_region = (extract_region(original_body) or "").strip()
+
+        def _accept(final_text: str) -> None:
+            res = refresh_pr_body(gh_exe, path, original_body, final_text)
+            self._on_log(f"  {res.message}",
+                         C["green"] if res else C["peach"])
+            if not res:
+                messagebox.showwarning("Refresh PR body", res.message,
+                                       parent=self._tab)
+
+        ProposalDialog(
+            self._tab,
+            WriteProposal(
+                filepath=f"PR #{pr_number} body "
+                         f"(manager-managed section only)",
+                original_content=current_region,
+                proposed_content=draft.strip(),
+                rationale="Replaces only the manager-managed section of the "
+                          "PR body. Anything written outside it is left "
+                          "untouched, and the write is abandoned if that "
+                          "section changed on GitHub since this preview.",
+            ),
+            _accept)
 
     def _draft_pr_via_cli(self, path: str):
         from helpers.claude_cli import spawn_claude_cli   # lazy import
@@ -789,6 +881,12 @@ class PRDraftCtrl:
         happened.
         """
         import tempfile
+        from helpers.pr_body_refresh import has_region, wrap_region
+        # Mark the manager-owned span so "Refresh PR body" can later rewrite
+        # exactly this much and leave anything the user adds on GitHub alone.
+        # HTML comments, so they are invisible in the rendered body.
+        if not has_region(body_text):
+            body_text = wrap_region(body_text)
         try:
             with tempfile.NamedTemporaryFile(
                     mode="w", encoding="utf-8", suffix=".md",

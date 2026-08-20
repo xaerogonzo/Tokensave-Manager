@@ -6,7 +6,7 @@ a locked-in "code reviewer" system prompt.
 
 Async pattern matches GitCommitDialog: daemon thread runs the LLM call,
 spinner shows progress, tokens stream into the output pane via
-`self.after(0, ...)` with worker-side batching (~50 ms / 32 chars) so
+`self._post(...)` with worker-side batching (~50 ms / 32 chars) so
 fast local models don't saturate Tk's event loop.
 
 Takes both an `llm_cfg: dict` (the AI-features sub-config from
@@ -31,12 +31,13 @@ from helpers.commit_messages import _pending_diff, _files_from_diff
 from helpers.llm import _call_llm
 from helpers.runtime import log
 from helpers.ui import append_text
+from theme import UiPumpMixin
 
 if TYPE_CHECKING:
     from state import ManagerConfig
 
 
-class AICodeReviewDialog(tk.Toplevel):
+class AICodeReviewDialog(UiPumpMixin, tk.Toplevel):
     """Stage 1 of the agentic-AI roadmap: AI Code Review on the pending diff.
 
     Pure read-only. Calls _call_llm once with a "you are a code reviewer"
@@ -45,7 +46,7 @@ class AICodeReviewDialog(tk.Toplevel):
     writes, no autonomy concerns — just a one-shot review.
 
     Async pattern matches GitCommitDialog: daemon thread runs the LLM call,
-    spinner shows progress, self.after(0, ...) pushes the result back to
+    spinner shows progress, self._post(...) pushes the result back to
     the main thread. Stop button aborts the in-flight request.
     """
 
@@ -72,6 +73,8 @@ class AICodeReviewDialog(tk.Toplevel):
 
     def __init__(self, parent, path: str, llm_cfg: dict, cfg: "ManagerConfig"):
         super().__init__(parent)
+        # Start the worker -> UI channel before anything can post to it.
+        self._start_ui_pump()
         self.title(f"AI Code Review — {os.path.basename(path)}")
         self.configure(bg=C["base"])
         self.resizable(True, True)
@@ -350,7 +353,7 @@ class AICodeReviewDialog(tk.Toplevel):
                 batch_chars[0] = 0
                 last_flush[0] = now
                 try:
-                    self.after(0, _flush, snapshot)
+                    self._post(_flush, snapshot)
                 except RuntimeError:
                     # Dialog destroyed mid-stream — stop trying to push.
                     pass
@@ -372,11 +375,11 @@ class AICodeReviewDialog(tk.Toplevel):
                 snapshot = "".join(batch_text)
                 batch_text.clear()
                 try:
-                    self.after(0, _flush, snapshot)
+                    self._post(_flush, snapshot)
                 except RuntimeError:
                     pass
             try:
-                self.after(0, self._on_review_ready, tok, result)
+                self._post(self._on_review_ready, tok, result)
             except RuntimeError:
                 # Dialog destroyed before result arrived — silent drop.
                 pass

@@ -261,6 +261,17 @@ class ProjectsTabController:
             return iid[5:]
         return None
 
+    def get_selected_paths(self) -> list:
+        """Every selected project path, in tree order.
+
+        Category rows and the placeholder rows are skipped, so a shift-select
+        spanning a group header yields only the real projects inside it.
+        """
+        if self._tree is None:
+            return []
+        return [iid[5:] for iid in self._tree.selection()
+                if iid.startswith("proj:")]
+
     def cancel_ai_proposals(self) -> None:
         """Forward shutdown cancellation to AITasksController."""
         self._ai_tasks.cancel_all_proposals()
@@ -420,7 +431,7 @@ class ProjectsTabController:
         ttk.Button(btns, text="＋  Scaffold",
                    style="Action.TButton",
                    command=self._cmd_bar.cmd_scaffold).pack(side=tk.LEFT, padx=(0, 6))
-        ttk.Button(btns, text="⚙  Retrofit Existing",
+        ttk.Button(btns, text="⚙  Add tokensave to a project",
                    command=self._cmd_bar.cmd_retrofit).pack(side=tk.LEFT, padx=(0, 6))
         ttk.Button(btns, text="↺↺  Sync All",
                    command=self._cmd_bar.cmd_sync_all).pack(side=tk.LEFT)
@@ -430,9 +441,26 @@ class ProjectsTabController:
         ttk.Button(btns, text="Settings",
                    command=self._on_settings).pack(side=tk.RIGHT, padx=(0, 6))
 
-        tk.Label(tab, text="Right-click any project for actions",
+        # Legend + hint. The Git column encodes eight states as glyphs whose
+        # only other distinction is colour, which is invisible to a
+        # colour-blind user and unlabelled for everyone else. The hint sits
+        # beside it at the same weight, since it was previously the sole
+        # pointer to every one of the 32 right-click commands and was styled
+        # as the least readable text on the tab.
+        legend = tk.Frame(tab, bg=C["base"])
+        legend.pack(fill=tk.X, padx=14, pady=(2, 0), side=tk.BOTTOM)
+        tk.Label(legend, text="Right-click a project for actions",
+                 font=("Segoe UI", 9), bg=C["base"], fg=C["subtext"],
+                 ).pack(side=tk.RIGHT)
+        tk.Label(legend,
+                 text=("Git:  ✓ clean   ● uncommitted changes   "
+                       "↑n to push   ↓n to pull   — no git   … checking"
+                       + "\n" +
+                       "Dimmed row = no tokensave index yet "
+                       "(right-click → Maintenance → Retrofit…)"),
                  font=("Segoe UI", 8), bg=C["base"], fg=C["overlay0"],
-                 ).pack(anchor=tk.E, padx=14, pady=(2, 0), side=tk.BOTTOM)
+                 justify=tk.LEFT, anchor=tk.W,
+                 ).pack(side=tk.LEFT)
 
         body = tk.Frame(tab, bg=C["base"], padx=14, pady=10)
         body.pack(fill=tk.BOTH, expand=True)
@@ -448,13 +476,16 @@ class ProjectsTabController:
             tree_wrap,
             columns=("active", "path", "synced", "cg", "git", "scaffold"),
             show="tree headings",
-            selectmode="browse",
+            # "extended" enables ctrl/shift multi-select so maintenance ops
+        # can run across several projects at once. Single-select
+        # behaviour is unchanged for every command that needs one path.
+        selectmode="extended",
         )
         self._tree.heading("#0",       text="Project")
         self._tree.heading("active",   text="")
         self._tree.heading("path",     text="Path")
         self._tree.heading("synced",   text="Last Synced")
-        self._tree.heading("cg",       text="CG")
+        self._tree.heading("cg",       text="CodeGraph")
         self._tree.heading("git",      text="Git")
         self._tree.heading("scaffold", text="Scaffold")
 
@@ -462,7 +493,7 @@ class ProjectsTabController:
         self._tree.column("active",   width=28,  stretch=False, anchor=tk.CENTER)
         self._tree.column("path",     width=220)
         self._tree.column("synced",   width=90,  stretch=False, anchor=tk.CENTER)
-        self._tree.column("cg",       width=36,  stretch=False, anchor=tk.CENTER)
+        self._tree.column("cg",       width=72,  stretch=False, anchor=tk.CENTER)
         self._tree.column("git",      width=60,  stretch=False, anchor=tk.CENTER)
         self._tree.column("scaffold", width=70,  stretch=False, anchor=tk.CENTER)
 
@@ -490,58 +521,180 @@ class ProjectsTabController:
         self._tree.bind("<Button-3>", self._on_right_click)
         self._tree.bind("<<TreeviewSelect>>", self._on_tree_select)
 
+    def _submenu(self, parent) -> tk.Menu:
+        """A themed cascade child, styled like its parent."""
+        return tk.Menu(parent, tearoff=0,
+                       bg=C["surface0"], fg=C["text"],
+                       activebackground=C["surface1"],
+                       activeforeground=C["text"],
+                       relief=tk.FLAT, bd=0, font=("Segoe UI", 10))
+
     def _build_context_menu(self) -> None:
+        """Group 38 commands into cascades.
+
+        Flat, this menu ran past the bottom of a laptop screen, and finding
+        one entry meant reading ~20 unrelated labels. Grouping is presentation
+        only — every command is the same delegate it was.
+
+        The four everyday actions stay at the top level, because burying a
+        one-click Sync inside a submenu would make the common case worse to
+        pay for the rare one. Destructive entries are gathered under
+        Maintenance rather than sitting beside read-only ones.
+        """
         m = tk.Menu(self._root, tearoff=0,
                     bg=C["surface0"], fg=C["text"],
                     activebackground=C["surface1"], activeforeground=C["text"],
                     relief=tk.FLAT, bd=0, font=("Segoe UI", 10))
-        m.add_command(label="★  Set as Active",  command=self._cmd_bar.cmd_set_active)
-        m.add_command(label="↺  Sync",           command=self._cmd_bar.cmd_sync)
-        m.add_command(label="📊  Status",         command=self._cmd_bar.cmd_status)
-        m.add_command(label="⟳  Force Re-sync",  command=self._cmd_bar.cmd_force_sync)
-        m.add_command(label="🔍  Doctor",         command=self._cmd_bar.cmd_doctor)
-        m.add_command(label="🧹  Housekeeping…",  command=self._cmd_bar.cmd_housekeeping)
+
+        # ── Everyday actions, kept one click away ──────────────────────────
+        m.add_command(label="★  Set as Active", command=self._cmd_bar.cmd_set_active)
+        m.add_command(label="↺  Sync",          command=self._cmd_bar.cmd_sync)
+        m.add_command(label="📊  Status",        command=self._cmd_bar.cmd_status)
         m.add_separator()
-        m.add_command(label="🧠  CodeGraph Init",            command=self._cmd_bar.cmd_codegraph_init)
-        m.add_command(label="🧠  CodeGraph Sync",            command=self._cmd_bar.cmd_codegraph_sync)
-        m.add_command(label="🧠  CodeGraph Reindex (Full)…", command=self._cmd_bar.cmd_codegraph_reindex)
-        m.add_command(label="🧠  CodeGraph Status",          command=self._cmd_bar.cmd_codegraph_status)
-        m.add_command(label="🧠  Remove CodeGraph Index…",   command=self._cmd_bar.cmd_codegraph_remove)
-        m.add_separator()
-        m.add_command(label="📜  Git Log",        command=self._cmd_bar.cmd_git_log)
-        m.add_command(label="📝  Git Commit…",        command=self._cmd_bar.cmd_git_commit)
-        m.add_command(label="🔍  AI Code Review…",    command=self._cmd_bar.cmd_ai_code_review)
-        m.add_command(label="🔧  Git Init",           command=self._cmd_bar.cmd_git_init)
-        m.add_command(label="📋  Manage .gitignore…",      command=self._cmd_bar.cmd_manage_gitignore)
-        m.add_command(label="🧹  Untrack Ignored Files…",  command=self._cmd_bar.cmd_untrack_ignored)
-        m.add_command(label="🔒  Private Repo…",               command=self._cmd_bar.cmd_private_repo)
-        m.add_command(label="🔍  Pre-commit AI Review hook…", command=self._cmd_bar.cmd_precommit_hook)
-        m.add_command(label="📝  Doc Updates… (CHANGELOG + README)", command=self.cmd_doc_updates)
-        m.add_command(label="📋  Roadmap…",                 command=self.cmd_roadmap_manager)
-        m.add_command(label="🔬  Refactor scout…",         command=self._cmd_bar.cmd_refactor_scout)
-        m.add_command(label="✓  Run checks…",              command=self._cmd_bar.cmd_run_checks)
-        m.add_command(label="🔄  Integration check",        command=self.cmd_integration_check)
-        m.add_separator()
-        m.add_command(label="📂  Open Folder",    command=self._cmd_bar.cmd_open_folder)
-        m.add_command(label="✏   Open in Editor", command=self._cmd_bar.cmd_open_editor)
-        m.add_command(label="⎘  Copy Path",       command=self._cmd_bar.cmd_copy_path)
-        m.add_separator()
-        m.add_command(label="⚙  Retrofit…",          command=self._cmd_bar.cmd_retrofit_selected)
-        m.add_command(label="🔗  Shadow Links…",     command=self._cmd_bar.cmd_shadow_links)
-        m.add_command(label="📁  Assign Category…", command=self.cmd_assign_category)
-        m.add_command(label="🗑  Remove Index…",     command=self._cmd_bar.cmd_remove)
-        m.add_separator()
-        m.add_command(label="Auto-detect",        command=self._cmd_bar.cmd_auto)
+
+        # ── Index ──────────────────────────────────────────────────────────
+        index_m = self._submenu(m)
+        index_m.add_command(label="⟳  Force Re-sync",
+                            command=self._cmd_bar.cmd_force_sync)
+        index_m.add_command(label="🔍  Doctor", command=self._cmd_bar.cmd_doctor)
+        index_m.add_command(label="🧹  Housekeeping…",
+                            command=self._cmd_bar.cmd_housekeeping)
+        index_m.add_separator()
+        index_m.add_command(label="🔗  Shadow Links…",
+                            command=self._cmd_bar.cmd_shadow_links)
+        index_m.add_command(label="🔄  Integration check",
+                            command=self.cmd_integration_check)
+        m.add_cascade(label="🗂  Index", menu=index_m)
+
+        # ── CodeGraph ──────────────────────────────────────────────────────
+        cg_m = self._submenu(m)
+        cg_m.add_command(label="Init",   command=self._cmd_bar.cmd_codegraph_init)
+        cg_m.add_command(label="Sync",   command=self._cmd_bar.cmd_codegraph_sync)
+        cg_m.add_command(label="Status", command=self._cmd_bar.cmd_codegraph_status)
+        cg_m.add_separator()
+        cg_m.add_command(label="Reindex (Full)…",
+                         command=self._cmd_bar.cmd_codegraph_reindex)
+        cg_m.add_command(label="Remove CodeGraph Index…",
+                         command=self._cmd_bar.cmd_codegraph_remove)
+        m.add_cascade(label="🧠  CodeGraph", menu=cg_m)
+
+        # ── Git ────────────────────────────────────────────────────────────
+        git_m = self._submenu(m)
+        git_m.add_command(label="📜  Git Log",   command=self._cmd_bar.cmd_git_log)
+        git_m.add_command(label="📝  Commit…",   command=self._cmd_bar.cmd_git_commit)
+        git_m.add_command(label="🔧  Git Init",  command=self._cmd_bar.cmd_git_init)
+        git_m.add_separator()
+        git_m.add_command(label="📋  Manage .gitignore…",
+                          command=self._cmd_bar.cmd_manage_gitignore)
+        git_m.add_command(label="🧹  Untrack Ignored Files…",
+                          command=self._cmd_bar.cmd_untrack_ignored)
+        git_m.add_command(label="🔒  Private Repo…",
+                          command=self._cmd_bar.cmd_private_repo)
+        m.add_cascade(label="🌿  Git", menu=git_m)
+
+        # ── AI & docs ──────────────────────────────────────────────────────
+        ai_m = self._submenu(m)
+        ai_m.add_command(label="🔍  AI Code Review…",
+                         command=self._cmd_bar.cmd_ai_code_review)
+        ai_m.add_command(label="🔍  Pre-commit AI Review hook…",
+                         command=self._cmd_bar.cmd_precommit_hook)
+        ai_m.add_separator()
+        ai_m.add_command(label="📝  Doc Updates… (CHANGELOG + README)",
+                         command=self.cmd_doc_updates)
+        ai_m.add_command(label="📋  Roadmap…", command=self.cmd_roadmap_manager)
+        ai_m.add_command(label="🔬  Refactor scout…",
+                         command=self._cmd_bar.cmd_refactor_scout)
+        ai_m.add_command(label="✓  Run checks…",
+                         command=self._cmd_bar.cmd_run_checks)
+        m.add_cascade(label="🤖  AI & docs", menu=ai_m)
+
+        # ── Open ───────────────────────────────────────────────────────────
+        open_m = self._submenu(m)
+        open_m.add_command(label="📂  Open Folder",
+                           command=self._cmd_bar.cmd_open_folder)
+        open_m.add_command(label="✏   Open in Editor",
+                           command=self._cmd_bar.cmd_open_editor)
+        open_m.add_command(label="⎘  Copy Path",
+                           command=self._cmd_bar.cmd_copy_path)
+        m.add_cascade(label="📂  Open", menu=open_m)
+
+        # ── Maintenance — everything destructive or structural ─────────────
+        maint_m = self._submenu(m)
+        maint_m.add_command(label="⚙  Retrofit…",
+                            command=self._cmd_bar.cmd_retrofit_selected)
+        maint_m.add_command(label="📁  Assign Category…",
+                            command=self.cmd_assign_category)
+        maint_m.add_command(label="Auto-detect", command=self._cmd_bar.cmd_auto)
+        maint_m.add_separator()
+        maint_m.add_command(label="🗑  Remove Index…",
+                            command=self._cmd_bar.cmd_remove)
+        m.add_cascade(label="🔧  Maintenance", menu=maint_m)
+
         self._ctx_menu = m
 
     def _on_right_click(self, event) -> None:
         row = self._tree.identify_row(event.y)
         if not row:
             return
-        self._tree.selection_set(row)
+        # Preserve an existing multi-selection when right-clicking inside it.
+        # Unconditionally calling selection_set() here would collapse the
+        # selection to one row, making multi-select unusable via the menu.
+        if row not in self._tree.selection():
+            self._tree.selection_set(row)
         if not row.startswith("proj:"):
             return
+        paths = self.get_selected_paths()
+        if len(paths) > 1:
+            # A separate menu, deliberately: showing single-project commands
+            # over a 3-project selection would invite clicking "Git Commit…"
+            # and having it act on exactly one of them, silently.
+            self._show_batch_menu(event, paths)
+            return
         self._ctx_menu.tk_popup(event.x_root, event.y_root)
+
+    def _open_cross_project_search(self, paths: list) -> None:
+        """Open the multi-project search over the current selection.
+
+        Lives here rather than in CommandBarCtrl, which is deliberately a pure
+        delegate with no Tk import — opening a dialog needs a parent window.
+        """
+        from dialogs.cross_project_search import CrossProjectSearchDialog
+        if len(paths) < 2:
+            return          # one project is what the Ask tab is already for
+        CrossProjectSearchDialog(self._root, paths, self._cfg)
+
+    def _show_batch_menu(self, event, paths: list) -> None:
+        """Context menu for a multi-project selection.
+
+        Only operations that stream to the log and open nothing are offered.
+        Status uses the log-only variant — the single-project command shows a
+        popup, and one popup per project is not a feature. Doctor is absent on
+        purpose: it schedules follow-up dialogs that would stack per project.
+        """
+        n = len(paths)
+        m = tk.Menu(self._root, tearoff=0,
+                    bg=C["surface0"], fg=C["text"],
+                    activebackground=C["surface1"], activeforeground=C["text"],
+                    relief=tk.FLAT, bd=0, font=("Segoe UI", 10))
+        m.add_command(label=f"{n} projects selected", state=tk.DISABLED)
+        m.add_separator()
+        m.add_command(label=f"↺  Sync all {n}",
+                      command=lambda: self._cmd_bar.cmd_batch(paths, "sync"))
+        m.add_command(label=f"⟳  Force Re-sync all {n}…",
+                      command=lambda: self._cmd_bar.cmd_batch(paths, "force"))
+        m.add_command(label=f"📊  Status of all {n}",
+                      command=lambda: self._cmd_bar.cmd_batch(paths, "status"))
+        m.add_separator()
+        m.add_command(label="🔍  Search across these projects…",
+                      command=lambda: self._open_cross_project_search(paths))
+        m.add_separator()
+        m.add_command(label="Clear selection",
+                      command=lambda: self._tree.selection_remove(
+                          *self._tree.selection()))
+        try:
+            m.tk_popup(event.x_root, event.y_root)
+        finally:
+            m.grab_release()
 
     def _on_tree_select(self, event=None) -> None:
         """Internal handler for <<TreeviewSelect>> — fires the project-select callback.

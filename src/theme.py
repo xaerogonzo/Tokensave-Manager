@@ -8,9 +8,13 @@ its own `src/dialogs/*.py` file.
 
 from __future__ import annotations
 
+import logging
+import queue
 import tkinter as tk
 
 from constants import C
+
+log = logging.getLogger(__name__)
 
 
 class _Tooltip:
@@ -175,3 +179,108 @@ def themed_checkbutton(parent: tk.Widget, **kw) -> tk.Checkbutton:
     kw.setdefault("activebackground", bg)
     kw.setdefault("activeforeground", C["text"])
     return tk.Checkbutton(parent, **kw)
+
+
+# ── Worker → UI hand-off ──────────────────────────────────────────────────
+
+
+class UiPumpMixin:
+    """Give a Tk window a thread-safe channel for its background workers.
+
+    Calling ``self.after(...)`` from a worker thread is the most expensive bug
+    shape this project has produced, because of HOW it fails:
+
+      * on Windows it usually works, so it survives review and local testing;
+      * when it does fail it raises "main thread is not in main loop", which
+        the broad ``except`` clauses around such calls routinely swallow;
+      * on Linux it does not raise at all — it BLOCKS. A CI diagnostic caught
+        a worker alive after 10 seconds having scheduled nothing and raised
+        nothing. No error, no log line, no way to tell what it was waiting on.
+
+    The rule this exists to make cheap: a worker never touches Tk. It hands a
+    callable to `_post()`, and `_ui_pump()` runs it on the Tk thread.
+
+    Mix in ahead of the Tk base class, and start the pump once the widgets
+    exist and before any thread does:
+
+        class MyDialog(UiPumpMixin, tk.Toplevel):
+            def __init__(self, parent):
+                super().__init__(parent)
+                ...build widgets...
+                self._start_ui_pump()
+
+    `tests/test_no_cross_thread_tk.py` enforces both halves — that workers
+    post rather than call, and that every subclass starts its pump.
+    """
+
+    _UI_PUMP_MS = 50
+
+    def _start_ui_pump(self) -> None:
+        """Create the queue and begin draining it. Tk thread, once."""
+        self._ui_queue: queue.Queue = queue.Queue()
+        self._ui_pump_id = None
+        self.bind("<Destroy>", self._stop_ui_pump, add="+")
+        self._ui_pump()
+
+    def _post(self, fn, *args) -> None:
+        """Run ``fn(*args)`` on the Tk thread. Safe from any thread."""
+        self._ui_queue.put((fn, args))
+
+    def _post_after(self, delay_ms: int, fn, *args) -> None:
+        """Run ``fn(*args)`` after ``delay_ms``. Safe from any thread.
+
+        A worker calling ``self.after(2000, ...)`` directly is the same
+        cross-thread call as ``after(0, ...)``: the delay changes what runs
+        when, not which thread does the scheduling. This posts the *timer
+        setup* onto the Tk thread, and the timer itself then behaves normally.
+        """
+        self._post(self._schedule_after, delay_ms, fn, args)
+
+    def _schedule_after(self, delay_ms: int, fn, args) -> None:
+        """Set the timer. Tk thread only — reached via `_post_after`."""
+        try:
+            self.after(delay_ms, lambda: fn(*args))
+        except tk.TclError:
+            pass          # window closed before the timer was set
+
+    def _ui_pump(self) -> None:
+        """Drain whatever the workers posted. Tk thread only."""
+        try:
+            if not self.winfo_exists():
+                return
+        except tk.TclError:
+            return
+        try:
+            while True:
+                fn, args = self._ui_queue.get_nowait()
+                try:
+                    fn(*args)
+                except tk.TclError:
+                    pass          # widget went away between post and run
+                except Exception:
+                    # One bad callback must not stop the pump: everything
+                    # posted afterwards would be dropped, and the window
+                    # would freeze in place with no error — the exact
+                    # invisible failure this class was written to end.
+                    log.exception("posted UI callback raised")
+        except queue.Empty:
+            pass
+        try:
+            self._ui_pump_id = self.after(self._UI_PUMP_MS, self._ui_pump)
+        except tk.TclError:
+            self._ui_pump_id = None
+
+    def _stop_ui_pump(self, evt=None) -> None:
+        """Stop rescheduling.
+
+        Bound to ``<Destroy>``, which also fires for every child widget, so
+        only the window's own destruction counts.
+        """
+        if evt is not None and getattr(evt, "widget", None) is not self:
+            return
+        if getattr(self, "_ui_pump_id", None):
+            try:
+                self.after_cancel(self._ui_pump_id)
+            except tk.TclError:
+                pass
+        self._ui_pump_id = None

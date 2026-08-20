@@ -104,9 +104,9 @@ class HelpTabController:
 
         # v4.13: Test Manager dialog (replaces the v4.12 "Run Smoke Tests"
         # button). Four tabs: Run+View, Coverage Gaps, Stale Tests,
-        # Scaffold Generator. The old smoke-tests dialog still works
-        # internally (it's reused by the V-E shared background helper),
-        # but novice users get the full test-lifecycle UI here.
+        # Scaffold Generator. This is the only test-runner surface: the
+        # smoke-tests dialog it replaced was left unreferenced here and
+        # deleted in Roadmap-9.
         ttk.Button(
             left_wrap, text="🧪  Test Manager…",
             command=self._open_test_manager,

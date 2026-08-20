@@ -12,13 +12,16 @@ import pytest
 tk = pytest.importorskip("tkinter")
 
 from dialogs.test_manager import TestManagerDialog
+from helpers.gh_ci_status import (
+    NO_RESULT, SUCCESS, UNAVAILABLE, CIStatus)
 
 pytestmark = pytest.mark.tk
 
 
 # ── Helper: build a dialog with everything mocked to defaults ────────────
 
-def _build_dialog(tk_root, mock_config, tmp_path, mocker):
+def _build_dialog(tk_root, mock_config, tmp_path, mocker,
+                  branch=None, ci_status=None):
     """Construct a TestManagerDialog with discovery helpers stubbed.
 
     The real helpers return live data from the project root; we
@@ -32,7 +35,20 @@ def _build_dialog(tk_root, mock_config, tmp_path, mocker):
                  return_value={})
     mocker.patch("dialogs.test_manager.load_stale_allowlist",
                  return_value=set())
-    return TestManagerDialog(tk_root, str(tmp_path), mock_config)
+    # The CI badge shells out to `gh` on a worker thread. tmp_path is not a
+    # git repo, so the real _current_branch already returns None and no
+    # thread starts — but pin that explicitly so a future change to branch
+    # resolution cannot silently start spawning `gh` calls (and leaking
+    # worker threads) from every construction test. Badge tests that need a
+    # branch re-patch this themselves and join the worker via wait_for.
+    mocker.patch("dialogs.test_manager._current_branch", return_value=branch)
+    ci_spy = mocker.patch(
+        "dialogs.test_manager.get_latest_run_status",
+        return_value=ci_status or CIStatus(SUCCESS, branch=branch or "main",
+                                           url="https://example/runs/1"))
+    dlg = TestManagerDialog(tk_root, str(tmp_path), mock_config)
+    dlg._ci_spy = ci_spy          # for badge tests to assert against
+    return dlg
 
 
 # ── Construction + initial state ─────────────────────────────────────────
@@ -270,3 +286,183 @@ def test_single_file_done_drops_stale_summary(
     dialog._on_pytest_done("tests/test_foo.py", 5, 5, "", False, [])
     saved = mock_save.call_args[0][1]
     assert "summary" not in saved
+
+
+# ── CI badge (Roadmap-9 Phase 2.1) ───────────────────────────────────────
+
+def _dialog_on_branch(tk_root, mock_config, tmp_path, mocker, wait_for,
+                      branch="main", status=None):
+    """Build a dialog whose badge resolves *branch*, and join the worker.
+
+    The badge query runs on a thread and reports back through after(0), so a
+    test must drive the event loop before asserting — and must not leave the
+    thread running past teardown, which the tk_root fixture correctly treats
+    as a leak.
+    """
+    dlg = _build_dialog(tk_root, mock_config, tmp_path, mocker,
+                        branch=branch, ci_status=status)
+    # wait_for drives the event loop, which runs the main-thread pump that
+    # applies whatever the worker posted onto the queue.
+    wait_for(lambda: dlg._ci_status is not None, timeout_s=3.0)
+    return dlg, dlg._ci_spy
+
+
+def test_ci_badge_renders_the_current_branch(
+        tk_root, mock_config, tmp_path, mocker, wait_for):
+    """The badge must name the branch it describes, and it must be the
+    CURRENT one — showing master's green while your branch is red is worse
+    than showing nothing at all."""
+    dlg, _ = _dialog_on_branch(tk_root, mock_config, tmp_path, mocker,
+                               wait_for, branch="Roadmap-9")
+    assert "Roadmap-9" in dlg._ci_var.get()
+
+
+def test_ci_badge_queries_the_checked_out_branch(
+        tk_root, mock_config, tmp_path, mocker, wait_for):
+    """Guards against the old backlog hint, which hard-coded master."""
+    _, spy = _dialog_on_branch(tk_root, mock_config, tmp_path, mocker,
+                               wait_for, branch="Roadmap-9")
+    assert spy.call_args[0][2] == "Roadmap-9"
+
+
+def test_ci_badge_click_opens_the_run(
+        tk_root, mock_config, tmp_path, mocker, wait_for):
+    opener = mocker.patch("dialogs.test_manager.webbrowser.open")
+    dlg, _ = _dialog_on_branch(
+        tk_root, mock_config, tmp_path, mocker, wait_for,
+        status=CIStatus(SUCCESS, branch="main", url="https://example/runs/7"))
+    dlg._on_ci_click()
+    opener.assert_called_once_with("https://example/runs/7")
+
+
+def test_ci_badge_click_is_a_noop_without_a_run(
+        tk_root, mock_config, tmp_path, mocker, wait_for):
+    """A branch with no runs has nothing to open; clicking must not raise."""
+    opener = mocker.patch("dialogs.test_manager.webbrowser.open")
+    dlg, _ = _dialog_on_branch(
+        tk_root, mock_config, tmp_path, mocker, wait_for,
+        status=CIStatus(NO_RESULT, branch="main"))
+    dlg._on_ci_click()
+    opener.assert_not_called()
+
+
+def test_detached_head_never_queries_gh(
+        tk_root, mock_config, tmp_path, mocker):
+    """No branch -> no gh call at all, and a label that says so.
+
+    Also the reason the shared fixture patches the branch to None: without
+    a branch there is no worker thread, so construction stays synchronous.
+    """
+    spy = mocker.patch("dialogs.test_manager.get_latest_run_status")
+    dlg = _build_dialog(tk_root, mock_config, tmp_path, mocker)
+    spy.assert_not_called()
+    assert "no branch" in dlg._ci_var.get()
+
+
+def test_ci_polling_is_cancelled_on_close(
+        tk_root, mock_config, tmp_path, mocker):
+    """A pending after() must not fire into a destroyed widget."""
+    dlg = _build_dialog(tk_root, mock_config, tmp_path, mocker)
+    assert dlg._ci_after_id is not None
+    assert dlg._ci_drain_id is not None
+    dlg._on_destroy_ci()
+    assert dlg._ci_after_id is None
+    assert dlg._ci_drain_id is None
+
+
+def test_unavailable_is_not_styled_as_failure(
+        tk_root, mock_config, tmp_path, mocker):
+    """"Could not ask gh" and "the build is broken" must not look alike."""
+    dlg = _build_dialog(tk_root, mock_config, tmp_path, mocker)
+    dlg._apply_ci_status(CIStatus(UNAVAILABLE, branch="main"),
+                         "CI unavailable")
+    unavailable_fg = dlg._ci_lbl.cget("fg")
+    dlg._apply_ci_status(CIStatus("failed", branch="main"), "CI failed")
+    assert dlg._ci_lbl.cget("fg") != unavailable_fg
+
+
+# ── Tab 2 measured coverage (Roadmap-9 Phase 2.5) ────────────────────────
+
+def test_tab2_shows_no_measured_data_when_cache_is_absent(
+        tk_root, mock_config, tmp_path, mocker):
+    """Without a run, the summary must SAY it is a heuristic rather than
+    presenting the filename guess as a coverage figure."""
+    dlg = _build_dialog(tk_root, mock_config, tmp_path, mocker)
+    dlg._refresh_tab_coverage()
+    assert "no measured data yet" in dlg._cov_summary_var.get()
+
+
+def test_tab2_dates_measured_numbers(
+        tk_root, mock_config, tmp_path, mocker):
+    """A percentage without an age reads as current however stale it is."""
+    import time as _time
+    from helpers.coverage_scan import CoverageMeta, CoverageResult
+    dlg = _build_dialog(tk_root, mock_config, tmp_path, mocker)
+    mocker.patch(
+        "dialogs.test_manager.load_coverage",
+        return_value=CoverageResult(
+            percents={"src/a.py": 80.0},
+            meta=CoverageMeta(generated_at=_time.time() - 600,
+                              branch="Roadmap-9")))
+    dlg._refresh_tab_coverage()
+    assert "10 min ago" in dlg._cov_summary_var.get()
+
+
+def test_tab2_marks_a_thin_file_differently_from_an_untested_one(
+        tk_root, mock_config, tmp_path, mocker):
+    """A file with tests but 12% coverage needs its tests EXTENDED; a file
+    with none needs its first test. Same colour would merge the two."""
+    from helpers.coverage_scan import CoverageResult
+    from helpers.test_discovery import CoverageRow
+    rows = [
+        CoverageRow(source_path="/p/src/thin.py", rel_path="src/thin.py",
+                    test_path="/p/tests/test_thin.py", has_tests=True),
+        CoverageRow(source_path="/p/src/none.py", rel_path="src/none.py",
+                    test_path="", has_tests=False),
+    ]
+    dlg = _build_dialog(tk_root, mock_config, tmp_path, mocker)
+    # AFTER construction: the shared fixture stubs scan_coverage_gaps to []
+    # and would otherwise win.
+    mocker.patch("dialogs.test_manager.scan_coverage_gaps", return_value=rows)
+    mocker.patch("dialogs.test_manager.load_coverage",
+                 return_value=CoverageResult(percents={"src/thin.py": 12.0}))
+    dlg._refresh_tab_coverage()
+    assert dlg._cov_tv.item("src/thin.py", "tags") == ("thin",)
+    assert dlg._cov_tv.item("src/none.py", "tags") == ("untested",)
+
+
+def test_tab2_does_not_show_zero_for_an_unmeasured_file(
+        tk_root, mock_config, tmp_path, mocker):
+    """"Not measured" must not render as "0% covered"."""
+    from helpers.coverage_scan import CoverageResult
+    from helpers.test_discovery import CoverageRow
+    rows = [CoverageRow(source_path="/p/src/x.py", rel_path="src/x.py",
+                        test_path="/p/tests/test_x.py", has_tests=True)]
+    dlg = _build_dialog(tk_root, mock_config, tmp_path, mocker)
+    mocker.patch("dialogs.test_manager.scan_coverage_gaps", return_value=rows)
+    mocker.patch("dialogs.test_manager.load_coverage",
+                 return_value=CoverageResult(percents={}))
+    dlg._refresh_tab_coverage()
+    cell = dlg._cov_tv.item("src/x.py", "values")[1]
+    assert "0%" not in cell
+    assert "?" in cell
+
+
+def test_the_ci_badge_explains_its_state_set():
+    """⚪ and ⚫ are the two a user would otherwise read as failure."""
+    import pathlib
+    src = pathlib.Path("src/dialogs/test_manager.py").read_text(
+        encoding="utf-8")
+    assert "_Tooltip(self._ci_lbl" in src
+    assert "no result yet" in src
+    assert "NOT the same as a failure" in src, \
+        "the unavailable state must say it is not a failure"
+
+
+def test_sync_pr_checklist_says_what_it_will_not_touch():
+    """It writes to a live PR body; the reassurance is the point."""
+    import pathlib
+    src = pathlib.Path("src/dialogs/test_manager.py").read_text(
+        encoding="utf-8")
+    assert "_Tooltip(self._sync_pr_btn" in src
+    assert "left" in src and "untouched" in src

@@ -14,6 +14,8 @@ from __future__ import annotations
 
 import pytest
 
+from constants import CREATE_NEW_CONSOLE
+
 from controllers import doctor_ctrl as dc
 from controllers.doctor_ctrl import DoctorController, PurgeResult
 from helpers import housekeeping
@@ -143,7 +145,7 @@ def test_open_purge_terminal_launches_a_real_console(monkeypatch):
     _controller().open_purge_terminal("D:/proj")
     assert "doctor" in seen["cmd"]
     assert seen["cwd"] == "D:/proj"
-    assert seen["flags"] == dc.subprocess.CREATE_NEW_CONSOLE
+    assert seen["flags"] == CREATE_NEW_CONSOLE
 
 
 def test_verification_labels_render_a_count():

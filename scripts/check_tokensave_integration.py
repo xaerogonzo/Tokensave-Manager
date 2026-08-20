@@ -53,9 +53,19 @@ import sys
 from datetime import date
 from pathlib import Path
 
-# Force UTF-8 output so ✓/⚠ render correctly on Windows cmd / PowerShell
-if hasattr(sys.stdout, "buffer"):
-    sys.stdout = io.TextIOWrapper(sys.stdout.buffer, encoding="utf-8", errors="replace")
+def _force_utf8_stdout() -> None:
+    """Force UTF-8 output so ✓/⚠ render on Windows cmd / PowerShell.
+
+    Called from the __main__ guard, NOT at import time. Rebinding sys.stdout
+    on import makes the module unimportable under pytest: it wraps pytest's
+    capture object, which is then closed underneath the wrapper, and every
+    test in the file errors with "I/O operation on closed file". Every real
+    caller runs this as a script (directly, or as a subprocess from
+    UpdatePollerController.cmd_integration_check), so they all still get it.
+    """
+    if hasattr(sys.stdout, "buffer"):
+        sys.stdout = io.TextIOWrapper(
+            sys.stdout.buffer, encoding="utf-8", errors="replace")
 
 # ── Repo root ──────────────────────────────────────────────────────────────────
 
@@ -444,16 +454,25 @@ def _parse_args() -> dict:
 
 # ── Upstream-issue lifecycle helpers ───────────────────────────────────────────
 
-# Matches "ISSUE: #NNN" (frontmatter) or "issue #NNN" (embedded in STATUS lines)
-_ISSUE_DOC_RE = re.compile(r"(?:ISSUE:\s*#|issue\s+#)(\d+)", re.IGNORECASE)
+# Matches the ways a doc can name the issue it tracks:
+#   "ISSUE: #NNN"                     — frontmatter marker (auto-generated stubs)
+#   "issue #NNN" / "issue NNN"        — inline prose; the "#" is routinely dropped
+#   ".../issues/NNN"                  — a bare GitHub URL, e.g. in a STATUS line
+# The URL form matters because a hand-authored doc often cites its issue ONLY as
+# a link. Missing it had two live consequences: a resolved issue's doc was never
+# archived (it stayed ⚠ forever), and --fix would write a duplicate stub on top
+# of an existing hand-written doc.
+_ISSUE_DOC_RE = re.compile(
+    r"(?:ISSUE:\s*#|issue\s+#?|/issues/)(\d+)", re.IGNORECASE)
 
 
 def _find_issue_doc(number: int) -> "Path | None":
     """Return the Path of the active .md doc tracking *number*, or None.
 
-    Scans docs/upstream-issues/*.md (not archived/) for either:
-      • A dedicated "ISSUE: #NNN" frontmatter line  (new stubs)
-      • An embedded "issue #NNN" substring anywhere in the file  (legacy docs)
+    Scans docs/upstream-issues/*.md (not archived/) for any of:
+      • A dedicated "ISSUE: #NNN" frontmatter line       (auto-generated stubs)
+      • An inline "issue #NNN" or "issue NNN" substring  (hand-written prose)
+      • A ".../issues/NNN" GitHub URL                    (STATUS lines, links)
     """
     active_dir = _ISSUES
     if not active_dir.is_dir():
@@ -717,4 +736,5 @@ def main() -> None:
 
 
 if __name__ == "__main__":
+    _force_utf8_stdout()
     main()

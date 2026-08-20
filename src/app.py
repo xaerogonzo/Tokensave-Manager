@@ -56,6 +56,11 @@ from helpers.commit_messages import _suggest_commit_message
 from helpers.git import _find_tracked_but_ignored, _is_git_repo, _is_local_git_repo
 from helpers.mcp import _mcp_configs, _classify_mcp_entry
 from helpers.project_discovery import find_projects, get_pinned
+from helpers.source_watch import (
+    changed_files,
+    describe_changes,
+    snapshot_sources,
+)
 from helpers.worktree_health import find_orphaned_worktrees
 from helpers.runtime import (
     _acquire_instance_lock,
@@ -64,6 +69,7 @@ from helpers.runtime import (
 )
 from helpers.tray_manager import TrayManager
 from state import ManagerConfig
+from theme import UiPumpMixin
 
 
 # ── Prompt snippets (Reference tab) ─────────────────────────────────────────
@@ -89,7 +95,7 @@ def _geometry_on_screen(root: "tk.Tk", geom: str) -> bool:
     return x < sw and y < sh and x > -600 and y > -520
 
 
-class App(tk.Tk):
+class App(UiPumpMixin, tk.Tk):
     def __init__(self):
         super().__init__()
         self.title("TokenSave Manager")
@@ -127,8 +133,16 @@ class App(tk.Tk):
         log.info(f"  exe      : {self._cfg.tokensave_exe}")
         log.info(f"  templates: {self._cfg.template_dir}")
         log.info(f"  log file : {LOG_FILE}")
+        # ── Worker -> UI channel ──────────────────────────────────────
+        # App's background workers used to call self.after() directly. That
+        # is a cross-thread Tk call: it usually works on Windows, raises
+        # "main thread is not in main loop" when it does not, and on Linux
+        # simply BLOCKS with no error and no log line. Workers post here
+        # and the pump runs it on the Tk thread. Started before _build so
+        # nothing can post into a queue that is not being drained.
         self._style()
         self._build()
+        self._start_ui_pump()
         self.refresh()
         self.after(AUTO_REFRESH_MS, self._auto_refresh)
         self._tray_mgr = TrayManager(self, self._cfg, self._on_tray_quit)
@@ -138,6 +152,47 @@ class App(tk.Tk):
         # Staggered after _check_config so the two startup checks' log
         # lines don't interleave mid-write.
         self.after(1200, self._check_worktree_health)
+        # Snapshot our own source so an edit made while the manager runs can
+        # surface as a banner instead of as "my change did nothing".
+        self._src_root = os.path.dirname(os.path.abspath(__file__))
+        self._src_baseline = snapshot_sources(self._src_root)
+        self._src_banner_dismissed = False
+        self.after(self._SRC_CHECK_MS, self._check_source_changed)
+
+    # ── Manager-source change detection ──────────────────────────────────
+    #
+    # Python does not reload modules, so after editing src/ the running
+    # manager keeps executing what it imported at startup. The symptom is
+    # never a crash — a feature just behaves like its old self, and the
+    # natural conclusion is that the edit did not work.
+
+    _SRC_CHECK_MS = 60_000
+
+    def _check_source_changed(self) -> None:
+        try:
+            current = snapshot_sources(self._src_root)
+            changed = changed_files(self._src_baseline, current)
+            if changed and not self._src_banner_dismissed:
+                self._show_source_banner(changed)
+        finally:
+            self.after(self._SRC_CHECK_MS, self._check_source_changed)
+
+    def _show_source_banner(self, changed: list) -> None:
+        what = describe_changes(changed, self._src_root)
+        self._src_banner_lbl.configure(
+            text=f"⚠  Manager source changed since startup ({what}) — "
+                 f"restart to load the new code.")
+        if not self._src_banner.winfo_ismapped():
+            self._src_banner.pack(fill=tk.X, side=tk.TOP, before=self.nb)
+
+    def _dismiss_source_banner(self) -> None:
+        """Hide it, and stay hidden.
+
+        Re-raising on every subsequent edit would nag through exactly the
+        editing session where the user has already decided to restart later.
+        """
+        self._src_banner_dismissed = True
+        self._src_banner.pack_forget()
 
     def report_callback_exception(self, exc, val, tb):
         """Log unhandled exceptions raised inside Tk callbacks.
@@ -255,6 +310,19 @@ class App(tk.Tk):
 
         log_frame = tk.Frame(self, bg=C["base"], padx=14, pady=8)
         log_frame.pack(fill=tk.X, side=tk.BOTTOM)
+
+        # ── "source changed, restart" banner ──
+        # Packed before the notebook so it appears above the tabs, and stays
+        # hidden (pack_forget) until there is something to say.
+        self._src_banner = tk.Frame(self, bg=C["peach"])
+        self._src_banner_lbl = tk.Label(
+            self._src_banner, text="", bg=C["peach"], fg=C["crust"],
+            font=("Segoe UI", 9, "bold"), anchor=tk.W, padx=10, pady=4)
+        self._src_banner_lbl.pack(side=tk.LEFT, fill=tk.X, expand=True)
+        tk.Button(self._src_banner, text="Dismiss", relief=tk.FLAT,
+                  bg=C["peach"], fg=C["crust"], bd=0, padx=10,
+                  cursor="hand2",
+                  command=self._dismiss_source_banner).pack(side=tk.RIGHT)
 
         # ── Notebook ──
         self.nb = ttk.Notebook(self)
@@ -518,7 +586,7 @@ class App(tk.Tk):
             self.log.insert(tk.END, msg + "\n", tag)
             self.log.see(tk.END)
             self.log.configure(state=tk.DISABLED)
-        self.after(0, _do)
+        self._post(_do)
 
     def _set_running(self, running, label=""):
         if running:
@@ -549,7 +617,7 @@ class App(tk.Tk):
         def worker():
             cmd_str = "tokensave " + " ".join(args)
             self._log(f"$ {cmd_str}  [{label}]", C["blue"])
-            self.after(0, self._set_running, True, label)
+            self._post(self._set_running, True, label)
             log.info(f"RUN  {cmd_str}")
             log.debug(f"     cwd={cwd}")
             t0 = time.monotonic()
@@ -626,17 +694,17 @@ class App(tk.Tk):
                         self._auto_commit_after_sync(cwd)
                     elif args and args[0] == "upgrade":
                         # Auto-run integration check immediately after upgrade
-                        self.after(0, self._update_poller.cmd_integration_check)
+                        self._post(self._update_poller.cmd_integration_check)
                 else:
                     self._log(f"Exited with code {proc.returncode}", C["red"])
                     log.warning(f"DONE exit={proc.returncode}  [{elapsed:.1f}s]")
-                self.after(0, self.refresh)
+                self._post(self.refresh)
             except Exception as e:
                 self._log(f"Error: {e}", C["red"])
                 log.exception(f"EXCEPTION in _run({cmd_str})")
             finally:
                 self._current_proc = None
-                self.after(0, self._set_running, False)
+                self._post(self._set_running, False)
         threading.Thread(target=worker, daemon=True).start()
 
     def _auto_commit_after_sync(self, cwd: str) -> None:
@@ -685,7 +753,7 @@ class App(tk.Tk):
         """
         cmd_str = "tokensave " + " ".join(args)
         self._log(f"$ {cmd_str}  [{label}]", C["blue"])
-        self.after(0, self._set_running, True, label)
+        self._post(self._set_running, True, label)
         log.info(f"RUN  {cmd_str}")
         log.debug(f"     cwd={cwd}")
         t0 = time.monotonic()
@@ -712,7 +780,7 @@ class App(tk.Tk):
             return raw, proc.returncode, elapsed
         finally:
             self._current_proc = None
-            self.after(0, self._set_running, False)
+            self._post(self._set_running, False)
 
     def _shell_capture(self, cmd: list, cwd: str, env=None) -> tuple:
         """Run any shell command and return (stdout+stderr, returncode).
@@ -893,7 +961,7 @@ class App(tk.Tk):
                                 ln.strip() for ln in out.splitlines()
                                 if ln.strip() and not ln.strip().startswith(
                                     ("hint:", "The following", "warning:"))]
-                            self.after(0, lambda: messagebox.showwarning(
+                            self._post(lambda: messagebox.showwarning(
                                 "Tracked-but-ignored files",
                                 "Some of the files you selected are already "
                                 "tracked by git AND match a .gitignore rule. "
@@ -906,7 +974,7 @@ class App(tk.Tk):
                                 "paths first. Then commit the result.",
                                 parent=self))
                         else:
-                            self.after(0, lambda: self._log(
+                            self._post(lambda: self._log(
                                 f"git add failed: {out.strip()}", C["red"]))
                         return
 
@@ -918,14 +986,14 @@ class App(tk.Tk):
                 cout, crc = self._shell_capture(commit_cmd, path)
                 col = C["green"] if crc == 0 else C["red"]
                 for line in cout.strip().splitlines()[-4:]:
-                    self.after(0, lambda l=line: self._log(f"  {l}", col))
-                self.after(0, self.refresh)
+                    self._post(lambda l=line: self._log(f"  {l}", col))
+                self._post(self.refresh)
                 if crc == 0:
                     # Auto-sync private repo if one is configured (G8: scheduled
                     # on main thread so the dirty-bit logic runs thread-safely)
-                    self.after(0, lambda: self._start_private_sync(path, message))
+                    self._post(lambda: self._start_private_sync(path, message))
             finally:
-                self.after(0, self._git._git_end_op)
+                self._post(self._git._git_end_op)
 
         threading.Thread(target=worker, daemon=True).start()
 
@@ -952,7 +1020,7 @@ class App(tk.Tk):
             if not result and result.reason:
                 self._log(f"  Detail: {result.reason}", "red")
             # After finishing, check if another sync was queued (G8)
-            self.after(0, lambda: self._finish_private_sync(path))
+            self._post(lambda: self._finish_private_sync(path))
 
         threading.Thread(target=worker, daemon=True).start()
 

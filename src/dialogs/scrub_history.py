@@ -33,13 +33,14 @@ tab, then open this dialog and force-push.
 from __future__ import annotations
 
 import os
+import queue
 import threading
 import tkinter as tk
 from tkinter import filedialog, messagebox, ttk
 from typing import TYPE_CHECKING
 
 from constants import C
-from theme import bind_mousewheel
+from theme import UiPumpMixin, bind_mousewheel
 from helpers.git import _find_tracked_but_ignored
 from helpers.git_scrub import (
     build_backup_branch_name,
@@ -60,7 +61,7 @@ if TYPE_CHECKING:
     from state import ManagerConfig
 
 
-class ScrubHistoryDialog(tk.Toplevel):
+class ScrubHistoryDialog(UiPumpMixin, tk.Toplevel):
     """Erase a single file from ALL git history with layered safety nets.
 
     Constructed from ``GitignoreDialog`` after the user clicks "⚙ Advanced".
@@ -88,6 +89,18 @@ class ScrubHistoryDialog(tk.Toplevel):
         self._already_scrubbed = False   # True when 0 commits found + not in HEAD
         self._saved_remote_url = ""      # Captured before scrub; filter-repo always removes origin
 
+        # ── Worker -> UI channel ──────────────────────────────────────────
+        # Every background worker in this dialog used to call
+        # `self.after(0, ...)` directly. That is a cross-thread Tk call, and
+        # on Linux it does not raise — it BLOCKS. A CI diagnostic caught a
+        # scrub worker alive after 10s having scheduled nothing and raised
+        # nothing, which is the worst shape a bug can take: no error, no log
+        # line, no way to tell what it was waiting for.
+        #
+        # Workers now hand callables to UiPumpMixin's queue and a
+        # main-thread pump runs them, so no worker touches Tk at all. Same
+        # pattern as GitTabController._poll_log_queue.
+
         # Build sections — Save-style: bottom bar FIRST so it's always visible.
         self._build_destructive_banner()
         self._build_bottom_action_bar()
@@ -101,6 +114,9 @@ class ScrubHistoryDialog(tk.Toplevel):
 
         self._refresh_state()
         self._centre_on_parent(parent)
+
+        # Workers post to _ui_queue; nothing runs it until this starts.
+        self._start_ui_pump()
 
     # ── Section builders ──────────────────────────────────────────────────────
 
@@ -583,7 +599,7 @@ class ScrubHistoryDialog(tk.Toplevel):
 
         def _worker():
             ok, log = install_filter_repo(on_log=self._log_append_threadsafe)
-            self.after(0, lambda: _done(ok, log))
+            self._post(lambda: _done(ok, log))
 
         def _done(ok, log):
             try:
@@ -644,7 +660,7 @@ class ScrubHistoryDialog(tk.Toplevel):
                 self._path, self._cfg.git_exe, rel_file,
                 on_log=self._log_append_threadsafe,
             )
-            self.after(0, lambda: _done(ok))
+            self._post(lambda: _done(ok))
 
         def _done(ok: bool):
             try:
@@ -715,7 +731,7 @@ class ScrubHistoryDialog(tk.Toplevel):
                         creationflags=_CNW,
                     )
                 finally:
-                    self.after(0, self._post_commit_refresh)
+                    self._post(self._post_commit_refresh)
 
             threading.Thread(target=_worker, daemon=True).start()
 
@@ -761,7 +777,7 @@ class ScrubHistoryDialog(tk.Toplevel):
                 self._path, self._cfg.git_exe, self._backup_branch_name)
             self._log_append_threadsafe(log_b)
             if not ok_backup:
-                self.after(0, lambda: _done(False,
+                self._post(lambda: _done(False,
                     "Backup branch creation FAILED — aborting before scrub."))
                 return
             # 2. Snapshot remote URL — filter-repo unconditionally removes
@@ -779,7 +795,7 @@ class ScrubHistoryDialog(tk.Toplevel):
                 self._path, self._cfg.git_exe, rel_file,
                 on_log=self._log_append_threadsafe,
             )
-            self.after(0, lambda: _done(ok_scrub, ""))
+            self._post(lambda: _done(ok_scrub, ""))
 
         def _done(ok: bool, extra_msg: str):
             try:
@@ -849,7 +865,6 @@ class ScrubHistoryDialog(tk.Toplevel):
                 url = self._preflight.get("remote_url", "")
             if not url:
                 # Last resort: ask via main thread, block worker until answered
-                import queue
                 q: queue.Queue = queue.Queue()
                 from tkinter.simpledialog import askstring
                 def _ask():
@@ -859,8 +874,18 @@ class ScrubHistoryDialog(tk.Toplevel):
                         "session.\n\nEnter the GitHub URL to re-add it:",
                         parent=self)
                     q.put(val or "")
-                self.after(0, _ask)
-                url = q.get()
+                self._post(_ask)
+                # Bounded. This worker is asking the UI a question and
+                # blocking on the reply; without a timeout a dialog that is
+                # closing, or a pump that has stopped, wedges the thread
+                # permanently with nothing on screen to say why.
+                try:
+                    url = q.get(timeout=300)
+                except queue.Empty:
+                    self._log_append_threadsafe(
+                        "No remote URL supplied (timed out waiting for the "
+                        "prompt) — skipping remote restore.")
+                    url = ""
             if url:
                 self._saved_remote_url = url  # cache for subsequent pushes
             restore_remote_if_missing(
@@ -872,7 +897,7 @@ class ScrubHistoryDialog(tk.Toplevel):
                 self._path, self._cfg.git_exe, head,
                 on_log=self._log_append_threadsafe,
             )
-            self.after(0, lambda: _done(ok))
+            self._post(lambda: _done(ok))
 
         def _done(ok: bool):
             try:
@@ -920,6 +945,6 @@ class ScrubHistoryDialog(tk.Toplevel):
 
     def _log_append_threadsafe(self, line: str):
         try:
-            self.after(0, lambda l=line: self._log_append(l))
+            self._post(lambda l=line: self._log_append(l))
         except tk.TclError:
             pass

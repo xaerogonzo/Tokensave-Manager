@@ -46,12 +46,13 @@ from helpers.mcp import (
     _codegraph_agent_destination_path,
     _codegraph_agent_installed,
 )
+from theme import UiPumpMixin
 
 if TYPE_CHECKING:
     from state import ManagerConfig
 
 
-class CodegraphMCPPickerDialog(tk.Toplevel):
+class CodegraphMCPPickerDialog(UiPumpMixin, tk.Toplevel):
     """Per-agent MCP-wiring picker for the codegraph install command.
 
     Constructed from SettingsDialog when the user clicks "⚙ Configure
@@ -62,6 +63,8 @@ class CodegraphMCPPickerDialog(tk.Toplevel):
     def __init__(self, parent, cfg: "ManagerConfig",
                  on_done: "Callable[[], None] | None" = None) -> None:
         super().__init__(parent)
+        # Start the worker -> UI channel before anything can post to it.
+        self._start_ui_pump()
         self._parent_dialog = parent
         self._cfg = cfg
         self._on_done = on_done
@@ -251,16 +254,16 @@ class CodegraphMCPPickerDialog(tk.Toplevel):
                     encoding="utf-8", errors="replace",
                 )
             except subprocess.TimeoutExpired:
-                self.after(0, lambda: self._on_install_done(
+                self._post(lambda: self._on_install_done(
                     False, "codegraph install timed out after 120 s."))
                 return
             except (FileNotFoundError, OSError) as exc:
-                self.after(0, lambda e=exc: self._on_install_done(
+                self._post(lambda e=exc: self._on_install_done(
                     False, f"Could not launch codegraph: {e}"))
                 return
             ok = proc.returncode == 0
             log = (proc.stdout or "") + (proc.stderr or "")
-            self.after(0, lambda o=ok, l=log: self._on_install_done(o, l))
+            self._post(lambda o=ok, l=log: self._on_install_done(o, l))
 
         threading.Thread(target=_worker, daemon=True).start()
 

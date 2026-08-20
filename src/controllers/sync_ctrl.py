@@ -110,6 +110,42 @@ class SyncStatusController:
     def cmd_sync(self, path: str) -> None:
         self._on_run(["sync"], cwd=path, label=os.path.basename(path))
 
+    # Operations safe to run unattended across many projects: they stream to
+    # the log and open nothing. Status is deliberately the log-only variant —
+    # the single-project command shows a popup, and N popups is not a feature.
+    # Doctor is NOT here on purpose: it schedules follow-up dialogs (purge,
+    # worktree repair) that would stack one per project.
+    BATCH_OPS = {
+        "sync":   (["sync"],            "Sync"),
+        "force":  (["sync", "--force"], "Force re-sync"),
+        "status": (["status"],          "Status"),
+    }
+
+    def run_batch(self, paths: list, op: str = "sync") -> None:
+        """Run one tokensave op across *paths*, sequentially.
+
+        Sequential on purpose: the controller tracks a single ``current_proc``
+        so Stop can kill what is running, and N parallel subprocesses would
+        leave all but one unkillable. It is also kinder to a machine already
+        running several Claude sessions.
+        """
+        argv, label = self.BATCH_OPS.get(op, self.BATCH_OPS["sync"])
+        if op == "force":
+            n = len(paths)
+            # Asked once for the batch. Confirming a full rebuild per project
+            # would be worse than not asking at all.
+            if not messagebox.askyesno(
+                    "Force Re-sync",
+                    f"Rebuild the code graph from scratch for {n} "
+                    f"project{'s' if n != 1 else ''}?"
+                    + chr(10) + chr(10) +
+                    "Runs sequentially and may take several minutes.",
+                    parent=self._root):
+                return
+        projects = [{"name": os.path.basename(p) or p, "path": p}
+                    for p in paths]
+        self._run_project_batch(projects, argv, label)
+
     def cmd_sync_all(self) -> None:
         projects = self._get_projects()
         if not projects:
@@ -135,30 +171,40 @@ class SyncStatusController:
         ):
             return
 
-        projects_snapshot = list(ts_projects)
+        self._run_project_batch(list(ts_projects), ["sync"], "Sync")
+
+    def _run_project_batch(self, projects_snapshot: list, argv: list,
+                           label: str) -> None:
+        """Shared sequential runner: stream one op over N projects."""
+        count = len(projects_snapshot)
+        if not count:
+            return
 
         def worker():
             self._stop_requested = False
-            self._on_log(f"↺  Syncing all {count} projects…", C["blue"])
-            log.info(f"SYNC ALL — {count} projects")
-            self._tab.after(0, self._on_set_running, True, "all projects")
+            self._on_log(f"↺  {label} across {count} project{'s' if count != 1 else ''}…", C["blue"])
+            log.info(f"BATCH {label.upper()} — {count} projects")
+            self._tab.after(0, self._on_set_running, True,
+                            f"{count} projects")
             ok = fail = 0
             for i, p in enumerate(projects_snapshot, 1):
                 if self._stop_requested:
-                    self._on_log(f"  ■ Sync All aborted after {i - 1}/{count}.", C["red"])
-                    log.info("SYNC ALL aborted by user")
+                    self._on_log(
+                        f"  ■ {label} aborted after {i - 1}/{count}.",
+                        C["red"])
+                    log.info(f"BATCH {label} aborted by user")
                     break
                 name = p["name"]
                 path = p["path"]
                 self._on_log(f"[{i}/{count}] {name}", C["subtext"])
-                log.info(f"  SYNC {i}/{count}: {name}")
+                log.info(f"  {label} {i}/{count}: {name}")
                 t0 = time.monotonic()
                 try:
                     env = os.environ.copy()
                     env["NO_COLOR"] = "1"
                     env["TERM"] = "dumb"
                     proc = subprocess.Popen(
-                        [self._cfg.tokensave_exe, "sync"], cwd=path,
+                        [self._cfg.tokensave_exe, *argv], cwd=path,
                         stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
                         text=True, encoding="utf-8", errors="replace",
                         env=env, creationflags=CREATE_NO_WINDOW,
@@ -185,11 +231,11 @@ class SyncStatusController:
                 finally:
                     self._on_set_proc(None)
 
-            summary = f"Sync All done — {ok} succeeded"
+            summary = f"{label} done — {ok} succeeded"
             if fail:
                 summary += f", {fail} failed"
             self._on_log(summary, C["green"] if not fail else C["peach"])
-            log.info(f"SYNC ALL complete — ok={ok} fail={fail}")
+            log.info(f"BATCH {label} complete — ok={ok} fail={fail}")
             self._tab.after(0, self._on_set_running, False, "")
             self._tab.after(0, self._on_refresh)
 

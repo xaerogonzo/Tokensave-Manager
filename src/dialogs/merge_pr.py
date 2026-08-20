@@ -48,6 +48,10 @@ class MergePRDialog(tk.Toplevel):
         # Tracks whether to also delete the source branch on GitHub
         # after a successful merge (the same toggle gh's web UI offers).
         self._var_delete_branch = tk.BooleanVar(value=True)
+        # OFF by default: [Unreleased] accumulates since the last
+        # RELEASE, not since the last merge, so it can describe work
+        # that is not in this PR. Opting in is a deliberate act.
+        self._var_changelog_body = tk.BooleanVar(value=False)
 
         self._build_header_section(path)
         self._build_pr_list_section(prs)
@@ -129,6 +133,20 @@ class MergePRDialog(tk.Toplevel):
             activebackground=C["base"], activeforeground=C["text"],
             font=("Segoe UI", 9)).pack(side=tk.LEFT)
 
+        cl_row = tk.Frame(self, bg=C["base"])
+        cl_row.pack(fill=tk.X, padx=18, pady=(0, 2))
+        themed_checkbutton(cl_row,
+            text="Use CHANGELOG [Unreleased] as the merge-commit body",
+            variable=self._var_changelog_body,
+            bg=C["base"], fg=C["text"],
+            activebackground=C["base"], activeforeground=C["text"],
+            font=("Segoe UI", 9)).pack(side=tk.LEFT)
+        tk.Label(cl_row,
+                 text="(covers everything since the last release, "
+                      "not just this PR)",
+                 bg=C["base"], fg=C["overlay0"],
+                 font=("Segoe UI", 8)).pack(side=tk.LEFT, padx=(6, 0))
+
     def _build_buttons_section(self):
         """Three strategy buttons (Merge / Squash / Rebase) + Close."""
         btn_row = tk.Frame(self, bg=C["base"])
@@ -176,6 +194,7 @@ class MergePRDialog(tk.Toplevel):
         add   = pr.get("additions", 0)
         rem   = pr.get("deletions", 0)
         delete_branch = bool(self._var_delete_branch.get())
+        changelog_body = bool(self._var_changelog_body.get())
 
         strategy_name = {
             "merge":  "Merge commit",
@@ -200,4 +219,4 @@ class MergePRDialog(tk.Toplevel):
             return
         self.destroy()
         self._callback(self._path, pr_number, strategy, delete_branch,
-                       title)
+                       title, changelog_body)

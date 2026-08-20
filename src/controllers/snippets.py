@@ -42,7 +42,7 @@ import tkinter as tk
 from tkinter import ttk, messagebox
 from typing import TYPE_CHECKING
 
-from constants import C, _BASE_DIR
+from constants import CREATE_NEW_CONSOLE, C, _BASE_DIR
 from dialogs.snippet_edit import SnippetEditDialog
 
 if TYPE_CHECKING:
@@ -587,7 +587,7 @@ class SnippetsController:
                 proc = subprocess.Popen(
                     cmd_str,
                     cwd=project_path,
-                    creationflags=subprocess.CREATE_NEW_CONSOLE,
+                    creationflags=CREATE_NEW_CONSOLE,
                 )
             else:
                 proc = subprocess.Popen(

@@ -23,7 +23,7 @@ from tkinter import messagebox
 from typing import TYPE_CHECKING, Callable
 
 from constants import C
-from theme import themed_checkbutton
+from theme import UiPumpMixin, _Tooltip, themed_checkbutton
 from helpers.quality_checks import run_syntax_check, run_pyflakes_check
 from helpers.prepush_hook import (
     is_pre_push_hook_installed,
@@ -75,10 +75,14 @@ def _check_pyflakes(path: str) -> tuple[bool, str]:
 def _check_doctor(path: str, cfg: "ManagerConfig") -> tuple[bool, str]:
     """Call _audit_project_tree directly (pure function). Returns (passed, summary)."""
     try:
-        from controllers.doctor_ctrl import _audit_project_tree
+        from helpers.doctor_rules import _audit_project_tree
         raw = cfg.raw if isinstance(cfg.raw, dict) else {}
         skip_rel = set(raw.get("doctor_skip_paths") or [])
-        violations, _exempts, files_scanned = _audit_project_tree(path, skip_rel)
+        # Per-directory cap tiers, e.g. looser thresholds for scripts/ so the
+        # directory is audited rather than blanket-skipped.
+        overrides = raw.get("doctor_path_overrides") or {}
+        violations, _exempts, files_scanned = _audit_project_tree(
+            path, skip_rel, overrides)
         count = len(violations)
         if count == 0:
             return True, f"passed — {files_scanned} files scanned, 0 violations"
@@ -133,7 +137,7 @@ def _check_claude_review(diff: str, cfg: "ManagerConfig", cancelled: threading.E
 
 # ── Dialog ───────────────────────────────────────────────────────────────────
 
-class ChecksDialog(tk.Toplevel):
+class ChecksDialog(UiPumpMixin, tk.Toplevel):
     """Modal pre-merge checks panel. Construct on the Tk main thread."""
 
     def __init__(
@@ -145,6 +149,8 @@ class ChecksDialog(tk.Toplevel):
         on_log: Callable[[str, str], None],
     ) -> None:
         super().__init__(parent)
+        # Start the worker -> UI channel before anything can post to it.
+        self._start_ui_pump()
         self.title("Run checks")
         self.resizable(True, True)
         self.minsize(540, 300)
@@ -262,12 +268,25 @@ class ChecksDialog(tk.Toplevel):
             padx=10,
             pady=3,
         )
-        tk.Button(
+        _gen_btn = tk.Button(
             ci_frame,
             text="📋 Generate GitHub Actions",
             command=self._on_generate_workflow,
             **_btn_kw,
-        ).pack(side=tk.LEFT, padx=(0, 8))
+        )
+        _gen_btn.pack(side=tk.LEFT, padx=(0, 8))
+        _Tooltip(_gen_btn,
+                 "Writes .github/workflows/quality-checks.yml so the checks"
+                 + "\n" +
+                 "ticked above also run on GitHub for every push and PR."
+                 + "\n\n" +
+                 "Safe alongside an existing ci.yml — it is a separate file,"
+                 + "\n" +
+                 "and re-generating overwrites only its own."
+                 + "\n\n" +
+                 "The Doctor step it writes is ADVISORY: it reports findings"
+                 + "\n" +
+                 "to the job summary and never fails the build.")
 
         hook_label = (
             "Remove pre-push hook" if self._hook_installed
@@ -280,6 +299,18 @@ class ChecksDialog(tk.Toplevel):
             **_btn_kw,
         )
         self._hook_btn.pack(side=tk.LEFT)
+        _Tooltip(self._hook_btn,
+                 "Installs .git/hooks/pre-push, which runs the deterministic"
+                 + "\n" +
+                 "checks (syntax + pyflakes) before every push."
+                 + "\n\n" +
+                 "Doctor and the AI review are NOT run by the hook — they are"
+                 + "\n" +
+                 "advisory, and a push should not be blocked on an opinion."
+                 + "\n\n" +
+                 "A blocked push can always be overridden with:"
+                 + "\n" +
+                 "    git push --no-verify")
 
         self._ci_status_lbl = tk.Label(
             ci_frame, text="", bg=C["base"], fg=C["subtext"],
@@ -321,9 +352,9 @@ class ChecksDialog(tk.Toplevel):
         # Reset all rows
         for key in _LABELS:
             if enabled.get(key):
-                self.after(0, self._set_row, key, "pending", "running…")
+                self._post(self._set_row, key, "pending", "running…")
             else:
-                self.after(0, self._set_row, key, "skip", "skipped")
+                self._post(self._set_row, key, "skip", "skipped")
 
         # ── Large-diff check for Claude review (main thread only) ─────────────
         diff: str | None = None
@@ -339,7 +370,7 @@ class ChecksDialog(tk.Toplevel):
                 )
                 if not ok:
                     enabled.pop("claude")
-                    self.after(0, self._set_row, "claude", "skip", "skipped (large diff)")
+                    self._post(self._set_row, "claude", "skip", "skipped (large diff)")
 
         # ── Launch executor ───────────────────────────────────────────────────
         self._executor = concurrent.futures.ThreadPoolExecutor(
@@ -381,8 +412,8 @@ class ChecksDialog(tk.Toplevel):
         except Exception as e:
             state, summary = "fail", f"error: {e}"
 
-        self.after(0, self._set_row, key, state, summary)
-        self.after(0, self._maybe_reenable_run)
+        self._post(self._set_row, key, state, summary)
+        self._post(self._maybe_reenable_run)
 
     def _maybe_reenable_run(self) -> None:
         """Re-enable the Run button once all pending rows have resolved."""

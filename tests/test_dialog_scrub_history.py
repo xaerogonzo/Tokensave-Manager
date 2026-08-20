@@ -15,6 +15,10 @@ from __future__ import annotations
 
 from types import SimpleNamespace
 
+import threading
+
+import sys
+
 import pytest
 
 tk = pytest.importorskip("tkinter")
@@ -149,12 +153,17 @@ def test_scrub_now_aborts_if_backup_fails(
     patch_after(dialog)
     dialog._selected_file.set("secrets.json")
     dialog._backup_branch_name = "backup/before-scrub-1700000000"
+
+    # The worker posts to the dialog's UI queue and returns; it no longer
+    # calls self.after(), which is what used to block it on Linux. So it
+    # simply finishes, and joining it is deterministic.
+    before = {t.ident for t in threading.enumerate()}
     dialog._on_scrub_now()
+    for worker in [t for t in threading.enumerate() if t.ident not in before]:
+        worker.join(timeout=15.0)
+        assert not worker.is_alive(), f"{worker.name} did not finish"
 
-    # Wait a little so the worker has time to abort.
-    import time as _t; _t.sleep(0.2)
     mock_scrub.assert_not_called()
-
 
 # ── _on_install_filter_repo ──────────────────────────────────────────────
 

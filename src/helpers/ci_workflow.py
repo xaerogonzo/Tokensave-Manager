@@ -6,9 +6,13 @@ workflow that mirrors the checks available in the Run Checks dialog.
 Design decisions:
   * Creates a SEPARATE file (`quality-checks.yml`) alongside any existing
     `ci.yml`. Coexistence is fine — running syntax/pyflakes twice is cheap.
-  * Doctor step is NOT included: `doctor_ctrl.py` imports Tk at module level,
-    which fails on ubuntu-latest without extra `apt-get` + display setup.
-    Doctor is local-only (Run Checks dialog + pre-push hook on the dev machine).
+  * Doctor step IS included, but ADVISORY (continue-on-error). The rules moved
+    to `helpers/doctor_rules.py`, which is stdlib-only, so they finally run on
+    ubuntu-latest — the Tk import that used to block this is gone. It does not
+    gate the build: the caps are an aspiration, and any project with an
+    existing backlog would otherwise get a permanently red badge on day one.
+    It reports into the job summary so the number is visible and can be driven
+    down deliberately.
   * Claude step is NOT included: requires interactive auth unavailable in CI.
   * Test job (v4.12 / G-I): a pytest job is auto-added IFF the target
     project has both a ``tests/`` directory and a ``requirements-dev.txt``.
@@ -30,8 +34,9 @@ def generate_github_workflow(
     Returns (ok, message). ok=False if the directory cannot be created or
     the file cannot be written.
 
-    Only enabled CI-compatible checks produce workflow steps. Doctor and
-    Claude are silently omitted (CI-incompatible for different reasons).
+    Only enabled CI-compatible checks produce workflow steps. Doctor is
+    included as an ADVISORY step (it no longer needs Tk); Claude is still
+    omitted, since it needs interactive auth CI cannot provide.
     """
     workflows_dir = os.path.join(project_path, ".github", "workflows")
     try:
@@ -98,6 +103,26 @@ def _build_yaml(checks_enabled: dict[str, bool],
             "        run: python -m pyflakes src/"
         )
 
+    if checks_enabled.get("doctor", True):
+        # Advisory, never a gate — see the module docstring. The
+        # trailing "|| true" means even a crash in the audit cannot
+        # block a build.
+        steps.append(
+            "      - name: Doctor audit (advisory)\n"
+            "        continue-on-error: true\n"
+            "        run: |\n"
+            "          python - <<'EOF' >> \"$GITHUB_STEP_SUMMARY\" || true\n"
+            "          import sys; sys.path.insert(0, 'src')\n"
+            "          from helpers.doctor_rules import _audit_project_tree\n"
+            "          v, _ex, n = _audit_project_tree('.', set())\n"
+            "          print(f'### Doctor audit: {len(v)} violation(s) across {n} files')\n"
+            "          for line in v[:25]:\n"
+            "              print('- ' + line.strip())\n"
+            "          if len(v) > 25:\n"
+            "              print(f'- ...and {len(v) - 25} more')\n"
+            "          EOF"
+        )
+
     steps_yaml = "\n".join(steps)
 
     test_job_yaml = ""
@@ -126,10 +151,11 @@ def _build_yaml(checks_enabled: dict[str, bool],
         "# Managed by TokenSave Manager — regenerate via Run Checks dialog.\n"
         "# Coexists with ci.yml (if present); duplicate steps are harmless.\n"
         "#\n"
+        "# Doctor audit runs below as an advisory step; it reports into the\n"
+        "# job summary and never gates the build.\n"
+        "#\n"
         "# Not included here:\n"
-        "#   Doctor audit — local-only (requires project-specific Python setup).\n"
         "#   Claude review — local-only (requires interactive auth).\n"
-        "# Both are available from the Run Checks dialog and the pre-push hook.\n"
         "name: Quality Checks (manager)\n"
         "on:\n"
         "  pull_request:\n"

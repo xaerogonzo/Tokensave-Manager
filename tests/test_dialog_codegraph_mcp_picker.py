@@ -113,6 +113,8 @@ def test_install_builds_target_csv_argv(
                  return_value=(False, ""))
     mock_run = mocker.patch("dialogs.codegraph_mcp_picker.subprocess.run",
                             return_value=_proc(rc=0, stdout="done"))
+    # The install worker finishes by posting a success modal.
+    mocker.patch("dialogs.codegraph_mcp_picker.messagebox.showinfo")
 
     dialog = CodegraphMCPPickerDialog(tk_root, mock_config)
     patch_after(dialog)
@@ -149,6 +151,8 @@ def test_install_includes_no_permissions_flag_when_checked(
                  return_value=(False, ""))
     mock_run = mocker.patch("dialogs.codegraph_mcp_picker.subprocess.run",
                             return_value=_proc(rc=0))
+    # The install worker finishes by posting a success modal.
+    mocker.patch("dialogs.codegraph_mcp_picker.messagebox.showinfo")
 
     dialog = CodegraphMCPPickerDialog(tk_root, mock_config)
     patch_after(dialog)
@@ -175,6 +179,8 @@ def test_install_omits_no_permissions_when_unchecked(
                  return_value=(False, ""))
     mock_run = mocker.patch("dialogs.codegraph_mcp_picker.subprocess.run",
                             return_value=_proc(rc=0))
+    # The install worker finishes by posting a success modal.
+    mocker.patch("dialogs.codegraph_mcp_picker.messagebox.showinfo")
 
     dialog = CodegraphMCPPickerDialog(tk_root, mock_config)
     patch_after(dialog)

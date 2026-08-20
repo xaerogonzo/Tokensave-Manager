@@ -460,3 +460,97 @@ class TestFormatGitStatusCell:
         result = git._format_git_status_cell(status, has_git=True)
         assert isinstance(result, tuple)
         assert len(result) == 2
+
+# ── _current_branch (Roadmap-9: CI badge branch resolution) ────────────────────
+
+class TestCurrentBranch:
+    """The CI badge asks which branch to poll; a wrong answer shows the wrong
+    branch's build status, which is worse than showing none."""
+
+    @staticmethod
+    def _proc(out="", rc=0):
+        return SimpleNamespace(returncode=rc, stdout=out, stderr="")
+
+    def test_returns_the_branch_name(self):
+        with mock.patch.object(git.subprocess, "run",
+                               return_value=self._proc("Roadmap-9\n")):
+            assert git._current_branch("/p", "git") == "Roadmap-9"
+
+    def test_surrounding_whitespace_is_stripped(self):
+        with mock.patch.object(git.subprocess, "run",
+                               return_value=self._proc("  Roadmap-9  ")):
+            assert git._current_branch("/p", "git") == "Roadmap-9"
+
+    def test_detached_head_is_none_not_the_string_HEAD(self):
+        """`rev-parse --abbrev-ref` prints the literal "HEAD" when detached.
+
+        Returning it would make the badge query a branch named HEAD and report
+        "no CI result for HEAD" — nonsense dressed as a fact.
+        """
+        with mock.patch.object(git.subprocess, "run",
+                               return_value=self._proc("HEAD")):
+            assert git._current_branch("/p", "git") is None
+
+    def test_non_repo_is_none(self):
+        with mock.patch.object(git.subprocess, "run",
+                               return_value=self._proc("", rc=128)):
+            assert git._current_branch("/p", "git") is None
+
+    def test_missing_git_is_none_not_an_exception(self):
+        with mock.patch.object(git.subprocess, "run",
+                               side_effect=FileNotFoundError):
+            assert git._current_branch("/p", "git") is None
+
+    def test_empty_output_is_none(self):
+        with mock.patch.object(git.subprocess, "run",
+                               return_value=self._proc("   ")):
+            assert git._current_branch("/p", "git") is None
+
+
+class TestFmtAgeKeepsTheYear:
+    """Last Synced dropped the year, hiding the stale projects it exists to show.
+
+    `"%b %d"` rendered "May 13 this year" and "May 13 three years ago"
+    identically — on a column whose purpose is spotting a stale index, that
+    is the one distinction that matters.
+    """
+
+    @staticmethod
+    def _ts(**delta):
+        from datetime import datetime, timedelta
+        return (datetime.now() - timedelta(**delta)).timestamp()
+
+    def test_recent_stays_relative(self):
+        from helpers.project_discovery import fmt_age
+        assert fmt_age(self._ts(seconds=30)) == "just now"
+        assert fmt_age(self._ts(minutes=20)) == "20m ago"
+        assert fmt_age(self._ts(hours=5)) == "5h ago"
+        assert fmt_age(self._ts(days=3)) == "3d ago"
+
+    def test_this_year_shows_month_and_day(self):
+        from datetime import datetime
+        from helpers.project_discovery import fmt_age
+        ts = self._ts(days=60)
+        out = fmt_age(ts)
+        if datetime.fromtimestamp(ts).year == datetime.now().year:
+            assert out[-4:].strip().isdigit() is False or len(out) <= 6
+            assert str(datetime.now().year) not in out
+
+    def test_a_previous_year_carries_the_year(self):
+        from datetime import datetime
+        from helpers.project_discovery import fmt_age
+        ts = self._ts(days=800)
+        out = fmt_age(ts)
+        expected_year = str(datetime.fromtimestamp(ts).year)
+        assert expected_year in out, (
+            f"{out!r} does not say which year — a two-year-old index is "
+            f"indistinguishable from a two-month-old one")
+
+    def test_two_dates_two_years_apart_do_not_render_alike(self):
+        """The exact collision the old format produced."""
+        from datetime import datetime
+        from helpers.project_discovery import fmt_age
+        now = datetime.now()
+        a = now.replace(year=now.year - 1, month=5, day=13).timestamp()
+        b = now.replace(year=now.year - 3, month=5, day=13).timestamp()
+        assert fmt_age(a) != fmt_age(b)

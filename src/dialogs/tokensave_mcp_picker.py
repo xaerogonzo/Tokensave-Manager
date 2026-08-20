@@ -41,7 +41,7 @@ from tkinter import messagebox, ttk
 from typing import TYPE_CHECKING, Callable
 
 from constants import C, CREATE_NO_WINDOW
-from theme import bind_mousewheel
+from theme import UiPumpMixin, bind_mousewheel
 from helpers.mcp import (
     _TOKENSAVE_AGENTS,
     _tokensave_agent_destination_path,
@@ -76,7 +76,7 @@ def build_install_argv(
     return argv
 
 
-class TokensaveMCPPickerDialog(tk.Toplevel):
+class TokensaveMCPPickerDialog(UiPumpMixin, tk.Toplevel):
     """Per-agent picker for ``tokensave install``.
 
     ``preselect`` pre-checks a specific set of agent ids — used by the Doctor
@@ -92,6 +92,8 @@ class TokensaveMCPPickerDialog(tk.Toplevel):
         on_done: "Callable[[], None] | None" = None,
     ) -> None:
         super().__init__(parent)
+        # Start the worker -> UI channel before anything can post to it.
+        self._start_ui_pump()
         self._cfg = cfg
         self._on_done = on_done
         self._preselect = set(preselect or ())
@@ -319,7 +321,7 @@ class TokensaveMCPPickerDialog(tk.Toplevel):
 
     def _log_threadsafe(self, line: str) -> None:
         try:
-            self.after(0, lambda l=line: self._log(l))
+            self._post(lambda l=line: self._log(l))
         except tk.TclError:
             pass
 
@@ -397,7 +399,7 @@ class TokensaveMCPPickerDialog(tk.Toplevel):
                     fail_n += 1
                     # One agent failing must never abort the others.
                     self._log_threadsafe(f"  ✗ {agent_id}: {detail}")
-            self.after(0, lambda: self._on_install_done(ok_n, fail_n))
+            self._post(lambda: self._on_install_done(ok_n, fail_n))
 
         threading.Thread(target=_worker, daemon=True).start()
 

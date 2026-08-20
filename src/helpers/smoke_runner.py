@@ -7,10 +7,12 @@ Provides:
   uninstall_pre_commit_hook(repo_root)       → (ok, message)
   is_hook_installed(repo_root)               → bool
 
-As of v4.12 this runs the full pytest suite under ``tests/`` (not just
-the original ``smoke_test.py``). pytest auto-discovers both pytest-native
-files AND the existing ``unittest.TestCase`` classes in ``smoke_test.py``,
-so coverage strictly expanded.
+As of v4.12 this runs the whole pytest suite under ``tests/`` rather than a
+single file, and discovery is pytest's own: it collects both pytest-native
+test functions and the ``unittest.TestCase`` classes that several test
+modules still use. Roadmap-9 split the original ``tests/smoke_test.py`` into
+per-subsystem modules; nothing here names a test file, so that split needed
+no change on this side.
 
 v4.13 (V-E) extracts the worker-thread+subprocess wrapping into
 ``run_pytest_in_background`` so multiple dialogs can share it. Adds a
@@ -43,10 +45,10 @@ exit $?
 """.format(marker=_HOOK_MARKER)
 
 # --- subprocess creation flag (Windows: hide the console window) ----------
-try:
-    _CREATE_NO_WINDOW = subprocess.CREATE_NO_WINDOW  # type: ignore[attr-defined]
-except AttributeError:
-    _CREATE_NO_WINDOW = 0
+# Uses the platform-guarded constant rather than a local try/except, so there
+# is exactly one way to reach these flags and the structural guard in
+# tests/test_no_windows_only_subprocess_flags.py can stay strict.
+from constants import CREATE_NO_WINDOW as _CREATE_NO_WINDOW  # noqa: E402
 
 
 # ── Public helpers ─────────────────────────────────────────────────────────

@@ -129,13 +129,13 @@ def test_stop_current_no_projects_attr_is_safe():
     assert stub._stop_requested is True
 
 
-# ── _log (marshals to the Tk thread via self.after) ──────────────────────────
+# ── _log (marshals to the Tk thread via UiPumpMixin._post) ──────────────────────────
 
-def test_log_inserts_message_via_after():
+def test_log_inserts_message_via_post():
     log_widget = mock.MagicMock()
-    # after(0, cb) → run the callback immediately (simulates the Tk loop).
+    # _post(fn, *args) → run it immediately (simulates the pump draining).
     stub = SimpleNamespace(log=log_widget,
-                           after=lambda _delay, cb: cb())
+                           _post=lambda fn, *a: fn(*a))
     App._log(stub, "hello", "red")
     # The message (with newline) was inserted with a colour tag.
     args = log_widget.insert.call_args[0]
@@ -145,7 +145,7 @@ def test_log_inserts_message_via_after():
 
 def test_log_defaults_colour_tag():
     log_widget = mock.MagicMock()
-    stub = SimpleNamespace(log=log_widget, after=lambda _delay, cb: cb())
+    stub = SimpleNamespace(log=log_widget, _post=lambda fn, *a: fn(*a))
     App._log(stub, "plain")
     args = log_widget.insert.call_args[0]
     assert args[1] == "plain\n"
@@ -228,3 +228,83 @@ def test_check_worktree_health_handles_missing_projects_attr():
     with mock.patch("app.find_orphaned_worktrees", return_value=[]) as f:
         App._check_worktree_health(stub)
     f.assert_called_once_with([], "git")
+
+
+# ── Manager-source change banner (Roadmap-9 Phase 2.4) ──────────────────────
+
+def test_banner_appears_when_source_changed():
+    stub = SimpleNamespace(
+        _src_root="/proj/src", _src_baseline={}, _src_banner_dismissed=False,
+        nb=object(), after=lambda *a: None, shown=None,
+        _SRC_CHECK_MS=60_000, _check_source_changed=None)
+    stub._show_source_banner = lambda ch: setattr(stub, "shown", ch)
+    with mock.patch("app.snapshot_sources", return_value={"/proj/src/a.py": (1, 2)}), \
+         mock.patch("app.changed_files", return_value=["/proj/src/a.py"]):
+        App._check_source_changed(stub)
+    assert stub.shown == ["/proj/src/a.py"]
+
+
+def test_banner_stays_hidden_when_nothing_changed():
+    stub = SimpleNamespace(
+        _src_root="/proj/src", _src_baseline={}, _src_banner_dismissed=False,
+        nb=object(), after=lambda *a: None, shown=None,
+        _SRC_CHECK_MS=60_000, _check_source_changed=None)
+    stub._show_source_banner = lambda ch: setattr(stub, "shown", ch)
+    with mock.patch("app.snapshot_sources", return_value={}), \
+         mock.patch("app.changed_files", return_value=[]):
+        App._check_source_changed(stub)
+    assert stub.shown is None
+
+
+def test_dismissed_banner_does_not_come_back():
+    """Re-raising on every later edit would nag through the exact session
+    where the user has already decided to restart when convenient."""
+    stub = SimpleNamespace(
+        _src_root="/proj/src", _src_baseline={}, _src_banner_dismissed=True,
+        nb=object(), after=lambda *a: None, shown=None,
+        _SRC_CHECK_MS=60_000, _check_source_changed=None)
+    stub._show_source_banner = lambda ch: setattr(stub, "shown", ch)
+    with mock.patch("app.snapshot_sources", return_value={"a": (1, 2)}), \
+         mock.patch("app.changed_files", return_value=["/proj/src/a.py"]):
+        App._check_source_changed(stub)
+    assert stub.shown is None
+
+
+def test_check_reschedules_itself_even_when_the_scan_raises():
+    """The timer must survive a transient filesystem error, or the feature
+    silently stops working for the rest of the session."""
+    scheduled = []
+    stub = SimpleNamespace(
+        _src_root="/proj/src", _src_baseline={}, _src_banner_dismissed=False,
+        nb=object(), after=lambda ms, fn: scheduled.append(ms),
+        _SRC_CHECK_MS=60_000, _check_source_changed=None,
+        _show_source_banner=lambda ch: None)
+    with mock.patch("app.snapshot_sources", side_effect=OSError("boom")):
+        with pytest.raises(OSError):
+            App._check_source_changed(stub)
+    assert scheduled, "the next check was never scheduled"
+
+
+def test_banner_text_names_the_changed_files():
+    captured = {}
+    stub = SimpleNamespace(
+        _src_root="/proj/src",
+        _src_banner=SimpleNamespace(winfo_ismapped=lambda: False,
+                                    pack=lambda **kw: None),
+        _src_banner_lbl=SimpleNamespace(
+            configure=lambda **kw: captured.update(kw)),
+        nb=object())
+    with mock.patch("app.describe_changes", return_value="helpers/git.py"):
+        App._show_source_banner(stub, ["/proj/src/helpers/git.py"])
+    assert "helpers/git.py" in captured["text"]
+    assert "restart" in captured["text"].lower()
+
+
+def test_dismiss_hides_and_latches():
+    hidden = []
+    stub = SimpleNamespace(
+        _src_banner_dismissed=False,
+        _src_banner=SimpleNamespace(pack_forget=lambda: hidden.append(1)))
+    App._dismiss_source_banner(stub)
+    assert stub._src_banner_dismissed is True
+    assert hidden == [1]

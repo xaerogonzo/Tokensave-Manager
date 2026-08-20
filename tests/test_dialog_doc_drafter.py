@@ -79,3 +79,51 @@ def test_close_signals_all_tab_stop_events(tk_root, mock_config, tmp_path,
     dialog.tk.call(handler)          # simulate the close click
     assert all(s["stop"].is_set() for s in states)
     assert not dialog.winfo_exists()
+
+
+# ── Tab strip fits the dialog (Roadmap-9 Phase 4.2 / audit F8) ───────────
+
+class TestTabStripFits:
+    """Tk notebooks do not scroll their tab strip.
+
+    Once the strip is wider than the window, the overflowing tabs are
+    unreachable rather than merely cramped — the content is gone, not just
+    cropped. With every DocType key rendered as `key.upper()` the strip
+    needed roughly 760px while the dialog's own minsize is 720 wide, so the
+    last tab could not be clicked at the smallest supported size.
+    """
+
+    _MINSIZE_W = 720
+    _PX_PER_CHAR = 8      # deliberate over-estimate for a 9pt UI font
+
+    def _tab_texts(self):
+        from dialogs.doc_drafter_support import _TAB_LABELS
+        from helpers.doc_types import REGISTRY
+        return [f"  {_TAB_LABELS.get(k, k.upper())}  " for k in REGISTRY]
+
+    def test_the_strip_fits_at_the_dialogs_minimum_width(self):
+        width = sum(len(t) for t in self._tab_texts()) * self._PX_PER_CHAR
+        assert width < self._MINSIZE_W, (
+            f"tab strip needs ~{width}px but minsize is {self._MINSIZE_W}px — "
+            f"the last tab(s) would be unreachable")
+
+    def test_the_declared_minsize_still_matches_what_we_assumed(self):
+        """If the dialog shrinks, this budget has to be rechecked."""
+        import pathlib
+        src = pathlib.Path("src/dialogs/doc_drafter.py").read_text(
+            encoding="utf-8")
+        assert f"self.minsize({self._MINSIZE_W}, " in src, \
+            "minsize changed — re-derive the tab-strip budget"
+
+    def test_every_doctype_still_gets_a_label(self):
+        from helpers.doc_types import REGISTRY
+        assert len(self._tab_texts()) == len(REGISTRY)
+        assert all(t.strip() for t in self._tab_texts())
+
+    def test_overrides_only_shorten_never_rename_meaninglessly(self):
+        from dialogs.doc_drafter_support import _TAB_LABELS
+        for key, label in _TAB_LABELS.items():
+            assert len(label) < len(key.upper()), (
+                f"{key!r} override {label!r} is not shorter — the point is "
+                f"width")
+            assert label.isupper()

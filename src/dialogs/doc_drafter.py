@@ -18,7 +18,7 @@ Flow per tab:
 Closing the dialog (X button) signals stop_event on ALL tab workers and
 destroys cleanly.  No leaked threads.
 
-All Tk widget mutations from worker threads go through ``self.after(0, …)``
+All Tk widget mutations from worker threads go through ``self._post(…)``
 and are guarded with ``winfo_exists()`` + ``try/except TclError`` (same
 pattern as the gitignore AI-Suggest worker).
 """
@@ -40,6 +40,7 @@ from constants import C
 from helpers.release import _classify_commits_for_changelog
 from helpers import doc_drafter as dd
 from helpers.doc_types import REGISTRY
+from theme import UiPumpMixin
 from dialogs.doc_drafter_support import (
     _BACKEND_DEFAULT,
     _BACKEND_OPTIONS,
@@ -62,7 +63,7 @@ _RANGE_MODES = [
     ("Custom range…",            "custom"),
 ]
 
-class DocDrafterDialog(tk.Toplevel):
+class DocDrafterDialog(UiPumpMixin, tk.Toplevel):
     """Tabbed doc-update drafter (CHANGELOG + README)."""
 
     def __init__(self, parent, project_path,
@@ -70,6 +71,8 @@ class DocDrafterDialog(tk.Toplevel):
                  on_log: "Callable[[str, str | None], None] | None" = None,
                  on_commit_offer: "Callable[[str, str], None] | None" = None):
         super().__init__(parent)
+        # Start the worker -> UI channel before anything can post to it.
+        self._start_ui_pump()
         self._app             = parent
         self._project_path    = project_path
         self._cfg             = cfg
@@ -679,7 +682,7 @@ class DocDrafterDialog(tk.Toplevel):
         """Background worker body for _on_generate_impl.
 
         Runs on a daemon thread — all Tk mutations go through
-        ``self.after(0, callback)``.  Parameters are snapshots taken on the
+        ``self._post(callback)``.  Parameters are snapshots taken on the
         main thread before the thread was started (immutable once passed).
         """
         # Both tabs get the always-on changed-file context (Phase 1.8).
@@ -689,7 +692,7 @@ class DocDrafterDialog(tk.Toplevel):
         dt = REGISTRY[key]
         target_path = self._resolve_target_path(key)
         if not target_path:
-            self.after(0, lambda: self._on_generate_error(
+            self._post(lambda: self._on_generate_error(
                 key, "No target file selected — pick a file first."))
             return
         existing = dt.read_existing(target_path)
@@ -780,12 +783,12 @@ class DocDrafterDialog(tk.Toplevel):
             return
 
         if err or not text:
-            self.after(0, lambda m=(err or "empty result"), se=stop_event:
+            self._post(lambda m=(err or "empty result"), se=stop_event:
                        self._on_generate_error(key, m, captured_stop_event=se))
             return
         # v4: pass the captured stop_event so _on_generate_done can verify
         # identity — stale results from superseded Generate clicks are dropped.
-        self.after(0, lambda t=text, se=stop_event:
+        self._post(lambda t=text, se=stop_event:
                    self._on_generate_done(key, t, captured_stop_event=se))
 
     def _filter_draft_text(self, key, raw_text):
@@ -1118,7 +1121,7 @@ class DocDrafterDialog(tk.Toplevel):
             bridge = ProposalBridge(self._app, proposal, timeout_s=300.0)
             accepted, final_content = bridge.invoke()
             if not accepted or not final_content:
-                self.after(0, lambda: self._on_apply_result(
+                self._post(lambda: self._on_apply_result(
                     key, False, "Proposal rejected or timed out."))
                 return
 
@@ -1128,7 +1131,7 @@ class DocDrafterDialog(tk.Toplevel):
             # content" failure mode discovered during dogfooding.
             dt = REGISTRY[key]
             ok, msg, stats = dt.io_apply(target_path, final_content)
-            self.after(0, lambda o=ok, m=msg, s=stats:
+            self._post(lambda o=ok, m=msg, s=stats:
                        self._on_apply_result(key, o, m, s))
 
         threading.Thread(target=_worker, daemon=True,

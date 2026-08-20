@@ -26,9 +26,10 @@ from tkinter import ttk, messagebox
 
 from constants import C
 from helpers.llm import _iter_json_lines
+from theme import UiPumpMixin
 
 
-class OllamaModelManagerDialog(tk.Toplevel):
+class OllamaModelManagerDialog(UiPumpMixin, tk.Toplevel):
     """Browse, pull, and delete Ollama models without leaving the manager.
 
     Uses Ollama's native REST API (not the OpenAI-compatible /v1 surface):
@@ -87,6 +88,11 @@ class OllamaModelManagerDialog(tk.Toplevel):
         self._build_close_section()
 
         self.protocol("WM_DELETE_WINDOW", self._on_close)
+
+        # Both initial populations run on worker threads, so the pump has to
+        # be draining before either is scheduled.
+        self._start_ui_pump()
+
         # Initial population.
         self.after(80, self._check_connection)
         self.after(160, self._refresh_models)
@@ -214,11 +220,11 @@ class OllamaModelManagerDialog(tk.Toplevel):
                 with urllib.request.urlopen(url, timeout=3) as resp:
                     data = _json.loads(resp.read().decode("utf-8"))
                 ver = data.get("version", "?")
-                self.after(0, self._conn_lbl.configure,
+                self._post(self._conn_lbl.configure,
                     {"text": f"✓  Connected — Ollama {ver}", "fg": C["green"]})
             except (urllib.error.URLError, urllib.error.HTTPError,
                     TimeoutError, _json.JSONDecodeError, OSError) as e:
-                self.after(0, self._conn_lbl.configure,
+                self._post(self._conn_lbl.configure,
                     {"text": f"✗  Not reachable at {self._server()} — "
                              f"is the Ollama service running? ({type(e).__name__})",
                      "fg": C["red"]})
@@ -236,7 +242,7 @@ class OllamaModelManagerDialog(tk.Toplevel):
                     data = _json.loads(resp.read().decode("utf-8"))
             except (urllib.error.URLError, urllib.error.HTTPError,
                     TimeoutError, _json.JSONDecodeError, OSError):
-                self.after(0, self._populate_models, [])
+                self._post(self._populate_models, [])
                 return
             models = data.get("models") or []
             # Enrich each with context length via /api/show. This is N HTTP
@@ -248,7 +254,7 @@ class OllamaModelManagerDialog(tk.Toplevel):
                 size = int(m.get("size") or 0)
                 ctx = self._fetch_context_length(name)
                 enriched.append({"name": name, "size": size, "context": ctx})
-            self.after(0, self._populate_models, enriched)
+            self._post(self._populate_models, enriched)
 
         threading.Thread(target=_worker, daemon=True,
                          name="ollama-tags").start()
@@ -364,7 +370,7 @@ class OllamaModelManagerDialog(tk.Toplevel):
                     TimeoutError, OSError) as e:
                 ok = False
                 err = f"{type(e).__name__}: {e}"
-            self.after(0, self._after_delete, model, ok, err)
+            self._post(self._after_delete, model, ok, err)
 
         threading.Thread(target=_worker, daemon=True,
                          name="ollama-delete").start()
@@ -411,7 +417,7 @@ class OllamaModelManagerDialog(tk.Toplevel):
                 self._current_response = response
             except (urllib.error.URLError, urllib.error.HTTPError,
                     TimeoutError, OSError) as e:
-                self.after(0, self._after_pull, model, False,
+                self._post(self._after_pull, model, False,
                            f"{type(e).__name__}: {e}")
                 return
             try:
@@ -426,11 +432,11 @@ class OllamaModelManagerDialog(tk.Toplevel):
                         msg = (f"{status} — "
                                f"{self._human_bytes(completed)} / "
                                f"{self._human_bytes(total)}  ({pct:.0f}%)")
-                        self.after(0, self._update_pull_progress, pct, msg)
+                        self._post(self._update_pull_progress, pct, msg)
                     elif status:
-                        self.after(0, self._update_pull_status, status)
+                        self._post(self._update_pull_status, status)
                     if status == "success":
-                        self.after(0, self._after_pull, model, True, "")
+                        self._post(self._after_pull, model, True, "")
                         return
             finally:
                 try:
@@ -441,9 +447,9 @@ class OllamaModelManagerDialog(tk.Toplevel):
             # Stream ended without an explicit "success" — could be cancel,
             # network drop, or an error event. Cancelled path takes priority.
             if self._pull_cancelled:
-                self.after(0, self._after_pull, model, False, "cancelled")
+                self._post(self._after_pull, model, False, "cancelled")
             else:
-                self.after(0, self._after_pull, model, False,
+                self._post(self._after_pull, model, False,
                            "Stream ended without success")
 
         self._pull_thread = threading.Thread(

@@ -8,7 +8,7 @@ mainloop completely unblocked.
 
 Windows-specific notes
 ----------------------
-* subprocess.CREATE_NEW_CONSOLE opens a genuine separate cmd window without
+* CREATE_NEW_CONSOLE opens a genuine separate cmd window without
   routing through `cmd /c start` (which has the "first-quoted-arg-is-the-
   window-title" parsing bug).
 * When both claude_exe and instruction contain spaces, Python's list→cmdline
@@ -26,7 +26,7 @@ import subprocess
 import sys
 import threading
 
-from constants import CREATE_NO_WINDOW
+from constants import CREATE_NEW_CONSOLE, CREATE_NO_WINDOW
 from helpers.runtime import log
 
 # Per-thread record of WHY the most recent call_claude_cli_print returned None
@@ -81,7 +81,7 @@ def spawn_claude_cli(
             subprocess.Popen(
                 cmd_str,
                 cwd=project_path,
-                creationflags=subprocess.CREATE_NEW_CONSOLE,
+                creationflags=CREATE_NEW_CONSOLE,
             )
         else:
             argv = [claude_exe]
@@ -131,7 +131,7 @@ def spawn_claude_cli_interactive(
             subprocess.Popen(
                 cmd_str,
                 cwd=project_path,
-                creationflags=subprocess.CREATE_NEW_CONSOLE,
+                creationflags=CREATE_NEW_CONSOLE,
             )
         else:
             argv = [claude_exe]

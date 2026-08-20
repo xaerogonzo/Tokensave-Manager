@@ -1,7 +1,8 @@
 """tests/test_theme.py — Tk UI primitives (tooltips, mouse wheel, themed widgets).
 
-Tests _Tooltip hover behavior, bind_mousewheel canvas scrolling, and
-themed_checkbutton custom indicator images.
+Tests _Tooltip hover behavior, bind_mousewheel canvas scrolling,
+themed_checkbutton custom indicator images, and the UiPumpMixin that carries
+worker-thread updates onto the Tk thread.
 """
 from __future__ import annotations
 
@@ -10,7 +11,10 @@ tk = pytest.importorskip("tkinter")
 import tkinter as tk
 from unittest import mock
 
+import threading
+
 from theme import (
+    UiPumpMixin,
     _Tooltip,
     bind_mousewheel,
     _make_chk_images,
@@ -393,3 +397,157 @@ class TestThemedCheckbutton:
 
         assert padx in ("2", 2)
         assert bd in ("0", 0)
+
+class _PumpWindow(UiPumpMixin, tk.Toplevel):
+    """Minimal host for the mixin — a window and nothing else."""
+
+    def __init__(self, parent):
+        super().__init__(parent)
+        self.seen: list = []
+        self._start_ui_pump()
+
+
+class TestUiPumpMixin:
+    """Worker -> UI hand-off.
+
+    These exercise the mixin through a real Tk window and a real thread,
+    because the bug it replaces only ever appeared with both present: calling
+    `after()` from a worker works on Windows, and silently BLOCKS on Linux.
+    """
+
+    def _drain(self, win, wait_for, predicate):
+        wait_for(predicate, timeout_s=3.0)
+
+    def test_a_worker_thread_reaches_the_widget(self, tk_root, wait_for):
+        win = _PumpWindow(tk_root)
+        try:
+            done = threading.Event()
+
+            def _worker():
+                win._post(win.seen.append, "from-worker")
+                done.set()
+
+            t = threading.Thread(target=_worker, daemon=True)
+            t.start()
+            t.join(timeout=5.0)
+            assert done.is_set(), "worker did not finish"
+            self._drain(win, wait_for, lambda: win.seen == ["from-worker"])
+            assert win.seen == ["from-worker"]
+        finally:
+            win.destroy()
+
+    def test_posted_callables_run_in_order(self, tk_root, wait_for):
+        win = _PumpWindow(tk_root)
+        try:
+            for i in range(5):
+                win._post(win.seen.append, i)
+            self._drain(win, wait_for, lambda: len(win.seen) == 5)
+            assert win.seen == [0, 1, 2, 3, 4]
+        finally:
+            win.destroy()
+
+    def test_a_raising_callback_does_not_kill_the_pump(self, tk_root,
+                                                       wait_for):
+        """The regression this guards is a frozen window with no error.
+
+        If one bad callback escaped the pump loop, `_ui_pump` would never
+        reach its reschedule, every later post would be dropped, and the
+        window would sit there looking fine. So the pump logs and continues.
+        """
+        win = _PumpWindow(tk_root)
+        try:
+            def _boom():
+                raise ValueError("callback blew up")
+
+            win._post(_boom)
+            win._post(win.seen.append, "after-the-exception")
+            self._drain(win, wait_for, lambda: win.seen)
+            assert win.seen == ["after-the-exception"]
+
+            # And it is still alive for the NEXT post, not just this drain.
+            win._post(win.seen.append, "still-pumping")
+            self._drain(win, wait_for, lambda: len(win.seen) == 2)
+            assert win.seen == ["after-the-exception", "still-pumping"]
+        finally:
+            win.destroy()
+
+    def test_a_destroyed_widget_does_not_raise(self, tk_root, wait_for):
+        """Posts racing a closing window are normal, not errors."""
+        win = _PumpWindow(tk_root)
+        lbl = tk.Label(win, text="x")
+
+        def _touch():
+            lbl.configure(text="y")
+
+        lbl.destroy()
+        win._post(_touch)
+        win._post(win.seen.append, "survived")
+        self._drain(win, wait_for, lambda: win.seen == ["survived"])
+        assert win.seen == ["survived"]
+        win.destroy()
+
+    def test_stop_ignores_a_child_widgets_destroy(self, tk_root, wait_for):
+        """<Destroy> fires for every descendant, so the handler must check.
+
+        Without the `evt.widget is not self` guard, destroying any child
+        would cancel the pump and quietly freeze every later update.
+        """
+        win = _PumpWindow(tk_root)
+        try:
+            child = tk.Label(win, text="child")
+            child.pack()
+            win.update_idletasks()
+            child.destroy()
+            win.update()
+
+            assert win._ui_pump_id is not None, "child destroy killed the pump"
+            win._post(win.seen.append, "still-running")
+            self._drain(win, wait_for, lambda: win.seen == ["still-running"])
+            assert win.seen == ["still-running"]
+        finally:
+            win.destroy()
+
+    def test_destroying_the_window_stops_the_pump(self, tk_root):
+        win = _PumpWindow(tk_root)
+        win.update_idletasks()
+        assert win._ui_pump_id is not None
+        win.destroy()
+        tk_root.update()
+        assert win._ui_pump_id is None
+
+
+class TestUiPumpMixinTimers:
+    """_post_after — the "run this later" case.
+
+    A worker calling self.after(2000, ...) is the same cross-thread call as
+    after(0, ...): the delay changes what runs when, not which thread does
+    the scheduling. ReleaseWizardDialog had exactly this, closing itself two
+    seconds after a publish finished, from the publish worker.
+    """
+
+    def test_a_worker_can_schedule_a_timer(self, tk_root, wait_for):
+        win = _PumpWindow(tk_root)
+        try:
+            def _worker():
+                win._post_after(10, win.seen.append, "later")
+
+            t = threading.Thread(target=_worker, daemon=True)
+            t.start()
+            t.join(timeout=5.0)
+            wait_for(lambda: win.seen == ["later"], timeout_s=3.0)
+            assert win.seen == ["later"]
+        finally:
+            win.destroy()
+
+    def test_the_delay_is_actually_honoured(self, tk_root, wait_for):
+        """Otherwise _post_after would just be _post with extra steps."""
+        win = _PumpWindow(tk_root)
+        try:
+            win._post_after(400, win.seen.append, "slow")
+            win._post(win.seen.append, "fast")
+            wait_for(lambda: win.seen == ["fast"], timeout_s=2.0)
+            assert win.seen == ["fast"], "the delayed call ran too early"
+            wait_for(lambda: len(win.seen) == 2, timeout_s=3.0)
+            assert win.seen == ["fast", "slow"]
+        finally:
+            win.destroy()

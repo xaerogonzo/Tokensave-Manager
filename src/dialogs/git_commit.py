@@ -26,7 +26,7 @@ from tkinter import ttk, messagebox
 from typing import TYPE_CHECKING
 
 from constants import C
-from theme import bind_mousewheel, themed_checkbutton
+from theme import UiPumpMixin, bind_mousewheel, themed_checkbutton
 from helpers.commit_messages import CommitSuggestion, _suggest_commit_message
 from helpers.commit_request import clear_commit_request, load_commit_request
 from helpers.runtime import log
@@ -35,7 +35,7 @@ if TYPE_CHECKING:
     from state import ManagerConfig
 
 
-class GitCommitDialog(tk.Toplevel):
+class GitCommitDialog(UiPumpMixin, tk.Toplevel):
     """
     Stage and commit changes in a project's git repository.
     Shows the working-tree files as a checklist so the user can pick which
@@ -65,6 +65,8 @@ class GitCommitDialog(tk.Toplevel):
         cfg: ManagerConfig — passed to _suggest_commit_message for LLM config + git_exe.
         """
         super().__init__(parent)
+        # Start the worker -> UI channel before anything can post to it.
+        self._start_ui_pump()
         self.title(f"Git Commit — {os.path.basename(path)}")
         self.configure(bg=C["base"])
         self.resizable(True, True)
@@ -401,7 +403,7 @@ class GitCommitDialog(tk.Toplevel):
         Synchronous when LLM is disabled (heuristics are fast).
         Asynchronous when LLM is enabled — a daemon thread calls the
         orchestrator while the dialog stays responsive; the spinner label
-        shows progress; the result lands via `self.after(0, …)`.
+        shows progress; the result lands via `self._post(…)`.
 
         `source` is informational ("initial" / "suggest_button") for logging.
         """
@@ -454,7 +456,7 @@ class GitCommitDialog(tk.Toplevel):
                 suggestion = CommitSuggestion(message="", strategy="error")
             # Always come back to the main thread to touch widgets.
             try:
-                self.after(0, self._on_suggestion_ready, tok, suggestion)
+                self._post(self._on_suggestion_ready, tok, suggestion)
             except RuntimeError:
                 # Dialog was destroyed before result arrived — silent drop.
                 pass

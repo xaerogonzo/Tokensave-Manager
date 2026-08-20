@@ -162,3 +162,35 @@ def test_constructor_stores_all_sub_controllers(subs):
     assert ctrl._shadowlinks is subs["shadowlinks"]
     assert ctrl._scaffold is subs["scaffold"]
     assert ctrl._ai_tasks is subs["ai_tasks"]
+
+
+# ── Batch operations over a multi-project selection (Roadmap-9) ──────────────
+
+class TestBatchOps:
+    """`cmd_batch` runs a maintenance op across an explicit selection.
+
+    The single-project commands resolve one path via get_path; these take the
+    paths as an argument instead, because the selection IS the input.
+    """
+
+    def test_forwards_every_selected_path(self, subs):
+        ctrl, _gp, _rt = _make(subs)
+        ctrl.cmd_batch(["/a", "/b", "/c"], "sync")
+        subs["sync"].run_batch.assert_called_once_with(
+            ["/a", "/b", "/c"], "sync")
+
+    def test_gates_each_path_not_just_the_first(self, subs):
+        ctrl, _gp, rt = _make(subs)
+        rt.side_effect = lambda p: p != "/b"
+        ctrl.cmd_batch(["/a", "/b", "/c"], "sync")
+        subs["sync"].run_batch.assert_called_once_with(["/a", "/c"], "sync")
+
+    def test_does_nothing_when_nothing_survives_the_filter(self, subs):
+        ctrl, _gp, _rt = _make(subs, tokensave_ok=False)
+        ctrl.cmd_batch(["/a", "/b"], "sync")
+        subs["sync"].run_batch.assert_not_called()
+
+    def test_empty_selection_is_a_noop(self, subs):
+        ctrl, _gp, _rt = _make(subs)
+        ctrl.cmd_batch([], "sync")
+        subs["sync"].run_batch.assert_not_called()

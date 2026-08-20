@@ -33,7 +33,7 @@ from tkinter import messagebox, ttk
 from typing import TYPE_CHECKING, Callable
 
 from constants import C
-from theme import bind_mousewheel
+from theme import UiPumpMixin, bind_mousewheel
 from helpers.codegraph_daemon import (
     kill_codegraph_daemon,
     list_codegraph_daemons,
@@ -44,12 +44,14 @@ if TYPE_CHECKING:
     from state import ManagerConfig
 
 
-class CodegraphDaemonManagerDialog(tk.Toplevel):
+class CodegraphDaemonManagerDialog(UiPumpMixin, tk.Toplevel):
     """List every running CodeGraph daemon; stop any of them by PID."""
 
     def __init__(self, parent, cfg: "ManagerConfig",
                 on_done: "Callable[[], None] | None" = None) -> None:
         super().__init__(parent)
+        # Start the worker -> UI channel before anything can post to it.
+        self._start_ui_pump()
         self._cfg = cfg
         self._on_done = on_done
         self.title("CodeGraph — Manage daemons")
@@ -173,7 +175,7 @@ class CodegraphDaemonManagerDialog(tk.Toplevel):
 
         def _worker() -> None:
             daemons = list_codegraph_daemons(exe)
-            self.after(0, lambda: self._on_refresh_done(daemons))
+            self._post(lambda: self._on_refresh_done(daemons))
 
         threading.Thread(target=_worker, daemon=True).start()
 
@@ -251,7 +253,7 @@ class CodegraphDaemonManagerDialog(tk.Toplevel):
 
         def _worker() -> None:
             ok, detail = kill_codegraph_daemon(pid)
-            self.after(0, lambda: self._on_stop_done(pid, ok, detail))
+            self._post(lambda: self._on_stop_done(pid, ok, detail))
 
         threading.Thread(target=_worker, daemon=True).start()
 
@@ -297,7 +299,7 @@ class CodegraphDaemonManagerDialog(tk.Toplevel):
 
         def _worker() -> None:
             ok, detail = unlock_codegraph_project(exe, path)
-            self.after(0, lambda: self._on_unlock_done(ok, detail))
+            self._post(lambda: self._on_unlock_done(ok, detail))
 
         threading.Thread(target=_worker, daemon=True).start()
 

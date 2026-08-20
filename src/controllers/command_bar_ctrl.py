@@ -87,6 +87,18 @@ class CommandBarCtrl:
         if path and self.require_tokensave(path):
             self._sync.cmd_sync(path)
 
+    def cmd_batch(self, paths: list, op: str = "sync") -> None:
+        """Run a maintenance op across an explicit multi-project selection.
+
+        Stays a pure delegate like every other cmd_*: the confirmation for a
+        destructive op lives in sync_ctrl, which owns the Tk surface. Gating
+        is per path, not just the first, so a selection mixing indexed and
+        un-indexed projects runs on the ones that can.
+        """
+        paths = [p for p in paths if p and self.require_tokensave(p)]
+        if paths:
+            self._sync.run_batch(paths, op)
+
     def cmd_sync_all(self) -> None:
         self._sync.cmd_sync_all()
 

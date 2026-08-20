@@ -37,7 +37,7 @@ from tkinter import ttk, messagebox
 from typing import TYPE_CHECKING
 
 from constants import C
-from theme import bind_mousewheel
+from theme import UiPumpMixin, bind_mousewheel
 from helpers.release import (
     _release_basename, _last_release_tag, _commits_since,
     _suggest_bump_kind, _bump_version,
@@ -62,7 +62,7 @@ class _ReleaseCtx:
     staged_files: list = dataclasses.field(default_factory=list)
 
 
-class ReleaseWizardDialog(tk.Toplevel):
+class ReleaseWizardDialog(UiPumpMixin, tk.Toplevel):
     """One-button release wizard for tagged GitHub releases.
 
     Six stages stacked top-to-bottom in a scrollable canvas:
@@ -90,6 +90,8 @@ class ReleaseWizardDialog(tk.Toplevel):
 
     def __init__(self, parent, path: str, cfg: "ManagerConfig"):
         super().__init__(parent)
+        # Start the worker -> UI channel before anything can post to it.
+        self._start_ui_pump()
         self._app  = parent
         self._path = path
         self._cfg  = cfg
@@ -611,7 +613,7 @@ class ReleaseWizardDialog(tk.Toplevel):
         def _do():
             self._status_lbl.config(text=text, fg=fg or C["subtext"])
         try:
-            self.after(0, _do)
+            self._post(_do)
         except tk.TclError:
             pass  # dialog already destroyed
 
@@ -634,7 +636,7 @@ class ReleaseWizardDialog(tk.Toplevel):
                 pass
             self._app._git._git_end_op()
         try:
-            self.after(0, _reenable)
+            self._post(_reenable)
         except tk.TclError:
             pass
 
@@ -826,7 +828,6 @@ class ReleaseWizardDialog(tk.Toplevel):
             self._publishing = False
             self._app._git._git_end_op()
             self.destroy()
-        try:
-            self.after(2000, _close)
-        except tk.TclError:
-            pass
+        # Scheduling a timer is a Tk call like any other, so it goes
+        # through the pump too — this runs on the publish worker.
+        self._post_after(2000, _close)

@@ -13,18 +13,20 @@ from tkinter import ttk
 from typing import TYPE_CHECKING
 
 from constants import C
-from theme import bind_mousewheel
+from theme import UiPumpMixin, bind_mousewheel
 from helpers.daemon_cost import parse_tokensave_cost
 
 if TYPE_CHECKING:
     from state import ManagerConfig
 
 
-class CostViewerDialog(tk.Toplevel):
+class CostViewerDialog(UiPumpMixin, tk.Toplevel):
     """Show token savings and estimated cost recouped from tokensave."""
 
     def __init__(self, parent, cfg: "ManagerConfig"):
         super().__init__(parent)
+        # Start the worker -> UI channel before anything can post to it.
+        self._start_ui_pump()
         self._cfg = cfg
 
         self.title("Token Cost Savings")
@@ -134,7 +136,7 @@ class CostViewerDialog(tk.Toplevel):
 
         def _fetch():
             m = parse_tokensave_cost(self._cfg.tokensave_exe, scope="7day")
-            self.after(0, lambda metrics=m: self._apply_metrics(metrics))
+            self._post(lambda metrics=m: self._apply_metrics(metrics))
 
         threading.Thread(target=_fetch, daemon=True).start()
 
