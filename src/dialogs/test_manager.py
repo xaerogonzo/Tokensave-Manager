@@ -40,7 +40,7 @@ from tkinter import messagebox, ttk
 from typing import TYPE_CHECKING, Optional
 
 from constants import C
-from theme import _Tooltip
+from theme import UiPumpMixin, _Tooltip
 from helpers.coverage_scan import (
     format_cell,
     load_coverage,
@@ -80,7 +80,7 @@ _TEMPLATE_LABELS: dict[str, str] = {
 }
 
 
-class TestManagerDialog(tk.Toplevel):
+class TestManagerDialog(UiPumpMixin, tk.Toplevel):
     """Top-level dialog with the four test-lifecycle tabs."""
 
     # Tell pytest NOT to try collecting this class as a test class — it
@@ -89,6 +89,8 @@ class TestManagerDialog(tk.Toplevel):
 
     def __init__(self, parent, project_root: str, cfg: "ManagerConfig") -> None:
         super().__init__(parent)
+        # Start the worker -> UI channel before anything can post to it.
+        self._start_ui_pump()
         self._parent       = parent
         self._project_root = project_root
         self._cfg          = cfg
@@ -366,7 +368,7 @@ class TestManagerDialog(tk.Toplevel):
 
         def _cb(passed: int, total: int, output: str, cancelled: bool) -> None:
             try:
-                self.after(0, lambda: self._on_pytest_done(
+                self._post(lambda: self._on_pytest_done(
                     target, passed, total, output, cancelled,
                     extra_args or []))
             except tk.TclError:
@@ -484,7 +486,7 @@ class TestManagerDialog(tk.Toplevel):
     #
     # The `gh` query runs on a worker thread, but the result comes back
     # through a Queue drained by a main-thread `after` poller — NOT via
-    # `self.after(0, ...)` called from the worker. That shortcut raises
+    # `self._post(...)` called from the worker. That shortcut raises
     # "main thread is not in main loop" whenever the main thread happens not
     # to be inside Tcl at that moment, which is timing-dependent and so fails
     # intermittently rather than obviously. Same shape as
@@ -969,7 +971,7 @@ class TestManagerDialog(tk.Toplevel):
                 cancel_event=cancel_event,
             )
             if self.winfo_exists():
-                self.after(0, lambda c=content, e=err: _done(c, e))
+                self._post(lambda c=content, e=err: _done(c, e))
 
         def _done(content: "str | None", err: "str | None") -> None:
             if not self.winfo_exists():

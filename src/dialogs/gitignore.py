@@ -33,7 +33,7 @@ from tkinter import font as tkfont
 from typing import TYPE_CHECKING
 
 from constants import C, CREATE_NO_WINDOW
-from theme import _Tooltip, bind_mousewheel
+from theme import UiPumpMixin, _Tooltip, bind_mousewheel
 from helpers.gitignore import (
     _read_gitignore_lines, _write_gitignore_lines, _GITIGNORE_TEMPLATES,
 )
@@ -43,7 +43,7 @@ if TYPE_CHECKING:
     from state import ManagerConfig
 
 
-class GitignoreDialog(tk.Toplevel):
+class GitignoreDialog(UiPumpMixin, tk.Toplevel):
     """View and edit a project's .gitignore through a structured dialog.
 
     Layout:
@@ -64,6 +64,8 @@ class GitignoreDialog(tk.Toplevel):
 
     def __init__(self, parent, path: str, cfg: "ManagerConfig"):
         super().__init__(parent)
+        # Start the worker -> UI channel before anything can post to it.
+        self._start_ui_pump()
         self._app  = parent
         self._path = path
         self._cfg  = cfg
@@ -231,7 +233,7 @@ class GitignoreDialog(tk.Toplevel):
                             fg=C["overlay0"])
                 except (tk.TclError, RuntimeError):
                     pass
-            self.after(0, _show_source)
+            self._post(_show_source)
             untracked_str = self._collect_untracked_files(
                 self._cfg.git_exe, self._path)
             if stop_event.is_set():
@@ -244,10 +246,10 @@ class GitignoreDialog(tk.Toplevel):
                 return
             if error or not result:
                 err_msg = error or "AI call returned no result."
-                self.after(0, lambda m=err_msg: _on_error(m))
+                self._post(lambda m=err_msg: _on_error(m))
                 return
             parsed = _parse_ai_gitignore_patterns(result)
-            self.after(0, lambda p=parsed: _on_result(p))
+            self._post(lambda p=parsed: _on_result(p))
 
         # ── Callbacks — always guarded against destroyed-window TclError ────
 
@@ -773,7 +775,7 @@ class GitignoreDialog(tk.Toplevel):
             files = [ln.strip() for ln in stdout.splitlines() if ln.strip()]
         except Exception:
             files = []
-        self.after(0, lambda fs=files: self._populate_untracked(fs))
+        self._post(lambda fs=files: self._populate_untracked(fs))
 
     def _populate_untracked(self, files: list):
         """Render untracked files, grouping any that share a top-level

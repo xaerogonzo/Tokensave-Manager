@@ -18,7 +18,7 @@ import tkinter as tk
 from tkinter import messagebox, ttk
 
 from constants import C
-from theme import bind_mousewheel
+from theme import UiPumpMixin, bind_mousewheel
 
 
 # ── Jaccard helper ────────────────────────────────────────────────────────────
@@ -38,11 +38,13 @@ _JACCARD_FLOOR = 0.5
 
 # ── Main dialog ───────────────────────────────────────────────────────────────
 
-class RoadmapManagerDialog(tk.Toplevel):
+class RoadmapManagerDialog(UiPumpMixin, tk.Toplevel):
     """Roadmap Manager — Audit / Plan / Ship tabs."""
 
     def __init__(self, parent, project_path: str, cfg):
         super().__init__(parent)
+        # Start the worker -> UI channel before anything can post to it.
+        self._start_ui_pump()
         self._parent       = parent
         self._project_path = project_path
         self._cfg          = cfg
@@ -253,7 +255,7 @@ class RoadmapManagerDialog(tk.Toplevel):
         self._entries  = entries
         self._findings = findings
 
-        self.after(0, lambda n=next_roadmap_n(entries): self._on_load_done(n))
+        self._post(lambda n=next_roadmap_n(entries): self._on_load_done(n))
 
     def _on_load_done(self, next_n: int):
         # Update audit tree
@@ -358,14 +360,14 @@ class RoadmapManagerDialog(tk.Toplevel):
                 with open(self._roadmap_path, encoding="utf-8-sig") as fh:
                     original = fh.read()
             except OSError as exc:
-                self.after(0, lambda m=str(exc): messagebox.showerror(
+                self._post(lambda m=str(exc): messagebox.showerror(
                     "Read error", m, parent=self))
                 return
 
             proposed, ok, msg = _compute_promote_status(
                 original, roadmap_n, title, new_status)
             if not ok:
-                self.after(0, lambda m=msg: messagebox.showerror(
+                self._post(lambda m=msg: messagebox.showerror(
                     "Promote failed", m, parent=self))
                 return
 
@@ -381,7 +383,7 @@ class RoadmapManagerDialog(tk.Toplevel):
                 from helpers.roadmap_patch import _atomic_write
                 _atomic_write(self._roadmap_path, final,
                               f"promoted '{title}' to {new_status}")
-                self.after(0, self._load_async)
+                self._post(self._load_async)
 
         threading.Thread(target=_worker, daemon=True).start()
 
@@ -434,9 +436,9 @@ class RoadmapManagerDialog(tk.Toplevel):
                 with open(self._roadmap_path, encoding="utf-8-sig") as fh:
                     original = fh.read()
             except OSError as exc:
-                self.after(0, lambda m=str(exc): messagebox.showerror(
+                self._post(lambda m=str(exc): messagebox.showerror(
                     "Read error", m, parent=self))
-                self.after(0, lambda: self._plan_status_var.set(""))
+                self._post(lambda: self._plan_status_var.set(""))
                 return
         else:
             original = ""
@@ -444,9 +446,9 @@ class RoadmapManagerDialog(tk.Toplevel):
         proposed, ok, msg = _compute_insert_roadmap_section(
             original, roadmap_n, theme_title, content)
         if not ok:
-            self.after(0, lambda m=msg: messagebox.showerror(
+            self._post(lambda m=msg: messagebox.showerror(
                 "Insert failed", m, parent=self))
-            self.after(0, lambda: self._plan_status_var.set(""))
+            self._post(lambda: self._plan_status_var.set(""))
             return
 
         proposal = WriteProposal(
@@ -461,11 +463,11 @@ class RoadmapManagerDialog(tk.Toplevel):
             from helpers.roadmap_patch import _atomic_write
             _atomic_write(self._roadmap_path, final,
                           f"inserted Roadmap {roadmap_n} skeleton")
-            self.after(0, self._load_async)
-            self.after(0, lambda: self._plan_status_var.set(
+            self._post(self._load_async)
+            self._post(lambda: self._plan_status_var.set(
                 f"Roadmap {roadmap_n} inserted."))
         else:
-            self.after(0, lambda: self._plan_status_var.set("Proposal rejected."))
+            self._post(lambda: self._plan_status_var.set("Proposal rejected."))
 
     # ── Ship tab ──────────────────────────────────────────────────────────────
 
@@ -563,14 +565,14 @@ class RoadmapManagerDialog(tk.Toplevel):
                 with open(self._roadmap_path, encoding="utf-8-sig") as fh:
                     original = fh.read()
             except OSError as exc:
-                self.after(0, lambda m=str(exc): messagebox.showerror(
+                self._post(lambda m=str(exc): messagebox.showerror(
                     "Read error", m, parent=self))
                 break
 
             proposed, ok, msg = _compute_promote_status(
                 original, roadmap_n, title, "✅")
             if not ok:
-                self.after(0, lambda m=msg: messagebox.showwarning(
+                self._post(lambda m=msg: messagebox.showwarning(
                     "Skipped", m, parent=self))
                 continue
 
@@ -588,6 +590,6 @@ class RoadmapManagerDialog(tk.Toplevel):
                               f"shipped '{title}'")
                 done += 1
 
-        self.after(0, lambda d=done: self._ship_status_var.set(
+        self._post(lambda d=done: self._ship_status_var.set(
             f"{d} of {len(selected)} promoted to ✅"))
-        self.after(0, self._load_async)
+        self._post(self._load_async)

@@ -7,7 +7,7 @@ path, sync on demand, or remove the link entirely.
 
 Thread-safety contract:
   • All subprocess.run calls happen in daemon threads.
-  • Widget writes from threads always go through self.after(0, callback).
+  • Widget writes from threads always go through self._post(callback).
   • Every such callback starts with: if not self.winfo_exists(): return
   • Workers never touch _pending_private_sync / _active_private_syncs —
     those live in App and are managed by App's callbacks only.
@@ -23,9 +23,10 @@ from tkinter import filedialog, messagebox, ttk
 
 from constants import C, CREATE_NO_WINDOW
 from helpers.private_repo import _BACKUP_GIT_ENV, sync_private_repo
+from theme import UiPumpMixin
 
 
-class PrivateRepoManagerDialog(tk.Toplevel):
+class PrivateRepoManagerDialog(UiPumpMixin, tk.Toplevel):
     """Manage a configured private local git repo for a project."""
 
     def __init__(
@@ -39,6 +40,8 @@ class PrivateRepoManagerDialog(tk.Toplevel):
         on_refresh,
     ):
         super().__init__(parent)
+        # Start the worker -> UI channel before anything can post to it.
+        self._start_ui_pump()
         self._src       = src_path
         self._cfg_entry = cfg_entry          # live dict from cfg.raw
         self._cfg       = cfg
@@ -238,9 +241,9 @@ class PrivateRepoManagerDialog(tk.Toplevel):
                 )
             except (FileNotFoundError, subprocess.TimeoutExpired) as exc:
                 err_msg = f"git log failed: {exc}"
-                self.after(0, lambda m=err_msg: self._write_log_text("", error=m))
+                self._post(lambda m=err_msg: self._write_log_text("", error=m))
                 return
-            self.after(0, lambda: self._write_log_text(
+            self._post(lambda: self._write_log_text(
                 proc.stdout.strip(),
                 error=proc.stderr.strip() if proc.returncode != 0 else ""))
 
@@ -391,7 +394,7 @@ class PrivateRepoManagerDialog(tk.Toplevel):
                 except (FileNotFoundError, subprocess.TimeoutExpired) as exc:
                     self._on_log(f"  ✗ Ghost cleanup commit failed: {exc}", C["red"])
 
-            self.after(0, self._on_ghost_cleanup_done, dest)
+            self._post(self._on_ghost_cleanup_done, dest)
 
         threading.Thread(target=worker, daemon=True).start()
 
@@ -436,7 +439,7 @@ class PrivateRepoManagerDialog(tk.Toplevel):
                                        on_log=on_log, commit_msg="")
             if not result and result.reason:
                 on_log(f"  Detail: {result.reason}", "red")
-            self.after(0, self._on_sync_complete, dest)
+            self._post(self._on_sync_complete, dest)
 
         threading.Thread(target=worker, daemon=True).start()
 

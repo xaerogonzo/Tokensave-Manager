@@ -291,10 +291,90 @@ def patch_after(mocker):
     """
     def _patch(dialog):
         harness = AfterHarness()
+        # A dialog with a UiPumpMixin pump started it in __init__, using the
+        # REAL after() — so without this the pump keeps draining _ui_queue
+        # behind the harness and the test loses the deterministic control it
+        # asked for. Stop it BEFORE patching, so _stop_ui_pump still sees the
+        # real after_cancel.
+        stop = getattr(dialog, "_stop_ui_pump", None)
+        if callable(stop):
+            stop()
         mocker.patch.object(dialog, "after",        side_effect=harness.schedule)
         mocker.patch.object(dialog, "after_cancel", side_effect=harness.cancel)
+        if hasattr(dialog, "_post"):
+            # Posted callables become due immediately, so advance()/drain()
+            # fires them exactly like an after(0, ...) would have.
+            mocker.patch.object(
+                dialog, "_post",
+                side_effect=lambda fn, *a: harness.schedule(0, fn, *a))
+            mocker.patch.object(
+                dialog, "_post_after",
+                side_effect=lambda ms, fn, *a: harness.schedule(ms, fn, *a))
         return harness
     return _patch
+
+
+@pytest.fixture(autouse=True)
+def _no_real_modals(request, monkeypatch):
+    """Turn an unmocked modal into a fast failure instead of a hung run.
+
+    A dialog that opens a real messagebox during a test blocks forever
+    waiting for a click nobody is going to make. Locally that looks like a
+    mysterious hang; on CI it burns the whole job timeout and reports
+    nothing useful. It has now happened twice in this project, most recently
+    when converting dialogs to the UI pump made a worker callback that had
+    always been silently swallowed actually run.
+
+    Tests that assert on a messagebox still patch it themselves; those
+    patches are applied inside the test body and so take precedence here.
+    """
+    if "tk" not in request.keywords:
+        yield
+        return
+
+    import tkinter.filedialog as fd
+    import tkinter.messagebox as mb
+    import tkinter.simpledialog as sd
+
+    # Raising alone is not enough to make this visible: a modal opened from a
+    # callback running inside UiPumpMixin._ui_pump lands in the pump's
+    # "one bad callback must not stop the pump" handler, which logs and
+    # continues. The test would then PASS while the bug it is meant to catch
+    # went by. So record every violation and fail at teardown, where nothing
+    # can swallow it.
+    violations: list = []
+
+    def _boom(mod_name, fn_name):
+        def _fn(*_a, **_kw):
+            violations.append(f"{mod_name}.{fn_name}()")
+            raise AssertionError(
+                f"{mod_name}.{fn_name}() opened a REAL modal during a test. "
+                f"Patch it in the module under test — e.g. "
+                f'mocker.patch("dialogs.<module>.{mod_name.split(".")[-1]}'
+                f'.{fn_name}") — because an unmocked modal blocks the run '
+                f"until someone clicks it.")
+        return _fn
+
+    blocking = [
+        (mb, "tkinter.messagebox",
+         ("showinfo", "showwarning", "showerror", "askyesno", "askokcancel",
+          "askretrycancel", "askquestion", "askyesnocancel")),
+        (sd, "tkinter.simpledialog", ("askstring", "askinteger", "askfloat")),
+        (fd, "tkinter.filedialog",
+         ("askopenfilename", "askopenfilenames", "asksaveasfilename",
+          "askdirectory")),
+    ]
+    for mod, mod_name, fns in blocking:
+        for fn in fns:
+            monkeypatch.setattr(mod, fn, _boom(mod_name, fn), raising=False)
+
+    yield
+
+    if violations:
+        pytest.fail(
+            "a real modal was opened during this test and the exception was "
+            "swallowed before it could fail anything: "
+            + ", ".join(sorted(set(violations))))
 
 
 # ── fake_home (G-F + G-J Part 2) ──────────────────────────────────────────

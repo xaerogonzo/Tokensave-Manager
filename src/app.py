@@ -586,7 +586,7 @@ class App(UiPumpMixin, tk.Tk):
             self.log.insert(tk.END, msg + "\n", tag)
             self.log.see(tk.END)
             self.log.configure(state=tk.DISABLED)
-        self.after(0, _do)
+        self._post(_do)
 
     def _set_running(self, running, label=""):
         if running:
@@ -753,7 +753,7 @@ class App(UiPumpMixin, tk.Tk):
         """
         cmd_str = "tokensave " + " ".join(args)
         self._log(f"$ {cmd_str}  [{label}]", C["blue"])
-        self.after(0, self._set_running, True, label)
+        self._post(self._set_running, True, label)
         log.info(f"RUN  {cmd_str}")
         log.debug(f"     cwd={cwd}")
         t0 = time.monotonic()
@@ -780,7 +780,7 @@ class App(UiPumpMixin, tk.Tk):
             return raw, proc.returncode, elapsed
         finally:
             self._current_proc = None
-            self.after(0, self._set_running, False)
+            self._post(self._set_running, False)
 
     def _shell_capture(self, cmd: list, cwd: str, env=None) -> tuple:
         """Run any shell command and return (stdout+stderr, returncode).

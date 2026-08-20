@@ -226,6 +226,23 @@ class UiPumpMixin:
         """Run ``fn(*args)`` on the Tk thread. Safe from any thread."""
         self._ui_queue.put((fn, args))
 
+    def _post_after(self, delay_ms: int, fn, *args) -> None:
+        """Run ``fn(*args)`` after ``delay_ms``. Safe from any thread.
+
+        A worker calling ``self.after(2000, ...)`` directly is the same
+        cross-thread call as ``after(0, ...)``: the delay changes what runs
+        when, not which thread does the scheduling. This posts the *timer
+        setup* onto the Tk thread, and the timer itself then behaves normally.
+        """
+        self._post(self._schedule_after, delay_ms, fn, args)
+
+    def _schedule_after(self, delay_ms: int, fn, args) -> None:
+        """Set the timer. Tk thread only — reached via `_post_after`."""
+        try:
+            self.after(delay_ms, lambda: fn(*args))
+        except tk.TclError:
+            pass          # window closed before the timer was set
+
     def _ui_pump(self) -> None:
         """Drain whatever the workers posted. Tk thread only."""
         try:

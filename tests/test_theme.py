@@ -514,3 +514,40 @@ class TestUiPumpMixin:
         win.destroy()
         tk_root.update()
         assert win._ui_pump_id is None
+
+
+class TestUiPumpMixinTimers:
+    """_post_after — the "run this later" case.
+
+    A worker calling self.after(2000, ...) is the same cross-thread call as
+    after(0, ...): the delay changes what runs when, not which thread does
+    the scheduling. ReleaseWizardDialog had exactly this, closing itself two
+    seconds after a publish finished, from the publish worker.
+    """
+
+    def test_a_worker_can_schedule_a_timer(self, tk_root, wait_for):
+        win = _PumpWindow(tk_root)
+        try:
+            def _worker():
+                win._post_after(10, win.seen.append, "later")
+
+            t = threading.Thread(target=_worker, daemon=True)
+            t.start()
+            t.join(timeout=5.0)
+            wait_for(lambda: win.seen == ["later"], timeout_s=3.0)
+            assert win.seen == ["later"]
+        finally:
+            win.destroy()
+
+    def test_the_delay_is_actually_honoured(self, tk_root, wait_for):
+        """Otherwise _post_after would just be _post with extra steps."""
+        win = _PumpWindow(tk_root)
+        try:
+            win._post_after(400, win.seen.append, "slow")
+            win._post(win.seen.append, "fast")
+            wait_for(lambda: win.seen == ["fast"], timeout_s=2.0)
+            assert win.seen == ["fast"], "the delayed call ran too early"
+            wait_for(lambda: len(win.seen) == 2, timeout_s=3.0)
+            assert win.seen == ["fast", "slow"]
+        finally:
+            win.destroy()

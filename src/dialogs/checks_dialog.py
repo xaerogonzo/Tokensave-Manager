@@ -23,7 +23,7 @@ from tkinter import messagebox
 from typing import TYPE_CHECKING, Callable
 
 from constants import C
-from theme import _Tooltip, themed_checkbutton
+from theme import UiPumpMixin, _Tooltip, themed_checkbutton
 from helpers.quality_checks import run_syntax_check, run_pyflakes_check
 from helpers.prepush_hook import (
     is_pre_push_hook_installed,
@@ -137,7 +137,7 @@ def _check_claude_review(diff: str, cfg: "ManagerConfig", cancelled: threading.E
 
 # ── Dialog ───────────────────────────────────────────────────────────────────
 
-class ChecksDialog(tk.Toplevel):
+class ChecksDialog(UiPumpMixin, tk.Toplevel):
     """Modal pre-merge checks panel. Construct on the Tk main thread."""
 
     def __init__(
@@ -149,6 +149,8 @@ class ChecksDialog(tk.Toplevel):
         on_log: Callable[[str, str], None],
     ) -> None:
         super().__init__(parent)
+        # Start the worker -> UI channel before anything can post to it.
+        self._start_ui_pump()
         self.title("Run checks")
         self.resizable(True, True)
         self.minsize(540, 300)
@@ -350,9 +352,9 @@ class ChecksDialog(tk.Toplevel):
         # Reset all rows
         for key in _LABELS:
             if enabled.get(key):
-                self.after(0, self._set_row, key, "pending", "running…")
+                self._post(self._set_row, key, "pending", "running…")
             else:
-                self.after(0, self._set_row, key, "skip", "skipped")
+                self._post(self._set_row, key, "skip", "skipped")
 
         # ── Large-diff check for Claude review (main thread only) ─────────────
         diff: str | None = None
@@ -368,7 +370,7 @@ class ChecksDialog(tk.Toplevel):
                 )
                 if not ok:
                     enabled.pop("claude")
-                    self.after(0, self._set_row, "claude", "skip", "skipped (large diff)")
+                    self._post(self._set_row, "claude", "skip", "skipped (large diff)")
 
         # ── Launch executor ───────────────────────────────────────────────────
         self._executor = concurrent.futures.ThreadPoolExecutor(
@@ -410,8 +412,8 @@ class ChecksDialog(tk.Toplevel):
         except Exception as e:
             state, summary = "fail", f"error: {e}"
 
-        self.after(0, self._set_row, key, state, summary)
-        self.after(0, self._maybe_reenable_run)
+        self._post(self._set_row, key, state, summary)
+        self._post(self._maybe_reenable_run)
 
     def _maybe_reenable_run(self) -> None:
         """Re-enable the Run button once all pending rows have resolved."""

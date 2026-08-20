@@ -129,13 +129,13 @@ def test_stop_current_no_projects_attr_is_safe():
     assert stub._stop_requested is True
 
 
-# ── _log (marshals to the Tk thread via self.after) ──────────────────────────
+# ── _log (marshals to the Tk thread via UiPumpMixin._post) ──────────────────────────
 
-def test_log_inserts_message_via_after():
+def test_log_inserts_message_via_post():
     log_widget = mock.MagicMock()
-    # after(0, cb) → run the callback immediately (simulates the Tk loop).
+    # _post(fn, *args) → run it immediately (simulates the pump draining).
     stub = SimpleNamespace(log=log_widget,
-                           after=lambda _delay, cb: cb())
+                           _post=lambda fn, *a: fn(*a))
     App._log(stub, "hello", "red")
     # The message (with newline) was inserted with a colour tag.
     args = log_widget.insert.call_args[0]
@@ -145,7 +145,7 @@ def test_log_inserts_message_via_after():
 
 def test_log_defaults_colour_tag():
     log_widget = mock.MagicMock()
-    stub = SimpleNamespace(log=log_widget, after=lambda _delay, cb: cb())
+    stub = SimpleNamespace(log=log_widget, _post=lambda fn, *a: fn(*a))
     App._log(stub, "plain")
     args = log_widget.insert.call_args[0]
     assert args[1] == "plain\n"
