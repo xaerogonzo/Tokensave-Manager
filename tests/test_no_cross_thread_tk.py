@@ -41,16 +41,16 @@ _WORKER_NAMES = {"_worker", "worker"}
 
 # ── Ratchet ───────────────────────────────────────────────────────────────
 #
-# The pattern predates this guard and lives in 12 files. Converting them all
+# The pattern predates this guard and lived in 12 files. Converting them all
 # at once would be a large, risky change touching nearly every dialog, so
 # this is a RATCHET rather than a clean assertion: files already fixed stay
 # fixed, no file may get worse, and nothing new may join the list.
 #
 # Measured 2026-08-20. Lower a number as its dialog is converted; delete the
-# entry when it reaches zero. `test_the_baseline_is_not_stale` enforces that.
+# entry when it reaches zero. `test_the_baseline_is_not_stale` enforces that
+# — app.py was converted the same day and its entry is gone accordingly.
 _KNOWN_OFFENDERS = {
     "src/dialogs/tool_manager.py":             17,
-    "src/app.py":                              11,
     "src/dialogs/ollama_model_mgr.py":         11,
     "src/dialogs/private_repo_mgr.py":          4,
     "src/dialogs/codegraph_daemon_manager.py":  3,
@@ -156,6 +156,16 @@ def test_the_scrub_dialog_has_the_queue_and_pump():
     for token in ("self._ui_queue", "def _post", "def _pump",
                   "def _stop_ui_pump"):
         assert token in src, f"scrub_history lost {token}"
+
+
+def test_the_app_window_has_the_queue_and_pump():
+    """app.py was the largest offender (11 sites) and is the main window, so
+    a worker blocking there wedges the whole UI rather than one dialog."""
+    src = (_SRC / "app.py").read_text(encoding="utf-8")
+    for token in ("self._ui_queue", "def _post", "def _ui_pump",
+                  "def _start_ui_pump"):
+        assert token in src, f"app.py lost {token}"
+    assert "src/app.py" not in _counts_by_file()
 
 
 # ── the guard can actually fail ───────────────────────────────────────────

@@ -28,6 +28,7 @@ from __future__ import annotations
 import os
 import subprocess
 import sys
+import queue
 import threading
 import time
 import tkinter as tk
@@ -132,8 +133,18 @@ class App(tk.Tk):
         log.info(f"  exe      : {self._cfg.tokensave_exe}")
         log.info(f"  templates: {self._cfg.template_dir}")
         log.info(f"  log file : {LOG_FILE}")
+        # ── Worker -> UI channel ──────────────────────────────────────
+        # App's background workers used to call self.after() directly. That
+        # is a cross-thread Tk call: it usually works on Windows, raises
+        # "main thread is not in main loop" when it does not, and on Linux
+        # simply BLOCKS with no error and no log line. Workers post here
+        # and the pump runs it on the Tk thread. Started before _build so
+        # nothing can post into a queue that is not being drained.
+        self._ui_queue: queue.Queue = queue.Queue()
+        self._ui_pump_id = None
         self._style()
         self._build()
+        self._start_ui_pump()
         self.refresh()
         self.after(AUTO_REFRESH_MS, self._auto_refresh)
         self._tray_mgr = TrayManager(self, self._cfg, self._on_tray_quit)
@@ -184,6 +195,41 @@ class App(tk.Tk):
         """
         self._src_banner_dismissed = True
         self._src_banner.pack_forget()
+
+    # ── Worker -> UI plumbing ────────────────────────────────────────────
+
+    _UI_PUMP_MS = 50
+
+    def _post(self, fn, *args) -> None:
+        """Run *fn(*args)* on the Tk thread. Safe from any thread.
+
+        The one rule for every worker in this file: never touch Tk, post.
+        """
+        self._ui_queue.put((fn, args))
+
+    def _start_ui_pump(self) -> None:
+        self._ui_pump()
+
+    def _ui_pump(self) -> None:
+        """Drain whatever the workers posted. Tk thread only."""
+        try:
+            if not self.winfo_exists():
+                return
+        except tk.TclError:
+            return
+        try:
+            while True:
+                fn, args = self._ui_queue.get_nowait()
+                try:
+                    fn(*args)
+                except tk.TclError:
+                    pass          # widget went away between post and run
+        except queue.Empty:
+            pass
+        try:
+            self._ui_pump_id = self.after(self._UI_PUMP_MS, self._ui_pump)
+        except tk.TclError:
+            self._ui_pump_id = None
 
     def report_callback_exception(self, exc, val, tb):
         """Log unhandled exceptions raised inside Tk callbacks.
@@ -608,7 +654,7 @@ class App(tk.Tk):
         def worker():
             cmd_str = "tokensave " + " ".join(args)
             self._log(f"$ {cmd_str}  [{label}]", C["blue"])
-            self.after(0, self._set_running, True, label)
+            self._post(self._set_running, True, label)
             log.info(f"RUN  {cmd_str}")
             log.debug(f"     cwd={cwd}")
             t0 = time.monotonic()
@@ -685,17 +731,17 @@ class App(tk.Tk):
                         self._auto_commit_after_sync(cwd)
                     elif args and args[0] == "upgrade":
                         # Auto-run integration check immediately after upgrade
-                        self.after(0, self._update_poller.cmd_integration_check)
+                        self._post(self._update_poller.cmd_integration_check)
                 else:
                     self._log(f"Exited with code {proc.returncode}", C["red"])
                     log.warning(f"DONE exit={proc.returncode}  [{elapsed:.1f}s]")
-                self.after(0, self.refresh)
+                self._post(self.refresh)
             except Exception as e:
                 self._log(f"Error: {e}", C["red"])
                 log.exception(f"EXCEPTION in _run({cmd_str})")
             finally:
                 self._current_proc = None
-                self.after(0, self._set_running, False)
+                self._post(self._set_running, False)
         threading.Thread(target=worker, daemon=True).start()
 
     def _auto_commit_after_sync(self, cwd: str) -> None:
@@ -952,7 +998,7 @@ class App(tk.Tk):
                                 ln.strip() for ln in out.splitlines()
                                 if ln.strip() and not ln.strip().startswith(
                                     ("hint:", "The following", "warning:"))]
-                            self.after(0, lambda: messagebox.showwarning(
+                            self._post(lambda: messagebox.showwarning(
                                 "Tracked-but-ignored files",
                                 "Some of the files you selected are already "
                                 "tracked by git AND match a .gitignore rule. "
@@ -965,7 +1011,7 @@ class App(tk.Tk):
                                 "paths first. Then commit the result.",
                                 parent=self))
                         else:
-                            self.after(0, lambda: self._log(
+                            self._post(lambda: self._log(
                                 f"git add failed: {out.strip()}", C["red"]))
                         return
 
@@ -977,14 +1023,14 @@ class App(tk.Tk):
                 cout, crc = self._shell_capture(commit_cmd, path)
                 col = C["green"] if crc == 0 else C["red"]
                 for line in cout.strip().splitlines()[-4:]:
-                    self.after(0, lambda l=line: self._log(f"  {l}", col))
-                self.after(0, self.refresh)
+                    self._post(lambda l=line: self._log(f"  {l}", col))
+                self._post(self.refresh)
                 if crc == 0:
                     # Auto-sync private repo if one is configured (G8: scheduled
                     # on main thread so the dirty-bit logic runs thread-safely)
-                    self.after(0, lambda: self._start_private_sync(path, message))
+                    self._post(lambda: self._start_private_sync(path, message))
             finally:
-                self.after(0, self._git._git_end_op)
+                self._post(self._git._git_end_op)
 
         threading.Thread(target=worker, daemon=True).start()
 
@@ -1011,7 +1057,7 @@ class App(tk.Tk):
             if not result and result.reason:
                 self._log(f"  Detail: {result.reason}", "red")
             # After finishing, check if another sync was queued (G8)
-            self.after(0, lambda: self._finish_private_sync(path))
+            self._post(lambda: self._finish_private_sync(path))
 
         threading.Thread(target=worker, daemon=True).start()
 
