@@ -16,6 +16,9 @@ be tested without threads or sleeping.
 """
 from __future__ import annotations
 
+import os
+import sys
+
 import pytest
 
 from helpers.proc_kill import ProcessIdentity
@@ -100,9 +103,34 @@ def test_a_server_already_on_the_new_pin_is_left_alone(mocker):
 
 
 def test_a_path_spelled_differently_is_the_same_project(mocker):
-    """Config and command line rarely agree on separators or case."""
+    """A trailing separator and a `.` hop do not make it a different project.
+
+    Only equivalences that hold on BOTH platforms are asserted here. Case and
+    backslash-vs-slash are Windows-only facts — on Linux `/work/beta` and
+    `/WORK/BETA` are two different directories — and asserting them
+    unconditionally is what failed the Linux gate.
+    """
     kill = mocker.patch.object(pw, "kill_process")
-    watcher = _watcher(mocker, pin="D:\\work\\BETA")
+    spelled_differently = os.path.join(PROJ_B, ".") + os.sep
+    watcher = _watcher(mocker, pin=spelled_differently)
+    _wired(mocker, [_server(project=PROJ_B)],
+           {100: {"pid": 100, "project": PROJ_B}})
+
+    assert watcher.tick() == []
+    kill.assert_not_called()
+
+
+@pytest.mark.skipif(sys.platform != "win32",
+                    reason="case- and separator-insensitivity is Windows-only")
+def test_windows_treats_case_and_separator_variants_as_one_project(mocker):
+    """The other half, where it is actually true.
+
+    `os.path.normcase` folds case and rewrites separators on Windows and is
+    the identity on POSIX, which is the correct behaviour on both — so this
+    is a platform fact worth pinning, not a portability gap to paper over.
+    """
+    kill = mocker.patch.object(pw, "kill_process")
+    watcher = _watcher(mocker, pin=PROJ_B.replace("/", "\\").upper())
     _wired(mocker, [_server(project=PROJ_B)],
            {100: {"pid": 100, "project": PROJ_B}})
 

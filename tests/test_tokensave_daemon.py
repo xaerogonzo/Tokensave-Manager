@@ -13,6 +13,7 @@ ground truth. It skips when the machine has none.
 from __future__ import annotations
 
 import os
+import sys
 
 import pytest
 
@@ -52,14 +53,31 @@ def test_a_declared_project_is_authoritative(mocker):
     assert out[0].can_stop and not out[0].needs_confirmation
 
 
-def test_a_declared_project_matches_despite_separator_and_case_differences(mocker):
-    """The config and the command line rarely spell a path the same way."""
+def test_a_declared_project_matches_despite_redundant_path_parts(mocker):
+    """Resolves to the configured spelling, portably.
+
+    A trailing separator and a `.` hop name the same directory on every
+    platform. Case-folding and backslash-vs-slash do not — on Linux
+    `/work/alpha` and `/WORK/ALPHA` are different directories — so those are
+    asserted separately, under a Windows guard.
+    """
+    _shm(mocker, {})
+    declared = os.path.join(PROJ_A, ".") + os.sep
+    out = attribute_servers(
+        [_srv(1, 1000.0, 'tokensave.exe serve -p "%s"' % declared)], [PROJ_A])
+    assert out[0].attribution == AUTHORITATIVE
+    assert out[0].project == PROJ_A, "should resolve to the configured spelling"
+
+
+@pytest.mark.skipif(sys.platform != "win32",
+                    reason="case- and separator-insensitivity is Windows-only")
+def test_windows_matches_a_declared_project_despite_case_and_separators(mocker):
     _shm(mocker, {})
     declared = PROJ_A.replace(os.sep, "/").upper()
     out = attribute_servers(
         [_srv(1, 1000.0, 'tokensave.exe serve -p "%s"' % declared)], [PROJ_A])
     assert out[0].attribution == AUTHORITATIVE
-    assert out[0].project == PROJ_A, "should resolve to the configured spelling"
+    assert out[0].project == PROJ_A
 
 
 def test_a_declared_but_unknown_project_is_still_not_a_guess(mocker):
@@ -211,16 +229,25 @@ def test_stopping_forwards_the_scanned_identity(mocker):
 # ── identifying our own binary ───────────────────────────────────────────
 
 def test_a_process_merely_named_tokensave_is_not_ours_when_a_path_is_known():
-    """Name is not identification — an impostor must not get a Stop button."""
-    proc = {"exe": r"C:\somewhere\else\tokensave.exe"}
-    assert td._is_tokensave(proc, td._normalise_path(r"D:\real\tokensave.exe")) is False
-    assert td._is_tokensave(proc, td._normalise_path(r"C:\somewhere\else\tokensave.exe")) is True
+    """Name is not identification — an impostor must not get a Stop button.
+
+    Paths are built with os.path.join so `basename` resolves them on both
+    platforms: a hardcoded Windows path has no separators at all on
+    Linux, so its basename is the whole string and nothing matches.
+    """
+    ours = os.path.join(os.sep, "somewhere", "else", "tokensave.exe")
+    theirs = os.path.join(os.sep, "real", "tokensave.exe")
+    proc = {"exe": ours}
+    assert td._is_tokensave(proc, td._normalise_path(theirs)) is False
+    assert td._is_tokensave(proc, td._normalise_path(ours)) is True
 
 
 def test_without_a_configured_binary_we_fall_back_to_the_image_name():
     """Degraded but useful: better than showing nothing when unconfigured."""
-    assert td._is_tokensave({"exe": r"C:\x\tokensave.exe"}, "") is True
-    assert td._is_tokensave({"exe": r"C:\x\notepad.exe"}, "") is False
+    assert td._is_tokensave(
+        {"exe": os.path.join(os.sep, "x", "tokensave.exe")}, "") is True
+    assert td._is_tokensave(
+        {"exe": os.path.join(os.sep, "x", "notepad.exe")}, "") is False
 
 
 # ── PowerShell/CIM output shapes ─────────────────────────────────────────
