@@ -80,10 +80,11 @@ class SyncStatusController:
         if "ok" in states and not all(s == "ok" for s in states):
             bad = [lbl for (lbl, p), s in zip(configs, states) if s != "ok"]
             self._on_log(
-                f"  Pin will take effect at next Claude restart.  "
-                f"Note: {', '.join(bad)} also still needs its MCP wiring "
-                f"fixed (Settings → 🔌 Manage MCP wiring).",
+                f"  Note: {', '.join(bad)} still needs its MCP wiring fixed "
+                f"(Settings → 🔌 Manage MCP wiring) — the pin cannot "
+                f"reach it.",
                 C["peach"])
+            self._log_pin_effect()
         elif "ok" not in states:
             self._on_log(
                 "  No MCP config currently routes through the wrapper — "
@@ -91,12 +92,35 @@ class SyncStatusController:
                 "AND restart Claude.  Settings → 🔌 Manage MCP wiring.",
                 C["peach"])
         else:
-            self._on_log(
-                "  Pin will take effect at next Claude Desktop / Claude Code "
-                "restart.  (Live in-session reload is deferred — see the "
-                "wrapper script's docstring for context.)",
-                C["overlay0"])
+            self._log_pin_effect()
         self._on_refresh()
+
+    def _log_pin_effect(self) -> None:
+        """Say what the pin does -- and, more usefully, what it is not for.
+
+        This briefly claimed the change could be applied to a running Claude
+        Desktop. It cannot: the pin watcher that promised it was removed after
+        being measured, because killing Desktop's server does not make Desktop
+        start another one. See docs/MCP_INTEGRATION_GOTCHAS.md.
+
+        What replaced it is the more important fact, and the one a user
+        reading this line actually wants: the pin only chooses the DEFAULT
+        graph. Reading a different project needs no restart at all, because
+        every tokensave tool takes ``graph_root``. Saying only "restart
+        Claude" would be true and would still leave the user believing the
+        restart is unavoidable, which is what made this worth switching
+        projects over in the first place.
+        """
+        self._on_log(
+            "  This sets the DEFAULT project for Claude Desktop, which reads "
+            "it once when it starts its tokensave server — so changing that "
+            "default does need a Desktop restart.",
+            C["overlay0"])
+        self._on_log(
+            "  You do not need one to READ another project: pass "
+            "graph_root=<project path> on any tokensave call.  "
+            "Reference tab → “🌐  Query another project”.",
+            C["overlay0"])
 
     def cmd_auto(self) -> None:
         clear_pinned()

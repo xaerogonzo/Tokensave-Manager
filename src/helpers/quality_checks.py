@@ -13,6 +13,8 @@ import os
 import subprocess
 import sys
 
+from constants import CREATE_NO_WINDOW
+
 
 def run_syntax_check(project_path: str) -> tuple[bool, str]:
     """Run ``python -m compileall src/ -q``. Returns (passed, summary)."""
@@ -22,6 +24,7 @@ def run_syntax_check(project_path: str) -> tuple[bool, str]:
         capture_output=True,
         text=True,
         cwd=project_path,
+        creationflags=CREATE_NO_WINDOW,
     )
     if result.returncode == 0:
         return True, "passed (0 errors)"
@@ -38,6 +41,7 @@ def run_pyflakes_check(project_path: str) -> tuple[bool, str]:
         capture_output=True,
         text=True,
         cwd=project_path,
+        creationflags=CREATE_NO_WINDOW,
     )
     if result.returncode == 0:
         return True, "passed (0 warnings)"

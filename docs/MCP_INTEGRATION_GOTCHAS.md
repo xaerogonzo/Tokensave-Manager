@@ -366,16 +366,54 @@ the doctor warnings about hooks until the upstream fix lands.
 
 ---
 
-## What we DID NOT solve: live pin reloading
+## Live pin reloading: attempted, measured, abandoned
 
-After all this, the only thing left on the table from the original goal
-is **live in-session pin reloading**. The wrapper is back to its
-single-threaded shape and pin changes still require a Claude restart.
+**Do not build this. It was built. It does not work, and the reason is
+structural rather than a bug that could be fixed.**
 
-If you want to reintroduce live reload, do NOT do it in the wrapper.
-Options that should work:
+Option A below was implemented as `PinWatcherController` (Roadmap-10 phase
+8) and removed again after measurement. The step it depends on — item 4,
+"Claude Desktop's MCP supervisor sees its server die and respawns the
+wrapper" — is the part that is false. **Desktop does not respawn a died
+MCP server.** It surfaces "Server disconnected" and leaves it dead until
+the app restarts.
 
-### Option A: External watcher process
+Measured live, twice, with Desktop running throughout: after two pin
+changes with the watcher enabled there were zero wrapper processes, zero
+wrapper run records, and zero Desktop tokensave servers. The failure had
+been invisible until respawn verification was added, because the watcher
+logged "Claude Desktop will restart it" without ever checking — so the
+feature reported success while leaving the user with no server at all,
+which is strictly worse than the stale one they started with.
+
+The deeper reason no variant works: **an MCP stdio server's lifetime is
+owned by the client process that spawned it.** A wrapper the manager
+starts has its stdio connected to the manager, so it cannot become
+Desktop's server. There is no out-of-process way to hand a running Desktop
+a replacement.
+
+### What to do instead
+
+The pin only selects a **default** graph. Every tokensave MCP tool accepts
+`graph_root`, which opens any indexed project read-only — verified across
+unrelated directory trees, not just siblings:
+
+```
+tokensave_context(task=..., graph_root="D:\\Random Projects\\Fortuna Lab")
+→ tokensave_graph: root="D:\\Random Projects\\Fortuna Lab" read_only=true
+```
+
+So cross-project *reading* never needed a restart. The residual risk is an
+agent that does not know to pass it and answers confidently from the wrong
+graph — which is what `strict_tree` turns into an explicit refusal, and
+why the manager now offers it per-project rather than only in bulk.
+
+---
+
+The original options are kept below for the record. Option A is the one
+that was tried; its item 4 is the false premise.
+
+### Option A: External watcher process — TRIED, DOES NOT WORK
 
 A small standalone Python script (or compiled binary) that:
 1. Runs as a long-lived background process (started by the manager, perhaps)

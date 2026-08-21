@@ -61,6 +61,8 @@ from __future__ import annotations
 import os
 import re
 import subprocess
+
+from constants import CREATE_NO_WINDOW
 from dataclasses import dataclass, field
 
 try:
@@ -413,7 +415,8 @@ def _git(git_exe: str, repo: str, args: list,
         proc = subprocess.run(
             [git_exe, "-C", repo] + args,
             capture_output=True, text=True, timeout=timeout,
-            env=_GIT_ENV_NO_PROMPT, encoding="utf-8", errors="replace")
+            env=_GIT_ENV_NO_PROMPT, encoding="utf-8", errors="replace",
+            creationflags=CREATE_NO_WINDOW)
     except subprocess.TimeoutExpired:
         return "timed out after %ds" % timeout, 1
     except OSError as exc:

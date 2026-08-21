@@ -14,19 +14,49 @@ def switching(ctl):
     def _fill():
         h1, h2, p, warn, ok, dim, br, ins = ctl._hw()
         h1("Switching Projects")
-        warn("⚠  You must restart Claude Desktop after switching the active project.")
+        ok("✔  You usually do NOT need to restart Claude Desktop to work on "
+           "another project.")
         br()
-        p("The tokensave wrapper script runs once when Claude Desktop launches. It "
-          "reads the active project at startup and stays locked to it for that "
-          "session. Changing the pin (★ Set as Active) writes to a config file, "
-          "but the already-running server won't pick it up until Claude Desktop "
-          "restarts.")
+        p("The pin (★ Set as Active) chooses the DEFAULT project — the one "
+          "tokensave answers about when nothing says otherwise. Claude Desktop "
+          "reads it once, when it starts its tokensave server, so moving that "
+          "default is the one thing that really does need a restart.")
         br()
-        p("Workflow for switching:")
+        p("Reading a different project does not. Every tokensave tool takes a "
+          "graph_root argument, which opens any indexed project on demand — "
+          "including one in a completely unrelated folder tree:")
+        ins('  tokensave_context(task="…", graph_root="D:\\Projects\\Other")\n',
+            "dim")
+        br()
+        p("The Reference tab has this ready to paste — the "
+          "“🌐  Query another project” snippet. Fill in the path, copy, "
+          "paste.")
+        br()
+
+        h2("Two things to watch")
+        ins("  •  The selected graph opens read-only", "body")
+        ins(" — use it for reading and reviewing, not for edits.\n", "dim")
+        ins("  •  Claude has to be told", "body")
+        ins(" — without graph_root it answers from the pinned project, and a "
+            "wrong-project answer looks completely normal.\n", "dim")
+        br()
+        warn("Turn on strict_tree (right-click a project → 🗂 Index → "
+             "🛡 Enable strict_tree…) to make that second case fail loudly "
+             "instead of quietly answering from the wrong checkout. The same "
+             "entry reads Disable once it is on, so you can turn it back off "
+             "if it ever refuses something legitimate.")
+        br()
+
+        h2("When you do want to move the default")
         ins("  1. Select the new project in the list\n", "body")
         ins("  2. Click ★ Set as Active\n", "body")
         ins("  3. Fully quit Claude Desktop (File → Quit, not just close the window)\n", "body")
         ins("  4. Relaunch Claude Desktop\n", "body")
+        br()
+        dim("A manager feature that tried to skip step 3 by restarting Desktop's "
+            "server for you was removed in Roadmap-10. Desktop does not start a "
+            "replacement when its MCP server dies — it left you with no "
+            "tokensave at all. See docs/MCP_INTEGRATION_GOTCHAS.md.")
         br()
         p("Tip: to go back to whichever project you last synced automatically, "
           "click Auto-detect instead of pinning a specific project.")
@@ -78,7 +108,7 @@ def context_menu(ctl):
         br()
 
         h2("Index management")
-        ins("  ★  Set as Active  ", "body"); ins("Pin this project for Claude Desktop (restart Claude to apply)\n", "dim")
+        ins("  ★  Set as Active  ", "body"); ins("Pin the DEFAULT project for Claude Desktop (see Switching Projects)\n", "dim")
         ins("  ↺  Sync           ", "body"); ins("Incrementally re-index changed files\n", "dim")
         ins("  📊  Status         ", "body"); ins("Show node/edge/file counts and last sync time in a popup\n", "dim")
         ins("  ⟳  Force Re-sync  ", "body"); ins("Rebuild the entire code graph from scratch\n", "dim")

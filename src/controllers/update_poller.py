@@ -495,6 +495,7 @@ class UpdatePollerController:
             r = subprocess.run(
                 args, capture_output=True, text=True, timeout=15,
                 encoding="utf-8", errors="replace",
+                creationflags=CREATE_NO_WINDOW,
             )
             if r.returncode != 0:
                 return ""

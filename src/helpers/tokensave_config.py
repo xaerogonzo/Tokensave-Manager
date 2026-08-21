@@ -141,8 +141,34 @@ def should_recommend_enabling(state: StrictTreeState,
     learns to scroll past — the same nagging problem this Doctor has already
     had to fix once for agent-install prompts. An unknown state never
     triggers a recommendation either: we would be guessing.
+
+    *risk_present* now covers two reachable shapes rather than one; see
+    :func:`wrong_graph_risk` for the second. The gate itself is unchanged,
+    deliberately — the fix for "nobody sees this advice" is better evidence
+    of risk, not the removal of the requirement to have any.
     """
     return risk_present and state.verdict in (DISABLED, MISSING)
+
+
+def wrong_graph_risk(indexed_project_count: int,
+                     desktop_serves_one_project: bool) -> bool:
+    """Is the wrong-GRAPH failure reachable here, as distinct from wrong-TREE?
+
+    The original risk signal was a git worktree with no index of its own --
+    one project, two checkouts. This is the other shape, and on a machine
+    with several projects it is far more common: Claude Desktop resolves
+    the pinned project once at startup and answers everything from that one
+    graph, so any question asked about a different project is answered from
+    the wrong one and reads as perfectly normal.
+
+    Both conditions are required. One indexed project means there is no
+    other graph to be wrong about. A Desktop not wired to tokensave at all
+    cannot answer from anything.
+
+    Pure, so the Doctor can be tested without a config on disk or a live
+    Desktop install.
+    """
+    return desktop_serves_one_project and indexed_project_count > 1
 
 
 # ── the writer (Roadmap-10 follow-on) ─────────────────────────────────────

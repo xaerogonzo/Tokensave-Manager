@@ -162,26 +162,6 @@ class SettingsDialog(tk.Toplevel):
             font=("Segoe UI", 8), bg=C["base"], fg=C["overlay0"],
             justify=tk.LEFT).pack(anchor=tk.W, padx=36, pady=(0, 8))
 
-        from controllers.pin_watcher import ENABLED_KEY as _PIN_WATCH_KEY
-        self._var_pin_watch = tk.BooleanVar(
-            value=bool(raw.get(_PIN_WATCH_KEY, False)))
-        themed_checkbutton(body,
-            text="Apply \u201cSet as Active\u201d to Claude Desktop immediately",
-            variable=self._var_pin_watch,
-            bg=C["base"], fg=C["text"],
-            activebackground=C["base"], activeforeground=C["text"],
-            font=("Segoe UI", 10)).pack(anchor=tk.W, padx=20, pady=(0, 2))
-        tk.Label(body,
-            text="  Claude Desktop reads the active project once, when it starts its\n"
-                 "  tokensave server \u2014 so changing it normally does nothing until you\n"
-                 "  restart Desktop. With this on, the manager ends the server left on\n"
-                 "  the old project and Desktop starts a fresh one.\n"
-                 "  Only works while TokenSave Manager is running, and only touches\n"
-                 "  servers the manager itself started. Claude Code sessions bind to\n"
-                 "  their own project and are never affected.",
-            font=("Segoe UI", 8), bg=C["base"], fg=C["overlay0"],
-            justify=tk.LEFT).pack(anchor=tk.W, padx=36, pady=(0, 8))
-
         from helpers.smoke_runner import is_hook_installed
         _active_project = (raw.get("projects") or [{}])[0].get("path") or ""
         _hook_active = is_hook_installed(_active_project) if _active_project else False
@@ -328,8 +308,6 @@ class SettingsDialog(tk.Toplevel):
             for iid in self._roots_tv.get_children()
         ]
         raw["auto_commit_after_sync"] = self._var_autocommit.get()
-        from controllers.pin_watcher import ENABLED_KEY as _PIN_WATCH_KEY
-        raw[_PIN_WATCH_KEY] = self._var_pin_watch.get()
 
         # Pre-commit smoke-test hook — install or uninstall based on toggle.
         _precommit_wanted = self._var_precommit_hook.get()
