@@ -17,8 +17,14 @@ from helpers.shadow_links import (
     DEFAULT_SHADOW_EXT_MAP,
     ai_suggest_suffixes,
     indexed_extensions,
+    SHADOW_CANDIDATE,
+    SHADOW_STALE,
+    SHADOW_SUSPICIOUS,
+    load_shadow_config,
     load_shadow_map,
+    remove_stale_shadows,
     save_shadow_map,
+    scan_shadows,
     suggest_shadow_candidates,
 )
 
@@ -111,19 +117,9 @@ class ShadowLinksDialog(tk.Toplevel):
         # ── R9-SL5: unindexed-file-type scanner ──
         self._build_scanner_section()
 
-        # ── Status summary ──
-        existing = sum(
-            1 for r, _, fs in os.walk(path)
-            for f in fs
-            if any(f.endswith(src + tgt)
-                   for src, tgt in initial_map.items())
-        )
-        status_col = C["green"] if existing else C["overlay0"]
-        status_txt = (f"✔  {existing} shadow file(s) already exist in this project."
-                      if existing else "No shadow files found — none created yet.")
-        tk.Label(self, text=status_txt,
-                 font=("Segoe UI", 9), bg=C["base"],
-                 fg=status_col).pack(anchor=tk.W, padx=20, pady=(0, 4))
+        # ── Status summary (R9-SL3) ──
+        self._initial_map = initial_map
+        self._build_status_section(path, initial_map)
 
         ttk.Separator(self, orient="horizontal").pack(fill=tk.X, padx=20, pady=(4, 8))
 
@@ -134,6 +130,23 @@ class ShadowLinksDialog(tk.Toplevel):
                            bg=C["base"], fg=C["text"],
                            activebackground=C["base"], activeforeground=C["text"],
                            font=("Segoe UI", 10)).pack(anchor=tk.W, **pad)
+
+        # R9-SL2. Off by default: it adds a tree walk to every sync, and a
+        # project that never gains new files of these types gains nothing.
+        saved_config = load_shadow_config(path)
+        self._var_auto = tk.BooleanVar(
+            value=bool(saved_config and saved_config.auto_shadow))
+        themed_checkbutton(self, text="Keep shadows fresh on every sync",
+                           variable=self._var_auto,
+                           bg=C["base"], fg=C["text"],
+                           activebackground=C["base"], activeforeground=C["text"],
+                           font=("Segoe UI", 10)).pack(anchor=tk.W, **pad)
+        tk.Label(self,
+                 text=("      Files added after a run are not shadowed until "
+                       "you come back here, so new files silently drop out of "
+                       "the index."),
+                 font=("Segoe UI", 8), bg=C["base"], fg=C["overlay0"],
+                 justify=tk.LEFT, wraplength=520).pack(anchor=tk.W, padx=20)
 
         # ── Buttons ──
         btn_row = tk.Frame(self, bg=C["base"])
@@ -148,6 +161,98 @@ class ShadowLinksDialog(tk.Toplevel):
         px = parent.winfo_x() + (parent.winfo_width()  - self.winfo_width())  // 2
         py = parent.winfo_y() + (parent.winfo_height() - self.winfo_height()) // 2
         self.geometry(f"+{px}+{py}")
+
+    def _build_status_section(self, path: str, ext_map: dict) -> None:
+        """Summarise what is actually on disk, in four states (R9-SL3).
+
+        The old version counted shadow-shaped filenames and called them all
+        "shadow files". That conflates four different situations, two of
+        which the user needs to act on and one of which must never be
+        touched automatically.
+        """
+        self._status_lbl = tk.Label(self, text="", font=("Segoe UI", 9),
+                                    bg=C["base"], fg=C["overlay0"],
+                                    justify=tk.LEFT, wraplength=560)
+        self._status_lbl.pack(anchor=tk.W, padx=20, pady=(0, 2))
+
+        self._cleanup_row = tk.Frame(self, bg=C["base"])
+        self._cleanup_row.pack(fill=tk.X, padx=20, pady=(0, 4))
+        self._cleanup_btn = ttk.Button(self._cleanup_row,
+                                       text="Clean up stale shadows",
+                                       command=self._on_cleanup_stale)
+        self._refresh_status()
+
+    def _refresh_status(self) -> None:
+        findings = scan_shadows(self._path, self._initial_map)
+        counts = {}
+        for f in findings:
+            counts[f.state] = counts.get(f.state, 0) + 1
+        self._stale_count = counts.get(SHADOW_STALE, 0)
+
+        if not findings:
+            self._status_lbl.configure(
+                text="No shadow files found — none created yet.",
+                fg=C["overlay0"])
+            self._cleanup_btn.pack_forget()
+            return
+
+        healthy = len(findings) - sum(
+            counts.get(s, 0) for s in
+            (SHADOW_STALE, SHADOW_CANDIDATE, SHADOW_SUSPICIOUS))
+        lines = ["✔  %d shadow file(s) linked to a live source." % healthy]
+        colour = C["green"]
+
+        if self._stale_count:
+            lines.append(
+                "⚠  %d stale — the manager created these and their source "
+                "is gone. A hardlink outlives its source, so the index still "
+                "sees code with nothing behind it." % self._stale_count)
+            colour = C["peach"]
+        if counts.get(SHADOW_CANDIDATE):
+            lines.append(
+                "?  %d look like stale shadows but were not created here, so "
+                "their origin cannot be proven — left alone."
+                % counts[SHADOW_CANDIDATE])
+            colour = C["peach"] if colour != C["peach"] else colour
+        if counts.get(SHADOW_SUSPICIOUS):
+            lines.append(
+                "?  %d share a name with a live source but are no longer the "
+                "same file. Saving through an editor that replaces rather "
+                "than rewrites breaks the link — re-generate to restore it."
+                % counts[SHADOW_SUSPICIOUS])
+
+        self._status_lbl.configure(text="\n".join(lines), fg=colour)
+        if self._stale_count:
+            self._cleanup_btn.pack(side=tk.LEFT)
+        else:
+            self._cleanup_btn.pack_forget()
+
+    def _on_cleanup_stale(self) -> None:
+        """Delete only the stale shadows whose creation we recorded.
+
+        `remove_stale_shadows` re-scans rather than accepting a list from
+        here, so nothing this dialog displays can widen what gets deleted.
+        """
+        if not messagebox.askyesno(
+                "Clean up stale shadows",
+                "Delete %d shadow file(s) whose source no longer exists?\n\n"
+                "Only files the manager recorded creating are removed. "
+                "Anything that merely matches the naming pattern is left "
+                "alone, because there is no way to prove it was ours."
+                % self._stale_count,
+                parent=self):
+            return
+        removed, failed = remove_stale_shadows(self._path, self._initial_map)
+        if failed:
+            messagebox.showwarning(
+                "Partly cleaned",
+                "Removed %d; %d could not be deleted (still open, or "
+                "read-only)." % (removed, failed), parent=self)
+        else:
+            messagebox.showinfo("Cleaned up",
+                                "Removed %d stale shadow file(s)." % removed,
+                                parent=self)
+        self._refresh_status()
 
     def _build_scanner_section(self) -> None:
         """R9-SL5: a Scan button that lists file types tokensave isn't indexing,
@@ -317,7 +422,8 @@ class ShadowLinksDialog(tk.Toplevel):
             return
         # R9-SL1: persist for the next open. save_shadow_map never raises —
         # a failed write must not block the actual generation.
-        save_shadow_map(self._path, ext_map)
+        save_shadow_map(self._path, ext_map,
+                        auto_shadow=self._var_auto.get())
         run_sync = self._var_sync.get()
         self.destroy()
         self._callback(self._path, ext_map, run_sync)

@@ -9,6 +9,7 @@ from __future__ import annotations
 
 from types import SimpleNamespace
 
+from helpers.proc_kill import ProcessIdentity
 from helpers.codegraph_daemon import (
     kill_codegraph_daemon,
     list_codegraph_daemons,
@@ -96,59 +97,46 @@ def test_malformed_lines_are_skipped(mocker, tmp_path):
 
 
 # ── kill_codegraph_daemon ─────────────────────────────────────────────────
+#
+# The kill mechanics moved to `helpers/proc_kill.py` in Roadmap-10, so the
+# argv- and signal-level assertions moved with them (see tests/test_proc_kill.py).
+# What belongs HERE is the part that is this caller's own decision: which
+# semantics it asks for. Getting that wrong is the regression that folding two
+# different kill implementations together invites, and it would be invisible
+# at the argv level once the shared helper is doing the work.
 
-def test_kill_dispatches_taskkill_on_windows(mocker):
-    mocker.patch("helpers.codegraph_daemon.sys.platform", "win32")
-    run = mocker.patch("helpers.codegraph_daemon.subprocess.run",
-                       return_value=_proc(0, stdout="SUCCESS"))
+def test_kill_asks_for_single_process_graceful_semantics(mocker):
+    """A daemon stop must not become a tree kill, nor lose its grace period.
+
+    The two pre-existing implementations differed on exactly these axes —
+    tree/single and graceful/immediate — so they are asserted explicitly
+    rather than left to whatever the shared helper defaults to.
+    """
+    kp = mocker.patch("helpers.codegraph_daemon.kill_process",
+                      return_value=(True, "terminated via handle"))
     ok, detail = kill_codegraph_daemon(4321)
     assert ok is True
-    assert run.call_args.args[0] == ["taskkill", "/F", "/PID", "4321"]
+    assert kp.call_args.args[0] == 4321
+    assert kp.call_args.kwargs["tree"] is False
+    assert kp.call_args.kwargs["graceful"] is True
 
 
-def test_kill_taskkill_failure_reports_detail(mocker):
-    mocker.patch("helpers.codegraph_daemon.sys.platform", "win32")
-    mocker.patch("helpers.codegraph_daemon.subprocess.run",
-                return_value=_proc(1, stderr="ERROR: no such process"))
+def test_kill_passes_the_scanned_identity_through_for_verification(mocker):
+    """The PID-reuse guard is only real if the caller forwards the identity."""
+    ident = ProcessIdentity(pid=4321, created_at=123456, image="codegraph.exe")
+    kp = mocker.patch("helpers.codegraph_daemon.kill_process",
+                      return_value=(True, "terminated via verified handle"))
+    kill_codegraph_daemon(4321, expect=ident)
+    assert kp.call_args.kwargs["expect"] is ident
+
+
+def test_kill_failure_detail_reaches_the_caller(mocker):
+    """The dialog shows this string, so it must not be swallowed or reworded."""
+    mocker.patch("helpers.codegraph_daemon.kill_process",
+                 return_value=(False, "ERROR: no such process"))
     ok, detail = kill_codegraph_daemon(4321)
     assert ok is False
     assert "no such process" in detail
-
-
-def test_kill_posix_sigterm_success(mocker):
-    mocker.patch("helpers.codegraph_daemon.sys.platform", "linux")
-    calls = []
-    def _fake_kill(pid, sig):
-        calls.append(sig)
-        if len(calls) >= 2:   # process gone after the poll checks it once
-            raise ProcessLookupError
-    mocker.patch("helpers.codegraph_daemon.os.kill", side_effect=_fake_kill)
-    mocker.patch("helpers.codegraph_daemon.time.sleep")
-    ok, detail = kill_codegraph_daemon(999)
-    assert ok is True
-    assert "SIGTERM" in detail
-
-
-def test_kill_posix_escalates_to_sigkill(mocker):
-    """Process survives SIGTERM through the whole poll window → SIGKILL.
-
-    `signal.SIGKILL` doesn't exist on the real Windows `signal` module even
-    when `sys.platform` is patched to "linux" for the code path under test
-    (`_kill_posix` does a real `import signal`) — `create=True` lets the test
-    run on any dev platform.
-    """
-    mocker.patch("helpers.codegraph_daemon.sys.platform", "linux")
-    mocker.patch("signal.SIGKILL", 9, create=True)
-    calls = []
-    def _fake_kill(pid, sig):
-        calls.append(sig)
-        # Never raises ProcessLookupError -> poll loop exhausts -> SIGKILL sent.
-    mocker.patch("helpers.codegraph_daemon.os.kill", side_effect=_fake_kill)
-    mocker.patch("helpers.codegraph_daemon.time.sleep")
-    ok, detail = kill_codegraph_daemon(999)
-    assert ok is True
-    assert 9 in calls
-    assert "SIGKILL" in detail
 
 
 # ── unlock_codegraph_project ──────────────────────────────────────────────

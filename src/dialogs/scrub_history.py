@@ -836,6 +836,60 @@ class ScrubHistoryDialog(UiPumpMixin, tk.Toplevel):
         self._scrub_btn.configure(state=tk.DISABLED, text="✓ Scrubbed")
         self._force_push_btn.pack(side=tk.RIGHT, padx=(6, 0))
 
+    def _other_remotes(self) -> list:
+        """Configured remotes other than origin.
+
+        This push rewrites origin only. Every other remote still holds the
+        history that was just scrubbed — including the thing being removed
+        — so the user has to be told which ones, by name.
+        """
+        try:
+            from helpers.multi_remote import list_remotes
+            return [r.name for r in list_remotes(self._cfg.git_exe, self._path)
+                    if r.name != "origin"]
+        except Exception:
+            return []
+
+    def _other_remote_warning(self) -> str:
+        """Text naming the remotes this push will NOT reach."""
+        others = self._other_remotes()
+        if not others:
+            return ""
+        return ("\n\n\u26a0  This pushes to origin ONLY. These remotes also "
+                "have this repository and will still hold the un-scrubbed "
+                "history:\n%s\n"
+                "Push to each of them too, or the file stays recoverable "
+                "from there." % "\n".join("    \u2022 %s" % r for r in others))
+
+    def _report_scrub_push_done(self) -> None:
+        """Say what is actually true, which depends on the other remotes.
+
+        For a privacy scrub, a remote that was not rewritten is not a loose
+        end to mention in passing — it is the content still being published.
+        So this is a warning rather than a success box whenever one exists.
+        """
+        others = self._other_remotes()
+        if not others:
+            messagebox.showinfo(
+                "Done \u2014 remote history rewritten",
+                "Force-push succeeded.\n\n"
+                "The file is gone from the remote repository's history.\n\n"
+                "Anyone who had a clone will need to re-clone to stay\n"
+                "in sync.",
+                parent=self)
+            return
+        messagebox.showwarning(
+            "origin rewritten \u2014 other remotes still have it",
+            "Force-push to origin succeeded, and the file is gone from "
+            "origin's history.\n\n"
+            "\u26a0  These remotes were NOT updated and still carry the old "
+            "history:\n%s\n"
+            "Until each is force-pushed, the scrubbed content remains "
+            "recoverable from them.\n\n"
+            "Anyone who had a clone will need to re-clone to stay in sync."
+            % "\n".join("    \u2022 %s" % r for r in others),
+            parent=self)
+
     def _on_force_push(self):
         """Force-push the rewritten history to origin."""
         head = getattr(self, "_head_branch", None) \
@@ -844,8 +898,8 @@ class ScrubHistoryDialog(UiPumpMixin, tk.Toplevel):
                 "⚠  Force Push — overwrite remote history?",
                 f"Push rewritten history to origin/{head}.\n\n"
                 "Anyone who has cloned this repo will need to re-clone "
-                "afterwards — their local history is now divergent.\n\n"
-                "Proceed?",
+                "afterwards — their local history is now divergent."
+                + self._other_remote_warning() + "\n\nProceed?",
                 parent=self, default="no", icon="warning"):
             return
 
@@ -910,13 +964,7 @@ class ScrubHistoryDialog(UiPumpMixin, tk.Toplevel):
                     state=tk.DISABLED, text="✓ Force-pushed")
                 self._log_append(
                     "✓ Force-push succeeded — remote history is now clean.")
-                messagebox.showinfo(
-                    "Done — remote history rewritten",
-                    "Force-push succeeded.\n\n"
-                    "The file is gone from the remote repository's history.\n\n"
-                    "Anyone who had a clone will need to re-clone to stay\n"
-                    "in sync.",
-                    parent=self)
+                self._report_scrub_push_done()
             else:
                 self._force_push_btn.configure(
                     state=tk.NORMAL, text="⬆  Force Push to GitHub")

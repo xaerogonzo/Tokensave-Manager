@@ -363,3 +363,63 @@ def count_methods_in_class(file_path: str, class_name: str) -> int:
                 if isinstance(child, (ast.FunctionDef, ast.AsyncFunctionDef))
             )
     raise LookupError(f"class {class_name!r} not found in {file_path}")
+
+
+# ── Shadow-link health (R9-SL3) ───────────────────────────────────────────
+
+def audit_shadow_links(project_path: str) -> list:
+    """Warn-only notes about shadow hardlinks. Returns [] when not in use.
+
+    A hardlink outlives its source: delete or rename ``Blood.zsc`` and
+    ``Blood.zsc.cpp`` remains, so the index keeps serving code with nothing
+    behind it and git sees an untracked file the .gitignore pattern may no
+    longer cover.
+
+    Reports rather than fixes, and never counts a file it cannot attribute.
+    A file matching the shadow naming pattern that the manager did not record
+    creating might be the user's own work, and the difference between those
+    two is not visible on disk — see ``helpers/shadow_links.py``.
+
+    Silent for projects with no saved shadow map: they are not using the
+    feature, and every project would otherwise gain a line about it.
+
+    Imported lazily so this module's import surface stays exactly ``ast``,
+    ``os`` and ``re`` for the CI one-liner in ``helpers/ci_workflow.py``.
+    """
+    try:
+        from helpers.shadow_links import (
+            SHADOW_CANDIDATE, SHADOW_STALE, SHADOW_SUSPICIOUS,
+            load_shadow_config, scan_shadows,
+        )
+    except ImportError:
+        return []
+
+    config = load_shadow_config(project_path)
+    if not config:
+        return []
+
+    counts = {}
+    for finding in scan_shadows(project_path, config.ext_map,
+                                config.generated):
+        counts[finding.state] = counts.get(finding.state, 0) + 1
+
+    notes = []
+    if counts.get(SHADOW_STALE):
+        notes.append(
+            "  %d stale shadow link(s): the source file is gone but the "
+            "hardlink remains, so the index still contains it. "
+            "Right-click the project -> Shadow Links -> Clean up."
+            % counts[SHADOW_STALE])
+    if counts.get(SHADOW_SUSPICIOUS):
+        notes.append(
+            "  %d shadow file(s) share a name with a live source but are no "
+            "longer the same file -- an editor that saves by replacing "
+            "breaks the link. Re-generate to restore it."
+            % counts[SHADOW_SUSPICIOUS])
+    if counts.get(SHADOW_CANDIDATE):
+        notes.append(
+            "  %d file(s) match the shadow naming pattern with no source and "
+            "no record of being created here. Origin cannot be proven, so "
+            "nothing will touch them automatically."
+            % counts[SHADOW_CANDIDATE])
+    return notes

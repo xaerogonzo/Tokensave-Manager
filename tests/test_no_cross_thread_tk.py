@@ -42,6 +42,26 @@ So worker scope is now *discovered* — from actual `Thread(target=...)`,
 `submit(...)` and `add_done_callback(...)` arguments — and the convention
 names are only a backstop.
 
+## Why this file checks two receiver spellings
+
+The first version of this guard resolved worker scope correctly and still
+reported zero, because it only recognised one way of *spelling* the call.
+It matched `self.after(...)`, which is what a window writes — the guard was
+built alongside the dialog conversion and inherited its idiom.
+
+Controllers are not windows. They do not own an `after`; they hold a widget
+and post through `self._tab.after(...)` / `self._root.after(...)`. That
+receiver is an `ast.Attribute`, not an `ast.Name`, so the scanner skipped it
+in every thread. Measured when the second spelling was added: **101
+worker-scope calls across 19 files**, 99 of them resolved to a real thread
+target and 2 to callbacks handed into `agent.run()` on the worker thread.
+None had ever been visible.
+
+The match is deliberately narrow — `self.<attr>.after(...)`, one level, with
+`self` at the root — because the rule has to stay *scope-aware*. "Anything
+calling `.after()`" would fire on main-thread timers, and a guard that
+over-fires is a guard someone disables.
+
 `test_no_mixin_class_calls_after_zero` is the stronger, simpler rule, and the
 one that makes a conversion complete rather than partial: in a class that has
 a pump, `self.after(0, ...)` is never the right call. It means exactly what
@@ -72,12 +92,64 @@ _WORKER_PREFIXES = ("_bg_",)
 _SPAWNERS = {"submit", "add_done_callback"}
 
 
-# ── Ratchet ───────────────────────────────────────────────────────────────
+def _self_receiver(fn) -> "str | None":
+    """Name the receiver of `<recv>.<method>(...)` when it is rooted at self.
+
+    Returns "self" for `self.after(...)`, the attribute name for
+    `self._tab.after(...)`, and None for anything else — a local, a module,
+    a deeper chain. Both rules below share it so the two spellings can never
+    drift apart again.
+    """
+    if not isinstance(fn, ast.Attribute):
+        return None
+    recv = fn.value
+    if isinstance(recv, ast.Name):
+        return "self" if recv.id == "self" else None
+    if (isinstance(recv, ast.Attribute)
+            and isinstance(recv.value, ast.Name)
+            and recv.value.id == "self"):
+        return recv.attr
+    return None
+
+
+# ── Ratchet ─────────────────────────────────────────────────────────────────
 #
-# Every window is converted, so this is empty. It stays a ratchet rather than
-# a bare `== {}` so a genuinely hard case in future can be recorded here with
-# a reason, instead of the guard being disabled outright.
-_KNOWN_OFFENDERS: dict = {}
+# 82 calls across 18 files, every one invisible until the guard learned
+# the `self.<attr>.after(...)` spelling. This is a BASELINE, not an
+# endorsement: each entry is a real cross-thread Tk call that will block on
+# Linux if it ever runs there.
+#
+# How this list was produced, because it matters that it was not automatic:
+# the scanner was run and each finding classified by hand before being
+# recorded. 99 of the original 101 resolved to an actual `Thread(target=...)`
+# argument; the other 2 (`ask_tab._ask_spawn_worker`) are callbacks handed
+# into `agent.run()`, which invokes them on the spawned thread -- confirmed
+# by reading it, not assumed from the name. `controllers/git_tab.py` was
+# converted rather than recorded, which is why it is absent.
+#
+# Piping scanner output straight in here would have turned 82 live bugs into
+# 82 permanently blessed ones -- the precise outcome a ratchet exists to
+# prevent. Lower an entry when you fix a file; never raise one.
+_KNOWN_OFFENDERS: dict = {
+    "src/controllers/ai_tasks_ctrl.py": 4,
+    "src/controllers/ask_tab.py": 5,
+    "src/controllers/branch_mgmt_ctrl.py": 13,
+    "src/controllers/codegraph_ctrl.py": 4,
+    "src/controllers/doctor_ctrl.py": 5,
+    "src/controllers/git_ops_ctrl.py": 5,
+    "src/controllers/help_tab.py": 5,
+    "src/controllers/housekeeping_ctrl.py": 4,
+    "src/controllers/pr_draft_ctrl.py": 1,
+    "src/controllers/project_sync_ctrl.py": 1,
+    "src/controllers/scaffold_ctrl.py": 4,
+    "src/controllers/shadowlinks_ctrl.py": 4,
+    "src/controllers/sync_ctrl.py": 5,
+    "src/controllers/tasks_tab.py": 1,
+    "src/controllers/update_poller.py": 4,
+    "src/dialogs/settings_ai.py": 2,
+    "src/dialogs/settings_codegraph.py": 10,
+    "src/dialogs/settings_paths.py": 5,
+}
 
 
 def _worker_scope(tree) -> set:
@@ -139,14 +211,16 @@ class _Scanner(ast.NodeVisitor):
 
     def visit_Call(self, node):
         fn = node.func
-        if (isinstance(fn, ast.Attribute)
+        recv = _self_receiver(fn)
+        if (recv is not None
+                and isinstance(fn, ast.Attribute)
                 and fn.attr in _TK_METHODS
-                and isinstance(fn.value, ast.Name)
-                and fn.value.id == "self"
                 and any(_is_worker_name(n, self.scope) for n in self.stack)):
             chain = " > ".join(self.stack)
+            dotted = "self" if recv == "self" else f"self.{recv}"
             self.hits.append(
-                f"{self.rel}:{node.lineno}: self.{fn.attr}(...) inside {chain}")
+                f"{self.rel}:{node.lineno}: {dotted}.{fn.attr}(...) "
+                f"inside {chain}")
         self.generic_visit(node)
 
 
@@ -229,9 +303,8 @@ def _after_zero_calls(node) -> list:
     """Line numbers of `self.after(0, ...)` / `self.after_idle(...)`."""
     out = []
     for c in ast.walk(node):
-        if not (isinstance(c, ast.Call) and isinstance(c.func, ast.Attribute)
-                and isinstance(c.func.value, ast.Name)
-                and c.func.value.id == "self"):
+        if not (isinstance(c, ast.Call)
+                and _self_receiver(c.func) is not None):
             continue
         if c.func.attr == "after_idle":
             out.append(c.lineno)
@@ -282,10 +355,13 @@ def test_every_mixin_user_starts_its_pump():
 
 # ── the conversion cannot be quietly undone ───────────────────────────────
 
-# Every Tk window that runs background work. Named individually because the
-# ratchet alone would stay green if someone dropped the mixin from one.
+# Every Tk window -- and now controller -- that runs background work. Named
+# individually because the ratchet alone would stay green if someone dropped
+# the mixin from one: with no mixin there is no class for the after(0) rule to
+# check, and the file's calls would simply reappear as fresh ratchet entries.
 _CONVERTED = (
     "app.py",
+    "controllers/git_tab.py",   # the first controller on the shared pump
     "dialogs/ai_code_review.py",
     "dialogs/checks_dialog.py",
     "dialogs/codegraph_daemon_manager.py",
@@ -300,6 +376,7 @@ _CONVERTED = (
     "dialogs/roadmap_mgr.py",
     "dialogs/scrub_history.py",
     "dialogs/test_manager.py",
+    "dialogs/tokensave_daemon_manager.py",
     "dialogs/tokensave_mcp_picker.py",
     "dialogs/tool_manager.py",
 )
@@ -366,6 +443,92 @@ def test_main_thread_tk_calls_are_not_flagged():
                  "    def _pump(self):\n"
                  "        self.after(50, self._pump)\n") == []
 
+
+
+# -- the second receiver spelling: the hole that hid 101 real calls --------
+#
+# Five fixtures, and three of them assert the guard stays QUIET. That balance
+# is deliberate: widening a rule is only safe if its false-positive edges are
+# pinned too, and an over-firing guard gets switched off rather than fixed.
+#
+# Sources are triple-quoted rather than newline-escaped one-liners purely for
+# legibility -- these are the cases a future reader will need to reason about.
+
+def test_the_guard_catches_a_controller_posting_through_its_widget():
+    """self._tab.after(...) -- what every controller in this codebase writes.
+
+    Invisible to the original guard, which required an ast.Name receiver.
+    """
+    assert len(_scan("""
+class C:
+    def go(self):
+        def worker():
+            self._tab.after(0, lambda: None)
+        threading.Thread(target=worker).start()
+""")) == 1
+
+
+def test_the_guard_catches_any_self_held_widget_not_just_known_names():
+    """The rule is structural, not a list of blessed attribute names.
+
+    _root, _help_txt and _dlg are all real receivers in this codebase;
+    enumerating them would just be the naming convention that failed before.
+    """
+    assert len(_scan("""
+class C:
+    def go(self):
+        def worker():
+            self._whatever_i_am_called.after(0, lambda: None)
+        threading.Thread(target=worker).start()
+""")) == 1
+
+
+def test_a_controller_posting_on_the_main_thread_is_not_flagged():
+    """The widened rule must stay scope-aware.
+
+    A controller rescheduling its own poll loop is correct code, and the
+    single most common self._tab.after(...) in the codebase. Flagging it
+    would bury the real hits in noise.
+    """
+    assert _scan("""
+class C:
+    def _poll(self):
+        self._tab.after(100, self._poll)
+""") == []
+
+
+def test_a_receiver_that_is_not_rooted_at_self_is_not_claimed():
+    """other.after(...) may be a Tk call, or something else entirely.
+
+    The guard cannot tell without type information it does not have, so it
+    declines rather than guessing -- a false positive here would be
+    unfixable-by-construction, which is how guards get disabled.
+    """
+    assert _scan("""
+class C:
+    def go(self, other):
+        def worker():
+            other.after(0, lambda: None)
+        threading.Thread(target=worker).start()
+""") == []
+
+
+def test_a_widget_bound_in_init_is_still_caught_in_a_worker():
+    """Pins the resolution contract: the receiver is matched syntactically.
+
+    self._tab is assigned in __init__ and used in a worker far away. The
+    guard never has to prove _tab is a Tk widget -- self.<attr>.after(...)
+    in worker scope is the pattern, whatever the attribute holds.
+    """
+    assert len(_scan("""
+class C:
+    def __init__(self, parent):
+        self._tab = ttk.Frame(parent)
+    def go(self):
+        def worker():
+            self._tab.after(0, self._done)
+        threading.Thread(target=worker).start()
+""")) == 1
 
 def test_a_real_timer_stays_legal():
     """`after(N, ...)` for N > 0 is a timer, not a thread hand-off."""

@@ -28,6 +28,8 @@ import sys
 import threading
 from typing import Callable, Optional
 
+from helpers.proc_kill import kill_popen_tree
+
 # Marker embedded in every hook the manager writes so we can identify it.
 _HOOK_MARKER = "# TokenSaveManager-smoke-hook"
 
@@ -93,25 +95,18 @@ def _kill_tree(proc) -> None:
     """Kill *proc* and its entire child process tree (best-effort).
 
     A misbehaving AI test can spawn children (e.g. one that calls the real
-    ``run_smoke_tests`` launches a child pytest, or ``spawn_claude_cli`` opens a
-    console). Killing only the parent on timeout would orphan them, leaving them
-    burning CPU until reboot. Windows: ``taskkill /F /T /PID`` walks the child
-    tree by PID. POSIX: the process was started in its own session, so
-    ``killpg`` takes out the whole group.
+    ``run_smoke_tests`` launches a child pytest, or ``spawn_claude_cli`` opens
+    a console). Killing only the parent on timeout would orphan them, leaving
+    them burning CPU until reboot.
+
+    Delegates to ``proc_kill.kill_popen_tree``, which keeps this shape exactly:
+    ``taskkill /F /T`` on Windows, ``killpg`` with SIGKILL on POSIX, and
+    ``proc.kill()`` as the last resort. Tree kill stays TREE kill -- the
+    shared helper takes ``tree`` as a parameter precisely so folding these
+    two callers together could not quietly turn this into a single-process
+    kill and start orphaning children again.
     """
-    try:
-        if sys.platform == "win32":
-            subprocess.run(
-                ["taskkill", "/F", "/T", "/PID", str(proc.pid)],
-                capture_output=True, creationflags=_CREATE_NO_WINDOW)
-        else:
-            import signal
-            os.killpg(os.getpgid(proc.pid), signal.SIGKILL)
-    except Exception:
-        try:
-            proc.kill()
-        except Exception:
-            pass
+    kill_popen_tree(proc)
 
 
 def run_single_test_file(project_root: str, test_relpath: str,

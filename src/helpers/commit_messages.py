@@ -429,7 +429,19 @@ def _fetch_commit_context(tokensave_exe: str, repo_path: str, git_exe: str,
         return _ctx_cache[cache_key]
     try:
         proc = subprocess.run(
-            [tokensave_exe, "tool", "commit_context", "--staged-only"],
+            # `--staged-only` is a valued flag, not a bare switch: passing it
+            # alone makes tokensave exit with "flag requires a value", which
+            # this function then swallows as an empty result. It did exactly
+            # that on every call from the day it shipped, so the commit
+            # message never actually saw this context.
+            #
+            # `--project` scopes the query to the repo being committed.
+            # Without it the query resolves against the MANAGER's working
+            # directory, which is wherever the app was launched from and has
+            # nothing to do with the project in the Git tab.
+            [tokensave_exe, "tool", "commit_context",
+             "--staged-only", "true",
+             "--project", repo_path],
             capture_output=True, text=True, timeout=10,
             encoding="utf-8", errors="replace",
             creationflags=CREATE_NO_WINDOW,

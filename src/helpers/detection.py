@@ -165,3 +165,24 @@ def _root_label(r):
     if isinstance(r, str):
         return os.path.basename(p.rstrip("/\\"))
     return r.get("label", os.path.basename(p.rstrip("/\\"))) or os.path.basename(p.rstrip("/\\"))
+
+
+def _detect_glab() -> str:
+    """Path to glab.exe (GitLab CLI) if installed, else "".
+
+    Same shape as ``_detect_gh``: PATH first, then the winget install
+    location. Detection rather than a configured path, because that is how
+    every other forge CLI is found here — adding a config key for this one
+    would leave two ways to answer the same question.
+    """
+    found = shutil.which("glab")
+    if found:
+        return found
+    for candidate in [
+        r"C:\Program Files\glab\bin\glab.exe",
+        os.path.expandvars(
+            r"%LOCALAPPDATA%\Microsoft\WinGet\Links\glab.exe"),
+    ]:
+        if os.path.isfile(candidate):
+            return candidate
+    return ""

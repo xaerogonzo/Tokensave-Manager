@@ -64,12 +64,14 @@ if TYPE_CHECKING:
 
 _TOKENSAVE_VERSION_RE = re.compile(r"(\d+\.\d+\.\d+(?:\.\d+)?)")
 
-# Every action-button key a row MAY have. wire_btn / refresh_btn are
-# tokensave-only, daemons_btn is codegraph-only — callers iterate this and
-# check membership rather than indexing blindly.
+# Every action-button key a row MAY have. wire_btn / refresh_btn /
+# servers_btn are tokensave-only, daemons_btn is codegraph-only — callers
+# iterate this and check membership rather than indexing blindly.
+# Anything listed here MUST also have an entry in _BTN_DEFAULT_TEXT:
+# _set_row_busy restores labels by indexing that dict directly.
 _BTN_KEYS: tuple = (
     "install_btn", "update_btn", "uninstall_btn", "wire_btn", "refresh_btn",
-    "daemons_btn",
+    "servers_btn", "daemons_btn",
 )
 
 _BTN_DEFAULT_TEXT: dict = {
@@ -78,6 +80,7 @@ _BTN_DEFAULT_TEXT: dict = {
     "uninstall_btn": "Uninstall",
     "wire_btn":      "🔌  Wire into agents…",
     "refresh_btn":   "♻  Refresh agent config",
+    "servers_btn":   "🔌  Manage servers…",
     "daemons_btn":   "🔌  Manage daemons…",
 }
 
@@ -256,8 +259,13 @@ class ToolManagerDialog(UiPumpMixin, tk.Toplevel):
                 btn_row, text="♻  Refresh agent config",
                 command=self._on_refresh_agents)
             refresh_btn.pack(side=tk.LEFT, padx=(0, 6))
+            servers_btn = ttk.Button(
+                btn_row, text="🔌  Manage servers…",
+                command=self._on_manage_tokensave_servers)
+            servers_btn.pack(side=tk.LEFT, padx=(0, 6))
             self._tool_widgets[tool_id]["wire_btn"] = wire_btn
             self._tool_widgets[tool_id]["refresh_btn"] = refresh_btn
+            self._tool_widgets[tool_id]["servers_btn"] = servers_btn
         elif tool_id == "codegraph":
             daemons_btn = ttk.Button(
                 btn_row, text="🔌  Manage daemons…",
@@ -368,6 +376,12 @@ class ToolManagerDialog(UiPumpMixin, tk.Toplevel):
             state=tk.NORMAL if (installed and not busy) else tk.DISABLED)
         # Agent wiring / daemon management need the binary present, same
         # rule as update/uninstall.
+        #
+        # servers_btn is deliberately NOT in this list. `tokensave serve`
+        # processes outlive the binary being moved or uninstalled, and an
+        # orphan still holding a database lock is precisely what someone
+        # opens that dialog to hunt down — gating it on "installed" would
+        # disable it exactly when it is most needed.
         for k in ("wire_btn", "refresh_btn", "daemons_btn"):
             if k in widgets:
                 widgets[k].configure(
@@ -469,6 +483,19 @@ class ToolManagerDialog(UiPumpMixin, tk.Toplevel):
         # module load graph until actually needed.
         from dialogs.codegraph_daemon_manager import CodegraphDaemonManagerDialog
         CodegraphDaemonManagerDialog(self, self._cfg)
+
+    def _on_manage_tokensave_servers(self) -> None:
+        """Open the tokensave server list.
+
+        Unlike the CodeGraph equivalent, a missing binary is not a hard stop:
+        `tokensave serve` processes outlive the binary being moved or
+        uninstalled, and those orphans holding a database lock are exactly
+        what someone opens this dialog to find. Without a configured path the
+        helper falls back to matching on image name, which is weaker but still
+        useful -- and it will not offer Stop on anything it cannot identify.
+        """
+        from dialogs.tokensave_daemon_manager import TokensaveDaemonManagerDialog
+        TokensaveDaemonManagerDialog(self, self._cfg)
 
     # ── Codegraph lifecycle ───────────────────────────────────────────────────
 

@@ -6,6 +6,8 @@ construction (``codegraph install --target=<csv> --yes``), and the
 """
 from __future__ import annotations
 
+import threading
+
 from types import SimpleNamespace
 
 import pytest
@@ -98,6 +100,28 @@ def test_install_refuses_without_codegraph_exe(tk_root, mock_config, mocker):
     mock_run.assert_not_called()
 
 
+
+def _capture_threads(mocker) -> list:
+    """Collect the threads THIS dialog starts, and only those.
+
+    Scoped deliberately: the alternatives (a global `active_count()` or a
+    before/after `enumerate()` diff) both pick up long-lived threads from
+    elsewhere in the suite, which never exit and turn the wait into a
+    guaranteed timeout.
+    """
+    started: list = []
+    real_thread = threading.Thread
+
+    def _spy(*args, **kwargs):
+        thread = real_thread(*args, **kwargs)
+        started.append(thread)
+        return thread
+
+    mocker.patch("dialogs.codegraph_mcp_picker.threading.Thread",
+                 side_effect=_spy)
+    return started
+
+
 def test_install_builds_target_csv_argv(
     tk_root, mock_config, mocker, patch_after, wait_for, tmp_path
 ):
@@ -123,6 +147,7 @@ def test_install_builds_target_csv_argv(
     dialog._agent_vars["cursor"].set(True)
     dialog._agent_vars["codex"].set(False)
     dialog._agent_vars["opencode"].set(False)
+    spawned = _capture_threads(mocker)
     dialog._on_install()
 
     wait_for(lambda: mock_run.called, timeout_s=3.0)
@@ -134,6 +159,16 @@ def test_install_builds_target_csv_argv(
     targets = target_arg.split("=", 1)[1].split(",")
     assert set(targets) == {"claude", "cursor"}
     assert "--yes" in cmd
+    # Then wait for the worker THREAD ITSELF to exit. `mock_run.called`
+    # releases mid-worker, and the completion callback cannot be waited on
+    # instead: it arrives through the UI pump, which `patch_after` stops
+    # rescheduling. So the thread outlives the test and the G-D leak guard
+    # fails whichever unrelated test is in teardown when it gets noticed.
+    #
+    # The dialog's own thread is captured at construction. Neither a global
+    # count nor a before/after enumerate() diff works in a full suite: both
+    # sweep in long-lived threads belonging to other tests, which never exit.
+    wait_for(lambda: all(not t.is_alive() for t in spawned), timeout_s=3.0)
 
 
 def test_install_includes_no_permissions_flag_when_checked(
@@ -158,11 +193,22 @@ def test_install_includes_no_permissions_flag_when_checked(
     patch_after(dialog)
     dialog._agent_vars["claude"].set(True)
     dialog._no_perms_var.set(True)
+    spawned = _capture_threads(mocker)
     dialog._on_install()
 
     wait_for(lambda: mock_run.called, timeout_s=3.0)
     cmd = mock_run.call_args[0][0]
     assert "--no-permissions" in cmd
+    # Then wait for the worker THREAD ITSELF to exit. `mock_run.called`
+    # releases mid-worker, and the completion callback cannot be waited on
+    # instead: it arrives through the UI pump, which `patch_after` stops
+    # rescheduling. So the thread outlives the test and the G-D leak guard
+    # fails whichever unrelated test is in teardown when it gets noticed.
+    #
+    # The dialog's own thread is captured at construction. Neither a global
+    # count nor a before/after enumerate() diff works in a full suite: both
+    # sweep in long-lived threads belonging to other tests, which never exit.
+    wait_for(lambda: all(not t.is_alive() for t in spawned), timeout_s=3.0)
 
 
 def test_install_omits_no_permissions_when_unchecked(
@@ -186,11 +232,22 @@ def test_install_omits_no_permissions_when_unchecked(
     patch_after(dialog)
     dialog._agent_vars["claude"].set(True)
     dialog._no_perms_var.set(False)
+    spawned = _capture_threads(mocker)
     dialog._on_install()
 
     wait_for(lambda: mock_run.called, timeout_s=3.0)
     cmd = mock_run.call_args[0][0]
     assert "--no-permissions" not in cmd
+    # Then wait for the worker THREAD ITSELF to exit. `mock_run.called`
+    # releases mid-worker, and the completion callback cannot be waited on
+    # instead: it arrives through the UI pump, which `patch_after` stops
+    # rescheduling. So the thread outlives the test and the G-D leak guard
+    # fails whichever unrelated test is in teardown when it gets noticed.
+    #
+    # The dialog's own thread is captured at construction. Neither a global
+    # count nor a before/after enumerate() diff works in a full suite: both
+    # sweep in long-lived threads belonging to other tests, which never exit.
+    wait_for(lambda: all(not t.is_alive() for t in spawned), timeout_s=3.0)
 
 
 def test_install_in_flight_guard_blocks_double_click(

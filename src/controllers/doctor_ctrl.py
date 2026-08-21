@@ -147,7 +147,10 @@ _PURGE_EXPLANATIONS = {
 # The audit rules moved to helpers/doctor_rules.py so they can run without
 # Tk, which this module imports at scope. Only the entry point is needed here;
 # other callers import from helpers.doctor_rules directly.
-from helpers.doctor_rules import _audit_project_tree   # noqa: E402
+from helpers.doctor_rules import (                      # noqa: E402
+    _audit_project_tree,
+    audit_shadow_links,
+)
 
 
 # doctor emits `run `tokensave install --agent <id>`` on any integration it
@@ -289,9 +292,11 @@ class DoctorController:
             self._on_log(
                 "  ⚠ tokensave strict_tree is off while this project has "
                 "worktrees without their own index — the exact case where a "
-                "query is answered from the wrong checkout and looks normal. "
-                'Set "strict_tree": true in .tokensave/config.json to make '
-                "those refuse instead.", C["peach"])
+                "query is answered from the wrong checkout and looks "
+                "normal. Turn it on from the Projects tab \u2014 select the "
+                "project, then \u201cEnable strict_tree\u201d \u2014 to "
+                "make those calls fail with both tree paths named instead.",
+                C["peach"])
 
     def _analyse_doctor_output(self, path: str, output_lines: list,
                                returncode: int) -> None:
@@ -746,6 +751,22 @@ class DoctorController:
             project_path, skip)
 
         self._log_audit_results(violations, exempt_notes, files_scanned)
+        self._log_shadow_health(project_path)
+
+    def _log_shadow_health(self, project_path: str) -> None:
+        """Warn-only, and silent for projects that do not use shadow links.
+
+        Not a cap violation and deliberately not counted as one: a stale
+        shadow is a fact about the working tree, not a code-health defect,
+        and folding it into the violation count would move a number that
+        other things are measured against.
+        """
+        notes = audit_shadow_links(project_path)
+        if not notes:
+            return
+        self._on_log("═══ Shadow links ═══", C["mauve"])
+        for note in notes:
+            self._on_log(note, C["peach"])
 
     def _log_audit_results(
         self,
