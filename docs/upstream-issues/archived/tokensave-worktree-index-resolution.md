@@ -201,3 +201,59 @@ worse than having no index at all, because the tool never signals uncertainty
 
 Filed from TokenSave Manager. Paths were anonymised before submission (see
 the status note at the top); everything else went out as written here.
+
+---
+
+## §2 shipped in v7.10.0 — and how NOT to test it (added 2026-08-20)
+
+The table above is stale: it records §2 as unchanged in v7.9.0. Upstream
+implemented it in `ed8f731` and closed #372 on 2026-08-17.
+
+**What shipped:** `strict_tree` in `<project>/.tokensave/config.json`, a plain
+JSON boolean, default `false`.
+
+- On a detected wrong-tree condition, `tokensave_*` calls **fail** with an
+  error naming both the working-tree root and the index root, rather than
+  prefixing a warning to an answer they return anyway.
+- **One gate, two conditions.** It covers §2's worktree mismatch *and* the
+  branch-drift case from #400 (a server still serving the branch it started
+  on after a checkout), rather than growing a second mechanism.
+- **Only `tokensave_status` is exempt.** Upstream's design comment initially
+  listed four exemptions and then corrected itself: `tokensave_diagnose` and
+  `tokensave_diagnostics` are graph reads wearing diagnostic names, and
+  attributing a real compiler error to a node from another tree is a *worse*
+  instance of the failure, not an exception to it. `tokensave_config` reads
+  arbitrary TOML/JSON and is unrelated to tokensave's own config.
+- **`graph_root` selections are exempt** — naming another project is a
+  deliberate request, not a mistake.
+- **Config-only and opt-in.** No `TOKENSAVE_STRICT_WORKTREE` env override, on
+  purpose: a safety posture should not be switchable by an inherited variable.
+  Upstream may default it on at 8.0 and explicitly asked for field evidence on
+  whether it *fires when it should not*.
+
+### Two reproduction attempts that proved nothing — do not repeat them
+
+Both were run against v7.10.0 on Windows while adding the manager's writer for
+this setting, and both concluded "the setting has no effect". **That conclusion
+was wrong**; neither attempt triggered the detector.
+
+1. **Copied `.tokensave/` into the worktree** so it held an index whose
+   `root_dir` pointed at the main checkout. The detector's condition is a
+   worktree with *no index of its own*, so giving it one guarantees no
+   mismatch is ever detected. Queries answered identically on and off, which
+   is the correct behaviour for a project that has its own index.
+2. **Worktree with no index at all.** tokensave then declines to resolve one
+   across the boundary: `serve` exits with "Multiple tokensave projects found
+   — pass `-p <path>` to select one". The "index resolved from outside the
+   worktree boundary" precondition never arises, so again nothing to refuse.
+
+A valid reproduction needs a worktree with no `.tokensave/` of its own where
+tokensave nevertheless resolves an index from outside it — the shape described
+in the Environment section above (an MCP server registered globally with no
+`-p`), not a synthetic temp repo. **Nothing was filed**, correctly: there is no
+defect here, only a testing error.
+
+Incidental observation, not filed: `tokensave status` in an unindexed directory
+prompts `Create one now? [Y/n]` and proceeds when stdin is not a TTY, silently
+creating an index. Expected enough given it did ask, but worth knowing before
+running `status` from a scratch directory.

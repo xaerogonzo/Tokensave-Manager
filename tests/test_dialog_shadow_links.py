@@ -201,3 +201,63 @@ def test_ai_suggest_updates_row_suffixes(tk_root, tmp_path, mocker):
     assert suffixes[".gd"] == ".py"      # AI refined
     assert suffixes[".uc"] == ".cpp"     # unchanged prefill
     dialog.destroy()
+
+
+# ── Dialog: SL2 auto-refresh flag + SL3 status ───────────────────────────
+
+def test_auto_shadow_checkbox_defaults_off(tk_root, tmp_path, mocker):
+    """Opt-in: it adds a tree walk to every sync of this project."""
+    dialog = ShadowLinksDialog(tk_root, str(tmp_path), mocker.MagicMock())
+    assert dialog._var_auto.get() is False
+    dialog.destroy()
+
+
+def test_auto_shadow_checkbox_reflects_the_saved_flag(tk_root, tmp_path,
+                                                      mocker):
+    save_shadow_map(str(tmp_path), {".zsc": ".cpp"}, auto_shadow=True)
+    dialog = ShadowLinksDialog(tk_root, str(tmp_path), mocker.MagicMock())
+    assert dialog._var_auto.get() is True
+    dialog.destroy()
+
+
+def test_apply_persists_the_auto_shadow_flag(tk_root, tmp_path, mocker):
+    from helpers.shadow_links import load_shadow_config
+    dialog = ShadowLinksDialog(tk_root, str(tmp_path), mocker.MagicMock())
+    dialog._var_auto.set(True)
+    dialog._apply()
+    assert load_shadow_config(str(tmp_path)).auto_shadow is True
+
+
+def test_cleanup_button_is_hidden_when_nothing_is_stale(tk_root, tmp_path,
+                                                        mocker):
+    """A cleanup action with nothing to clean invites a pointless click."""
+    dialog = ShadowLinksDialog(tk_root, str(tmp_path), mocker.MagicMock())
+    assert dialog._stale_count == 0
+    assert not dialog._cleanup_btn.winfo_ismapped()
+    dialog.destroy()
+
+
+def test_cleanup_button_appears_only_for_provable_stale_shadows(
+        tk_root, tmp_path, mocker):
+    """An unprovable lookalike must not summon the cleanup button.
+
+    If it did, the button's count would promise to remove a file the manager
+    has no evidence it created.
+    """
+    import os
+    from helpers.shadow_links import refresh_shadows, supports_hardlinks
+    if not supports_hardlinks(str(tmp_path)):
+        pytest.skip("temp volume does not support hardlinks")
+
+    (tmp_path / "Blood.zsc").write_text("x", encoding="utf-8")
+    refresh_shadows(str(tmp_path), {".zsc": ".cpp"})
+    (tmp_path / "Handmade.zsc.cpp").write_text("mine", encoding="utf-8")
+
+    dialog = ShadowLinksDialog(tk_root, str(tmp_path), mocker.MagicMock())
+    assert dialog._stale_count == 0, "nothing stale yet — source still present"
+    dialog.destroy()
+
+    os.remove(tmp_path / "Blood.zsc")      # now the recorded one IS stale
+    dialog = ShadowLinksDialog(tk_root, str(tmp_path), mocker.MagicMock())
+    assert dialog._stale_count == 1, "the handmade file must not be counted"
+    dialog.destroy()

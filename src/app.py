@@ -128,6 +128,15 @@ class App(UiPumpMixin, tk.Tk):
             root=self,
         )
         self._update_poller.start()
+
+        # Makes "Set as Active" reach a running Claude Desktop, which
+        # otherwise reads the pin only when it starts its server. Off by
+        # default and a no-op until switched on in Settings; it ends a live
+        # MCP server, so it should be a decision rather than a surprise.
+        from controllers.pin_watcher import PinWatcherController
+        self._pin_watcher = PinWatcherController(cfg=self._cfg,
+                                                 on_log=self._log)
+        self._pin_watcher.start()
         log.info("=" * 60)
         log.info("TokenSave Manager started")
         log.info(f"  exe      : {self._cfg.tokensave_exe}")
@@ -220,6 +229,13 @@ class App(UiPumpMixin, tk.Tk):
             pass  # ask_ctrl not constructed yet (very early failure path)
         try:
             self._projects.cancel_ai_proposals()
+        except AttributeError:
+            pass
+        # The pin watcher is a daemon thread and would die with the process
+        # anyway, but stopping it explicitly means it cannot fire one last
+        # tick — and retire a live MCP server — while the app is tearing down.
+        try:
+            self._pin_watcher.stop()
         except AttributeError:
             pass
 

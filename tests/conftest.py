@@ -449,7 +449,10 @@ class _MockConfig:
 
     def __init__(self, **overrides):
         # Same defaults as a fresh manager-config.json minus the
-        # search_roots / window_geometry / per-machine paths.
+        # window_geometry / per-machine paths. `search_roots` is absent
+        # from raw on purpose so it defaults empty -- a dialog that
+        # walks search roots must not touch the real filesystem here --
+        # but the property exists, because ManagerConfig has it.
         self.raw: dict = {
             "tokensave_exe":             "",
             "codegraph_exe":             "",
@@ -484,6 +487,8 @@ class _MockConfig:
     def python_exe(self):          return self.raw.get("python_exe", sys.executable)
     @property
     def git_exe(self):             return self.raw.get("git_exe", "")
+    @property
+    def search_roots(self):        return self.raw.get("search_roots", [])
     @property
     def enable_llm_grounding(self):     return bool(self.raw.get("enable_llm_grounding", True))
     @property

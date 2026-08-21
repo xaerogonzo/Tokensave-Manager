@@ -627,9 +627,15 @@ class TestManagerDialog(UiPumpMixin, tk.Toplevel):
                  ).pack(side=tk.LEFT)
         ttk.Button(top, text="🔄 Refresh",
                    command=self._refresh_tab_coverage).pack(side=tk.RIGHT)
-        ttk.Button(top, text="📝 Add Tests for Selected",
-                   command=self._on_add_tests_for_selected
-                   ).pack(side=tk.RIGHT, padx=(0, 6))
+        gap_btn = ttk.Button(
+            top, text="📝 Add Tests for Selected",
+            command=self._on_add_tests_for_selected)
+        gap_btn.pack(side=tk.RIGHT, padx=(0, 6))
+        _Tooltip(gap_btn,
+                 "Write starter test files for the ticked source files.\n\n"
+                 "Creates tests/test_<name>.py with the scaffolding filled\n"
+                 "in — the assertions are still yours to write. Existing\n"
+                 "files are never overwritten.")
 
         # Treeview.
         frame = tk.Frame(parent, bg=C["base"])
@@ -724,12 +730,24 @@ class TestManagerDialog(UiPumpMixin, tk.Toplevel):
                  ).pack(side=tk.LEFT)
         ttk.Button(top, text="🔄 Refresh",
                    command=self._refresh_tab_stale).pack(side=tk.RIGHT)
-        ttk.Button(top, text="✓ Mark as Still Valid",
-                   command=self._on_mark_still_valid
-                   ).pack(side=tk.RIGHT, padx=(0, 6))
-        ttk.Button(top, text="🗑 Delete Test File",
-                   command=self._on_delete_stale_test
-                   ).pack(side=tk.RIGHT, padx=(0, 6))
+        keep_btn = ttk.Button(
+            top, text="✓ Mark as Still Valid",
+            command=self._on_mark_still_valid)
+        keep_btn.pack(side=tk.RIGHT, padx=(0, 6))
+        _Tooltip(keep_btn,
+                 "Dismiss this staleness warning without changing the file.\n\n"
+                 "Use when the test is fine and the detector is wrong — for\n"
+                 "example when it reaches a symbol through an alias.")
+
+        del_btn = ttk.Button(
+            top, text="🗑 Delete Test File",
+            command=self._on_delete_stale_test)
+        del_btn.pack(side=tk.RIGHT, padx=(0, 6))
+        _Tooltip(del_btn,
+                 "Permanently delete the selected test file from disk.\n\n"
+                 "For a test whose subject is gone. If the source still\n"
+                 "exists, the test is usually worth fixing rather than\n"
+                 "removing.")
 
         frame = tk.Frame(parent, bg=C["base"])
         frame.pack(fill=tk.BOTH, expand=True, padx=8, pady=(0, 8))

@@ -17,7 +17,15 @@ from tkinter import messagebox, ttk
 from typing import TYPE_CHECKING, Callable
 
 from constants import C
+from theme import _Tooltip
 from helpers.claude_tasks import scan_sessions, scan_worktrees
+from helpers.worktree_cleanup import (
+    LOCK_TOKENSAVE_DB,
+    LOCK_WORKTREE_DIRECTORY,
+    delete_orphan_directory,
+    human_size,
+    remove_worktree,
+)
 
 if TYPE_CHECKING:
     from state import ManagerConfig
@@ -55,7 +63,12 @@ class TasksController:
         # Toolbar row
         toolbar = tk.Frame(tab, bg=C["base"])
         toolbar.pack(fill=tk.X, padx=6, pady=(6, 0))
-        ttk.Button(toolbar, text="⟳ Refresh", command=self._refresh).pack(side=tk.RIGHT)
+        refresh_btn = ttk.Button(toolbar, text="⟳ Refresh", command=self._refresh)
+        refresh_btn.pack(side=tk.RIGHT)
+        _Tooltip(refresh_btn,
+                 "Re-scan for git worktrees and recent Claude Code\n"
+                 "sessions.\n\n"
+                 "Reads only — nothing is created, merged or deleted.")
 
         # Resizable split
         paned = ttk.Panedwindow(tab, orient=tk.VERTICAL)
@@ -300,55 +313,136 @@ class TasksController:
         info = self._wt_selected_info()
         if not info:
             return
-        worktree_path = info["path"]
-        branch = info["branch"]
+        project_path = self._get_project_path()
+        if not project_path:
+            return
+        worktree_path, branch = info["path"], info["branch"]
 
-        confirmed = messagebox.askyesno(
-            "Delete worktree",
-            f"Delete worktree for branch '{branch}'?\n{worktree_path}",
-        )
-        if not confirmed:
+        if not messagebox.askyesno(
+                "Delete worktree",
+                "Delete worktree for branch '%s'?\n%s" % (branch, worktree_path),
+                parent=self._tab):
             return
 
-        ok, err = self._git_worktree_remove(worktree_path, force=False)
-        if ok:
+        res = remove_worktree(self._cfg.git_exe, project_path, worktree_path)
+        if res.success:
             self._refresh()
             return
 
-        # Dirty worktree — git refuses without --force
-        if err and ("is not empty" in err or "contains untracked" in err or "contains modified" in err):
-            force_ok = messagebox.askyesno(
-                "Uncommitted work exists",
-                "Uncommitted work exists in this worktree.\nForce delete? (data will be lost)",
-                icon="warning",
-            )
-            if not force_ok:
+        # Git refused outright and pruned nothing — the classic dirty-worktree
+        # case, where --force is genuinely the next step.
+        if res.retry_would_help:
+            if not self._looks_like_dirty_worktree(res.stderr):
+                messagebox.showerror("Delete failed",
+                                     res.stderr or "Unknown error",
+                                     parent=self._tab)
                 return
-            ok2, err2 = self._git_worktree_remove(worktree_path, force=True)
-            if ok2:
+            if not messagebox.askyesno(
+                    "Uncommitted work exists",
+                    "Uncommitted work exists in this worktree.\n"
+                    "Force delete? (data will be lost)",
+                    icon="warning", parent=self._tab):
+                return
+            res = remove_worktree(self._cfg.git_exe, project_path,
+                                  worktree_path, force=True)
+            if res.success:
                 self._refresh()
                 return
-            # --force failed (OS file lock)
-            messagebox.showerror(
-                "Delete failed",
-                "Folder is locked by another process.\n"
-                "Close any active terminals or Claude Code sessions running in this worktree, "
-                "then try again.",
-            )
-        else:
-            messagebox.showerror("Delete failed", err or "Unknown error")
 
-    def _git_worktree_remove(self, path: str, force: bool) -> tuple[bool, str]:
-        cmd = [self._cfg.git_exe, "worktree", "remove", path]
-        if force:
-            cmd.append("--force")
-        try:
-            result = subprocess.run(cmd, capture_output=True, text=True, timeout=15)
-            if result.returncode == 0:
-                return True, ""
-            return False, result.stderr or result.stdout
-        except Exception as exc:
-            return False, str(exc)
+        if res.is_half_state:
+            self._offer_orphan_cleanup(project_path, worktree_path, res)
+            return
+
+        messagebox.showerror("Delete failed", res.stderr or "Unknown error",
+                             parent=self._tab)
+
+    @staticmethod
+    def _looks_like_dirty_worktree(stderr: str) -> bool:
+        text = (stderr or "").lower()
+        return any(s in text for s in
+                   ("is not empty", "contains untracked", "contains modified"))
+
+    def _offer_orphan_cleanup(self, project_path: str, worktree_path: str,
+                              res) -> None:
+        """Explain the half-state, then offer the two things that can help.
+
+        `git worktree remove` deregisters even when the delete fails, so at
+        this point git is finished and only a directory remains. Telling the
+        user to retry — what this tab used to do — sends them round a loop
+        with nothing left to execute.
+
+        The directory is NOT offered up for deletion casually: it usually
+        holds the uncommitted work that caused the delete to fail, so the
+        default action is to open it and look.
+        """
+        self._refresh()          # git's view changed; the tree should follow
+
+        holder = {
+            LOCK_TOKENSAVE_DB:
+                "A tokensave server is holding this worktree's index "
+                "(.tokensave/tokensave.db).\n"
+                "Tool Manager → tokensave → \"Manage servers…\" can "
+                "identify and stop it.\n\n"
+                "After stopping it the error changes to name the folder "
+                "rather than the database — that is how you know the "
+                "database lock actually released.",
+            LOCK_WORKTREE_DIRECTORY:
+                "Something has the folder itself open — usually a "
+                "terminal, an editor, or a Claude Code session running "
+                "inside it.\n\n"
+                "A session cannot release its own working directory; that "
+                "clears when the session exits.",
+        }.get(res.lock_kind,
+              "Something is holding files in the folder open.")
+
+        size = ""
+        if res.signature:
+            size = "\n\nThe folder still contains %d file%s (%s)." % (
+                res.signature.file_count,
+                "" if res.signature.file_count == 1 else "s",
+                human_size(res.signature.total_bytes))
+
+        if not messagebox.askyesno(
+                "Worktree deregistered, folder remains",
+                "Git has removed this worktree from its records, but could "
+                "not delete the folder:\n\n%s\n\n%s%s\n\n"
+                "Retrying the removal will not help — git has nothing "
+                "left to do.\n\n"
+                "Open the folder now to check what is in it?"
+                % (worktree_path, holder, size),
+                parent=self._tab):
+            self._offer_orphan_delete(project_path, worktree_path, res)
+            return
+
+        if os.path.isdir(worktree_path):
+            os.startfile(worktree_path)
+        self._offer_orphan_delete(project_path, worktree_path, res)
+
+    def _offer_orphan_delete(self, project_path: str, worktree_path: str,
+                             res) -> None:
+        """Second, separate confirmation before destroying anything.
+
+        Deliberately a distinct prompt from the one above: "git forgot about
+        this" is not evidence the contents are disposable, and the delete is
+        irreversible.
+        """
+        if not os.path.isdir(worktree_path):
+            return
+        if not messagebox.askyesno(
+                "Delete the leftover folder?",
+                "Permanently delete this folder and everything in it?\n\n%s\n\n"
+                "Anything not committed or pushed will be lost. If the lock "
+                "is still held, some files may refuse to delete."
+                % worktree_path,
+                icon="warning", default="no", parent=self._tab):
+            return
+        ok, detail = delete_orphan_directory(
+            self._cfg.git_exe, project_path, worktree_path, res.signature)
+        if ok:
+            messagebox.showinfo("Folder deleted", detail, parent=self._tab)
+        else:
+            messagebox.showerror("Not deleted", detail, parent=self._tab)
+        self._refresh()
 
     def _git_is_dirty(self, path: str) -> bool:
         try:

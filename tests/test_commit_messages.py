@@ -455,3 +455,55 @@ class TestPendingDiffNewFileFallback:
         result = _pending_diff(str(tmp_path), "some/path.py", git_exe="git")
         assert result == ""
         assert not ls_called
+
+# ── commit_context invocation (Roadmap-10) ───────────────────────────────
+
+class TestCommitContextInvocation:
+    """Two bugs lived in one subprocess call, and both failed silently.
+
+    `_fetch_commit_context` returns "" on any non-zero exit, so a malformed
+    command line is indistinguishable from "this project has no context to
+    offer". That is what hid both of these from the day the feature shipped.
+    """
+
+    def _argv(self, mocker, repo="D:/work/proj"):
+        from helpers import commit_messages as cm
+        # Results are cached by (head sha, diff hash) so repeated Suggest
+        # clicks do not re-spawn the subprocess — which also means a second
+        # test with the same inputs would assert against nothing.
+        cm._ctx_cache.clear()
+        mocker.patch.object(cm.subprocess, "run", side_effect=[
+            _CompletedStub(stdout="deadbeef\n"),      # git rev-parse HEAD
+            _CompletedStub(stdout='{"changed_files": []}'),
+        ])
+        cm._fetch_commit_context("tokensave.exe", repo, "git.exe", "diff-text")
+        return cm.subprocess.run.call_args_list[1][0][0]
+
+    def test_staged_only_is_passed_with_a_value(self, mocker):
+        """A bare `--staged-only` makes tokensave exit with a config error.
+
+        Verified against the real binary: "flag `--staged-only` requires a
+        value". Every call failed, and the caller swallowed it.
+        """
+        argv = self._argv(mocker)
+        idx = argv.index("--staged-only")
+        assert argv[idx + 1] == "true", (
+            "--staged-only must carry a value or tokensave refuses the call")
+
+    def test_the_query_is_scoped_to_the_repo_being_committed(self, mocker):
+        """Otherwise it resolves against the MANAGER's working directory.
+
+        Which is wherever the app was launched from, and has nothing to do
+        with the project selected in the Git tab — so a multi-project user
+        gets another project's context, or none.
+        """
+        argv = self._argv(mocker, repo="D:/work/other-project")
+        idx = argv.index("--project")
+        assert argv[idx + 1] == "D:/work/other-project"
+
+
+class _CompletedStub:
+    def __init__(self, stdout="", returncode=0):
+        self.stdout = stdout
+        self.stderr = ""
+        self.returncode = returncode

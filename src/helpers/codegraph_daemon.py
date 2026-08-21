@@ -33,9 +33,9 @@ from __future__ import annotations
 import os
 import re
 import subprocess
-import sys
-import time
 from typing import Tuple
+
+from helpers.proc_kill import ProcessIdentity, kill_process
 
 try:
     from constants import CREATE_NO_WINDOW
@@ -93,51 +93,23 @@ def list_codegraph_daemons(codegraph_exe: str) -> list:
     return daemons
 
 
-def kill_codegraph_daemon(pid: int) -> Tuple[bool, str]:
-    """Terminate a daemon by PID. Returns (ok, detail).
+def kill_codegraph_daemon(pid: int,
+                          expect: "ProcessIdentity | None" = None
+                          ) -> Tuple[bool, str]:
+    """Terminate ONE daemon by PID. Returns (ok, detail).
 
-    Windows: ``taskkill /F /PID <pid>``. POSIX: SIGTERM, briefly wait, then
-    SIGKILL if the process is still alive — mirrors the documented (now-moot)
-    tokensave-daemon-stop workaround exactly.
+    Semantics preserved from the original: a single process, not its tree,
+    and graceful-first on POSIX (SIGTERM, brief wait, then SIGKILL).
+
+    The Windows MECHANISM changed deliberately in Roadmap-10: it was
+    ``taskkill /F /PID``, which re-resolves the number at the moment it runs,
+    so a PID recycled between listing the daemons and clicking Stop would
+    have been killed instead. ``proc_kill`` opens a handle, verifies identity
+    through it, and terminates that same handle. Pass *expect* -- the identity
+    captured when the row was scanned -- to get that protection; without it
+    the call still works, just without the check.
     """
-    if sys.platform == "win32":
-        try:
-            proc = subprocess.run(
-                ["taskkill", "/F", "/PID", str(pid)],
-                capture_output=True, text=True, timeout=_KILL_TIMEOUT,
-                creationflags=CREATE_NO_WINDOW,
-                encoding="utf-8", errors="replace",
-            )
-        except (OSError, subprocess.TimeoutExpired) as exc:
-            return False, f"could not run taskkill: {exc}"
-        if proc.returncode == 0:
-            return True, (proc.stdout or "").strip()
-        return False, ((proc.stderr or proc.stdout or "").strip()
-                       or f"taskkill exited {proc.returncode}")
-    return _kill_posix(pid)
-
-
-def _kill_posix(pid: int) -> Tuple[bool, str]:
-    import signal
-    try:
-        os.kill(pid, signal.SIGTERM)
-    except ProcessLookupError:
-        return True, "already gone"
-    except OSError as exc:
-        return False, f"SIGTERM failed: {exc}"
-    for _ in range(20):   # ~2s at 0.1s steps
-        try:
-            os.kill(pid, 0)
-        except ProcessLookupError:
-            return True, "terminated (SIGTERM)"
-        time.sleep(0.1)
-    try:
-        os.kill(pid, signal.SIGKILL)
-    except ProcessLookupError:
-        return True, "terminated (SIGTERM, raced SIGKILL)"
-    except OSError as exc:
-        return False, f"SIGKILL failed: {exc}"
-    return True, "terminated (SIGKILL)"
+    return kill_process(pid, tree=False, graceful=True, expect=expect)
 
 
 def unlock_codegraph_project(codegraph_exe: str, path: str) -> Tuple[bool, str]:

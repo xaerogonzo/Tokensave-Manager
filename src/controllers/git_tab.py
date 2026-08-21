@@ -28,13 +28,14 @@ from tkinter import messagebox, ttk
 from typing import TYPE_CHECKING
 
 from constants import C, CREATE_NO_WINDOW, _ANSI, _GIT_ENV_NO_PROMPT
-from theme import _Tooltip
+from theme import _Tooltip, UiPumpMixin
 from helpers.git import _is_local_git_repo
 from helpers.llm import _is_auth_error
 from dialogs.set_remote import SetRemoteDialog
 from dialogs.github_setup import GitHubSetupDialog
 from dialogs.merge_pr import MergePRDialog
 from helpers.merge_body import build_merge_body
+from helpers.multi_remote import PUSH_AUTH, list_remotes, push as mr_push
 from dialogs.release_wizard import ReleaseWizardDialog
 
 if TYPE_CHECKING:
@@ -211,7 +212,7 @@ def _build_merge_cmd(pr_number: int, strategy: str, delete_branch: bool,
     return cmd
 
 
-class GitTabController:
+class GitTabController(UiPumpMixin):
     """Owns the Git tab UI and all git operations.
 
     Decoupled from App via four explicit callbacks. No back-reference to App.
@@ -249,6 +250,11 @@ class GitTabController:
         # to self._pr_draft (PRDraftCtrl) — initialized after sub-controllers below.
         self._tab = tk.Frame(notebook, bg=C["base"])
         notebook.add(self._tab, text="  Git  ")
+        # Before any sub-controller is built: several of them spawn threads,
+        # and _post() needs the queue that _start_ui_pump() creates. Starting
+        # it late fails the way this whole mechanism exists to prevent -- an
+        # AttributeError on a worker thread, where nothing is watching.
+        self._start_ui_pump()
         # Phase 4 (Roadmap-2): branch new/switch/merge/delete extracted into a
         # sub-controller (callback injection; no parent reference). The Git tab's
         # branch buttons delegate to self._branch_mgmt.cmd_* below.
@@ -307,6 +313,10 @@ class GitTabController:
         return bool(self._git_path)
 
     # ── Log queue ─────────────────────────────────────────────────────────────
+
+    def _ui_host(self):
+        """UiPumpMixin drives this widget: a controller is not one itself."""
+        return self._tab
 
     def _poll_log_queue(self) -> None:
         try:
@@ -451,6 +461,10 @@ class GitTabController:
 
         btn_push    = ttk.Button(row1, text="⬆  Push",
                                  command=self.cmd_git_push)
+        # Right-click reaches the target list, mirroring how Draft PR exposes
+        # its base-branch override. Left-click stays one action.
+        btn_push.bind("<Button-3>", lambda e: self.cmd_push_targets())
+        btn_push.bind("<Shift-Button-1>", lambda e: self.cmd_push_targets())
         btn_pull    = ttk.Button(row1, text="⬇  Pull",
                                  command=self.cmd_git_pull)
         btn_fetch   = ttk.Button(row1, text="📡  Fetch",
@@ -660,7 +674,7 @@ class GitTabController:
                 [self._cfg.git_exe, "-C", path, "log", "--oneline", "-15"], path)
             log_text = log_out.strip() if lrc == 0 else ""
 
-            self._tab.after(0, lambda: self._git_update_ui(
+            self._post(lambda: self._git_update_ui(
                 path, name, is_repo, branch, remote, status_out, log_text))
 
         threading.Thread(target=worker, daemon=True).start()
@@ -742,7 +756,7 @@ class GitTabController:
             combined = "\n".join(filter(None, [d1.strip(), d2.strip()]))
             if not combined:
                 combined = f"(no diff available — {fname} may be untracked or binary)"
-            self._tab.after(0, lambda d=combined: self._git_show_diff(d))
+            self._post(lambda d=combined: self._git_show_diff(d))
 
         threading.Thread(target=worker, daemon=True).start()
 
@@ -775,85 +789,138 @@ class GitTabController:
     # ── Git action commands ────────────────────────────────────────────────────
 
     def cmd_git_push(self):
-        path = self._git_path
-        if not path:
-            return
-        if self._git_op_in_flight:
-            return
-        name = os.path.basename(path)
-        self._on_log(f"[{name}] Pushing…", C["peach"])
-        self._git_begin_op()
-
-        def worker():
-            try:
-                out, rc = self._on_shell(
-                    [self._cfg.git_exe, "-C", path, "push", "-u", "origin", "HEAD"], path,
-                    env=_GIT_ENV_NO_PROMPT)
-                col = C["green"] if rc == 0 else C["red"]
-                for line in out.strip().splitlines()[-6:]:
-                    self._log_queue.put((f"  {line}", col))
-                if rc != 0 and _is_auth_error(out):
-                    self._tab.after(0, lambda: messagebox.showinfo(
-                        "GitHub Authentication Required",
-                        "GitHub needs to verify your identity.\n\n"
-                        "Open a terminal in this project folder and run:\n"
-                        "    git push\n\n"
-                        "A browser window will open asking you to log in to GitHub.\n"
-                        "After that, this button will work normally.",
-                        parent=self._root))
-            finally:
-                self._tab.after(0, self._git_end_op)
-
-        threading.Thread(target=worker, daemon=True).start()
+        self._run_multi_push(force=False)
 
     def cmd_git_force_push(self):
-        """Force-push current branch using --force-with-lease (safe force push)."""
+        """Force-push, leasing against each remote's own current tip."""
+        path = self._git_path
+        if not path or self._git_op_in_flight:
+            return
+        targets, _upstream = self._push_targets(path)
+        if not self._confirm_force_push(targets):
+            return
+        self._run_multi_push(force=True, confirmed=True)
+
+    def cmd_push_targets(self) -> None:
+        """Open the push-target chooser for the active project."""
         path = self._git_path
         if not path:
             return
-        if self._git_op_in_flight:
-            return
-        confirmed = messagebox.askyesno(
+        from dialogs.remotes_manager import RemotesManagerDialog
+        RemotesManagerDialog(self._root, path, self._cfg,
+                             on_saved=self._git_refresh)
+
+    # ── multi-remote push ────────────────────────────────────────────────
+
+    def _push_targets(self, path: str) -> tuple:
+        """(selected remote names, upstream remote) for *path*.
+
+        Reconciled against `git remote` on every call, so a remote renamed or
+        deleted outside the manager drops out rather than failing at push
+        time — or worse, silently shrinking the push while still reporting
+        success for the remotes that remain.
+        """
+        from dialogs.remotes_manager import load_selection, load_upstream
+        remotes = list_remotes(self._cfg.git_exe, path)
+        return (load_selection(self._cfg, path, remotes),
+                load_upstream(self._cfg, path, remotes))
+
+    def _confirm_force_push(self, targets) -> bool:
+        where = "\n".join("    • %s" % t for t in targets) or "    (none)"
+        return messagebox.askyesno(
             "⚠  Force Push — are you sure?",
-            "Force-pushing rewrites the remote branch history.\n\n"
+            "Force-pushing rewrites the remote branch history on:\n\n"
+            "%s\n\n"
             "This is safe to use after 'Scrub from History' removed a\n"
             "sensitive file — but anyone who has cloned this repo will need\n"
             "to re-clone afterwards (their history will no longer match).\n\n"
-            "Uses --force-with-lease, which refuses to overwrite commits\n"
-            "that someone else pushed since your last fetch.\n\n"
-            "Force-push now?",
-            icon="warning",
-            default="no",
-            parent=self._root,
-        )
-        if not confirmed:
+            "Each remote is checked immediately beforehand and skipped if it\n"
+            "moved since, so commits someone else pushed are not discarded.\n\n"
+            "Force-push now?" % where,
+            icon="warning", default="no", parent=self._root)
+
+    def _run_multi_push(self, *, force: bool, confirmed: bool = False):
+        path = self._git_path
+        if not path or self._git_op_in_flight:
             return
+        targets, upstream = self._push_targets(path)
+        if not targets:
+            messagebox.showinfo(
+                "No push targets",
+                "No remotes are selected for this project.\n\n"
+                "Use \"Push targets…\" to choose which remotes a push goes to.",
+                parent=self._root)
+            return
+
         name = os.path.basename(path)
-        self._on_log(f"[{name}] Force-pushing…", C["peach"])
+        verb = "Force-pushing" if force else "Pushing"
+        self._on_log("[%s] %s to %s…" % (name, verb, ", ".join(targets)),
+                     C["peach"])
         self._git_begin_op()
+
+        git_exe = self._cfg.git_exe
 
         def worker():
             try:
-                out, rc = self._on_shell(
-                    [self._cfg.git_exe, "-C", path,
-                     "push", "--force-with-lease", "origin", "HEAD"],
-                    path, env=_GIT_ENV_NO_PROMPT)
-                col = C["green"] if rc == 0 else C["red"]
-                for line in out.strip().splitlines()[-6:]:
-                    self._log_queue.put((f"  {line}", col))
-                if rc != 0 and _is_auth_error(out):
-                    self._tab.after(0, lambda: messagebox.showinfo(
-                        "GitHub Authentication Required",
-                        "GitHub needs to verify your identity.\n\n"
-                        "Open a terminal in this project folder and run:\n"
-                        "    git push\n\n"
-                        "A browser window will open asking you to log in to GitHub.\n"
-                        "After that, this button will work normally.",
-                        parent=self._root))
+                outcome = mr_push(git_exe, path, targets,
+                                  upstream_remote=upstream,
+                                  force_with_lease=force)
+                for line in self._describe_outcome(outcome):
+                    self._log_queue.put(line)
+                self._post(lambda: self._after_push(outcome))
             finally:
-                self._tab.after(0, self._git_end_op)
+                self._post(self._git_end_op)
 
         threading.Thread(target=worker, daemon=True).start()
+
+    @staticmethod
+    def _describe_outcome(outcome) -> list:
+        """One log line per remote, plus per-destination detail when it differs.
+
+        A remote with several push URLs gets a line each: reporting the remote
+        as a single success would hide one destination having been rejected.
+        """
+        lines = []
+        for result in outcome.results:
+            glyph = "✓" if result.ok else "✗"
+            colour = C["green"] if result.ok else C["red"]
+            lines.append(("  %s %-12s %s" % (glyph, result.remote,
+                                             result.detail), colour))
+            if len(result.destinations) > 1:
+                for dest in result.destinations:
+                    lines.append(("      %s %s"
+                                  % ("✓" if dest.ok else "✗", dest.url),
+                                  C["green"] if dest.ok else C["red"]))
+        return lines
+
+    def _after_push(self, outcome) -> None:
+        """One dialog, per-remote detail preserved. Tk thread."""
+        self._git_refresh()
+        if outcome.all_ok:
+            return
+        if any(r.kind == PUSH_AUTH for r in outcome.failed_remotes):
+            self._show_auth_help(outcome)
+            return
+        detail = "\n".join(
+            "  %s %s — %s" % ("✓" if r.ok else "✗", r.remote, r.detail)
+            for r in outcome.results)
+        messagebox.showwarning(
+            "Push %s" % ("partly failed" if outcome.is_partial else "failed"),
+            "%s\n\n%s" % (outcome.summary(), detail), parent=self._root)
+
+    def _show_auth_help(self, outcome) -> None:
+        failed = [r.remote for r in outcome.failed_remotes
+                  if r.kind == PUSH_AUTH]
+        messagebox.showinfo(
+            "Authentication required",
+            "These remotes need to verify your identity:\n\n"
+            "%s\n\n"
+            "Open a terminal in this project folder and run:\n"
+            "    git push %s\n\n"
+            "Sign in when prompted; this button will work normally "
+            "afterwards." % ("\n".join("    • %s" % r for r in failed),
+                             failed[0] if failed else ""),
+            parent=self._root)
 
     def cmd_git_fetch(self):
         """Fetch remote refs (--prune) without merging. Updates remote-tracking branches."""
@@ -877,7 +944,7 @@ class GitTabController:
                     for line in lines[-6:]:
                         self._log_queue.put((f"  {line}", col))
                 if rc != 0 and _is_auth_error(out):
-                    self._tab.after(0, lambda: messagebox.showinfo(
+                    self._post(lambda: messagebox.showinfo(
                         "GitHub Authentication Required",
                         "GitHub needs to verify your identity.\n\n"
                         "Open a terminal in this project folder and run:\n"
@@ -886,7 +953,7 @@ class GitTabController:
                         "After that, this button will work normally.",
                         parent=self._root))
             finally:
-                self._tab.after(0, self._git_end_op)
+                self._post(self._git_end_op)
 
         threading.Thread(target=worker, daemon=True).start()
 
@@ -910,7 +977,7 @@ class GitTabController:
                     self._log_queue.put((f"  {line}", col))
                 if rc != 0:
                     if _is_auth_error(out):
-                        self._tab.after(0, lambda: messagebox.showinfo(
+                        self._post(lambda: messagebox.showinfo(
                             "GitHub Authentication Required",
                             "GitHub needs to verify your identity.\n\n"
                             "Open a terminal in this project folder and run:\n"
@@ -919,7 +986,7 @@ class GitTabController:
                             "After that, this button will work normally.",
                             parent=self._root))
                     elif "conflict" in out.lower():
-                        self._tab.after(0, lambda: messagebox.showwarning(
+                        self._post(lambda: messagebox.showwarning(
                             "Merge Conflicts",
                             "Pull completed but there are merge conflicts.\n\n"
                             "Open the project in your editor and look for files\n"
@@ -927,7 +994,7 @@ class GitTabController:
                             "Resolve them, then use 📝 Commit… to commit the result.",
                             parent=self._root))
             finally:
-                self._tab.after(0, self._git_end_op)
+                self._post(self._git_end_op)
 
         threading.Thread(target=worker, daemon=True).start()
 
@@ -1025,11 +1092,11 @@ class GitTabController:
                 self._log_queue.put((
                     f"  Found {len(prs)} open PR(s).  Opening selection dialog…",
                     C["overlay0"]))
-                self._tab.after(0, self._show_merge_pr_dialog, path, prs)
+                self._post(self._show_merge_pr_dialog, path, prs)
             except (OSError, subprocess.TimeoutExpired) as e:
                 self._log_queue.put((f"  ✗ gh pr list error: {e}", C["red"]))
             finally:
-                self._tab.after(0, self._git_end_op)
+                self._post(self._git_end_op)
 
         threading.Thread(target=worker, daemon=True, name="gh-pr-list").start()
 
@@ -1093,7 +1160,7 @@ class GitTabController:
                         f"  ✓ PR #{pr_number} merged ({strategy}).  "
                         f"Pulling master to sync local…",
                         C["green"]))
-                    self._tab.after(0, self._post_merge_pr_sync, path)
+                    self._post(self._post_merge_pr_sync, path)
                 else:
                     self._log_queue.put((
                         f"  ✗ gh pr merge exited with code {proc.returncode}",
@@ -1101,7 +1168,7 @@ class GitTabController:
             except (OSError, FileNotFoundError) as e:
                 self._log_queue.put((f"  ✗ Error running gh: {e}", C["red"]))
             finally:
-                self._tab.after(0, self._git_end_op)
+                self._post(self._git_end_op)
 
         threading.Thread(target=worker, daemon=True, name="gh-pr-merge").start()
 
@@ -1148,8 +1215,8 @@ class GitTabController:
                     self._log_queue.put((
                         f"  ⚠ Pull failed: {out.strip()[:200]}", C["peach"]))
             finally:
-                self._tab.after(0, self._git_end_op)
-                self._tab.after(0, self._git_refresh)
+                self._post(self._git_end_op)
+                self._post(self._git_refresh)
 
         threading.Thread(target=worker, daemon=True, name="post-merge-sync").start()
 
@@ -1237,7 +1304,7 @@ class GitTabController:
                 msg = "Last commit undone — changes are now staged." if rc == 0 else out.strip()
                 self._log_queue.put((f"  [{os.path.basename(path)}] {msg}", col))
             finally:
-                self._tab.after(0, self._git_end_op)
+                self._post(self._git_end_op)
 
         threading.Thread(target=worker, daemon=True).start()
 
@@ -1269,7 +1336,7 @@ class GitTabController:
                 msg = f"Remote {action}: {url}" if rc == 0 else out.strip()
                 self._log_queue.put((f"  [{os.path.basename(path)}] {msg}", col))
             finally:
-                self._tab.after(0, self._git_end_op)
+                self._post(self._git_end_op)
 
         threading.Thread(target=worker, daemon=True).start()
 

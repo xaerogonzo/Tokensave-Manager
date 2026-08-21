@@ -215,11 +215,23 @@ class UiPumpMixin:
 
     _UI_PUMP_MS = 50
 
+    def _ui_host(self):
+        """The widget this pump drives. Override when ``self`` is not one.
+
+        Windows mix this in alongside a Tk base class, so ``self`` *is* the
+        widget and the default is right. Controllers are not widgets — they
+        own one (``self._tab``) — and would otherwise need a second, parallel
+        pump of their own. Overriding this one method lets them share the
+        machinery the guard already enforces, instead of growing a bespoke
+        copy that nothing checks.
+        """
+        return self
+
     def _start_ui_pump(self) -> None:
         """Create the queue and begin draining it. Tk thread, once."""
         self._ui_queue: queue.Queue = queue.Queue()
         self._ui_pump_id = None
-        self.bind("<Destroy>", self._stop_ui_pump, add="+")
+        self._ui_host().bind("<Destroy>", self._stop_ui_pump, add="+")
         self._ui_pump()
 
     def _post(self, fn, *args) -> None:
@@ -239,14 +251,15 @@ class UiPumpMixin:
     def _schedule_after(self, delay_ms: int, fn, args) -> None:
         """Set the timer. Tk thread only — reached via `_post_after`."""
         try:
-            self.after(delay_ms, lambda: fn(*args))
+            self._ui_host().after(delay_ms, lambda: fn(*args))
         except tk.TclError:
             pass          # window closed before the timer was set
 
     def _ui_pump(self) -> None:
         """Drain whatever the workers posted. Tk thread only."""
+        host = self._ui_host()
         try:
-            if not self.winfo_exists():
+            if not host.winfo_exists():
                 return
         except tk.TclError:
             return
@@ -266,7 +279,7 @@ class UiPumpMixin:
         except queue.Empty:
             pass
         try:
-            self._ui_pump_id = self.after(self._UI_PUMP_MS, self._ui_pump)
+            self._ui_pump_id = host.after(self._UI_PUMP_MS, self._ui_pump)
         except tk.TclError:
             self._ui_pump_id = None
 
@@ -276,11 +289,11 @@ class UiPumpMixin:
         Bound to ``<Destroy>``, which also fires for every child widget, so
         only the window's own destruction counts.
         """
-        if evt is not None and getattr(evt, "widget", None) is not self:
+        if evt is not None and getattr(evt, "widget", None) is not self._ui_host():
             return
         if getattr(self, "_ui_pump_id", None):
             try:
-                self.after_cancel(self._ui_pump_id)
+                self._ui_host().after_cancel(self._ui_pump_id)
             except tk.TclError:
                 pass
         self._ui_pump_id = None

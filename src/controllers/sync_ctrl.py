@@ -30,6 +30,7 @@ import tkinter as tk
 from constants import C, CREATE_NO_WINDOW, _ANSI
 from helpers.mcp import _mcp_configs, _classify_mcp_entry
 from helpers.project_discovery import clear_pinned, set_pinned
+from helpers.shadow_links import load_shadow_config, refresh_shadows
 from helpers.runtime import log
 
 if TYPE_CHECKING:
@@ -108,7 +109,49 @@ class SyncStatusController:
         self._on_refresh()
 
     def cmd_sync(self, path: str) -> None:
+        self._refresh_shadows_if_enabled(path)
         self._on_run(["sync"], cwd=path, label=os.path.basename(path))
+
+    def _refresh_shadows_if_enabled(self, path: str) -> None:
+        """SL2: regenerate shadow links before the index is rebuilt.
+
+        Opt-in per project. Files added since the last manual run are not
+        shadowed, so tokensave silently stops seeing them -- a new `.zsc`
+        just drops out of the index with no signal that anything is missing.
+
+        Cost when disabled is one small file read: the walk and the hardlink
+        probe are behind the flag, so projects that never turned this on pay
+        nothing. Runs before the sync rather than after, so the new links are
+        present for the indexer that is about to read them.
+        """
+        config = load_shadow_config(path)
+        if not (config and config.auto_shadow):
+            return
+        result = refresh_shadows(path, config.ext_map)
+        self._log_shadow_refresh(result, path)
+
+    def _log_shadow_refresh(self, result: dict, path: str) -> None:
+        """Report only what the user can act on.
+
+        A silent no-op on a volume without hardlink support is correct: that
+        is a property of the disk, not an error, and repeating it on every
+        sync would train the user to ignore the log. A FAILURE on a volume
+        that does support them is the opposite -- a permissions or filesystem
+        problem that would otherwise present as "auto-shadow appears to do
+        nothing at all".
+        """
+        if not result["ran"]:
+            return
+        if result["failed"]:
+            self._on_log(
+                "  ⚠ shadow links: %d created, %d could not be created "
+                "in %s" % (result["created"], result["failed"],
+                           os.path.basename(path)),
+                C["peach"])
+        elif result["created"]:
+            self._on_log("  + %d shadow link%s created" % (
+                result["created"], "" if result["created"] == 1 else "s"),
+                C["overlay0"])
 
     # Operations safe to run unattended across many projects: they stream to
     # the log and open nothing. Status is deliberately the log-only variant —
@@ -197,6 +240,10 @@ class SyncStatusController:
                 name = p["name"]
                 path = p["path"]
                 self._on_log(f"[{i}/{count}] {name}", C["subtext"])
+                # Already on a worker thread here, and _on_log is
+                # thread-safe, so the same per-project refresh applies.
+                if argv[:1] == ["sync"]:
+                    self._refresh_shadows_if_enabled(path)
                 log.info(f"  {label} {i}/{count}: {name}")
                 t0 = time.monotonic()
                 try:
