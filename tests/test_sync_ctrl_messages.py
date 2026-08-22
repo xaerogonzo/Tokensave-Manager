@@ -118,3 +118,44 @@ def test_the_retired_claims_are_gone_from_the_source():
 
     assert "Live in-session reload is deferred" not in src
     assert "pin_watcher" not in src
+
+
+def test_pinning_says_claude_code_sessions_are_unaffected(mocker):
+    """The distinction this message kept eating.
+
+    Claude Code can run inside the Claude Desktop window, so a bare "Claude
+    Desktop" reads as "this application" to someone working there — and is
+    wrong for them, because a Claude Code session binds to its own working
+    directory and never reads the pin. Saying only "Desktop needs a restart"
+    invites a user to restart the wrong client and conclude the feature is
+    broken when nothing changes. It confused a real user three times in one
+    session before the wording changed.
+    """
+    logs = []
+    _sync_ctrl(logs, mocker).cmd_set_active(PROJ)
+
+    joined = " ".join(logs)
+    assert "Claude Code" in joined
+    assert "own chats" in joined, "must scope the restart to Desktop's chats"
+
+
+def test_any_line_demanding_a_restart_names_the_client(mocker):
+    """Guards the failure mode, not one sentence.
+
+    The harm is a reader restarting the wrong client and concluding nothing
+    works. So a line that says a restart IS needed must name who needs it. A
+    line saying one is NOT needed cannot cause that mistake, and is exempt --
+    an earlier version of this test asserted over every restart mention and
+    immediately failed on "READING another project needs no restart", which
+    was correct prose caught by an over-specified rule.
+    """
+    logs = []
+    _sync_ctrl(logs, mocker).cmd_set_active(PROJ)
+
+    for line in logs:
+        low = line.lower()
+        if "restart" not in low:
+            continue
+        if "no restart" in low or "nothing to restart" in low:
+            continue                      # tells you NOT to; cannot mislead
+        assert "Desktop" in line or "Claude Code" in line, line

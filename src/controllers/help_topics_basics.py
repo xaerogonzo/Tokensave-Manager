@@ -18,9 +18,26 @@ def switching(ctl):
            "another project.")
         br()
         p("The pin (★ Set as Active) chooses the DEFAULT project — the one "
-          "tokensave answers about when nothing says otherwise. Claude Desktop "
-          "reads it once, when it starts its tokensave server, so moving that "
-          "default is the one thing that really does need a restart.")
+          "tokensave answers about when nothing says otherwise. Claude "
+          "Desktop's own chats read it once, when Desktop starts its "
+          "tokensave server, so moving that default is the one thing that "
+          "really does need a restart.")
+        br()
+
+        h2("Claude Desktop and Claude Code are not the same client")
+        p("Worth getting straight first, because Claude Code can run inside "
+          "the Desktop window and still be a different thing:")
+        ins("  •  Desktop's own chats", "body")
+        ins(" reach tokensave through the wrapper script, which reads the "
+            "pin when Desktop starts it.\n", "dim")
+        ins("  •  Claude Code sessions", "body")
+        ins(" register tokensave directly and bind to their own working "
+            "directory. The pin never reaches them, and restarting one "
+            "changes nothing about which project it serves.\n", "dim")
+        br()
+        p("So everything below about pinning and restarting is about "
+          "Desktop's chats. If you are reading this from a Claude Code "
+          "session, the pin is not what decides your project.")
         br()
         p("Reading a different project does not. Every tokensave tool takes a "
           "graph_root argument, which opens any indexed project on demand — "

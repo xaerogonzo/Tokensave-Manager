@@ -110,14 +110,27 @@ class SyncStatusController:
         Claude" would be true and would still leave the user believing the
         restart is unavoidable, which is what made this worth switching
         projects over in the first place.
+
+        It says "Desktop's own chats" rather than "Claude Desktop" on
+        purpose. Claude Code runs *inside* the Desktop window, so the shorter
+        phrasing reads as "this application" to someone working there -- and
+        it is wrong for them, because a Claude Code session registers
+        tokensave directly, binds to its own working directory, and never
+        reads the pin at all. That ambiguity confused a real user three times
+        in one session before the wording was changed.
         """
         self._on_log(
-            "  This sets the DEFAULT project for Claude Desktop, which reads "
-            "it once when it starts its tokensave server — so changing that "
-            "default does need a Desktop restart.",
+            "  This sets the DEFAULT project for Claude Desktop's own chats, "
+            "which read it once when Desktop starts its tokensave server — so "
+            "changing that default does need a Desktop restart.",
             C["overlay0"])
         self._on_log(
-            "  You do not need one to READ another project: pass "
+            "  Claude Code sessions are NOT affected — they bind to their own "
+            "working directory and never read this pin, so there is nothing "
+            "to restart there.",
+            C["overlay0"])
+        self._on_log(
+            "  Either way, READING another project needs no restart: pass "
             "graph_root=<project path> on any tokensave call.  "
             "Reference tab → “🌐  Query another project”.",
             C["overlay0"])

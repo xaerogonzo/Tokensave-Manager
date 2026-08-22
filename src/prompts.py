@@ -284,8 +284,8 @@ PROMPT_SNIPPETS: list[tuple[str, str]] = [
     ),
     (
         "\U0001f310  Query another project",
-        "Answer this about a DIFFERENT project than the one you are "
-        "pinned to: [[what you want to know]]\n\n"
+        "Answer this about a DIFFERENT project than the one this session "
+        "is serving: [[what you want to know]]\n\n"
         "The project is at [[project path]]. Pass "
         "graph_root=\"[[project path]]\" on EVERY tokensave call you "
         "make for it — tokensave_context first, then tokensave_search / "

@@ -247,3 +247,20 @@ def test_categories_has_override_section():
     h2_titles = [t[1] for t in ctl._calls if t[0] == "h2"]
     assert any("override" in t.lower() or "single" in t.lower()
                for t in h2_titles)
+
+
+def test_switching_separates_desktop_chats_from_claude_code():
+    """The topic explains pinning, so it has to say who pinning applies to.
+
+    Claude Code runs inside the Desktop window; without this section the
+    whole topic reads as advice for a client it does not actually govern.
+    """
+    ctl = _make_ctl()
+    htb.switching(ctl)
+
+    headings = [c[1] for c in ctl._calls if c[0] == "h2"]
+    assert any("Claude Code" in h for h in headings), headings
+
+    body = " ".join(c[1] for c in ctl._calls if len(c) > 1)
+    assert "working directory" in body, "must say what Code binds to instead"
+    assert "wrapper" in body, "must say how Desktop's chats reach the pin"
