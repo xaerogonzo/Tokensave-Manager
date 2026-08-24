@@ -185,6 +185,17 @@ class MCPConfigDialog(tk.Toplevel):
             root = proj.get("path") if isinstance(proj, dict) else str(proj)
             if not root:
                 continue
+            # Only projects with a real tokensave index. Without one there
+            # is nothing to bind a server TO -- and the classifier
+            # (correctly) refuses project scope for such a path, so the row
+            # would fall through to the GLOBAL wrapper proposal and offer to
+            # write this machine's absolute paths into a shared project
+            # file. That is the precise outcome this feature exists to
+            # prevent. Filtered here rather than by loosening the scope
+            # rule, which would let any stray .mcp.json be judged by
+            # project rules.
+            if not os.path.isdir(os.path.join(root, ".tokensave")):
+                continue
             name = (proj.get("name") if isinstance(proj, dict) else "") \
                 or os.path.basename(root) or root
             info = _classify_mcp_entry(_project_mcp_path(root), self._cfg.raw)

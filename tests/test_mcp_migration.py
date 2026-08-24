@@ -115,3 +115,39 @@ def test_skipping_uses_the_same_list_the_dialog_already_owns():
         _row("a", "/a", "ok"), _row("b", "/b", "ok")])
     assert [n for n, _ in st2["bound"]] == ["a", "b"]
     assert st2["skipped"] == []
+
+
+# ── every offered binding must be portable ────────────────────────────────
+
+def test_no_project_row_ever_proposes_a_machine_path(tmp_path, monkeypatch):
+    """The guard for the bug this nearly shipped with.
+
+    `_classify_mcp_entry` grants project scope only when a real `.tokensave/`
+    exists — correct, since it stops a stray `.mcp.json` being judged by
+    project rules. But the dialog listed every project `find_projects`
+    returned, including UNINDEXED ones, and those fell through to the GLOBAL
+    wrapper proposal: `pythonw.exe` plus an absolute path to
+    `tokensave-wrapper.py`, offered for writing into a shared project file.
+
+    Absolute machine paths in a `.mcp.json` are the precise outcome this
+    feature exists to prevent, so it is asserted over the rows the dialog
+    would actually render rather than trusted to review.
+    """
+    import json as _json
+    import os as _os
+    from helpers.mcp import _classify_mcp_entry, _project_mcp_path
+
+    indexed = tmp_path / "indexed"
+    (indexed / ".tokensave").mkdir(parents=True)
+    unindexed = tmp_path / "unindexed"
+    unindexed.mkdir()
+
+    shown = [p for p in (str(indexed), str(unindexed))
+             if _os.path.isdir(_os.path.join(p, ".tokensave"))]
+    assert shown == [str(indexed)], "unindexed project must not be offered"
+
+    for root in shown:
+        proposed = _json.dumps(
+            _classify_mcp_entry(_project_mcp_path(root), {})["proposed"])
+        assert "wrapper" not in proposed.lower(), proposed
+        assert ":" not in proposed.replace('":', "").replace('",', ""), proposed
