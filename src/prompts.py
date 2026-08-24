@@ -282,6 +282,24 @@ PROMPT_SNIPPETS: list[tuple[str, str]] = [
         "Output: ranked table — score | file:line A | file:line B | "
         "verdict | proposed action. Cap at 10 pairs."
     ),
+    (
+        "\U0001f310  Query another project",
+        "Answer this about a DIFFERENT project than the one this session "
+        "is serving: [[what you want to know]]\n\n"
+        "The project is at [[project path]]. Pass "
+        "graph_root=\"[[project path]]\" on EVERY tokensave call you "
+        "make for it — tokensave_context first, then tokensave_search / "
+        "tokensave_node / tokensave_callers as needed. Without "
+        "graph_root you will silently answer from the pinned project "
+        "instead, which looks completely normal and is wrong.\n\n"
+        "Two things to know: the selected graph opens read-only, so use "
+        "this for reading and reviewing, not for edits; and if the reply "
+        "warns that the graph is stale, say so rather than treating the "
+        "answer as current — the other project may not have been synced "
+        "recently.\n\n"
+        "Cite file:line for every claim, and state which project each "
+        "citation came from."
+    ),
 
     # ─────────────────────────── 🛠 WORKFLOWS ─────────────────────────────
     (

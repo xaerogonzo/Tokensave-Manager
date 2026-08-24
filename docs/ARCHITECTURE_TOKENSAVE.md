@@ -178,7 +178,7 @@ Carbon · D · Lua · Julia · R · MATLAB · Groovy · Gradle · Maven · SQL
 |------|------|
 | Binary | `D:\Claude Co worker\Token Save\tokensave.exe` |
 | Project DB | `<project-root>\.tokensave\tokensave.db` (plus `.db-wal` and `.db-shm` siblings for WAL-mode SQLite) |
-| Desktop pin file | `%USERPROFILE%\.tokensave\desktop-project.txt` (still single-shot at wrapper startup — live in-session reload deferred) |
+| Desktop pin file | `%USERPROFILE%\.tokensave\desktop-project.txt` (read by the wrapper at spawn, so a change needs a Desktop restart to take effect — but only to move the **default** graph: `graph_root` on any tokensave call reads a different indexed project with no restart at all) |
 | MCP config (Claude Desktop, traditional install) | `%APPDATA%\Claude\claude_desktop_config.json` |
 | MCP config (Claude Desktop, UWP / Microsoft Store install) | `%LOCALAPPDATA%\Packages\Claude_<id>\LocalCache\Roaming\Claude\claude_desktop_config.json` ⚠ |
 | MCP config (Claude Code) | `%USERPROFILE%\.claude.json` |

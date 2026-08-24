@@ -554,7 +554,7 @@ class TestContextMenuGrouping:
         cmds, _ = self._menu_calls()
         dupes = [c for c in set(cmds) if cmds.count(c) > 1]
         assert dupes == [], f"command wired twice: {dupes}"
-        assert len(cmds) == 32, f"expected 32 commands, found {len(cmds)}"
+        assert len(cmds) == 33, f"expected 33 commands, found {len(cmds)}"
 
     def test_the_everyday_actions_stay_one_click_away(self):
         """Burying Sync in a submenu would make the common case worse."""
@@ -604,3 +604,177 @@ class TestColumnLegibility:
         src = self._source()
         assert "Add tokensave to a project" in src
         assert "Retrofit Existing" not in src
+
+
+# ── strict_tree toggle ───────────────────────────────────────────────────
+
+class TestStrictTreeToggle:
+    """One entry, two directions.
+
+    The enable confirmation has always ended with "turn it off again if it
+    refuses something it should not" — advice the UI could not follow, because
+    the only call site passed `True` as a literal. The writer took a bool and
+    its off path was already tested; nothing could reach it. These cover the
+    direction that was missing and the labelling that decides which one runs.
+    """
+
+    def _ctrl(self):
+        from controllers.projects_tab import ProjectsTabController
+        return object.__new__(ProjectsTabController)
+
+    def _entry(self, ctrl):
+        """A stub menu entry, recording whatever label it is given."""
+        seen = {}
+        ctrl._strict_tree_entry = (
+            SimpleNamespace(entryconfigure=lambda i, label: seen.update(
+                index=i, label=label)), 4)
+        return seen
+
+    # ── which direction the entry offers ─────────────────────────────────
+
+    def test_a_project_with_it_off_is_offered_enable(self, monkeypatch):
+        import controllers.projects_tab as pt
+        ctrl = self._ctrl()
+        seen = self._entry(ctrl)
+        monkeypatch.setattr(
+            "helpers.tokensave_config.read_strict_tree",
+            lambda p: SimpleNamespace(is_enabled=False))
+
+        ctrl._sync_strict_tree_label("/some/project")
+
+        assert seen["label"] == pt._STRICT_TREE_ON_LABEL
+
+    def test_a_project_with_it_on_is_offered_disable(self, monkeypatch):
+        """The whole point: previously there was no way to express this."""
+        import controllers.projects_tab as pt
+        ctrl = self._ctrl()
+        seen = self._entry(ctrl)
+        monkeypatch.setattr(
+            "helpers.tokensave_config.read_strict_tree",
+            lambda p: SimpleNamespace(is_enabled=True))
+
+        ctrl._sync_strict_tree_label("/some/project")
+
+        assert seen["label"] == pt._STRICT_TREE_OFF_LABEL
+
+    def test_an_unreadable_project_is_never_offered_disable(self, monkeypatch):
+        """Offering Disable would assert a state we failed to read.
+
+        `read_strict_tree` is deliberate about never reporting an unreadable
+        config as "off"; the menu must not undo that by inferring one.
+        """
+        import controllers.projects_tab as pt
+        ctrl = self._ctrl()
+        seen = self._entry(ctrl)
+
+        def _boom(path):
+            raise OSError("permission denied")
+
+        monkeypatch.setattr("helpers.tokensave_config.read_strict_tree", _boom)
+
+        ctrl._sync_strict_tree_label("/some/project")
+
+        assert seen["label"] == pt._STRICT_TREE_ON_LABEL
+
+    def test_a_menu_that_was_never_built_is_not_an_error(self):
+        """`_on_right_click` runs against a stubbed menu in other tests, and
+        at runtime nothing guarantees the menu exists before a relabel."""
+        ctrl = self._ctrl()
+        ctrl._sync_strict_tree_label("/some/project")      # must not raise
+
+    # ── which direction actually runs ────────────────────────────────────
+
+    def test_toggling_a_project_that_is_on_turns_it_off(self, monkeypatch):
+        ctrl = self._ctrl()
+        ctrl._selected_path = lambda: "/some/project"
+        monkeypatch.setattr(
+            "helpers.tokensave_config.read_strict_tree",
+            lambda p: SimpleNamespace(is_enabled=True))
+        calls = []
+        ctrl._set_strict_tree = lambda paths, enabled: calls.append(
+            (paths, enabled))
+
+        ctrl._toggle_strict_tree_selected()
+
+        assert calls == [(["/some/project"], False)]
+
+    def test_toggling_a_project_that_is_off_turns_it_on(self, monkeypatch):
+        ctrl = self._ctrl()
+        ctrl._selected_path = lambda: "/some/project"
+        monkeypatch.setattr(
+            "helpers.tokensave_config.read_strict_tree",
+            lambda p: SimpleNamespace(is_enabled=False))
+        calls = []
+        ctrl._set_strict_tree = lambda paths, enabled: calls.append(
+            (paths, enabled))
+
+        ctrl._toggle_strict_tree_selected()
+
+        assert calls == [(["/some/project"], True)]
+
+    # ── the writer is actually asked to turn it off ──────────────────────
+
+    def test_disabling_passes_false_through_to_the_writer(self, monkeypatch):
+        """The defect in one line: this argument used to be a literal True."""
+        ctrl = self._ctrl()
+        ctrl._tab = SimpleNamespace(winfo_toplevel=lambda: None)
+        ctrl._on_log = lambda *a, **k: None
+        ctrl._on_refresh = lambda: None
+        monkeypatch.setattr(
+            "controllers.projects_tab.messagebox.askyesno",
+            lambda *a, **k: True)
+        written = []
+        monkeypatch.setattr(
+            "helpers.tokensave_config.set_strict_tree",
+            lambda path, enabled: (written.append((path, enabled)),
+                                   (True, "strict_tree turned off"))[1])
+
+        ctrl._set_strict_tree(["/p1", "/p2"], False)
+
+        assert written == [("/p1", False), ("/p2", False)]
+
+    def test_the_disable_confirmation_says_disable(self, monkeypatch):
+        """A dialog titled "Enable" that turns something off is worse than none."""
+        ctrl = self._ctrl()
+        ctrl._tab = SimpleNamespace(winfo_toplevel=lambda: None)
+        ctrl._on_log = lambda *a, **k: None
+        ctrl._on_refresh = lambda: None
+        asked = {}
+
+        def _ask(title, body, **kw):
+            asked["title"], asked["body"] = title, body
+            return False                      # decline: nothing should be written
+
+        monkeypatch.setattr(
+            "controllers.projects_tab.messagebox.askyesno", _ask)
+        written = []
+        monkeypatch.setattr(
+            "helpers.tokensave_config.set_strict_tree",
+            lambda path, enabled: written.append(path))
+
+        ctrl._set_strict_tree(["/p1"], False)
+
+        assert "Disable" in asked["title"]
+        assert "OFF" in asked["body"]
+        assert written == [], "declining the dialog still wrote"
+
+    def test_the_batch_menu_offers_both_directions(self):
+        """A multi-project selection can be mixed, so it gets two entries
+        rather than a toggle that would have to guess what it is toggling."""
+        import ast
+        import pathlib
+        src = pathlib.Path("src/controllers/projects_tab.py").read_text(
+            encoding="utf-8")
+        fn = next(n for n in ast.walk(ast.parse(src))
+                  if isinstance(n, ast.FunctionDef)
+                  and n.name == "_show_batch_menu")
+        labels = [ast.unparse(kw.value)
+                  for node in ast.walk(fn)
+                  if isinstance(node, ast.Call)
+                  and isinstance(node.func, ast.Attribute)
+                  and node.func.attr == "add_command"
+                  for kw in node.keywords if kw.arg == "label"]
+        strict = [l for l in labels if "strict_tree" in l]
+        assert len(strict) == 2, strict
+        assert any("Enable" in l for l in strict)
+        assert any("Disable" in l for l in strict)

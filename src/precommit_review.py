@@ -51,6 +51,8 @@ _HERE = os.path.dirname(os.path.abspath(__file__))   # → <manager>/src
 if _HERE not in sys.path:
     sys.path.insert(0, _HERE)
 
+from constants import CREATE_NO_WINDOW
+
 
 def _stderr(msg: str) -> None:
     """Tagged stderr output so users can grep for our lines."""
@@ -65,6 +67,7 @@ def _read_staged_diff() -> "str | None":
             capture_output=True, text=True,
             encoding="utf-8", errors="replace",
             timeout=10,
+            creationflags=CREATE_NO_WINDOW,
         )
     except (OSError, subprocess.TimeoutExpired) as e:
         _stderr(f"could not read `git diff --cached`: {e} — skipping review")

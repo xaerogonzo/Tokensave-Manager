@@ -22,6 +22,7 @@ from helpers.tokensave_config import (
     config_path,
     read_strict_tree,
     should_recommend_enabling,
+    wrong_graph_risk,
 )
 
 
@@ -153,3 +154,54 @@ def test_unknown_state_never_recommends(tmp_path):
     """Cannot read the setting -> cannot advise changing it."""
     state = read_strict_tree(str(tmp_path))       # no config file at all
     assert should_recommend_enabling(state, risk_present=True) is False
+
+
+# ── the second reachable-risk shape ──────────────────────────────────────
+
+# The original risk signal was one project with two checkouts (a worktree
+# with no index). `wrong_graph_risk` is the other shape and the far more
+# common one: Claude Desktop resolves the pinned project once at startup and
+# answers everything from that graph, so a question about a DIFFERENT project
+# comes back answered from the wrong one, reading as perfectly normal.
+#
+# The reason this is a widened definition of risk rather than a removed gate:
+# `should_recommend_enabling` documents a deliberate decision NOT to advise
+# unconditionally, because a line printed on every Doctor run for every
+# project is how a real signal becomes something users scroll past. These
+# tests hold both halves — the new evidence counts, and no-evidence still
+# stays quiet.
+
+
+def test_several_projects_and_a_pinned_desktop_is_a_real_risk():
+    assert wrong_graph_risk(16, desktop_serves_one_project=True) is True
+
+
+def test_a_single_project_cannot_be_the_wrong_one():
+    """With one graph there is no other graph to be wrong about."""
+    assert wrong_graph_risk(1, desktop_serves_one_project=True) is False
+    assert wrong_graph_risk(0, desktop_serves_one_project=True) is False
+
+
+def test_a_desktop_not_wired_to_tokensave_cannot_answer_from_anything():
+    assert wrong_graph_risk(16, desktop_serves_one_project=False) is False
+
+
+def test_the_new_signal_still_goes_through_the_same_gate():
+    """Widened evidence, unchanged rule: no risk means no advice.
+
+    If this ever passes with risk_present=False the anti-nag property is
+    gone, and the Doctor is back to printing advice on every project.
+    """
+    from helpers.tokensave_config import StrictTreeState
+
+    off = StrictTreeState(verdict=DISABLED, detail="off")
+    assert should_recommend_enabling(off, risk_present=True) is True
+    assert should_recommend_enabling(off, risk_present=False) is False
+
+
+def test_an_unknown_state_is_never_advised_on_however_risky():
+    """Recommending on a config we could not read would be guessing."""
+    from helpers.tokensave_config import StrictTreeState
+
+    unknown = StrictTreeState(verdict=UNREADABLE, detail="permission denied")
+    assert should_recommend_enabling(unknown, risk_present=True) is False

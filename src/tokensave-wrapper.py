@@ -31,14 +31,27 @@ stdio note (2026-05-23):
   defensive — it makes the wrapper work under both console (python.exe)
   and windowless (pythonw.exe) launches.
 
-Live-reload note (deferred):
-  An earlier revision added a background daemon thread that watched the
-  pin file. Removed for now — not strictly needed for correctness, and
-  the threading interaction with subprocess + pythonw is fiddly. Pin
-  changes currently require a Claude Desktop restart. Future live-reload
-  will be implemented as an OUT-OF-PROCESS watcher (sibling process or a
-  manager-managed daemon) that signals the running tokensave PID
-  directly via taskkill, leaving this wrapper single-threaded.
+Live-reload note (closed — it cannot be done from here, or anywhere):
+  Two attempts, both dead. First, a daemon thread in this wrapper watching
+  the pin file: broke the MCP handshake under pythonw, reverted. This file
+  is single-threaded and must stay that way.
+
+  Second, an out-of-process watcher in the manager that killed the server
+  so Claude Desktop would start a fresh one. Built, shipped, then measured:
+  **Desktop does not restart a died MCP server.** It reports "Server
+  disconnected" and leaves it. The wrapper below spawns one child, waits on
+  it and exits — so killing that child ends this process, Desktop sees the
+  pipe close, and nothing comes back. The watcher was removed; the evidence
+  is in docs/MCP_INTEGRATION_GOTCHAS.md.
+
+  The reason no third attempt will work: an MCP stdio server's lifetime
+  belongs to the client that spawned it. Nothing outside Claude Desktop can
+  hand a running Desktop a replacement, because a server the manager spawns
+  has its stdio wired to the manager. That is the transport, not a gap.
+
+  None of which matters as much as it sounds, because the pin only picks a
+  DEFAULT: every tokensave tool takes ``graph_root``, so another indexed
+  project can be read without touching the pin or restarting anything.
 """
 
 import json

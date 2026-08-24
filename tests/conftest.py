@@ -8,9 +8,10 @@ documenting WHY the fixture exists in this shape.
 Fixture summary:
 
 * ``tk_root``        — withdrawn Tk root for headless dialog tests. Neutralises
-                       ``grab_set`` (TclError on non-viewable windows) and
-                       asserts no daemon threads leaked across the test
-                       boundary (G-D).
+                       ``grab_set`` (TclError on non-viewable windows), keeps
+                       dialog Toplevels invisible so a run does not flash 162
+                       windows across the screen (G-N), and asserts no daemon
+                       threads leaked across the test boundary (G-D).
 * ``wait_for``       — polling helper that drives ``root.update()`` each
                        iteration so worker-scheduled ``after(0, ...)``
                        callbacks actually fire (G-G + G-M). The canonical
@@ -42,6 +43,7 @@ discovers the ``test_*.py`` modules automatically, including the
 """
 from __future__ import annotations
 
+import gc
 import importlib
 import os
 import sys
@@ -72,9 +74,12 @@ def _tk_root_session():
     failures on Windows (Tcl's interpreter state doesn't fully reset
     between roots). Sharing a single root across tests sidesteps this.
 
-    The root stays withdrawn (never displayed). Per-test isolation is
-    provided by the function-scoped ``tk_root`` wrapper below, which
-    destroys any child Toplevels left over from a previous test.
+    The root stays withdrawn (never displayed), and Toplevels built on it
+    are made transparent rather than shown — see the comment on the patch
+    below for why withdrawing them instead would change what tests can
+    observe. Per-test isolation is provided by the function-scoped
+    ``tk_root`` wrapper below, which destroys any child Toplevels left over
+    from a previous test.
     """
     import tkinter as tk
     try:
@@ -88,8 +93,37 @@ def _tk_root_session():
     original_grab_set = tk.Toplevel.grab_set
     tk.Toplevel.grab_set = lambda self: None      # type: ignore[assignment]
 
+    # Same trick, for visibility (G-N). Withdrawing the root above hides the
+    # ROOT and nothing else: a Toplevel is a sibling window, not a child
+    # widget, so it maps and paints regardless. Measured on a full run, 162
+    # of 162 Toplevels were mapped — every dialog test flashed a real window
+    # across the developer's screen for as long as the test took.
+    #
+    # `-alpha 0.0` rather than `withdraw()`, deliberately: a withdrawn window
+    # reports `winfo_viewable() == 0` and `winfo_ismapped() == 0` and loses
+    # its position (geometry resets to +0+0), and dialogs read all three —
+    # `_centre_on_parent` measures itself, and the sizing code waits on
+    # mapping. A transparent window is still mapped, still viewable, still
+    # where it was put, and simply cannot be seen. Verified: the suite passes
+    # identically with and without this.
+    #
+    # Set TOKENSAVE_SHOW_TEST_WINDOWS=1 to watch the dialogs for real, which
+    # is occasionally the fastest way to understand a layout bug.
+    original_toplevel_init = tk.Toplevel.__init__
+    if not os.environ.get("TOKENSAVE_SHOW_TEST_WINDOWS"):
+
+        def _invisible_init(self, *args, **kwargs):
+            original_toplevel_init(self, *args, **kwargs)
+            try:
+                self.wm_attributes("-alpha", 0.0)
+            except tk.TclError:
+                pass          # headless WMs may ignore alpha; harmless there
+
+        tk.Toplevel.__init__ = _invisible_init    # type: ignore[assignment]
+
     yield root
 
+    tk.Toplevel.__init__ = original_toplevel_init  # type: ignore[assignment]
     tk.Toplevel.grab_set = original_grab_set      # type: ignore[assignment]
     try:
         root.destroy()
@@ -132,6 +166,20 @@ def tk_root(_tk_root_session):
             _tk_root_session.update_idletasks()
         except tk.TclError:
             pass
+
+        # Collect this test's Tk garbage HERE, on the main thread, while the
+        # interpreter is still in a state that can service it (G-N).
+        # `tk.Variable.__del__` calls into Tcl, and destroying a Toplevel does
+        # not drop the Python references to the Variables it held. Left to
+        # chance, that garbage is finalized whenever the next collection
+        # happens to run -- which may be inside a LATER test's worker thread,
+        # producing `RuntimeError: main thread is not in main loop` from a
+        # destructor, attributed to whichever test was unlucky enough to be
+        # running. Observed exactly that: a ChecksDialog Variable from one
+        # test surfacing during another test's ThreadPoolExecutor run, and
+        # only once total allocation crossed a GC threshold, so it appeared
+        # and vanished with unrelated changes elsewhere in the suite.
+        gc.collect()
 
         # G-D: catch ghost threads BEFORE they crash a later test.
         leaked = threading.active_count() - baseline_threads

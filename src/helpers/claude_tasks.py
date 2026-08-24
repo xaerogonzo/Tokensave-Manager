@@ -6,6 +6,8 @@ import os
 import re
 import subprocess
 
+from constants import CREATE_NO_WINDOW
+
 def _claude_projects_dir() -> str:
     """Return ``~/.claude/projects/`` resolved at call time (NOT import time).
 
@@ -64,6 +66,7 @@ def scan_worktrees(project_path: str, git_exe: str) -> list[dict]:
             capture_output=True,
             text=True,
             timeout=10,
+            creationflags=CREATE_NO_WINDOW,
         )
         if result.returncode != 0:
             return []

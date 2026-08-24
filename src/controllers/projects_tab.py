@@ -50,7 +50,18 @@ if TYPE_CHECKING:
     from state import ManagerConfig
 
 
+#: The two faces of one menu entry. Module-level so the tests can assert
+#: against the same strings the menu uses.
+_STRICT_TREE_ON_LABEL = "🛡  Enable strict_tree…"
+_STRICT_TREE_OFF_LABEL = "🛡  Disable strict_tree…"
+
+
 class ProjectsTabController:
+
+    #: (submenu, entry index) for the strict_tree toggle, set by
+    #: _build_context_menu. None until the menu exists -- callers that
+    #: run before it (or against a stubbed menu) have nothing to relabel.
+    _strict_tree_entry = None
     """Owns the Projects tab UI and all per-project commands.
 
     No back-reference to App — all cross-App dependencies flow through the
@@ -593,6 +604,11 @@ class ProjectsTabController:
         index_m.add_command(label="🔍  Doctor", command=self._cmd_bar.cmd_doctor)
         index_m.add_command(label="🧹  Housekeeping…",
                             command=self._cmd_bar.cmd_housekeeping)
+        index_m.add_command(label=_STRICT_TREE_ON_LABEL,
+                            command=self._toggle_strict_tree_selected)
+        # The label depends on the selected project, and the menu is built
+        # once — so keep a handle on the entry and restate it at popup time.
+        self._strict_tree_entry = (index_m, index_m.index("end"))
         index_m.add_separator()
         index_m.add_command(label="🔗  Shadow Links…",
                             command=self._cmd_bar.cmd_shadow_links)
@@ -684,6 +700,7 @@ class ProjectsTabController:
             # and having it act on exactly one of them, silently.
             self._show_batch_menu(event, paths)
             return
+        self._sync_strict_tree_label(paths[0] if paths else "")
         self._ctx_menu.tk_popup(event.x_root, event.y_root)
 
     def _open_cross_project_search(self, paths: list) -> None:
@@ -697,11 +714,57 @@ class ProjectsTabController:
             return          # one project is what the Ask tab is already for
         CrossProjectSearchDialog(self._root, paths, self._cfg)
 
-    def _enable_strict_tree(self, paths: list) -> None:
-        """Turn tokensave's strict_tree on across the selection.
+    def _sync_strict_tree_label(self, path: str) -> None:
+        """Point the entry at whichever direction is actually available.
 
-        Offered as a batch because it is per-project and was enabled nowhere:
-        a one-at-a-time toggle across sixteen projects does not get used.
+        Read at popup time rather than when the menu is built: the menu is
+        constructed once and reused for every project, so a value captured
+        at build time would be both stale and wrong for most rows. One
+        small file read per right-click.
+
+        An unreadable or absent config reads as "not on", which offers
+        Enable — and the writer then refuses with a specific reason. That
+        is the right way round: offering Disable for a project whose state
+        we could not determine would be asserting a fact we do not have.
+        """
+        if not self._strict_tree_entry:
+            return
+        menu, index = self._strict_tree_entry
+        label = _STRICT_TREE_ON_LABEL
+        if path:
+            try:
+                from helpers.tokensave_config import read_strict_tree
+                if read_strict_tree(path).is_enabled:
+                    label = _STRICT_TREE_OFF_LABEL
+            except Exception:                              # noqa: BLE001
+                pass          # a mislabelled entry must not eat the menu
+        try:
+            menu.entryconfigure(index, label=label)
+        except tk.TclError:
+            pass
+
+    def _toggle_strict_tree_selected(self) -> None:
+        """Single-project entry point, in whichever direction applies.
+
+        The batch form was the only way in, which meant a user who never
+        multi-selects could not reach it at all -- and the Doctor was
+        telling them to turn it on. It is a toggle rather than an enable
+        because the confirmation dialog has always said "turn it off again
+        if it refuses something it should not", and until now there was no
+        way to do that short of hand-editing config.json.
+        """
+        path = self._selected_path()
+        if not path:
+            return
+        from helpers.tokensave_config import read_strict_tree
+        self._set_strict_tree([path], not read_strict_tree(path).is_enabled)
+
+    def _set_strict_tree(self, paths: list, enabled: bool = True) -> None:
+        """Write tokensave's strict_tree across the selection.
+
+        Offered as a batch as well as singly: it is per-project and was
+        enabled nowhere, and a one-at-a-time toggle across sixteen projects
+        does not get used.
 
         With it on, a tokensave call that would be answered from the wrong
         tree fails with an error naming both roots, instead of prefixing a
@@ -715,8 +778,8 @@ class ProjectsTabController:
         """
         from helpers.tokensave_config import set_strict_tree
         n = len(paths)
-        if not messagebox.askyesno(
-                "Enable strict_tree",
+        if enabled:
+            title, body = "Enable strict_tree", (
                 "Turn on tokensave's strict_tree for %d project%s?\n\n"
                 "With it on, a tokensave query that would be answered from "
                 "the wrong checkout fails with an error naming both trees, "
@@ -724,18 +787,32 @@ class ProjectsTabController:
                 "are not in.\n\n"
                 "It is opt-in upstream because sharing one index across a "
                 "family of worktrees is a legitimate setup \u2014 so turn it "
-                "off again if it refuses something it should not.\n\n"
+                "off again from this same menu entry if it refuses something "
+                "it should not.\n\n"
                 "This edits each project's .tokensave/config.json. Projects "
                 "without a tokensave index are skipped."
-                % (n, "" if n == 1 else "s"),
-                parent=self._root):
+                % (n, "" if n == 1 else "s"))
+        else:
+            title, body = "Disable strict_tree", (
+                "Turn OFF tokensave's strict_tree for %d project%s?\n\n"
+                "With it off, a query that resolves an index from another "
+                "checkout goes back to returning a plausible answer with a "
+                "warning attached, rather than failing outright.\n\n"
+                "That is the right choice if it is refusing something "
+                "legitimate \u2014 sharing one index across a family of "
+                "worktrees is a supported setup, and upstream ships this "
+                "off for exactly that reason.\n\n"
+                "This edits each project's .tokensave/config.json."
+                % (n, "" if n == 1 else "s"))
+        if not messagebox.askyesno(title, body, parent=self._root):
             return
 
         changed = skipped = failed = 0
-        self._on_log("Enabling strict_tree across %d project%s…"
-                     % (n, "" if n == 1 else "s"), C["blue"])
+        verb = "Enabling" if enabled else "Disabling"
+        self._on_log("%s strict_tree across %d project%s…"
+                     % (verb, n, "" if n == 1 else "s"), C["blue"])
         for path in paths:
-            ok, detail = set_strict_tree(path, True)
+            ok, detail = set_strict_tree(path, enabled)
             name = os.path.basename(path) or path
             if not ok:
                 # Refusals are expected and informative (no index yet, or an
@@ -749,8 +826,9 @@ class ProjectsTabController:
                 changed += 1
                 self._on_log("  ✓ %s" % name, C["green"])
         self._on_log(
-            "  strict_tree: %d enabled, %d already on, %d skipped"
-            % (changed, skipped, failed),
+            "  strict_tree: %d %s, %d already %s, %d skipped"
+            % (changed, "enabled" if enabled else "disabled",
+               skipped, "on" if enabled else "off", failed),
             C["green"] if not failed else C["peach"])
         self._on_refresh()
 
@@ -779,7 +857,9 @@ class ProjectsTabController:
         m.add_command(label="🔍  Search across these projects…",
                       command=lambda: self._open_cross_project_search(paths))
         m.add_command(label=f"🛡  Enable strict_tree on all {n}…",
-                      command=lambda: self._enable_strict_tree(paths))
+                      command=lambda: self._set_strict_tree(paths, True))
+        m.add_command(label=f"🛡  Disable strict_tree on all {n}…",
+                      command=lambda: self._set_strict_tree(paths, False))
         m.add_separator()
         m.add_command(label="Clear selection",
                       command=lambda: self._tree.selection_remove(

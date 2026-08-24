@@ -22,7 +22,7 @@ import tkinter as tk
 from tkinter import messagebox
 from typing import TYPE_CHECKING, Callable
 
-from constants import C
+from constants import C, CREATE_NO_WINDOW
 from theme import UiPumpMixin, _Tooltip, themed_checkbutton
 from helpers.quality_checks import run_syntax_check, run_pyflakes_check
 from helpers.prepush_hook import (
@@ -101,6 +101,7 @@ def _get_pr_diff(path: str, base: str, git_exe: str) -> str:
         capture_output=True,
         text=True,
         cwd=path,
+        creationflags=CREATE_NO_WINDOW,
     )
     return result.stdout
 

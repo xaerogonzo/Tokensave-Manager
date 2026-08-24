@@ -45,6 +45,8 @@ from __future__ import annotations
 import os
 import shutil
 import subprocess
+
+from constants import CREATE_NO_WINDOW
 from dataclasses import dataclass
 
 _GIT_TIMEOUT = 15
@@ -117,7 +119,8 @@ def remove_worktree(git_exe: str, main_repo: str, worktree_path: str,
     try:
         proc = subprocess.run(cmd, capture_output=True, text=True,
                               timeout=_GIT_TIMEOUT,
-                              encoding="utf-8", errors="replace")
+                              encoding="utf-8", errors="replace",
+                              creationflags=CREATE_NO_WINDOW)
         rc, stderr = proc.returncode, (proc.stderr or proc.stdout or "")
     except (OSError, subprocess.TimeoutExpired) as exc:
         rc, stderr = 1, str(exc)
@@ -146,7 +149,8 @@ def is_registered(git_exe: str, main_repo: str, worktree_path: str) -> bool:
         proc = subprocess.run(
             [git_exe, "-C", main_repo, "worktree", "list", "--porcelain"],
             capture_output=True, text=True, timeout=_GIT_TIMEOUT,
-            encoding="utf-8", errors="replace")
+            encoding="utf-8", errors="replace",
+            creationflags=CREATE_NO_WINDOW)
         if proc.returncode != 0:
             # Cannot tell. Report "still registered" so callers stay on the
             # cautious branch and never offer to delete on a failed lookup.

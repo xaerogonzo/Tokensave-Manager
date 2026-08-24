@@ -16,7 +16,7 @@ import tkinter as tk
 from tkinter import messagebox, ttk
 from typing import TYPE_CHECKING, Callable
 
-from constants import C
+from constants import C, CREATE_NO_WINDOW
 from theme import _Tooltip
 from helpers.claude_tasks import scan_sessions, scan_worktrees
 from helpers.worktree_cleanup import (
@@ -300,6 +300,7 @@ class TasksController:
                 capture_output=True,
                 text=True,
                 timeout=30,
+                creationflags=CREATE_NO_WINDOW,
             )
             if result.returncode == 0:
                 messagebox.showinfo("Merge complete", f"Branch '{branch}' merged successfully.")
@@ -451,6 +452,7 @@ class TasksController:
                 capture_output=True,
                 text=True,
                 timeout=10,
+                creationflags=CREATE_NO_WINDOW,
             )
             return bool(result.stdout.strip())
         except Exception:

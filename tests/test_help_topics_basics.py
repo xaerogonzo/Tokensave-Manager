@@ -54,11 +54,40 @@ def test_switching_emits_h1():
     assert any("Switch" in t for t in h1_titles)
 
 
-def test_switching_contains_restart_warning():
+def test_switching_leads_with_the_no_restart_fact():
+    """This topic used to open with "You must restart Claude Desktop".
+
+    That was the headline for as long as nobody checked, and it is what kept
+    people quitting Desktop to change projects. The restart is real but it
+    only moves the DEFAULT graph, so the first thing the topic says now is
+    that you usually do not need one.
+    """
     ctl = _make_ctl()
     htb.switching(ctl)
-    warn_texts = [t[1] for t in ctl._calls if t[0] == "warn"]
-    assert any("restart" in t.lower() for t in warn_texts)
+    prose = [c[1] for c in ctl._calls if c[0] in ("ok", "warn", "p")]
+    assert "not need" in prose[0].lower(), prose[0]
+
+
+def test_switching_names_graph_root():
+    """Without the mechanism the reassurance is just a claim."""
+    ctl = _make_ctl()
+    htb.switching(ctl)
+    body = " ".join(c[1] for c in ctl._calls if len(c) > 1)
+    assert "graph_root" in body
+
+
+def test_switching_still_explains_the_restart():
+    """Dropping it would trade one wrong impression for another.
+
+    Changing the default project genuinely does need a Desktop restart, and
+    a user who reads only "you don't need to restart" and then pins a
+    project would be left wondering why nothing changed.
+    """
+    ctl = _make_ctl()
+    htb.switching(ctl)
+    body = " ".join(c[1] for c in ctl._calls if len(c) > 1)
+    assert "restart" in body.lower()
+    assert "DEFAULT" in body
 
 
 # ── window_tray ──────────────────────────────────────────────────────────────
@@ -218,3 +247,20 @@ def test_categories_has_override_section():
     h2_titles = [t[1] for t in ctl._calls if t[0] == "h2"]
     assert any("override" in t.lower() or "single" in t.lower()
                for t in h2_titles)
+
+
+def test_switching_separates_desktop_chats_from_claude_code():
+    """The topic explains pinning, so it has to say who pinning applies to.
+
+    Claude Code runs inside the Desktop window; without this section the
+    whole topic reads as advice for a client it does not actually govern.
+    """
+    ctl = _make_ctl()
+    htb.switching(ctl)
+
+    headings = [c[1] for c in ctl._calls if c[0] == "h2"]
+    assert any("Claude Code" in h for h in headings), headings
+
+    body = " ".join(c[1] for c in ctl._calls if len(c) > 1)
+    assert "working directory" in body, "must say what Code binds to instead"
+    assert "wrapper" in body, "must say how Desktop's chats reach the pin"

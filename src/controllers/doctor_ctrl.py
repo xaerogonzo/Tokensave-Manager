@@ -31,6 +31,7 @@ from helpers.runtime import log
 from helpers.tokensave_config import (
     read_strict_tree,
     should_recommend_enabling,
+    wrong_graph_risk,
 )
 from helpers.worktree_health import (
     find_orphaned_worktrees_for_project,
@@ -290,13 +291,31 @@ class DoctorController:
                          C["overlay0"])
         elif should_recommend_enabling(state, risk_present):
             self._on_log(
-                "  ⚠ tokensave strict_tree is off while this project has "
-                "worktrees without their own index — the exact case where a "
-                "query is answered from the wrong checkout and looks "
-                "normal. Turn it on from the Projects tab \u2014 select the "
-                "project, then \u201cEnable strict_tree\u201d \u2014 to "
-                "make those calls fail with both tree paths named instead.",
+                "  ⚠ tokensave strict_tree is off, and the wrong-graph "
+                "failure is reachable here — a query answered from another "
+                "project's index, or another checkout's, reads as perfectly "
+                "normal. Right-click the project \u2192 \U0001f5c2 Index \u2192 "
+                "\u201c\U0001f6e1 Enable strict_tree\u2026\u201d to make those calls "
+                "fail with both roots named instead.",
                 C["peach"])
+
+    def _wrong_graph_risk(self) -> bool:
+        """Several indexed projects, and a Desktop pinned to exactly one.
+
+        Read defensively: this only decides whether to print one advisory
+        line, so a missing Claude config or an unreadable search root must
+        degrade to "no evidence" rather than take the Doctor down with it.
+        """
+        try:
+            from helpers.mcp import _classify_mcp_entry, _mcp_configs
+            from helpers.project_discovery import find_projects
+            wired = any(
+                _classify_mcp_entry(p, self._cfg.raw)["state"] == "ok"
+                for _label, p in _mcp_configs())
+            count = len(find_projects(self._cfg.search_roots))
+        except Exception:                                   # noqa: BLE001
+            return False
+        return wrong_graph_risk(count, wired)
 
     def _analyse_doctor_output(self, path: str, output_lines: list,
                                returncode: int) -> None:
@@ -318,7 +337,8 @@ class DoctorController:
                 f"{o['worktree_path']} has no tokensave index of "
                 "its own — a session started there would silently "
                 "get answers about a different checkout.", C["peach"])
-        self._report_strict_tree(path, risk_present=bool(orphans))
+        self._report_strict_tree(
+            path, risk_present=bool(orphans) or self._wrong_graph_risk())
         if other_n:
             # Informational only — never worth a modal. These are agents
             # that are either not installed here or already wired.
