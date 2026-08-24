@@ -299,6 +299,96 @@ class DoctorController:
                 "fail with both roots named instead.",
                 C["peach"])
 
+    def _report_project_binding(self, path: str) -> None:
+        """Whether this project binds its own Claude Code MCP server.
+
+        Three states, and only one of them earns advice:
+
+          bound             silent
+          unbound           suggest binding, but ONLY when there is more than
+                            one indexed project -- with one there is nothing to
+                            be wrong about, the same evidence-not-nagging rule
+                            `should_recommend_enabling` documents
+          bound + shadowed  a DIFFERENT diagnostic. The .mcp.json is correct and
+                            something higher-precedence is serving anyway, so
+                            "fix the binding" would be useless advice
+
+        Deliberately never says the user-scoped entry is broken. It is
+        upstream's canonical shape and it resolves correctly much of the time --
+        measured, not assumed. The honest word is "unbound", not "wrong".
+        """
+        from helpers.mcp import _classify_mcp_entry, _project_mcp_path
+
+        try:
+            info = _classify_mcp_entry(_project_mcp_path(path), self._cfg.raw)
+        except Exception:                                    # noqa: BLE001
+            return
+
+        state = info.get("state")
+        if state == "project_mismatch":
+            # Worth saying regardless of project count: this file actively
+            # points somewhere else, and every answer here comes from another
+            # codebase looking entirely normal.
+            self._on_log("  \u26a0 " + info.get("issue", "").split(" Apply")[0],
+                         C["peach"])
+            return
+
+        if state == "ok":
+            self._report_binding_is_effective(path)
+            return
+
+        if not self._several_projects():
+            return
+        self._on_log(
+            "  \u2139 no project MCP binding \u2014 Claude Code sessions here fall "
+            "back to the user-scoped tokensave entry, which resolves by "
+            "searching upward from wherever the session started. Right-click "
+            "the project \u2192 \U0001f5c2 Index \u2192 \u201c\U0001f50c Bind to this "
+            "project\u2026\u201d to make it explicit.",
+            C["overlay0"])
+
+    def _report_binding_is_effective(self, path: str) -> None:
+        """A binding exists on disk. Is it the one Claude Code actually uses?
+
+        Asked rather than derived: Claude Code resolves local > project > user
+        and dedupes by server name, so a correct `.mcp.json` can still be
+        overridden. Computing that here would eventually report "bound" while
+        something else serves -- exactly the class of confident-wrong answer
+        this whole effort is about.
+
+        Costs a CLI call, so it runs only for projects already known to be
+        bound; unbound ones are decided from the file alone.
+        """
+        from helpers.mcp import effective_scope
+
+        try:
+            got = effective_scope(path)
+        except Exception:                                    # noqa: BLE001
+            return
+        if not got.is_known or got.is_project:
+            return                       # correct, or we could not tell
+        if got.pending_approval:
+            self._on_log(
+                "  \u23f8 project MCP binding written but not yet approved \u2014 "
+                "run `claude` in this project once and approve it.",
+                C["overlay0"])
+            return
+        if got.is_shadowed:
+            self._on_log(
+                "  \u26a0 this project has a tokensave binding, but Claude Code "
+                "is serving the %s-scoped definition instead (it takes "
+                "precedence). Editing .mcp.json will not change which server "
+                "runs." % got.scope,
+                C["peach"])
+
+    def _several_projects(self) -> bool:
+        """More than one indexed project, read defensively."""
+        try:
+            from helpers.project_discovery import find_projects
+            return len(find_projects(self._cfg.search_roots)) > 1
+        except Exception:                                    # noqa: BLE001
+            return False
+
     def _wrong_graph_risk(self) -> bool:
         """Several indexed projects, and a Desktop pinned to exactly one.
 
@@ -339,6 +429,7 @@ class DoctorController:
                 "get answers about a different checkout.", C["peach"])
         self._report_strict_tree(
             path, risk_present=bool(orphans) or self._wrong_graph_risk())
+        self._report_project_binding(path)
         if other_n:
             # Informational only — never worth a modal. These are agents
             # that are either not installed here or already wired.

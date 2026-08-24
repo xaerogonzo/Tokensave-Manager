@@ -438,6 +438,115 @@ def _apply_mcp_fix(cfg_path: str, proposed_entry: dict) -> tuple[bool, str]:
     return True, f"Wrote tokensave entry to {cfg_path}{backup_msg}"
 
 
+# ── which definition is Claude Code actually using? ───────────────────────
+
+SCOPE_PROJECT = "project"
+SCOPE_USER = "user"
+SCOPE_LOCAL = "local"
+SCOPE_ABSENT = "absent"
+SCOPE_UNKNOWN = "unknown"
+
+#: Claude Code resolves local > project > user and dedupes by server NAME, so a
+#: project `.mcp.json` does not automatically win: a local definition for the
+#: same name overrides it, and an unapproved project entry does not take effect
+#: at all. Rather than re-implement that precedence — and eventually claim
+#: "bound" while something else is serving — ask the client, which prints the
+#: winner directly.
+
+
+@dataclasses.dataclass(frozen=True)
+class EffectiveScope:
+    """What `claude mcp get <name>` reports for a project."""
+
+    scope: str
+    pending_approval: bool = False
+    connected: bool = False
+    detail: str = ""
+
+    @property
+    def is_known(self) -> bool:
+        return self.scope != SCOPE_UNKNOWN
+
+    @property
+    def is_project(self) -> bool:
+        return self.scope == SCOPE_PROJECT
+
+    @property
+    def is_shadowed(self) -> bool:
+        """A project binding exists on disk but something else is serving.
+
+        Only meaningful for a project the caller already knows is bound; this
+        type cannot tell "shadowed" from "never bound" on its own.
+        """
+        return self.scope in (SCOPE_USER, SCOPE_LOCAL)
+
+
+def _parse_mcp_get(text: str) -> "EffectiveScope":
+    """Parse `claude mcp get` output. Pure, so the shapes can be tested.
+
+    Keyed off the words the CLI actually prints, captured from live runs:
+
+        Scope: Project config (shared via .mcp.json)
+        Scope: User config (available in all your projects)
+        Status: ⏸ Pending approval (run `claude` to approve)
+        Status: ✔ Connected
+    """
+    low = (text or "").lower()
+    if "no mcp server" in low or "not found" in low:
+        return EffectiveScope(SCOPE_ABSENT, detail=text.strip()[:200])
+
+    scope = SCOPE_UNKNOWN
+    for line in (text or "").splitlines():
+        stripped = line.strip().lower()
+        if not stripped.startswith("scope:"):
+            continue
+        if "project config" in stripped:
+            scope = SCOPE_PROJECT
+        elif "local config" in stripped:
+            scope = SCOPE_LOCAL
+        elif "user config" in stripped:
+            scope = SCOPE_USER
+        break
+
+    return EffectiveScope(
+        scope,
+        pending_approval="pending approval" in low,
+        connected="connected" in low and "pending approval" not in low,
+        detail=text.strip()[:200])
+
+
+def effective_scope(project_root: str, server: str = "tokensave",
+                    timeout: int = 45) -> "EffectiveScope":
+    """Ask Claude Code which `server` definition wins inside `project_root`.
+
+    Run with cwd set to the project, because the answer is per-directory. Any
+    failure — no `claude` on PATH, a timeout, unexpected output — comes back as
+    UNKNOWN rather than a guess: reporting "shadowed" because a CLI call fell
+    over would send the user hunting for a conflict that does not exist.
+    """
+    if not project_root or not os.path.isdir(project_root):
+        return EffectiveScope(SCOPE_UNKNOWN, detail="no such project directory")
+
+    # Resolve the launcher explicitly. On Windows `claude` is an npm shim
+    # (`claude.CMD`), and CreateProcess does not apply PATHEXT the way a shell
+    # does -- so a bare "claude" here fails with WinError 2 even though the
+    # same command works in a terminal. shutil.which does apply it.
+    import shutil
+    exe = shutil.which("claude")
+    if not exe:
+        return EffectiveScope(SCOPE_UNKNOWN,
+                              detail="the `claude` CLI is not on PATH")
+    try:
+        proc = subprocess.run(
+            [exe, "mcp", "get", server],
+            capture_output=True, text=True, timeout=timeout, cwd=project_root,
+            encoding="utf-8", errors="replace",
+            creationflags=CREATE_NO_WINDOW)
+    except (OSError, subprocess.TimeoutExpired) as exc:
+        return EffectiveScope(SCOPE_UNKNOWN, detail=str(exc)[:200])
+    return _parse_mcp_get((proc.stdout or "") + "\n" + (proc.stderr or ""))
+
+
 def _is_claude_running() -> dict:
     """Detect running Claude Desktop / Claude Code processes.
 

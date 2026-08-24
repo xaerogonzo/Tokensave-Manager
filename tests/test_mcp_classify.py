@@ -23,6 +23,13 @@ import pytest
 
 from helpers.mcp import (
     PROJECT_PATH_ARG,
+    SCOPE_ABSENT,
+    SCOPE_LOCAL,
+    SCOPE_PROJECT,
+    SCOPE_UNKNOWN,
+    SCOPE_USER,
+    _parse_mcp_get,
+    effective_scope,
     _apply_mcp_fix,
     _canonical_mcp_entry,
     _canonical_project_entry,
@@ -400,3 +407,94 @@ def test_empty_paths_are_never_equal():
     """A missing `-p` value must not compare equal to a missing project root
     and quietly read as correctly bound."""
     assert not _same_project("", "")
+
+
+# ── which definition actually wins ────────────────────────────────────────
+
+# Claude Code resolves local > project > user and dedupes by server NAME, so a
+# project `.mcp.json` does not automatically win — an unapproved one does not
+# take effect at all, and a local definition overrides it. Re-implementing that
+# precedence would eventually have the manager report "bound" while something
+# else is serving, so it asks the client instead. These samples are captured
+# verbatim from live `claude mcp get` runs.
+
+USER_SAMPLE = """tokensave:
+  Scope: User config (available in all your projects)
+  Status: ✔ Connected
+
+To remove this server, run: claude mcp remove tokensave -s user"""
+
+PROJECT_SAMPLE = """tsprobe:
+  Scope: Project config (shared via .mcp.json)
+  Status: ⏸ Pending approval (run `claude` to approve)
+
+To remove this server, run: claude mcp remove tsprobe -s project"""
+
+LOCAL_SAMPLE = """tokensave:
+  Scope: Local config (private to you in this project)
+  Status: ✔ Connected"""
+
+
+def test_a_user_scoped_winner_is_recognised():
+    got = _parse_mcp_get(USER_SAMPLE)
+    assert got.scope == SCOPE_USER
+    assert got.connected and not got.pending_approval
+
+
+def test_a_project_scoped_winner_is_recognised():
+    got = _parse_mcp_get(PROJECT_SAMPLE)
+    assert got.scope == SCOPE_PROJECT
+    assert got.is_project
+
+
+def test_pending_approval_is_not_connected():
+    """An unapproved project entry exists but is not serving. Treating it as
+    bound would report success for a binding that never took effect."""
+    got = _parse_mcp_get(PROJECT_SAMPLE)
+    assert got.pending_approval is True
+    assert got.connected is False
+
+
+def test_a_local_definition_is_recognised_as_shadowing():
+    """The case that makes "fix the .mcp.json" insufficient advice."""
+    got = _parse_mcp_get(LOCAL_SAMPLE)
+    assert got.scope == SCOPE_LOCAL
+    assert got.is_shadowed
+
+
+def test_a_project_scoped_winner_is_not_shadowed():
+    assert _parse_mcp_get(PROJECT_SAMPLE).is_shadowed is False
+
+
+def test_an_absent_server_is_not_unknown():
+    """"No such server" is a fact; "could not tell" is not. Collapsing them
+    would let a failed lookup read as a definite absence."""
+    got = _parse_mcp_get("No MCP server found with name: tokensave")
+    assert got.scope == SCOPE_ABSENT
+    assert got.is_known
+
+
+def test_unrecognised_output_is_unknown_not_a_guess():
+    for text in ("", "something entirely different", "Scope: who knows"):
+        assert _parse_mcp_get(text).scope == SCOPE_UNKNOWN
+
+
+def test_a_missing_project_directory_is_unknown(tmp_path):
+    got = effective_scope(str(tmp_path / "nope"))
+    assert got.scope == SCOPE_UNKNOWN
+
+
+def test_a_missing_cli_is_unknown_rather_than_shadowed(monkeypatch, tmp_path):
+    """A failed lookup must never present as a conflict.
+
+    Reporting "shadowed" because the CLI could not be found would send the user
+    hunting for a competing definition that does not exist.
+    """
+    import shutil as _shutil
+    monkeypatch.setattr(_shutil, "which", lambda *a, **k: None)
+
+    got = effective_scope(str(tmp_path))
+
+    assert got.scope == SCOPE_UNKNOWN
+    assert got.is_shadowed is False
+    assert "not on PATH" in got.detail
