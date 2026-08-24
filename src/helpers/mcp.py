@@ -429,13 +429,81 @@ def _apply_mcp_fix(cfg_path: str, proposed_entry: dict) -> tuple[bool, str]:
     servers = data.setdefault("mcpServers", {})
     servers["tokensave"] = proposed_entry
 
-    try:
-        with open(cfg_path, "w", encoding="utf-8") as f:
-            json.dump(data, f, indent=2)
-            f.write("\n")
-    except OSError as e:
-        return False, f"Could not write config: {e}"
+    ok, err = _write_json_atomic(cfg_path, data)
+    if not ok:
+        return False, err
     return True, f"Wrote tokensave entry to {cfg_path}{backup_msg}"
+
+
+def _write_json_atomic(cfg_path: str, data: dict) -> "tuple[bool, str]":
+    """Temp file + os.replace, never a truncating in-place write.
+
+    A half-written Claude config does not read as damaged, it reads as
+    *absent* — the classifier would call it `unparseable` at best, and Claude
+    itself would lose every server in the file. The failure would be far worse
+    than the failed write it came from. Same reasoning as
+    `tokensave_config.set_strict_tree`.
+    """
+    import tempfile
+
+    directory = os.path.dirname(cfg_path) or "."
+    tmp = ""
+    try:
+        fd, tmp = tempfile.mkstemp(dir=directory, prefix=".mcp_", suffix=".tmp")
+        with os.fdopen(fd, "w", encoding="utf-8") as fh:
+            json.dump(data, fh, indent=2)
+            fh.write("\n")
+        os.replace(tmp, cfg_path)
+    except OSError as exc:
+        if tmp and os.path.exists(tmp):
+            try:
+                os.remove(tmp)
+            except OSError:
+                pass
+        return False, f"Could not write config: {exc}"
+    return True, ""
+
+
+def remove_mcp_entry(cfg_path: str, server: str = "tokensave") -> "tuple[bool, str]":
+    """Delete one server from a Claude MCP config. Returns (changed, detail).
+
+    Used by the migration off the user-scoped `tokensave`, which cannot be a
+    side effect of binding a project: Claude Code dedupes by server name, so
+    once projects are bound the user-scoped definition is what shadows them —
+    but removing it also takes tokensave away from every project that is NOT
+    bound. That is a decision, not a cleanup step.
+
+    Refuses rather than guesses: an unparseable file is left alone, and an
+    already-absent entry is reported as no change rather than as success.
+    """
+    if not cfg_path or not os.path.isfile(cfg_path):
+        return False, f"No such config file: {cfg_path}"
+
+    try:
+        backup = cfg_path + ".backup." + str(int(time.time() * 1000))
+        shutil.copy2(cfg_path, backup)
+    except OSError as exc:
+        return False, f"Could not write backup: {exc}"
+
+    try:
+        with open(cfg_path, encoding="utf-8") as fh:
+            data = json.load(fh)
+    except (OSError, json.JSONDecodeError) as exc:
+        return False, f"Could not parse existing file: {exc}"
+    if not isinstance(data, dict):
+        return False, "Config root is not a JSON object"
+
+    servers = data.get("mcpServers")
+    if not isinstance(servers, dict) or server not in servers:
+        return False, f"No '{server}' entry in {cfg_path} — nothing to remove."
+
+    removed = servers.pop(server)
+    ok, err = _write_json_atomic(cfg_path, data)
+    if not ok:
+        return False, err
+    return True, ("Removed '%s' from %s (backup: %s)\n\nRemoved entry:\n%s"
+                  % (server, cfg_path, os.path.basename(backup),
+                     json.dumps(removed, indent=2)))
 
 
 # ── which definition is Claude Code actually using? ───────────────────────

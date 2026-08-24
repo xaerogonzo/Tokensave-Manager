@@ -30,6 +30,7 @@ from helpers.mcp import (
     SCOPE_USER,
     _parse_mcp_get,
     effective_scope,
+    remove_mcp_entry,
     _apply_mcp_fix,
     _canonical_mcp_entry,
     _canonical_project_entry,
@@ -498,3 +499,99 @@ def test_a_missing_cli_is_unknown_rather_than_shadowed(monkeypatch, tmp_path):
     assert got.scope == SCOPE_UNKNOWN
     assert got.is_shadowed is False
     assert "not on PATH" in got.detail
+
+
+# ── removing the user-scoped entry ────────────────────────────────────────
+
+# The migration off user scope cannot be a side effect of binding a project.
+# Claude Code dedupes by server NAME, so once projects are bound the
+# user-scoped definition is what shadows them — but removing it also takes
+# tokensave away from every project that is NOT bound. That is a decision, and
+# these tests are mostly about the removal refusing to guess.
+
+
+def test_removal_takes_the_entry_and_leaves_the_neighbours(code_cfg):
+    _write(code_cfg, servers={
+        "tokensave": {"command": "x"},
+        "codegraph": {"command": "codegraph", "args": ["serve", "--mcp"]}})
+
+    ok, detail = remove_mcp_entry(code_cfg)
+
+    assert ok, detail
+    with open(code_cfg, encoding="utf-8") as fh:
+        servers = json.load(fh)["mcpServers"]
+    assert "tokensave" not in servers
+    assert servers["codegraph"] == {"command": "codegraph", "args": ["serve", "--mcp"]}
+
+
+def test_removal_reports_what_it_removed(code_cfg):
+    """There is no undo button; the entry has to come back in the result so it
+    can be pasted into a restore."""
+    _write(code_cfg, servers={"tokensave": {"command": "very-specific-value"}})
+
+    ok, detail = remove_mcp_entry(code_cfg)
+
+    assert ok
+    assert "very-specific-value" in detail
+
+
+def test_removal_writes_a_backup(code_cfg, tmp_path):
+    _write(code_cfg, servers={"tokensave": {"command": "x"}})
+
+    remove_mcp_entry(code_cfg)
+
+    backups = [p for p in os.listdir(tmp_path) if ".backup." in p]
+    assert len(backups) == 1, backups
+    with open(os.path.join(str(tmp_path), backups[0]), encoding="utf-8") as fh:
+        assert "tokensave" in json.load(fh)["mcpServers"]
+
+
+def test_removing_an_absent_entry_is_not_success(code_cfg):
+    """"Nothing to do" must not read as "done" — the migration verifies its
+    own outcome, and a false success would let it proceed on a bad premise."""
+    _write(code_cfg, servers={"codegraph": {"command": "x"}})
+
+    ok, detail = remove_mcp_entry(code_cfg)
+
+    assert ok is False
+    assert "nothing to remove" in detail.lower()
+
+
+def test_removal_refuses_an_unparseable_file(code_cfg):
+    _write(code_cfg, raw_text="{ not json")
+
+    ok, detail = remove_mcp_entry(code_cfg)
+
+    assert ok is False
+    assert "parse" in detail.lower()
+    assert open(code_cfg, encoding="utf-8").read() == "{ not json"
+
+
+def test_removal_refuses_a_missing_file(tmp_path):
+    ok, detail = remove_mcp_entry(str(tmp_path / "gone.json"))
+    assert ok is False
+    assert "No such config file" in detail
+
+
+def test_removal_leaves_no_temp_files_behind(code_cfg, tmp_path):
+    """Atomic write via temp + os.replace; a stray .mcp_*.tmp would mean the
+    replace path is not doing what it claims."""
+    _write(code_cfg, servers={"tokensave": {"command": "x"}})
+
+    remove_mcp_entry(code_cfg)
+
+    leftovers = [p for p in os.listdir(tmp_path) if p.startswith(".mcp_")]
+    assert leftovers == [], leftovers
+
+
+def test_other_top_level_keys_survive_removal(code_cfg):
+    """`~/.claude.json` holds project history and approvals, not just servers."""
+    with open(code_cfg, "w", encoding="utf-8") as fh:
+        json.dump({"numStartups": 7, "projects": {"a": {}},
+                   "mcpServers": {"tokensave": {"command": "x"}}}, fh)
+
+    assert remove_mcp_entry(code_cfg)[0] is True
+
+    with open(code_cfg, encoding="utf-8") as fh:
+        data = json.load(fh)
+    assert data["numStartups"] == 7 and data["projects"] == {"a": {}}

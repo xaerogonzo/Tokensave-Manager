@@ -34,7 +34,8 @@ from constants import C
 from theme import bind_mousewheel
 from helpers.mcp import (
     _mcp_configs, _classify_mcp_entry, _apply_mcp_fix, _is_claude_running,
-    _project_mcp_path,
+    _mcp_code_cfg_path, _project_mcp_path, effective_scope,
+    remove_mcp_entry,
 )
 
 if TYPE_CHECKING:
@@ -232,7 +233,10 @@ class MCPConfigDialog(tk.Toplevel):
             for name, root, info in bound:
                 self._render_block(name, _project_mcp_path(root),
                                    blocked_reason=blocked)
+            self._render_migration(rows)
             return
+
+        self._render_migration(rows)
 
         strip = tk.Frame(self._body, bg=C["base"])
         strip.pack(fill=tk.X, padx=4, pady=(6, 2))
@@ -322,6 +326,189 @@ class MCPConfigDialog(tk.Toplevel):
                       "the environment they started with." if ok else ""),
             parent=self)
         self._render()
+
+    def _migration_status(self, rows) -> dict:
+        """Counts for the migration guard. Reads files only — no CLI calls.
+
+        Readiness deliberately does NOT mean "verified serving". While the
+        user-scoped entry still exists it is the thing that may be shadowing a
+        binding, so demanding proof of correct service *before* removing it
+        would be asking for an outcome the removal itself produces.
+        Verification happens after, on a representative bound project.
+        """
+        raw = self._cfg.raw if isinstance(self._cfg.raw, dict) else {}
+        skips = raw.get("mcp_skip_warnings") or []
+        bound, skipped, remaining = [], [], []
+        for name, root, info in rows:
+            if info["state"] == "ok":
+                bound.append((name, root))
+            elif _project_mcp_path(root) in skips:
+                skipped.append((name, root))
+            else:
+                remaining.append((name, root))
+        return {"bound": bound, "skipped": skipped, "remaining": remaining,
+                "ready": not remaining and bool(bound)}
+
+    def _render_migration(self, rows):
+        """Where the user-scoped fallback stands, and the action to retire it.
+
+        Stated rather than hidden: once the user-scoped entry is gone, a
+        project with no binding has no tokensave at all. That is the deliberate
+        trade — determinism instead of a fallback that is usually right — and
+        it is not something to discover afterwards.
+        """
+        st = self._migration_status(rows)
+        code_cfg = _mcp_code_cfg_path()
+        info = _classify_mcp_entry(code_cfg, self._cfg.raw)
+        still_there = info.get("current") is not None
+
+        box = tk.Frame(self._body, bg=C["surface0"])
+        box.pack(fill=tk.X, padx=4, pady=(12, 4), ipady=6)
+
+        if not still_there:
+            tk.Label(box,
+                     text="  ✓  Migration complete — no user-scoped tokensave "
+                          "entry remains. Each project serves its own graph.",
+                     font=("Segoe UI", 9, "bold"),
+                     bg=C["surface0"], fg=C["green"], anchor=tk.W,
+                     justify=tk.LEFT, wraplength=740).pack(fill=tk.X, padx=8)
+            return
+
+        tk.Label(box, text="  ⚠  User-scoped fallback is still active",
+                 font=("Segoe UI", 10, "bold"),
+                 bg=C["surface0"], fg=C["peach"], anchor=tk.W).pack(
+            fill=tk.X, padx=8, pady=(4, 2))
+        tk.Label(box,
+                 text="  %d bound · %d skipped · %d still to bind"
+                      % (len(st["bound"]), len(st["skipped"]),
+                         len(st["remaining"])),
+                 font=("Consolas", 9), bg=C["surface0"], fg=C["text"],
+                 anchor=tk.W).pack(fill=tk.X, padx=8)
+        tk.Label(box,
+                 text=("  Claude Code dedupes MCP servers by name, so while a "
+                       "user-scoped `tokensave` exists it can shadow a project "
+                       "binding. Removing it makes each project's own binding "
+                       "authoritative — and leaves any UNBOUND project with no "
+                       "tokensave at all. Bind or skip each project first."),
+                 font=("Segoe UI", 8), bg=C["surface0"], fg=C["overlay0"],
+                 justify=tk.LEFT, wraplength=740, anchor=tk.W).pack(
+            fill=tk.X, padx=8, pady=(2, 4))
+
+        if st["ready"]:
+            ttk.Button(box, text="Remove user-scoped tokensave…",
+                       style="Primary.TButton",
+                       command=self._remove_user_scoped).pack(
+                anchor=tk.W, padx=8, pady=(2, 2))
+        else:
+            names = ", ".join(n for n, _ in st["remaining"][:4])
+            more = "" if len(st["remaining"]) <= 4 else " …"
+            tk.Label(box,
+                     text=("  Not offered yet — %s%s %s still unbound and not "
+                           "skipped." % (names, more,
+                                         "is" if len(st["remaining"]) == 1
+                                         else "are"))
+                          if st["remaining"] else
+                          "  Not offered yet — bind at least one project first.",
+                     font=("Segoe UI", 9), bg=C["surface0"], fg=C["overlay0"],
+                     justify=tk.LEFT, wraplength=740, anchor=tk.W).pack(
+                fill=tk.X, padx=8, pady=(0, 4))
+
+    def _remove_user_scoped(self):
+        """Its own reviewed operation: diff, backup, apply, then VERIFY.
+
+        Never a side effect of binding one project. And the result is not
+        assumed — after removal a representative bound project is asked what
+        Claude Code now serves, because "the file changed" and "the right
+        server runs" are different claims. That distinction is the whole
+        lesson of the pin watcher.
+        """
+        code_cfg = _mcp_code_cfg_path()
+        info = _classify_mcp_entry(code_cfg, self._cfg.raw)
+        current = info.get("current")
+        if current is None:
+            messagebox.showinfo("Nothing to remove",
+                                "No user-scoped tokensave entry found in\n%s"
+                                % code_cfg, parent=self)
+            return
+
+        if not messagebox.askyesno(
+                "Remove user-scoped tokensave",
+                "Remove this entry from\n%s ?\n\n%s\n\n"
+                "After this, a Claude Code session only gets tokensave if its "
+                "project has its own .mcp.json binding. Projects you skipped "
+                "will have no tokensave at all.\n\n"
+                "A timestamped backup is written first, and the removed entry "
+                "is shown afterwards so it can be restored by hand."
+                % (code_cfg, json.dumps(current, indent=2)),
+                parent=self):
+            return
+
+        ok, detail = remove_mcp_entry(code_cfg)
+        if not ok:
+            self._log_to_app("MCP migration FAILED: %s" % detail, C["red"])
+            messagebox.showerror("Removal failed", detail, parent=self)
+            self._render()
+            return
+
+        self._log_to_app("MCP migration: removed the user-scoped tokensave "
+                         "entry.", C["green"])
+        self._verify_migration(detail)
+        self._render()
+
+    def _verify_migration(self, removal_detail: str):
+        """Ask Claude Code what a bound project now serves.
+
+        A failure here is reported as `verification_failed`, not as success
+        with a caveat: the user needs to know the difference between "the file
+        changed" and "the right server runs".
+        """
+        rows = []
+        try:
+            from helpers.project_discovery import find_projects
+            for proj in find_projects(self._cfg.search_roots):
+                root = proj.get("path") if isinstance(proj, dict) else str(proj)
+                if not root:
+                    continue
+                if _classify_mcp_entry(_project_mcp_path(root),
+                                       self._cfg.raw)["state"] == "ok":
+                    rows.append(root)
+        except Exception:                                    # noqa: BLE001
+            rows = []
+
+        if not rows:
+            messagebox.showinfo(
+                "Removed — not verified",
+                removal_detail + "\n\nNo bound project was available to check "
+                "against, so this was not verified end to end.",
+                parent=self)
+            return
+
+        root = rows[0]
+        got = effective_scope(root)
+        if got.is_project or got.pending_approval:
+            messagebox.showinfo(
+                "Migration verified",
+                removal_detail
+                + "\n\nClaude Code now reports the PROJECT-scoped definition "
+                  "in:\n%s\n\nRestart any running Claude Code session before "
+                  "relying on it." % root,
+                parent=self)
+            self._log_to_app("MCP migration verified against %s." % root,
+                             C["green"])
+            return
+
+        self._log_to_app(
+            "MCP migration verification_failed: %s reports scope=%s."
+            % (root, got.scope), C["peach"])
+        messagebox.showwarning(
+            "Removed, but verification failed",
+            removal_detail
+            + "\n\nverification_failed: after removal, %s still reports "
+              "scope=%s rather than the project definition.\n\nThe file "
+              "changed but the expected server is not the one serving. Do not "
+              "assume the migration succeeded."
+            % (root, got.scope),
+            parent=self)
 
     def _toggle_bound(self):
         self._show_bound = not self._show_bound
