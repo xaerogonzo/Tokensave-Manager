@@ -146,12 +146,69 @@ def _canonical_mcp_entry(cfg: dict) -> dict:
     return {"command": py, "args": [wrapper]}
 
 
+#: What a project-scoped entry passes as `-p`. A literal "." rather than an
+#: absolute path or ${CLAUDE_PROJECT_DIR}, and both halves of that were
+#: measured rather than assumed (Roadmap-11 Phase 0):
+#:
+#:   * Claude Code spawns a project-scoped MCP server with cwd = the project
+#:     root, even when the session was launched from a subdirectory. Verified by
+#:     elimination: an explicit path does not search upward (upstream #372), so
+#:     a cwd of `<root>/src` would have errored instead of answering.
+#:   * `${CLAUDE_PROJECT_DIR:-X}` resolves to X — the variable is not set at
+#:     config-resolution time, and does not appear in a Claude Code session's
+#:     environment at all. The documented-looking form silently degrades to its
+#:     default, so it buys nothing over ".".
+#:
+#: "." is what keeps the file portable: a `.mcp.json` is project-scoped config
+#: meant to be shared through version control, and an absolute path would make
+#: it a machine-local file wearing a shared file's name.
+PROJECT_PATH_ARG = "."
+
+
+def _project_mcp_path(project_root: str) -> str:
+    """Where Claude Code looks for a project's own MCP config."""
+    return os.path.join(project_root, ".mcp.json")
+
+
+def _canonical_project_entry(cfg: dict) -> dict:
+    """The entry the manager wants in a project's `.mcp.json`.
+
+    Takes no project root **on purpose**. It returns a template, not an
+    interpolated path, which is what structurally prevents this machine's paths
+    from reaching a file other people may check out. The project root is used
+    for classifying an existing entry and for choosing a verification cwd —
+    never for building this.
+
+    Deliberately not the wrapper: the wrapper exists to read the Desktop pin,
+    and a project binding must ignore the pin entirely. `cfg` is accepted for
+    symmetry with :func:`_canonical_mcp_entry` and for future binding modes.
+    """
+    return {"command": "tokensave", "args": ["serve", "-p", PROJECT_PATH_ARG]}
+
+
+def _same_project(a: str, b: str) -> bool:
+    """Do two paths name the same checkout?
+
+    `D:\\P\\Foo`, `D:\\P\\.\\Foo` and `D:\\P\\Foo\\` are one directory, and on
+    Windows so are case variants and junction aliases. Comparing raw strings
+    would report "bound to a different project" for a project bound to itself.
+    """
+    def norm(p):
+        try:
+            return os.path.normcase(os.path.realpath(os.path.abspath(p)))
+        except (OSError, ValueError):
+            return os.path.normcase(p)
+    return bool(a) and bool(b) and norm(a) == norm(b)
+
+
 @dataclasses.dataclass
 class _McpCtx:
     cmd: str
     cmd_lower: str
     args: list
     is_claude_code: bool
+    is_project_scoped: bool = False
+    project_root: str = ""
 
 
 def _chk_bundled_wrapper(ctx: "_McpCtx", base: dict) -> dict | None:
@@ -171,6 +228,49 @@ def _chk_python_wrapper(ctx: "_McpCtx", base: dict) -> dict | None:
     return {**base, "state": "wrong_wrapper", "label": "⚠ wrapper path missing",
             "issue": (f"Points at {ctx.args[0]} but that file doesn't exist. "
                       "Click Apply to update to the current wrapper location.")}
+
+
+def _chk_project_scoped(ctx: "_McpCtx", base: dict) -> dict | None:
+    """Verdicts for a project's own `.mcp.json`, where the rules invert.
+
+    In a global config a hardcoded `-p` is a defect — it locks every session to
+    one project. In a project-scoped file it is the entire point, and a bare
+    `serve` is the defect: this is the one place with enough information to bind
+    explicitly, and declining to use it falls back to cwd resolution.
+    """
+    if not ctx.is_project_scoped:
+        return None
+
+    args = ctx.args if isinstance(ctx.args, list) else []
+    if "-p" not in args:
+        return {**base, "state": "project_unbound",
+                "label": "\u26a0 project entry is unbound",
+                "issue": ("This project's .mcp.json runs `serve` without `-p`, so "
+                          "it falls back to cwd resolution instead of binding "
+                          "explicitly. Click Apply to bind it to this project.")}
+    try:
+        target = args[args.index("-p") + 1]
+    except (IndexError, ValueError):
+        target = ""
+
+    # The template form is correct by construction: Claude Code spawns the
+    # server at the project root, so "." IS this project.
+    if target == PROJECT_PATH_ARG:
+        return {**base, "state": "ok", "label": "\u2713 bound to this project",
+                "issue": ""}
+    if _same_project(target, ctx.project_root):
+        return {**base, "state": "project_absolute",
+                "label": "\u26a0 bound by absolute path",
+                "issue": (f"Bound to the right project, but as \"{target}\" — a "
+                          "path that only exists on this machine. A .mcp.json is "
+                          "shared through version control; Apply rewrites it to "
+                          "the portable form.")}
+    return {**base, "state": "project_mismatch",
+            "label": "\u26a0 bound to a DIFFERENT project",
+            "issue": (f"This file binds tokensave to \"{target}\", which is not "
+                      "this project. Every query here would be answered from "
+                      "another codebase and look completely normal. Apply to "
+                      "rebind.")}
 
 
 def _chk_direct_serve(ctx: "_McpCtx", base: dict) -> dict | None:
@@ -197,7 +297,11 @@ def _chk_direct_serve(ctx: "_McpCtx", base: dict) -> dict | None:
                       "Desktop restart. Click Apply to route through the wrapper.")}
 
 
-_MCP_CMD_CHECKERS = [_chk_bundled_wrapper, _chk_python_wrapper, _chk_direct_serve]
+# Project scope runs FIRST: inside a `.mcp.json` its verdicts replace the
+# global ones entirely, and it matches on any command shape (the binary may
+# be named `tokensave` off PATH rather than `tokensave.exe`).
+_MCP_CMD_CHECKERS = [_chk_project_scoped, _chk_bundled_wrapper,
+                     _chk_python_wrapper, _chk_direct_serve]
 
 
 def _classify_mcp_entry(cfg_path: str, cfg: dict) -> dict:
@@ -234,7 +338,20 @@ def _classify_mcp_entry(cfg_path: str, cfg: dict) -> dict:
 
     Pure function — no side effects. Safe to call on every startup.
     """
-    proposed = _canonical_mcp_entry(cfg)
+    # Scope is derived from the path, so no caller had to change. A
+    # `.mcp.json` counts as project-scoped only when its directory actually
+    # holds a tokensave index -- the filename alone would let a stray
+    # `somewhere/.mcp.json` be judged by project rules it has nothing to do
+    # with.
+    project_root = ""
+    if os.path.basename(cfg_path).lower() == ".mcp.json":
+        candidate = os.path.dirname(cfg_path)
+        if os.path.isdir(os.path.join(candidate, ".tokensave")):
+            project_root = candidate
+    is_project_scoped = bool(project_root)
+
+    proposed = (_canonical_project_entry(cfg) if is_project_scoped
+                else _canonical_mcp_entry(cfg))
     base = {"cfg_path": cfg_path, "current": None, "proposed": proposed}
     is_claude_code = cfg_path.lower().endswith(".claude.json")
 
@@ -263,7 +380,8 @@ def _classify_mcp_entry(cfg_path: str, cfg: dict) -> dict:
     cmd = (entry.get("command") or "").strip()
     args = entry.get("args") or []
     ctx = _McpCtx(cmd=cmd, cmd_lower=cmd.lower().replace("/", os.sep),
-                  args=args, is_claude_code=is_claude_code)
+                  args=args, is_claude_code=is_claude_code,
+                  is_project_scoped=is_project_scoped, project_root=project_root)
 
     for checker in _MCP_CMD_CHECKERS:
         result = checker(ctx, base)
