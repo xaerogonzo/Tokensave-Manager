@@ -394,6 +394,56 @@ Rules are grouped by subsystem. The top **Working Rules** section governs *how* 
 - **`cmd.exe` multi-quote parsing**: when both an exe path and an argument contain spaces, `cmd.exe` strips the outermost quotes. The fix used in `helpers/claude_cli.py` is the `""outer""` double-double-quote wrapper passed as a raw string with `CREATE_NEW_CONSOLE`, never as a list. See the helper's docstring before adding similar patterns.
 - **`_shell_quote_win(path)`** (in `helpers/scaffold.py`) wraps a path in double-quotes if it contains spaces, escaping any embedded `"`. Use it for every path embedded in a **cmd-compatible hook command string** (the `"command"` value in `.claude/settings.json` hook JSON). NOT for PowerShell, bare subprocess lists, or contexts with variable expansion. It is the only correct quoting path for hook JSON — do not inline equivalent logic elsewhere.
 
+### Driving the app for a live check — do NOT use the mouse
+
+Some findings only exist in the running window, so live checks are routine. **Do
+not drive them through the machine's input queue.** `SetCursorPos` +
+`mouse_event` jumps the cursor, requires the Manager to hold focus for every
+step, and makes the screen unusable for the length of a run. It is also fragile
+in a way that reads as an app bug — during the Roadmap-11 session a click
+intended for the Manager landed in a browser and started its dictation
+recorder, and `SetForegroundWindow` was refused by Windows' foreground lock
+anyway.
+
+**Script the app from inside instead.** `TOKENSAVE_MANAGER_DRIVE` names a JSON
+file of steps (`src/debug_drive.py` documents the shape), run on Tk's own timer
+inside the process:
+
+```bash
+TOKENSAVE_MANAGER_DRIVE=/path/to/script.json python src/app.py
+```
+
+    {"do": "tab",    "name": "Projects"}     matches on containment, so no glyph
+    {"do": "dialog", "name": "mcp"}          also "settings"; grab is released
+    {"do": "click",  "text": "show"}         Button.invoke() — no cursor
+    {"do": "scroll", "to": "bottom"}
+    {"do": "report", "what": "mcp"}          per-row state + badge + issue
+    {"do": "shot",   "path": "C:/tmp/x.png"}
+    {"do": "wait"} {"do": "quit"}
+
+`after_ms` on any step is how long to wait BEFORE the next one, which is how a
+background check is waited on (default 400 ms). Give `shot` an **absolute**
+path outside the repo.
+
+**`shot` is a `PrintWindow` render, not a screen grab** (`helpers/window_capture.py`),
+so the window can sit behind whatever you are working in, or be driven with
+nothing on screen. PNG is encoded longhand with `zlib` — Pillow would be this
+project's first runtime dependency and the import guard would reject it.
+
+**Prefer `report` over `shot`.** A screenshot has to be looked at; a report of
+what each row actually says can be diffed, pasted and asserted on. For "is this
+row claiming something it cannot know", the label text *is* the finding — that
+is how the ten false-green MCP rows were confirmed.
+
+Two traps, both already paid for: a `click` whose command re-renders the pane
+**destroys the button**, so read its label before `invoke()`; and `_say()`
+exists because every badge here is `✓`/`⚠`/`✗` and a cp1252 console raises
+`UnicodeEncodeError` inside the step handler, which stops the timer chain and
+looks exactly like the app hanging.
+
+The same pattern lives in Fortuna Lab (`FORTUNA_DRIVE`) and OpenChem Studio
+(`OPENCHEM_DRIVE`); this is the Tk port of it.
+
 ### GUI / Tkinter
 
 - **All tkinter widget updates from background threads must go through `self.after(0, ...)`** with a `winfo_exists()` guard. Direct widget calls from threads will crash. Background-built widgets must be constructed on the main thread via `after(0, ...)` — never inside the worker.
