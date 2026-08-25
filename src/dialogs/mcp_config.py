@@ -146,6 +146,9 @@ class MCPConfigDialog(UiPumpMixin, tk.Toplevel):
         # Bumped on every render so a verification still in flight from the
         # previous one cannot write a stale badge into fresh widgets.
         self._verify_gen = 0
+        # Collapsed by default: it needs no action, and a permanently
+        # expanded warning at the top of the dialog reads as a fault.
+        self._show_dups = False
         self._start_ui_pump()
         self._render()
 
@@ -202,34 +205,62 @@ class MCPConfigDialog(UiPumpMixin, tk.Toplevel):
         return "⚠  " + "\n⚠  ".join(parts)
 
     def _render_duplicate_keys(self):
-        """Warn when one directory is recorded under several spellings.
+        """Note — quietly — that one directory is recorded under several spellings.
 
-        Not a cosmetic complaint: approval, trust and allowed-tools are stored
-        per key, so duplicates mean a session's settings depend on how its
-        directory was spelled at launch. Reported without a repair button —
-        merging two entries means choosing whose approvals survive, which
-        belongs in front of the user under the show-diff protocol rather than
-        inside a status render.
+        This was a ⚠ block listing every duplicate, and it dominated the top of
+        the dialog while describing something that needs no action. Two reasons
+        it is now collapsed and informational:
+
+        Its severity was inherited from a claim that has since stopped being
+        true. It warned that duplicates mean "two independent sets of MCP
+        approvals" — but approval lives in each project's own
+        `.claude/settings.local.json`, not in these keys, so the part that
+        actually mattered does not depend on the spelling any more. What is
+        left is the trust flag, allowed-tools and session history: a re-prompt
+        at worst.
+
+        And nothing is being asked of the user. The manager no longer mints
+        duplicates, and merging existing ones means choosing whose settings
+        survive — a decision for the show-diff protocol, not a status render.
+        A red block with no action attached trains people to ignore red blocks.
         """
         dups = duplicate_project_keys(projects=self._claude_projects)
         if not dups:
             return
 
+        if not self._show_dups:
+            strip = tk.Frame(self._body, bg=C["base"])
+            strip.pack(fill=tk.X, padx=4, pady=(8, 2))
+            tk.Label(strip,
+                     text="•  %d project%s recorded under more than one path "
+                          "spelling in ~/.claude.json — no action needed"
+                          % (len(dups), "" if len(dups) == 1 else "s"),
+                     font=("Segoe UI", 9), bg=C["base"],
+                     fg=C["overlay0"], anchor=tk.W).pack(side=tk.LEFT)
+            ttk.Button(strip, text="details",
+                       command=self._toggle_dups).pack(
+                side=tk.LEFT, padx=(10, 0))
+            return
+
         box = tk.Frame(self._body, bg=C["surface0"])
         box.pack(fill=tk.X, padx=4, pady=(10, 2), ipady=6)
-        tk.Label(box,
-                 text="  ⚠  %d project%s recorded more than once in "
-                      "~/.claude.json" % (
-                          len(dups), "" if len(dups) == 1 else "s"),
+        head = tk.Frame(box, bg=C["surface0"])
+        head.pack(fill=tk.X, padx=8, pady=(4, 2))
+        tk.Label(head,
+                 text="•  %d project%s recorded under more than one path "
+                      "spelling" % (len(dups), "" if len(dups) == 1 else "s"),
                  font=("Segoe UI", 10, "bold"),
-                 bg=C["surface0"], fg=C["peach"], anchor=tk.W).pack(
-            fill=tk.X, padx=8, pady=(4, 2))
+                 bg=C["surface0"], fg=C["blue"], anchor=tk.W).pack(side=tk.LEFT)
+        ttk.Button(head, text="hide", command=self._toggle_dups).pack(
+            side=tk.RIGHT)
         tk.Label(box,
                  text=("  Claude Code keys per-project state by the directory "
                        "a session started in, spelled however the launcher "
-                       "spelled it. The same folder under two spellings gets "
-                       "two independent sets of MCP approvals and trust flags, "
-                       "so which one applies depends on how you launched."),
+                       "spelled it. This does NOT affect MCP approval — that "
+                       "lives in each project's own .claude/settings.local.json. "
+                       "What is split across spellings is the trust flag, "
+                       "allowed-tools and session history, so an unfamiliar "
+                       "spelling may re-ask the trust question once."),
                  font=("Segoe UI", 9), bg=C["surface0"], fg=C["text"],
                  justify=tk.LEFT, wraplength=720, anchor=tk.W).pack(
             fill=tk.X, padx=8)
@@ -252,8 +283,9 @@ class MCPConfigDialog(UiPumpMixin, tk.Toplevel):
                  text=("  The manager now launches `claude` using a spelling "
                        "Claude Code already has on file, so it no longer adds "
                        "new ones. Collapsing the existing duplicates means "
-                       "deciding which side's approvals survive — edit the "
-                       "file directly if you want them merged."),
+                       "deciding which side's settings survive, so it is left "
+                       "to you — edit the file directly if you want them "
+                       "merged. Leaving them alone is a fine answer."),
                  font=("Segoe UI", 8, "italic"),
                  bg=C["surface0"], fg=C["overlay0"],
                  justify=tk.LEFT, wraplength=720, anchor=tk.W).pack(
@@ -591,7 +623,7 @@ class MCPConfigDialog(UiPumpMixin, tk.Toplevel):
                 text=("  %s  %d bound project%s %s not approved yet. An "
                       "unapproved binding does not load, and removing the "
                       "user-scoped entry will not approve it%s"
-                      % ("⚠" if worst else "ℹ", unapproved,
+                      % ("⚠" if worst else "•", unapproved,
                          "" if unapproved == 1 else "s",
                          "is" if unapproved == 1 else "are",
                          " — every project would be left with no tokensave "
@@ -955,6 +987,10 @@ class MCPConfigDialog(UiPumpMixin, tk.Toplevel):
                 issue.configure(text=text)
         except tk.TclError:
             pass                         # row destroyed between post and run
+
+    def _toggle_dups(self):
+        self._show_dups = not self._show_dups
+        self._render()
 
     def _toggle_bound(self):
         self._show_bound = not self._show_bound
