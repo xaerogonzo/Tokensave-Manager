@@ -946,23 +946,68 @@ def effective_scope(project_root: str, server: str = "tokensave",
     return _parse_mcp_get((proc.stdout or "") + "\n" + (proc.stderr or ""))
 
 
-def _is_claude_running() -> dict:
-    """Detect running Claude Desktop / Claude Code processes.
+#: How recently `~/.claude.json` must have been written to count as evidence
+#: that a Claude Code session is live. Measured 2026-08-25 with one session
+#: open: 30 seconds old. Generous enough to cover an idle session, short enough
+#: that yesterday's file does not read as one.
+_CLAUDE_JSON_ACTIVE_SECS = 300
 
-    Returns a dict: {"desktop": bool, "code": bool, "pids": [int, ...]}.
 
-    Why this matters: Claude Desktop periodically rewrites
-    `claude_desktop_config.json` with its in-memory state, including its
-    cached copy of `mcpServers`. Any edit we make while Desktop is running
-    is silently clobbered within ~1-2 minutes. The configurator dialog
-    refuses to apply a fix to a config whose owning app is currently
-    running — the user gets a clear "quit Claude Desktop, then retry"
-    message instead of a fix that mysteriously reverts itself.
+def claude_code_active(claude_json_path: str = "") -> "tuple[bool, str]":
+    """Is a Claude Code session live? Answered from the FILE, not the process list.
 
-    Best-effort: uses tasklist on Windows. Empty/false results don't
-    block the apply — the warning is advisory, not enforced.
+    Process-name matching already went stale here once, silently: this module
+    looked for `claude-code.exe`, which has never existed, so `code` was
+    permanently False and the one warning that mattered for `~/.claude.json`
+    could never fire. Claude Code ships as an npm CLI (running as `node.exe`,
+    far too generic to match on), as a native binary, and hosted inside the
+    desktop app — where it is `claude.exe` and therefore indistinguishable from
+    Desktop by name. No executable name settles this question.
+
+    The file's own mtime does, and it is evidence rather than inference: a
+    session rewrites `~/.claude.json` continuously, so a recent write means
+    something is actively writing the file we are about to edit. That is
+    precisely the risk the warning exists to describe, and it holds however
+    Claude Code happens to be packaged.
+
+    Returns `(active, detail)`; `detail` is for display, so it says how the
+    answer was reached rather than making the user take it on trust.
     """
-    result = {"desktop": False, "code": False, "pids": []}
+    path = claude_json_path or _claude_json_path()
+    try:
+        age = time.time() - os.path.getmtime(path)
+    except OSError:
+        return False, ""
+    if age <= _CLAUDE_JSON_ACTIVE_SECS:
+        if age < 90:
+            return True, "%s was written %d seconds ago" % (
+                os.path.basename(path), max(0, int(age)))
+        return True, "%s was written %d minutes ago" % (
+            os.path.basename(path), max(1, int(age // 60)))
+    return False, ""
+
+
+def _is_claude_running() -> dict:
+    """Detect running Claude Desktop / Claude Code.
+
+    Returns `{"desktop": bool, "code": bool, "pids": [int, ...],
+    "code_detail": str}`.
+
+    Why this matters: both apps rewrite their own MCP config from in-memory
+    state, so an edit made while one is running is silently clobbered — Desktop
+    within ~1-2 minutes for `claude_desktop_config.json`, and a Claude Code
+    session for `~/.claude.json`. The dialog refuses to write a config whose
+    owning app is live, so the user gets "quit it, then retry" instead of a fix
+    that mysteriously reverts.
+
+    `desktop` comes from the process list; `code` comes from the config's mtime
+    for the reasons in :func:`claude_code_active`. Best-effort throughout —
+    a false result must not block a write, because the alternative is a dialog
+    that cannot be used when detection breaks.
+    """
+    code, code_detail = claude_code_active()
+    result = {"desktop": False, "code": code, "pids": [],
+              "code_detail": code_detail}
     try:
         r = subprocess.run(
             ["tasklist", "/FO", "CSV", "/NH"],
@@ -983,9 +1028,6 @@ def _is_claude_running() -> dict:
             continue
         if name == "claude.exe":
             result["desktop"] = True
-            result["pids"].append(pid)
-        elif name in ("claude-code.exe",):  # currently bundled inside claude.exe; future-proof
-            result["code"] = True
             result["pids"].append(pid)
     return result
 

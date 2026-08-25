@@ -160,26 +160,44 @@ class MCPConfigDialog(UiPumpMixin, tk.Toplevel):
         self._claude_projects = read_claude_projects()
 
         # Warning banner — running Claude apps
-        running = _is_claude_running()
-        if running["desktop"] or running["code"]:
-            apps = []
-            if running["desktop"]:
-                apps.append("Claude Desktop")
-            if running["code"]:
-                apps.append("Claude Code")
-            self._warn_lbl.configure(
-                text=("⚠  " + " / ".join(apps) + " is currently running. "
-                      "It rewrites its own config file every 1–2 minutes, "
-                      "which will silently revert any fix you apply here. "
-                      "Fully quit the app before clicking Apply on its row."))
-        else:
-            self._warn_lbl.configure(text="")
+        self._running = _is_claude_running()
+        self._warn_lbl.configure(text=self._running_warning(self._running))
 
         for label, path in _mcp_configs():
             self._render_block(label, path)
 
         self._render_duplicate_keys()
         self._render_projects_section()
+
+    @staticmethod
+    def _running_warning(running: dict) -> str:
+        """The banner text for whichever Claude apps are live.
+
+        Names the FILE each app rewrites, not just the app. The previous
+        wording joined both apps into one sentence — "Claude Desktop / Claude
+        Code is currently running. It rewrites its own config file" — which is
+        ungrammatical for two apps and, worse, left the reader to guess which
+        file was at risk. The two apps own different files, and the one this
+        dialog's migration button writes is Claude Code's.
+        """
+        parts = []
+        if running.get("desktop"):
+            parts.append(
+                "Claude Desktop is running — it rewrites "
+                "claude_desktop_config.json from its in-memory cache every "
+                "1–2 minutes, so a change to that row reverts on its own.")
+        if running.get("code"):
+            detail = running.get("code_detail") or ""
+            parts.append(
+                "A Claude Code session is live%s — it rewrites ~/.claude.json "
+                "continuously, so editing the Claude Code row OR removing the "
+                "user-scoped entry can be undone without warning. This "
+                "includes a session running inside the Claude desktop app, "
+                "and any `claude` in a terminal."
+                % (" (%s)" % detail if detail else ""))
+        if not parts:
+            return ""
+        return "⚠  " + "\n⚠  ".join(parts)
 
     def _render_duplicate_keys(self):
         """Warn when one directory is recorded under several spellings.
@@ -557,6 +575,12 @@ class MCPConfigDialog(UiPumpMixin, tk.Toplevel):
                 parent=self):
             return
 
+        # Asked AFTER the diff, not before: this is the more specific of the
+        # two questions, and putting it first would make the user answer
+        # "is a session live" before they had seen what is being removed.
+        if self._code_running_guard("Removing the user-scoped entry"):
+            return
+
         ok, detail = remove_mcp_entry(code_cfg)
         if not ok:
             self._log_to_app("MCP migration FAILED: %s" % detail, C["red"])
@@ -874,41 +898,83 @@ class MCPConfigDialog(UiPumpMixin, tk.Toplevel):
         except (AttributeError, tk.TclError):
             pass
 
-    def _apply_running_guard(self, label: str) -> bool:
-        """Return True and surface an error if the target Claude app is running.
+    def _desktop_running_guard(self, label: str) -> bool:
+        """Refuse to write Desktop's config while Desktop is running.
 
-        Writing the MCP config while Claude is live is either ignored (Desktop
-        only reloads at startup) or silently reverted (Desktop writes its cache
-        back to disk every 1–2 minutes). The guard prevents silent no-ops.
+        A hard refusal, because the outcome is certain: Desktop reads the file
+        only at startup and writes its cache back every 1–2 minutes, so the
+        write is guaranteed to be either ignored or reverted.
         """
         running = _is_claude_running()
-        if not ((label == "Claude Desktop" and running["desktop"]) or
-                (label == "Claude Code" and running["code"])):
+        if not (label == "Claude Desktop" and running["desktop"]):
             return False
         self._log_to_app(
-            f"MCP Apply REFUSED: {label} is still running. "
-            f"No changes were written. Quit {label} (verify zero "
-            f"rows in Task Manager) then click Apply again.",
-            C["red"])
+            "MCP Apply REFUSED: Claude Desktop is still running. No changes "
+            "were written. Quit it (verify zero rows in Task Manager) then "
+            "click Apply again.", C["red"])
         messagebox.showerror(
-            f"Apply refused — {label} is running",
-            f"{label} is currently running and is reading the MCP "
-            "config from its in-memory cache.  Writing to the file now "
-            "would either be ignored (Desktop only reloads at startup) "
-            "or silently reverted (Desktop writes its cache back to "
-            "disk every 1–2 minutes).\n\n"
+            "Apply refused — Claude Desktop is running",
+            "Claude Desktop is reading the MCP config from its in-memory "
+            "cache. Writing to the file now would either be ignored (it only "
+            "reloads at startup) or silently reverted (it writes its cache "
+            "back to disk every 1–2 minutes).\n\n"
             "★  NO CHANGES WERE WRITTEN  ★\n\n"
-            f"To fix:\n"
-            f"1. Fully quit {label} (tray icon → Quit).\n"
-            f"2. Verify ZERO rows for 'claude' in Task Manager.\n"
-            f"3. Wait ~5 seconds for stragglers (crashpad, renderer).\n"
+            "To fix:\n"
+            "1. Fully quit Claude Desktop (tray icon → Quit).\n"
+            "2. Verify ZERO rows for 'claude' in Task Manager.\n"
+            "3. Wait ~5 seconds for stragglers (crashpad, renderer).\n"
             "4. Click Re-detect, then Apply this fix.",
             parent=self)
         self._render()
         return True
 
+    def _code_running_guard(self, what: str) -> bool:
+        """Confirm before writing `~/.claude.json` while a session looks live.
+
+        Returns True when the caller should abandon the write.
+
+        A confirmation rather than a refusal, deliberately, and the asymmetry
+        with Desktop is the point. Desktop's outcome is certain, so refusing is
+        doing the user a favour. Here the evidence is the config's mtime — see
+        `claude_code_active` for why no process name can answer it — which
+        means it can be a session that has just been closed, and the window is
+        five minutes wide. A hard block would strand someone for five minutes
+        after they did exactly what they were told, so the honest move is to
+        state the risk and let them decide.
+        """
+        running = _is_claude_running()
+        if not running.get("code"):
+            return False
+        detail = running.get("code_detail") or ""
+        proceed = messagebox.askyesno(
+            "A Claude Code session looks live",
+            "%s writes ~/.claude.json, and a Claude Code session appears to "
+            "be running%s.\n\n"
+            "A live session rewrites that file from its own state, so this "
+            "change can be undone within a minute or two — and it will look "
+            "like the change silently failed rather than like it was "
+            "reverted.\n\n"
+            "This includes a session running inside the Claude desktop app, "
+            "not just `claude` in a terminal.\n\n"
+            "Recommended: exit every Claude Code session first, then click "
+            "Re-detect.\n\n"
+            "Proceed anyway?"
+            % (what, " (%s)" % detail if detail else ""),
+            default="no", parent=self)
+        if proceed:
+            self._log_to_app(
+                "MCP: proceeding with %s while a Claude Code session looks "
+                "live — re-check the row afterwards." % what, C["peach"])
+            return False
+        self._log_to_app(
+            "MCP: %s cancelled — a Claude Code session looks live." % what,
+            C["overlay0"])
+        return True
+
     def _apply(self, cfg_path: str, label: str):
-        if self._apply_running_guard(label):
+        if self._desktop_running_guard(label):
+            return
+        if label == "Claude Code" and self._code_running_guard("This fix"):
             return
 
         proposed = self._config_state[cfg_path]["proposed"]
