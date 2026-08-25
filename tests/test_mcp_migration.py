@@ -184,3 +184,89 @@ def test_no_project_row_ever_proposes_a_machine_path(tmp_path, monkeypatch):
             _classify_mcp_entry(_project_mcp_path(root), {})["proposed"])
         assert "wrapper" not in proposed.lower(), proposed
         assert ":" not in proposed.replace('":', "").replace('",', ""), proposed
+
+
+# ── the strip must say how many are APPROVED, not just bound ──────────────
+#
+# "All bound" does not mean "all working": an unapproved binding is not in the
+# running at all, and retiring the fallback does not approve it. A user who
+# bound everything and removed the user-scoped entry with nothing approved was
+# left with no tokensave in any project.
+
+
+def test_status_counts_approved_separately_from_bound():
+    st = _dialog()._migration_status([
+        _row("a", "/a", "ok"),
+        _row("b", "/b", "project_unapproved"),
+        _row("c", "/c", "project_shadowed")])
+
+    assert len(st["bound"]) == 3
+    assert [n for n, _ in st["approved"]] == ["a", "c"]
+
+
+def test_an_unapproved_row_is_bound_but_not_approved():
+    """Both halves matter: it still counts toward readiness."""
+    st = _dialog()._migration_status([_row("a", "/a", "project_unapproved")])
+
+    assert st["ready"] is True
+    assert len(st["bound"]) == 1
+    assert st["approved"] == []
+
+
+def test_a_shadowed_row_counts_as_approved():
+    """Shadowing is a scope problem, not an approval one.
+
+    Lumping it in with unapproved would tell the user to approve something that
+    is already approved and is failing for a different reason.
+    """
+    st = _dialog()._migration_status([_row("a", "/a", "project_shadowed")])
+    assert len(st["approved"]) == 1
+
+
+# ── which buttons each row offers ─────────────────────────────────────────
+#
+# The states differ in what the user can DO about them, and getting that wrong
+# is what shipped an "Apply this fix" on a row whose file was already correct.
+
+
+def _buttons_for(tk_root, state, project_root="/p"):
+    """Render one row's action strip and return the button labels."""
+    import tkinter as tk
+    from tkinter import ttk
+
+    dlg = object.__new__(MCPConfigDialog)
+    dlg._cfg = _Cfg()
+    frame = tk.Frame(tk_root)
+    info = {"state": state, "label": "x", "issue": "", "current": None,
+            "proposed": {}}
+    dlg._render_block_actions(frame, "Claude Code", "/p/.mcp.json", info,
+                              "", project_root)
+    return [w.cget("text") for w in frame.winfo_children()
+            for w in ([w] + list(w.winfo_children()))
+            if isinstance(w, (ttk.Button, tk.Button))]
+
+
+def test_an_unapproved_row_offers_approve_and_not_apply(tk_root):
+    """The one advisory state the manager can resolve itself."""
+    labels = _buttons_for(tk_root, "project_unapproved")
+    assert any("Approve this binding" in t for t in labels)
+    assert not any("Apply this fix" in t for t in labels)
+
+
+def test_a_shadowed_row_offers_neither(tk_root):
+    """Nothing to apply and nothing to approve — the fix is elsewhere."""
+    labels = _buttons_for(tk_root, "project_shadowed")
+    assert not any("Approve this binding" in t for t in labels)
+    assert not any("Apply this fix" in t for t in labels)
+
+
+def test_a_broken_row_still_offers_apply(tk_root):
+    labels = _buttons_for(tk_root, "project_unbound")
+    assert any("Apply this fix" in t for t in labels)
+    assert not any("Approve this binding" in t for t in labels)
+
+
+def test_approve_is_not_offered_without_a_project_root(tk_root):
+    """The global config rows have no project to approve."""
+    labels = _buttons_for(tk_root, "project_unapproved", project_root="")
+    assert not any("Approve this binding" in t for t in labels)

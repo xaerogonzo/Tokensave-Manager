@@ -41,6 +41,7 @@ from helpers.mcp import (
     SCOPE_USER,
     EffectiveScope,
     annotate_project_binding,
+    approve_project_binding,
     canonical_launch_dir,
     describe_effective,
     duplicate_project_keys,
@@ -468,3 +469,100 @@ def test_a_known_approval_does_not_fake_a_verified_row():
     got = EffectiveScope(SCOPE_LOCAL)
     state, _label, _issue = describe_effective(got, approval=APPROVAL_APPROVED)
     assert state == "project_shadowed"
+
+
+# ── approving a binding, in the file Claude Code actually reads ───────────
+#
+# The gap this closes: a user who bound every project and retired the
+# user-scoped entry was left with every project bound, none approved, and no
+# tokensave anywhere -- with the only remedy being an interactive session in
+# each project. Writing `.claude/settings.local.json` is what Claude Code's own
+# prompt records, verified end to end against a live session.
+
+
+def test_approve_creates_the_file_and_the_directory(tmp_path):
+    ok, detail = approve_project_binding(str(tmp_path))
+    assert ok, detail
+    written = json.loads(
+        (tmp_path / ".claude" / "settings.local.json").read_text("utf-8"))
+    assert written["enabledMcpjsonServers"] == ["tokensave"]
+
+
+def test_approve_then_read_back_agrees(tmp_path):
+    """The writer and the reader must not disagree about the same file."""
+    approve_project_binding(str(tmp_path))
+    assert mcpjson_approval(str(tmp_path), projects={}).state == APPROVAL_APPROVED
+
+
+def test_approve_preserves_other_settings(tmp_path):
+    """These files carry the user's own permissions."""
+    d = tmp_path / ".claude"
+    d.mkdir()
+    (d / "settings.local.json").write_text(
+        json.dumps({"permissions": {"allow": ["Bash(ls)"]},
+                    "enabledMcpjsonServers": ["other"]}), encoding="utf-8")
+
+    ok, _ = approve_project_binding(str(tmp_path))
+    assert ok
+    got = json.loads((d / "settings.local.json").read_text("utf-8"))
+    assert got["permissions"] == {"allow": ["Bash(ls)"]}
+    assert got["enabledMcpjsonServers"] == ["other", "tokensave"]
+
+
+def test_approve_backs_up_an_existing_file(tmp_path):
+    d = tmp_path / ".claude"
+    d.mkdir()
+    (d / "settings.local.json").write_text("{}", encoding="utf-8")
+    ok, detail = approve_project_binding(str(tmp_path))
+    assert ok
+    assert "Backup:" in detail
+    assert [p for p in os.listdir(d) if ".backup." in p]
+
+
+def test_approve_clears_a_standing_rejection(tmp_path):
+    """Otherwise the file would say yes and behave like no."""
+    d = tmp_path / ".claude"
+    d.mkdir()
+    (d / "settings.local.json").write_text(
+        json.dumps({"disabledMcpjsonServers": ["tokensave"]}), encoding="utf-8")
+
+    ok, detail = approve_project_binding(str(tmp_path))
+    assert ok
+    assert "disabledMcpjsonServers" in detail
+    got = json.loads((d / "settings.local.json").read_text("utf-8"))
+    assert got["enabledMcpjsonServers"] == ["tokensave"]
+    assert got["disabledMcpjsonServers"] == []
+
+
+def test_approve_is_idempotent(tmp_path):
+    assert approve_project_binding(str(tmp_path))[0] is True
+    ok, detail = approve_project_binding(str(tmp_path))
+    assert ok is False
+    assert "already approved" in detail
+
+
+def test_approve_refuses_to_clobber_an_unparseable_file(tmp_path):
+    """Refusing beats destroying settings to add one approval."""
+    d = tmp_path / ".claude"
+    d.mkdir()
+    (d / "settings.local.json").write_text("{not json", encoding="utf-8")
+
+    ok, detail = approve_project_binding(str(tmp_path))
+    assert ok is False
+    assert "refusing to overwrite" in detail
+    assert (d / "settings.local.json").read_text("utf-8") == "{not json"
+
+
+def test_approve_refuses_a_missing_project(tmp_path):
+    ok, detail = approve_project_binding(str(tmp_path / "nope"))
+    assert ok is False
+    assert "No such project directory" in detail
+
+
+def test_approve_is_per_server_name(tmp_path):
+    approve_project_binding(str(tmp_path), "codegraph")
+    got = json.loads(
+        (tmp_path / ".claude" / "settings.local.json").read_text("utf-8"))
+    assert got["enabledMcpjsonServers"] == ["codegraph"]
+    assert mcpjson_approval(str(tmp_path), "tokensave",
+                            projects={}).state != APPROVAL_APPROVED

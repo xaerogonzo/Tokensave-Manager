@@ -819,6 +819,81 @@ def local_scope_shadow(project_root: str, server: str = "tokensave",
     return sorted(hits)
 
 
+def approve_project_binding(project_root: str, server: str = "tokensave"
+                            ) -> "tuple[bool, str]":
+    """Record approval for `server` in the project's own settings.local.json.
+
+    Writes exactly what Claude Code's own approval prompt writes, in the file
+    Claude Code writes it to — verified end to end on 2026-08-25, where a
+    project approved this way served its own graph while the pin pointed
+    elsewhere. Chosen over `~/.claude.json` deliberately: that layer gets
+    migrated out from under you, and it is keyed by directory spelling, so an
+    approval recorded under one spelling is invisible to a session launched
+    with another. A project file has neither problem.
+
+    Refuses rather than clobbers when the file exists and will not parse: the
+    file carries the user's own permissions, and overwriting it to add one
+    approval would be a far worse outcome than not approving.
+
+    Returns `(ok, detail)`. Never raises.
+    """
+    if not project_root or not os.path.isdir(project_root):
+        return False, "No such project directory: %s" % project_root
+
+    folder = os.path.join(project_root, ".claude")
+    path = os.path.join(folder, "settings.local.json")
+    data: dict = {}
+    backup = ""
+    if os.path.isfile(path):
+        try:
+            with open(path, encoding="utf-8-sig") as fh:
+                data = json.load(fh)
+        except (OSError, ValueError) as exc:
+            return False, ("%s exists but could not be read (%s). Fix it by "
+                           "hand — refusing to overwrite settings that may "
+                           "hold your own permissions." % (path, exc))
+        if not isinstance(data, dict):
+            return False, "%s is not a JSON object; refusing to overwrite." % path
+        try:
+            backup = "%s.backup.%d" % (path, int(time.time() * 1000))
+            shutil.copy2(path, backup)
+        except OSError as exc:
+            return False, "Could not back up %s: %s" % (path, exc)
+
+    enabled = data.get("enabledMcpjsonServers")
+    enabled = list(enabled) if isinstance(enabled, list) else []
+    disabled = data.get("disabledMcpjsonServers")
+    disabled = list(disabled) if isinstance(disabled, list) else []
+
+    notes = []
+    if server in enabled and server not in disabled:
+        return False, "%s is already approved in %s" % (server, path)
+    if server not in enabled:
+        enabled.append(server)
+    if server in disabled:
+        # A rejection outranks the approval, so leaving it would write a file
+        # that says yes and behaves like no.
+        disabled = [s for s in disabled if s != server]
+        notes.append("removed it from disabledMcpjsonServers")
+        data["disabledMcpjsonServers"] = disabled
+    data["enabledMcpjsonServers"] = enabled
+
+    try:
+        os.makedirs(folder, exist_ok=True)
+    except OSError as exc:
+        return False, "Could not create %s: %s" % (folder, exc)
+    ok, err = _write_json_atomic(path, data)
+    if not ok:
+        return False, err
+
+    detail = "Approved %s in %s" % (server, path)
+    if notes:
+        detail += " (%s)" % "; ".join(notes)
+    if backup:
+        detail += "\nBackup: %s" % os.path.basename(backup)
+    return True, detail
+
+
 # ── composing the file verdict with what `~/.claude.json` proves ──────────
 
 #: The `.mcp.json` is correct and something OUTSIDE it blocks the binding.
