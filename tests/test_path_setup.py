@@ -98,8 +98,13 @@ def test_resolution_reads_the_composed_path_not_os_environ(monkeypatch, tmp_path
     """
     bindir = tmp_path / "bin"
     bindir.mkdir()
-    (bindir / "tokensave.exe").write_text("x")
-    (bindir / "tokensave").write_text("x")          # POSIX name too
+    for name in ("tokensave.exe", "tokensave"):     # both platforms' spellings
+        exe = bindir / name
+        exe.write_text("x")
+        # shutil.which checks the execute bit on POSIX; Windows ignores it and
+        # keys off PATHEXT instead. Without this the test passes locally and
+        # fails only on CI, which is the whole class of bug it exists to catch.
+        os.chmod(exe, 0o755)
 
     monkeypatch.setenv("PATH", "")                  # this process sees nothing
     monkeypatch.setattr(ps, "composed_path", lambda: str(bindir))
@@ -180,3 +185,23 @@ def test_only_not_on_path_advertises_itself_as_fixable(verdict, ready, fixable):
     state = ps.PathState(verdict)
     assert state.is_ready is ready
     assert state.is_fixable is fixable
+
+
+def test_already_present_is_answered_on_every_platform(monkeypatch, tmp_path):
+    """A no-op must not be reported as a platform limitation.
+
+    `add_to_user_path` checks idempotence BEFORE importing winreg, because
+    "already there, nothing to do" is true on any OS. Ordering them the other
+    way made this fail on Linux CI while passing on Windows — the platform
+    import short-circuited with "only supported on Windows" for a call that
+    had nothing to do in the first place.
+    """
+    bindir = tmp_path / "bin"
+    bindir.mkdir()
+    monkeypatch.setattr(ps, "user_path", lambda: str(bindir))
+
+    ok, detail = ps.add_to_user_path(str(bindir))
+
+    assert ok is False
+    assert "Already on the user PATH" in detail
+    assert "Windows" not in detail

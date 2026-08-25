@@ -168,16 +168,21 @@ def add_to_user_path(directory: str) -> "tuple[bool, str]":
     if not os.path.isdir(directory):
         return False, "Not a directory: %s" % directory
 
-    try:
-        import winreg
-    except ImportError:
-        return False, "Editing PATH is only supported on Windows."
+    # Idempotence first, deliberately ahead of the platform import:
+    # "already there, nothing to do" is true on any OS, and answering
+    # "only supported on Windows" to a no-op would be both unhelpful and
+    # untrue. It also made this fail on Linux CI while passing locally.
 
     current = user_path()
     existing = [p for p in current.split(os.pathsep) if p.strip()]
     if any(os.path.normcase(p.rstrip("\\/")) == os.path.normcase(directory)
            for p in existing):
         return False, "Already on the user PATH: %s" % directory
+
+    try:
+        import winreg
+    except ImportError:
+        return False, "Editing PATH is only supported on Windows."
 
     new_value = os.pathsep.join(existing + [directory]) if existing else directory
     try:
