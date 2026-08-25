@@ -692,25 +692,82 @@ class McpJsonApproval:
                               APPROVAL_AMBIGUOUS)
 
 
-def _entry_approval(entry: dict, server: str) -> str:
-    """Approval recorded in one `projects[...]` entry."""
-    if not isinstance(entry, dict):
-        return APPROVAL_PENDING
-    if entry.get("enableAllProjectMcpServers") is True:
+def _settings_approval(data: dict, server: str) -> "str | None":
+    """Approval recorded in one settings-shaped dict, or None for no opinion.
+
+    "No opinion" is a distinct answer from "not approved", and conflating them
+    is what made this reader wrong. `enabledMcpjsonServers: []` is an opinion —
+    nothing is approved. The key being ABSENT is silence, and silence must not
+    outvote a record that actually says something.
+    """
+    if not isinstance(data, dict):
+        return None
+    if data.get("enableAllProjectMcpServers") is True:
         return APPROVAL_APPROVED
-    enabled = entry.get("enabledMcpjsonServers")
+    enabled = data.get("enabledMcpjsonServers")
+    disabled = data.get("disabledMcpjsonServers")
     if isinstance(enabled, list) and server in enabled:
         return APPROVAL_APPROVED
-    disabled = entry.get("disabledMcpjsonServers")
     if isinstance(disabled, list) and server in disabled:
         return APPROVAL_REJECTED
-    return APPROVAL_PENDING
+    if isinstance(enabled, list):
+        return APPROVAL_PENDING          # present but does not name it
+    return None
+
+
+def _entry_approval(entry: dict, server: str) -> str:
+    """Approval in one `~/.claude.json` `projects[...]` entry.
+
+    Kept returning a definite verdict for callers that want one; silence maps
+    to PENDING here because an entry Claude Code created but never recorded an
+    approval in has, in fact, not approved anything.
+    """
+    got = _settings_approval(entry, server)
+    return got if got is not None else APPROVAL_PENDING
+
+
+def local_settings_approval(project_root: str,
+                            server: str = "tokensave") -> "str | None":
+    """Approval from the project's own `.claude/settings*.json`, or None.
+
+    **This is where Claude Code actually keeps it.** Measured 2026-08-25:
+    approvals written into `~/.claude.json` were migrated out into
+    `<project>/.claude/settings.local.json` within ~12 seconds, and the field
+    was stripped from the duplicate path keys on the way. A reader that only
+    consults `~/.claude.json` therefore reports stale state for every project
+    Claude Code has touched since — which is how this function's absence made
+    a working Fortuna Lab render as "approval depends on how you launch".
+
+    `settings.local.json` is consulted before `settings.json`: it is the
+    machine-local override, and it is the file Claude Code writes.
+    """
+    for name in ("settings.local.json", "settings.json"):
+        path = os.path.join(project_root, ".claude", name)
+        try:
+            with open(path, encoding="utf-8-sig") as fh:
+                data = json.load(fh)
+        except (OSError, ValueError):
+            continue
+        got = _settings_approval(data, server)
+        if got is not None:
+            return got
+    return None
 
 
 def mcpjson_approval(project_root: str, server: str = "tokensave",
                      claude_json_path: str = "",
                      projects: "dict | None" = None) -> "McpJsonApproval":
-    """Read Claude Code's approval for `server` in `project_root`."""
+    """Read Claude Code's approval for `server` in `project_root`.
+
+    The project's own `.claude/settings*.json` is authoritative and is checked
+    FIRST, because that is where Claude Code migrates approvals to. Only when
+    it has no opinion does this fall back to the `~/.claude.json` project keys.
+    """
+    local = local_settings_approval(project_root, server)
+    if local is not None:
+        return McpJsonApproval(
+            local, detail="from .claude/settings.local.json")
+
     if projects is None:
         projects = read_claude_projects(claude_json_path)
     keys = matching_project_keys(project_root, projects)
@@ -719,12 +776,26 @@ def mcpjson_approval(project_root: str, server: str = "tokensave",
             APPROVAL_UNKNOWN,
             detail="Claude Code has no record of this project yet.")
 
-    verdicts = {k: _entry_approval(projects.get(k) or {}, server) for k in keys}
+    # Keys that record nothing are SKIPPED rather than counted as dissent.
+    # Claude Code's migration strips `enabledMcpjsonServers` from the duplicate
+    # path keys, so "the duplicates disagree" became the normal post-migration
+    # state — and reporting it as ambiguity warned about projects that work.
+    verdicts = {}
+    for key in keys:
+        got = _settings_approval(projects.get(key) or {}, server)
+        if got is not None:
+            verdicts[key] = got
+    if not verdicts:
+        return McpJsonApproval(
+            APPROVAL_UNKNOWN, keys=tuple(sorted(keys)),
+            detail="Claude Code has entries for this project but no recorded "
+                   "approval either way.")
+
     distinct = set(verdicts.values())
     if len(distinct) == 1:
-        return McpJsonApproval(distinct.pop(), keys=tuple(sorted(keys)))
+        return McpJsonApproval(distinct.pop(), keys=tuple(sorted(verdicts)))
     return McpJsonApproval(
-        APPROVAL_AMBIGUOUS, keys=tuple(sorted(keys)),
+        APPROVAL_AMBIGUOUS, keys=tuple(sorted(verdicts)),
         detail="; ".join("%s -> %s" % (k, v)
                          for k, v in sorted(verdicts.items())))
 

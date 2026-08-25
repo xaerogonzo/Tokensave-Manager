@@ -45,15 +45,20 @@ from helpers.mcp import (
     describe_effective,
     duplicate_project_keys,
     local_scope_shadow,
+    local_settings_approval,
     matching_project_keys,
     mcpjson_approval,
     normalize_project_key,
     read_claude_projects,
 )
 
-WIN = r"D:\Random Projects\Fortuna Lab"
-NIX = "D:/Random Projects/Fortuna Lab"
-LOW = "d:/Random Projects/Fortuna Lab"
+#: Deliberately a drive that does not exist. `mcpjson_approval` now reads
+#: `<root>/.claude/settings*.json` first, so a real path here would make
+#: these tests read the developer's own machine -- which is exactly how
+#: they first went green against live state instead of their fixtures.
+WIN = r"Z:\Proj\Fortuna Lab"
+NIX = "Z:/Proj/Fortuna Lab"
+LOW = "z:/Proj/Fortuna Lab"
 
 
 def _ok_info():
@@ -65,7 +70,7 @@ def _ok_info():
 # ── tier 2a: path keys ────────────────────────────────────────────────────
 
 @pytest.mark.parametrize("path", [WIN, NIX, LOW, NIX + "/", WIN + "\\",
-                                  "D:/Random Projects/./Fortuna Lab"])
+                                  "Z:/Proj/./Fortuna Lab"])
 def test_normalize_collapses_every_spelling_of_one_directory(path):
     assert normalize_project_key(path) == normalize_project_key(WIN)
 
@@ -82,7 +87,7 @@ def test_normalize_is_stable_on_both_platforms():
 
 def test_normalize_keeps_distinct_directories_distinct():
     assert normalize_project_key(WIN) != normalize_project_key(
-        r"D:\Random Projects\Fortuna Labs")
+        r"Z:\Proj\Fortuna Labs")
     assert normalize_project_key("") == ""
 
 
@@ -280,7 +285,8 @@ def test_every_advisory_state_is_produced_by_something():
         {WIN: {"enabledMcpjsonServers": []}},
         {WIN: {"disabledMcpjsonServers": ["tokensave"]}},
         {WIN: {"mcpServers": {"tokensave": {}}}},
-        {WIN: {"enabledMcpjsonServers": ["tokensave"]}, NIX: {}},
+        {WIN: {"enabledMcpjsonServers": ["tokensave"]},
+         NIX: {"enabledMcpjsonServers": []}},
     ):
         produced.add(annotate_project_binding(
             _ok_info(), WIN, projects=projects)["state"])
@@ -332,3 +338,93 @@ def test_describe_effective_returns_none_when_it_cannot_tell(got):
     verify" badge instead would replace a true statement with a complaint.
     """
     assert describe_effective(got) is None
+
+
+# ── tier 2b': .claude/settings.local.json is where approval really lives ───
+#
+# Measured 2026-08-25: approvals written into `~/.claude.json` were migrated
+# out into `<project>/.claude/settings.local.json` within ~12 seconds, and the
+# field was STRIPPED from the duplicate path keys on the way. A reader that
+# only consulted `~/.claude.json` therefore reported a working Fortuna Lab as
+# "approval depends on how you launch" — a warning about a project that was
+# provably serving its own graph at the time.
+
+
+def _local(tmp_path, payload, name="settings.local.json"):
+    d = tmp_path / ".claude"
+    d.mkdir(exist_ok=True)
+    (d / name).write_text(json.dumps(payload), encoding="utf-8")
+    return str(tmp_path)
+
+
+def test_local_settings_beat_the_claude_json_keys(tmp_path):
+    """The project file wins: it is what Claude Code actually honours."""
+    root = _local(tmp_path, {"enabledMcpjsonServers": ["tokensave"]})
+    projects = {root: {"enabledMcpjsonServers": []}}      # stale, says no
+    got = mcpjson_approval(root, projects=projects)
+    assert got.state == APPROVAL_APPROVED
+    assert "settings.local.json" in got.detail
+
+
+def test_local_settings_can_also_reject(tmp_path):
+    root = _local(tmp_path, {"disabledMcpjsonServers": ["tokensave"]})
+    assert mcpjson_approval(root, projects={}).state == APPROVAL_REJECTED
+
+
+def test_settings_local_wins_over_settings_json(tmp_path):
+    """`settings.local.json` is the machine-local override Claude Code writes."""
+    _local(tmp_path, {"enabledMcpjsonServers": []}, "settings.json")
+    root = _local(tmp_path, {"enabledMcpjsonServers": ["tokensave"]})
+    assert mcpjson_approval(root, projects={}).state == APPROVAL_APPROVED
+
+
+def test_plain_settings_json_is_consulted_when_local_is_silent(tmp_path):
+    root = _local(tmp_path, {"enabledMcpjsonServers": ["tokensave"]},
+                  "settings.json")
+    _local(tmp_path, {"permissions": {}})                  # no opinion
+    assert mcpjson_approval(root, projects={}).state == APPROVAL_APPROVED
+
+
+def test_an_unreadable_settings_file_falls_through(tmp_path):
+    """Corrupt JSON must not be read as a verdict."""
+    d = tmp_path / ".claude"
+    d.mkdir()
+    (d / "settings.local.json").write_text("{not json", encoding="utf-8")
+    projects = {str(tmp_path): {"enabledMcpjsonServers": ["tokensave"]}}
+    assert mcpjson_approval(str(tmp_path),
+                            projects=projects).state == APPROVAL_APPROVED
+
+
+def test_local_settings_approval_is_none_when_silent(tmp_path):
+    root = _local(tmp_path, {"permissions": {"allow": []}})
+    assert local_settings_approval(root) is None
+
+
+# ── silence is not dissent ────────────────────────────────────────────────
+
+def test_a_key_with_no_recorded_approval_is_skipped_not_counted():
+    """Claude Code strips the field from duplicate keys during migration.
+
+    Counting that silence as a dissenting vote made "the duplicates disagree"
+    the normal post-migration state and produced ambiguity warnings for
+    projects that were working.
+    """
+    projects = {WIN: {"enabledMcpjsonServers": ["tokensave"]},
+                NIX: {"hasTrustDialogAccepted": True}}      # silent
+    got = mcpjson_approval(WIN, projects=projects)
+    assert got.state == APPROVAL_APPROVED
+    assert got.keys == (WIN,)
+
+
+def test_an_empty_enabled_list_is_still_an_opinion():
+    """`[]` says "nothing approved"; an absent key says nothing at all."""
+    projects = {WIN: {"enabledMcpjsonServers": []}}
+    assert mcpjson_approval(WIN, projects=projects).state == APPROVAL_PENDING
+
+
+def test_entries_that_all_stay_silent_are_unknown_not_pending():
+    """Unknown does not block; pending does. The difference matters."""
+    projects = {WIN: {"hasTrustDialogAccepted": True}, NIX: {}}
+    got = mcpjson_approval(WIN, projects=projects)
+    assert got.state == APPROVAL_UNKNOWN
+    assert got.blocks_binding is False
