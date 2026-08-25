@@ -428,3 +428,43 @@ def test_entries_that_all_stay_silent_are_unknown_not_pending():
     got = mcpjson_approval(WIN, projects=projects)
     assert got.state == APPROVAL_UNKNOWN
     assert got.blocks_binding is False
+
+
+# ── tier 3 must not override a true row with a stale one ──────────────────
+#
+# `claude mcp get` reported "⏸ Pending approval" for Fortuna Lab while its
+# server was demonstrably running and serving that project's own graph — it
+# does not read `.claude/settings.local.json`. Left unchecked, tier 3 turned
+# every correctly-approved row back into "⚠ written, not yet approved".
+
+
+def test_pending_from_the_client_is_ignored_when_approval_is_known():
+    got = EffectiveScope(SCOPE_USER, pending_approval=True)
+    assert describe_effective(got, approval=APPROVAL_APPROVED) is None
+
+
+@pytest.mark.parametrize("approval", [None, APPROVAL_PENDING,
+                                      APPROVAL_UNKNOWN, APPROVAL_REJECTED])
+def test_pending_is_still_reported_when_approval_is_not_established(approval):
+    """Only a POSITIVE local approval suppresses it; silence does not."""
+    got = EffectiveScope(SCOPE_USER, pending_approval=True)
+    state, _label, _issue = describe_effective(got, approval=approval)
+    assert state == "project_unapproved"
+
+
+def test_a_known_approval_does_not_suppress_a_shadow_verdict():
+    """`mcp get` IS authoritative about which scope wins.
+
+    Only its approval reporting is unreliable; suppressing the shadow verdict
+    too would hide the failure this whole tier exists to catch.
+    """
+    got = EffectiveScope(SCOPE_USER, connected=True)
+    state, _label, _issue = describe_effective(got, approval=APPROVAL_APPROVED)
+    assert state == "project_shadowed"
+
+
+def test_a_known_approval_does_not_fake_a_verified_row():
+    """Approval is not proof of serving — the row must still say what it is."""
+    got = EffectiveScope(SCOPE_LOCAL)
+    state, _label, _issue = describe_effective(got, approval=APPROVAL_APPROVED)
+    assert state == "project_shadowed"

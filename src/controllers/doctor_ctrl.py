@@ -359,7 +359,8 @@ class DoctorController:
         Costs a CLI call, so it runs only for projects already known to be
         bound; unbound ones are decided from the file alone.
         """
-        from helpers.mcp import effective_scope
+        from helpers.mcp import (APPROVAL_APPROVED, effective_scope,
+                                 mcpjson_approval)
 
         try:
             got = effective_scope(path)
@@ -367,6 +368,15 @@ class DoctorController:
             return
         if not got.is_known or got.is_project:
             return                       # correct, or we could not tell
+        # `claude mcp get` does not read .claude/settings.local.json, so its
+        # "pending approval" is a false negative for any project approved
+        # there. Checked against the cheap reader before it is repeated.
+        try:
+            approved = mcpjson_approval(path).state == APPROVAL_APPROVED
+        except Exception:                                    # noqa: BLE001
+            approved = False
+        if got.pending_approval and approved:
+            return
         if got.pending_approval:
             self._on_log(
                 "  \u23f8 project MCP binding written but not yet approved \u2014 "

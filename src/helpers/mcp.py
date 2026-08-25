@@ -966,7 +966,8 @@ def _parse_mcp_get(text: str) -> "EffectiveScope":
         detail=text.strip()[:200])
 
 
-def describe_effective(got: "EffectiveScope", server: str = "tokensave") -> tuple:
+def describe_effective(got: "EffectiveScope", server: str = "tokensave",
+                       approval: "str | None" = None) -> tuple:
     """`(state, label, issue)` for a row Claude Code has been asked about.
 
     Pure, so every verdict the dialog can display is testable without a CLI.
@@ -974,12 +975,22 @@ def describe_effective(got: "EffectiveScope", server: str = "tokensave") -> tupl
     `claude`, a timeout — because overwriting a row that already says
     something true with "could not verify" trades a correct badge for a
     complaint about our own tooling.
+
+    `approval` is the cheap tier's verdict, and passing it is what stops this
+    tier from overriding a true row with a stale one. **`claude mcp get` is not
+    a reliable source for approval**: measured 2026-08-25, it reported
+    `⏸ Pending approval` for a project whose server was demonstrably running
+    and serving that project's own graph, because it does not read
+    `.claude/settings.local.json`. It IS reliable about scope resolution —
+    which definition wins — so those verdicts are kept.
     """
     if got is None or not got.is_known:
         return None
     if got.is_project:
         return ("ok", "✓ bound — verified serving", "")
     if got.pending_approval:
+        if approval == APPROVAL_APPROVED:
+            return None          # the client is behind; do not contradict it
         return ("project_unapproved", "⚠ written, not yet approved",
                 ("Claude Code reports this binding as pending approval, so "
                  "sessions here still fall back to the user-scoped entry. Run "

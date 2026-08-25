@@ -750,7 +750,17 @@ class MCPConfigDialog(UiPumpMixin, tk.Toplevel):
             return
         badge, issue = widgets
 
-        verdict = describe_effective(got)
+        # Hand the cheap tier's verdict across: `claude mcp get` does not read
+        # .claude/settings.local.json, so left alone it would downgrade a
+        # correctly-approved row to "not yet approved".
+        from helpers.mcp import mcpjson_approval
+        root = os.path.dirname(path)
+        try:
+            approval = mcpjson_approval(root,
+                                        projects=self._claude_projects).state
+        except Exception:                                    # noqa: BLE001
+            approval = None
+        verdict = describe_effective(got, approval=approval)
         if verdict is None:
             # Could not tell. Restore the file-level verdict rather than
             # leaving "checking…" on screen forever or inventing a failure:
