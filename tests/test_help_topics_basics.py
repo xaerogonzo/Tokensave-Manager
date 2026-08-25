@@ -264,3 +264,25 @@ def test_switching_separates_desktop_chats_from_claude_code():
     body = " ".join(c[1] for c in ctl._calls if len(c) > 1)
     assert "working directory" in body, "must say what Code binds to instead"
     assert "wrapper" in body, "must say how Desktop's chats reach the pin"
+
+
+def test_switching_tells_claude_code_users_to_bind_the_project():
+    """graph_root is the cross-project tool, not the everyday answer.
+
+    Before per-project binding existed, this topic could only offer
+    graph_root — a per-call remedy that is forgotten exactly once before it
+    produces a confident wrong answer. Binding fixes the default instead, so
+    the topic has to say so or it keeps recommending the workaround over the
+    fix.
+    """
+    ctl = _make_ctl()
+    htb.switching(ctl)
+
+    headings = [c[1] for c in ctl._calls if c[0] == "h2"]
+    assert any("bind the project" in h.lower() for h in headings), headings
+
+    body = " ".join(c[1] for c in ctl._calls if len(c) > 1)
+    assert ".mcp.json" in body
+    assert "Bind to this project" in body
+    # And it must not drop the caveats that make the advice usable.
+    assert "new" in body and "approval" in body

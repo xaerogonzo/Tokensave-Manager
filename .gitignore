@@ -82,3 +82,6 @@ build.ps1
 
 # Added by TokenSave Manager
 dist/
+
+# tokensave MCP binding (TokenSave Manager) — machine-local by choice
+.mcp.json

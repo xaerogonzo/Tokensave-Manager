@@ -146,12 +146,78 @@ def _canonical_mcp_entry(cfg: dict) -> dict:
     return {"command": py, "args": [wrapper]}
 
 
+#: What a project-scoped entry passes as `-p`. A literal "." rather than an
+#: absolute path or ${CLAUDE_PROJECT_DIR}, and both halves of that were
+#: measured rather than assumed (Roadmap-11 Phase 0):
+#:
+#:   * Claude Code spawns a project-scoped MCP server with cwd = the project
+#:     root, even when the session was launched from a subdirectory. Verified by
+#:     elimination: an explicit path does not search upward (upstream #372), so
+#:     a cwd of `<root>/src` would have errored instead of answering.
+#:   * `${CLAUDE_PROJECT_DIR:-X}` resolves to X — the variable is not set at
+#:     config-resolution time, and does not appear in a Claude Code session's
+#:     environment at all. The documented-looking form silently degrades to its
+#:     default, so it buys nothing over ".".
+#:
+#: "." is what keeps the file portable: a `.mcp.json` is project-scoped config
+#: meant to be shared through version control, and an absolute path would make
+#: it a machine-local file wearing a shared file's name.
+PROJECT_PATH_ARG = "."
+
+#: Config key: add `.mcp.json` to the project's .gitignore after binding.
+#: Default ON, and the default is a judgement call worth stating. The file
+#: is deliberately portable so it CAN be committed — but committing it
+#: hands every collaborator an MCP server definition that only works if
+#: they happen to have tokensave on PATH. Opting them in silently is the
+#: ruder default, so the manager ignores by default and lets anyone who
+#: wants it shared turn this off.
+GITIGNORE_PROJECT_MCP_KEY = "gitignore_project_mcp"
+
+
+def _project_mcp_path(project_root: str) -> str:
+    """Where Claude Code looks for a project's own MCP config."""
+    return os.path.join(project_root, ".mcp.json")
+
+
+def _canonical_project_entry(cfg: dict) -> dict:
+    """The entry the manager wants in a project's `.mcp.json`.
+
+    Takes no project root **on purpose**. It returns a template, not an
+    interpolated path, which is what structurally prevents this machine's paths
+    from reaching a file other people may check out. The project root is used
+    for classifying an existing entry and for choosing a verification cwd —
+    never for building this.
+
+    Deliberately not the wrapper: the wrapper exists to read the Desktop pin,
+    and a project binding must ignore the pin entirely. `cfg` is accepted for
+    symmetry with :func:`_canonical_mcp_entry` and for future binding modes.
+    """
+    return {"command": "tokensave", "args": ["serve", "-p", PROJECT_PATH_ARG]}
+
+
+def _same_project(a: str, b: str) -> bool:
+    """Do two paths name the same checkout?
+
+    `D:\\P\\Foo`, `D:\\P\\.\\Foo` and `D:\\P\\Foo\\` are one directory, and on
+    Windows so are case variants and junction aliases. Comparing raw strings
+    would report "bound to a different project" for a project bound to itself.
+    """
+    def norm(p):
+        try:
+            return os.path.normcase(os.path.realpath(os.path.abspath(p)))
+        except (OSError, ValueError):
+            return os.path.normcase(p)
+    return bool(a) and bool(b) and norm(a) == norm(b)
+
+
 @dataclasses.dataclass
 class _McpCtx:
     cmd: str
     cmd_lower: str
     args: list
     is_claude_code: bool
+    is_project_scoped: bool = False
+    project_root: str = ""
 
 
 def _chk_bundled_wrapper(ctx: "_McpCtx", base: dict) -> dict | None:
@@ -171,6 +237,49 @@ def _chk_python_wrapper(ctx: "_McpCtx", base: dict) -> dict | None:
     return {**base, "state": "wrong_wrapper", "label": "⚠ wrapper path missing",
             "issue": (f"Points at {ctx.args[0]} but that file doesn't exist. "
                       "Click Apply to update to the current wrapper location.")}
+
+
+def _chk_project_scoped(ctx: "_McpCtx", base: dict) -> dict | None:
+    """Verdicts for a project's own `.mcp.json`, where the rules invert.
+
+    In a global config a hardcoded `-p` is a defect — it locks every session to
+    one project. In a project-scoped file it is the entire point, and a bare
+    `serve` is the defect: this is the one place with enough information to bind
+    explicitly, and declining to use it falls back to cwd resolution.
+    """
+    if not ctx.is_project_scoped:
+        return None
+
+    args = ctx.args if isinstance(ctx.args, list) else []
+    if "-p" not in args:
+        return {**base, "state": "project_unbound",
+                "label": "\u26a0 project entry is unbound",
+                "issue": ("This project's .mcp.json runs `serve` without `-p`, so "
+                          "it falls back to cwd resolution instead of binding "
+                          "explicitly. Click Apply to bind it to this project.")}
+    try:
+        target = args[args.index("-p") + 1]
+    except (IndexError, ValueError):
+        target = ""
+
+    # The template form is correct by construction: Claude Code spawns the
+    # server at the project root, so "." IS this project.
+    if target == PROJECT_PATH_ARG:
+        return {**base, "state": "ok", "label": "\u2713 bound to this project",
+                "issue": ""}
+    if _same_project(target, ctx.project_root):
+        return {**base, "state": "project_absolute",
+                "label": "\u26a0 bound by absolute path",
+                "issue": (f"Bound to the right project, but as \"{target}\" — a "
+                          "path that only exists on this machine. A .mcp.json is "
+                          "shared through version control; Apply rewrites it to "
+                          "the portable form.")}
+    return {**base, "state": "project_mismatch",
+            "label": "\u26a0 bound to a DIFFERENT project",
+            "issue": (f"This file binds tokensave to \"{target}\", which is not "
+                      "this project. Every query here would be answered from "
+                      "another codebase and look completely normal. Apply to "
+                      "rebind.")}
 
 
 def _chk_direct_serve(ctx: "_McpCtx", base: dict) -> dict | None:
@@ -197,7 +306,11 @@ def _chk_direct_serve(ctx: "_McpCtx", base: dict) -> dict | None:
                       "Desktop restart. Click Apply to route through the wrapper.")}
 
 
-_MCP_CMD_CHECKERS = [_chk_bundled_wrapper, _chk_python_wrapper, _chk_direct_serve]
+# Project scope runs FIRST: inside a `.mcp.json` its verdicts replace the
+# global ones entirely, and it matches on any command shape (the binary may
+# be named `tokensave` off PATH rather than `tokensave.exe`).
+_MCP_CMD_CHECKERS = [_chk_project_scoped, _chk_bundled_wrapper,
+                     _chk_python_wrapper, _chk_direct_serve]
 
 
 def _classify_mcp_entry(cfg_path: str, cfg: dict) -> dict:
@@ -234,7 +347,20 @@ def _classify_mcp_entry(cfg_path: str, cfg: dict) -> dict:
 
     Pure function — no side effects. Safe to call on every startup.
     """
-    proposed = _canonical_mcp_entry(cfg)
+    # Scope is derived from the path, so no caller had to change. A
+    # `.mcp.json` counts as project-scoped only when its directory actually
+    # holds a tokensave index -- the filename alone would let a stray
+    # `somewhere/.mcp.json` be judged by project rules it has nothing to do
+    # with.
+    project_root = ""
+    if os.path.basename(cfg_path).lower() == ".mcp.json":
+        candidate = os.path.dirname(cfg_path)
+        if os.path.isdir(os.path.join(candidate, ".tokensave")):
+            project_root = candidate
+    is_project_scoped = bool(project_root)
+
+    proposed = (_canonical_project_entry(cfg) if is_project_scoped
+                else _canonical_mcp_entry(cfg))
     base = {"cfg_path": cfg_path, "current": None, "proposed": proposed}
     is_claude_code = cfg_path.lower().endswith(".claude.json")
 
@@ -263,7 +389,8 @@ def _classify_mcp_entry(cfg_path: str, cfg: dict) -> dict:
     cmd = (entry.get("command") or "").strip()
     args = entry.get("args") or []
     ctx = _McpCtx(cmd=cmd, cmd_lower=cmd.lower().replace("/", os.sep),
-                  args=args, is_claude_code=is_claude_code)
+                  args=args, is_claude_code=is_claude_code,
+                  is_project_scoped=is_project_scoped, project_root=project_root)
 
     for checker in _MCP_CMD_CHECKERS:
         result = checker(ctx, base)
@@ -311,13 +438,190 @@ def _apply_mcp_fix(cfg_path: str, proposed_entry: dict) -> tuple[bool, str]:
     servers = data.setdefault("mcpServers", {})
     servers["tokensave"] = proposed_entry
 
-    try:
-        with open(cfg_path, "w", encoding="utf-8") as f:
-            json.dump(data, f, indent=2)
-            f.write("\n")
-    except OSError as e:
-        return False, f"Could not write config: {e}"
+    ok, err = _write_json_atomic(cfg_path, data)
+    if not ok:
+        return False, err
     return True, f"Wrote tokensave entry to {cfg_path}{backup_msg}"
+
+
+def _write_json_atomic(cfg_path: str, data: dict) -> "tuple[bool, str]":
+    """Temp file + os.replace, never a truncating in-place write.
+
+    A half-written Claude config does not read as damaged, it reads as
+    *absent* — the classifier would call it `unparseable` at best, and Claude
+    itself would lose every server in the file. The failure would be far worse
+    than the failed write it came from. Same reasoning as
+    `tokensave_config.set_strict_tree`.
+    """
+    import tempfile
+
+    directory = os.path.dirname(cfg_path) or "."
+    tmp = ""
+    try:
+        fd, tmp = tempfile.mkstemp(dir=directory, prefix=".mcp_", suffix=".tmp")
+        with os.fdopen(fd, "w", encoding="utf-8") as fh:
+            json.dump(data, fh, indent=2)
+            fh.write("\n")
+        os.replace(tmp, cfg_path)
+    except OSError as exc:
+        if tmp and os.path.exists(tmp):
+            try:
+                os.remove(tmp)
+            except OSError:
+                pass
+        return False, f"Could not write config: {exc}"
+    return True, ""
+
+
+def remove_mcp_entry(cfg_path: str, server: str = "tokensave") -> "tuple[bool, str]":
+    """Delete one server from a Claude MCP config. Returns (changed, detail).
+
+    Used by the migration off the user-scoped `tokensave`, which cannot be a
+    side effect of binding a project: Claude Code dedupes by server name, so
+    once projects are bound the user-scoped definition is what shadows them —
+    but removing it also takes tokensave away from every project that is NOT
+    bound. That is a decision, not a cleanup step.
+
+    Refuses rather than guesses: an unparseable file is left alone, and an
+    already-absent entry is reported as no change rather than as success.
+    """
+    if not cfg_path or not os.path.isfile(cfg_path):
+        return False, f"No such config file: {cfg_path}"
+
+    try:
+        backup = cfg_path + ".backup." + str(int(time.time() * 1000))
+        shutil.copy2(cfg_path, backup)
+    except OSError as exc:
+        return False, f"Could not write backup: {exc}"
+
+    try:
+        with open(cfg_path, encoding="utf-8") as fh:
+            data = json.load(fh)
+    except (OSError, json.JSONDecodeError) as exc:
+        return False, f"Could not parse existing file: {exc}"
+    if not isinstance(data, dict):
+        return False, "Config root is not a JSON object"
+
+    servers = data.get("mcpServers")
+    if not isinstance(servers, dict) or server not in servers:
+        return False, f"No '{server}' entry in {cfg_path} — nothing to remove."
+
+    removed = servers.pop(server)
+    ok, err = _write_json_atomic(cfg_path, data)
+    if not ok:
+        return False, err
+    return True, ("Removed '%s' from %s (backup: %s)\n\nRemoved entry:\n%s"
+                  % (server, cfg_path, os.path.basename(backup),
+                     json.dumps(removed, indent=2)))
+
+
+# ── which definition is Claude Code actually using? ───────────────────────
+
+SCOPE_PROJECT = "project"
+SCOPE_USER = "user"
+SCOPE_LOCAL = "local"
+SCOPE_ABSENT = "absent"
+SCOPE_UNKNOWN = "unknown"
+
+#: Claude Code resolves local > project > user and dedupes by server NAME, so a
+#: project `.mcp.json` does not automatically win: a local definition for the
+#: same name overrides it, and an unapproved project entry does not take effect
+#: at all. Rather than re-implement that precedence — and eventually claim
+#: "bound" while something else is serving — ask the client, which prints the
+#: winner directly.
+
+
+@dataclasses.dataclass(frozen=True)
+class EffectiveScope:
+    """What `claude mcp get <name>` reports for a project."""
+
+    scope: str
+    pending_approval: bool = False
+    connected: bool = False
+    detail: str = ""
+
+    @property
+    def is_known(self) -> bool:
+        return self.scope != SCOPE_UNKNOWN
+
+    @property
+    def is_project(self) -> bool:
+        return self.scope == SCOPE_PROJECT
+
+    @property
+    def is_shadowed(self) -> bool:
+        """A project binding exists on disk but something else is serving.
+
+        Only meaningful for a project the caller already knows is bound; this
+        type cannot tell "shadowed" from "never bound" on its own.
+        """
+        return self.scope in (SCOPE_USER, SCOPE_LOCAL)
+
+
+def _parse_mcp_get(text: str) -> "EffectiveScope":
+    """Parse `claude mcp get` output. Pure, so the shapes can be tested.
+
+    Keyed off the words the CLI actually prints, captured from live runs:
+
+        Scope: Project config (shared via .mcp.json)
+        Scope: User config (available in all your projects)
+        Status: ⏸ Pending approval (run `claude` to approve)
+        Status: ✔ Connected
+    """
+    low = (text or "").lower()
+    if "no mcp server" in low or "not found" in low:
+        return EffectiveScope(SCOPE_ABSENT, detail=text.strip()[:200])
+
+    scope = SCOPE_UNKNOWN
+    for line in (text or "").splitlines():
+        stripped = line.strip().lower()
+        if not stripped.startswith("scope:"):
+            continue
+        if "project config" in stripped:
+            scope = SCOPE_PROJECT
+        elif "local config" in stripped:
+            scope = SCOPE_LOCAL
+        elif "user config" in stripped:
+            scope = SCOPE_USER
+        break
+
+    return EffectiveScope(
+        scope,
+        pending_approval="pending approval" in low,
+        connected="connected" in low and "pending approval" not in low,
+        detail=text.strip()[:200])
+
+
+def effective_scope(project_root: str, server: str = "tokensave",
+                    timeout: int = 45) -> "EffectiveScope":
+    """Ask Claude Code which `server` definition wins inside `project_root`.
+
+    Run with cwd set to the project, because the answer is per-directory. Any
+    failure — no `claude` on PATH, a timeout, unexpected output — comes back as
+    UNKNOWN rather than a guess: reporting "shadowed" because a CLI call fell
+    over would send the user hunting for a conflict that does not exist.
+    """
+    if not project_root or not os.path.isdir(project_root):
+        return EffectiveScope(SCOPE_UNKNOWN, detail="no such project directory")
+
+    # Resolve the launcher explicitly. On Windows `claude` is an npm shim
+    # (`claude.CMD`), and CreateProcess does not apply PATHEXT the way a shell
+    # does -- so a bare "claude" here fails with WinError 2 even though the
+    # same command works in a terminal. shutil.which does apply it.
+    import shutil
+    exe = shutil.which("claude")
+    if not exe:
+        return EffectiveScope(SCOPE_UNKNOWN,
+                              detail="the `claude` CLI is not on PATH")
+    try:
+        proc = subprocess.run(
+            [exe, "mcp", "get", server],
+            capture_output=True, text=True, timeout=timeout, cwd=project_root,
+            encoding="utf-8", errors="replace",
+            creationflags=CREATE_NO_WINDOW)
+    except (OSError, subprocess.TimeoutExpired) as exc:
+        return EffectiveScope(SCOPE_UNKNOWN, detail=str(exc)[:200])
+    return _parse_mcp_get((proc.stdout or "") + "\n" + (proc.stderr or ""))
 
 
 def _is_claude_running() -> dict:

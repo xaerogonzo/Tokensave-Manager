@@ -609,6 +609,8 @@ class ProjectsTabController:
         # The label depends on the selected project, and the menu is built
         # once — so keep a handle on the entry and restate it at popup time.
         self._strict_tree_entry = (index_m, index_m.index("end"))
+        index_m.add_command(label="🔌  Bind to this project…",
+                            command=self._bind_project_selected)
         index_m.add_separator()
         index_m.add_command(label="🔗  Shadow Links…",
                             command=self._cmd_bar.cmd_shadow_links)
@@ -713,6 +715,21 @@ class ProjectsTabController:
         if len(paths) < 2:
             return          # one project is what the Ask tab is already for
         CrossProjectSearchDialog(self._root, paths, self._cfg)
+
+    def _bind_project_selected(self) -> None:
+        """Open the MCP dialog focused on this project's binding.
+
+        Deliberately a navigation action, not a write. `MCPConfigDialog`
+        documents itself as the one place that mutates Claude's MCP
+        configs -- it owns the diff, the timestamped backup and the
+        per-row Apply -- and a second write path here would duplicate all
+        three while quietly making that claim false.
+        """
+        path = self._selected_path()
+        if not path:
+            return
+        from dialogs.mcp_config import MCPConfigDialog
+        MCPConfigDialog(self._root, self._cfg, focus_project=path)
 
     def _sync_strict_tree_label(self, path: str) -> None:
         """Point the entry at whichever direction is actually available.

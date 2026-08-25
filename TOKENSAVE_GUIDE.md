@@ -274,6 +274,16 @@ Add to `claude_desktop_config.json`:
 ```
 **Note:** You must restart Claude Desktop after changing this config, and the `-p` flag must point to a folder that has already been initialised with `tokensave init`.
 
+**For Claude Code, prefer a per-project binding instead.** A `.mcp.json` in the project root gives each session its own server, so several projects can be worked on at once without any of them answering about another:
+
+```json
+{"mcpServers": {"tokensave": {
+  "command": "tokensave",
+  "args": ["serve", "-p", "."]}}}
+```
+
+It holds no machine-specific paths — Claude Code spawns a project-scoped server with the project root as its working directory, so `.` resolves correctly even when the session was launched from a subdirectory. It does require `tokensave` to be on PATH. TokenSave Manager writes this for you (Settings → 🔌 Manage MCP wiring, or right-click a project → 🗂 Index → 🔌 Bind to this project…) and checks the PATH prerequisite first.
+
 ---
 
 ## Background Daemon

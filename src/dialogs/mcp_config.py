@@ -34,6 +34,8 @@ from constants import C
 from theme import bind_mousewheel
 from helpers.mcp import (
     _mcp_configs, _classify_mcp_entry, _apply_mcp_fix, _is_claude_running,
+    _mcp_code_cfg_path, _project_mcp_path, effective_scope,
+    remove_mcp_entry,
 )
 
 if TYPE_CHECKING:
@@ -61,9 +63,16 @@ class MCPConfigDialog(tk.Toplevel):
     this dialog — they never edit the JSON themselves.
     """
 
-    def __init__(self, parent, cfg: "ManagerConfig"):
+    def __init__(self, parent, cfg: "ManagerConfig", focus_project: str = ""):
         super().__init__(parent)
         self._cfg = cfg
+        # Set when opened from the Projects tab: that project renders
+        # expanded even if it is already bound, because the user asked
+        # about it specifically.
+        self._focus_project = focus_project or ""
+        # Bound projects collapse by default. With seventeen of them the
+        # useful axis is "what needs attention", not "show everything".
+        self._show_bound = bool(focus_project)
         self.title("MCP Integration")
         self.configure(bg=C["base"])
         self.resizable(True, True)
@@ -153,7 +162,370 @@ class MCPConfigDialog(tk.Toplevel):
         for label, path in _mcp_configs():
             self._render_block(label, path)
 
-    def _render_block(self, label: str, path: str):
+        self._render_projects_section()
+
+    def _render_projects_section(self):
+        """Per-project `.mcp.json` bindings, grouped by whether they need work.
+
+        A Claude Code session reads the `.mcp.json` in its project root, and a
+        binding there is what makes the session serve THAT project rather than
+        whatever the user-scoped entry happens to resolve to. Rendered through
+        the same block helpers as the two global configs, so these rows inherit
+        the diff, the backup and the per-row Apply rather than growing a second
+        write path.
+        """
+        try:
+            from helpers.project_discovery import find_projects
+            projects = find_projects(self._cfg.search_roots)
+        except Exception:                                    # noqa: BLE001
+            return                       # never let discovery break the dialog
+
+        rows = []
+        for proj in projects:
+            root = proj.get("path") if isinstance(proj, dict) else str(proj)
+            if not root:
+                continue
+            # Only projects with a real tokensave index. Without one there
+            # is nothing to bind a server TO -- and the classifier
+            # (correctly) refuses project scope for such a path, so the row
+            # would fall through to the GLOBAL wrapper proposal and offer to
+            # write this machine's absolute paths into a shared project
+            # file. That is the precise outcome this feature exists to
+            # prevent. Filtered here rather than by loosening the scope
+            # rule, which would let any stray .mcp.json be judged by
+            # project rules.
+            if not os.path.isdir(os.path.join(root, ".tokensave")):
+                continue
+            name = (proj.get("name") if isinstance(proj, dict) else "") \
+                or os.path.basename(root) or root
+            info = _classify_mcp_entry(_project_mcp_path(root), self._cfg.raw)
+            rows.append((name, root, info))
+        if not rows:
+            return
+
+        needs = [r for r in rows if r[2]["state"] != "ok"]
+        bound = [r for r in rows if r[2]["state"] == "ok"]
+
+        # A project entry says `"command": "tokensave"` so the file stays
+        # portable, which makes PATH resolution a prerequisite rather than
+        # a detail. Offering Apply while it is unmet would write a config
+        # that parses fine and cannot start.
+        from helpers import path_setup
+        path_state = path_setup.read_state(self._cfg.raw)
+        blocked = "" if path_state.is_ready else (
+            "Blocked: `tokensave` does not resolve as a command yet — "
+            "see the note above. Binding now would write a config that "
+            "cannot start.")
+
+        tk.Label(self._body,
+                 text="  Per-project bindings  (Claude Code)",
+                 font=("Segoe UI", 11, "bold"),
+                 bg=C["base"], fg=C["blue"]).pack(
+            anchor=tk.W, padx=4, pady=(16, 0))
+        tk.Label(self._body,
+                 text=("  Each Claude Code session reads its own project's "
+                       ".mcp.json. Without one it falls back to the user-scoped "
+                       "entry above, which resolves by searching upward from "
+                       "whatever directory the session started in."),
+                 font=("Segoe UI", 8), bg=C["base"], fg=C["overlay0"],
+                 justify=tk.LEFT, wraplength=740, anchor=tk.W).pack(
+            fill=tk.X, padx=4, pady=(0, 4))
+
+        self._render_path_prerequisite(path_state)
+
+        for name, root, info in needs:
+            self._render_block("%s  —  needs binding" % name,
+                               _project_mcp_path(root),
+                               blocked_reason=blocked)
+
+        if not bound:
+            return
+        if self._show_bound:
+            for name, root, info in bound:
+                self._render_block(name, _project_mcp_path(root),
+                                   blocked_reason=blocked)
+            self._render_migration(rows)
+            return
+
+        self._render_migration(rows)
+
+        strip = tk.Frame(self._body, bg=C["base"])
+        strip.pack(fill=tk.X, padx=4, pady=(6, 2))
+        tk.Label(strip,
+                 text="\u2713  %d project%s already bound" % (
+                     len(bound), "" if len(bound) == 1 else "s"),
+                 font=("Segoe UI", 9), bg=C["base"], fg=C["green"]).pack(
+            side=tk.LEFT)
+        ttk.Button(strip, text="show",
+                   command=self._toggle_bound).pack(side=tk.LEFT, padx=(10, 0))
+
+    def _render_path_prerequisite(self, state):
+        """Show whether `tokensave` runs as a bare command, and offer the fix.
+
+        Three states, and the last two must not be conflated: a binary that is
+        installed but unreachable is a setup step, while a missing one is an
+        installation problem with a different remedy. Telling someone to
+        reinstall software they already have is its own bug.
+        """
+        if state.is_ready:
+            tk.Label(self._body,
+                     text="  ✓  `tokensave` resolves on PATH — project "
+                          "bindings can start.",
+                     font=("Segoe UI", 9), bg=C["base"], fg=C["green"],
+                     anchor=tk.W).pack(fill=tk.X, padx=4, pady=(2, 6))
+            return
+
+        box = tk.Frame(self._body, bg=C["surface0"])
+        box.pack(fill=tk.X, padx=4, pady=(2, 8), ipady=6)
+        tk.Label(box, text="  ⚠  Prerequisite: tokensave is not on PATH",
+                 font=("Segoe UI", 10, "bold"),
+                 bg=C["surface0"], fg=C["peach"], anchor=tk.W).pack(
+            fill=tk.X, padx=8, pady=(4, 2))
+        tk.Label(box, text="  " + state.detail,
+                 font=("Segoe UI", 9), bg=C["surface0"], fg=C["text"],
+                 justify=tk.LEFT, wraplength=720, anchor=tk.W).pack(
+            fill=tk.X, padx=8)
+        tk.Label(box,
+                 text=("  A project binding uses the bare command `tokensave` "
+                       "on purpose: a .mcp.json is shared through version "
+                       "control, and an absolute path would only work on this "
+                       "machine."),
+                 font=("Segoe UI", 8, "italic"),
+                 bg=C["surface0"], fg=C["overlay0"],
+                 justify=tk.LEFT, wraplength=720, anchor=tk.W).pack(
+            fill=tk.X, padx=8, pady=(2, 4))
+
+        if not state.is_fixable:
+            return
+        ttk.Button(box, text="Add tokensave to PATH…",
+                   style="Primary.TButton",
+                   command=lambda d=state.exe_dir: self._add_to_path(d)).pack(
+            anchor=tk.W, padx=8, pady=(2, 2))
+
+    def _add_to_path(self, directory: str):
+        """Its own confirmed action, never folded into a project Apply.
+
+        Shows the exact directory and the current value before touching
+        anything, and reports the previous value afterwards: there is no file
+        to back up for an environment variable, so the old value has to be
+        surfaced somewhere the user can copy it from.
+        """
+        from helpers import path_setup
+
+        current = path_setup.user_path()
+        if not messagebox.askyesno(
+                "Add tokensave to PATH",
+                "Append this folder to your USER PATH?\n\n"
+                "    %s\n\n"
+                "Current user PATH:\n%s\n\n"
+                "User scope only — no administrator rights, and nothing "
+                "other accounts can see. Programs already running keep their "
+                "old environment, so Claude Code must be restarted before a "
+                "project binding will start."
+                % (directory, current or "(empty)"),
+                parent=self):
+            return
+
+        ok, detail = path_setup.add_to_user_path(directory)
+        self._log_to_app(
+            ("PATH: " + detail.splitlines()[0]) if detail else "PATH unchanged",
+            C["green"] if ok else C["peach"])
+        messagebox.showinfo(
+            "PATH updated" if ok else "PATH unchanged",
+            detail + ("\n\nRestart Claude Code (and any open terminals) "
+                      "before binding a project — running processes keep "
+                      "the environment they started with." if ok else ""),
+            parent=self)
+        self._render()
+
+    def _migration_status(self, rows) -> dict:
+        """Counts for the migration guard. Reads files only — no CLI calls.
+
+        Readiness deliberately does NOT mean "verified serving". While the
+        user-scoped entry still exists it is the thing that may be shadowing a
+        binding, so demanding proof of correct service *before* removing it
+        would be asking for an outcome the removal itself produces.
+        Verification happens after, on a representative bound project.
+        """
+        raw = self._cfg.raw if isinstance(self._cfg.raw, dict) else {}
+        skips = raw.get("mcp_skip_warnings") or []
+        bound, skipped, remaining = [], [], []
+        for name, root, info in rows:
+            if info["state"] == "ok":
+                bound.append((name, root))
+            elif _project_mcp_path(root) in skips:
+                skipped.append((name, root))
+            else:
+                remaining.append((name, root))
+        return {"bound": bound, "skipped": skipped, "remaining": remaining,
+                "ready": not remaining and bool(bound)}
+
+    def _render_migration(self, rows):
+        """Where the user-scoped fallback stands, and the action to retire it.
+
+        Stated rather than hidden: once the user-scoped entry is gone, a
+        project with no binding has no tokensave at all. That is the deliberate
+        trade — determinism instead of a fallback that is usually right — and
+        it is not something to discover afterwards.
+        """
+        st = self._migration_status(rows)
+        code_cfg = _mcp_code_cfg_path()
+        info = _classify_mcp_entry(code_cfg, self._cfg.raw)
+        still_there = info.get("current") is not None
+
+        box = tk.Frame(self._body, bg=C["surface0"])
+        box.pack(fill=tk.X, padx=4, pady=(12, 4), ipady=6)
+
+        if not still_there:
+            tk.Label(box,
+                     text="  ✓  Migration complete — no user-scoped tokensave "
+                          "entry remains. Each project serves its own graph.",
+                     font=("Segoe UI", 9, "bold"),
+                     bg=C["surface0"], fg=C["green"], anchor=tk.W,
+                     justify=tk.LEFT, wraplength=740).pack(fill=tk.X, padx=8)
+            return
+
+        tk.Label(box, text="  ⚠  User-scoped fallback is still active",
+                 font=("Segoe UI", 10, "bold"),
+                 bg=C["surface0"], fg=C["peach"], anchor=tk.W).pack(
+            fill=tk.X, padx=8, pady=(4, 2))
+        tk.Label(box,
+                 text="  %d bound · %d skipped · %d still to bind"
+                      % (len(st["bound"]), len(st["skipped"]),
+                         len(st["remaining"])),
+                 font=("Consolas", 9), bg=C["surface0"], fg=C["text"],
+                 anchor=tk.W).pack(fill=tk.X, padx=8)
+        tk.Label(box,
+                 text=("  Claude Code dedupes MCP servers by name, so while a "
+                       "user-scoped `tokensave` exists it can shadow a project "
+                       "binding. Removing it makes each project's own binding "
+                       "authoritative — and leaves any UNBOUND project with no "
+                       "tokensave at all. Bind or skip each project first."),
+                 font=("Segoe UI", 8), bg=C["surface0"], fg=C["overlay0"],
+                 justify=tk.LEFT, wraplength=740, anchor=tk.W).pack(
+            fill=tk.X, padx=8, pady=(2, 4))
+
+        if st["ready"]:
+            ttk.Button(box, text="Remove user-scoped tokensave…",
+                       style="Primary.TButton",
+                       command=self._remove_user_scoped).pack(
+                anchor=tk.W, padx=8, pady=(2, 2))
+        else:
+            names = ", ".join(n for n, _ in st["remaining"][:4])
+            more = "" if len(st["remaining"]) <= 4 else " …"
+            tk.Label(box,
+                     text=("  Not offered yet — %s%s %s still unbound and not "
+                           "skipped." % (names, more,
+                                         "is" if len(st["remaining"]) == 1
+                                         else "are"))
+                          if st["remaining"] else
+                          "  Not offered yet — bind at least one project first.",
+                     font=("Segoe UI", 9), bg=C["surface0"], fg=C["overlay0"],
+                     justify=tk.LEFT, wraplength=740, anchor=tk.W).pack(
+                fill=tk.X, padx=8, pady=(0, 4))
+
+    def _remove_user_scoped(self):
+        """Its own reviewed operation: diff, backup, apply, then VERIFY.
+
+        Never a side effect of binding one project. And the result is not
+        assumed — after removal a representative bound project is asked what
+        Claude Code now serves, because "the file changed" and "the right
+        server runs" are different claims. That distinction is the whole
+        lesson of the pin watcher.
+        """
+        code_cfg = _mcp_code_cfg_path()
+        info = _classify_mcp_entry(code_cfg, self._cfg.raw)
+        current = info.get("current")
+        if current is None:
+            messagebox.showinfo("Nothing to remove",
+                                "No user-scoped tokensave entry found in\n%s"
+                                % code_cfg, parent=self)
+            return
+
+        if not messagebox.askyesno(
+                "Remove user-scoped tokensave",
+                "Remove this entry from\n%s ?\n\n%s\n\n"
+                "After this, a Claude Code session only gets tokensave if its "
+                "project has its own .mcp.json binding. Projects you skipped "
+                "will have no tokensave at all.\n\n"
+                "A timestamped backup is written first, and the removed entry "
+                "is shown afterwards so it can be restored by hand."
+                % (code_cfg, json.dumps(current, indent=2)),
+                parent=self):
+            return
+
+        ok, detail = remove_mcp_entry(code_cfg)
+        if not ok:
+            self._log_to_app("MCP migration FAILED: %s" % detail, C["red"])
+            messagebox.showerror("Removal failed", detail, parent=self)
+            self._render()
+            return
+
+        self._log_to_app("MCP migration: removed the user-scoped tokensave "
+                         "entry.", C["green"])
+        self._verify_migration(detail)
+        self._render()
+
+    def _verify_migration(self, removal_detail: str):
+        """Ask Claude Code what a bound project now serves.
+
+        A failure here is reported as `verification_failed`, not as success
+        with a caveat: the user needs to know the difference between "the file
+        changed" and "the right server runs".
+        """
+        rows = []
+        try:
+            from helpers.project_discovery import find_projects
+            for proj in find_projects(self._cfg.search_roots):
+                root = proj.get("path") if isinstance(proj, dict) else str(proj)
+                if not root:
+                    continue
+                if _classify_mcp_entry(_project_mcp_path(root),
+                                       self._cfg.raw)["state"] == "ok":
+                    rows.append(root)
+        except Exception:                                    # noqa: BLE001
+            rows = []
+
+        if not rows:
+            messagebox.showinfo(
+                "Removed — not verified",
+                removal_detail + "\n\nNo bound project was available to check "
+                "against, so this was not verified end to end.",
+                parent=self)
+            return
+
+        root = rows[0]
+        got = effective_scope(root)
+        if got.is_project or got.pending_approval:
+            messagebox.showinfo(
+                "Migration verified",
+                removal_detail
+                + "\n\nClaude Code now reports the PROJECT-scoped definition "
+                  "in:\n%s\n\nRestart any running Claude Code session before "
+                  "relying on it." % root,
+                parent=self)
+            self._log_to_app("MCP migration verified against %s." % root,
+                             C["green"])
+            return
+
+        self._log_to_app(
+            "MCP migration verification_failed: %s reports scope=%s."
+            % (root, got.scope), C["peach"])
+        messagebox.showwarning(
+            "Removed, but verification failed",
+            removal_detail
+            + "\n\nverification_failed: after removal, %s still reports "
+              "scope=%s rather than the project definition.\n\nThe file "
+              "changed but the expected server is not the one serving. Do not "
+              "assume the migration succeeded."
+            % (root, got.scope),
+            parent=self)
+
+    def _toggle_bound(self):
+        self._show_bound = not self._show_bound
+        self._render()
+
+    def _render_block(self, label: str, path: str, blocked_reason: str = ""):
         info = _classify_mcp_entry(path, self._cfg.raw)
         self._config_state[path] = info
 
@@ -167,7 +539,7 @@ class MCPConfigDialog(tk.Toplevel):
         self._render_block_header(frame, label, path, info)
         if info["state"] != "ok":
             self._render_block_diff(frame, info)
-        self._render_block_actions(frame, label, path, info)
+        self._render_block_actions(frame, label, path, info, blocked_reason)
 
     def _render_block_header(self, frame, label: str, path: str, info: dict):
         """Path label, optional UWP tag, and status badge."""
@@ -192,14 +564,24 @@ class MCPConfigDialog(tk.Toplevel):
                      bg=C["base"], fg=tag_colour).pack(side=tk.LEFT)
 
         state = info["state"]
+        # project_mismatch is red with the unreadable/missing cases, not
+        # amber with the drift ones: a binding pointed at ANOTHER project
+        # answers every query from the wrong codebase and looks normal.
         badge_colour = (C["green"] if state == "ok"
-                        else C["peach"] if state in ("direct_serve", "wrong_wrapper")
+                        else C["peach"] if state in (
+                            "direct_serve", "wrong_wrapper",
+                            "project_unbound", "project_absolute")
                         else C["red"])
         tk.Label(head, text=info["label"],
                  font=("Segoe UI", 9, "bold"),
                  bg=C["base"], fg=badge_colour).pack(side=tk.RIGHT)
 
-        issue_text = info["issue"] or "No action needed — already routes through the wrapper."
+        # The default only made sense for the two global configs; a project
+        # binding deliberately does NOT route through the wrapper.
+        _ok_default = ("No action needed — bound to this project."
+                       if os.path.basename(path).lower() == ".mcp.json"
+                       else "No action needed — already routes through the wrapper.")
+        issue_text = info["issue"] or _ok_default
         tk.Label(frame, text=issue_text,
                  font=("Segoe UI", 9),
                  bg=C["base"], fg=C["overlay0"],
@@ -233,10 +615,24 @@ class MCPConfigDialog(tk.Toplevel):
                            state=tk.DISABLED)
         diff_box.pack(fill=tk.X, padx=8, pady=(2, 4))
 
-    def _render_block_actions(self, frame, label: str, path: str, info: dict):
+    def _render_block_actions(self, frame, label: str, path: str, info: dict,
+                              blocked_reason: str = ""):
         """Apply / Skip / Open buttons and the backup-notice strip."""
         actions = tk.Frame(frame, bg=C["base"])
         actions.pack(fill=tk.X, padx=8, pady=(2, 4))
+
+        if blocked_reason and info["state"] != "ok":
+            # No Apply button rather than a disabled one: the reason is the
+            # useful part, and a greyed control invites clicking to find
+            # out why it is greyed.
+            tk.Label(actions, text=blocked_reason,
+                     font=("Segoe UI", 9), bg=C["base"], fg=C["peach"],
+                     justify=tk.LEFT, wraplength=700, anchor=tk.W).pack(
+                fill=tk.X)
+            ttk.Button(actions, text="Open file",
+                       command=lambda p=path: self._open_file(p)).pack(
+                side=tk.LEFT, pady=(4, 0))
+            return
 
         if info["state"] == "ok":
             ttk.Button(actions, text="Open file",
@@ -255,7 +651,8 @@ class MCPConfigDialog(tk.Toplevel):
 
         tk.Label(frame,
             text=("  A timestamped backup is written before any change. "
-                  "Other mcpServers entries in this file are preserved verbatim."),
+                  "Other mcpServers entries in this file are preserved "
+                  "(as data \u2014 formatting and comments are not)."),
             font=("Segoe UI", 8, "italic"),
             bg=C["base"], fg=C["overlay0"],
             justify=tk.LEFT, anchor=tk.W).pack(
@@ -310,6 +707,7 @@ class MCPConfigDialog(tk.Toplevel):
         proposed = self._config_state[cfg_path]["proposed"]
         ok, msg = _apply_mcp_fix(cfg_path, proposed)
         if ok:
+            msg += self._maybe_gitignore(cfg_path)
             self._log_to_app(
                 f"MCP Apply OK: wrote canonical tokensave entry to "
                 f"{label} config.  {msg}",
@@ -330,6 +728,39 @@ class MCPConfigDialog(tk.Toplevel):
                 f"MCP Apply FAILED: {label} — {msg}", C["red"])
             messagebox.showerror("Fix failed", msg, parent=self)
         self._render()
+
+    def _maybe_gitignore(self, cfg_path: str) -> str:
+        """Ignore a freshly written project `.mcp.json`, if the user wants that.
+
+        Only ever touches a PROJECT binding — the two global configs live in
+        Claude's own directories and are nobody's repository.
+
+        The default is on, and it is a judgement call rather than an obvious
+        one: the file is portable precisely so it *can* be committed, but
+        committing it hands every collaborator an MCP server definition that
+        only works if they happen to have tokensave on PATH. Opting people in
+        silently is the ruder default. Anyone who wants it shared turns the
+        setting off; anyone who already committed it is unaffected, since git
+        ignores nothing it is already tracking.
+
+        Returns a suffix for the Apply message, or "" when nothing happened.
+        Never raises: failing to ignore is not a reason to report a successful
+        write as failed.
+        """
+        if os.path.basename(cfg_path).lower() != ".mcp.json":
+            return ""
+        raw = self._cfg.raw if isinstance(self._cfg.raw, dict) else {}
+        from helpers.mcp import GITIGNORE_PROJECT_MCP_KEY
+        if not raw.get(GITIGNORE_PROJECT_MCP_KEY, True):
+            return ""
+        try:
+            from helpers.gitignore import ensure_pattern
+            added, detail = ensure_pattern(
+                os.path.dirname(cfg_path), ".mcp.json",
+                comment="# tokensave MCP binding (TokenSave Manager)")
+        except Exception as exc:                             # noqa: BLE001
+            return "\n\n(could not update .gitignore: %s)" % exc
+        return ("\n\n" + detail) if added else ""
 
     def _skip(self, cfg_path: str):
         raw = self._cfg.raw

@@ -554,7 +554,7 @@ class TestContextMenuGrouping:
         cmds, _ = self._menu_calls()
         dupes = [c for c in set(cmds) if cmds.count(c) > 1]
         assert dupes == [], f"command wired twice: {dupes}"
-        assert len(cmds) == 33, f"expected 33 commands, found {len(cmds)}"
+        assert len(cmds) == 34, f"expected 34 commands, found {len(cmds)}"
 
     def test_the_everyday_actions_stay_one_click_away(self):
         """Burying Sync in a submenu would make the common case worse."""
@@ -778,3 +778,26 @@ class TestStrictTreeToggle:
         assert len(strict) == 2, strict
         assert any("Enable" in l for l in strict)
         assert any("Disable" in l for l in strict)
+
+
+def test_the_strict_tree_entry_index_still_points_at_the_toggle(controller):
+    """The captured menu index must survive entries added around it.
+
+    `_build_context_menu` records the toggle's position with `index("end")`
+    immediately after adding it, and `_sync_strict_tree_label` later rewrites
+    the label at that index. Insert a command above the capture and the toggle
+    silently starts relabelling its neighbour instead — no error, no failing
+    test, just a menu that lies. Adding the "Bind to this project" entry was
+    exactly that hazard, so it is pinned rather than remembered.
+    """
+    from controllers import projects_tab as pt
+
+    menu, index = controller._strict_tree_entry
+    assert menu.entrycget(index, "label") in (
+        pt._STRICT_TREE_ON_LABEL, pt._STRICT_TREE_OFF_LABEL)
+
+
+def test_binding_is_reachable_from_the_index_cascade(controller):
+    """Guards the wiring: the dialog can be perfectly correct and unreachable."""
+    labels = _menu_labels(controller._ctx_menu)
+    assert any("Bind to this project" in lbl for lbl in labels), labels
