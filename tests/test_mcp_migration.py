@@ -23,7 +23,7 @@ import pytest
 pytestmark = pytest.mark.tk
 
 from dialogs.mcp_config import MCPConfigDialog
-from helpers.mcp import _project_mcp_path
+from helpers.mcp import ADVISORY_STATES, _project_mcp_path
 
 
 class _Cfg:
@@ -99,6 +99,39 @@ def test_every_not_ok_state_blocks_until_bound_or_skipped(state):
 
     assert st["ready"] is False
     assert [n for n, _ in st["remaining"]] == ["b"]
+
+
+@pytest.mark.parametrize("state", sorted(ADVISORY_STATES))
+def test_an_advisory_state_still_counts_as_bound(state):
+    """A shadowed or unapproved binding is a WRITTEN binding.
+
+    Its file is correct by construction, and what blocks it is usually the
+    user-scoped entry this migration exists to remove. Counting it as unbound
+    would withhold the button at exactly the moment it is the fix — the same
+    "demand the outcome beforehand" trap the readiness rule already refuses
+    for shadowing.
+    """
+    st = _dialog()._migration_status([
+        _row("a", "/a", "ok"), _row("b", "/b", state)])
+
+    assert st["ready"] is True
+    assert [n for n, _ in st["bound"]] == ["a", "b"]
+    assert st["remaining"] == []
+
+
+def test_advisory_alone_is_still_ready():
+    """Every project shadowed and none plainly `ok` is the live starting state.
+
+    Measured on a real machine: ten correct `.mcp.json` files, none approved,
+    every session served by the user-scoped entry. If that configuration could
+    not reach the removal button, the migration would be unreachable for the
+    exact population that needs it most.
+    """
+    st = _dialog()._migration_status([
+        _row("a", "/a", "project_unapproved"),
+        _row("b", "/b", "project_shadowed")])
+
+    assert st["ready"] is True
 
 
 def test_skipping_uses_the_same_list_the_dialog_already_owns():

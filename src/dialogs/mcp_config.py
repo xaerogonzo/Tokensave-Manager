@@ -26,23 +26,25 @@ from __future__ import annotations
 
 import json
 import os
+import threading
 import tkinter as tk
 from tkinter import ttk, messagebox
 from typing import TYPE_CHECKING
 
 from constants import C
-from theme import bind_mousewheel
+from theme import UiPumpMixin, bind_mousewheel
 from helpers.mcp import (
     _mcp_configs, _classify_mcp_entry, _apply_mcp_fix, _is_claude_running,
     _mcp_code_cfg_path, _project_mcp_path, effective_scope,
-    remove_mcp_entry,
+    remove_mcp_entry, ADVISORY_STATES, annotate_project_binding,
+    describe_effective, duplicate_project_keys, read_claude_projects,
 )
 
 if TYPE_CHECKING:
     from state import ManagerConfig
 
 
-class MCPConfigDialog(tk.Toplevel):
+class MCPConfigDialog(UiPumpMixin, tk.Toplevel):
     """Manage tokensave entries in Claude Desktop's and Claude Code's MCP
     config files.
 
@@ -133,6 +135,16 @@ class MCPConfigDialog(tk.Toplevel):
 
         # Per-config-path state for the renderer
         self._config_state: dict[str, dict] = {}
+        # Badge + issue widgets per row, so the verification pass can revise a
+        # verdict in place instead of rebuilding the whole body underneath the
+        # user's scroll position.
+        self._row_widgets: dict[str, tuple] = {}
+        # One read of ~/.claude.json per render, shared by every row.
+        self._claude_projects: dict = {}
+        # Bumped on every render so a verification still in flight from the
+        # previous one cannot write a stale badge into fresh widgets.
+        self._verify_gen = 0
+        self._start_ui_pump()
         self._render()
 
     # ── Rendering ───────────────────────────────────────────────────────
@@ -142,6 +154,10 @@ class MCPConfigDialog(tk.Toplevel):
         Re-detect / after each Apply so the state badges stay fresh."""
         for child in self._body.winfo_children():
             child.destroy()
+        self._row_widgets.clear()
+        # Any verification still running belongs to the widgets just destroyed.
+        self._verify_gen += 1
+        self._claude_projects = read_claude_projects()
 
         # Warning banner — running Claude apps
         running = _is_claude_running()
@@ -162,7 +178,71 @@ class MCPConfigDialog(tk.Toplevel):
         for label, path in _mcp_configs():
             self._render_block(label, path)
 
+        self._render_duplicate_keys()
         self._render_projects_section()
+
+    def _render_duplicate_keys(self):
+        """Warn when one directory is recorded under several spellings.
+
+        Not a cosmetic complaint: approval, trust and allowed-tools are stored
+        per key, so duplicates mean a session's settings depend on how its
+        directory was spelled at launch. Reported without a repair button —
+        merging two entries means choosing whose approvals survive, which
+        belongs in front of the user under the show-diff protocol rather than
+        inside a status render.
+        """
+        dups = duplicate_project_keys(projects=self._claude_projects)
+        if not dups:
+            return
+
+        box = tk.Frame(self._body, bg=C["surface0"])
+        box.pack(fill=tk.X, padx=4, pady=(10, 2), ipady=6)
+        tk.Label(box,
+                 text="  ⚠  %d project%s recorded more than once in "
+                      "~/.claude.json" % (
+                          len(dups), "" if len(dups) == 1 else "s"),
+                 font=("Segoe UI", 10, "bold"),
+                 bg=C["surface0"], fg=C["peach"], anchor=tk.W).pack(
+            fill=tk.X, padx=8, pady=(4, 2))
+        tk.Label(box,
+                 text=("  Claude Code keys per-project state by the directory "
+                       "a session started in, spelled however the launcher "
+                       "spelled it. The same folder under two spellings gets "
+                       "two independent sets of MCP approvals and trust flags, "
+                       "so which one applies depends on how you launched."),
+                 font=("Segoe UI", 9), bg=C["surface0"], fg=C["text"],
+                 justify=tk.LEFT, wraplength=720, anchor=tk.W).pack(
+            fill=tk.X, padx=8)
+
+        listing = tk.Frame(box, bg=C["surface0"])
+        listing.pack(fill=tk.X, padx=8, pady=(4, 2))
+        for keys in list(dups.values())[:6]:
+            for key in keys:
+                tk.Label(listing, text="    " + key, font=("Consolas", 8),
+                         bg=C["surface0"], fg=C["subtext"], anchor=tk.W).pack(
+                    fill=tk.X)
+            tk.Label(listing, text="", bg=C["surface0"]).pack()
+        if len(dups) > 6:
+            tk.Label(listing, text="    … and %d more" % (len(dups) - 6),
+                     font=("Segoe UI", 8, "italic"),
+                     bg=C["surface0"], fg=C["overlay0"], anchor=tk.W).pack(
+                fill=tk.X)
+
+        tk.Label(box,
+                 text=("  The manager now launches `claude` using a spelling "
+                       "Claude Code already has on file, so it no longer adds "
+                       "new ones. Collapsing the existing duplicates means "
+                       "deciding which side's approvals survive — edit the "
+                       "file directly if you want them merged."),
+                 font=("Segoe UI", 8, "italic"),
+                 bg=C["surface0"], fg=C["overlay0"],
+                 justify=tk.LEFT, wraplength=720, anchor=tk.W).pack(
+            fill=tk.X, padx=8, pady=(2, 2))
+        ttk.Button(box, text="Open ~/.claude.json",
+                   command=lambda: self._open_file(
+                       os.path.join(os.path.expanduser("~"),
+                                    ".claude.json"))).pack(
+            anchor=tk.W, padx=8, pady=(2, 4))
 
     def _render_projects_section(self):
         """Per-project `.mcp.json` bindings, grouped by whether they need work.
@@ -199,11 +279,20 @@ class MCPConfigDialog(tk.Toplevel):
             name = (proj.get("name") if isinstance(proj, dict) else "") \
                 or os.path.basename(root) or root
             info = _classify_mcp_entry(_project_mcp_path(root), self._cfg.raw)
+            info = annotate_project_binding(
+                info, root, projects=self._claude_projects)
             rows.append((name, root, info))
         if not rows:
             return
 
-        needs = [r for r in rows if r[2]["state"] != "ok"]
+        # Three buckets, not two. An advisory row has a CORRECT file and an
+        # external blocker, so it needs attention like a broken one but must
+        # not offer Apply — rewriting a correct file changes nothing and would
+        # report success for it.
+        needs = [r for r in rows
+                 if r[2]["state"] != "ok"
+                 and r[2]["state"] not in ADVISORY_STATES]
+        advisory = [r for r in rows if r[2]["state"] in ADVISORY_STATES]
         bound = [r for r in rows if r[2]["state"] == "ok"]
 
         # A project entry says `"command": "tokensave"` so the file stays
@@ -236,15 +325,22 @@ class MCPConfigDialog(tk.Toplevel):
         for name, root, info in needs:
             self._render_block("%s  —  needs binding" % name,
                                _project_mcp_path(root),
-                               blocked_reason=blocked)
+                               blocked_reason=blocked, project_root=root)
+
+        for name, root, info in advisory:
+            self._render_block("%s  —  bound, but not in effect" % name,
+                               _project_mcp_path(root),
+                               blocked_reason=blocked, project_root=root)
 
         if not bound:
+            self._start_verification(rows)
             return
         if self._show_bound:
             for name, root, info in bound:
                 self._render_block(name, _project_mcp_path(root),
-                                   blocked_reason=blocked)
+                                   blocked_reason=blocked, project_root=root)
             self._render_migration(rows)
+            self._start_verification(rows)
             return
 
         self._render_migration(rows)
@@ -258,6 +354,7 @@ class MCPConfigDialog(tk.Toplevel):
             side=tk.LEFT)
         ttk.Button(strip, text="show",
                    command=self._toggle_bound).pack(side=tk.LEFT, padx=(10, 0))
+        self._start_verification(rows)
 
     def _render_path_prerequisite(self, state):
         """Show whether `tokensave` runs as a bare command, and offer the fix.
@@ -351,7 +448,13 @@ class MCPConfigDialog(tk.Toplevel):
         skips = raw.get("mcp_skip_warnings") or []
         bound, skipped, remaining = [], [], []
         for name, root, info in rows:
-            if info["state"] == "ok":
+            # Advisory states count as bound here, and must. Their files are
+            # correct by construction, and the thing blocking them is usually
+            # the user-scoped entry this migration removes — treating them as
+            # unbound would withhold the button precisely when it is the fix,
+            # which is the same "demand the outcome beforehand" trap the
+            # readiness rule already refuses for shadowing.
+            if info["state"] == "ok" or info["state"] in ADVISORY_STATES:
                 bound.append((name, root))
             elif _project_mcp_path(root) in skips:
                 skipped.append((name, root))
@@ -521,12 +624,97 @@ class MCPConfigDialog(tk.Toplevel):
             % (root, got.scope),
             parent=self)
 
+    # ── verification: what is Claude Code ACTUALLY serving? ─────────────
+
+    def _start_verification(self, rows):
+        """Ask Claude Code about each rendered row, in the background.
+
+        The file check and the approval check together still cannot answer
+        "which server runs" — only the client can, and asking costs a
+        subprocess per project. So it runs off the Tk thread and revises each
+        badge as its answer lands, rather than making the dialog sit blank for
+        the length of ten CLI calls.
+
+        Rows the free tier already disqualified are skipped: their verdict is
+        settled, and spending a CLI call to re-derive a known answer would just
+        delay the rows that are still in question.
+        """
+        targets = [(_project_mcp_path(root), root) for _n, root, info in rows
+                   if info["state"] == "ok"
+                   and _project_mcp_path(root) in self._row_widgets]
+        if not targets:
+            return
+
+        for path, _root in targets:
+            self._mark_verifying(path)
+
+        gen = self._verify_gen
+
+        def _worker():
+            for path, root in targets:
+                if gen != self._verify_gen:
+                    return              # a re-render replaced these widgets
+                try:
+                    got = effective_scope(root)
+                except Exception:                            # noqa: BLE001
+                    continue            # one project must not stop the rest
+                self._post(self._apply_verification, gen, path, got)
+
+        threading.Thread(target=_worker, daemon=True).start()
+
+    def _mark_verifying(self, path: str):
+        """Say an answer is being fetched, so the row is not read as final."""
+        widgets = self._row_widgets.get(path)
+        if not widgets:
+            return
+        badge, _issue = widgets
+        try:
+            badge.configure(text="⋯ checking with Claude Code…",
+                            fg=C["overlay0"])
+        except tk.TclError:
+            pass
+
+    def _apply_verification(self, gen: int, path: str, got):
+        """Write one verification result into its row. Tk thread only."""
+        if gen != self._verify_gen:
+            return
+        widgets = self._row_widgets.get(path)
+        if not widgets:
+            return
+        badge, issue = widgets
+
+        verdict = describe_effective(got)
+        if verdict is None:
+            # Could not tell. Restore the file-level verdict rather than
+            # leaving "checking…" on screen forever or inventing a failure:
+            # an unreachable `claude` is a fact about our tooling, not about
+            # the user's binding.
+            info = self._config_state.get(path) or {}
+            state = info.get("state", "ok")
+            label = info.get("label", "")
+            text = info.get("issue", "")
+        else:
+            state, label, text = verdict
+            self._config_state[path] = {**(self._config_state.get(path) or {}),
+                                        "state": state, "label": label,
+                                        "issue": text}
+        try:
+            badge.configure(text=label, fg=self._badge_colour(state))
+            if text:
+                issue.configure(text=text)
+        except tk.TclError:
+            pass                         # row destroyed between post and run
+
     def _toggle_bound(self):
         self._show_bound = not self._show_bound
         self._render()
 
-    def _render_block(self, label: str, path: str, blocked_reason: str = ""):
+    def _render_block(self, label: str, path: str, blocked_reason: str = "",
+                      project_root: str = ""):
         info = _classify_mcp_entry(path, self._cfg.raw)
+        if project_root:
+            info = annotate_project_binding(
+                info, project_root, projects=self._claude_projects)
         self._config_state[path] = info
 
         frame = tk.LabelFrame(
@@ -537,7 +725,10 @@ class MCPConfigDialog(tk.Toplevel):
         frame.pack(fill=tk.X, padx=4, pady=(8, 4), ipady=4)
 
         self._render_block_header(frame, label, path, info)
-        if info["state"] != "ok":
+        # No diff for an advisory row: the file already matches the proposal,
+        # so a current-vs-proposed box would show two identical blocks and
+        # imply there is an edit to make.
+        if info["state"] != "ok" and info["state"] not in ADVISORY_STATES:
             self._render_block_diff(frame, info)
         self._render_block_actions(frame, label, path, info, blocked_reason)
 
@@ -564,29 +755,42 @@ class MCPConfigDialog(tk.Toplevel):
                      bg=C["base"], fg=tag_colour).pack(side=tk.LEFT)
 
         state = info["state"]
-        # project_mismatch is red with the unreadable/missing cases, not
-        # amber with the drift ones: a binding pointed at ANOTHER project
-        # answers every query from the wrong codebase and looks normal.
-        badge_colour = (C["green"] if state == "ok"
-                        else C["peach"] if state in (
-                            "direct_serve", "wrong_wrapper",
-                            "project_unbound", "project_absolute")
-                        else C["red"])
-        tk.Label(head, text=info["label"],
-                 font=("Segoe UI", 9, "bold"),
-                 bg=C["base"], fg=badge_colour).pack(side=tk.RIGHT)
+        badge = tk.Label(head, text=info["label"],
+                         font=("Segoe UI", 9, "bold"),
+                         bg=C["base"], fg=self._badge_colour(state))
+        badge.pack(side=tk.RIGHT)
 
         # The default only made sense for the two global configs; a project
-        # binding deliberately does NOT route through the wrapper.
-        _ok_default = ("No action needed — bound to this project."
+        # binding deliberately does NOT route through the wrapper. "bound to
+        # this project" is deliberately NOT claimed here any more: this row is
+        # rendered from the file alone, and the file cannot know whether Claude
+        # Code is serving it. The verification pass upgrades the wording once
+        # something has actually been asked.
+        _ok_default = ("The file binds tokensave to this project."
                        if os.path.basename(path).lower() == ".mcp.json"
                        else "No action needed — already routes through the wrapper.")
         issue_text = info["issue"] or _ok_default
-        tk.Label(frame, text=issue_text,
-                 font=("Segoe UI", 9),
-                 bg=C["base"], fg=C["overlay0"],
-                 justify=tk.LEFT, wraplength=720, anchor=tk.W).pack(
-            fill=tk.X, padx=8, pady=(0, 4))
+        issue = tk.Label(frame, text=issue_text,
+                         font=("Segoe UI", 9),
+                         bg=C["base"], fg=C["overlay0"],
+                         justify=tk.LEFT, wraplength=720, anchor=tk.W)
+        issue.pack(fill=tk.X, padx=8, pady=(0, 4))
+        self._row_widgets[path] = (badge, issue)
+
+    @staticmethod
+    def _badge_colour(state: str) -> str:
+        """Colour for a status badge.
+
+        project_mismatch sits with the unreadable/missing cases rather than the
+        drift ones: a binding pointed at ANOTHER project answers every query
+        from the wrong codebase and looks entirely normal doing it.
+        """
+        if state == "ok":
+            return C["green"]
+        if state in ("direct_serve", "wrong_wrapper", "project_unbound",
+                     "project_absolute") or state in ADVISORY_STATES:
+            return C["peach"]
+        return C["red"]
 
     def _render_block_diff(self, frame, info: dict):
         """Diff text box showing current vs proposed JSON — only for non-ok states."""
@@ -621,7 +825,10 @@ class MCPConfigDialog(tk.Toplevel):
         actions = tk.Frame(frame, bg=C["base"])
         actions.pack(fill=tk.X, padx=8, pady=(2, 4))
 
-        if blocked_reason and info["state"] != "ok":
+        # An advisory row has nothing to apply, so a "binding is blocked"
+        # notice would name a prerequisite for work that is already done.
+        if (blocked_reason and info["state"] != "ok"
+                and info["state"] not in ADVISORY_STATES):
             # No Apply button rather than a disabled one: the reason is the
             # useful part, and a greyed control invites clicking to find
             # out why it is greyed.
@@ -634,7 +841,7 @@ class MCPConfigDialog(tk.Toplevel):
                 side=tk.LEFT, pady=(4, 0))
             return
 
-        if info["state"] == "ok":
+        if info["state"] == "ok" or info["state"] in ADVISORY_STATES:
             ttk.Button(actions, text="Open file",
                        command=lambda p=path: self._open_file(p)).pack(side=tk.LEFT)
         else:

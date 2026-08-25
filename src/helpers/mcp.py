@@ -15,6 +15,8 @@ import dataclasses
 import glob
 import json
 import os
+import posixpath
+import re
 import shutil
 import subprocess
 import sys
@@ -515,6 +517,284 @@ def remove_mcp_entry(cfg_path: str, server: str = "tokensave") -> "tuple[bool, s
                      json.dumps(removed, indent=2)))
 
 
+# ── canonical `~/.claude.json` project keys ───────────────────────────────
+
+#: Claude Code keys per-project state by the directory a session was launched
+#: in, spelled however the launcher spelled it. `D:\Random Projects\Foo` and
+#: `D:/Random Projects/Foo` are one directory and routinely end up as two keys
+#: with divergent state, so an approval recorded under one is invisible to a
+#: reader matching the other. Exact string matching against these keys is
+#: therefore always a bug.
+_DRIVE_RE = re.compile(r"^([A-Za-z]):")
+
+
+def _claude_json_path() -> str:
+    """Claude Code's own config, which holds per-project MCP approval state."""
+    return os.path.join(os.path.expanduser("~"), ".claude.json")
+
+
+def normalize_project_key(path: str) -> str:
+    """The comparison form for a `~/.claude.json` `projects` key.
+
+    Separators are unified before `normpath` so the answer is the same whether
+    this runs on Windows or on Linux CI: these keys are Windows paths either
+    way, and `posixpath` is the only module that collapses `a/b` and `a\\b`
+    identically on both. The drive letter is folded for the same reason —
+    `os.path.normcase` would fold it on Windows and leave it on Linux, which is
+    exactly the kind of platform-dependent verdict that cannot be tested.
+
+    Deliberately does NOT touch the filesystem. This runs over every key in a
+    file with dozens of them, some naming directories that no longer exist; a
+    `realpath` per key would turn a cheap read into a pile of stat calls and
+    would silently re-point any key that happens to be a symlink.
+    """
+    if not path:
+        return ""
+    unified = posixpath.normpath(path.replace("\\", "/"))
+    unified = _DRIVE_RE.sub(lambda m: m.group(1).lower() + ":", unified)
+    return os.path.normcase(unified).rstrip("/\\") or unified
+
+
+def read_claude_projects(claude_json_path: str = "") -> dict:
+    """The `projects` map from `~/.claude.json`, or `{}` if unreadable.
+
+    Unreadable degrades to empty rather than raising: every caller is
+    decorating a status row, and a missing Claude config must read as "nothing
+    known" instead of taking the dialog down.
+    """
+    path = claude_json_path or _claude_json_path()
+    try:
+        with open(path, encoding="utf-8-sig") as fh:
+            data = json.load(fh)
+    except (OSError, ValueError):
+        return {}
+    projects = data.get("projects") if isinstance(data, dict) else None
+    return projects if isinstance(projects, dict) else {}
+
+
+def matching_project_keys(project_root: str, projects: dict) -> list:
+    """Every raw key in `projects` naming `project_root`, matched normalised.
+
+    A list rather than one key because duplicates are the normal case, not the
+    exceptional one, and which duplicate applies depends on how the session was
+    launched — a caller that collapses them to a single key is guessing.
+    """
+    want = normalize_project_key(project_root)
+    if not want or not isinstance(projects, dict):
+        return []
+    return [k for k in projects if normalize_project_key(k) == want]
+
+
+def canonical_launch_dir(project_root: str, projects: "dict | None" = None,
+                         claude_json_path: str = "") -> str:
+    """The spelling to launch `claude` with so no NEW duplicate key is minted.
+
+    Prefers a spelling Claude Code has already recorded: reusing a key that
+    exists is strictly better than adding a fourth way to spell one directory.
+    Falls back to the OS-canonical form when the project is unknown to Claude
+    Code, which is also what a human typing the path would produce.
+    """
+    if projects is None:
+        projects = read_claude_projects(claude_json_path)
+    existing = matching_project_keys(project_root, projects)
+    # Deterministic when several already exist: picking arbitrarily would make
+    # the choice depend on dict ordering.
+    for key in sorted(existing):
+        if os.path.isdir(key):
+            return key
+    try:
+        return os.path.normpath(os.path.abspath(project_root))
+    except (OSError, ValueError):
+        return project_root
+
+
+def duplicate_project_keys(claude_json_path: str = "",
+                           projects: "dict | None" = None) -> dict:
+    """Normalised path -> the two-or-more raw keys that share it.
+
+    Reported rather than repaired. Merging entries in `~/.claude.json` means
+    choosing which side's approvals, trust flag and allowed-tools list survive,
+    and that is a decision to put in front of the user behind the show-diff
+    protocol — not something to do as a side effect of rendering a status row.
+    """
+    if projects is None:
+        projects = read_claude_projects(claude_json_path)
+    groups: dict = {}
+    for key in projects:
+        groups.setdefault(normalize_project_key(key), []).append(key)
+    return {norm: sorted(keys) for norm, keys in groups.items()
+            if len(keys) > 1}
+
+
+# ── has Claude Code approved this project's `.mcp.json`? ──────────────────
+
+APPROVAL_APPROVED = "approved"
+APPROVAL_PENDING = "pending"
+APPROVAL_REJECTED = "rejected"
+APPROVAL_AMBIGUOUS = "ambiguous"
+APPROVAL_UNKNOWN = "unknown"
+
+
+@dataclasses.dataclass(frozen=True)
+class McpJsonApproval:
+    """Whether Claude Code has approved a project's `.mcp.json` servers.
+
+    Free to compute — one read of `~/.claude.json`, no subprocess — and it
+    answers the question that precedes every other one: an unapproved
+    project-scoped server is not competing for the name at all, so no amount of
+    correct `.mcp.json` content makes it serve. Worth its own tier because
+    `effective_scope` costs a CLI call per project, while this settles the
+    common case for free across every row at once.
+    """
+
+    state: str
+    keys: tuple = ()
+    detail: str = ""
+
+    @property
+    def is_approved(self) -> bool:
+        return self.state == APPROVAL_APPROVED
+
+    @property
+    def blocks_binding(self) -> bool:
+        """True when the binding provably cannot be serving yet.
+
+        `unknown` is excluded on purpose: no entry in `~/.claude.json` means
+        Claude Code has never run in this project, which is not evidence of
+        anything. `ambiguous` IS included — duplicate keys that disagree make
+        the outcome depend on how the session is launched, and a row claiming
+        "bound" there would be right only by luck.
+        """
+        return self.state in (APPROVAL_PENDING, APPROVAL_REJECTED,
+                              APPROVAL_AMBIGUOUS)
+
+
+def _entry_approval(entry: dict, server: str) -> str:
+    """Approval recorded in one `projects[...]` entry."""
+    if not isinstance(entry, dict):
+        return APPROVAL_PENDING
+    if entry.get("enableAllProjectMcpServers") is True:
+        return APPROVAL_APPROVED
+    enabled = entry.get("enabledMcpjsonServers")
+    if isinstance(enabled, list) and server in enabled:
+        return APPROVAL_APPROVED
+    disabled = entry.get("disabledMcpjsonServers")
+    if isinstance(disabled, list) and server in disabled:
+        return APPROVAL_REJECTED
+    return APPROVAL_PENDING
+
+
+def mcpjson_approval(project_root: str, server: str = "tokensave",
+                     claude_json_path: str = "",
+                     projects: "dict | None" = None) -> "McpJsonApproval":
+    """Read Claude Code's approval for `server` in `project_root`."""
+    if projects is None:
+        projects = read_claude_projects(claude_json_path)
+    keys = matching_project_keys(project_root, projects)
+    if not keys:
+        return McpJsonApproval(
+            APPROVAL_UNKNOWN,
+            detail="Claude Code has no record of this project yet.")
+
+    verdicts = {k: _entry_approval(projects.get(k) or {}, server) for k in keys}
+    distinct = set(verdicts.values())
+    if len(distinct) == 1:
+        return McpJsonApproval(distinct.pop(), keys=tuple(sorted(keys)))
+    return McpJsonApproval(
+        APPROVAL_AMBIGUOUS, keys=tuple(sorted(keys)),
+        detail="; ".join("%s -> %s" % (k, v)
+                         for k, v in sorted(verdicts.items())))
+
+
+def local_scope_shadow(project_root: str, server: str = "tokensave",
+                       claude_json_path: str = "",
+                       projects: "dict | None" = None) -> list:
+    """Keys defining `server` in their LOCAL-scoped `mcpServers`.
+
+    The third shadow source, and the only one that outranks a project binding
+    outright. Free to read alongside approval, so there is no reason to make
+    the user spend a CLI call to discover it.
+    """
+    if projects is None:
+        projects = read_claude_projects(claude_json_path)
+    hits = []
+    for key in matching_project_keys(project_root, projects):
+        servers = (projects.get(key) or {}).get("mcpServers")
+        if isinstance(servers, dict) and server in servers:
+            hits.append(key)
+    return sorted(hits)
+
+
+# ── composing the file verdict with what `~/.claude.json` proves ──────────
+
+#: The `.mcp.json` is correct and something OUTSIDE it blocks the binding.
+#: These rows must not offer Apply: rewriting a file that already says the
+#: right thing is a no-op dressed up as a fix, and it would leave the user
+#: clicking a button that reports success while nothing changes.
+ADVISORY_STATES = frozenset({
+    "project_unapproved", "project_rejected", "project_key_ambiguous",
+    "project_local_shadow", "project_shadowed",
+})
+
+
+def annotate_project_binding(info: dict, project_root: str,
+                             server: str = "tokensave",
+                             claude_json_path: str = "",
+                             projects: "dict | None" = None) -> dict:
+    """Downgrade a file-level "ok" using what `~/.claude.json` proves.
+
+    `_classify_mcp_entry` reads `.mcp.json` and nothing else, so its "ok" means
+    "this file says the right thing" — never "this is the server Claude Code
+    runs". Presenting the first as the second is the specific failure this
+    exists to stop: ten rows of "bound to this project" while every session was
+    being answered by the user-scoped entry.
+
+    Only ever downgrades. A verdict that is not "ok" already names a defect in
+    the file itself, and that defect is what the user should fix first.
+    """
+    if info.get("state") != "ok":
+        return info
+    if projects is None:
+        projects = read_claude_projects(claude_json_path)
+
+    shadow = local_scope_shadow(project_root, server, projects=projects)
+    if shadow:
+        return {**info, "state": "project_local_shadow",
+                "label": "\u26a0 overridden by a local-scoped entry",
+                "issue": ("This file is correct, but %s also defines a "
+                          "LOCAL-scoped `%s` for this project, and local scope "
+                          "outranks project scope. Editing .mcp.json will not "
+                          "change which server runs \u2014 remove the local "
+                          "entry with `claude mcp remove %s -s local`."
+                          % (", ".join(shadow), server, server))}
+
+    got = mcpjson_approval(project_root, server, projects=projects)
+    if got.state == APPROVAL_PENDING:
+        return {**info, "state": "project_unapproved",
+                "label": "\u26a0 written, not yet approved",
+                "issue": ("This file is correct, but Claude Code has not "
+                          "approved it, so the server is not in the running at "
+                          "all and sessions here fall back to the user-scoped "
+                          "entry. Run `claude` once in this project and approve "
+                          "the .mcp.json server when prompted.")}
+    if got.state == APPROVAL_REJECTED:
+        return {**info, "state": "project_rejected",
+                "label": "\u26a0 written, but rejected in Claude Code",
+                "issue": ("This file is correct, but `%s` is listed in this "
+                          "project's disabledMcpjsonServers, so Claude Code "
+                          "will not load it. Re-approve it from a `claude` "
+                          "session in this project." % server)}
+    if got.state == APPROVAL_AMBIGUOUS:
+        return {**info, "state": "project_key_ambiguous",
+                "label": "\u26a0 approval depends on how you launch",
+                "issue": ("This project is recorded more than once in "
+                          "~/.claude.json under different spellings of the "
+                          "same path, and they disagree about approval (%s). "
+                          "Which one applies depends on the directory spelling "
+                          "the session was started with." % got.detail)}
+    return info
+
+
 # ── which definition is Claude Code actually using? ───────────────────────
 
 SCOPE_PROJECT = "project"
@@ -592,6 +872,40 @@ def _parse_mcp_get(text: str) -> "EffectiveScope":
         detail=text.strip()[:200])
 
 
+def describe_effective(got: "EffectiveScope", server: str = "tokensave") -> tuple:
+    """`(state, label, issue)` for a row Claude Code has been asked about.
+
+    Pure, so every verdict the dialog can display is testable without a CLI.
+    Returns `None` when the answer carries no information — an unreachable
+    `claude`, a timeout — because overwriting a row that already says
+    something true with "could not verify" trades a correct badge for a
+    complaint about our own tooling.
+    """
+    if got is None or not got.is_known:
+        return None
+    if got.is_project:
+        return ("ok", "✓ bound — verified serving", "")
+    if got.pending_approval:
+        return ("project_unapproved", "⚠ written, not yet approved",
+                ("Claude Code reports this binding as pending approval, so "
+                 "sessions here still fall back to the user-scoped entry. Run "
+                 "`claude` once in this project and approve it."))
+    if got.is_shadowed:
+        return ("project_shadowed",
+                "⚠ shadowed by the %s-scoped entry" % got.scope,
+                ("This file is correct, but Claude Code reports it is serving "
+                 "the %s-scoped `%s` instead — that scope takes precedence. "
+                 "Editing .mcp.json will not change which server runs; retire "
+                 "the %s-scoped entry."
+                 % (got.scope, server, got.scope)))
+    if got.scope == SCOPE_ABSENT:
+        return ("missing", "✗ Claude Code sees no %s at all" % server,
+                ("The file is on disk but Claude Code reports no `%s` server "
+                 "in this project. Check that `%s` resolves as a command."
+                 % (server, server)))
+    return None
+
+
 def effective_scope(project_root: str, server: str = "tokensave",
                     timeout: int = 45) -> "EffectiveScope":
     """Ask Claude Code which `server` definition wins inside `project_root`.
@@ -600,6 +914,13 @@ def effective_scope(project_root: str, server: str = "tokensave",
     failure — no `claude` on PATH, a timeout, unexpected output — comes back as
     UNKNOWN rather than a guess: reporting "shadowed" because a CLI call fell
     over would send the user hunting for a conflict that does not exist.
+
+    The cwd goes through `canonical_launch_dir` rather than being passed
+    through raw. Claude Code records per-project state under the spelling of
+    the directory it was started in, so a status check run with a spelling the
+    user never uses does not just read the wrong entry — it CREATES a second
+    one, and this function was itself a source of the duplicate keys it now
+    has to see past.
     """
     if not project_root or not os.path.isdir(project_root):
         return EffectiveScope(SCOPE_UNKNOWN, detail="no such project directory")
@@ -616,7 +937,8 @@ def effective_scope(project_root: str, server: str = "tokensave",
     try:
         proc = subprocess.run(
             [exe, "mcp", "get", server],
-            capture_output=True, text=True, timeout=timeout, cwd=project_root,
+            capture_output=True, text=True, timeout=timeout,
+            cwd=canonical_launch_dir(project_root),
             encoding="utf-8", errors="replace",
             creationflags=CREATE_NO_WINDOW)
     except (OSError, subprocess.TimeoutExpired) as exc:
