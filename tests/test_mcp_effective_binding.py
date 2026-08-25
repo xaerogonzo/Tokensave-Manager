@@ -112,12 +112,8 @@ def test_canonical_launch_dir_reuses_an_existing_key(tmp_path):
     `effective_scope` was itself minting duplicates by spawning `claude` with
     whatever spelling project discovery produced.
     """
-    real = tmp_path / "Proj"
-    real.mkdir()
-    existing = str(real)
-    projects = {existing: {}}
-    got = canonical_launch_dir(str(real).replace(os.sep, "/"),
-                               projects=projects)
+    existing, other = _two_spellings(tmp_path)
+    got = canonical_launch_dir(other, projects={existing: {}})
     assert got == existing
 
 
@@ -578,6 +574,28 @@ def test_approve_is_per_server_name(tmp_path):
 # wrote another.
 
 
+def _two_spellings(tmp_path):
+    """Two DIFFERENT strings naming one real directory, on any platform.
+
+    `str(p), str(p).replace(os.sep, "/")` looks like it produces a backslash
+    and a forward-slash spelling. On Linux `os.sep` IS "/", so the replace is a
+    no-op and both names are the same string — the duplicate under test never
+    exists. Two tests failed outright on CI and three more passed VACUOUSLY,
+    asserting `== {}` against a dict that was empty for the wrong reason.
+
+    A trailing separator is a genuinely different string that normalises to the
+    same key and still passes `os.path.isdir` on both platforms. The asserts
+    are the point: they make a future platform quirk fail here rather than turn
+    these tests back into no-ops.
+    """
+    real = tmp_path / "Proj"
+    real.mkdir(exist_ok=True)
+    a, b = str(real), str(real) + os.sep
+    assert a != b, "the two spellings must actually differ"
+    assert normalize_project_key(a) == normalize_project_key(b)
+    return a, b
+
+
 def _proj(session=False, **extra):
     e = dict(extra)
     if session:
@@ -587,35 +605,27 @@ def _proj(session=False, **extra):
 
 def test_canonical_launch_dir_prefers_the_spelling_with_a_session(tmp_path):
     """Match the session's spelling or a status check describes another record."""
-    real = tmp_path / "Proj"
-    real.mkdir()
-    win, nix = str(real), str(real).replace(os.sep, "/")
+    win, nix = _two_spellings(tmp_path)
     projects = {win: _proj(), nix: _proj(session=True)}
 
     assert canonical_launch_dir(win, projects=projects) == nix
 
 
 def test_stale_keys_are_the_ones_with_nothing_in_them(tmp_path):
-    real = tmp_path / "Proj"
-    real.mkdir()
-    win, nix = str(real), str(real).replace(os.sep, "/")
+    win, nix = _two_spellings(tmp_path)
     got = stale_duplicate_keys(projects={win: _proj(), nix: _proj(session=True)})
     assert list(got.values()) == [[win]]
 
 
 def test_a_group_with_no_session_anywhere_is_left_alone(tmp_path):
     """No obvious keeper means the choice is the user's, not ours."""
-    real = tmp_path / "Proj"
-    real.mkdir()
-    win, nix = str(real), str(real).replace(os.sep, "/")
+    win, nix = _two_spellings(tmp_path)
     assert stale_duplicate_keys(projects={win: _proj(), nix: _proj()}) == {}
 
 
 def test_a_duplicate_holding_a_real_decision_is_kept(tmp_path):
     """allowedTools and a rejection are decisions, not litter."""
-    real = tmp_path / "Proj"
-    real.mkdir()
-    win, nix = str(real), str(real).replace(os.sep, "/")
+    win, nix = _two_spellings(tmp_path)
     for field, value in (("allowedTools", ["Bash"]),
                          ("disabledMcpjsonServers", ["tokensave"]),
                          ("enableAllProjectMcpServers", True)):
@@ -626,13 +636,11 @@ def test_a_duplicate_holding_a_real_decision_is_kept(tmp_path):
 
 def test_an_approval_is_kept_until_the_project_file_records_it(tmp_path):
     """That copy IS the approval while nothing else holds it."""
-    real = tmp_path / "Proj"
-    real.mkdir()
-    win, nix = str(real), str(real).replace(os.sep, "/")
+    win, nix = _two_spellings(tmp_path)
     projects = {win: _proj(enabledMcpjsonServers=["tokensave"]),
                 nix: _proj(session=True)}
     assert stale_duplicate_keys(projects=projects) == {}
 
     # Once the project file says the same thing, the copy is redundant.
-    approve_project_binding(str(real))
+    approve_project_binding(win)
     assert list(stale_duplicate_keys(projects=projects).values()) == [[win]]
