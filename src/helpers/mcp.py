@@ -608,6 +608,66 @@ def matching_project_keys(project_root: str, projects: dict) -> list:
     return [k for k in projects if normalize_project_key(k) == want]
 
 
+#: Fields Claude Code writes only after a session has actually run. Their
+#: presence is what separates a spelling the user really works in from one some
+#: tool created by invoking `claude` in that directory once.
+_SESSION_FIELDS = ("lastSessionId", "lastCost", "lastStartTime", "lastDuration")
+
+
+def _has_session(entry: dict) -> bool:
+    """Has a real Claude Code session run under this key?"""
+    return isinstance(entry, dict) and any(f in entry for f in _SESSION_FIELDS)
+
+
+def stale_duplicate_keys(claude_json_path: str = "",
+                         projects: "dict | None" = None) -> dict:
+    """Duplicate keys that hold nothing worth keeping.
+
+    A duplicate is safe to drop when a sibling spelling has the real session
+    history and this one records no session, no MCP approval and no allowed
+    tools — i.e. it exists only because some tool ran `claude` in that
+    directory once. This manager's own status checks were doing exactly that,
+    so most of these are its litter.
+
+    Returns `{normalised: [stale raw keys]}`, and only for groups where at
+    least one sibling DOES have session history — without that the group has
+    no obvious keeper and the choice is the user's.
+    """
+    if projects is None:
+        projects = read_claude_projects(claude_json_path)
+    out: dict = {}
+    for norm, keys in duplicate_project_keys(projects=projects).items():
+        if not any(_has_session(projects.get(k) or {}) for k in keys):
+            continue
+        # An approval here is only load-bearing while the project file does not
+        # already record it. Once it does, this copy is a redundant duplicate
+        # of something stored authoritatively elsewhere — and treating it as
+        # precious is how a cleanup finds nothing: writing approvals into these
+        # keys is exactly what made them look meaningful in the first place.
+        local = None
+        for key in keys:
+            if os.path.isdir(key):
+                local = local_settings_approval(key, server="tokensave")
+                break
+
+        stale = []
+        for key in keys:
+            entry = projects.get(key) or {}
+            if _has_session(entry):
+                continue
+            if entry.get("disabledMcpjsonServers") or \
+                    entry.get("allowedTools") or \
+                    entry.get("enableAllProjectMcpServers"):
+                continue                 # carries a real decision; keep it
+            if entry.get("enabledMcpjsonServers") and \
+                    local != APPROVAL_APPROVED:
+                continue                 # this copy IS the approval; keep it
+            stale.append(key)
+        if stale:
+            out[norm] = sorted(stale)
+    return out
+
+
 def canonical_launch_dir(project_root: str, projects: "dict | None" = None,
                          claude_json_path: str = "") -> str:
     """The spelling to launch `claude` with so no NEW duplicate key is minted.
@@ -620,9 +680,15 @@ def canonical_launch_dir(project_root: str, projects: "dict | None" = None,
     if projects is None:
         projects = read_claude_projects(claude_json_path)
     existing = matching_project_keys(project_root, projects)
-    # Deterministic when several already exist: picking arbitrarily would make
-    # the choice depend on dict ordering.
-    for key in sorted(existing):
+
+    # Prefer the spelling the user's REAL sessions use, identified by session
+    # history. Measured 2026-08-25: this manager's own status checks had
+    # created a bare entry under the backslash spelling for eight projects,
+    # while every actual session lived under the forward-slash one — so
+    # picking alphabetically read one record and wrote another. Matching the
+    # session's spelling is what makes a status check describe the thing the
+    # user is actually running.
+    for key in sorted(existing, key=lambda k: (not _has_session(projects[k]), k)):
         if os.path.isdir(key):
             return key
     try:

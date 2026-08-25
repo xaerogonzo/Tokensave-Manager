@@ -51,6 +51,7 @@ from helpers.mcp import (
     mcpjson_approval,
     normalize_project_key,
     read_claude_projects,
+    stale_duplicate_keys,
 )
 
 #: Deliberately a drive that does not exist. `mcpjson_approval` now reads
@@ -566,3 +567,72 @@ def test_approve_is_per_server_name(tmp_path):
     assert got["enabledMcpjsonServers"] == ["codegraph"]
     assert mcpjson_approval(str(tmp_path), "tokensave",
                             projects={}).state != APPROVAL_APPROVED
+
+
+# ── which duplicate keys are nobody's real project ────────────────────────
+#
+# Measured 2026-08-25: eight projects had a duplicate key holding no session
+# history at all, created by this manager's own status checks running `claude`
+# in a directory Claude Code had not seen. Every real session lived under a
+# different spelling, so the status checks read one record and the user's work
+# wrote another.
+
+
+def _proj(session=False, **extra):
+    e = dict(extra)
+    if session:
+        e["lastSessionId"] = "abc"
+    return e
+
+
+def test_canonical_launch_dir_prefers_the_spelling_with_a_session(tmp_path):
+    """Match the session's spelling or a status check describes another record."""
+    real = tmp_path / "Proj"
+    real.mkdir()
+    win, nix = str(real), str(real).replace(os.sep, "/")
+    projects = {win: _proj(), nix: _proj(session=True)}
+
+    assert canonical_launch_dir(win, projects=projects) == nix
+
+
+def test_stale_keys_are_the_ones_with_nothing_in_them(tmp_path):
+    real = tmp_path / "Proj"
+    real.mkdir()
+    win, nix = str(real), str(real).replace(os.sep, "/")
+    got = stale_duplicate_keys(projects={win: _proj(), nix: _proj(session=True)})
+    assert list(got.values()) == [[win]]
+
+
+def test_a_group_with_no_session_anywhere_is_left_alone(tmp_path):
+    """No obvious keeper means the choice is the user's, not ours."""
+    real = tmp_path / "Proj"
+    real.mkdir()
+    win, nix = str(real), str(real).replace(os.sep, "/")
+    assert stale_duplicate_keys(projects={win: _proj(), nix: _proj()}) == {}
+
+
+def test_a_duplicate_holding_a_real_decision_is_kept(tmp_path):
+    """allowedTools and a rejection are decisions, not litter."""
+    real = tmp_path / "Proj"
+    real.mkdir()
+    win, nix = str(real), str(real).replace(os.sep, "/")
+    for field, value in (("allowedTools", ["Bash"]),
+                         ("disabledMcpjsonServers", ["tokensave"]),
+                         ("enableAllProjectMcpServers", True)):
+        got = stale_duplicate_keys(
+            projects={win: _proj(**{field: value}), nix: _proj(session=True)})
+        assert got == {}, field
+
+
+def test_an_approval_is_kept_until_the_project_file_records_it(tmp_path):
+    """That copy IS the approval while nothing else holds it."""
+    real = tmp_path / "Proj"
+    real.mkdir()
+    win, nix = str(real), str(real).replace(os.sep, "/")
+    projects = {win: _proj(enabledMcpjsonServers=["tokensave"]),
+                nix: _proj(session=True)}
+    assert stale_duplicate_keys(projects=projects) == {}
+
+    # Once the project file says the same thing, the copy is redundant.
+    approve_project_binding(str(real))
+    assert list(stale_duplicate_keys(projects=projects).values()) == [[win]]

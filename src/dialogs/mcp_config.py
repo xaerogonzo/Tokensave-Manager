@@ -265,6 +265,26 @@ class MCPConfigDialog(UiPumpMixin, tk.Toplevel):
                  justify=tk.LEFT, wraplength=720, anchor=tk.W).pack(
             fill=tk.X, padx=8)
 
+        # Say which of these are nobody's real project. Most were created by
+        # tools running `claude` in a directory Claude Code had not seen — this
+        # manager's own status checks included — so "are these supposed to
+        # exist?" has an answer, and it is mostly "no".
+        from helpers.mcp import stale_duplicate_keys
+        stale = stale_duplicate_keys(projects=self._claude_projects)
+        n_stale = sum(len(v) for v in stale.values())
+        if n_stale:
+            tk.Label(
+                box,
+                text=("  %d of these hold no session, no approval and no "
+                      "allowed-tools, while a sibling spelling has all of it. "
+                      "Those are leftovers from something running `claude` in "
+                      "the directory once — this manager's own status checks "
+                      "included — and deleting them loses nothing."
+                      % n_stale),
+                font=("Segoe UI", 9), bg=C["surface0"], fg=C["subtext"],
+                justify=tk.LEFT, wraplength=720, anchor=tk.W).pack(
+                fill=tk.X, padx=8, pady=(4, 0))
+
         # A fixed-height scroller rather than one Label per path. Expanded, the
         # per-Label version grew with the duplicate count until it pushed the
         # bindings off the page and scrolled its own `hide` button out of
