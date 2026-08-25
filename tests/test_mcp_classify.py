@@ -28,6 +28,7 @@ from helpers.mcp import (
     SCOPE_PROJECT,
     SCOPE_UNKNOWN,
     SCOPE_USER,
+    USER_SCOPE_RETIRED_KEY,
     _parse_mcp_get,
     effective_scope,
     remove_mcp_entry,
@@ -595,3 +596,71 @@ def test_other_top_level_keys_survive_removal(code_cfg):
     with open(code_cfg, encoding="utf-8") as fh:
         data = json.load(fh)
     assert data["numStartups"] == 7 and data["projects"] == {"a": {}}
+
+
+# ── a chosen absence is not a defect ──────────────────────────────────────
+#
+# After the user-scoped migration, no `tokensave` in `~/.claude.json` IS the
+# intended end state. Reporting it as "✗ no tokensave entry — click Apply"
+# told the user to undo the migration they had just completed, in the same
+# dialog whose next panel congratulated them for finishing it. Four surfaces
+# read this verdict (startup banner, Settings summary, pin note, the MCP
+# dialog), which is why the correction lives in the classifier.
+
+
+def test_a_retired_user_scope_reads_as_done_not_missing(code_cfg):
+    _write(code_cfg, servers={})
+    info = _classify_mcp_entry(code_cfg, {USER_SCOPE_RETIRED_KEY: True})
+
+    assert info["state"] == "ok"
+    assert "retired" in info["label"]
+    assert "Nothing to do" in info["issue"]
+
+
+def test_without_the_flag_an_absent_entry_is_still_missing(code_cfg):
+    """A user who never had one must still be offered it."""
+    _write(code_cfg, servers={})
+    info = _classify_mcp_entry(code_cfg, {})
+
+    assert info["state"] == "missing"
+    assert info["label"] == "✗ no tokensave entry"
+
+
+def test_a_false_flag_is_treated_as_absent(code_cfg):
+    """The undo path writes False rather than deleting the key."""
+    _write(code_cfg, servers={})
+    assert _classify_mcp_entry(
+        code_cfg, {USER_SCOPE_RETIRED_KEY: False})["state"] == "missing"
+
+
+def test_the_flag_does_not_excuse_the_desktop_config(desktop_cfg):
+    """Desktop has no project scope, so it still needs the wrapper entry.
+
+    The retirement is specifically about Claude Code's user scope; letting the
+    flag silence Desktop would hide a genuinely broken app.
+    """
+    _write(desktop_cfg, servers={})
+    info = _classify_mcp_entry(desktop_cfg, {USER_SCOPE_RETIRED_KEY: True})
+
+    assert info["state"] == "missing"
+
+
+def test_the_flag_does_not_suppress_a_real_verdict(code_cfg):
+    """It only ever explains an ABSENCE.
+
+    An entry that is present and wrong must still be reported as wrong -- the
+    flag says "you meant to remove it", not "stop looking".
+    """
+    _write(code_cfg, servers={"tokensave": {"command": "weird.exe"}})
+    info = _classify_mcp_entry(code_cfg, {USER_SCOPE_RETIRED_KEY: True})
+
+    assert info["state"] != "ok"
+
+
+def test_a_retired_verdict_still_carries_a_proposal(code_cfg):
+    """`proposed` is what the explicit re-add path applies."""
+    _write(code_cfg, servers={})
+    info = _classify_mcp_entry(code_cfg, {USER_SCOPE_RETIRED_KEY: True})
+
+    assert info["proposed"]
+    assert info["current"] is None

@@ -175,6 +175,13 @@ PROJECT_PATH_ARG = "."
 #: wants it shared turn this off.
 GITIGNORE_PROJECT_MCP_KEY = "gitignore_project_mcp"
 
+#: Set when the user-scoped `tokensave` entry is retired, so its later ABSENCE
+#: reads as a completed decision rather than as a missing entry to re-add.
+#: Recorded rather than inferred: "no entry and some project is bound" would
+#: also match a user who never had one, and the difference matters because one
+#: of them should be offered the entry and the other must not be.
+USER_SCOPE_RETIRED_KEY = "mcp_user_scope_retired"
+
 
 def _project_mcp_path(project_root: str) -> str:
     """Where Claude Code looks for a project's own MCP config."""
@@ -382,6 +389,22 @@ def _classify_mcp_entry(cfg_path: str, cfg: dict) -> dict:
     servers = data.get("mcpServers") or {}
     entry = servers.get("tokensave")
     if not isinstance(entry, dict):
+        # An ABSENCE that was chosen is not a defect. After the user-scoped
+        # migration, no entry here is the whole point: each project serves its
+        # own graph and the fallback is deliberately gone. Reporting it as
+        # "✗ no tokensave entry — click Apply" told the user to undo the
+        # migration they had just completed, in the same dialog whose next
+        # panel congratulated them for finishing it. Four surfaces read this
+        # verdict (startup banner, Settings summary, pin note, this dialog),
+        # so the correction belongs here rather than in each of them.
+        if is_claude_code and cfg.get(USER_SCOPE_RETIRED_KEY):
+            return {**base, "state": "ok",
+                    "label": "✓ retired — projects serve themselves",
+                    "issue": ("Deliberately empty. The user-scoped entry was "
+                              "retired, so each project's own .mcp.json is "
+                              "authoritative and a project with no binding "
+                              "gets no tokensave at all — which is the "
+                              "point. Nothing to do here.")}
         return {**base, "state": "missing", "label": "✗ no tokensave entry",
                 "issue": ("No 'tokensave' MCP server is configured. "
                           "Click Apply to add the canonical wrapper-based "

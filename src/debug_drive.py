@@ -315,4 +315,16 @@ class _Driver:
             pass
         # `destroy` alone leaves the tray thread holding the process open,
         # and a diagnostic run that never exits cannot be scripted.
-        self._app.after(200, lambda: os._exit(0))
+        # `os._exit` skips interpreter shutdown, which includes flushing --
+        # so a piped transcript can lose its tail, and the run then looks like
+        # it died mid-report.
+        self._app.after(200, self._exit_now)
+
+    @staticmethod
+    def _exit_now() -> None:
+        for stream in (sys.stdout, sys.stderr):
+            try:
+                stream.flush()
+            except (OSError, ValueError):
+                pass
+        os._exit(0)

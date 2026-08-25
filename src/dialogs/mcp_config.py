@@ -36,7 +36,8 @@ from theme import UiPumpMixin, bind_mousewheel
 from helpers.mcp import (
     _mcp_configs, _classify_mcp_entry, _apply_mcp_fix, _is_claude_running,
     _mcp_code_cfg_path, _project_mcp_path, effective_scope,
-    remove_mcp_entry, ADVISORY_STATES, annotate_project_binding,
+    remove_mcp_entry, ADVISORY_STATES, USER_SCOPE_RETIRED_KEY,
+    _canonical_mcp_entry, annotate_project_binding,
     describe_effective, duplicate_project_keys, read_claude_projects,
 )
 
@@ -588,9 +589,51 @@ class MCPConfigDialog(UiPumpMixin, tk.Toplevel):
             self._render()
             return
 
+        # Record the DECISION, not just its effect. Without this the next
+        # render reads the absence as a missing entry and offers to put it
+        # back — in the same dialog that just reported the migration complete.
+        raw = self._cfg.raw
+        if isinstance(raw, dict):
+            raw[USER_SCOPE_RETIRED_KEY] = True
+            self._cfg.save()
+
         self._log_to_app("MCP migration: removed the user-scoped tokensave "
                          "entry.", C["green"])
         self._verify_migration(detail)
+        self._render()
+
+    def _unretire_user_scoped(self):
+        """Put the user-scoped entry back, as an explicit undo.
+
+        The retirement flag would otherwise be a one-way door with no way out
+        of the UI. Offered as undoing a migration rather than as "Apply this
+        fix", because that is what it is — every unbound project starts
+        resolving through the fallback again.
+        """
+        if not messagebox.askyesno(
+                "Re-add the user-scoped entry",
+                "This undoes the migration.\n\n"
+                "A user-scoped `tokensave` outranks nothing, but Claude Code "
+                "dedupes MCP servers by name — so it can shadow a project "
+                "binding again, and every project will resolve through it "
+                "rather than through its own .mcp.json.\n\n"
+                "Re-add it?",
+                default="no", parent=self):
+            return
+        if self._code_running_guard("Re-adding the user-scoped entry"):
+            return
+        raw = self._cfg.raw
+        if isinstance(raw, dict):
+            raw[USER_SCOPE_RETIRED_KEY] = False
+            self._cfg.save()
+        code_cfg = _mcp_code_cfg_path()
+        ok, msg = _apply_mcp_fix(code_cfg, _canonical_mcp_entry(raw))
+        self._log_to_app(
+            ("MCP: re-added the user-scoped tokensave entry. %s" % msg) if ok
+            else ("MCP: re-add FAILED — %s" % msg),
+            C["peach"] if ok else C["red"])
+        (messagebox.showinfo if ok else messagebox.showerror)(
+            "Re-added" if ok else "Re-add failed", msg, parent=self)
         self._render()
 
     def _verify_migration(self, removal_detail: str):
@@ -868,6 +911,12 @@ class MCPConfigDialog(UiPumpMixin, tk.Toplevel):
         if info["state"] == "ok" or info["state"] in ADVISORY_STATES:
             ttk.Button(actions, text="Open file",
                        command=lambda p=path: self._open_file(p)).pack(side=tk.LEFT)
+            # The retired row is the one "ok" state a user might want to leave,
+            # and the flag that produces it has no other exit from the UI.
+            if "retired" in info.get("label", ""):
+                ttk.Button(actions, text="Re-add user-scoped entry…",
+                           command=self._unretire_user_scoped).pack(
+                    side=tk.LEFT, padx=(8, 0))
         else:
             ttk.Button(
                 actions, text="Apply this fix",
