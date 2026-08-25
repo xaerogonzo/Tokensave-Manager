@@ -315,6 +315,16 @@ class MCPConfigDialog(UiPumpMixin, tk.Toplevel):
         advisory = [r for r in rows if r[2]["state"] in ADVISORY_STATES]
         bound = [r for r in rows if r[2]["state"] == "ok"]
 
+        # Skip is an ANSWER, and this view never honoured it. A skipped
+        # project kept rendering under "needs binding" with a loud Apply
+        # button, so clicking Skip appeared to do nothing at all — and for a
+        # project already on the list it genuinely did nothing, because
+        # `_skip` short-circuits when the path is present.
+        raw_cfg = self._cfg.raw if isinstance(self._cfg.raw, dict) else {}
+        skips = raw_cfg.get("mcp_skip_warnings") or []
+        skipped = [r for r in needs if _project_mcp_path(r[1]) in skips]
+        needs = [r for r in needs if _project_mcp_path(r[1]) not in skips]
+
         # A project entry says `"command": "tokensave"` so the file stays
         # portable, which makes PATH resolution a prerequisite rather than
         # a detail. Offering Apply while it is unmet would write a config
@@ -352,6 +362,8 @@ class MCPConfigDialog(UiPumpMixin, tk.Toplevel):
                                _project_mcp_path(root),
                                blocked_reason=blocked, project_root=root)
 
+        self._render_skipped(skipped)
+
         if not bound:
             self._start_verification(rows)
             return
@@ -375,6 +387,49 @@ class MCPConfigDialog(UiPumpMixin, tk.Toplevel):
         ttk.Button(strip, text="show",
                    command=self._toggle_bound).pack(side=tk.LEFT, padx=(10, 0))
         self._start_verification(rows)
+
+    def _render_skipped(self, skipped):
+        """Unbound projects the user has explicitly answered "not this one" to.
+
+        Shown, but quietly and without an Apply button. Hiding them entirely
+        would make Skip look like it deleted the project; leaving them in the
+        loud group made Skip look like it did nothing. One line each, and a way
+        back, is the honest middle.
+        """
+        if not skipped:
+            return
+        strip = tk.Frame(self._body, bg=C["base"])
+        strip.pack(fill=tk.X, padx=4, pady=(10, 2))
+        tk.Label(strip,
+                 text="⤼  %d project%s skipped — not bound, and you asked not "
+                      "to be warned" % (len(skipped),
+                                        "" if len(skipped) == 1 else "s"),
+                 font=("Segoe UI", 9), bg=C["base"], fg=C["overlay0"],
+                 anchor=tk.W).pack(fill=tk.X)
+        for name, root, _info in skipped:
+            row = tk.Frame(self._body, bg=C["base"])
+            row.pack(fill=tk.X, padx=16, pady=(2, 0))
+            tk.Label(row, text="%s" % name, font=("Segoe UI", 9),
+                     bg=C["base"], fg=C["subtext"]).pack(side=tk.LEFT)
+            tk.Label(row, text="  " + _project_mcp_path(root),
+                     font=("Consolas", 8),
+                     bg=C["base"], fg=C["overlay0"]).pack(side=tk.LEFT)
+            ttk.Button(row, text="Un-skip",
+                       command=lambda p=_project_mcp_path(root):
+                           self._unskip(p)).pack(side=tk.RIGHT)
+
+    def _unskip(self, cfg_path: str):
+        """Take a project back off the skip list and re-render."""
+        raw = self._cfg.raw
+        skips = (raw.get("mcp_skip_warnings") or []) \
+            if isinstance(raw, dict) else []
+        if cfg_path in skips:
+            skips = [s for s in skips if s != cfg_path]
+            raw["mcp_skip_warnings"] = skips
+            self._cfg.save()
+            self._log_to_app("MCP: no longer skipping %s." % cfg_path,
+                             C["overlay0"])
+        self._render()
 
     def _render_path_prerequisite(self, state):
         """Show whether `tokensave` runs as a bare command, and offer the fix.
@@ -1224,18 +1279,33 @@ class MCPConfigDialog(UiPumpMixin, tk.Toplevel):
         return ("\n\n" + detail) if added else ""
 
     def _skip(self, cfg_path: str):
+        """Record "not this one", then SHOW that it was recorded.
+
+        Two bugs lived here. It never re-rendered, so the row it was clicked on
+        stayed exactly as it was; and when the path was already on the list it
+        short-circuited the write and still reported success, so on an
+        already-skipped project the click did nothing whatsoever and said
+        nothing about it. Both read as a dead button.
+        """
         raw = self._cfg.raw
         skips = (raw.get("mcp_skip_warnings") or []) \
                 if isinstance(raw, dict) else []
-        if cfg_path not in skips:
+        already = cfg_path in skips
+        if not already:
             skips.append(cfg_path)
             raw["mcp_skip_warnings"] = skips
             self._cfg.save()
+            self._log_to_app("MCP: skipping %s from now on." % cfg_path,
+                             C["overlay0"])
         messagebox.showinfo(
-            "Skipped",
-            f"Won't warn about {cfg_path} on startup anymore.\n\n"
-            "Open this dialog from Settings → MCP integration to revisit.",
+            "Already skipped" if already else "Skipped",
+            ("%s was already on the skip list, so nothing changed.\n\n"
+             if already else
+             "Won't warn about %s on startup anymore.\n\n") % cfg_path
+            + "It now appears under “skipped” below, with an "
+              "Un-skip button if you change your mind.",
             parent=self)
+        self._render()
 
     def _open_file(self, cfg_path: str):
         """Open the config file in the user's default editor, or its parent

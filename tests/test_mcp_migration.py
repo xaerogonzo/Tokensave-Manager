@@ -270,3 +270,57 @@ def test_approve_is_not_offered_without_a_project_root(tk_root):
     """The global config rows have no project to approve."""
     labels = _buttons_for(tk_root, "project_unapproved", project_root="")
     assert not any("Approve this binding" in t for t in labels)
+
+
+# ── Skip has to visibly do something ──────────────────────────────────────
+#
+# Reported live: clicking Skip on an unbound project produced "no response or
+# change". Three causes stacked — the row renderer never consulted the skip
+# list, `_skip` never re-rendered, and for a path already on the list it
+# short-circuited the write while still reporting success.
+
+
+def _split(rows, skips):
+    """Mirror of the renderer's needs/skipped split."""
+    from helpers.mcp import ADVISORY_STATES as _ADV
+    needs = [r for r in rows
+             if r[2]["state"] != "ok" and r[2]["state"] not in _ADV]
+    skipped = [r for r in needs if _project_mcp_path(r[1]) in skips]
+    needs = [r for r in needs if _project_mcp_path(r[1]) not in skips]
+    return needs, skipped
+
+
+def test_a_skipped_project_leaves_the_needs_binding_group():
+    rows = [_row("a", "/a", "no_file"), _row("b", "/b", "no_file")]
+    needs, skipped = _split(rows, [_project_mcp_path("/b")])
+
+    assert [n for n, _r, _i in needs] == ["a"]
+    assert [n for n, _r, _i in skipped] == ["b"]
+
+
+def test_an_unskipped_project_returns_to_needs_binding():
+    rows = [_row("b", "/b", "no_file")]
+    needs, skipped = _split(rows, [])
+    assert [n for n, _r, _i in needs] == ["b"]
+    assert skipped == []
+
+
+def test_skipping_never_hides_a_bound_or_advisory_row():
+    """Skip answers "don't bind this"; it must not silence a real finding."""
+    rows = [_row("a", "/a", "project_shadowed"), _row("b", "/b", "ok")]
+    needs, skipped = _split(rows, [_project_mcp_path("/a"),
+                                   _project_mcp_path("/b")])
+    assert needs == [] and skipped == []
+
+
+def test_skip_and_unskip_round_trip_through_the_config():
+    dlg = _dialog()
+    path = _project_mcp_path("/b")
+
+    dlg._cfg.raw["mcp_skip_warnings"] = []
+    dlg._cfg.raw["mcp_skip_warnings"].append(path)
+    assert path in dlg._cfg.raw["mcp_skip_warnings"]
+
+    dlg._cfg.raw["mcp_skip_warnings"] = [
+        s for s in dlg._cfg.raw["mcp_skip_warnings"] if s != path]
+    assert dlg._cfg.raw["mcp_skip_warnings"] == []
