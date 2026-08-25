@@ -265,19 +265,32 @@ class MCPConfigDialog(UiPumpMixin, tk.Toplevel):
                  justify=tk.LEFT, wraplength=720, anchor=tk.W).pack(
             fill=tk.X, padx=8)
 
+        # A fixed-height scroller rather than one Label per path. Expanded, the
+        # per-Label version grew with the duplicate count until it pushed the
+        # bindings off the page and scrolled its own `hide` button out of
+        # reach — so the only way to close a panel needing no action was to
+        # scroll back up hunting for it. Bounded here, the whole panel stays
+        # about twelve lines whatever the count, and because it scrolls, every
+        # group can be listed instead of truncating at six.
         listing = tk.Frame(box, bg=C["surface0"])
         listing.pack(fill=tk.X, padx=8, pady=(4, 2))
-        for keys in list(dups.values())[:6]:
-            for key in keys:
-                tk.Label(listing, text="    " + key, font=("Consolas", 8),
-                         bg=C["surface0"], fg=C["subtext"], anchor=tk.W).pack(
-                    fill=tk.X)
-            tk.Label(listing, text="", bg=C["surface0"]).pack()
-        if len(dups) > 6:
-            tk.Label(listing, text="    … and %d more" % (len(dups) - 6),
-                     font=("Segoe UI", 8, "italic"),
-                     bg=C["surface0"], fg=C["overlay0"], anchor=tk.W).pack(
-                fill=tk.X)
+        text = tk.Text(listing, height=8, font=("Consolas", 8),
+                       bg=C["mantle"], fg=C["subtext"], relief=tk.FLAT,
+                       padx=8, pady=6, wrap=tk.NONE)
+        bar = ttk.Scrollbar(listing, orient="vertical", command=text.yview)
+        text.configure(yscrollcommand=bar.set)
+        text.pack(side=tk.LEFT, fill=tk.X, expand=True)
+        bar.pack(side=tk.RIGHT, fill=tk.Y)
+        for group in dups.values():
+            for key in group:
+                text.insert(tk.END, key + "\n")
+            text.insert(tk.END, "\n")
+        # Swallow the wheel so it scrolls this box and not the dialog behind
+        # it — the SettingsDialog rule for any nested scroller.
+        text.bind("<MouseWheel>",
+                  lambda e, w=text: (w.yview_scroll(
+                      int(-1 * (e.delta / 120)), "units"), "break")[1])
+        text.configure(state=tk.DISABLED)
 
         tk.Label(box,
                  text=("  The manager now launches `claude` using a spelling "
