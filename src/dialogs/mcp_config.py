@@ -707,6 +707,7 @@ class MCPConfigDialog(tk.Toplevel):
         proposed = self._config_state[cfg_path]["proposed"]
         ok, msg = _apply_mcp_fix(cfg_path, proposed)
         if ok:
+            msg += self._maybe_gitignore(cfg_path)
             self._log_to_app(
                 f"MCP Apply OK: wrote canonical tokensave entry to "
                 f"{label} config.  {msg}",
@@ -727,6 +728,39 @@ class MCPConfigDialog(tk.Toplevel):
                 f"MCP Apply FAILED: {label} — {msg}", C["red"])
             messagebox.showerror("Fix failed", msg, parent=self)
         self._render()
+
+    def _maybe_gitignore(self, cfg_path: str) -> str:
+        """Ignore a freshly written project `.mcp.json`, if the user wants that.
+
+        Only ever touches a PROJECT binding — the two global configs live in
+        Claude's own directories and are nobody's repository.
+
+        The default is on, and it is a judgement call rather than an obvious
+        one: the file is portable precisely so it *can* be committed, but
+        committing it hands every collaborator an MCP server definition that
+        only works if they happen to have tokensave on PATH. Opting people in
+        silently is the ruder default. Anyone who wants it shared turns the
+        setting off; anyone who already committed it is unaffected, since git
+        ignores nothing it is already tracking.
+
+        Returns a suffix for the Apply message, or "" when nothing happened.
+        Never raises: failing to ignore is not a reason to report a successful
+        write as failed.
+        """
+        if os.path.basename(cfg_path).lower() != ".mcp.json":
+            return ""
+        raw = self._cfg.raw if isinstance(self._cfg.raw, dict) else {}
+        from helpers.mcp import GITIGNORE_PROJECT_MCP_KEY
+        if not raw.get(GITIGNORE_PROJECT_MCP_KEY, True):
+            return ""
+        try:
+            from helpers.gitignore import ensure_pattern
+            added, detail = ensure_pattern(
+                os.path.dirname(cfg_path), ".mcp.json",
+                comment="# tokensave MCP binding (TokenSave Manager)")
+        except Exception as exc:                             # noqa: BLE001
+            return "\n\n(could not update .gitignore: %s)" % exc
+        return ("\n\n" + detail) if added else ""
 
     def _skip(self, cfg_path: str):
         raw = self._cfg.raw

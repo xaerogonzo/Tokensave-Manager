@@ -109,6 +109,44 @@ def _ensure_gitignore(path: str) -> list:
     ]
 
 
+def ensure_pattern(path: str, pattern: str,
+                   comment: str = "") -> "tuple[bool, str]":
+    """Append one pattern to `<path>/.gitignore` unless already covered.
+
+    Returns (added, detail). Idempotent, and deliberately conservative about
+    what counts as "already there": only a bare line or a `/`-anchored line is
+    treated as coverage. A substring match would let a comment mentioning the
+    pattern, or an unrelated `foo.mcp.json`, suppress a needed entry.
+
+    Reuses the atomic writer so a killed process cannot leave a half-written
+    .gitignore behind.
+    """
+    pattern = (pattern or "").strip()
+    if not pattern:
+        return False, "No pattern given."
+    if not os.path.isdir(os.path.join(path, ".git")):
+        return False, "Not a git repository — nothing to ignore."
+
+    lines = _read_gitignore_lines(path)
+    for raw in lines:
+        stripped = raw.strip()
+        if stripped in (pattern, "/" + pattern):
+            return False, "Already ignored: %s" % pattern
+
+    addition = []
+    if lines and lines[-1].strip():
+        addition.append("")
+    if comment:
+        addition.append(comment)
+    addition.append(pattern)
+
+    try:
+        _write_gitignore_lines(path, lines + addition)
+    except OSError as exc:
+        return False, "Could not update .gitignore: %s" % exc
+    return True, "Added to .gitignore: %s" % pattern
+
+
 def _baseline_patterns() -> list:
     """Return _BASELINE_GITIGNORE as a flat list of pattern lines.
 

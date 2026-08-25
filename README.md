@@ -443,7 +443,7 @@ Recommended starter prompts:
 ### Help Tab
 
 A scrollable guide covering:
-- How to switch active projects
+- How to switch active projects (and why Claude Code usually needs no switch)
 - Button reference for every toolbar and context menu item
 - Project categories and how to set them up
 - The full git workflow — what branches are, when to use them, step-by-step PR creation
@@ -452,17 +452,88 @@ A scrollable guide covering:
 
 ---
 
+## Per-Project Bindings — working on several projects at once
+
+**The problem.** Without a binding, every Claude Code session falls back to the
+**user-scoped** `tokensave` entry in `~/.claude.json` — a bare `serve` with no
+`-p`, which resolves by searching upward from whatever directory the session
+happened to start in. Usually that lands on the right project. When it doesn't,
+nothing says so: you get confident, well-formed answers about a *different*
+codebase.
+
+Observed live: a session working in one project, with the Manager pinned to
+another, returned the other project's symbols. It was caught only because the
+returned file paths looked wrong.
+
+**The fix.** Give each project its own MCP server via a `.mcp.json` in its root:
+
+```json
+{"mcpServers": {"tokensave": {
+  "command": "tokensave",
+  "args": ["serve", "-p", "."]}}}
+```
+
+Every session in that project is then bound at startup — no cwd guessing, no
+pin involvement, and no need to remember `graph_root` for your own code.
+
+**Right-click a project → 🗂 Index → 🔌 Bind to this project…**, or see them all
+at once in Settings → 🔌 Manage MCP wiring.
+
+### What the Manager checks for you
+
+| | |
+|---|---|
+| **PATH prerequisite** | `"command": "tokensave"` keeps the file portable, so tokensave must resolve as a bare command. The dialog detects this, offers a one-click fix, and **withholds Apply** until it's satisfied rather than writing a config that cannot start. |
+| **Wrong-project bindings** | A `.mcp.json` pointing at *another* project is flagged loudly — that is the failure this feature exists to prevent. |
+| **Machine paths** | A binding that works only on your machine is flagged. The generated file contains none. |
+| **Shadowing** | Claude Code resolves `local > project > user` and dedupes by server name, so a *correct* binding can still be overridden. Doctor asks Claude Code which definition actually wins and says so — because "fix your .mcp.json" is useless advice when the file is already right. |
+
+### Three things to expect
+
+1. **Only new sessions are affected.** A session already running keeps the
+   server it started with.
+2. **Each project prompts once.** Claude Code shows `⏸ Pending approval` for a
+   new `.mcp.json` server. Answer it once per project.
+3. **`claude mcp list` will warn about multiple scopes** while `tokensave`
+   exists at both user and project level. Harmless — and resolved by the
+   optional migration below.
+
+### `.gitignore` by default
+
+The file is portable on purpose, so it *can* be committed. But committing it
+hands everyone who clones the repo an MCP server that only starts if they have
+tokensave on PATH — opting them in silently is the ruder default. So the
+Manager adds `.mcp.json` to `.gitignore` after binding.
+
+Turn that off in **Settings → "Add .mcp.json to .gitignore when binding a
+project"** if you'd rather share it. Either way git ignores nothing it is
+already tracking.
+
+### Retiring the user-scoped fallback (optional)
+
+Once your projects are bound, the user-scoped entry is what shadows them. The
+Manager can remove it — but only when **every project is bound or explicitly
+skipped, and at least one is actually bound**. Afterwards it asks Claude Code
+what a bound project now serves and reports `verification_failed` rather than
+success if the answer is wrong.
+
+Worth understanding before you do it: once the fallback is gone, a project with
+no binding has **no tokensave at all**. That is the deliberate trade —
+determinism instead of a fallback that is usually right.
+
 ## Right-Click Menu
 
 Right-click any project row in the Projects tab to get the full per-project action menu:
 
 | Menu Item | What it does |
 |-----------|-------------|
-| ★ Set as Active | Pin this project for Claude Desktop |
+| ★ Set as Active | Pin the **default** project for Claude Desktop's own chats (Claude Code sessions are unaffected — see Per-Project Bindings) |
 | ↺ Sync | Run `tokensave sync` |
 | 📊 Status | Show `tokensave status` output |
 | ⟳ Force Re-sync | Run `tokensave sync --force` |
 | 🔍 Doctor | Run `tokensave doctor` |
+| 🔌 Bind to this project… | Give this project its own Claude Code MCP server (writes `.mcp.json`) |
+| 🛡 Enable/Disable strict_tree | Toggle tokensave's wrong-tree refusal for this project |
 | 📜 Git Log | Switch to Git tab and refresh |
 | 📝 Git Commit… | Open commit dialog for this project |
 | 🔧 Git Init | Initialise a git repo + write baseline `.gitignore` + optional initial commit |

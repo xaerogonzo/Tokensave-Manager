@@ -162,6 +162,24 @@ class SettingsDialog(tk.Toplevel):
             font=("Segoe UI", 8), bg=C["base"], fg=C["overlay0"],
             justify=tk.LEFT).pack(anchor=tk.W, padx=36, pady=(0, 8))
 
+        from helpers.mcp import GITIGNORE_PROJECT_MCP_KEY
+        self._var_gitignore_mcp = tk.BooleanVar(
+            value=bool(raw.get(GITIGNORE_PROJECT_MCP_KEY, True)))
+        themed_checkbutton(body,
+            text="Add .mcp.json to .gitignore when binding a project",
+            variable=self._var_gitignore_mcp,
+            bg=C["base"], fg=C["text"],
+            activebackground=C["base"], activeforeground=C["text"],
+            font=("Segoe UI", 10)).pack(anchor=tk.W, padx=20, pady=(0, 2))
+        tk.Label(body,
+            text="  A project binding is portable on purpose, so it CAN be committed \u2014\n"
+                 "  it holds no machine paths. But committing it gives everyone who\n"
+                 "  clones the repo a tokensave MCP server that only starts if they\n"
+                 "  have tokensave on PATH. Off = share it; on = keep it local.\n"
+                 "  Either way, git ignores nothing it is already tracking.",
+            font=("Segoe UI", 8), bg=C["base"], fg=C["overlay0"],
+            justify=tk.LEFT).pack(anchor=tk.W, padx=36, pady=(0, 8))
+
         from helpers.smoke_runner import is_hook_installed
         _active_project = (raw.get("projects") or [{}])[0].get("path") or ""
         _hook_active = is_hook_installed(_active_project) if _active_project else False
@@ -308,6 +326,8 @@ class SettingsDialog(tk.Toplevel):
             for iid in self._roots_tv.get_children()
         ]
         raw["auto_commit_after_sync"] = self._var_autocommit.get()
+        from helpers.mcp import GITIGNORE_PROJECT_MCP_KEY
+        raw[GITIGNORE_PROJECT_MCP_KEY] = self._var_gitignore_mcp.get()
 
         # Pre-commit smoke-test hook — install or uninstall based on toggle.
         _precommit_wanted = self._var_precommit_hook.get()

@@ -164,6 +164,15 @@ def _canonical_mcp_entry(cfg: dict) -> dict:
 #: it a machine-local file wearing a shared file's name.
 PROJECT_PATH_ARG = "."
 
+#: Config key: add `.mcp.json` to the project's .gitignore after binding.
+#: Default ON, and the default is a judgement call worth stating. The file
+#: is deliberately portable so it CAN be committed — but committing it
+#: hands every collaborator an MCP server definition that only works if
+#: they happen to have tokensave on PATH. Opting them in silently is the
+#: ruder default, so the manager ignores by default and lets anyone who
+#: wants it shared turn this off.
+GITIGNORE_PROJECT_MCP_KEY = "gitignore_project_mcp"
+
 
 def _project_mcp_path(project_root: str) -> str:
     """Where Claude Code looks for a project's own MCP config."""

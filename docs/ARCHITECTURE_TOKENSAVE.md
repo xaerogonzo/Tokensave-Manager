@@ -194,8 +194,44 @@ Carbon · D · Lua · Julia · R · MATLAB · Groovy · Gradle · Maven · SQL
 - **CLI subcommand names.** `tokensave query` (not `search` — `search` doesn't exist as a subcommand even though MCP exposes `tokensave_search`). `tokensave context` accepts `--format json|markdown` (not `--json`). `tokensave install --agent claude` configures Claude Code integration but writes hook commands without quoting paths-with-spaces — see `docs/upstream-issues/tokensave-hook-quoting.md` for the bug draft.
 - **`tokensave doctor` purge prompt is TTY-gated.** Piped stdin won't trigger the y/n prompt for purging stale global-DB entries. The manager's Doctor button detects this case and offers to spawn `cmd.exe /k "tokensave doctor"` in a NEW console window where the user can answer the prompt for real.
 
+## Per-project bindings (Claude Code)
+
+A `.mcp.json` in a project root gives that project its own MCP server:
+
+```json
+{"mcpServers": {"tokensave": {"command": "tokensave", "args": ["serve", "-p", "."]}}}
+```
+
+Two measured facts hold it up, both recorded because the plausible-looking
+alternatives failed:
+
+* **`-p .` resolves to the project root**, even when the session was launched
+  from a subdirectory — Claude Code spawns a project-scoped server with the
+  project root as its cwd. Established by elimination: an explicit path does
+  not search upward (upstream #372), so a cwd of `<root>/src` would have
+  errored rather than answering.
+* **`${CLAUDE_PROJECT_DIR:-X}` resolves to `X`.** The variable is not set at
+  config-resolution time and does not appear in a live session's environment,
+  so the documented-looking form degrades silently to its default. A sentinel
+  default proved it.
+
+`"command": "tokensave"` rather than an absolute path is what keeps the file
+shareable; it makes tokensave-on-PATH a prerequisite, which
+`helpers/path_setup.py` checks and repairs as its own confirmed action.
+
+Precedence is `local > project > user`, deduped by server **name**. The manager
+never re-derives this — `claude mcp get <name>` run with `cwd` set to the
+project prints the winner, and a manager that computed it itself would
+eventually report "bound" while something else served.
+
 ## tokensave-wrapper.py (manager-side script)
 
 A thin script the manager registers as Claude Desktop's MCP server in `claude_desktop_config.json`. Spawns `tokensave.exe serve -p <pinned-project>` and proxies its stdio. **Critical:** the Popen call must pass `stdin=sys.stdin, stdout=sys.stdout, stderr=sys.stderr` explicitly — default-inheritance under pythonw.exe breaks console-child stdio in a way that times out MCP handshake at 30 s. **Also critical:** keep it single-threaded — `import threading` and daemon threads introduce additional subtle stdio issues. Both of these were learned the hard way and are documented in detail in `docs/MCP_INTEGRATION_GOTCHAS.md`.
 
-The wrapper currently reads the pin file ONCE at startup. Live in-session pin reloading (so `★ Set as Active` swaps the served project without a Claude restart) is deferred — must be implemented out-of-process (sibling watcher daemon that signals via `taskkill /F` to the tokensave PID, or DXT extension migration) rather than inside the wrapper.
+The wrapper reads the pin file ONCE at startup, and that is now understood to be permanent rather than deferred.
+
+**Do not build a watcher for this.** The "sibling watcher daemon that signals via `taskkill`" this section used to propose was implemented (Roadmap-10 `PinWatcherController`) and removed after measurement: **Claude Desktop does not restart a died MCP server.** It reports "Server disconnected" and leaves it, so killing the server turned a stale-but-working session into no session at all. Full evidence in `docs/MCP_INTEGRATION_GOTCHAS.md`.
+
+The deeper reason no variant works: an MCP stdio server's lifetime belongs to the client that spawned it. A wrapper the manager starts has its stdio wired to the manager, so it can never become Desktop's server.
+
+**For Claude Code this is moot** — see "Per-project bindings" below. For Desktop, `graph_root` reads another project without any restart; only moving the *default* graph needs one.

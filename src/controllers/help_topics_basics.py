@@ -39,6 +39,23 @@ def switching(ctl):
           "Desktop's chats. If you are reading this from a Claude Code "
           "session, the pin is not what decides your project.")
         br()
+
+        h2("Claude Code: bind the project instead")
+        p("Without a binding a session resolves its project by searching "
+          "upward from wherever it started \u2014 usually right, and silently "
+          "wrong when it is not. Giving the project its own .mcp.json fixes "
+          "that at the source, so several projects can be open at once "
+          "without any of them answering about another:")
+        ins("  Right-click the project \u2192 \U0001f5c2 Index \u2192 "
+            "\u201c\U0001f50c Bind to this project\u2026\u201d\n", "body")
+        ins("  (or Settings \u2192 \U0001f50c Manage MCP wiring to see them "
+            "all)\n", "dim")
+        br()
+        p("Then graph_root is only needed for reaching ACROSS projects, "
+          "which is what it is actually for. Two things to expect: only new "
+          "sessions pick up a binding, and each project asks for approval "
+          "once.")
+        br()
         p("Reading a different project does not. Every tokensave tool takes a "
           "graph_root argument, which opens any indexed project on demand — "
           "including one in a completely unrelated folder tree:")
