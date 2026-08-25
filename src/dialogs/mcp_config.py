@@ -275,11 +275,13 @@ class MCPConfigDialog(UiPumpMixin, tk.Toplevel):
         if n_stale:
             tk.Label(
                 box,
-                text=("  %d of these hold no session, no approval and no "
-                      "allowed-tools, while a sibling spelling has all of it. "
-                      "Those are leftovers from something running `claude` in "
-                      "the directory once — this manager's own status checks "
-                      "included — and deleting them loses nothing."
+                text=("  %d of these hold no session and no settings a "
+                      "sibling spelling does not already have. Those are "
+                      "leftovers from something running `claude` in the "
+                      "directory once — this manager's own status checks "
+                      "included. Deleting one costs at most the trust "
+                      "question being asked again, once, if you ever launch "
+                      "a session with that exact spelling."
                       % n_stale),
                 font=("Segoe UI", 9), bg=C["surface0"], fg=C["subtext"],
                 justify=tk.LEFT, wraplength=720, anchor=tk.W).pack(
