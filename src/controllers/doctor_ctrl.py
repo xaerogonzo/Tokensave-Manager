@@ -391,6 +391,88 @@ class DoctorController:
                 "runs." % got.scope,
                 C["peach"])
 
+    def _desktop_servers(self) -> list:
+        """Running tokensave servers, memoised for one doctor pass.
+
+        Enumeration shells out to PowerShell/CIM, so it is cached rather than
+        repeated per report. The TTL is short because the whole point of the
+        check is that the answer changes when Desktop restarts a server.
+        """
+        import time as _time
+        now = _time.time()
+        cached = getattr(self, "_srv_cache", None)
+        if cached and now - cached[0] < 30:
+            return cached[1]
+        try:
+            from helpers.project_discovery import find_projects
+            from helpers.tokensave_daemon import list_tokensave_servers
+            projects = [p["path"]
+                        for p in find_projects(self._cfg.search_roots)]
+            servers = list_tokensave_servers(
+                tokensave_exe=self._cfg.tokensave_exe,
+                known_projects=projects)
+        except Exception:                                    # noqa: BLE001
+            servers = []
+        self._srv_cache = (now, servers)
+        return servers
+
+    def _report_desktop_shadow(self, path: str) -> None:
+        """Is Claude Desktop's global tokensave answering for this project?
+
+        The check every other binding report cannot make. `claude mcp get`
+        reads `~/.claude.json` and never `claude_desktop_config.json`, so a
+        Desktop-registered `tokensave` is invisible to
+        `_report_binding_is_effective` above — which is precisely how a
+        session in this repo spent four queries believing its index was stale
+        while being answered from another project's graph.
+
+        Speaks only for the states the user can act on. A Desktop server that
+        happens to be serving THIS project is correct for this project and
+        gets silence; so does a dormant entry, because Desktop is closed and
+        there is nothing to do. Reporting either would make this the next
+        over-eager doctor warning, which this doctor has already had to be
+        fixed for once.
+        """
+        from helpers import mcp_desktop
+        from helpers.mcp_shadow import (SHADOW_ACTIVE, SHADOW_UNCERTAIN,
+                                        classify_shadow)
+
+        try:
+            configs = mcp_desktop.discover_desktop_configs()
+            present = mcp_desktop.desktop_entry_present(configs=configs)
+            retired = bool(self._cfg.raw.get(
+                mcp_desktop.DESKTOP_SCOPE_RETIRED_KEY))
+        except Exception:                                    # noqa: BLE001
+            return
+
+        if mcp_desktop.lifecycle_state(present, retired) == \
+                mcp_desktop.LIFECYCLE_RETURNED:
+            self._on_log(
+                "  ⚠ Claude Desktop's tokensave entry has come back after "
+                "you retired it — an app update or a hand edit can do that. "
+                "Until it is retired again it wins the `tokensave` name over "
+                "every project binding on this machine.", C["peach"])
+
+        if not present:
+            return
+
+        verdict = classify_shadow(path, desktop_entry_present=True,
+                                  servers=self._desktop_servers())
+
+        if verdict.state == SHADOW_ACTIVE:
+            self._on_log(
+                "  ⚠ this project's binding is correct, but Claude "
+                "Desktop runs its own tokensave server and that one wins the "
+                "name. It is serving %s (PID %s), so questions asked here are "
+                "answered from that tree. Settings → MCP Integration → "
+                "“Retire Desktop tokensave…”."
+                % (verdict.served_project, verdict.pid), C["peach"])
+        elif verdict.state == SHADOW_UNCERTAIN:
+            self._on_log(
+                "  ? Claude Desktop is running a tokensave server, but which "
+                "project it serves could not be established — so whether "
+                "this binding is being shadowed is unknown.", C["overlay0"])
+
     def _several_projects(self) -> bool:
         """More than one indexed project, read defensively."""
         try:
@@ -440,6 +522,7 @@ class DoctorController:
         self._report_strict_tree(
             path, risk_present=bool(orphans) or self._wrong_graph_risk())
         self._report_project_binding(path)
+        self._report_desktop_shadow(path)
         if other_n:
             # Informational only — never worth a modal. These are agents
             # that are either not installed here or already wired.

@@ -49,9 +49,31 @@ Live-reload note (closed — it cannot be done from here, or anywhere):
   hand a running Desktop a replacement, because a server the manager spawns
   has its stdio wired to the manager. That is the transport, not a gap.
 
-  None of which matters as much as it sounds, because the pin only picks a
-  DEFAULT: every tokensave tool takes ``graph_root``, so another indexed
-  project can be read without touching the pin or restarting anything.
+Why there is no cwd rule (measured 2026-08-26, and it cannot be added):
+  The obvious fix for "the pin picked the wrong project" is to prefer the
+  directory the server was started in. It does not work HERE, and the reason
+  is structural rather than a missing feature.
+
+  Claude Desktop spawns this wrapper for the whole APP, not per session: two
+  live wrappers were observed with ``ppid`` = the Desktop process itself
+  (PID 20724), started 8 hours apart. So this process's cwd is Desktop's cwd.
+  It carries no information about which repository any given session is
+  working in, and every Desktop-hosted Claude Code session inherits whichever
+  single server this wrapper started.
+
+  That is what makes the pin decisive rather than advisory, and it is why the
+  manager now offers to retire Claude Desktop's ``tokensave`` entry outright
+  (Settings -> MCP Integration). A project's own ``.mcp.json`` runs
+  ``tokensave serve -p .`` with a cwd Claude Code sets to the project, which
+  IS reliable -- it was already running correctly beside the wrapper's server
+  the whole time, just losing the name collision.
+
+  An earlier version of this note ended by saying none of it mattered much,
+  "because the pin only picks a DEFAULT: every tokensave tool takes
+  ``graph_root``". Both halves are wrong for this path. The pin picks the
+  ONLY tree such a session can see, and an array ``graph_root`` does not
+  survive Claude Code's tool-call path (it arrives as a string and is
+  rejected). A session in the wrong tree cannot read its way out.
 """
 
 import json

@@ -24,9 +24,11 @@ from __future__ import annotations
 
 import json
 import os
+from unittest.mock import patch
 
 import pytest
 
+from helpers import mcp_desktop
 from helpers.mcp import (
     APPROVAL_AMBIGUOUS,
     APPROVAL_APPROVED,
@@ -290,7 +292,28 @@ def test_every_advisory_state_is_produced_by_something():
             _ok_info(), WIN, projects=projects)["state"])
     produced.add(describe_effective(
         EffectiveScope(SCOPE_USER, connected=True))[0])
+    # The runtime tier's state has no config-file producer at all -- Claude
+    # Desktop's own `tokensave` lives in a file `claude mcp get` never reads,
+    # so it is emitted by the dialog from a live process scan instead. Named
+    # here rather than exempted, so the guard still fails on a state nothing
+    # can emit.
+    produced.add(_desktop_shadow_state())
     assert ADVISORY_STATES <= produced
+
+
+def _desktop_shadow_state() -> str:
+    """The state `_annotate_desktop_shadow` assigns to a shadowed row."""
+    from dialogs.mcp_desktop_panel import DesktopMigrationMixin
+
+    class _Srv:
+        pid, project, selection = 1, r"D:\Other Project", "pin"
+        attribution, started_at, is_guess = "authoritative", 1.0, False
+
+    host = DesktopMigrationMixin()
+    host._servers = [_Srv()]
+    with patch.object(mcp_desktop, "desktop_entry_present",
+                      return_value=True):
+        return host._annotate_desktop_shadow(_ok_info(), WIN)["state"]
 
 
 # ── tier 3: what Claude Code reports ──────────────────────────────────────

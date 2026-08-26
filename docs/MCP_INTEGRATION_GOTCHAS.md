@@ -8,13 +8,121 @@ tried → what went wrong → the lesson**.
 
 ---
 
-## TL;DR — three things to know before touching this code
+## TL;DR — four things to know before touching this code
+
+0. **Claude Desktop's `tokensave` entry shadows every project's own binding, machine-wide.** Desktop spawns the wrapper app-level, the wrapper picks one project from the pin, and Claude Code dedupes MCP servers by NAME — so a Desktop-hosted session in *any* repo is answered from that one project. Symptom: the index looks stale and a re-sync does not help. See [The scope collision](#the-scope-collision-desktops-tokensave-outranks-every-project-binding) below, and prove it with the two-command recipe there before re-indexing anything.
+
 
 1. **Claude Desktop's MCP config file is NOT `%APPDATA%\Claude\claude_desktop_config.json` on Microsoft Store / UWP installs.** It's actually `%LOCALAPPDATA%\Packages\Claude_<id>\LocalCache\Roaming\Claude\claude_desktop_config.json`. Both paths exist on disk simultaneously; Windows asymmetric file-path redirection makes them resolve to different physical files depending on whether the caller is in UWP context. Edit only the package-internal path.
 
 2. **`subprocess.Popen(args, creationflags=CREATE_NO_WINDOW)` with default `stdin/stdout/stderr=None` doesn't reliably proxy stdio under pythonw.exe.** Tokensave (a console child) never sees the MCP messages Claude Desktop is piping in. Pass `stdin=sys.stdin, stdout=sys.stdout, stderr=sys.stderr` explicitly.
 
 3. **Don't add `import threading` or daemon threads to the wrapper script.** It interacts badly with Windows stdio handling under pythonw.exe in subtle ways. Any live-reload feature must be implemented as an **out-of-process** mechanism, not inside the wrapper.
+
+---
+
+## The scope collision: Desktop's `tokensave` outranks every project binding
+
+*Diagnosed 2026-08-26, after the same symptom had been misread three times.*
+
+### The symptom, and why it is so convincing
+
+A session reports that the tokensave index is stale. Re-syncing does not fix
+it. Three lookups of symbols known to exist return `[]` — one written minutes
+earlier, one four commits back, one shipped long ago. `tokensave_status`
+reports a branch the repository does not have.
+
+**Three misses in a row is not staleness. It is a different tree.**
+
+The tell that settles it: after a re-sync, `status` comes back byte-identical
+— same `last_sync_at`, same node count — while `uptime_secs` has reset. The
+server restarted and reopened *the same wrong database*.
+
+### The mechanism
+
+1. Claude Desktop registers `tokensave` in its own `claude_desktop_config.json`,
+   pointing at `src/tokensave-wrapper.py`.
+2. Desktop spawns that wrapper **for the whole app, not per session**. Measured:
+   two live wrappers, both with `ppid` = the Desktop process (PID 20724).
+3. The wrapper therefore has no way to know which repository a session is in,
+   and picks one project from the global pin
+   (`~/.tokensave/desktop-project.txt`).
+4. Every Desktop-hosted Claude Code session inherits that single server.
+5. Claude Code **dedupes MCP servers by name**, so this entry beats the
+   project's own `.mcp.json` — which is running correctly at the same moment.
+
+Measured in Token Save Manager Source while its own session was being answered
+from OpenChem Studio:
+
+| Source | Files | Nodes | DB size | Branch |
+|---|---|---|---|---|
+| `tokensave_status` over MCP | 741 | 24,530 | 93,863,936 | `joback-thermophysical` |
+| `tokensave status` over CLI | 301 | 9,568 | 33.0 MB | `Roadmap-11` |
+
+`93,863,936` was a byte-exact match for OpenChem Studio's `tokensave.db`.
+
+### Why none of the existing defences caught it
+
+- **`strict_tree` cannot.** It was `true` in both projects. The server opened
+  one project's index and reads *that project's* config, so it believes it is
+  serving correctly. `strict_tree` guards `graph_root` redirection inside a
+  server; it knows nothing about which repo the client is in.
+- **`claude mcp get` cannot.** It reads `~/.claude.json` and never
+  `claude_desktop_config.json`, so Desktop's entry is invisible to the one
+  tier that asks the client which definition wins.
+- **The earlier migration did not cover it.** Retiring the *user-scoped*
+  `~/.claude.json` entry was correct and was done — the Desktop entry is a
+  separate definition that outlived it.
+
+### The proof recipe — run this before re-indexing anything
+
+```bash
+"D:/Claude Co worker/Token Save/tokensave.exe" status "<project>"
+```
+
+Compare `db_size_bytes` and `active_branch` against `tokensave_status` over
+MCP. If they disagree, the MCP server is on another tree and no amount of
+syncing will help. The CLI always reads the project you name, so it is the
+tiebreak — and it is a usable workspace for the rest of the session:
+
+```bash
+"D:/Claude Co worker/Token Save/tokensave.exe" tool search <symbol> --project "<project>"
+```
+
+These are **diagnostic heuristics, not correctness predicates**. Repeated
+empty results are a strong wrong-tree signal; the authoritative test is always
+MCP status versus direct CLI status for the same project.
+
+### The fix
+
+Settings → MCP Integration → **Retire Desktop tokensave…**. Each project's
+own `.mcp.json` (`tokensave serve -p .`) then wins, and every session serves
+its own tree. The accepted trade is that **Claude Desktop chat loses tokensave
+entirely** — deliberate, and stated in the confirmation.
+
+Three things about that migration are load-bearing:
+
+- **Quit Claude Desktop first.** It rewrites `claude_desktop_config.json` from
+  its in-memory cache every 1–2 minutes, so an edit made while it runs is
+  silently reverted. The manager enforces this as a hard gate rather than a
+  banner.
+- **Both physical config files must change** on a UWP install (see TL;DR #1) —
+  they are one logical configuration seen from two process contexts.
+- **A running server keeps its old project.** It resolves the project once, at
+  startup. Restart Desktop, then verify.
+
+### Verification is three layers, and all three must agree
+
+The reason config-only checking was never enough here: the configuration
+looked plausible, the server was healthy, and it was simply serving the wrong
+repository.
+
+```
+config truth       the project's .mcp.json resolves to project scope
+process truth      the live server belongs to that project (wrapper record / -p;
+                   -shm mtime corroborates, never identifies)
+behavioural truth  MCP tokensave_status == direct CLI status for that project
+```
 
 ---
 
