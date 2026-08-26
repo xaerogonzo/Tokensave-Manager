@@ -159,6 +159,13 @@ class App(UiPumpMixin, tk.Tk):
         self._src_banner_dismissed = False
         self.after(self._SRC_CHECK_MS, self._check_source_changed)
 
+        # Last, so a driven run sees the window a user gets rather than a
+        # half-built one. No-ops unless TOKENSAVE_MANAGER_DRIVE names a
+        # script; the reference is kept because nothing else owns the
+        # `after` chain, and a collected driver strands the run.
+        from debug_drive import start_if_requested
+        self._driver = start_if_requested(self)
+
     # ── Manager-source change detection ──────────────────────────────────
     #
     # Python does not reload modules, so after editing src/ the running

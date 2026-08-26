@@ -23,7 +23,7 @@ import pytest
 pytestmark = pytest.mark.tk
 
 from dialogs.mcp_config import MCPConfigDialog
-from helpers.mcp import _project_mcp_path
+from helpers.mcp import ADVISORY_STATES, _project_mcp_path
 
 
 class _Cfg:
@@ -101,6 +101,39 @@ def test_every_not_ok_state_blocks_until_bound_or_skipped(state):
     assert [n for n, _ in st["remaining"]] == ["b"]
 
 
+@pytest.mark.parametrize("state", sorted(ADVISORY_STATES))
+def test_an_advisory_state_still_counts_as_bound(state):
+    """A shadowed or unapproved binding is a WRITTEN binding.
+
+    Its file is correct by construction, and what blocks it is usually the
+    user-scoped entry this migration exists to remove. Counting it as unbound
+    would withhold the button at exactly the moment it is the fix — the same
+    "demand the outcome beforehand" trap the readiness rule already refuses
+    for shadowing.
+    """
+    st = _dialog()._migration_status([
+        _row("a", "/a", "ok"), _row("b", "/b", state)])
+
+    assert st["ready"] is True
+    assert [n for n, _ in st["bound"]] == ["a", "b"]
+    assert st["remaining"] == []
+
+
+def test_advisory_alone_is_still_ready():
+    """Every project shadowed and none plainly `ok` is the live starting state.
+
+    Measured on a real machine: ten correct `.mcp.json` files, none approved,
+    every session served by the user-scoped entry. If that configuration could
+    not reach the removal button, the migration would be unreachable for the
+    exact population that needs it most.
+    """
+    st = _dialog()._migration_status([
+        _row("a", "/a", "project_unapproved"),
+        _row("b", "/b", "project_shadowed")])
+
+    assert st["ready"] is True
+
+
 def test_skipping_uses_the_same_list_the_dialog_already_owns():
     """Reuses `mcp_skip_warnings`, which Apply already clears — so binding a
     previously skipped project takes it out of the skipped bucket without any
@@ -151,3 +184,143 @@ def test_no_project_row_ever_proposes_a_machine_path(tmp_path, monkeypatch):
             _classify_mcp_entry(_project_mcp_path(root), {})["proposed"])
         assert "wrapper" not in proposed.lower(), proposed
         assert ":" not in proposed.replace('":', "").replace('",', ""), proposed
+
+
+# ── the strip must say how many are APPROVED, not just bound ──────────────
+#
+# "All bound" does not mean "all working": an unapproved binding is not in the
+# running at all, and retiring the fallback does not approve it. A user who
+# bound everything and removed the user-scoped entry with nothing approved was
+# left with no tokensave in any project.
+
+
+def test_status_counts_approved_separately_from_bound():
+    st = _dialog()._migration_status([
+        _row("a", "/a", "ok"),
+        _row("b", "/b", "project_unapproved"),
+        _row("c", "/c", "project_shadowed")])
+
+    assert len(st["bound"]) == 3
+    assert [n for n, _ in st["approved"]] == ["a", "c"]
+
+
+def test_an_unapproved_row_is_bound_but_not_approved():
+    """Both halves matter: it still counts toward readiness."""
+    st = _dialog()._migration_status([_row("a", "/a", "project_unapproved")])
+
+    assert st["ready"] is True
+    assert len(st["bound"]) == 1
+    assert st["approved"] == []
+
+
+def test_a_shadowed_row_counts_as_approved():
+    """Shadowing is a scope problem, not an approval one.
+
+    Lumping it in with unapproved would tell the user to approve something that
+    is already approved and is failing for a different reason.
+    """
+    st = _dialog()._migration_status([_row("a", "/a", "project_shadowed")])
+    assert len(st["approved"]) == 1
+
+
+# ── which buttons each row offers ─────────────────────────────────────────
+#
+# The states differ in what the user can DO about them, and getting that wrong
+# is what shipped an "Apply this fix" on a row whose file was already correct.
+
+
+def _buttons_for(tk_root, state, project_root="/p"):
+    """Render one row's action strip and return the button labels."""
+    import tkinter as tk
+    from tkinter import ttk
+
+    dlg = object.__new__(MCPConfigDialog)
+    dlg._cfg = _Cfg()
+    frame = tk.Frame(tk_root)
+    info = {"state": state, "label": "x", "issue": "", "current": None,
+            "proposed": {}}
+    dlg._render_block_actions(frame, "Claude Code", "/p/.mcp.json", info,
+                              "", project_root)
+    return [w.cget("text") for w in frame.winfo_children()
+            for w in ([w] + list(w.winfo_children()))
+            if isinstance(w, (ttk.Button, tk.Button))]
+
+
+def test_an_unapproved_row_offers_approve_and_not_apply(tk_root):
+    """The one advisory state the manager can resolve itself."""
+    labels = _buttons_for(tk_root, "project_unapproved")
+    assert any("Approve this binding" in t for t in labels)
+    assert not any("Apply this fix" in t for t in labels)
+
+
+def test_a_shadowed_row_offers_neither(tk_root):
+    """Nothing to apply and nothing to approve — the fix is elsewhere."""
+    labels = _buttons_for(tk_root, "project_shadowed")
+    assert not any("Approve this binding" in t for t in labels)
+    assert not any("Apply this fix" in t for t in labels)
+
+
+def test_a_broken_row_still_offers_apply(tk_root):
+    labels = _buttons_for(tk_root, "project_unbound")
+    assert any("Apply this fix" in t for t in labels)
+    assert not any("Approve this binding" in t for t in labels)
+
+
+def test_approve_is_not_offered_without_a_project_root(tk_root):
+    """The global config rows have no project to approve."""
+    labels = _buttons_for(tk_root, "project_unapproved", project_root="")
+    assert not any("Approve this binding" in t for t in labels)
+
+
+# ── Skip has to visibly do something ──────────────────────────────────────
+#
+# Reported live: clicking Skip on an unbound project produced "no response or
+# change". Three causes stacked — the row renderer never consulted the skip
+# list, `_skip` never re-rendered, and for a path already on the list it
+# short-circuited the write while still reporting success.
+
+
+def _split(rows, skips):
+    """Mirror of the renderer's needs/skipped split."""
+    from helpers.mcp import ADVISORY_STATES as _ADV
+    needs = [r for r in rows
+             if r[2]["state"] != "ok" and r[2]["state"] not in _ADV]
+    skipped = [r for r in needs if _project_mcp_path(r[1]) in skips]
+    needs = [r for r in needs if _project_mcp_path(r[1]) not in skips]
+    return needs, skipped
+
+
+def test_a_skipped_project_leaves_the_needs_binding_group():
+    rows = [_row("a", "/a", "no_file"), _row("b", "/b", "no_file")]
+    needs, skipped = _split(rows, [_project_mcp_path("/b")])
+
+    assert [n for n, _r, _i in needs] == ["a"]
+    assert [n for n, _r, _i in skipped] == ["b"]
+
+
+def test_an_unskipped_project_returns_to_needs_binding():
+    rows = [_row("b", "/b", "no_file")]
+    needs, skipped = _split(rows, [])
+    assert [n for n, _r, _i in needs] == ["b"]
+    assert skipped == []
+
+
+def test_skipping_never_hides_a_bound_or_advisory_row():
+    """Skip answers "don't bind this"; it must not silence a real finding."""
+    rows = [_row("a", "/a", "project_shadowed"), _row("b", "/b", "ok")]
+    needs, skipped = _split(rows, [_project_mcp_path("/a"),
+                                   _project_mcp_path("/b")])
+    assert needs == [] and skipped == []
+
+
+def test_skip_and_unskip_round_trip_through_the_config():
+    dlg = _dialog()
+    path = _project_mcp_path("/b")
+
+    dlg._cfg.raw["mcp_skip_warnings"] = []
+    dlg._cfg.raw["mcp_skip_warnings"].append(path)
+    assert path in dlg._cfg.raw["mcp_skip_warnings"]
+
+    dlg._cfg.raw["mcp_skip_warnings"] = [
+        s for s in dlg._cfg.raw["mcp_skip_warnings"] if s != path]
+    assert dlg._cfg.raw["mcp_skip_warnings"] == []

@@ -113,6 +113,42 @@ refuse to apply config edits until they're gone. We built
 that explicitly says *"NO CHANGES WERE WRITTEN — fully quit Claude
 Desktop first"*.
 
+**Lesson 1b (2026-08-25): the same hazard applies to `~/.claude.json`, and
+the detection for it was dead code for its entire life.** Claude Code
+rewrites that file continuously while a session is open — measured at 30
+seconds old with one session running — so removing the user-scoped
+`tokensave` entry, which is exactly what the migration button does, can be
+undone within a minute and read as the removal silently failing.
+
+`_is_claude_running()` matched the process name `claude-code.exe`. **That
+name has never existed.** `code` was therefore permanently `False`, so the
+banner never mentioned Claude Code and the Apply guard on the Claude Code
+row could never fire. Nothing failed loudly; the warning simply was not
+there.
+
+No executable name can answer this. Claude Code ships as an npm CLI (runs
+as `node.exe`, far too generic to match), as a native binary, and hosted
+inside the desktop app — where it is `claude.exe`, indistinguishable from
+Desktop. `claude_code_active()` therefore uses the **mtime of
+`~/.claude.json`** (a 5-minute window): packaging-independent, and direct
+evidence of the actual risk rather than an inference from a process list.
+
+Two deliberate asymmetries in the guards:
+
+- **Desktop gets a hard refusal, Claude Code gets a confirmation.** Desktop's
+  outcome is certain, so refusing helps. The mtime is probabilistic and its
+  window is five minutes wide, so a hard block would strand someone for five
+  minutes *after* they had closed every session as instructed.
+- **The banner gives each app its own sentence.** The old wording was
+  `"Claude Desktop / Claude Code is currently running. It rewrites its own
+  config file"` — ungrammatical for two apps, and it never said which file
+  was at risk. They own different files, and the migration button writes
+  Claude Code's.
+
+The banner also states that the desktop app hosts Claude Code sessions.
+"Quit Claude Code" is not actionable advice for someone whose session is a
+tab in `claude.exe`.
+
 **What went wrong (the second time)**: Even after a clean quit-then-edit
 cycle, the user reported MCP still timing out at next launch. This
 turned out to be Attempt 3.
