@@ -41,12 +41,13 @@ from helpers.mcp import (
     _canonical_mcp_entry, annotate_project_binding,
     describe_effective, duplicate_project_keys, read_claude_projects,
 )
+from dialogs.mcp_desktop_panel import DesktopMigrationMixin
 
 if TYPE_CHECKING:
     from state import ManagerConfig
 
 
-class MCPConfigDialog(UiPumpMixin, tk.Toplevel):
+class MCPConfigDialog(DesktopMigrationMixin, UiPumpMixin, tk.Toplevel):
     """Manage tokensave entries in Claude Desktop's and Claude Code's MCP
     config files.
 
@@ -149,6 +150,16 @@ class MCPConfigDialog(UiPumpMixin, tk.Toplevel):
         # Collapsed by default: it needs no action, and a permanently
         # expanded warning at the top of the dialog reads as a fault.
         self._show_dups = False
+        # Running tokensave servers, for the runtime tier. None means "not
+        # scanned yet"; the scan shells out to PowerShell, so it happens once
+        # in the background and the render that follows reads the result.
+        # Kept off the render path because a synchronous enumeration would
+        # freeze the dialog for as long as CIM takes to answer.
+        self._servers: "list | None" = None
+        # `(running, detail)` from the same background scan — asking costs a
+        # subprocess, so it never happens on the render path.
+        self._desktop_running: "tuple | None" = None
+        self._shadow_scanning = False
         self._start_ui_pump()
         self._render()
 
@@ -368,6 +379,7 @@ class MCPConfigDialog(UiPumpMixin, tk.Toplevel):
             info = _classify_mcp_entry(_project_mcp_path(root), self._cfg.raw)
             info = annotate_project_binding(
                 info, root, projects=self._claude_projects)
+            info = self._annotate_desktop_shadow(info, root)
             rows.append((name, root, info))
         if not rows:
             return
@@ -609,6 +621,19 @@ class MCPConfigDialog(UiPumpMixin, tk.Toplevel):
                 "ready": not remaining and bool(bound)}
 
     def _render_migration(self, rows):
+        """Both retirement migrations, in the order they must be done.
+
+        Two different global `tokensave` definitions can shadow a project
+        binding, and retiring one says nothing about the other. Claude Code's
+        user-scoped entry lives in `~/.claude.json`; Claude Desktop's lives in
+        `claude_desktop_config.json`, which `claude mcp get` does not read —
+        so the second was invisible to every check this dialog had, and
+        outlived the first migration by months.
+        """
+        self._render_user_scope_migration(rows)
+        self._render_desktop_migration(rows)
+
+    def _render_user_scope_migration(self, rows):
         """Where the user-scoped fallback stands, and the action to retire it.
 
         Stated rather than hidden: once the user-scoped entry is gone, a

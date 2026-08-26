@@ -74,6 +74,7 @@ from __future__ import annotations
 import json
 import os
 import re
+import shutil
 import subprocess
 import sys
 from dataclasses import dataclass, field
@@ -373,13 +374,64 @@ def stop_tokensave_server(server: TokensaveServer,
 
 # ── process enumeration ───────────────────────────────────────────────────
 
-def _enumerate_processes() -> list:
+class EnumerationFailed(RuntimeError):
+    """Process enumeration could not run at all — distinct from "found none".
+
+    The difference is the whole point. Collapsing both into ``[]`` is what let
+    a manager whose PATH lacked the PowerShell directory report "no Desktop
+    tokensave server is running" while two were, and "could not determine" for
+    a question it had simply failed to ask. Callers that must not guess pass
+    ``strict=True`` and catch this.
+    """
+
+
+def _powershell_exe() -> str:
+    """Resolve PowerShell, without trusting PATH.
+
+    Measured 2026-08-26: the manager, launched as a windowless ``pythonw.exe``,
+    ran with a PATH that did not contain
+    ``System32\\WindowsPowerShell\\v1.0``. A bare ``"powershell"`` then fails
+    ``CreateProcess`` with WinError 2, the ``OSError`` was swallowed, and every
+    enumeration silently returned nothing — so the Daemon Manager showed no
+    servers and the Desktop-retirement gate could never be satisfied.
+
+    Same lesson ``effective_scope`` already records for ``claude``: what a
+    shell resolves and what ``CreateProcess`` resolves are not the same set.
+    Falls back to the absolute System32 location, which is present on every
+    supported Windows, and prefers ``pwsh`` when the machine has it.
+    """
+    for name in ("pwsh", "powershell"):
+        found = shutil.which(name)
+        if found:
+            return found
+    fallback = os.path.join(
+        os.environ.get("SystemRoot", r"C:\Windows"), "System32",
+        "WindowsPowerShell", "v1.0", "powershell.exe")
+    return fallback if os.path.isfile(fallback) else ""
+
+
+def _enumerate_processes(name_like: str = "tokensave",
+                         *, strict: bool = False) -> list:
+    """Running processes whose image name contains *name_like*.
+
+    The filter is a parameter rather than a constant because
+    :mod:`helpers.mcp_desktop` needs the identical shape for ``claude.exe`` —
+    it has to tell Claude Desktop from Claude Code, and only the executable
+    path separates them. Duplicating the CIM plumbing to ask the same question
+    about a different image name would mean two places to get the
+    ``CreationDate`` conversion below wrong.
+
+    ``strict`` raises :class:`EnumerationFailed` instead of returning ``[]``
+    when the enumeration itself could not run. Default stays fail-open, which
+    is right for a listing; it is wrong for a gate.
+    """
     if sys.platform == "win32":
-        return _enumerate_windows()
-    return _enumerate_posix()
+        return _enumerate_windows(name_like, strict=strict)
+    return _enumerate_posix(name_like)
 
 
-def _enumerate_windows() -> list:
+def _enumerate_windows(name_like: str = "tokensave",
+                       *, strict: bool = False) -> list:
     """PowerShell/CIM, because a command line is what we need.
 
     The toolhelp snapshot API is cheaper but cannot return a command line,
@@ -387,7 +439,8 @@ def _enumerate_windows() -> list:
     is.
     """
     script = (
-        "Get-CimInstance Win32_Process -Filter \"Name LIKE '%tokensave%'\" | "
+        "Get-CimInstance Win32_Process -Filter \"Name LIKE '%%%s%%'\" | "
+        % name_like.replace("'", "").replace('"', "") +
         "Select-Object ProcessId, ExecutablePath, CommandLine, "
         # DateTimeOffset applies the machine's UTC offset. Subtracting a
         # bare unix-epoch literal instead gives LOCAL midnight, so the result
@@ -398,13 +451,28 @@ def _enumerate_windows() -> list:
         # mtime has sub-second precision and matches turn on fractions.
         "@{n='Start';e={[DateTimeOffset]::new($_.CreationDate)"
         ".ToUnixTimeMilliseconds()/1000}} | ConvertTo-Json -Compress")
+    exe = _powershell_exe()
+    if not exe:
+        if strict:
+            raise EnumerationFailed("PowerShell could not be located")
+        return []
     try:
         proc = subprocess.run(
-            ["powershell", "-NoProfile", "-NonInteractive", "-Command", script],
+            [exe, "-NoProfile", "-NonInteractive", "-Command", script],
             capture_output=True, text=True, timeout=_PROC_TIMEOUT,
+            # stdin is detached rather than inherited: the manager runs as a
+            # windowless pythonw.exe, where an inherited handle is not a
+            # usable one (docs/MCP_INTEGRATION_GOTCHAS.md, attempt 5).
+            stdin=subprocess.DEVNULL,
             creationflags=CREATE_NO_WINDOW, encoding="utf-8", errors="replace")
-    except (OSError, subprocess.TimeoutExpired):
+    except (OSError, subprocess.TimeoutExpired) as exc:
+        if strict:
+            raise EnumerationFailed("%s: %s" % (type(exc).__name__, exc))
         return []
+    if strict and proc.returncode != 0:
+        raise EnumerationFailed(
+            (proc.stderr or "").strip()[:200] or
+            "PowerShell exited %s" % proc.returncode)
     return _parse_cim_json(proc.stdout or "")
 
 
@@ -438,13 +506,26 @@ def _parse_cim_json(raw: str) -> list:
     return out
 
 
-def _enumerate_posix() -> list:
+def _enumerate_posix(name_like: str = "tokensave") -> list:
+    """Every process whose image basename contains *name_like*.
+
+    The Windows branch pushes this filter down into the CIM query; here it is
+    applied after the fact, because /proc has to be walked either way. Callers
+    still narrow further (``_is_tokensave`` verifies the binary), so this is a
+    cheap pre-filter, not identification.
+
+    Matched against the WHOLE path, not the basename. ``_is_tokensave`` accepts
+    a configured binary by full-path equality regardless of what it is called,
+    so a basename filter could drop a process the caller would have kept —
+    a filter that is meant to be cheap must not also be narrowing.
+    """
     out = []
     try:
         pids = [n for n in os.listdir("/proc") if n.isdigit()]
     except OSError:
         return []
     boot = _boot_time()
+    needle = (name_like or "").lower()
     for name in pids:
         pid = int(name)
         try:
@@ -453,6 +534,8 @@ def _enumerate_posix() -> list:
                     "utf-8", "replace").strip()
             exe = os.readlink("/proc/%s/exe" % name)
         except OSError:
+            continue
+        if needle and needle not in exe.lower():
             continue
         out.append({"pid": pid, "exe": exe, "cmdline": cmdline,
                     "started_at": _posix_start_time(name, boot)})

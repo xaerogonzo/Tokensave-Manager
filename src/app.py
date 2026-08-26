@@ -478,6 +478,36 @@ class App(UiPumpMixin, tk.Tk):
     # ❓ Help tab    — handled by HelpTabController
     # ═══════════════════════════════════════════════════════════════════
 
+    def _pin_tag(self, pinned: bool) -> str:
+        """What the pin actually decides, which is not always the same thing.
+
+        "pinned" alone reads as "this is the project tokensave serves", and
+        that is true only while Claude Desktop still defines its own
+        `tokensave`: the wrapper resolves the pin, and every Desktop-hosted
+        Claude Code session inherits that one server whatever repo it is in.
+        Retire that entry and the pin keeps working for the manager's own
+        project discovery while deciding nothing at all about MCP.
+
+        Both states get their own word rather than one label that is
+        half-wrong in each. Cached briefly because `refresh()` is a hot path
+        and this answer changes about once per migration.
+        """
+        if not pinned:
+            return "auto"
+        import time as _time
+        now = _time.time()
+        cached = getattr(self, "_pin_tag_cache", None)
+        if cached and now - cached[0] < 10:
+            return cached[1]
+        try:
+            from helpers import mcp_desktop
+            serves_mcp = mcp_desktop.desktop_entry_present()
+        except Exception:                                    # noqa: BLE001
+            serves_mcp = True        # the louder label is the safer default
+        tag = "pinned · serves MCP" if serves_mcp else "manager default"
+        self._pin_tag_cache = (now, tag)
+        return tag
+
     def refresh(self):
         self.projects = find_projects(self._cfg.search_roots)
         pinned = get_pinned()
@@ -488,8 +518,8 @@ class App(UiPumpMixin, tk.Tk):
 
         if self.active_path:
             name = os.path.basename(self.active_path)
-            tag  = "pinned" if pinned else "auto"
-            self.active_badge.config(text=f"  ★ {name}  ({tag})  ")
+            self.active_badge.config(
+                text=f"  ★ {name}  ({self._pin_tag(bool(pinned))})  ")
         else:
             self.active_badge.config(text="  No project  ")
 

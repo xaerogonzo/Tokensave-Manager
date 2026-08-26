@@ -288,6 +288,28 @@ class TokensaveDaemonManagerDialog(UiPumpMixin, tk.Toplevel):
                 "project's session instead.\n\n"
                 "Stop process %d anyway?" % (srv.project, srv.pid),
                 icon="warning", default="no", parent=self)
+        from helpers.mcp_shadow import WRAPPER_SELECTIONS
+
+        if srv.selection in WRAPPER_SELECTIONS:
+            # A wrapper-spawned server belongs to Claude Desktop, and Desktop
+            # does NOT restart an MCP server that dies -- it reports "Server
+            # disconnected" and leaves it (docs/MCP_INTEGRATION_GOTCHAS.md).
+            # The generic wording below promises a reconnect that will not
+            # happen, which would turn "serving the wrong tree" into "no
+            # tokensave at all" with no warning.
+            return messagebox.askyesno(
+                "Stop Claude Desktop's tokensave server?",
+                "Stop the tokensave server for:\n    %s\n\n"
+                "(pid %d — started by Claude Desktop)\n\n"
+                "Claude Desktop's tokensave tools will disconnect, and "
+                "Desktop will NOT start a replacement: it reports the server "
+                "as disconnected and leaves it that way until Desktop itself "
+                "is restarted.\n\n"
+                "This is a cleanup for a server that is serving the wrong "
+                "project — not routine maintenance."
+                % (srv.project or "(unidentified)", srv.pid),
+                icon="warning", default="no", parent=self)
+
         return messagebox.askyesno(
             "Stop this server?",
             "Stop the tokensave server for:\n    %s\n\n"

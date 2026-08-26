@@ -182,6 +182,13 @@ GITIGNORE_PROJECT_MCP_KEY = "gitignore_project_mcp"
 #: of them should be offered the entry and the other must not be.
 USER_SCOPE_RETIRED_KEY = "mcp_user_scope_retired"
 
+#: The same decision for Claude Desktop's own entry — see
+#: :mod:`helpers.mcp_desktop`, which owns that migration. The constant lives
+#: HERE because `_classify_mcp_entry` must read it to stop reporting a
+#: deliberate absence as a defect, and `mcp_desktop` imports from this module;
+#: defining it there and importing it back would be a cycle.
+DESKTOP_SCOPE_RETIRED_KEY = "mcp_desktop_scope_retired"
+
 
 def _project_mcp_path(project_root: str) -> str:
     """Where Claude Code looks for a project's own MCP config."""
@@ -322,6 +329,48 @@ _MCP_CMD_CHECKERS = [_chk_project_scoped, _chk_bundled_wrapper,
                      _chk_python_wrapper, _chk_direct_serve]
 
 
+def _retired_absence(base: dict, cfg: dict, *, is_claude_code: bool,
+                     is_project_scoped: bool) -> "dict | None":
+    """An ABSENCE that was chosen is not a defect. ``None`` when it wasn't.
+
+    Both global migrations end with an empty `mcpServers`, and that is the
+    point of them: each project serves its own graph and the global fallback
+    is deliberately gone. Reporting it as "✗ no tokensave entry — click Apply"
+    told the user to undo the migration they had just completed, in the same
+    dialog whose next panel congratulated them for finishing it. Measured
+    twice, once per migration.
+
+    **Four surfaces read this verdict** — startup banner, Settings summary,
+    pin note and the MCP dialog — so the correction belongs here rather than
+    in each of them.
+
+    A project `.mcp.json` is never excused: retiring the global entries is
+    what makes project bindings load-bearing, so an unbound project still
+    needs binding and must keep saying so.
+    """
+    if is_project_scoped:
+        return None
+    if is_claude_code and cfg.get(USER_SCOPE_RETIRED_KEY):
+        return {**base, "state": "ok",
+                "label": "✓ retired — projects serve themselves",
+                "issue": ("Deliberately empty. The user-scoped entry was "
+                          "retired, so each project's own .mcp.json is "
+                          "authoritative and a project with no binding gets "
+                          "no tokensave at all — which is the point. Nothing "
+                          "to do here.")}
+    if not is_claude_code and cfg.get(DESKTOP_SCOPE_RETIRED_KEY):
+        return {**base, "state": "ok",
+                "label": "✓ retired — projects serve themselves",
+                "issue": ("Deliberately empty. Claude Desktop's entry ran the "
+                          "pin-aware wrapper, which serves one project for the "
+                          "whole machine and outranks every project's own "
+                          ".mcp.json. Retiring it is what makes Claude Code "
+                          "sessions serve their own project. Claude Desktop "
+                          "chat has no tokensave as a result — the deliberate "
+                          "trade. Nothing to do here.")}
+    return None
+
+
 def _classify_mcp_entry(cfg_path: str, cfg: dict) -> dict:
     """Inspect a Claude MCP config file and report what shape its tokensave
     entry is in.
@@ -389,22 +438,10 @@ def _classify_mcp_entry(cfg_path: str, cfg: dict) -> dict:
     servers = data.get("mcpServers") or {}
     entry = servers.get("tokensave")
     if not isinstance(entry, dict):
-        # An ABSENCE that was chosen is not a defect. After the user-scoped
-        # migration, no entry here is the whole point: each project serves its
-        # own graph and the fallback is deliberately gone. Reporting it as
-        # "✗ no tokensave entry — click Apply" told the user to undo the
-        # migration they had just completed, in the same dialog whose next
-        # panel congratulated them for finishing it. Four surfaces read this
-        # verdict (startup banner, Settings summary, pin note, this dialog),
-        # so the correction belongs here rather than in each of them.
-        if is_claude_code and cfg.get(USER_SCOPE_RETIRED_KEY):
-            return {**base, "state": "ok",
-                    "label": "✓ retired — projects serve themselves",
-                    "issue": ("Deliberately empty. The user-scoped entry was "
-                              "retired, so each project's own .mcp.json is "
-                              "authoritative and a project with no binding "
-                              "gets no tokensave at all — which is the "
-                              "point. Nothing to do here.")}
+        chosen = _retired_absence(base, cfg, is_claude_code=is_claude_code,
+                                  is_project_scoped=is_project_scoped)
+        if chosen is not None:
+            return chosen
         return {**base, "state": "missing", "label": "✗ no tokensave entry",
                 "issue": ("No 'tokensave' MCP server is configured. "
                           "Click Apply to add the canonical wrapper-based "
@@ -966,9 +1003,14 @@ def approve_project_binding(project_root: str, server: str = "tokensave"
 #: These rows must not offer Apply: rewriting a file that already says the
 #: right thing is a no-op dressed up as a fix, and it would leave the user
 #: clicking a button that reports success while nothing changes.
+#:
+#: ``project_desktop_shadowed`` is the runtime member of this set, and the
+#: only one no config file can reveal: Claude Desktop defines its own
+#: ``tokensave`` in ``claude_desktop_config.json``, which ``claude mcp get``
+#: never reads. See :mod:`helpers.mcp_shadow`.
 ADVISORY_STATES = frozenset({
     "project_unapproved", "project_rejected", "project_key_ambiguous",
-    "project_local_shadow", "project_shadowed",
+    "project_local_shadow", "project_shadowed", "project_desktop_shadowed",
 })
 
 

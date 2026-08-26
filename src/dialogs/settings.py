@@ -38,7 +38,8 @@ from typing import TYPE_CHECKING
 from constants import C
 from theme import bind_mousewheel, themed_checkbutton
 from helpers.detection import _root_path, _root_label
-from helpers.mcp import _mcp_configs, _classify_mcp_entry
+from helpers.mcp import (DESKTOP_SCOPE_RETIRED_KEY, USER_SCOPE_RETIRED_KEY,
+                         _mcp_configs, _classify_mcp_entry)
 from dialogs.settings_paths import PathsSection
 from dialogs.settings_codegraph import CodegraphSection
 from dialogs.settings_ai import AISection
@@ -211,28 +212,63 @@ class SettingsDialog(tk.Toplevel):
                       for _, p in _mcp_configs()]
         except Exception:
             states = []
-        if states and all(s == "ok" for s in states):
-            summary = "✓  Both Claude Desktop and Claude Code route through the wrapper."
-            summary_fg = C["green"]
-        elif "no_file" in states or "missing" in states:
-            summary = "✗  One or more Claude configs need a tokensave entry."
-            summary_fg = C["red"]
-        elif any(s in ("direct_serve", "wrong_wrapper", "unparseable") for s in states):
-            summary = "⚠  One or more Claude configs bypass the wrapper (★ pin won't work for them)."
-            summary_fg = C["peach"]
-        else:
-            summary = ""
-            summary_fg = C["overlay0"]
+        raw = self._cfg.raw if isinstance(self._cfg.raw, dict) else {}
+        summary, summary_fg = self._mcp_summary(states, raw)
         if summary:
             tk.Label(body, text="  " + summary,
                      font=("Segoe UI", 9), bg=C["base"], fg=summary_fg,
                      justify=tk.LEFT, anchor=tk.W,
                      wraplength=620).pack(anchor=tk.W, padx=36, pady=(0, 2))
-        tk.Label(body,
-            text="  Routes tokensave through the manager's pin-aware wrapper so\n"
-                 "  ★ Set as Active swaps projects live, without restarting Claude.",
+        tk.Label(body, text=self._mcp_blurb(raw),
             font=("Segoe UI", 8), bg=C["base"], fg=C["overlay0"],
             justify=tk.LEFT).pack(anchor=tk.W, padx=36, pady=(0, 8))
+
+    @staticmethod
+    def _mcp_summary(states: list, raw: dict) -> tuple:
+        """``(text, colour)`` for the MCP status line.
+
+        Split out of the section builder so the wording can be reasoned about
+        on its own — and because "route through the wrapper" stops being true
+        the moment either migration completes. Saying it afterwards would
+        describe the arrangement the user deliberately dismantled.
+        """
+        retired = [name for name, key in
+                   (("Claude Desktop", DESKTOP_SCOPE_RETIRED_KEY),
+                    ("Claude Code", USER_SCOPE_RETIRED_KEY))
+                   if raw.get(key)]
+        if states and all(s == "ok" for s in states):
+            if retired:
+                return ("✓  %s retired — each project serves its own graph."
+                        % " and ".join(retired), C["green"])
+            return ("✓  Both Claude Desktop and Claude Code route through the "
+                    "wrapper.", C["green"])
+        if "no_file" in states or "missing" in states:
+            return ("✗  One or more Claude configs need a tokensave entry.",
+                    C["red"])
+        if any(s in ("direct_serve", "wrong_wrapper", "unparseable")
+               for s in states):
+            return ("⚠  One or more Claude configs bypass the wrapper "
+                    "(★ pin won't work for them).", C["peach"])
+        return "", C["overlay0"]
+
+    @staticmethod
+    def _mcp_blurb(raw: dict) -> str:
+        """What the ★ pin actually does, which the migration changes.
+
+        The pin routes MCP only while Claude Desktop's entry exists. Once it
+        is retired the pin still picks this manager's default project but
+        decides nothing about which graph a Claude Code session is served —
+        and the old sentence promised exactly that.
+        """
+        if raw.get(DESKTOP_SCOPE_RETIRED_KEY):
+            return ("  Each Claude Code session is served by its own "
+                    "project's .mcp.json.\n"
+                    "  ★ Set as Active now picks this manager's default "
+                    "project only — not the MCP graph.")
+        return ("  Routes tokensave through the manager's pin-aware wrapper "
+                "so\n"
+                "  ★ Set as Active swaps projects live, without restarting "
+                "Claude.")
 
     # ── Cross-dialog launchers (lazy-imported per Rule 6) ───────────────────
 
