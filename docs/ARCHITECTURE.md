@@ -932,6 +932,13 @@ Auto-detect    →  delete DESKTOP_PROJECT_FILE
 Restart Claude Desktop  →  tokensave-wrapper.py reads pin (or auto-selects)
                             →  spawns: tokensave.exe serve -p <path>
 ```
+The last two lines apply only while Claude Desktop still defines a `tokensave`
+MCP server. After the Roadmap-11 retirement migration the pin picks the
+manager's **default project** and decides nothing about which graph any Claude
+Code session is served — each one reads its own project's `.mcp.json`. The
+header badge distinguishes the two states (`pinned · serves MCP` versus
+`manager default`), and `helpers/project_discovery` still consumes the pin, so
+it is narrowed rather than obsolete.
 
 ### tokensave CLI calls (`_run`)
 ```

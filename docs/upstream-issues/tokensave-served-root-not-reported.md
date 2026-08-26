@@ -1,6 +1,7 @@
 # No surface reports which project the server is actually serving
 
-**Status:** filed upstream as [#437](https://github.com/aovestdipaperino/tokensave/issues/437)
+STATUS: FILED 2026-08-19 — https://github.com/aovestdipaperino/tokensave/issues/437
+
 **Version observed:** tokensave 7.10.0, Windows 11
 **Relationship to prior issues:** follow-up to #372 (a fifth ask it did not
 cover), adjacent to #368 and #396, not a duplicate of any.
@@ -102,3 +103,38 @@ where it cannot detect anything, and the operator can — but only if told which
 project is being served.
 
 Paths in this report are generic stand-ins; the shapes are as observed.
+
+---
+
+## Confirmed again 2026-08-26, with a cheaper identification trick
+
+This issue predicted the failure exactly, and it happened three times before
+being believed. A session in `Token Save Manager Source` was answered from
+`OpenChem Studio` for its entire length. What made it so hard to diagnose is
+precisely what this issue describes: **every answer looked normal.**
+
+| Source | Files | Nodes | `db_size_bytes` | Branch |
+|---|---|---|---|---|
+| `tokensave_status` over MCP | 741 | 24,530 | 93,863,936 | `joback-thermophysical` |
+| `tokensave status` over CLI | 307 | 9,813 | 35,635,200 | `Roadmap-11` |
+
+Two workarounds worth recording until a served-root line exists upstream:
+
+- **`db_size_bytes` identifies the tree.** It matched
+  `OpenChem Studio\.tokensave\tokensave.db` byte for byte, which turned a
+  suspicion into a fact in one step. `active_branch` is the cheaper first
+  check — a branch the repository does not have is conclusive on its own —
+  but a shared branch name like `main` will not discriminate, and
+  `db_size_bytes` will.
+- **`uptime_secs` resetting while `last_sync_at` and the node count stay
+  byte-identical** means the server restarted and reopened *the same* wrong
+  database. That distinguishes "my re-sync did not reach it" from "my re-sync
+  did nothing", which are otherwise indistinguishable from the client.
+
+The local cause here was not an unexpected cwd but an MCP registration that
+resolved a *pin* — Claude Desktop spawning one app-level wrapper shared by
+every session (see `docs/MCP_INTEGRATION_GOTCHAS.md`). That is a client-side
+problem and has been fixed client-side. It does not change the ask: **a
+default-path server should name the project it resolved**, because no amount
+of client correctness makes a silent wrong-tree answer detectable from the
+inside.

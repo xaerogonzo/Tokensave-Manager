@@ -178,7 +178,7 @@ Carbon · D · Lua · Julia · R · MATLAB · Groovy · Gradle · Maven · SQL
 |------|------|
 | Binary | `D:\Claude Co worker\Token Save\tokensave.exe` |
 | Project DB | `<project-root>\.tokensave\tokensave.db` (plus `.db-wal` and `.db-shm` siblings for WAL-mode SQLite) |
-| Desktop pin file | `%USERPROFILE%\.tokensave\desktop-project.txt` (read by the wrapper at spawn, so a change needs a Desktop restart to take effect — but only to move the **default** graph: `graph_root` on any tokensave call reads a different indexed project with no restart at all) |
+| Desktop pin file | `%USERPROFILE%\.tokensave\desktop-project.txt` — read by the wrapper at spawn. **Once Desktop's `tokensave` entry is retired (Roadmap-11) this decides nothing about MCP at all**: it picks the manager's own default project and nothing else. While the entry exists it chooses the single graph every Desktop-hosted session gets, and a change needs a Desktop restart |
 | MCP config (Claude Desktop, traditional install) | `%APPDATA%\Claude\claude_desktop_config.json` |
 | MCP config (Claude Desktop, UWP / Microsoft Store install) | `%LOCALAPPDATA%\Packages\Claude_<id>\LocalCache\Roaming\Claude\claude_desktop_config.json` ⚠ |
 | MCP config (Claude Code) | `%USERPROFILE%\.claude.json` |
@@ -229,6 +229,10 @@ eventually report "bound" while something else served.
 A thin script the manager registers as Claude Desktop's MCP server in `claude_desktop_config.json`. Spawns `tokensave.exe serve -p <pinned-project>` and proxies its stdio. **Critical:** the Popen call must pass `stdin=sys.stdin, stdout=sys.stdout, stderr=sys.stderr` explicitly — default-inheritance under pythonw.exe breaks console-child stdio in a way that times out MCP handshake at 30 s. **Also critical:** keep it single-threaded — `import threading` and daemon threads introduce additional subtle stdio issues. Both of these were learned the hard way and are documented in detail in `docs/MCP_INTEGRATION_GOTCHAS.md`.
 
 The wrapper reads the pin file ONCE at startup, and that is now understood to be permanent rather than deferred.
+
+**Retired by default since Roadmap-11.** Claude Desktop spawns this wrapper for the whole APP, not per session — two live wrappers were measured with `ppid` = the Desktop process itself. Every Desktop-hosted Claude Code session therefore inherited the one server the pin chose, whatever repository it was working in, and Claude Code dedupes MCP servers by name so it outranked each project's own correct `.mcp.json`. The manager now offers **Settings → MCP Integration → "Retire Desktop tokensave…"**, after which each Claude Code session serves its own project and Claude Desktop chat has no tokensave at all — a deliberate trade, stated in the confirmation. See "The scope collision" in `docs/MCP_INTEGRATION_GOTCHAS.md`.
+
+**A cwd rule here cannot fix it.** The obvious repair — prefer the directory the server started in — fails because this process's parent is the app, so its cwd carries no information about any session.
 
 **Do not build a watcher for this.** The "sibling watcher daemon that signals via `taskkill`" this section used to propose was implemented (Roadmap-10 `PinWatcherController`) and removed after measurement: **Claude Desktop does not restart a died MCP server.** It reports "Server disconnected" and leaves it, so killing the server turned a stale-but-working session into no session at all. Full evidence in `docs/MCP_INTEGRATION_GOTCHAS.md`.
 

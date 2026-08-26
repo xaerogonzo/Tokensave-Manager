@@ -111,6 +111,52 @@ Three things about that migration are load-bearing:
 - **A running server keeps its old project.** It resolves the project once, at
   startup. Restart Desktop, then verify.
 
+### Two bugs the fix surfaced, both worth knowing on their own
+
+**Process enumeration was silently returning nothing inside the manager.**
+`tokensave_daemon._enumerate_windows` spawned a bare `"powershell"`, so
+`CreateProcess` depended on PATH, and the resulting `OSError` was swallowed
+into `[]` — indistinguishable from "found none". The manager runs as a
+windowless `pythonw.exe` whose PATH did not contain
+`System32\WindowsPowerShell\v1.0`, so every enumeration came back empty. It
+became visible only because the new Desktop panel printed both halves at once:
+
+```
+No Desktop tokensave server is running right now (Claude Desktop is closed).
+Could not determine whether Claude Desktop is running (no process information
+was returned).
+```
+
+Two contradictory sentences, and two servers actually running. **The Tokensave
+Daemon Manager dialog had been listing zero servers for the same reason.**
+
+Reproduce it in one line — strip the PowerShell directory from PATH and call
+`desktop_app_running()`; you get `(None, 'no process information was
+returned')`, the exact string.
+
+Fixed by `_powershell_exe()`: `shutil.which` for `pwsh` then `powershell`,
+falling back to the absolute System32 path. Same lesson `effective_scope`
+already recorded for `claude` — *what a shell resolves and what
+`CreateProcess` resolves are not the same set*. Plus `stdin=DEVNULL`, and a
+`strict=True` mode raising `EnumerationFailed` so a caller that must not guess
+can tell "failed to ask" from "asked, found none".
+
+Two plausible hypotheses were eliminated by measurement first, and both are
+worth not re-chasing: pythonw stdio inheritance works fine even when fully
+detached (`sys.stdin is None` and the CIM call still returns), and CIM takes
+0.34s and is unaffected by four-way concurrency.
+
+**`os.path.normcase` is a no-op on POSIX.** `discover_desktop_configs` tested
+a normcased path for the lowercase markers `"packages"` and `"claude_"`. On
+Windows `normcase` lowercases, so it worked; on Linux it does nothing, the
+comparison was permanently False, and the `%APPDATA%` view was never marked
+active — dropping it out of the change set and half-applying the migration
+across the two physical views of one configuration. Caught only by Linux CI.
+
+Recognising the *shape* of a Windows path must not depend on the host OS, so
+that comparison lowercases explicitly now. Path *equality* still goes through
+`normcase`, which is correct: it folds case exactly where the filesystem does.
+
 ### Verification is three layers, and all three must agree
 
 The reason config-only checking was never enough here: the configuration

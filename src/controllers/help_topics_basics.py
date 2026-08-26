@@ -279,6 +279,14 @@ def autodetect(ctl):
         p("The wrapper script (tokensave-wrapper.py / tokensave-wrapper.exe) "
           "runs at Claude Desktop startup and decides which project to serve:")
         br()
+        warn("Only while Claude Desktop still defines a tokensave MCP server.")
+        p("Desktop starts ONE wrapper for the whole app, not one per session, "
+          "so every Claude Code session hosted in Desktop inherited whichever "
+          "single project this picked — whatever repository it was working "
+          "in. Settings → Manage MCP wiring… → “Retire "
+          "Desktop tokensave…” turns that off, after which each "
+          "project serves itself and the steps below decide nothing.")
+        br()
         ins("  1. ", "body"); ins("Checks desktop-project.txt — uses that path if present and valid\n", "dim")
         ins("  2. ", "body"); ins("Otherwise scans project roots for .tokensave/tokensave.db files\n", "dim")
         ins("  3. ", "body"); ins("Picks the one with the most recent modification time\n", "dim")
