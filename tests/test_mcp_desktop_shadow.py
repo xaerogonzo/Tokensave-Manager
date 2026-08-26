@@ -29,6 +29,7 @@ from __future__ import annotations
 
 import json
 import os
+import sys
 
 import pytest
 
@@ -187,6 +188,10 @@ def test_newest_wrapper_server_is_the_one_reported():
     assert verdict.pid == 2
 
 
+@pytest.mark.skipif(sys.platform != "win32",
+                    reason="backslash and forward slash name one directory "
+                           "only on Windows; on POSIX they are different "
+                           "paths and _same_project is right to say so")
 def test_path_spelling_variants_are_the_same_project():
     """`D:\\P\\Foo` and `D:/P/Foo/` are one directory, not a shadow."""
     servers = [_desktop_wrapper("D:/Random Projects/OpenChem Studio/")]
@@ -263,6 +268,28 @@ def test_traditional_copy_is_part_of_the_active_uwp_configuration(fake_home):
     will, wont = change_set(configs)
     assert len(will) == 2
     assert wont == []
+
+
+def test_active_uwp_detection_does_not_depend_on_normcase(fake_home, mocker):
+    """Reproduces on Windows the failure that only Linux CI could see.
+
+    ``os.path.normcase`` lowercases on Windows and is a NO-OP on POSIX. The
+    UWP-shape test was written against a normcased path, so on Linux
+    ``"packages" in ...`` was permanently False, the `%APPDATA%` view dropped
+    out of the change set, and the migration would have been half-applied
+    across the two physical views of one configuration. It passed here purely
+    because this developer machine is Windows.
+
+    Patching normcase to identity is what a POSIX host does, so this now fails
+    on both platforms if the explicit lowering is ever removed.
+    """
+    _write_cfg(_uwp_path(fake_home))
+    _write_cfg(_traditional_path(fake_home))
+    mocker.patch("os.path.normcase", side_effect=lambda p: p)
+
+    will, _wont = change_set(discover_desktop_configs())
+
+    assert len(will) == 2, [c.path for c in will]
 
 
 def test_inactive_package_is_listed_but_not_changed(fake_home):
@@ -655,5 +682,9 @@ def test_powershell_is_resolved_without_trusting_path(mocker, monkeypatch):
     mocker.patch("shutil.which", return_value=None)
     mocker.patch("os.path.isfile", return_value=True)
 
-    assert tokensave_daemon._powershell_exe().lower().endswith(
-        r"system32\windowspowershell\v1.0\powershell.exe")
+    # Built with os.path.join rather than a literal: the separator this
+    # returns is the HOST's, and the assertion is about falling back to the
+    # System32 location, not about which slash the runner happens to use.
+    expected = os.path.join("System32", "WindowsPowerShell", "v1.0",
+                            "powershell.exe")
+    assert tokensave_daemon._powershell_exe().lower().endswith(expected.lower())

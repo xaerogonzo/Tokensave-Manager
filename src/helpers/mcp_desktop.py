@@ -114,6 +114,20 @@ def _digest(path: str) -> str:
         return ""
 
 
+def _same_file(a: str, b: str) -> bool:
+    """Do two path strings name the same file?
+
+    ``os.path.normcase`` still does the case folding, which is correct: it is
+    case-insensitive exactly where the filesystem is. What must NOT be left to
+    it is recognising a Windows path *shape* on a POSIX host — see
+    :func:`discover_desktop_configs`.
+    """
+    if not a or not b:
+        return False
+    return (os.path.normcase(os.path.abspath(a))
+            == os.path.normcase(os.path.abspath(b)))
+
+
 def _install_id(path: str) -> str:
     """Name the installation a physical config belongs to.
 
@@ -186,17 +200,25 @@ def discover_desktop_configs(server: str = "tokensave") -> list:
     """
     active_path = ""
     try:
-        active_path = os.path.normcase(_resolve_desktop_cfg_path())
+        active_path = _resolve_desktop_cfg_path()
     except OSError:
         active_path = ""
-    active_is_uwp = "packages" in active_path and "claude_" in active_path
+    # Lowercased EXPLICITLY rather than through os.path.normcase, which
+    # lowercases on Windows and is a NO-OP on POSIX. The markers below
+    # describe the shape of a Windows UWP path, and recognising that shape
+    # must not depend on the host OS. Under Linux CI the cased path made
+    # `"packages" in ...` permanently False, so the %APPDATA% view dropped out
+    # of the change set — the half-applied migration this module exists to
+    # prevent, passing on Windows purely by accident.
+    active_lower = active_path.lower()
+    active_is_uwp = "packages" in active_lower and "claude_" in active_lower
 
     out = []
     for path in _candidate_paths():
         exists = os.path.isfile(path)
         entry, error = _read_entry(path, server) if exists else (None, "")
         install = _install_id(path)
-        is_active = os.path.normcase(path) == active_path or (
+        is_active = _same_file(path, active_path) or (
             active_is_uwp and install == "traditional" and exists)
         out.append(DesktopConfig(
             path=path, install_id=install, is_active=is_active,
