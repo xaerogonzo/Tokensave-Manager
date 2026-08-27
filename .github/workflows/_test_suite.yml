@@ -101,7 +101,7 @@ jobs:
           fi
       - name: Upload coverage artifact
         if: ${{ inputs.coverage && always() }}
-        uses: actions/upload-artifact@v5
+        uses: actions/upload-artifact@v7
         with:
           name: coverage-report
           path: coverage.xml
