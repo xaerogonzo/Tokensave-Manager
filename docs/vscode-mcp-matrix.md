@@ -69,7 +69,8 @@ the two locations.
 |---|---|---|---|---|---|---|---|---|
 | **Claude Code VS Code extension** | ext host → spawned Claude Code CLI | `.mcp.json` + `~/.claude.json` — **measured** | **project `.mcp.json`** ✓ | n/a — VS Code's file is never read | pending | no prompt seen (see caveat) | all four ✓ | **`no action required`** |
 | Claude Code CLI | CLI | same chain (control case) | pending | pending | pending | same | pending | pending |
-| Copilot Agent Host | Agent Host | **`<ws>/.mcp.json` AND `<APPDATA>/Code/User/mcp.json`** — measured | both, in different categories | **pending** (names differed) | pending | discovered ≠ enabled | configured ✓, connected ✓ | **`detect-only`** |
+| Copilot, in-editor | VS Code's Agent Host | **`<ws>/.mcp.json` AND `<APPDATA>/Code/User/mcp.json`** — measured | both, in different categories | **pending** (names differed) | pending | discovered ≠ enabled | configured ✓, connected ✓ | **`detect-only`** |
+| Copilot CLI (standalone) | its own Agent Host | **`~/.copilot/mcp-config.json`** — measured | n/a, never started one | n/a | n/a | never reached | configured ✓, **started ✗** | **`no action required`** |
 | VS Code user MCP | VS Code native | `<APPDATA>/Code/User/mcp.json` | feeds Copilot only | pending | pending | unchecked by default | **invisible to Claude Code**; visible to Copilot | **`detect-only`** |
 | Workspace root `.mcp.json` | both hosts | `<ws>/.mcp.json` | **serves BOTH clients** | pending | pending | Claude Code: approval chain; Copilot: tool picker | configured ✓, serving ✓ | **`managed` (already)** |
 
@@ -249,6 +250,62 @@ Log filenames are machine-readable identifiers for the surface:
 `workspace-dot-mcp` is VS Code's own name for the root `.mcp.json` surface —
 independent confirmation that it reads that file, and a cheap detection hook
 for a future Doctor rule.
+
+## The two Copilots are not one client
+
+A correction to this document's own earlier rows, and exactly the conflation
+it exists to prevent. "Copilot" covers two separate consumers here:
+
+- **Copilot in the editor**, whose Agent Host is VS Code's. This is what A0.2
+  measured: it reads the workspace `.mcp.json` (filed under "Built-In") and
+  `%APPDATA%\Code\User\mcp.json` (filed under "User").
+- **The standalone Copilot CLI**, which owns `~/.copilot/` and reads
+  `~/.copilot/mcp-config.json`. That file **never appeared** in VS Code's MCP
+  Servers view, because the in-editor client does not read it.
+
+`_TOKENSAVE_AGENT_PATHS["copilot"]` lists both paths under one `--agent` id,
+which is what makes them easy to conflate.
+
+### The `~/.copilot` entry, measured 2026-08-26
+
+It holds `tokensave` with `args: ["serve"]` and no `-p`, the same shape as the
+VS Code one. Three findings, and together they say **leave it alone**:
+
+1. **A bare `serve` is wrong under either spawn condition**, so the host's cwd
+   need not be known to condemn it:
+
+   | spawn cwd | result |
+   |---|---|
+   | HOME, or `C:/` | `Multiple tokensave projects found — pass -p <path>`, exits 1 |
+   | a project root | starts, and serves **that one** project |
+
+   So it is either dead, or a single-project shadow. A global entry cannot be
+   right for ten projects.
+
+2. **Nothing consumes it on this machine.** There is no `github.copilot` VS
+   Code extension installed — only `ms-azuretools.vscode-azure-github-copilot`,
+   a different product.
+
+3. **The Agent Host has never started an MCP server.** Its logs
+   (`~/.copilot/logs/process-*.log`) hold only lifecycle lines — "Starting CLI
+   in server mode (stdio)", "Rust JSON-RPC engine", "waiting for requests" —
+   with zero occurrences of `mcp` or `tokensave`.
+
+**Why removal would be a net loss.** `_tokensave_agent_wired("copilot")` checks
+both copilot paths and returns True only because this file contains the string
+`tokensave`. It is now the last one that does. Remove it and `tokensave doctor`
+begins offering `install --agent copilot` on every run — the nag loop
+`_extract_install_nags` exists to prevent — and re-running that install writes
+a bare `serve` back into both paths anyway.
+
+Contrast with the VS Code user entry, which **was** removed: that one was
+provably being started and dying, and ten working per-project bindings already
+existed to replace it. Same shape, opposite correct action. Fixing this one by
+symmetry would have bought a permanent nag in exchange for nothing.
+
+Revisit only if the standalone CLI starts being used: probe its spawn cwd with
+an entry that records `os.getcwd()`, and fix the nag filter *before* removing
+anything.
 
 ## What is still open
 
