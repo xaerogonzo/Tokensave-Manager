@@ -1,0 +1,72 @@
+{
+  "fixture_version": 1,
+  "experiment": "baseline",
+  "purpose": "The three tokensave definitions present on the reference machine before any Phase-C change. Sanitised. This is the 'before' state the repair actions are measured against, and the shape data the schema adapter must round-trip.",
+  "measured_at": "2026-08-26",
+
+  "surfaces": [
+    {
+      "name": "VS Code user MCP",
+      "path": "<APPDATA>/Code/User/mcp.json",
+      "schema_key": "servers",
+      "shape": {
+        "servers": {
+          "tokensave": {
+            "args": ["serve"],
+            "command": "<TOKENSAVE_EXE>",
+            "type": "stdio"
+          }
+        },
+        "inputs": []
+      },
+      "notes": [
+        "Distinct top-level key ('servers', not 'mcpServers') plus a sibling 'inputs' array and a per-entry 'type' discriminator. This is the only one of the three needing a schema adapter.",
+        "Bare 'serve' with no -p. Structurally identical to the Claude Desktop entry retired in PR #18 (e9db057), but the VERDICT is pending A0: a fallback that never wins for a bound project is not broken.",
+        "File is tab-indented plain JSON here; JSONC tolerance is UNPROVEN and must be verified before choosing a parser."
+      ]
+    },
+    {
+      "name": "Copilot Agent Host user MCP",
+      "path": "<HOME>/.copilot/mcp-config.json",
+      "schema_key": "mcpServers",
+      "shape": {
+        "mcpServers": {
+          "tokensave": {
+            "type": "stdio",
+            "command": "<TOKENSAVE_EXE>",
+            "args": ["serve"]
+          }
+        }
+      },
+      "notes": [
+        "Shares the 'mcpServers' key with Claude Code's .mcp.json, so the existing classifier may handle it with little or no adaptation.",
+        "Carries a per-entry 'type' field that .mcp.json entries do not.",
+        "Also bare 'serve'. Same pending-verdict caveat.",
+        "Already listed as a Copilot surface by _TOKENSAVE_AGENT_PATHS['copilot'] in src/helpers/mcp.py, alongside the VS Code user file."
+      ]
+    },
+    {
+      "name": "Claude Code project binding",
+      "path": "<PROJECT>/.mcp.json",
+      "schema_key": "mcpServers",
+      "shape": {
+        "mcpServers": {
+          "tokensave": {
+            "command": "tokensave",
+            "args": ["serve", "-p", "."]
+          }
+        }
+      },
+      "notes": [
+        "The correct, already-managed shape. Command is a bare name and the path arg is a template, never an interpolated machine path - see _canonical_project_entry in src/helpers/mcp.py.",
+        "No 'type' field."
+      ]
+    }
+  ],
+
+  "adapter_implications": [
+    "Two of three surfaces already use 'mcpServers'; only the VS Code user/workspace file uses 'servers' + 'inputs'.",
+    "A 'type' field appears in the two agent surfaces but not in .mcp.json - write_servers must preserve it rather than normalising it away.",
+    "'inputs' is a sibling of 'servers' and must survive a read/write round-trip, along with any other unknown data field."
+  ]
+}
