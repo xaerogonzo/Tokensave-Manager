@@ -8,6 +8,7 @@ generator's output is small and predictable.
 from __future__ import annotations
 
 import os
+import pathlib
 import re
 
 from helpers.ci_workflow import generate_github_workflow
@@ -87,11 +88,39 @@ def test_triggers_on_pr_and_push_to_main_master(tmp_path):
 
 
 def test_uses_setup_python_and_checkout(tmp_path):
-    """Workflow uses pinned actions/checkout@v4 + actions/setup-python@v5."""
+    """Workflow uses pinned actions/checkout@v5 + actions/setup-python@v6."""
     _ok, _msg, content = _generate(tmp_path, {"syntax": True})
-    assert "actions/checkout@v4" in content
-    assert "actions/setup-python@v5" in content
+    assert "actions/checkout@v5" in content
+    assert "actions/setup-python@v6" in content
     assert "python-version: '3.11'" in content
+
+
+def test_generated_pins_match_the_ones_this_repo_runs_itself(tmp_path):
+    """The Manager may not write other people a workflow older than its own.
+
+    This drifted once and the drift was invisible: the repo moved to
+    `checkout@v5` + `setup-python@v6`, the generator stayed on `@v4` + `@v5`,
+    and nothing connected the two — so the Manager kept writing the exact Node
+    20 deprecation this repo had just finished removing, into other people's
+    repositories.
+
+    Matching on the pins the repo's own CI uses means a future bump either
+    updates both or fails here. Parsed from `ci.yml` rather than hardcoded a
+    second time, since a second copy is the thing that drifts.
+    """
+    repo = pathlib.Path(__file__).resolve().parents[1]
+    ours = repo.joinpath(".github", "workflows", "ci.yml").read_text(
+        encoding="utf-8")
+    _ok, _msg, generated = _generate(tmp_path, {"syntax": True})
+
+    for action in ("actions/checkout", "actions/setup-python"):
+        mine = set(re.findall(rf"{action}@(v\d+)", ours))
+        theirs = set(re.findall(rf"{action}@(v\d+)", generated))
+        assert len(mine) == 1, f"this repo pins {action} inconsistently: {mine}"
+        assert theirs, f"the generated workflow never uses {action}"
+        assert theirs == mine, (
+            f"generated workflow pins {action}@{theirs} while this repo runs "
+            f"@{mine} — bump helpers/ci_workflow.py to match")
 
 
 # ── Conditional step inclusion ────────────────────────────────────────────

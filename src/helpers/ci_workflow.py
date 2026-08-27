@@ -79,8 +79,8 @@ def _build_yaml(checks_enabled: dict[str, bool],
     steps: list[str] = []
 
     steps.append(
-        "      - uses: actions/checkout@v4\n"
-        "      - uses: actions/setup-python@v5\n"
+        "      - uses: actions/checkout@v5\n"
+        "      - uses: actions/setup-python@v6\n"
         "        with:\n"
         "          python-version: '3.11'"
     )
@@ -133,8 +133,8 @@ def _build_yaml(checks_enabled: dict[str, bool],
             "  test:\n"
             "    runs-on: ubuntu-latest\n"
             "    steps:\n"
-            "      - uses: actions/checkout@v4\n"
-            "      - uses: actions/setup-python@v5\n"
+            "      - uses: actions/checkout@v5\n"
+            "      - uses: actions/setup-python@v6\n"
             "        with:\n"
             "          python-version: '3.11'\n"
             "      - name: Install dev deps\n"
