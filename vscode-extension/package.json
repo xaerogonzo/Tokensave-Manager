@@ -2,11 +2,12 @@
   "name": "tokensave-manager",
   "displayName": "TokenSave Manager",
   "description": "Run TokenSave Manager checks, sync, doctor and test gaps from inside VS Code.",
-  "version": "2.2.1",
+  "version": "2.3.1",
   "publisher": "tokensave",
   "license": "MIT",
   "engines": {
-    "vscode": "^1.85.0"
+    "vscode": "^1.85.0",
+    "node": ">=20"
   },
   "categories": [
     "Other"
@@ -34,7 +35,7 @@
     "commands": [
       {
         "command": "tokensaveManager.setManagerPath",
-        "title": "Set Manager Path\u2026",
+        "title": "Set Manager Path…",
         "category": "TokenSave Manager"
       },
       {
@@ -72,6 +73,26 @@
         "command": "tokensaveManager.commitRequest",
         "title": "Show Pending Commit Request",
         "category": "TokenSave Manager"
+      },
+      {
+        "command": "tokensaveManager.status",
+        "title": "Status",
+        "category": "TokenSave Manager"
+      },
+      {
+        "command": "tokensaveManager.scout",
+        "title": "Scout",
+        "category": "TokenSave Manager"
+      },
+      {
+        "command": "tokensaveManager.tests",
+        "title": "Tests",
+        "category": "TokenSave Manager"
+      },
+      {
+        "command": "tokensaveManager.testRun",
+        "title": "Run Tests",
+        "category": "TokenSave Manager"
       }
     ],
     "menus": {
@@ -99,17 +120,17 @@
         "tokensaveManager.cliPath": {
           "type": "string",
           "default": "",
-          "markdownDescription": "Absolute path to a built `tokensave-manager-cli.exe`. Takes precedence over `managerPath`. Leave empty unless you have no checkout \u2014 a compiled CLI is a snapshot and goes stale whenever the Manager changes."
+          "markdownDescription": "Absolute path to a built `tokensave-manager-cli.exe`. Takes precedence over `managerPath`. Leave empty unless you have no checkout — a compiled CLI is a snapshot and goes stale whenever the Manager changes."
         },
         "tokensaveManager.configPath": {
           "type": "string",
           "default": "",
-          "markdownDescription": "Absolute path to `manager-config.json`, passed to the CLI as `--config`. **Not needed in source mode** \u2014 the CLI finds the config beside the checkout. Required only when running a relocated binary."
+          "markdownDescription": "Absolute path to `manager-config.json`, passed to the CLI as `--config`. **Not needed in source mode** — the CLI finds the config beside the checkout. Required only when running a relocated binary."
         },
         "tokensaveManager.testGapsBase": {
           "type": "string",
-          "default": "origin/master",
-          "description": "Git ref that Test Gaps compares against."
+          "default": "auto",
+          "markdownDescription": "Git ref that Test Gaps compares against. `auto` asks the repository for its own default branch (`refs/remotes/origin/HEAD`), which is right whether it uses `main` or `master`. Set an explicit ref to override."
         }
       }
     }
@@ -119,7 +140,7 @@
     "watch": "tsc -watch -p ./",
     "vscode:prepublish": "npm run compile",
     "package": "vsce package --target win32-x64",
-    "test": "node --test test/cli.test.js",
+    "test": "node --test test/cli.test.js test/diagnostics.test.js",
     "pretest": "npm run compile"
   },
   "devDependencies": {

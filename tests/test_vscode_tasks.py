@@ -34,8 +34,11 @@ from helpers.vscode_tasks import (
     build_workspace_json,
     default_runner,
     goto_argv,
+    plan_workspace_merge,
     preview_workspace,
+    read_workspace,
     write_tasks_json,
+    write_merged_workspace,
     write_workspace_file,
 )
 
@@ -280,3 +283,103 @@ def test_the_path_stays_a_single_argv_element_even_with_spaces():
 def test_a_non_integer_line_is_coerced_not_interpolated_raw(line):
     """Guards against `file.py:42.0` reaching the editor."""
     assert goto_argv(["code"], "x.py", line)[-1] == "x.py:42"
+
+
+# ── R12-11: merging into an existing .code-workspace ──────────────────────
+#
+# A `.code-workspace` is a file people hand-edit, and VS Code stores extension
+# state and launch configuration in it. Regenerating one from scratch throws
+# away whatever the Manager does not happen to know about, so the merge path
+# exists to make every write additive except where the user actually chose
+# otherwise — and to SHOW that choice before it happens.
+
+def test_an_absolute_and_a_relative_path_are_the_same_folder(tmp_path):
+    """The trap this planner exists for: the same directory written two ways
+    would otherwise be reported as "added" when it is already present."""
+    out = tmp_path / "all.code-workspace"
+    repo = tmp_path / "repo"
+    existing = {"folders": [{"path": str(repo).replace(chr(92), "/")}]}
+    plan = plan_workspace_merge(existing, [str(repo)], str(out))
+    assert plan["added"] == []
+    assert plan["retained"] == [str(repo)]
+    assert plan["removed"] == []
+
+
+def test_a_new_folder_is_reported_as_added(tmp_path):
+    out = tmp_path / "all.code-workspace"
+    plan = plan_workspace_merge({"folders": [{"path": "a"}]},
+                                [str(tmp_path / "a"), str(tmp_path / "b")],
+                                str(out))
+    assert plan["retained"] == [str(tmp_path / "a")]
+    assert plan["added"] == [str(tmp_path / "b")]
+
+
+def test_a_deselected_folder_is_reported_as_removed_not_silently_dropped(
+        tmp_path):
+    """The selection is the new folder set, so dropping one is a real outcome.
+    Returning it means the UI has to show it rather than merely imply it."""
+    out = tmp_path / "all.code-workspace"
+    existing = {"folders": [{"path": "a"}, {"path": "b"}]}
+    plan = plan_workspace_merge(existing, [str(tmp_path / "a")], str(out))
+    assert plan["removed"] == ["b"]
+
+
+def test_settings_the_manager_did_not_write_survive_a_merge(tmp_path):
+    out = tmp_path / "all.code-workspace"
+    existing = {"folders": [], "settings": {"editor.tabSize": 2}}
+    plan = plan_workspace_merge(existing, [str(tmp_path / "a")], str(out))
+    assert plan["document"]["settings"] == {"editor.tabSize": 2}
+
+
+def test_unknown_top_level_keys_survive_a_merge(tmp_path):
+    """VS Code puts launch configuration and extension recommendations in
+    here. The Manager owns `folders`; it does not own the file."""
+    out = tmp_path / "all.code-workspace"
+    existing = {"folders": [], "launch": {"configurations": [1]},
+                "extensions": {"recommendations": ["x"]}}
+    plan = plan_workspace_merge(existing, [str(tmp_path / "a")], str(out))
+    assert plan["document"]["launch"] == {"configurations": [1]}
+    assert plan["document"]["extensions"] == {"recommendations": ["x"]}
+
+
+def test_merging_into_nothing_is_just_a_fresh_descriptor(tmp_path):
+    out = tmp_path / "all.code-workspace"
+    plan = plan_workspace_merge(None, [str(tmp_path / "a")], str(out))
+    assert plan["added"] == [str(tmp_path / "a")]
+    assert plan["retained"] == [] and plan["removed"] == []
+    assert plan["document"]["settings"] == {}
+
+
+def test_the_planned_document_is_what_actually_gets_written(tmp_path):
+    """Same guarantee `preview_workspace` gives for the folder list, extended
+    to the whole file: the preview and the bytes cannot disagree."""
+    out = tmp_path / "all.code-workspace"
+    plan = plan_workspace_merge({"settings": {"a": 1}},
+                                [str(tmp_path / "repo")], str(out))
+    ok, _ = write_merged_workspace(str(out), plan["document"])
+    assert ok
+    assert json.loads(out.read_text(encoding="utf-8")) == plan["document"]
+
+
+def test_planned_folders_match_the_preview_function(tmp_path):
+    """The planner must not invent its own relativisation."""
+    out = tmp_path / "all.code-workspace"
+    folders = [str(tmp_path / "a"), str(tmp_path / "b")]
+    plan = plan_workspace_merge(None, folders, str(out))
+    assert plan["document"]["folders"] == preview_workspace(folders, str(out))
+
+
+def test_an_unreadable_descriptor_reads_as_none(tmp_path):
+    """Distinguished from "absent" by the file existing — a caller must be
+    able to refuse to overwrite what it could not understand."""
+    out = tmp_path / "broken.code-workspace"
+    out.write_text("{not json", encoding="utf-8")
+    assert read_workspace(str(out)) is None
+    assert out.exists(), "the caller distinguishes unreadable from absent"
+
+
+def test_a_readable_descriptor_round_trips(tmp_path):
+    out = tmp_path / "ok.code-workspace"
+    ok, _ = write_merged_workspace(str(out), {"folders": [], "settings": {}})
+    assert ok
+    assert read_workspace(str(out)) == {"folders": [], "settings": {}}

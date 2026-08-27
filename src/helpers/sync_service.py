@@ -20,6 +20,7 @@ from __future__ import annotations
 
 import dataclasses
 import os
+import re
 import subprocess
 
 from constants import CREATE_NO_WINDOW
@@ -88,6 +89,28 @@ def prepare_shadows(project_root: str) -> ShadowPrep:
     )
 
 
+#: Strips the colour codes and spinner control sequences tokensave writes.
+_ANSI_RE = re.compile(r"\x1b\[[0-9;?]*[A-Za-z]")
+
+#: The summary tokensave prints when a sync completes:
+#:     ✔ sync done — 3 added, 4 modified, 0 removed in 1726ms
+_SYNC_COUNTS_RE = re.compile(
+    r"(?P<added>\d+) added, (?P<modified>\d+) modified, (?P<removed>\d+) removed")
+
+
+def parse_sync_counts(output: str) -> "dict | None":
+    """What the sync actually changed, or None when it did not say.
+
+    Pure. Returning None rather than zeroes is the whole point: "the tool did
+    not tell us" and "the tool told us nothing changed" are different answers,
+    and only one of them justifies skipping a refresh.
+    """
+    match = _SYNC_COUNTS_RE.search(_ANSI_RE.sub("", output or ""))
+    if not match:
+        return None
+    return {name: int(value) for name, value in match.groupdict().items()}
+
+
 @dataclasses.dataclass(frozen=True)
 class SyncResult:
     """What a completed sync produced, for a caller that cannot stream."""
@@ -97,6 +120,23 @@ class SyncResult:
     argv: list
     shadows: ShadowPrep = dataclasses.field(default_factory=ShadowPrep)
     error: str = ""
+    counts: "dict | None" = None
+
+    @property
+    def changed(self) -> "bool | None":
+        """Did this sync change anything? True / False / **None**.
+
+        Three-valued on purpose. `unverified` is not `no_change` — the same
+        rule `DoctorScanResult.ok` and `EXIT_VERIFY_FAILED` exist to enforce —
+        so a caller that cannot tell must not be handed a confident `False`.
+        Observed from tokensave's own summary line rather than inferred from a
+        zero exit code, which only says the command ran.
+        """
+        if self.shadows.created:
+            return True                # we created links ourselves
+        if self.counts is None:
+            return None
+        return any(self.counts.values())
 
 
 def run_sync(project_root: str, tokensave_exe: str, *,
@@ -135,10 +175,12 @@ def run_sync(project_root: str, tokensave_exe: str, *,
     except OSError as exc:
         return SyncResult(ok=False, returncode=1, output="", argv=argv,
                           shadows=shadows, error=str(exc))
+    output = proc.stdout or ""
     return SyncResult(
         ok=proc.returncode == 0,
         returncode=proc.returncode,
-        output=proc.stdout or "",
+        output=output,
         argv=argv,
         shadows=shadows,
+        counts=parse_sync_counts(output),
     )

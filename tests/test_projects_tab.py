@@ -554,7 +554,10 @@ class TestContextMenuGrouping:
         cmds, _ = self._menu_calls()
         dupes = [c for c in set(cmds) if cmds.count(c) > 1]
         assert dupes == [], f"command wired twice: {dupes}"
-        assert len(cmds) == 35, f"expected 35 commands, found {len(cmds)}"
+        # A ratcheted count, so adding a menu entry is a visible act
+        # rather than something that slips in. 36 since Roadmap-13 added
+        # "Generate VS Code workspace..." beside the tasks generator.
+        assert len(cmds) == 36, f"expected 36 commands, found {len(cmds)}"
 
     def test_the_everyday_actions_stay_one_click_away(self):
         """Burying Sync in a submenu would make the common case worse."""

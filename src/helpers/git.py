@@ -308,3 +308,90 @@ def _current_branch(path: str, git_exe: str) -> "str | None":
     if not name or name == "HEAD":
         return None
     return name
+
+
+def git_status_argv(path: str, git_exe: str) -> list:
+    """The argv for the porcelain-v2 status both readers parse.
+
+    Extracted so the command itself cannot drift between the Projects-tab
+    scanner — which must route through the app's injected shell runner to stay
+    off the Tk thread — and the headless CLI, which runs it directly. The
+    parser (`_parse_git_status_v2`) was already shared; this makes the input
+    shared too.
+    """
+    return [git_exe, "-C", path, "status", "--porcelain=v2", "--branch"]
+
+
+def read_git_status(path: str, git_exe: str) -> "dict | None":
+    """Branch + dirty state for *path*, or None when it cannot be determined.
+
+    None means "we could not find out", which is deliberately not the same as
+    a clean tree — reporting an unreadable repository as clean is the failure
+    this codebase keeps designing against.
+
+    Cheap by construction: one `git status` and one `rev-parse`, no tree walk.
+    """
+    try:
+        proc = subprocess.run(
+            git_status_argv(path, git_exe),
+            capture_output=True, text=True,
+            creationflags=CREATE_NO_WINDOW,
+        )
+    except (FileNotFoundError, OSError):
+        return None
+    if proc.returncode != 0:
+        return None
+    status = _parse_git_status_v2(proc.stdout or "")
+    status["branch"] = _current_branch(path, git_exe)
+    return status
+
+
+def ref_exists(path: str, git_exe: str, ref: str) -> bool:
+    """Does *ref* resolve in the repo at *path*?
+
+    Exists because a diff against a ref that is not there produces an empty
+    changed-file list, which reads as "nothing changed" — the most reassuring
+    possible rendering of "the question was never asked". A caller that wants
+    to say "that base does not exist" has to check first.
+    """
+    if not ref:
+        return False
+    try:
+        proc = subprocess.run(
+            [git_exe, "-C", path, "rev-parse", "--verify", "--quiet",
+             f"{ref}^{{commit}}"],
+            capture_output=True, text=True,
+            creationflags=CREATE_NO_WINDOW,
+        )
+    except (FileNotFoundError, OSError):
+        return False
+    return proc.returncode == 0
+
+
+def default_base_ref(path: str, git_exe: str) -> "str | None":
+    """The repo's own default branch as a remote-tracking ref, or None.
+
+    Reads `refs/remotes/origin/HEAD`, which is what `git clone` sets and what
+    `git remote set-head` refreshes — so this is asking git which branch the
+    remote considers default, not guessing between `main` and `master`.
+
+    Returns None rather than a guess when the symbolic ref is missing (a repo
+    with no remote, or one cloned before the ref was written). A caller should
+    then ask for an explicit base: picking one for the user is how a diff ends
+    up silently answering a different question than the one asked.
+    """
+    try:
+        proc = subprocess.run(
+            [git_exe, "-C", path, "symbolic-ref", "refs/remotes/origin/HEAD"],
+            capture_output=True, text=True,
+            creationflags=CREATE_NO_WINDOW,
+        )
+    except (FileNotFoundError, OSError):
+        return None
+    if proc.returncode != 0:
+        return None
+    ref = (proc.stdout or "").strip()
+    prefix = "refs/remotes/"
+    if not ref.startswith(prefix):
+        return None
+    return ref[len(prefix):] or None

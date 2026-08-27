@@ -57,14 +57,26 @@ Manager's third build target), and `tokensaveManager.configPath` to a
 works, but it is the one with the staleness problem — prefer a checkout.
 
 A CLI can also be bundled into the VSIX at
-`bin/windows-x64/tokensave-manager-cli.exe` before packaging; the extension
-falls back to it when nothing is configured. The published package ships
-without one, which is why it is ~14 KB rather than ~15 MB.
+`bin/windows-x64/tokensave-manager-cli.exe`; the extension falls back to it
+when nothing is configured. The published package ships without one, which is
+why it is ~14 KB rather than ~15 MB.
+
+Bundling is a **deliberate act**: `.vscodeignore` excludes `bin/**`, so remove
+that line before packaging if you actually want the binary in there. It used to
+exclude only `bin/**/README.md`, which meant a build artefact left in the tree
+would be packaged by accident — and a bundled CLI is a snapshot that goes stale
+the moment the Manager changes. The release workflow asserts the binary is
+absent, so the accident cannot ship even if the ignore file is edited wrongly.
 
 ### Other settings
 
-`tokensaveManager.testGapsBase` — the git ref Test Gaps compares against
-(default `origin/master`).
+`tokensaveManager.testGapsBase` — the git ref Test Gaps compares against.
+Defaults to `auto`, which asks the repository for its own default branch
+via `refs/remotes/origin/HEAD` — right whether it uses `main` or `master`.
+Set an explicit ref to override. A ref that does not exist is refused
+rather than quietly diffed against nothing, because an empty diff renders
+as "0 test gaps" — the most reassuring way to report a question that was
+never asked.
 
 ## Platform
 
@@ -98,9 +110,50 @@ One root per workspace folder. **Every row carries the folder it belongs to**,
 so in a multi-root workspace an action can never be aimed at a sibling project
 by accident — the same reason the CLI requires an explicit `--project`.
 
+| Row | What it does |
+|---|---|
+| **Status** | Branch, dirty state, index counts, MCP binding, pending request — one cheap look |
+| **MCP status** | Which tokensave server serves this project |
+| **Doctor** | Stale entries, plus the anti-monolith cap audit |
+| **Checks** | Syntax + pyflakes |
+| **Scout** | Refactor candidates read from the tokensave index. No LLM |
+| **Tests** | What exists, what is uncovered, what looks stale |
+| **Test gaps** | Tests suggested for what changed against a base ref |
+| **Run tests** | Runs the suite once and reports the counts |
+| **Commit request** | The request waiting for approval in the Manager |
+
 Rows refresh when a command completes, when the workspace folders change, when
 the extension's settings change, and when a watcher sees `.mcp.json` or a
 pending commit request move underneath you.
+
+## The Problems panel
+
+**Checks**, **Doctor** and **Scout** put their findings in VS Code's Problems
+panel, with a squiggle on the line each one refers to. Click one to jump
+straight there.
+
+Everything about a finding — where it is, how bad it is, what to call it — is
+decided in the Manager and travels in the CLI's envelope. The extension does
+not classify anything; it converts 1-based positions to the editor's 0-based
+ones and renders what it was handed.
+
+Three details worth knowing:
+
+- **Results are replaced when a command finishes, never cleared when it
+  starts.** A long Scout run leaves the previous findings on screen until it
+  has something truer to show, rather than presenting an empty panel that has
+  not been earned.
+- **Each command owns only its own findings.** Re-running Scout never disturbs
+  what Checks reported, and neither one touches a sibling workspace folder —
+  even when both folders contain a file at the same relative path.
+- **Running the tests produces no diagnostics.** A failing test is not a
+  statement about a line of source, and a red suite would bury the findings
+  that are. Its output goes to the output channel instead.
+
+Syntax errors are reported twice on purpose, by two different tools that
+disagree usefully: `compileall` says the file will not compile and points at
+the line, while `pyflakes` knows the exact column. Neither is dropped, and each
+names its source.
 
 ## Exit codes
 
@@ -118,11 +171,19 @@ reading text:
 ## Developing
 
 ```bash
-npm install
+npm ci          # the lockfile is committed, so builds are reproducible
 npm run compile
 npm test        # node --test, no test framework dependency
 npm run package # vsce package --target win32-x64
 ```
+
+`npm test` runs against a stubbed `vscode` module (`test/vscode-stub.js`), so
+it needs no editor download and no extension host. The stub is behavioural
+rather than a mock — ranges keep their numbers and URIs really join — because
+the properties worth asserting only mean something if those parts behave.
+
+CI runs exactly these three commands on a pinned Node, so a green run here is a
+green run there.
 
 The exit-code table and envelope schema are restated in `src/cli.ts` so
 TypeScript can branch on them; the Manager's Python suite cross-checks both

@@ -1,0 +1,5 @@
+<PROJECT>\src\flakey.py:1:1: 'os' imported but unused
+<PROJECT>\src\flakey.py:2:1: 'sys' imported but unused
+<PROJECT>\src\flakey.py:6:5: local variable 'y' is assigned to but never used
+<PROJECT>\src\flakey.py:7:12: undefined name 'undefined_name'
+<PROJECT>\src\flakey2.py:1:1: 'json.dumps' imported but unused

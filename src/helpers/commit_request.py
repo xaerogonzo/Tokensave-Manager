@@ -25,6 +25,7 @@ Pure-function module — no Tkinter. Safe to call from any thread.
 
 from __future__ import annotations
 
+import hashlib
 import json
 import os
 
@@ -69,6 +70,46 @@ def load_commit_request(project_root: str) -> "dict | None":
         "note":            str(data.get("note") or ""),
         "created_at":      str(data.get("created_at") or ""),
     }
+
+
+#: What makes two requests the SAME request. `created_at` is deliberately not
+#: in here: it records when a request was filed, not what it asks for, so two
+#: identical proposals a minute apart must not read as a conflict.
+IDENTITY_FIELDS = ("files", "suggested_scope", "note")
+
+
+def normalise_request(files, suggested_scope: str = "",
+                      note: str = "") -> dict:
+    """The canonical form of a request, for comparison and for writing.
+
+    One function so both sides normalise identically. They did not: the reader
+    stripped whitespace from each path while the CLI's conflict check did not,
+    so a path with a trailing space could never compare equal to itself and
+    every re-file looked like a conflict.
+    """
+    return {
+        "files": [str(f).replace(chr(92), "/").strip()
+                  for f in (files or []) if str(f).strip()],
+        "suggested_scope": str(suggested_scope or ""),
+        "note": str(note or ""),
+    }
+
+
+def request_identity(request: "dict | None") -> str:
+    """A stable hash of what a request ASKS FOR. "" for nothing pending.
+
+    Deterministic by construction — sorted keys, no insignificant whitespace —
+    so the answer does not depend on dict ordering or on how the file happened
+    to be serialised. Comparing re-serialised JSON text instead would make the
+    verdict an artefact of `indent=` and key order rather than of content.
+    """
+    if not request:
+        return ""
+    canonical = normalise_request(request.get("files"),
+                                  request.get("suggested_scope"),
+                                  request.get("note"))
+    blob = json.dumps(canonical, sort_keys=True, separators=(",", ":"))
+    return hashlib.sha256(blob.encode("utf-8")).hexdigest()
 
 
 def write_commit_request(project_root: str, files: list,

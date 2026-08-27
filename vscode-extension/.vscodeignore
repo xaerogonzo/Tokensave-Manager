@@ -4,7 +4,21 @@ src/**
 test/**
 tsconfig.json
 .gitignore
-bin/**/README.md
+package-lock.json
+
+# The whole bin/ tree, not just the README that used to be named here.
+#
+# `bin/**/README.md` excluded exactly one file, so a locally built
+# `bin/windows-x64/tokensave-manager-cli.exe` — gitignored, but present after
+# any run of the Manager's build.ps1 — would be packaged. That turns a ~14 KB
+# extension into a ~15 MB one silently, and ships a snapshot CLI that goes
+# stale the moment the Manager changes.
+#
+# Bundling a CLI is still supported, but it is now a deliberate act: remove
+# this line before packaging. The release workflow asserts the binary is
+# ABSENT, so the accident cannot ship even if this file is edited by mistake.
+bin/**
+
 **/*.map
 **/*.ts
 !out/**/*.js

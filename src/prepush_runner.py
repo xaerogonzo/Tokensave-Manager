@@ -130,7 +130,7 @@ def _run_doctor(project_path: str) -> tuple[str, bool, str]:
         count = len(violations)
         if count == 0:
             return "doctor", True, f"passed — {files_scanned} files, 0 violations"
-        first = violations[0][:150] if violations else ""
+        first = str(violations[0])[:150] if violations else ""
         suffix = f" (+{count - 1} more)" if count > 1 else ""
         return "doctor", False, f"{count} violation(s): {first}{suffix}"
     except Exception as e:

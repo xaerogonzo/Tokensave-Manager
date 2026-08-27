@@ -26,6 +26,25 @@ export const EXIT = {
   VERIFY_FAILED: 4,   // it ran but could not be verified
 } as const;
 
+/**
+ * One diagnostic, exactly as the envelope carries it.
+ *
+ * Coordinates are **1-based**; the single conversion to VS Code's 0-based
+ * `Position` happens in `diagnostics.ts` and nowhere else. `severity` is a
+ * closed set chosen by the producer — this side never infers it from `rule`.
+ */
+export interface Finding {
+  file: string;
+  line: number;
+  column: number;
+  end_line: number;
+  end_column: number;
+  severity: "error" | "warning" | "information" | "hint";
+  message: string;
+  rule: string;
+  symbol: string;
+}
+
 /** The envelope, exactly as src/cli.py emits it. */
 export interface Envelope {
   schema_version: number;
@@ -33,6 +52,8 @@ export interface Envelope {
   command: string;
   ok: boolean;
   data: Record<string, unknown>;
+  /** Always present; an empty array for commands that produce none. */
+  findings: Finding[];
   warnings: string[];
   error: string | null;
 }
@@ -46,6 +67,41 @@ export interface CliResult {
 
 /** The highest schema this extension knows how to read. */
 export const SUPPORTED_SCHEMA = 1;
+
+/** The lowest. There is no schema 0, so the window today is exactly {1}. */
+export const MINIMUM_SCHEMA = 1;
+
+/**
+ * Why an envelope's schema is unusable, or null when it is fine.
+ *
+ * "Backward compatible" is a support window, not "every lower integer
+ * forever" — widening it has to be a deliberate act with a test behind it.
+ *
+ *   missing  → reject. A `schema_version` that is absent used to sail through
+ *              the old `envelope.schema_version > SUPPORTED_SCHEMA` check,
+ *              because `undefined > 1` is `false` in JavaScript. That is a
+ *              malformed envelope being treated as a version-1 one.
+ *   == 1     → accept
+ *   > 1      → reject, and say the extension is the thing to update
+ *   < 1      → reject; no such version was ever emitted
+ */
+export function schemaProblem(envelope: Envelope): string | null {
+  const version = envelope.schema_version;
+  if (typeof version !== "number" || !Number.isFinite(version)) {
+    return "the CLI's output carried no envelope schema version; "
+      + "this is not a Manager envelope";
+  }
+  if (version > SUPPORTED_SCHEMA) {
+    return `Manager CLI ${envelope.cli_version} speaks envelope schema `
+      + `${version}; this extension understands ${SUPPORTED_SCHEMA}. `
+      + "Update the extension.";
+  }
+  if (version < MINIMUM_SCHEMA) {
+    return `envelope schema ${version} predates anything this extension `
+      + `supports (minimum ${MINIMUM_SCHEMA})`;
+  }
+  return null;
+}
 
 /** How the CLI gets invoked: a command plus any fixed leading arguments. */
 export interface Runner {
@@ -206,15 +262,9 @@ export async function runCli(
       }
       try {
         const envelope = JSON.parse(stdout) as Envelope;
-        if (envelope.schema_version > SUPPORTED_SCHEMA) {
-          resolve({
-            exitCode,
-            envelope,
-            transportError:
-              `Manager CLI ${envelope.cli_version} speaks envelope schema `
-              + `${envelope.schema_version}; this extension understands `
-              + `${SUPPORTED_SCHEMA}. Update the extension.`,
-          });
+        const problem = schemaProblem(envelope);
+        if (problem !== null) {
+          resolve({ exitCode, envelope, transportError: problem });
           return;
         }
         resolve({ exitCode, envelope, transportError: null });

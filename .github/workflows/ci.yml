@@ -1,7 +1,9 @@
 # TokenSave Manager — CI pipeline.
 #
-# Four layers of safety:
+# Five layers of safety:
 #
+#   0. `extension`       — the VS Code extension's TypeScript: typecheck +
+#                          its own test suite (always runs).
 #   1. `check`           — syntax + pyflakes + import hygiene (always runs).
 #   2. `test-warn`       — full pytest suite on push to long-lived
 #                          integration branches (Roadmap-*); warn-only.
@@ -88,3 +90,30 @@ jobs:
   test-postmerge:
     if: github.event_name == 'push' && (github.ref == 'refs/heads/main' || github.ref == 'refs/heads/master')
     uses: ./.github/workflows/_test_suite.yml
+
+  # ── VS Code extension: typecheck + its own suite (always runs) ──────────
+  # The extension drives src/cli.py, and its decision logic — which runner to
+  # resolve, what an exit code means, whether the envelope schema is one it
+  # understands — is exactly the part that can silently drift from the Python
+  # side. `test/cli.test.js` stubs the `vscode` module through `Module._load`,
+  # so this needs no extension host and no editor download: node --test only.
+  #
+  # `npm ci` (not `npm install`) so the committed lockfile is authoritative —
+  # that is why .gitignore negates its package-lock.json. Node is pinned
+  # rather than floating; the range is declared in package.json `engines`.
+  extension:
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: vscode-extension
+    steps:
+      - uses: actions/checkout@v5
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+      - name: Install (locked)
+        run: npm ci
+      - name: Typecheck
+        run: npm run compile
+      - name: Extension tests
+        run: npm test

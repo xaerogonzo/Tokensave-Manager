@@ -19,34 +19,16 @@
 
 const test = require("node:test");
 const assert = require("node:assert");
-const Module = require("node:module");
 const path = require("node:path");
 const fs = require("node:fs");
 const os = require("node:os");
 
 // ── the vscode stub ─────────────────────────────────────────────────────────
 
-let settings = {};
-
-const vscodeStub = {
-  workspace: {
-    getConfiguration() {
-      return {
-        get(key, fallback) {
-          return key in settings ? settings[key] : fallback;
-        },
-      };
-    },
-  },
-};
-
-const originalLoad = Module._load;
-Module._load = function (request, ...rest) {
-  if (request === "vscode") {
-    return vscodeStub;
-  }
-  return originalLoad.call(this, request, ...rest);
-};
+// The stub lives in its own module so `diagnostics.test.js` shares it
+// rather than keeping a second copy that could drift. Requiring it
+// installs the `Module._load` hook, so it must come before `out/cli.js`.
+const { setSettings } = require("./vscode-stub");
 
 const cli = require("../out/cli.js");
 
@@ -64,7 +46,7 @@ function withBundledExe() {
   return root;
 }
 
-test.beforeEach(() => { settings = {}; });
+test.beforeEach(() => { setSettings({}); });
 
 // ── how the CLI gets invoked ────────────────────────────────────────────────
 
@@ -80,7 +62,7 @@ test("a checkout runs the live cli.py, not a snapshot", () => {
   // The point of source mode: a compiled binary is a copy of the Manager as
   // it was at build time, and goes stale the moment the Manager changes.
   const checkout = withCheckout();
-  settings = { managerPath: checkout, pythonPath: "C:/py/python.exe" };
+  setSettings({ managerPath: checkout, pythonPath: "C:/py/python.exe" });
 
   const runner = cli.resolveRunner(context(withBundledExe()));
   assert.strictEqual(runner.kind, "source");
@@ -90,7 +72,7 @@ test("a checkout runs the live cli.py, not a snapshot", () => {
 });
 
 test("source mode falls back to python on PATH", () => {
-  settings = { managerPath: withCheckout() };
+  setSettings({ managerPath: withCheckout() });
   assert.strictEqual(cli.resolveRunner(context("/nowhere")).command, "python");
 });
 
@@ -98,7 +80,7 @@ test("a managerPath with no src/cli.py is refused, not silently downgraded", () 
   // Falling through to the bundled exe here would run a different, older
   // Manager than the one the user pointed at.
   const empty = fs.mkdtempSync(path.join(os.tmpdir(), "tsm-nosrc-"));
-  settings = { managerPath: empty };
+  setSettings({ managerPath: empty });
   assert.strictEqual(cli.resolveRunner(context(withBundledExe())), null);
 });
 
@@ -106,7 +88,7 @@ test("an explicit cliPath outranks a checkout", () => {
   const root = withBundledExe();
   const custom = path.join(root, "elsewhere.exe");
   fs.writeFileSync(custom, "");
-  settings = { cliPath: custom, managerPath: withCheckout() };
+  setSettings({ cliPath: custom, managerPath: withCheckout() });
 
   const runner = cli.resolveRunner(context(root));
   assert.strictEqual(runner.kind, "bundled");
@@ -123,7 +105,7 @@ test("the bundled copy is the last resort", () => {
 
 test("a configured exe that does not exist resolves to null", () => {
   const root = withBundledExe();
-  settings = { cliPath: path.join(root, "no-such.exe") };
+  setSettings({ cliPath: path.join(root, "no-such.exe") });
   assert.strictEqual(cli.resolveRunner(context(root)), null);
 });
 
@@ -146,7 +128,7 @@ test("with nothing configured the advice names the recommended setting", () => {
 test("a bad checkout path is quoted back rather than replaced by advice", () => {
   const empty = fs.mkdtempSync(path.join(os.tmpdir(), "tsm-empty3-"));
   const bogus = path.join(empty, "not-a-checkout");
-  settings = { managerPath: bogus };
+  setSettings({ managerPath: bogus });
   const reason = cliUnavailableOnWin32(empty);
   assert.ok(reason.includes(bogus));
   assert.match(reason, /src\/cli\.py/);
@@ -155,13 +137,13 @@ test("a bad checkout path is quoted back rather than replaced by advice", () => 
 test("a bad configured exe is quoted back too", () => {
   const empty = fs.mkdtempSync(path.join(os.tmpdir(), "tsm-empty4-"));
   const bogus = path.join(empty, "typo.exe");
-  settings = { cliPath: bogus };
+  setSettings({ cliPath: bogus });
   assert.ok(cliUnavailableOnWin32(empty).includes(bogus));
 });
 
 test("source mode is not refused off Windows", () => {
   // Only the bundled binary is Windows-only; cli.py runs anywhere Python does.
-  settings = { managerPath: withCheckout() };
+  setSettings({ managerPath: withCheckout() });
   const reason = onPlatform("linux",
     () => cli.cliUnavailableReason(context("/nowhere")));
   assert.strictEqual(reason, null);
@@ -178,7 +160,7 @@ test("with nothing configured off Windows, the message says why", () => {
 
 const envelope = (over = {}) => ({
   schema_version: 1, cli_version: "2.2.1", command: "doctor",
-  ok: true, data: {}, warnings: [], error: null, ...over,
+  ok: true, data: {}, findings: [], warnings: [], error: null, ...over,
 });
 
 test("a transport failure outranks anything in the envelope", () => {
@@ -306,4 +288,40 @@ test("every contributed command has a declared handler id", () => {
       || tree.includes(`id: "${short}"`);
     assert.ok(registered, `${command} is contributed but never registered`);
   }
+});
+
+// ── the envelope schema support window ──────────────────────────────────────
+
+test("an envelope at the supported schema is accepted", () => {
+  assert.strictEqual(cli.schemaProblem(envelope()), null);
+});
+
+test("a NEWER schema is refused, and names the extension as the fix", () => {
+  const problem = cli.schemaProblem(envelope({ schema_version: 2 }));
+  assert.match(problem, /Update the extension/);
+});
+
+test("a MISSING schema version is refused, not treated as version 1", () => {
+  // The old check was `envelope.schema_version > SUPPORTED_SCHEMA`, and
+  // `undefined > 1` is false in JavaScript — so a payload with no version at
+  // all sailed straight through as if it were a version-1 envelope.
+  const bare = envelope();
+  delete bare.schema_version;
+  assert.match(cli.schemaProblem(bare), /no envelope schema version/);
+});
+
+test("a non-numeric schema version is refused", () => {
+  assert.notStrictEqual(cli.schemaProblem(envelope({ schema_version: "1" })),
+                        null);
+});
+
+test("a schema BELOW the window is refused", () => {
+  // "Backward compatible" is a support window, not every lower integer
+  // forever. Widening it should be a deliberate act with a test behind it.
+  assert.notStrictEqual(cli.schemaProblem(envelope({ schema_version: 0 })),
+                        null);
+});
+
+test("the supported window is exactly one version today", () => {
+  assert.strictEqual(cli.MINIMUM_SCHEMA, cli.SUPPORTED_SCHEMA);
 });

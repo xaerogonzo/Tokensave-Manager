@@ -290,3 +290,90 @@ def open_in_editor(editor_cmd: str, path: str, line: "int | None" = None,
     except (OSError, ValueError) as exc:
         return False, f"could not launch {editor_cmd!r}: {exc}"
     return True, ""
+
+
+def _folder_key(path_value: str, anchor_dir: str) -> str:
+    """A comparison key for a workspace folder entry.
+
+    A `.code-workspace` may name the same directory as an absolute path or as
+    one relative to the descriptor, and on Windows with either separator and
+    either case. Comparing the raw strings reports a folder as "added" when it
+    is already there, which turns a merge preview into a lie.
+    """
+    resolved = path_value if os.path.isabs(path_value) else \
+        os.path.join(anchor_dir, path_value)
+    resolved = os.path.normpath(os.path.abspath(resolved))
+    return os.path.normcase(resolved)
+
+
+def plan_workspace_merge(existing: "dict | None", folders: list,
+                         out_path: str) -> dict:
+    """What writing *folders* to *out_path* would do to an existing descriptor.
+
+    Returns ``{"added", "retained", "removed", "document"}`` — the three lists
+    for a preview, and the exact document that would be written.
+
+    **Merge, never silent replacement.** A `.code-workspace` is a file people
+    hand-edit: it carries `settings`, and VS Code stores extension state and
+    launch configuration in there too. Regenerating it from scratch would throw
+    away whatever the Manager does not happen to know about, so every key it
+    does not own is carried across untouched, and `settings` is preserved
+    rather than reset.
+
+    The selection IS the new folder set, so a folder present before and not
+    selected now appears under ``removed``. That is a real outcome and the
+    caller must show it — which is why it is returned rather than merely
+    implied.
+    """
+    anchor = os.path.dirname(os.path.abspath(out_path))
+    document = dict(existing or {})
+
+    previous = document.get("folders")
+    previous = previous if isinstance(previous, list) else []
+    previous_by_key = {}
+    for entry in previous:
+        if isinstance(entry, dict) and entry.get("path"):
+            previous_by_key[_folder_key(str(entry["path"]), anchor)] = entry
+
+    selected_keys = []
+    added, retained = [], []
+    for folder in folders:
+        key = _folder_key(folder, anchor)
+        selected_keys.append(key)
+        (retained if key in previous_by_key else added).append(folder)
+
+    removed = [entry["path"] for key, entry in previous_by_key.items()
+               if key not in set(selected_keys)]
+
+    document["folders"] = preview_workspace(folders, out_path)
+    document.setdefault("settings", {})
+    return {"added": added, "retained": retained, "removed": removed,
+            "document": document}
+
+
+def read_workspace(out_path: str) -> "dict | None":
+    """An existing `.code-workspace`, or None when there is none to read.
+
+    Unparseable is reported as None so a caller can refuse to overwrite what it
+    cannot understand — silently replacing a file whose contents were not
+    readable is exactly the loss this whole merge path exists to prevent. The
+    two cases are distinguished by whether the file exists.
+    """
+    try:
+        with open(out_path, encoding="utf-8-sig") as fh:
+            doc = json.load(fh)
+    except (OSError, ValueError):
+        return None
+    return doc if isinstance(doc, dict) else None
+
+
+def write_merged_workspace(out_path: str, document: dict) -> tuple:
+    """Write an already-planned descriptor. Returns (ok, message)."""
+    try:
+        os.makedirs(os.path.dirname(os.path.abspath(out_path)), exist_ok=True)
+        with open(out_path, "w", encoding="utf-8", newline="\n") as fh:
+            fh.write(json.dumps(document, indent=2) + "\n")
+    except OSError as exc:
+        return False, f"could not write {out_path}: {exc}"
+    count = len(document.get("folders") or [])
+    return True, f"written: {os.path.basename(out_path)} - {count} folder(s)"

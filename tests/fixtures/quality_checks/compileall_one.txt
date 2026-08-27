@@ -1,0 +1,6 @@
+*** Error compiling '<PROJECT_ESC>\\src\\bad1.py'...
+  File "<PROJECT>\src\bad1.py", line 1
+    def f(:
+          ^
+SyntaxError: invalid syntax
+

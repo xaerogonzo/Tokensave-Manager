@@ -1,0 +1,18 @@
+*** Error compiling '<PROJECT_ESC>\\src\\bad1.py'...
+  File "<PROJECT>\src\bad1.py", line 1
+    def f(:
+          ^
+SyntaxError: invalid syntax
+
+*** Error compiling '<PROJECT_ESC>\\src\\bad2.py'...
+  File "<PROJECT>\src\bad2.py", line 1
+    x = (1
+        ^
+SyntaxError: '(' was never closed
+
+*** Error compiling '<PROJECT_ESC>\\src\\bad3.py'...
+  File "<PROJECT>\src\bad3.py", line 1
+    class C
+           ^
+SyntaxError: expected ':'
+

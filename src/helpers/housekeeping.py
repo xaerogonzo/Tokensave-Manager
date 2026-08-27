@@ -175,6 +175,29 @@ def parse_stale_entries(transcript: "str | list[str]") -> "list[StaleEntry]":
     return [StaleEntry(path=p) for p in paths]
 
 
+def parse_stale_total(transcript: "str | list[str]") -> "int | None":
+    """The count tokensave itself reports, or None if it did not say.
+
+    `parse_stale_entries` returns the paths it could read, and tokensave
+    TRUNCATES that list — ten bullets, then "… and 2 more". Counting bullets
+    therefore under-reports, and the header carries the real total:
+
+        ! 12 stale project(s) in global DB (registered but `.tokensave/` is gone)
+
+    The header regex already captured that number; it was simply discarded.
+    Reported separately rather than folded into the entry list, because the
+    two answer different questions — how many there are, and which ones we can
+    name. A caller must not present the shorter list as the whole story.
+    """
+    lines = (transcript.splitlines() if isinstance(transcript, str)
+             else list(transcript))
+    for line in lines:
+        match = _STALE_HEADER_RE.search(line)
+        if match:
+            return int(match.group(1))
+    return None
+
+
 def classify_stale_entries(entries: "list[StaleEntry]",
                            home: "str | None" = None) -> "list[StaleEntry]":
     """Fill in `reason` and `session_logs_present` from the filesystem.
