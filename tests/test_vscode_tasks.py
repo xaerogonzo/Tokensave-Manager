@@ -23,6 +23,7 @@ import os
 
 import pytest
 
+from helpers import vscode_tasks
 from helpers.vscode_tasks import (
     FROZEN_UNSUPPORTED,
     TASKS,
@@ -191,10 +192,29 @@ def test_a_relative_workspace_survives_being_moved(tmp_path):
     assert not os.path.isabs(entries[0]["path"])
 
 
-def test_an_unreachable_folder_falls_back_to_absolute():
-    """Windows offers no relative path across drives; absolute beats crashing."""
+def test_an_unreachable_folder_falls_back_to_absolute(monkeypatch):
+    """Windows offers no relative path across drives; absolute beats crashing.
+
+    The condition is forced rather than produced by real paths, because
+    `relpath` only raises on Windows: `posixpath` happily returns
+    `../../Z:/elsewhere/repo` for two different "drives", so a test that
+    passed a `Z:/` path would assert the host's path semantics instead of our
+    fallback, and pass here while failing on a Linux runner. Same trap as
+    `normcase` being a no-op on POSIX, which this repo has already hit once.
+    """
+    def _no_relative_path(*_args, **_kwargs):
+        raise ValueError("path is on mount 'Z:', start on mount 'C:'")
+
+    monkeypatch.setattr(vscode_tasks.os.path, "relpath", _no_relative_path)
     entries = preview_workspace(["Z:/elsewhere/repo"], "C:/ws/all.code-workspace")
     assert entries[0]["path"] == "Z:/elsewhere/repo"
+
+
+def test_a_reachable_folder_is_still_made_relative(tmp_path):
+    """The other side of the branch above, using real paths."""
+    out = tmp_path / "all.code-workspace"
+    entries = preview_workspace([str(tmp_path / "repo")], str(out))
+    assert entries[0]["path"] == "repo"
 
 
 def test_the_workspace_carries_no_mcp_configuration(tmp_path):
