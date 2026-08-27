@@ -326,7 +326,7 @@ class HousekeepingDialog(tk.Toplevel):
         self._ctrl.purge_async(self._path, self._baseline, self._on_purged)
 
     def _on_purged(self, result) -> None:
-        from controllers.doctor_ctrl import PurgeResult
+        from helpers.doctor_service import PurgeResult
         self._set_state(action_state=ACT_NONE)
         if result.status == PurgeResult.HANDED_OFF:
             self._say("Handed off to a terminal — nothing changed yet",
@@ -353,7 +353,8 @@ class HousekeepingDialog(tk.Toplevel):
         self._report_verification(result)
 
     def _report_verification(self, result) -> None:
-        from controllers.doctor_ctrl import DoctorController, VERIFY_VERIFIED
+        from controllers.doctor_ctrl import DoctorController
+        from helpers.doctor_service import VERIFY_VERIFIED
         label = DoctorController.verification_label(result) or result.status
         self._say(label,
                   C["green"] if result.verification_status == VERIFY_VERIFIED

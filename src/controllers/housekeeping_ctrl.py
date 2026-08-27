@@ -105,7 +105,7 @@ class HousekeepingController:
         has to be true.
         """
         def worker():
-            from controllers.doctor_ctrl import PurgeResult
+            from helpers.doctor_service import PurgeResult
             try:
                 result = self._doctor.purge_stale(path, baseline=baseline)
                 if result.status == PurgeResult.HANDED_OFF:
@@ -131,7 +131,7 @@ class HousekeepingController:
                 result = self._doctor.verify_purge(path, baseline)
             except Exception as e:                          # pragma: no cover
                 log.exception("EXCEPTION in housekeeping verify")
-                from controllers.doctor_ctrl import PurgeResult, VERIFY_UNVERIFIED
+                from helpers.doctor_service import PurgeResult, VERIFY_UNVERIFIED
                 result = PurgeResult(PurgeResult.VERIFICATION_FAILED,
                                      verification_status=VERIFY_UNVERIFIED,
                                      error=str(e))

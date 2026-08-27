@@ -6,7 +6,7 @@ agents actually present on the machine so the follow-up prompt isn't noise.
 """
 from __future__ import annotations
 
-from controllers.doctor_ctrl import _extract_install_nags
+from helpers.doctor_service import extract_install_nags
 
 
 # Trimmed from a real `tokensave doctor` v7.8.1 run. Note doctor uses BOTH
@@ -37,14 +37,14 @@ def _no_agents_installed(_agent_id):
 
 
 def test_returns_empty_when_no_nags(mocker):
-    assert _extract_install_nags(["all good", "Done."]) == ([], 0)
+    assert extract_install_nags(["all good", "Done."]) == ([], 0)
 
 
 def test_undetected_agents_collapse_to_a_count(mocker):
     """The whole point: 4 nagged agents the user doesn't have → 0 actionable."""
     mocker.patch("helpers.mcp._tokensave_agent_installed",
                  side_effect=_no_agents_installed)
-    actionable, other = _extract_install_nags(_REAL_OUTPUT)
+    actionable, other = extract_install_nags(_REAL_OUTPUT)
     assert actionable == []
     assert other == 4          # opencode, codex, roo-code, kiro
 
@@ -52,7 +52,7 @@ def test_undetected_agents_collapse_to_a_count(mocker):
 def test_detected_agent_is_actionable(mocker):
     mocker.patch("helpers.mcp._tokensave_agent_installed",
                  side_effect=lambda a: a == "codex")
-    actionable, other = _extract_install_nags(_REAL_OUTPUT)
+    actionable, other = extract_install_nags(_REAL_OUTPUT)
     assert actionable == ["codex"]
     assert other == 3
 
@@ -61,7 +61,7 @@ def test_duplicate_nags_for_one_agent_counted_once(mocker):
     """opencode is nagged twice in the real output; it must not double-count."""
     mocker.patch("helpers.mcp._tokensave_agent_installed",
                  side_effect=lambda a: a == "opencode")
-    actionable, other = _extract_install_nags(_REAL_OUTPUT)
+    actionable, other = extract_install_nags(_REAL_OUTPUT)
     assert actionable == ["opencode"]
     assert other == 3
 
@@ -70,7 +70,7 @@ def test_hyphenated_agent_id_parses(mocker):
     """`roo-code` must survive the id regex."""
     mocker.patch("helpers.mcp._tokensave_agent_installed",
                  return_value=True)
-    actionable, _ = _extract_install_nags(
+    actionable, _ = extract_install_nags(
         ["! x not found - run `tokensave install --agent roo-code`"])
     assert actionable == ["roo-code"]
 
@@ -84,7 +84,7 @@ def test_severity_is_not_the_filter(mocker):
     """
     mocker.patch("helpers.mcp._tokensave_agent_installed",
                  side_effect=_no_agents_installed)
-    actionable, other = _extract_install_nags([
+    actionable, other = extract_install_nags([
         "  ✘ Kiro tokensave agent NOT installed -- run "
         "`tokensave install --agent kiro`",
     ])
@@ -105,7 +105,7 @@ def test_already_wired_agent_is_not_actionable(mocker):
     """
     mocker.patch("helpers.mcp._tokensave_agent_installed", return_value=True)
     mocker.patch("helpers.mcp._tokensave_agent_wired", return_value=True)
-    actionable, other = _extract_install_nags([
+    actionable, other = extract_install_nags([
         "! Insiders mcp.json not found - run `tokensave install --agent copilot`",
     ])
     assert actionable == []
@@ -116,7 +116,7 @@ def test_installed_but_unwired_agent_is_actionable(mocker):
     """The genuine case must still surface — this is the whole feature."""
     mocker.patch("helpers.mcp._tokensave_agent_installed", return_value=True)
     mocker.patch("helpers.mcp._tokensave_agent_wired", return_value=False)
-    actionable, other = _extract_install_nags([
+    actionable, other = extract_install_nags([
         "! cursor/mcp.json not found - run `tokensave install --agent cursor`",
     ])
     assert actionable == ["cursor"]
@@ -127,7 +127,7 @@ def test_wired_check_short_circuits_uninstalled_agents(mocker):
     """Not installed => not actionable regardless of wired state."""
     mocker.patch("helpers.mcp._tokensave_agent_installed", return_value=False)
     mocker.patch("helpers.mcp._tokensave_agent_wired", return_value=False)
-    actionable, other = _extract_install_nags([
+    actionable, other = extract_install_nags([
         "! run `tokensave install --agent kiro`",
     ])
     assert actionable == []
