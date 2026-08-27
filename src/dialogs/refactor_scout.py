@@ -76,6 +76,7 @@ class RefactorScoutDialog(tk.Toplevel):
         on_batch_clipboard: Callable[[list[Finding]], None] | None = None,
         on_batch_cli: Callable[[list[Finding]], None] | None = None,
         on_batch_ask: Callable[[list[Finding]], None] | None = None,
+        on_open_location: Callable[[str, int], None] | None = None,
     ) -> None:
         super().__init__(parent)
         self.title("🔬 Refactor scout")
@@ -90,6 +91,7 @@ class RefactorScoutDialog(tk.Toplevel):
         self._on_batch_clipboard = on_batch_clipboard
         self._on_batch_cli = on_batch_cli
         self._on_batch_ask = on_batch_ask
+        self._on_open_location = on_open_location
         self._on_save_ignored = on_save_ignored
         # Local mutable copy — we push the updated set back on close (or
         # on every Ignore click for crash safety).
@@ -273,9 +275,18 @@ class RefactorScoutDialog(tk.Toplevel):
         tk.Label(head, text=f.metric or f.kind,
                  font=("Consolas", 9, "bold"),
                  bg=C["mantle"], fg=badge_colour).pack(side=tk.LEFT)
-        tk.Label(head, text=f"  {f.file}:{f.line}",
-                 font=("Consolas", 9),
-                 bg=C["mantle"], fg=C["subtext"]).pack(side=tk.LEFT)
+        # file:line is the one part of a finding that names a place, so it is
+        # the affordance for going there. Only made clickable when a handler
+        # exists — a label that looks like a link and does nothing is worse
+        # than a plain one.
+        loc = tk.Label(head, text=f"  {f.file}:{f.line}",
+                       font=("Consolas", 9),
+                       bg=C["mantle"], fg=C["subtext"])
+        loc.pack(side=tk.LEFT)
+        if self._on_open_location is not None:
+            loc.configure(fg=C["blue"], cursor="hand2")
+            loc.bind("<Button-1>",
+                     lambda _e, ff=f: self._open_location(ff))
 
         # Symbol + message
         tk.Label(card, text=_clean_symbol(f.symbol),
@@ -347,6 +358,12 @@ class RefactorScoutDialog(tk.Toplevel):
                    command=self._clear_suppressions).pack(side=tk.LEFT)
 
     # ── Actions ──────────────────────────────────────────────────────────────
+
+    def _open_location(self, finding: Finding) -> None:
+        """Jump the editor to this finding's file and line."""
+        if self._on_open_location is None:
+            return
+        self._on_open_location(finding.file, finding.line)
 
     def _investigate(self, finding: Finding) -> None:
         if self._on_investigate is None:

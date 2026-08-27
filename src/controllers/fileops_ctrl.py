@@ -12,16 +12,15 @@ Dependency contract:
 from __future__ import annotations
 
 import os
-import shlex
 import shutil
-import subprocess
 from tkinter import messagebox
 from typing import TYPE_CHECKING, Callable
 
 import tkinter as tk
 
-from constants import C, CREATE_NO_WINDOW
+from constants import C
 from helpers.runtime import log
+from helpers.vscode_tasks import open_in_editor
 
 if TYPE_CHECKING:
     from state import ManagerConfig
@@ -51,16 +50,27 @@ class FileOpsController:
     def cmd_open_folder(self, path: str) -> None:
         os.startfile(path)
 
-    def cmd_open_editor(self, path: str) -> None:
+    def cmd_open_editor(self, path: str, line: "int | None" = None,
+                        column: "int | None" = None) -> None:
+        """Open *path* in the configured editor, optionally at a line.
+
+        The line argument exists so findings that already know a location can
+        land the cursor on it rather than dropping the user at the top of a
+        1,400-line file. Refactor-scout findings carry `file` and `line` and
+        are wired to it; **Doctor violations are plain strings with no line
+        number** ("_render_projects_section() complexity 20 (cap 10)"), so they
+        cannot use this without first resolving the symbol.
+
+        This is the Manager driving an editor from OUTSIDE. Inside a VS Code
+        extension the right call is `vscode.window.showTextDocument`, which
+        avoids spawning a second process; see docs/vscode-mcp-matrix.md.
+        """
         editor_str = self._cfg.raw.get("editor_cmd", "code")
-        try:
-            cmd = shlex.split(editor_str)
-            cmd.append(path)
-            subprocess.Popen(cmd, creationflags=CREATE_NO_WINDOW)
-        except FileNotFoundError:
+        ok, error = open_in_editor(editor_str, path, line, column)
+        if not ok:
             messagebox.showerror(
                 "Editor not found",
-                f"Could not launch '{editor_str}'.\n\n"
+                f"Could not launch '{editor_str}'.\n\n{error}\n\n"
                 "Set the correct editor command in Settings.",
                 parent=self._root,
             )

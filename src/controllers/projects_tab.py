@@ -19,6 +19,7 @@ Per Round 4 plan rules:
 from __future__ import annotations
 
 import os
+import sys
 import tkinter as tk
 from tkinter import messagebox, ttk
 from typing import TYPE_CHECKING
@@ -668,6 +669,9 @@ class ProjectsTabController:
                            command=self._cmd_bar.cmd_open_editor)
         open_m.add_command(label="⎘  Copy Path",
                            command=self._cmd_bar.cmd_copy_path)
+        open_m.add_separator()
+        open_m.add_command(label="⚙   Generate VS Code tasks…",
+                           command=self.cmd_generate_vscode_tasks)
         m.add_cascade(label="📂  Open", menu=open_m)
 
         # ── Maintenance — everything destructive or structural ─────────────
@@ -1000,6 +1004,38 @@ class ProjectsTabController:
 
 
     # ── Category assignment ───────────────────────────────────────────────────
+
+    def cmd_generate_vscode_tasks(self) -> None:
+        """Write `.vscode/tasks.json` exposing the Manager's CLI to VS Code.
+
+        Confirms first because the file is overwritten wholesale — it is
+        generated, and a hand-edited copy would be lost. The runner is derived
+        from how this Manager is installed rather than configured; see
+        `helpers.vscode_tasks.default_runner`.
+        """
+        path = self._selected_path()
+        if not path:
+            return
+        from constants import _BASE_DIR
+        from helpers.vscode_tasks import (applicable_tasks, default_runner,
+                                          write_tasks_json)
+
+        runner = default_runner(
+            _BASE_DIR, frozen=bool(os.environ.get("NUITKA_ONEFILE_PARENT")),
+            python_exe=sys.executable)
+        names = "\n".join(f"  • {t.label}" for t in applicable_tasks(runner))
+        target = os.path.join(path, ".vscode", "tasks.json")
+        existing = ("\n\nThis OVERWRITES the existing file."
+                    if os.path.isfile(target) else "")
+        if not messagebox.askyesno(
+                "Generate VS Code tasks",
+                f"Write .vscode/tasks.json in\n{path}\n\n"
+                f"Tasks:\n{names}{existing}",
+                parent=self._root):
+            return
+
+        ok, message = write_tasks_json(path, runner)
+        self._on_log(f"[vscode] {message}", C["green"] if ok else C["peach"])
 
     def cmd_assign_category(self) -> None:
         path = self._selected_path()
