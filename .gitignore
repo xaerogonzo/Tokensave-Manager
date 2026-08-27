@@ -74,6 +74,11 @@ node_modules/
 npm-debug.log
 yarn-error.log
 package-lock.json
+# ...except the VS Code extension's, which CI needs: `npm ci` refuses to
+# run without a lockfile, and an unpinned `npm install` can resolve
+# different typescript/@types versions on different machines. Negated for
+# this one path rather than changing the project-wide convention.
+!vscode-extension/package-lock.json
 .pycache__/
 
 # Added by TokenSave Manager
