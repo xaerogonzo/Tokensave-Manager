@@ -24,7 +24,7 @@ from __future__ import annotations
 import ast
 import os
 import re
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 
 _CAP_FILE_LINES         = 1500  # Doctor warning threshold (BASIC_INSTRUCTIONS aspires to 800)
 _CAP_METHOD_LINES       = 100
@@ -44,6 +44,33 @@ class Caps:
 
 
 DEFAULT_CAPS = Caps()
+
+
+@dataclass(frozen=True)
+class Violation:
+    """One cap violation, with the position the AST already knew.
+
+    These used to be plain formatted strings, which is why a Doctor finding
+    could not be clicked to a line while a scout finding could: the auditors
+    walk AST nodes and therefore always had ``node.lineno``, but threw it away
+    at the point of formatting.
+
+    **``__str__`` reproduces the old text exactly**, byte for byte, so every
+    existing renderer — the Doctor tab, the Run Checks dialog, the pre-push
+    hook and the generated CI workflow — keeps working untouched. That parity
+    is a tested property, not an intention; see ``tests/test_doctor_rules.py``.
+
+    ``file`` is empty until ``_audit_project_tree`` places it: the node-level
+    auditors are given a node, not a path, and inventing one there would mean
+    two sources of truth for which file a violation belongs to.
+    """
+    message: str
+    symbol: str = ""
+    line: int = 1
+    file: str = ""
+
+    def __str__(self) -> str:
+        return f"  {self.file}: {self.message}" if self.file else self.message
 
 # Keys accepted in a doctor_path_overrides entry, mapped onto Caps fields.
 _OVERRIDE_KEYS = {
@@ -213,14 +240,18 @@ def _audit_project_tree(
     project_path: str,
     skip_rel_paths: set[str],
     overrides: "dict | None" = None,
-) -> tuple[list[str], list[str], int]:
+) -> tuple[list[Violation], list[str], int]:
     """Walk audit-eligible files; return (violations, exempts, files_scanned).
 
     Python files (`*.py`) get the full AST audit (methods, classes,
     complexity). Non-Python source/prose files (see `_AUDIT_TEXT_EXTS`)
     get a line-count-only check against the same file cap.
+
+    Violations are `Violation` records, not strings. Every existing consumer
+    renders them with `str()` and gets exactly what it got before; a consumer
+    that wants the position (the VS Code Problems panel) can now have it.
     """
-    violations: list[str] = []
+    violations: list[Violation] = []
     exempt_notes: list[str] = []
     files_scanned = 0
 
@@ -250,7 +281,11 @@ def _audit_project_tree(
             if result["exempt"]:
                 exempt_notes.append(f"  (exempt: {rel} — {result['exempt_reason']})")
             else:
-                violations.extend(f"  {rel}: {v}" for v in result["violations"])
+                # The node-level auditors know the symbol and the line but not
+                # the path; this is the one place that knows `rel`, so it is
+                # the one place that fills it in.
+                violations.extend(replace(v, file=rel)
+                                  for v in result["violations"])
 
     return violations, exempt_notes, files_scanned
 
@@ -278,36 +313,50 @@ def _audit_text_file(path: str, caps: Caps = DEFAULT_CAPS) -> dict | None:
 
     line_count = source.count("\n") + 1
     if line_count > caps.file_lines:
+        # Line 1: the file itself is the subject, so the top of it is where a
+        # reader wants to land. There is no narrower position to offer.
         return {"exempt": False, "exempt_reason": None,
-                "violations": [f"file is {line_count} lines (cap {caps.file_lines})"]}
+                "violations": [Violation(
+                    f"file is {line_count} lines (cap {caps.file_lines})",
+                    line=1)]}
     return {"exempt": False, "exempt_reason": None, "violations": []}
 
 
 def _audit_method_node(
     node: ast.FunctionDef | ast.AsyncFunctionDef,
     caps: Caps = DEFAULT_CAPS,
-) -> list[str]:
-    """Return violation strings for a single method/function node."""
-    out: list[str] = []
+) -> list[Violation]:
+    """Return violations for a single method/function node.
+
+    ``node.lineno`` is the line the ``def`` sits on, which is where a reader
+    wants the cursor for both of these findings.
+    """
+    out: list[Violation] = []
     span = _method_span_lines(node)
     if span > caps.method_lines and not _is_layout_method(node):
-        out.append(f"{node.name}() is {span} lines (cap {caps.method_lines})")
+        out.append(Violation(
+            f"{node.name}() is {span} lines (cap {caps.method_lines})",
+            symbol=node.name, line=node.lineno))
     cc = _cyclomatic_complexity(node)
     if cc > caps.complexity:
-        out.append(f"{node.name}() complexity {cc} (cap {caps.complexity})")
+        out.append(Violation(
+            f"{node.name}() complexity {cc} (cap {caps.complexity})",
+            symbol=node.name, line=node.lineno))
     return out
 
 
 def _audit_class_node(node: ast.ClassDef,
-                      caps: Caps = DEFAULT_CAPS) -> list[str]:
-    """Return violation strings for a class node."""
+                      caps: Caps = DEFAULT_CAPS) -> list[Violation]:
+    """Return violations for a class node."""
     method_count = sum(
         1 for child in node.body
         if isinstance(child, (ast.FunctionDef, ast.AsyncFunctionDef))
     )
     if method_count > caps.class_methods:
-        return [f"class {node.name} has {method_count} direct methods "
-                f"(cap {caps.class_methods})"]
+        return [Violation(
+            f"class {node.name} has {method_count} direct methods "
+            f"(cap {caps.class_methods})",
+            symbol=node.name, line=node.lineno)]
     return []
 
 
@@ -327,10 +376,11 @@ def _audit_python_file(path: str, caps: Caps = DEFAULT_CAPS) -> dict | None:
     if reason:
         return {"exempt": True, "exempt_reason": reason, "violations": []}
 
-    violations: list[str] = []
+    violations: list[Violation] = []
     line_count = source.count("\n") + 1
     if line_count > caps.file_lines:
-        violations.append(f"file is {line_count} lines (cap {caps.file_lines})")
+        violations.append(Violation(
+            f"file is {line_count} lines (cap {caps.file_lines})", line=1))
 
     try:
         tree = ast.parse(source)

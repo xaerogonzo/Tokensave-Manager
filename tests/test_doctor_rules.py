@@ -169,8 +169,10 @@ def test_a_loosened_cap_still_reports_the_extreme_case(tmp_path):
     loose, _, _ = _audit_project_tree(
         str(tmp_path), set(), {"scripts": {"max_complexity": 20}})
     assert len(loose) == 1
-    assert "wild()" in loose[0], "the extreme one still surfaces"
-    assert "cap 20" in loose[0], "the message reports the cap actually applied"
+    assert "wild()" in str(loose[0]), "the extreme one still surfaces"
+    assert "cap 20" in str(loose[0]), "the message reports the cap applied"
+    assert loose[0].symbol == "wild", "the symbol travels with the finding"
+    assert loose[0].line > 0, "and so does the line it sits on"
 
 
 def test_skip_via_overrides_scans_nothing_there(tmp_path):
@@ -205,5 +207,88 @@ def test_caps_are_reported_in_the_message(tmp_path):
     path = _write(tmp_path, "x.py", _complex_fn("f", branches=30))
     default = _audit_python_file(path)
     loosened = _audit_python_file(path, Caps(complexity=25))
-    assert "cap 10" in default["violations"][0]
-    assert "cap 25" in loosened["violations"][0]
+    assert "cap 10" in str(default["violations"][0])
+    assert "cap 25" in str(loosened["violations"][0])
+
+
+# ── R12-10: violations became records, and must still render as before ─────
+#
+# The audit used to hand back formatted strings, which is why a Doctor finding
+# could not be clicked to a line while a scout finding could — the auditors
+# walk AST nodes and always had `node.lineno`, but discarded it when
+# formatting. `Violation` keeps it.
+#
+# `__str__` reproducing the old text EXACTLY is the property the whole change
+# rests on: four consumers render these — the Doctor tab, the Run Checks
+# dialog, the pre-push hook and the *generated* CI workflow snippet — and none
+# of them were rewritten. Verified against the pre-change implementation on
+# this repo's own tree: 152 violations, strings byte-identical.
+
+def test_str_of_a_placed_violation_is_the_historic_two_space_form(tmp_path):
+    """`  <rel path>: <message>` — the exact shape every renderer expects."""
+    _write(tmp_path, "pkg/mod.py", _complex_fn("f", branches=30))
+    violations, _, _ = _audit_project_tree(str(tmp_path), set())
+    assert str(violations[0]) == "  pkg/mod.py: f() complexity 31 (cap 10)"
+
+
+def test_a_file_level_violation_renders_and_points_at_line_one(tmp_path):
+    """The file itself is the subject, so there is no narrower position."""
+    _write(tmp_path, "big.py", "x = 1\n" * 20)
+    violations, _, _ = _audit_project_tree(
+        str(tmp_path), set(), {"big.py": {"max_lines": 5}})
+    assert str(violations[0]) == "  big.py: file is 21 lines (cap 5)"
+    assert (violations[0].line, violations[0].symbol) == (1, "")
+
+
+def test_a_class_violation_carries_the_class_name_and_its_def_line(tmp_path):
+    methods = "\n".join(f"    def m{i}(self): pass" for i in range(45))
+    _write(tmp_path, "big.py", "# leading comment\n\nclass Wide:\n" + methods + "\n")
+    violations, _, _ = _audit_project_tree(str(tmp_path), set())
+    hit = next(v for v in violations if "class Wide" in str(v))
+    assert hit.symbol == "Wide"
+    assert hit.line == 3, "the line the `class` keyword sits on"
+    assert str(hit).startswith("  big.py: class Wide has 45 direct methods")
+
+
+def test_a_method_violation_points_at_its_def_not_the_file_top(tmp_path):
+    _write(tmp_path, "m.py", "# pad\n# pad\n" + _complex_fn("deep", branches=30))
+    violations, _, _ = _audit_project_tree(str(tmp_path), set())
+    assert violations[0].symbol == "deep"
+    assert violations[0].line == 3
+
+
+def test_several_violations_in_one_file_each_keep_their_own_position(tmp_path):
+    _write(tmp_path, "two.py",
+           _complex_fn("first", branches=30) + "\n" + _complex_fn("second", branches=30))
+    violations, _, _ = _audit_project_tree(str(tmp_path), set())
+    assert [v.symbol for v in violations] == ["first", "second"]
+    assert violations[0].line < violations[1].line
+    assert all(v.file == "two.py" for v in violations)
+
+
+def test_a_path_with_a_space_survives_into_the_rendered_string(tmp_path):
+    """This project lives under a path with a space in it."""
+    _write(tmp_path, "my dir/mod.py", _complex_fn("f", branches=30))
+    violations, _, _ = _audit_project_tree(str(tmp_path), set())
+    assert violations[0].file == "my dir/mod.py"
+    assert str(violations[0]).startswith("  my dir/mod.py: ")
+
+
+def test_rendered_paths_use_forward_slashes_on_every_platform(tmp_path):
+    _write(tmp_path, "a/b/c.py", _complex_fn("f", branches=30))
+    violations, _, _ = _audit_project_tree(str(tmp_path), set())
+    assert violations[0].file == "a/b/c.py"
+    assert chr(92) not in str(violations[0])
+
+
+def test_every_violation_from_a_tree_walk_is_placed(tmp_path):
+    """An unplaced violation would render without its path — the node-level
+    auditors do not know the file, so `_audit_project_tree` must fill it in."""
+    _write(tmp_path, "a.py", _complex_fn("f", branches=30))
+    _write(tmp_path, "sub/b.py", _complex_fn("g", branches=30))
+    violations, _, _ = _audit_project_tree(str(tmp_path), set())
+    assert violations, "fixture should trip the cap"
+    for violation in violations:
+        assert violation.file, "every violation carries its path"
+        assert violation.line >= 1
+        assert str(violation).startswith("  " + violation.file + ": ")

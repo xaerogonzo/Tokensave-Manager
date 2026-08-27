@@ -1,0 +1,2 @@
+<PROJECT>/src/flakey.py:1:1: 'os' imported but unused
+<PROJECT>/src/flakey.py:7:12: undefined name 'undefined_name'

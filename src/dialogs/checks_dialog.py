@@ -86,7 +86,7 @@ def _check_doctor(path: str, cfg: "ManagerConfig") -> tuple[bool, str]:
         count = len(violations)
         if count == 0:
             return True, f"passed — {files_scanned} files scanned, 0 violations"
-        first = violations[0][:150] if violations else ""
+        first = str(violations[0])[:150] if violations else ""
         suffix = f" (+{count - 1} more)" if count > 1 else ""
         return False, f"{count} violation(s): {first}{suffix}"
     except Exception as e:

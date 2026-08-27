@@ -1,0 +1,6 @@
+*** Error compiling '<PROJECT_ESC>\\src\\toplevel_return.py'...
+  File "<PROJECT>\src\toplevel_return.py", line 1
+    return 5
+    ^^^^^^^^
+SyntaxError: 'return' outside function
+

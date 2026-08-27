@@ -773,7 +773,7 @@ class DoctorController:
 
     def _log_audit_results(
         self,
-        violations: list[str],
+        violations: list,
         exempt_notes: list[str],
         files_scanned: int,
     ) -> None:
@@ -788,8 +788,10 @@ class DoctorController:
                 f"  Found {len(violations)} violation{plural} "
                 f"across {files_scanned} files:",
                 C["peach"])
-            for line in violations:
-                self._on_log(line, C["peach"])
+            for violation in violations:
+                # `Violation.__str__` reproduces the pre-R12-10 text
+                # exactly, so this log is byte-identical to before.
+                self._on_log(str(violation), C["peach"])
 
         for note in exempt_notes:
             self._on_log(note, C["overlay0"])

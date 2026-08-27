@@ -117,7 +117,7 @@ def _build_yaml(checks_enabled: dict[str, bool],
             "          v, _ex, n = _audit_project_tree('.', set())\n"
             "          print(f'### Doctor audit: {len(v)} violation(s) across {n} files')\n"
             "          for line in v[:25]:\n"
-            "              print('- ' + line.strip())\n"
+            "              print('- ' + str(line).strip())\n"
             "          if len(v) > 25:\n"
             "              print(f'- ...and {len(v) - 25} more')\n"
             "          EOF"

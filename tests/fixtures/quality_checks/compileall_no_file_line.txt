@@ -1,0 +1,3 @@
+*** Error compiling '<PROJECT_ESC>\\src\\badbytes.py'...
+SyntaxError: source code string cannot contain null bytes
+
