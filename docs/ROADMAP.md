@@ -7,6 +7,14 @@ Status legend:
 - 🟡 In progress — actively being built
 - 🔮 Planned — design locked, not started
 - 💭 Considering — not yet committed
+- 🧊 Parked — deliberately not being done, with the reasoning recorded so
+  it is not re-proposed. Not the same as blocked.
+
+> **Where the recent history lives.** The per-roadmap sections below stop at
+> Roadmap 8. Roadmaps 9 through 12 are recorded in
+> [CHANGELOG.md](../CHANGELOG.md), which carries the narrative detail; the
+> deferred-item registry is `memory/roadmap_backlog.md`. Roadmap 12 (VS Code
+> integration) shipped 2026-08-26.
 
 ---
 
@@ -254,8 +262,21 @@ From the v4.4 cascade backlog:
 #### Theme H — Agent architecture / external IDE integration
 - 🔮 Claude Agent SDK migration spike (revisit ONLY if real usage shows
   print-mode CLI users hit a quality ceiling)
-- 🔮 Visual Studio integration via companion REST API + VSIX (large,
-  needs C# toolchain — defer unless explicit demand)
+- 🧊 **Visual Studio 2022 integration — PARKED by decision (2026-08-26),
+  not blocked.** Roadmap-12 shipped VS *Code* integration instead, and
+  that turned out to need no C# at all: VS Code speaks MCP natively, so
+  the project's own `.mcp.json` already serves both the Claude Code
+  extension and Copilot. VS 2022 has no native MCP, so it is the only
+  target that would still need the original companion-REST-API + VSIX
+  architecture.
+  **De-risked if it is ever revived:** Roadmap-12's `src/cli.py` already
+  provides the stable JSON contract such a companion server would
+  serve — envelope with `schema_version`/`cli_version`, semantic exit
+  codes, explicit `--project` — so the remaining work is the C# VSIX and
+  a local HTTP shim over an interface that already exists and is tested.
+  **Why parked:** VS Code is where the tooling ecosystem is, and the
+  user does not want to install or maintain VS 2022 for this. Revive
+  only on a concrete need, not on symmetry.
 - 🔮 GitHub-issues mirror for backlog items (1-way push from
   `memory/roadmap_backlog.md`)
 - 🔮 "🤖 Use Claude to fill in tests" button on Test Manager Tab 4
