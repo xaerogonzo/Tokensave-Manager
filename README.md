@@ -31,6 +31,10 @@ If you use Claude across several projects, this is the control panel: switch act
 - [Right-Click Menu](#right-click-menu)
 - [Git Workflow — Step by Step](#git-workflow--step-by-step)
 - [Configuration Reference](#configuration-reference)
+- [Working from VS Code](#working-from-vs-code)
+  - [The headless CLI](#the-headless-cli)
+  - [VS Code tasks](#vs-code-tasks)
+  - [The VS Code extension](#the-vs-code-extension)
 - [Building from Source](#building-from-source)
 - [Project Structure](#project-structure)
 - [Roadmap](#roadmap)
@@ -634,6 +638,89 @@ All settings live in `manager-config.json` at the project root (not committed to
 | `project_categories` | No | Per-project category overrides — managed via the right-click menu |
 | `user_snippets` | No | Custom prompt snippets shown in the Reference tab |
 | `auto_commit_after_sync` | No | If `true`, auto-commits after every successful sync (default: `false`) |
+
+---
+
+## Working from VS Code
+
+Everything below is optional. The Manager is still the full UI — this is about
+reaching a few of its operations without leaving the editor.
+
+### The headless CLI
+
+`src/cli.py` (shipped compiled as `tokensave-manager-cli.exe`) exposes
+Doctor, Sync, Checks, Test Gaps, MCP Status and Commit Request as JSON:
+
+```bash
+tokensave-manager-cli doctor --project "D:/path/to/project" --json
+```
+
+The contract is fixed, because tasks, the VS Code extension and any future
+integration all depend on it:
+
+- **stdout is exactly one JSON envelope and nothing else.** stderr carries the
+  human summary, which `--json` suppresses.
+- **Exit codes are semantic**, so a caller can tell "Doctor found problems"
+  from "the CLI itself failed" without reading text:
+
+  | Code | Meaning |
+  |---|---|
+  | 0 | success |
+  | 1 | ran, found problems |
+  | 2 | invalid command line |
+  | 3 | a prerequisite is missing (tokensave, git, a config) |
+  | 4 | ran but could not be verified |
+
+- **`--project` is required.** A working directory is not a statement about
+  which project you mean, and the Manager has been bitten by that inference
+  before.
+- `--config <path>` points a relocated CLI at an install; by default it reads
+  the `manager-config.json` beside the executable.
+
+`checks` needs a real Python interpreter, so it is unavailable in the compiled
+CLI and says so (exit 3) rather than failing obscurely. Run it from a source
+checkout, or use the Manager's Run Checks dialog.
+
+### VS Code tasks
+
+**Projects tab → right-click a project → 📂 Open → "Generate VS Code tasks…"**
+writes `.vscode/tasks.json` with one task per available command. Tasks pass
+`${workspaceFolder}` explicitly and run as `process` tasks, so paths containing
+spaces survive intact.
+
+### The VS Code extension
+
+`vscode-extension/` puts the same commands in a sidebar view, one root per
+workspace folder. It is a thin shell over the CLI — it renders envelopes and
+reimplements none of the Manager's logic — and it is **propose-only**: it can
+file a commit request, and nothing else. Approval still happens in the
+Manager's Git tab.
+
+Build and install:
+
+```bash
+cd vscode-extension
+npm install && npm run compile
+npm test
+npm run package
+```
+
+Then **Extensions → … → Install from VSIX**, and point it at your checkout:
+
+```jsonc
+"tokensaveManager.managerPath": "D:/path/to/Token Save Manager Source"
+```
+
+That runs the **live** `src/cli.py` rather than a compiled copy, so the
+extension never lags the Manager, needs no `configPath`, and can run `checks`
+(which a frozen build cannot — `sys.executable` under Nuitka onefile is the
+extracted binary, not an interpreter). The packaged extension is ~14 KB
+because it bundles no binary; a built CLI is an option for machines with no
+checkout, at the cost of going stale.
+
+See [vscode-extension/README.md](vscode-extension/README.md) for the settings,
+and [docs/vscode-mcp-matrix.md](docs/vscode-mcp-matrix.md) for which MCP client
+in VS Code reads which config — the answer is less obvious than it looks.
 
 ---
 

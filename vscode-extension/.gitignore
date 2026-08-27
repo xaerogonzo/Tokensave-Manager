@@ -1,0 +1,5 @@
+node_modules/
+out/
+*.vsix
+# Build artifact, not source: produced by the Manager's build.ps1 console target.
+bin/windows-x64/tokensave-manager-cli.exe
