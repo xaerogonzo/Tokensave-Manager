@@ -416,6 +416,15 @@ class AITasksController:
         def _batch_ask(items) -> None:
             self._batch_scout_to_ask(path, items)
 
+        def _open_location(rel_file: str, line: int) -> None:
+            """Jump the editor to a finding. Findings carry repo-relative paths."""
+            from helpers.vscode_tasks import open_in_editor
+            target = os.path.join(path, rel_file)
+            ok, error = open_in_editor(
+                self._cfg.raw.get("editor_cmd", "code"), target, line)
+            if not ok:
+                self._on_log(f"[scout] {error}", "peach")
+
         RefactorScoutDialog(
             parent=self._root,
             project_path=path,
@@ -429,6 +438,7 @@ class AITasksController:
             on_batch_ask=_batch_ask if self._on_seed_ask else None,
             on_save_ignored=_save_ignored,
             currently_ignored=ignored,
+            on_open_location=_open_location,
         )
 
         total = sum(len(v) for v in findings.values())

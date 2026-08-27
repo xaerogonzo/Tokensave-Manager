@@ -592,6 +592,49 @@ if __name__ == "__main__":
 `tokensave-manager.exe` for backward-compat with the bundled-wrapper detection
 in `helpers/mcp.py`.
 
+### Build targets — three, and the third is not optional
+
+**`build.ps1` is gitignored** (it is generated from
+`templates/nuitka-build.ps1.template`), so this is the tracked record of what it
+must contain. A fresh checkout that regenerates it will lose the third target
+unless it is re-added.
+
+| Target | Entry | Console mode |
+|---|---|---|
+| `tokensave-manager.exe` | `src/app.py` | `disable` (GUI) |
+| `tokensave-wrapper.exe` | `src/tokensave-wrapper.py` | `disable` (spawned by MCP clients) |
+| **`tokensave-manager-cli.exe`** | **`src/cli.py`** | **`force`** |
+
+The console mode is the whole point of the third target, not a detail. A binary
+built with `--windows-console-mode=disable` has **no stdout at all**, so
+exposing `src/cli.py` through either existing target would produce an exe whose
+entire contract — one JSON envelope on stdout — is silently unreachable.
+
+```powershell
+$consoleCliArgs = @(
+    "-m", "nuitka", "--onefile",
+    "--windows-console-mode=force",
+    "--include-package=helpers",   # cli.py imports lazily inside its handlers
+    "--nofollow-import-to=tkinter", # must run where the GUI's deps are absent
+    # ... the same numpy/scipy/pandas/matplotlib/sklearn/IPython/notebook
+    #     exclusions the other two targets use ...
+    "--remove-output", "--assume-yes-for-downloads",
+    "--output-dir=$DIST",
+    "--output-filename=tokensave-manager-cli.exe"
+)
+Build-Exe "$ROOT\src\cli.py" "tokensave-manager-cli.exe" $consoleCliArgs
+```
+
+Two limitations of the packaged CLI, both deliberate:
+
+* **`checks` is unavailable.** It shells out to `sys.executable -m compileall` /
+  `-m pyflakes`, and under onefile `sys.executable` is the extracted binary, not
+  an interpreter. `cli._is_frozen()` reports this as exit 3 with an explanation
+  rather than letting it surface as `[WinError 2]`.
+* **Config is read from beside the exe** (`_CONFIG_PATH` = `<exe dir>/
+  manager-config.json`), so a CLI shipped elsewhere finds none and commands
+  needing `tokensave_exe` exit 3. Commands that need no config work anywhere.
+
 ### Legacy section (pre-Round 4 monolith)
 
 The sections that follow were written when the GUI lived in a single

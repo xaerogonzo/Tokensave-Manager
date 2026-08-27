@@ -30,7 +30,8 @@ import tkinter as tk
 from constants import C, CREATE_NO_WINDOW, _ANSI
 from helpers.mcp import _mcp_configs, _classify_mcp_entry
 from helpers.project_discovery import clear_pinned, set_pinned
-from helpers.shadow_links import load_shadow_config, refresh_shadows
+from helpers.sync_service import (ShadowPrep, prepare_shadows,
+                                  sync_argv)
 from helpers.runtime import log
 
 if TYPE_CHECKING:
@@ -147,7 +148,7 @@ class SyncStatusController:
 
     def cmd_sync(self, path: str) -> None:
         self._refresh_shadows_if_enabled(path)
-        self._on_run(["sync"], cwd=path, label=os.path.basename(path))
+        self._on_run(sync_argv(), cwd=path, label=os.path.basename(path))
 
     def _refresh_shadows_if_enabled(self, path: str) -> None:
         """SL2: regenerate shadow links before the index is rebuilt.
@@ -161,13 +162,9 @@ class SyncStatusController:
         nothing. Runs before the sync rather than after, so the new links are
         present for the indexer that is about to read them.
         """
-        config = load_shadow_config(path)
-        if not (config and config.auto_shadow):
-            return
-        result = refresh_shadows(path, config.ext_map)
-        self._log_shadow_refresh(result, path)
+        self._log_shadow_refresh(prepare_shadows(path), path)
 
-    def _log_shadow_refresh(self, result: dict, path: str) -> None:
+    def _log_shadow_refresh(self, prep: "ShadowPrep", path: str) -> None:
         """Report only what the user can act on.
 
         A silent no-op on a volume without hardlink support is correct: that
@@ -177,17 +174,17 @@ class SyncStatusController:
         problem that would otherwise present as "auto-shadow appears to do
         nothing at all".
         """
-        if not result["ran"]:
+        if not prep.worth_reporting:
             return
-        if result["failed"]:
+        if prep.failed:
             self._on_log(
                 "  ⚠ shadow links: %d created, %d could not be created "
-                "in %s" % (result["created"], result["failed"],
+                "in %s" % (prep.created, prep.failed,
                            os.path.basename(path)),
                 C["peach"])
-        elif result["created"]:
+        else:
             self._on_log("  + %d shadow link%s created" % (
-                result["created"], "" if result["created"] == 1 else "s"),
+                prep.created, "" if prep.created == 1 else "s"),
                 C["overlay0"])
 
     # Operations safe to run unattended across many projects: they stream to
@@ -196,8 +193,8 @@ class SyncStatusController:
     # Doctor is NOT here on purpose: it schedules follow-up dialogs (purge,
     # worktree repair) that would stack one per project.
     BATCH_OPS = {
-        "sync":   (["sync"],            "Sync"),
-        "force":  (["sync", "--force"], "Force re-sync"),
+        "sync":   (sync_argv(),             "Sync"),
+        "force":  (sync_argv(force=True),   "Force re-sync"),
         "status": (["status"],          "Status"),
     }
 

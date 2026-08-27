@@ -17,8 +17,9 @@ import pytest
 from constants import CREATE_NEW_CONSOLE
 
 from controllers import doctor_ctrl as dc
-from controllers.doctor_ctrl import DoctorController, PurgeResult
-from helpers import housekeeping
+from controllers.doctor_ctrl import DoctorController
+from helpers import doctor_service, housekeeping
+from helpers.doctor_service import PurgeResult
 
 
 # ── Purge flow ────────────────────────────────────────────────────────────────
@@ -54,8 +55,8 @@ def test_baseline_prevents_a_second_doctor_run(monkeypatch):
     """Passing a baseline must not trigger another `tokensave doctor`."""
     ctrl = _controller()
     scans = []
-    monkeypatch.setattr(ctrl, "scan_stale",
-                        lambda *a, **k: scans.append(a) or dc.DoctorScanResult(True))
+    monkeypatch.setattr(doctor_service, "scan_stale",
+                        lambda *a, **k: scans.append(a) or doctor_service.DoctorScanResult(True))
     ctrl.purge_stale("D:/proj", baseline=_entries(1))
     assert scans == []
 
@@ -63,14 +64,14 @@ def test_baseline_prevents_a_second_doctor_run(monkeypatch):
 def test_nothing_to_purge_reports_verified():
     r = _controller().purge_stale("D:/proj", baseline=[])
     assert r.status == PurgeResult.SUCCESS
-    assert r.verification_status == dc.VERIFY_VERIFIED
+    assert r.verification_status == doctor_service.VERIFY_VERIFIED
 
 
 def test_failed_baseline_scan_is_a_process_error(monkeypatch):
     """A scan we couldn't run must not be mistaken for 'nothing to purge'."""
     ctrl = _controller()
-    monkeypatch.setattr(ctrl, "scan_stale",
-                        lambda *a, **k: dc.DoctorScanResult(False, error="boom"))
+    monkeypatch.setattr(doctor_service, "scan_stale",
+                        lambda *a, **k: doctor_service.DoctorScanResult(False, error="boom"))
     r = ctrl.purge_stale("D:/proj")
     assert r.status == PurgeResult.PROCESS_ERROR
     assert "boom" in r.error
@@ -91,14 +92,14 @@ _ONE_LEFT = """
 
 
 @pytest.mark.parametrize("before,after_text,expected", [
-    (3, "", dc.VERIFY_VERIFIED),
-    (3, _ONE_LEFT, dc.VERIFY_PARTIAL),
+    (3, "", doctor_service.VERIFY_VERIFIED),
+    (3, _ONE_LEFT, doctor_service.VERIFY_PARTIAL),
 ])
 def test_verification_outcomes(monkeypatch, before, after_text, expected):
     ctrl = _controller()
     monkeypatch.setattr(
-        ctrl, "scan_stale",
-        lambda *a, **k: dc.DoctorScanResult(True, transcript=after_text))
+        doctor_service, "scan_stale",
+        lambda *a, **k: doctor_service.DoctorScanResult(True, transcript=after_text))
     r = ctrl.verify_purge("D:/proj", _entries(before))
     assert r.verification_status == expected
 
@@ -111,10 +112,10 @@ def test_no_change_is_distinct_from_partial(monkeypatch):
       • D:\\gone\\1
 """
     monkeypatch.setattr(
-        ctrl, "scan_stale",
-        lambda *a, **k: dc.DoctorScanResult(True, transcript=same))
+        doctor_service, "scan_stale",
+        lambda *a, **k: doctor_service.DoctorScanResult(True, transcript=same))
     r = ctrl.verify_purge("D:/proj", _entries(2))
-    assert r.verification_status == dc.VERIFY_NO_CHANGE
+    assert r.verification_status == doctor_service.VERIFY_NO_CHANGE
     assert r.status == PurgeResult.VERIFICATION_FAILED
 
 
@@ -122,10 +123,10 @@ def test_failed_scan_is_unverified_not_no_change(monkeypatch):
     """'We couldn't find out' must never be reported as 'nothing happened'."""
     ctrl = _controller()
     monkeypatch.setattr(
-        ctrl, "scan_stale",
-        lambda *a, **k: dc.DoctorScanResult(False, error="timed out"))
+        doctor_service, "scan_stale",
+        lambda *a, **k: doctor_service.DoctorScanResult(False, error="timed out"))
     r = ctrl.verify_purge("D:/proj", _entries(2))
-    assert r.verification_status == dc.VERIFY_UNVERIFIED
+    assert r.verification_status == doctor_service.VERIFY_UNVERIFIED
     assert "timed out" in r.error
 
 
@@ -151,5 +152,5 @@ def test_open_purge_terminal_launches_a_real_console(monkeypatch):
 def test_verification_labels_render_a_count():
     r = PurgeResult(PurgeResult.VERIFICATION_FAILED,
                     stale_after=_entries(3),
-                    verification_status=dc.VERIFY_PARTIAL)
+                    verification_status=doctor_service.VERIFY_PARTIAL)
     assert "3 remaining" in DoctorController.verification_label(r)

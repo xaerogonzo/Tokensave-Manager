@@ -554,7 +554,7 @@ class TestContextMenuGrouping:
         cmds, _ = self._menu_calls()
         dupes = [c for c in set(cmds) if cmds.count(c) > 1]
         assert dupes == [], f"command wired twice: {dupes}"
-        assert len(cmds) == 34, f"expected 34 commands, found {len(cmds)}"
+        assert len(cmds) == 35, f"expected 35 commands, found {len(cmds)}"
 
     def test_the_everyday_actions_stay_one_click_away(self):
         """Burying Sync in a submenu would make the common case worse."""

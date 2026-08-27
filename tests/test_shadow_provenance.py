@@ -37,6 +37,7 @@ from helpers.shadow_links import (
     scan_shadows,
     supports_hardlinks,
 )
+from helpers.sync_service import ShadowPrep, prepare_shadows
 
 EXT_MAP = {".zsc": ".cpp"}
 
@@ -298,24 +299,25 @@ def test_sync_does_not_touch_the_disk_when_auto_shadow_is_off(project, mocker):
     every sync.
     """
     save_shadow_map(project, EXT_MAP, auto_shadow=False)
-    refresh = mocker.patch("controllers.sync_ctrl.refresh_shadows")
-    _controller([])._refresh_shadows_if_enabled(project)
+    refresh = mocker.patch("helpers.sync_service.refresh_shadows")
+    prepare_shadows(project)
     refresh.assert_not_called()
 
 
 def test_sync_refreshes_shadows_when_auto_shadow_is_on(project, mocker):
     save_shadow_map(project, EXT_MAP, auto_shadow=True)
-    refresh = mocker.patch("controllers.sync_ctrl.refresh_shadows",
+    refresh = mocker.patch("helpers.sync_service.refresh_shadows",
                            return_value={"ran": True, "reason": "",
                                          "created": 1, "skipped": 0,
                                          "failed": 0})
-    _controller([])._refresh_shadows_if_enabled(project)
+    prep = prepare_shadows(project)
     refresh.assert_called_once()
+    assert (prep.ran, prep.created, prep.failed) == (True, 1, 0)
 
 
 def test_a_project_with_no_saved_map_is_never_refreshed(tmp_path, mocker):
-    refresh = mocker.patch("controllers.sync_ctrl.refresh_shadows")
-    _controller([])._refresh_shadows_if_enabled(str(tmp_path))
+    refresh = mocker.patch("helpers.sync_service.refresh_shadows")
+    prepare_shadows(str(tmp_path))
     refresh.assert_not_called()
 
 
@@ -324,9 +326,7 @@ def test_a_project_with_no_saved_map_is_never_refreshed(tmp_path, mocker):
 def test_an_unsupported_volume_logs_nothing(project):
     """A property of the disk, not an error — and it would repeat every sync."""
     logs = []
-    _controller(logs)._log_shadow_refresh(
-        {"ran": False, "reason": "volume does not support hardlinks",
-         "created": 0, "skipped": 0, "failed": 0}, project)
+    _controller(logs)._log_shadow_refresh(ShadowPrep(ran=False), project)
     assert logs == []
 
 
@@ -334,16 +334,14 @@ def test_creating_nothing_logs_nothing(project):
     """The steady state on a project whose files have not changed."""
     logs = []
     _controller(logs)._log_shadow_refresh(
-        {"ran": True, "reason": "", "created": 0, "skipped": 12,
-         "failed": 0}, project)
+        ShadowPrep(ran=True, created=0, failed=0), project)
     assert logs == []
 
 
 def test_created_links_are_reported(project):
     logs = []
     _controller(logs)._log_shadow_refresh(
-        {"ran": True, "reason": "", "created": 3, "skipped": 0,
-         "failed": 0}, project)
+        ShadowPrep(ran=True, created=3, failed=0), project)
     assert len(logs) == 1 and "3 shadow link" in logs[0]
 
 
@@ -356,7 +354,6 @@ def test_failures_on_a_supported_volume_are_warned_about(project):
     """
     logs = []
     _controller(logs)._log_shadow_refresh(
-        {"ran": True, "reason": "", "created": 0, "skipped": 0,
-         "failed": 4}, project)
+        ShadowPrep(ran=True, created=0, failed=4), project)
     assert len(logs) == 1
     assert "4 could not be created" in logs[0]

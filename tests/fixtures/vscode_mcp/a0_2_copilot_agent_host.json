@@ -1,0 +1,119 @@
+{
+  "fixture_version": 1,
+  "experiment": "A0.2",
+  "client": "GitHub Copilot / VS Code native agent",
+  "host": "Copilot Agent Host inside VS Code",
+  "measured_at": "2026-08-26",
+  "consulted_sources": [
+    "<APPDATA>/Code/User/mcp.json",
+    "<PROJECT>/.mcp.json"
+  ],
+  "not_consulted": [],
+  "effective_source": "both are read; they populate different categories in the MCP Servers view",
+  "layers": {
+    "configured": {
+      "status": "measured",
+      "value": "7 servers discovered: User 2, Extensions 4, Built-In 1"
+    },
+    "started": {
+      "status": "pending",
+      "value": "not invoked - every MCP server is unchecked in the tool picker"
+    },
+    "connected": {
+      "status": "measured",
+      "value": "discovered and listed, but NOT enabled for chat"
+    },
+    "serving_project": {
+      "status": "pending"
+    }
+  },
+  "vscode_categories": {
+    "User": [
+      "tokensave",
+      "tsprobe-b"
+    ],
+    "Extensions": [
+      "GitKraken",
+      "Azure MCP",
+      "Foundry MCP",
+      "pylance mcp server"
+    ],
+    "Built-In": [
+      "tsprobe-a"
+    ]
+  },
+  "evidence": [
+    {
+      "tag": "behavioural",
+      "claim": "Copilot/VS Code reads the workspace ROOT .mcp.json natively.",
+      "method": "MCP Servers view in 'Agent Customizations for Local', workspace = scratch projA",
+      "observed": "tsprobe-a is listed - it is defined ONLY in <PROJECT>/.mcp.json and nowhere else on the machine. VS Code files it under the category label 'Built-In'."
+    },
+    {
+      "tag": "behavioural",
+      "claim": "Copilot also reads VS Code's user-scope mcp.json.",
+      "method": "same view",
+      "observed": "the 'User' category holds exactly the two entries in <APPDATA>/Code/User/mcp.json - tokensave and the planted tsprobe-b."
+    },
+    {
+      "tag": "behavioural",
+      "claim": "Both servers reach Copilot's tool picker.",
+      "method": "Configure Tools dialog",
+      "observed": "tsprobe-a and tsprobe-b both appear as expandable entries with their own 'Update Tools' action."
+    },
+    {
+      "tag": "behavioural",
+      "claim": "Discovery is NOT enablement.",
+      "method": "checkbox state in Configure Tools ('92 Selected')",
+      "observed": "every MCP server - tokensave, tsprobe-a, tsprobe-b, Azure MCP, Foundry MCP, GitKraken, pylance - is UNCHECKED, while Built-In tools and extension tool-sets are checked. A configured server contributes nothing until selected."
+    },
+    {
+      "tag": "behavioural",
+      "claim": "VS Code does NOT collapse same-named servers from different scopes in its tool picker.",
+      "method": "collision run - 'tsprobe' defined in BOTH <PROJECT>/.mcp.json (-> projA) and <APPDATA>/Code/User/mcp.json (-> projB)",
+      "observed": "Configure Tools listed TWO separate 'tsprobe' entries, each with its own 'Update Tools' action, both unchecked. No 'disabled' marking on either."
+    },
+    {
+      "tag": "behavioural",
+      "claim": "Copilot never started either server, so arbitration was not exercised.",
+      "method": "asked Copilot agent mode for the tsprobe status",
+      "observed": "Copilot offered 'The MCP servers tsprobe, tokensave, Foundry MCP may have new tools and require interaction to start. Start them now?', then reported 'The dedicated tsprobe MCP entry is not exposed in the available tool catalog' and fell back to a shell 'tsprobe status' that does not exist. No MCP tool call occurred."
+    },
+    {
+      "tag": "behavioural",
+      "claim": "Copilot's MCP servers are inert on this machine until explicitly started.",
+      "method": "same run",
+      "observed": "every MCP server unchecked in the picker AND an explicit start prompt. A bare-serve entry sitting in VS Code's user config is therefore doing nothing for Copilot unless the user has started it."
+    },
+    {
+      "tag": "process",
+      "claim": "VS Code spawns MCP servers with cwd = the user's HOME directory, not the workspace folder.",
+      "method": "VS Code MCP server log, <APPDATA>/Code/logs/<stamp>/window1/mcpServer.mcp.config.usrlocal.tokensave.log",
+      "observed": "the bare-serve entry reported 'no TokenSave index found at <HOME>' - it resolved the home directory, never the open workspace."
+    },
+    {
+      "tag": "behavioural",
+      "claim": "The bare-serve user-scope entry does not shadow anything. It CRASHES.",
+      "method": "same log",
+      "observed": "'Multiple tokensave projects found - pass -p <path> to select one', 15 projects listed, then 'Error: config error: no TokenSave index found' and 'Connection state: Error Process exited with code 1'."
+    },
+    {
+      "tag": "process",
+      "claim": "VS Code names its config sources in the log filenames.",
+      "method": "log directory listing",
+      "observed": "user scope -> 'mcpServer.mcp.config.usrlocal.<name>.log'; workspace root .mcp.json -> 'mcpServer.workspace-dot-mcp.0.<name>.log'. 'workspace-dot-mcp' is VS Code's own identifier for the root .mcp.json surface - machine-readable, and independent confirmation that it reads that file."
+    },
+    {
+      "tag": "process",
+      "claim": "A server that never connects exposes no tools, which is why its checkbox will not stick.",
+      "method": "0-byte logs for all four probe servers + the Configure Tools UI",
+      "observed": "tsprobe/tsprobe-a/tsprobe-b logs are empty (never launched). In the picker those entries expand to nothing but 'Update Tools', whereas the working Pylance server expands to 6 named tools. Ticking them moved the count 204->202 and did not persist."
+    }
+  ],
+  "manager_action": "detect-only",
+  "conclusion": "Copilot Agent Host reads BOTH the workspace root .mcp.json (VS Code calls this source 'workspace-dot-mcp') and VS Code's user mcp.json. Combined with A0.3, one project .mcp.json serves both clients, so the Manager's existing binding covers them and no .vscode/mcp.json is needed.\n\nCORRECTION to the premise this investigation started from: the bare-serve user-scope entry is NOT a Desktop-style shadow. VS Code spawns MCP servers with cwd = HOME, so tokensave finds no index, refuses to guess among the registered projects, and exits 1. It has never served anything. The Manager's right action is therefore 'this entry is dead - fix or remove it', not 'repair a shadow'.",
+  "not_yet_measured": [
+    "Duplicate-name arbitration remains formally unmeasured, but it is now largely moot for this surface: a user-scope bare serve cannot win an arbitration it crashes out of. It would only matter for a user-scope entry carrying a valid -p.",
+    "Why VS Code labels a workspace .mcp.json server 'Built-In' in the MCP Servers view while calling the source 'workspace-dot-mcp' in its logs."
+  ]
+}

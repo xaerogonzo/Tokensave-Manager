@@ -19,12 +19,35 @@ import sys
 
 
 # ── Repo base dir (works under both python.exe and Nuitka --onefile) ─────────
-# Under Nuitka --onefile, NUITKA_ONEFILE_PARENT is the actual .exe path.
-# In dev mode, constants.py lives in src/ so go up one level to repo root.
-if os.environ.get("NUITKA_ONEFILE_PARENT"):
-    _BASE_DIR = os.path.dirname(os.path.abspath(os.environ["NUITKA_ONEFILE_PARENT"]))
-else:
-    _BASE_DIR = os.path.normpath(os.path.join(os.path.dirname(os.path.abspath(__file__)), ".."))
+
+def _resolve_base_dir(env: dict, argv0: str, module_file: str) -> str:
+    """Directory the Manager treats as its installation root.
+
+    `NUITKA_ONEFILE_PARENT` marks a onefile build, but its VALUE is the parent
+    process **PID**, not a path — measured against Nuitka 4.1, which reports
+    e.g. `'41108'`. The previous implementation ran that through
+    `dirname(abspath(...))`, which resolves a bare number against the current
+    directory and therefore returned **the cwd**: a packaged Manager looked for
+    `manager-config.json`, and wrote its logs, wherever it happened to be
+    launched from. It worked only because the usual launch path has the exe's
+    own folder as the cwd.
+
+    `sys.argv[0]` is the bootstrap exe's real path under onefile — verified by
+    building a probe — so it is what the frozen branch uses. Note `sys.executable`
+    is NOT a substitute: in a onefile build it points at the temporary extracted
+    binary, not at the exe the user launched.
+
+    Pure and parameterised so both branches are testable without a build; the
+    module-level constant below is the only caller in production.
+    """
+    if env.get("NUITKA_ONEFILE_PARENT"):
+        return os.path.dirname(os.path.abspath(argv0))
+    # Dev mode: constants.py lives in src/, so go up one level to the repo root.
+    return os.path.normpath(
+        os.path.join(os.path.dirname(os.path.abspath(module_file)), ".."))
+
+
+_BASE_DIR = _resolve_base_dir(os.environ, sys.argv[0], __file__)
 
 _CONFIG_PATH = os.path.join(_BASE_DIR, "manager-config.json")
 LOG_DIR      = os.path.join(_BASE_DIR, "logs")
@@ -57,6 +80,20 @@ MAX_DEPTH = 4
 
 
 # ── Windows subprocess flag ───────────────────────────────────────────────────
+# ── Version ───────────────────────────────────────────────────────────────────
+# THE canonical version of the Manager. Before this existed the project had no
+# single version source at all — nothing in pyproject.toml, no constant, and no
+# version in the window title — so anything needing one (the headless CLI's
+# `cli_version`, and later the VS Code extension deciding whether it understands
+# a payload) would have had to invent a second.
+#
+# Kept in step with the git tag by hand at release time. Deriving it from `git
+# describe` is not an option: the Nuitka onefile build ships without a
+# repository, and a version that silently reads "unknown" in the artifact users
+# actually run is worse than one maintained deliberately.
+APP_VERSION = "2.2.1"
+
+
 # Hide the cmd.exe window when spawning subprocesses from a Tk app under
 # pythonw.exe — without this every git/tokensave invocation flashes a
 # black console. MUST be 0 off-Windows: a non-zero `creationflags` makes

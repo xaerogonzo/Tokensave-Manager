@@ -1,0 +1,114 @@
+{
+  "fixture_version": 1,
+  "experiment": "A0.3",
+  "client": "Claude Code VS Code extension",
+  "client_version": "anthropic.claude-code-2.1.246-win32-x64",
+  "host": "VS Code extension host, which spawns the Claude Code CLI",
+  "measured_at": "2026-08-26",
+  "consulted_sources": [
+    "<PROJECT>/.mcp.json",
+    "<PROJECT>/.claude/settings.local.json",
+    "<PROJECT>/.claude/settings.json",
+    "<HOME>/.claude.json",
+    "managed-settings.json / managed-mcp.json (enterprise, not present here)"
+  ],
+  "not_consulted": [
+    "<APPDATA>/Code/User/mcp.json",
+    "<PROJECT>/.vscode/mcp.json",
+    "<HOME>/.copilot/mcp-config.json"
+  ],
+  "effective_source": "<PROJECT>/.mcp.json (project scope), alongside <HOME>/.claude.json for user scope",
+  "layers": {
+    "configured": {
+      "status": "measured",
+      "value": "Claude Code's own chain only"
+    },
+    "started": {
+      "status": "measured",
+      "value": "tokensave serve -p . spawned on demand; uptime_secs 5 at first tool call"
+    },
+    "connected": {
+      "status": "measured",
+      "value": "2 MCP servers, 2 connected, 0 not connected, 0 disabled"
+    },
+    "serving_project": {
+      "status": "measured",
+      "value": "projA - the workspace folder"
+    }
+  },
+  "evidence": [
+    {
+      "tag": "config",
+      "claim": "The extension contributes no MCP settings of its own.",
+      "method": "package.json contributes.configuration.properties",
+      "observed": "15 claudeCode.* properties, none MCP-related (environmentVariables, useTerminal, allowDangerouslySkipPermissions, claudeProcessWrapper, respectGitIgnore, initialPermissionMode, disableLoginPrompt, autosave, focusView, useCtrlEnterToSend, preferredLocation, enableNewConversationShortcut, enableReopenClosedSessionShortcut, hideOnboarding, usePythonEnvironment)"
+    },
+    {
+      "tag": "config",
+      "claim": "The extension claims Claude Code's settings files, not VS Code's MCP file.",
+      "method": "package.json contributes.jsonValidation",
+      "observed": "fileMatch = **/.claude/settings.json, **/.claude/settings.local.json, **/ClaudeCode/managed-settings.json, **/claude-code/managed-settings.json"
+    },
+    {
+      "tag": "config",
+      "claim": "Its bundled settings schema speaks Claude Code's MCP vocabulary, keyed on .mcp.json.",
+      "method": "claude-code-settings.schema.json properties",
+      "observed": "enabledMcpjsonServers ('List of approved MCP servers from .mcp.json'), disabledMcpjsonServers, enableAllProjectMcpServers, allowedMcpServers, deniedMcpServers, allowManagedMcpServersOnly, allowAllClaudeAiMcps"
+    },
+    {
+      "tag": "config",
+      "claim": "The bundle never references VS Code's native MCP file or schema.",
+      "method": "grep over extension.js (3,015,235 bytes)",
+      "observed": "mcpServers x34, McpServers x44, mcp.json x8 (all Claude Code's .mcp.json / managed-mcp.json), modelcontextprotocol x6, enabledMcpjsonServers x1; ZERO hits for '.vscode/mcp' or 'Code/User/mcp'"
+    },
+    {
+      "tag": "config",
+      "claim": "The extension spawns the CLI rather than implementing MCP itself.",
+      "method": "extension.js string context + claudeCode.claudeProcessWrapper / claudeCode.useTerminal settings",
+      "observed": "'this setting does not gate other MCP entry points (SDK setMcpServers, claude mcp add, .mcp.json). Also blocks surfaces that spawn the CLI with these flags'"
+    },
+    {
+      "tag": "behavioural",
+      "claim": "The extension reads the project's own .mcp.json.",
+      "method": "Claude Code session opened on the scratch projA in VS Code; asked for a tsprobe status",
+      "observed": "tool invoked as mcp__tsprobe-a__tokensave_status - tsprobe-a is defined ONLY in <PROJECT>/.mcp.json"
+    },
+    {
+      "tag": "behavioural",
+      "claim": "It does NOT read VS Code's own mcp.json.",
+      "method": "tsprobe-b was planted in <APPDATA>/Code/User/mcp.json pointing at projB before the run",
+      "observed": "session reported exactly 2 servers; they are tsprobe-a (project .mcp.json) and codegraph (user <HOME>/.claude.json). tsprobe-b never appeared, despite being present in VS Code's file throughout."
+    },
+    {
+      "tag": "behavioural",
+      "claim": "The server answered from the correct tree.",
+      "method": "projA and projB were built with deliberately different shapes, then compared against the pre-run measurement",
+      "observed": "node_count 14, file_count 7, db_size_bytes 475136 - byte-exact match for projA (projB is 23 files / 46 nodes). sibling_projects listed projB, i.e. the server was standing IN projA looking outward."
+    },
+    {
+      "tag": "process",
+      "claim": "No bare-serve server was running to shadow it.",
+      "method": "Win32_Process enumeration of tokensave.exe during the run",
+      "observed": "3 servers live, every one 'tokensave serve -p .'; none bare."
+    },
+    {
+      "tag": "behavioural",
+      "claim": "No MCP approval prompt appears in the session transcript.",
+      "method": "reading the pasted transcript of the first session in a freshly created project",
+      "observed": "tsprobe-a was connected and callable with no visible approval step. NOT proof that approval was skipped - the folder trust dialog may have covered it, and the transcript may not render such prompts. Flagged for the trust-layer work, not relied upon."
+    },
+    {
+      "tag": "behavioural",
+      "claim": "Immune to a same-named user-scope server: reconfirmed under collision.",
+      "method": "'tsprobe' defined in BOTH <PROJECT>/.mcp.json (-> projA) and <APPDATA>/Code/User/mcp.json (-> projB), then asked the Claude Code panel for status",
+      "observed": "node_count 14 / file_count 7 / db_size_bytes 475136 - projA, byte-exact. The identically-named user-scope server pointing at projB had no effect, because that file is never read."
+    }
+  ],
+  "manager_action": "no action required",
+  "provisional_conclusion": "CONFIRMED. The Claude Code VS Code extension uses Claude Code's own MCP chain (project .mcp.json + user ~/.claude.json) and ignores VS Code's mcp.json entirely. The Manager's existing .mcp.json machinery therefore already covers the priority client inside VS Code: no VS Code-specific binding, and no mcp_vscode.py, is needed for it. Phase C is reduced to the Copilot surfaces, if measurement shows they need it.",
+  "incidental_finding": {
+    "key": "enableAllProjectMcpServers",
+    "why_it_matters": "memory/roadmap11_binding_inert.md records 'There is NO CLI to approve - approval is interactive, or you write settings.local.json yourself.' This first-party settings key is a third option and may be a cleaner approval path than writing enabledMcpjsonServers per project.",
+    "status": "unverified - do not act on until tested"
+  }
+}

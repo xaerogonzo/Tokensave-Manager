@@ -1,0 +1,130 @@
+{
+  "name": "tokensave-manager",
+  "displayName": "TokenSave Manager",
+  "description": "Run TokenSave Manager checks, sync, doctor and test gaps from inside VS Code.",
+  "version": "2.2.1",
+  "publisher": "tokensave",
+  "license": "MIT",
+  "engines": {
+    "vscode": "^1.85.0"
+  },
+  "categories": [
+    "Other"
+  ],
+  "main": "./out/extension.js",
+  "contributes": {
+    "viewsContainers": {
+      "activitybar": [
+        {
+          "id": "tokensaveManager",
+          "title": "TokenSave Manager",
+          "icon": "resources/icon.svg"
+        }
+      ]
+    },
+    "views": {
+      "tokensaveManager": [
+        {
+          "id": "tokensaveManager.projects",
+          "name": "Projects",
+          "contextualTitle": "TokenSave Manager"
+        }
+      ]
+    },
+    "commands": [
+      {
+        "command": "tokensaveManager.setManagerPath",
+        "title": "Set Manager Path\u2026",
+        "category": "TokenSave Manager"
+      },
+      {
+        "command": "tokensaveManager.refresh",
+        "title": "Refresh",
+        "category": "TokenSave Manager",
+        "icon": "$(refresh)"
+      },
+      {
+        "command": "tokensaveManager.doctor",
+        "title": "Doctor",
+        "category": "TokenSave Manager"
+      },
+      {
+        "command": "tokensaveManager.mcpStatus",
+        "title": "MCP Status",
+        "category": "TokenSave Manager"
+      },
+      {
+        "command": "tokensaveManager.testGaps",
+        "title": "Test Gaps",
+        "category": "TokenSave Manager"
+      },
+      {
+        "command": "tokensaveManager.checks",
+        "title": "Run Checks",
+        "category": "TokenSave Manager"
+      },
+      {
+        "command": "tokensaveManager.sync",
+        "title": "Sync Tokensave",
+        "category": "TokenSave Manager"
+      },
+      {
+        "command": "tokensaveManager.commitRequest",
+        "title": "Show Pending Commit Request",
+        "category": "TokenSave Manager"
+      }
+    ],
+    "menus": {
+      "view/title": [
+        {
+          "command": "tokensaveManager.refresh",
+          "when": "view == tokensaveManager.projects",
+          "group": "navigation"
+        }
+      ]
+    },
+    "configuration": {
+      "title": "TokenSave Manager",
+      "properties": {
+        "tokensaveManager.managerPath": {
+          "type": "string",
+          "default": "",
+          "markdownDescription": "**Recommended.** Path to your TokenSave Manager checkout or install. The extension then runs its live `src/cli.py` rather than a bundled binary, so it never goes stale, finds `manager-config.json` automatically, and can run `checks`."
+        },
+        "tokensaveManager.pythonPath": {
+          "type": "string",
+          "default": "",
+          "markdownDescription": "Python interpreter used with `managerPath`. Defaults to `python` on PATH."
+        },
+        "tokensaveManager.cliPath": {
+          "type": "string",
+          "default": "",
+          "markdownDescription": "Absolute path to a built `tokensave-manager-cli.exe`. Takes precedence over `managerPath`. Leave empty unless you have no checkout \u2014 a compiled CLI is a snapshot and goes stale whenever the Manager changes."
+        },
+        "tokensaveManager.configPath": {
+          "type": "string",
+          "default": "",
+          "markdownDescription": "Absolute path to `manager-config.json`, passed to the CLI as `--config`. **Not needed in source mode** \u2014 the CLI finds the config beside the checkout. Required only when running a relocated binary."
+        },
+        "tokensaveManager.testGapsBase": {
+          "type": "string",
+          "default": "origin/master",
+          "description": "Git ref that Test Gaps compares against."
+        }
+      }
+    }
+  },
+  "scripts": {
+    "compile": "tsc -p ./",
+    "watch": "tsc -watch -p ./",
+    "vscode:prepublish": "npm run compile",
+    "package": "vsce package --target win32-x64",
+    "test": "node --test test/cli.test.js",
+    "pretest": "npm run compile"
+  },
+  "devDependencies": {
+    "@types/node": "^20.11.0",
+    "@types/vscode": "^1.85.0",
+    "typescript": "^5.4.0"
+  }
+}
