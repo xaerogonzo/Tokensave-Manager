@@ -1019,3 +1019,104 @@ def test_test_run_is_classified_read_only():
     """It runs a suite but writes nothing to the project beyond its own lock."""
     assert "test-run" in cli.READ_ONLY_COMMANDS
     assert "tests" in cli.READ_ONLY_COMMANDS
+
+
+# ── found in real use, 2026-08-27 ───────────────────────────────────────────
+
+def test_a_project_with_no_python_tests_is_not_reported_as_unverifiable(
+        capsys, tmp_path):
+    """Found on a PowerShell project with a tests/ directory: pytest collected
+    0 items and said "no tests ran", and this command called that "could not
+    verify the result".
+
+    `_parse_pytest_summary` scans for passed/failed/error, and pytest's
+    zero-test footer contains none of them, so it returns (0, 0) — the same
+    value it returns when the output was unreadable. Conflating them is exactly
+    what EXIT_VERIFY_FAILED exists to prevent, committed by the code enforcing
+    it.
+    """
+    project = _suite(tmp_path, "# a file with no tests in it\n")
+    code, env, _ = _run(capsys, ["test-run", "--project", project, "--json"])
+    assert code == EXIT_OK
+    assert env["data"]["collected"] == 0
+    assert env["error"] is None
+
+
+def test_an_actually_unreadable_run_is_still_unverifiable(capsys, tmp_path,
+                                                          mocker):
+    """The fix must not swallow the case it was carved out of."""
+    project = _suite(tmp_path, "def test_a(): assert 1\n")
+    mocker.patch("helpers.smoke_runner.run_smoke_tests",
+                 return_value=(0, 0, "pytest timed out after 300 s."))
+    code, env, _ = _run(capsys, ["test-run", "--project", project, "--json"])
+    assert code == EXIT_VERIFY_FAILED
+    assert "could not read" in env["error"]
+
+
+@pytest.mark.parametrize("output,expected", [
+    pytest.param("===== no tests ran in 0.17s =====", True, id="no-tests-ran"),
+    pytest.param("collecting ... collected 0 items", True, id="collected-zero"),
+    pytest.param("pytest timed out after 300 s.", False, id="timeout"),
+    pytest.param("", False, id="nothing-at-all"),
+    pytest.param("INTERNALERROR> boom", False, id="crash"),
+])
+def test_only_pytest_saying_so_counts_as_zero_tests(output, expected):
+    assert cli._collected_nothing(output) is expected
+
+
+def test_test_gaps_asks_the_repo_for_its_default_branch(capsys, project,
+                                                        mocker):
+    """`origin/master` as a hardcoded default is simply wrong on every repo
+    that uses `main` — and it presented as "0 test gaps", not as an error.
+    `auto` reads refs/remotes/origin/HEAD, which is the answer git already
+    holds rather than a guess between the two names."""
+    mocker.patch("helpers.config._load_config", return_value={"git_exe": "git"})
+    mocker.patch("helpers.git.default_base_ref", return_value="origin/main")
+    mocker.patch("helpers.git.ref_exists", return_value=True)
+    suggest = mocker.patch("helpers.test_gap_report.suggest_tests_for_diff",
+                           return_value=[])
+    code, env, _ = _run(capsys, ["test-gaps", "--project", project, "--json"])
+    assert code == EXIT_OK
+    assert env["data"]["base"] == "origin/main"
+    assert env["data"]["base_requested"] == cli.AUTO_BASE
+    assert suggest.call_args.args[-1] == "origin/main"
+
+
+def test_an_explicit_base_is_never_replaced_by_the_detected_one(capsys,
+                                                                project,
+                                                                mocker):
+    """Honouring what was asked for is the whole point; `auto` is opt-in."""
+    mocker.patch("helpers.config._load_config", return_value={"git_exe": "git"})
+    detect = mocker.patch("helpers.git.default_base_ref",
+                          return_value="origin/main")
+    mocker.patch("helpers.git.ref_exists", return_value=True)
+    suggest = mocker.patch("helpers.test_gap_report.suggest_tests_for_diff",
+                           return_value=[])
+    _, env, _ = _run(capsys, ["test-gaps", "--project", project, "--json",
+                              "--base", "v1.0"])
+    assert env["data"]["base"] == "v1.0"
+    assert suggest.call_args.args[-1] == "v1.0"
+    detect.assert_not_called()
+
+
+def test_auto_refuses_rather_than_guessing_when_the_repo_will_not_say(
+        capsys, project, mocker):
+    """No trying `main` then `master`: picking one is how a diff ends up
+    answering a different question than the one asked."""
+    mocker.patch("helpers.config._load_config", return_value={"git_exe": "git"})
+    mocker.patch("helpers.git.default_base_ref", return_value=None)
+    code, env, _ = _run(capsys, ["test-gaps", "--project", project, "--json"])
+    assert code == EXIT_PREREQUISITE
+    assert "default branch" in env["error"]
+
+
+def test_a_bad_explicit_base_names_the_one_that_would_have_worked(capsys,
+                                                                  project,
+                                                                  mocker):
+    mocker.patch("helpers.config._load_config", return_value={"git_exe": "git"})
+    mocker.patch("helpers.git.default_base_ref", return_value="origin/main")
+    mocker.patch("helpers.git.ref_exists", return_value=False)
+    _, env, _ = _run(capsys, ["test-gaps", "--project", project, "--json",
+                              "--base", "origin/master"])
+    assert "origin/master" in env["error"]
+    assert "origin/main" in env["error"], "the hint is the useful half"

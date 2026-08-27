@@ -70,8 +70,13 @@ absent, so the accident cannot ship even if the ignore file is edited wrongly.
 
 ### Other settings
 
-`tokensaveManager.testGapsBase` — the git ref Test Gaps compares against
-(default `origin/master`).
+`tokensaveManager.testGapsBase` — the git ref Test Gaps compares against.
+Defaults to `auto`, which asks the repository for its own default branch
+via `refs/remotes/origin/HEAD` — right whether it uses `main` or `master`.
+Set an explicit ref to override. A ref that does not exist is refused
+rather than quietly diffed against nothing, because an empty diff renders
+as "0 test gaps" — the most reassuring way to report a question that was
+never asked.
 
 ## Platform
 

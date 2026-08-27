@@ -366,3 +366,32 @@ def ref_exists(path: str, git_exe: str, ref: str) -> bool:
     except (FileNotFoundError, OSError):
         return False
     return proc.returncode == 0
+
+
+def default_base_ref(path: str, git_exe: str) -> "str | None":
+    """The repo's own default branch as a remote-tracking ref, or None.
+
+    Reads `refs/remotes/origin/HEAD`, which is what `git clone` sets and what
+    `git remote set-head` refreshes — so this is asking git which branch the
+    remote considers default, not guessing between `main` and `master`.
+
+    Returns None rather than a guess when the symbolic ref is missing (a repo
+    with no remote, or one cloned before the ref was written). A caller should
+    then ask for an explicit base: picking one for the user is how a diff ends
+    up silently answering a different question than the one asked.
+    """
+    try:
+        proc = subprocess.run(
+            [git_exe, "-C", path, "symbolic-ref", "refs/remotes/origin/HEAD"],
+            capture_output=True, text=True,
+            creationflags=CREATE_NO_WINDOW,
+        )
+    except (FileNotFoundError, OSError):
+        return None
+    if proc.returncode != 0:
+        return None
+    ref = (proc.stdout or "").strip()
+    prefix = "refs/remotes/"
+    if not ref.startswith(prefix):
+        return None
+    return ref[len(prefix):] or None

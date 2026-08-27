@@ -57,6 +57,9 @@ EXIT_USAGE = 2               # invalid invocation (argparse also uses 2)
 EXIT_PREREQUISITE = 3        # a required tool or path is missing
 EXIT_VERIFY_FAILED = 4       # an operation ran but could not be verified
 
+#: `--base auto` means "ask the repository", not "assume master".
+AUTO_BASE = "auto"
+
 
 class Result:
     """What a command handler returns, before it becomes an envelope."""
@@ -454,6 +457,15 @@ def _cmd_test_run(args) -> Result:
             "total": total, "duration_seconds": round(duration, 2),
             "output": output[-_OUTPUT_CAP:]}
 
+    if total == 0 and _collected_nothing(output):
+        # pytest SAID "no tests ran". That is a result, read successfully, and
+        # it is not the same as failing to read one — which is the whole reason
+        # EXIT_VERIFY_FAILED exists. Treating a project that simply has no
+        # Python tests (a PowerShell repo with a tests/ directory, say) as
+        # unverifiable was this command reporting its own contract backwards.
+        data["collected"] = 0
+        return Result(EXIT_OK, data,
+                      human="test-run: no tests collected")
     if total == 0:
         # It ran, but no summary could be read — a timeout, a launch failure,
         # or a collection error. Reporting EXIT_OK here would say "it passed".
@@ -468,6 +480,22 @@ def _cmd_test_run(args) -> Result:
 #: Tail of pytest output kept in the envelope. Enough to see the failures
 #: without shipping a megabyte of collection noise to an editor.
 _OUTPUT_CAP = 20000
+
+
+def _collected_nothing(output: str) -> bool:
+    """True when pytest positively reported that it found no tests.
+
+    `_parse_pytest_summary` scans for `passed`/`failed`/`error`, and pytest's
+    zero-test footer — `===== no tests ran in 0.17s =====` — contains none of
+    them, so it returns (0, 0): the same value it returns when the output could
+    not be read at all. Those are different answers and only one of them is
+    honest to report as unverifiable.
+
+    Keyed on pytest's own summary line rather than on an empty count, so a
+    timeout or a crashed collection still falls through to EXIT_VERIFY_FAILED.
+    """
+    text = (output or "").lower()
+    return "no tests ran" in text or "collected 0 items" in text
 
 
 def _count_skipped(output: str) -> int:
@@ -490,25 +518,46 @@ def _cmd_test_gaps(args) -> Result:
     `origin/master` is a sensible default, not a guarantee, and a fresh clone
     with no fetch or a repo whose default branch is `main` both hit it.
 
-    There is deliberately no fallback to `master`, `HEAD` or the current
-    branch: silently answering a different question than the one asked is the
+    `--base auto` (the default) asks the repository which branch its remote
+    considers default, via `refs/remotes/origin/HEAD`. That is not a guess
+    between `main` and `master` — it is the answer git already holds, and a
+    hardcoded `origin/master` default was simply wrong on every repo that uses
+    `main`. When the symbolic ref is missing, `auto` refuses and asks for an
+    explicit base rather than trying candidates.
+
+    An explicitly named base is honoured exactly as given, and verified. There
+    is deliberately no fallback to `master`, `HEAD` or the current branch:
+    silently answering a different question than the one asked is the
     inference this whole surface exists to remove.
     """
-    from helpers.git import ref_exists
+    from helpers.git import default_base_ref, ref_exists
     from helpers.test_gap_report import suggest_tests_for_diff
     project = _resolve_project(args.project)
     cfg = _load_manager_config(args.config)
     git_exe = (cfg.get("git_exe") or "git").strip() or "git"
 
-    if not ref_exists(project, git_exe, args.base):
+    base = args.base
+    if base == AUTO_BASE:
+        base = default_base_ref(project, git_exe)
+        if not base:
+            raise _Prerequisite(
+                "could not read this repository's default branch "
+                "(refs/remotes/origin/HEAD is not set) — pass --base "
+                "explicitly, or run `git remote set-head origin --auto`")
+
+    if not ref_exists(project, git_exe, base):
+        detected = default_base_ref(project, git_exe)
+        hint = f" — this repository's default looks like {detected!r}" \
+            if detected and detected != base else ""
         raise _Prerequisite(
-            f"base ref {args.base!r} does not exist in this repository — "
-            "pass --base with one that does (and `git fetch` first if it is "
+            f"base ref {base!r} does not exist in this repository{hint}. "
+            "Pass --base with one that does (and `git fetch` first if it is "
             "a remote-tracking ref)")
 
-    suggestions = suggest_tests_for_diff(project, git_exe, args.base)
+    suggestions = suggest_tests_for_diff(project, git_exe, base)
     data = {
-        "base": args.base,
+        "base": base,
+        "base_requested": args.base,
         "count": len(suggestions),
         "suggestions": [
             {"source": getattr(s, "source_path", ""),
@@ -518,7 +567,7 @@ def _cmd_test_gaps(args) -> Result:
         ],
     }
     return Result(EXIT_OK, data,
-                  human=f"{len(suggestions)} test gap(s) against {args.base}")
+                  human=f"{len(suggestions)} test gap(s) against {base}")
 
 
 def _cmd_mcp_status(args) -> Result:
@@ -753,7 +802,9 @@ def _build_parser() -> argparse.ArgumentParser:
     add("test-run", "run the suite once and report structured counts")
 
     t = add("test-gaps", "suggest tests for changes against a base ref")
-    t.add_argument("--base", default="origin/master")
+    t.add_argument("--base", default=AUTO_BASE,
+                   help="git ref to compare against; 'auto' asks the "
+                        "repository for its default branch")
 
     m = add("mcp-status", "report MCP binding across layers (read-only)")
     m.add_argument("--probe-effective", action="store_true",

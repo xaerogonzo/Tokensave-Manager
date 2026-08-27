@@ -2,7 +2,7 @@
   "name": "tokensave-manager",
   "displayName": "TokenSave Manager",
   "description": "Run TokenSave Manager checks, sync, doctor and test gaps from inside VS Code.",
-  "version": "2.3.0",
+  "version": "2.3.1",
   "publisher": "tokensave",
   "license": "MIT",
   "engines": {
@@ -129,8 +129,8 @@
         },
         "tokensaveManager.testGapsBase": {
           "type": "string",
-          "default": "origin/master",
-          "description": "Git ref that Test Gaps compares against."
+          "default": "auto",
+          "markdownDescription": "Git ref that Test Gaps compares against. `auto` asks the repository for its own default branch (`refs/remotes/origin/HEAD`), which is right whether it uses `main` or `master`. Set an explicit ref to override."
         }
       }
     }
