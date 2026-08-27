@@ -268,21 +268,32 @@ def _cmd_doctor(args) -> Result:
                       human=f"doctor scan failed: {scan.error}")
 
     stale = housekeeping.parse_stale_entries(scan.transcript)
+    # tokensave TRUNCATES its own list — ten bullets, then "… and 2 more" — so
+    # counting the entries we could name under-reports the total. The header
+    # carries the real number and is authoritative; the named list is what we
+    # can act on. Reporting only the shorter one presented 12 stale projects
+    # as 10.
+    named = [getattr(e, "path", str(e)) for e in stale]
+    total = housekeeping.parse_stale_total(scan.transcript)
+    if total is None:
+        total = len(named)
     data = {
         "scanned": True,
         "exit_code": scan.exit_code,
-        "stale_count": len(stale),
-        "stale": [getattr(e, "path", str(e)) for e in stale],
+        "stale_count": total,
+        "stale": named,
+        "stale_truncated": total > len(named),
         "audit": audit,
     }
     advisory = f" ({audit['violation_count']} audit finding(s))" \
         if audit["violation_count"] else ""
-    if not stale:
+    if not total:
         return Result(EXIT_OK, data, findings=findings,
                       human=f"doctor: no stale entries{advisory}")
+    shown = f" ({len(named)} listed)" if data["stale_truncated"] else ""
     return Result(EXIT_FAILED, data, findings=findings,
-                  human=f"doctor: {len(stale)} stale entr"
-                        f"{'y' if len(stale) == 1 else 'ies'}{advisory}")
+                  human=f"doctor: {total} stale entr"
+                        f"{'y' if total == 1 else 'ies'}{shown}{advisory}")
 
 
 def _cmd_sync(args) -> Result:
@@ -346,8 +357,18 @@ def _cmd_scout(args) -> Result:
     from helpers.refactor_scout import run_scout
     project = _resolve_project(args.project)
 
+    # Honour the suppressions made in the Manager's scout dialog. Without this
+    # a finding dismissed there came straight back in the editor, which makes
+    # the Ignore button look broken and is the sort of split-brain the single
+    # findings contract exists to avoid.
     try:
-        by_kind, suppressed = run_scout(project)
+        ignored = set(_load_manager_config(args.config)
+                      .get("refactor_scout_ignored") or [])
+    except _Prerequisite:
+        ignored = set()
+
+    try:
+        by_kind, suppressed = run_scout(project, ignored)
     except FileNotFoundError as exc:
         # Scout is only as good as the index. Say which index, and how to make
         # one, rather than reporting "no findings" from a tree never scanned.

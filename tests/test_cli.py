@@ -1120,3 +1120,62 @@ def test_a_bad_explicit_base_names_the_one_that_would_have_worked(capsys,
                               "--base", "origin/master"])
     assert "origin/master" in env["error"]
     assert "origin/main" in env["error"], "the hint is the useful half"
+
+
+def test_scout_honours_suppressions_made_in_the_manager(capsys, project,
+                                                        mocker):
+    """A finding dismissed in the Manager's scout dialog came straight back in
+    the editor, because this command called run_scout with no ignored set. That
+    makes the Ignore button look broken, and is the split-brain the single
+    findings contract exists to avoid."""
+    mocker.patch("helpers.config._load_config",
+                 return_value={"refactor_scout_ignored": ["abc", "def"]})
+    run = mocker.patch("helpers.refactor_scout.run_scout",
+                       return_value=({}, 2))
+    _run(capsys, ["scout", "--project", project, "--json"])
+    assert run.call_args.args[1] == {"abc", "def"}
+
+
+def test_scout_still_runs_when_there_is_no_config_to_read(capsys, project,
+                                                          mocker):
+    mocker.patch("helpers.config._load_config", return_value={})
+    run = mocker.patch("helpers.refactor_scout.run_scout",
+                       return_value=({}, 0))
+    code, _, _ = _run(capsys, ["scout", "--project", project, "--json"])
+    assert code == EXIT_OK
+    assert run.call_args.args[1] == set()
+
+
+def test_doctor_reports_the_count_tokensave_gives_not_the_bullets_it_shows(
+        capsys, project, mocker):
+    """tokensave TRUNCATES its stale list — ten bullets, then "… and 2 more" —
+    so counting the entries we could name reported 12 stale projects as 10."""
+    from helpers.doctor_service import DoctorScanResult
+    transcript = ("  ! 12 stale project(s) in global DB (registered but gone):\n"
+                  "      - D:/a\n      - D:/b\n      ... and 10 more\n"
+                  "        Re-run `tokensave doctor` interactively to purge.\n")
+    mocker.patch("helpers.config._load_config",
+                 return_value={"tokensave_exe": "tokensave"})
+    mocker.patch("helpers.doctor_service.scan_stale",
+                 return_value=DoctorScanResult(True, transcript=transcript,
+                                               exit_code=0))
+    _, env, _ = _run(capsys, ["doctor", "--project", project, "--json"])
+    assert env["data"]["stale_count"] == 12
+    assert len(env["data"]["stale"]) == 2
+    assert env["data"]["stale_truncated"] is True
+
+
+def test_an_untruncated_stale_list_is_not_marked_truncated(capsys, project,
+                                                           mocker):
+    from helpers.doctor_service import DoctorScanResult
+    transcript = ("  ! 2 stale project(s) in global DB (registered but gone):\n"
+                  "      - D:/a\n      - D:/b\n"
+                  "        Re-run `tokensave doctor` interactively to purge.\n")
+    mocker.patch("helpers.config._load_config",
+                 return_value={"tokensave_exe": "tokensave"})
+    mocker.patch("helpers.doctor_service.scan_stale",
+                 return_value=DoctorScanResult(True, transcript=transcript,
+                                               exit_code=0))
+    _, env, _ = _run(capsys, ["doctor", "--project", project, "--json"])
+    assert env["data"]["stale_count"] == 2
+    assert env["data"]["stale_truncated"] is False
