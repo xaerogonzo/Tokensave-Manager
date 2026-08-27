@@ -672,6 +672,8 @@ class ProjectsTabController:
         open_m.add_separator()
         open_m.add_command(label="⚙   Generate VS Code tasks…",
                            command=self.cmd_generate_vscode_tasks)
+        open_m.add_command(label="🗂  Generate VS Code workspace…",
+                           command=self.cmd_generate_vscode_workspace)
         m.add_cascade(label="📂  Open", menu=open_m)
 
         # ── Maintenance — everything destructive or structural ─────────────
@@ -1036,6 +1038,24 @@ class ProjectsTabController:
 
         ok, message = write_tasks_json(path, runner)
         self._on_log(f"[vscode] {message}", C["green"] if ok else C["peach"])
+
+    def cmd_generate_vscode_workspace(self) -> None:
+        """Right-click -> Open -> Generate VS Code workspace...
+
+        Project-wide rather than selection-scoped: a workspace is a set of
+        repos, and which ones belong together is the one question the Manager
+        cannot answer for itself. Its registry is a discovery result — every
+        repo under the search roots — so generating across all of it produces a
+        workspace of unrelated code. Hence a picker.
+        """
+        from dialogs.workspace_builder import WorkspaceBuilderDialog
+        paths = [p["path"] for p in self._get_projects() if p.get("path")]
+        if not paths:
+            messagebox.showinfo(
+                "Generate VS Code workspace",
+                "No projects are registered yet.", parent=self._root)
+            return
+        WorkspaceBuilderDialog(self._root, sorted(paths), on_log=self._on_log)
 
     def cmd_assign_category(self) -> None:
         path = self._selected_path()

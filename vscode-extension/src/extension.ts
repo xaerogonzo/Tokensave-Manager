@@ -18,13 +18,20 @@ import * as fs from "fs";
 import * as path from "path";
 import * as vscode from "vscode";
 import { CliResult, EXIT, runCli } from "./cli";
-import { ACTIONS, ProjectsProvider } from "./tree";
+import { DiagnosticStore } from "./diagnostics";
+import { ACTIONS, DIAGNOSTIC_COMMANDS, ProjectsProvider } from "./tree";
 
 let output: vscode.OutputChannel;
+let diagnostics: DiagnosticStore;
 
 export function activate(context: vscode.ExtensionContext): void {
   output = vscode.window.createOutputChannel("TokenSave Manager");
   context.subscriptions.push(output);
+
+  const collection =
+    vscode.languages.createDiagnosticCollection("tokensave");
+  context.subscriptions.push(collection);
+  diagnostics = new DiagnosticStore(collection);
 
   const provider = new ProjectsProvider(context);
   context.subscriptions.push(
@@ -118,7 +125,13 @@ async function setManagerPath(provider: ProjectsProvider): Promise<void> {
 function registerRefreshTriggers(context: vscode.ExtensionContext,
                                  provider: ProjectsProvider): void {
   context.subscriptions.push(
-    vscode.workspace.onDidChangeWorkspaceFolders(() => provider.refresh()),
+    vscode.workspace.onDidChangeWorkspaceFolders((event) => {
+      // A folder that left the workspace must not keep contributing squiggles.
+      for (const folder of event.removed) {
+        diagnostics.forgetFolder(folder);
+      }
+      provider.refresh();
+    }),
     vscode.workspace.onDidChangeConfiguration((event) => {
       if (event.affectsConfiguration("tokensaveManager")) {
         provider.refresh();
@@ -174,12 +187,22 @@ async function runAction(context: vscode.ExtensionContext,
         .get<string>("testGapsBase", "origin/master")]
     : [];
 
+  output.appendLine(
+    `[${new Date().toISOString()}] running ${command} in ${folder.uri.fsPath}`);
+
   const result = await vscode.window.withProgress(
     { location: vscode.ProgressLocation.Window,
       title: `TokenSave: ${command} — ${folder.name}` },
     () => runCli(context, command, folder, extra));
 
   provider.record(folder, actionId, result);
+  // Swap diagnostics in only once there is a real answer. Clearing when the
+  // command STARTED would empty the Problems panel for the length of the run
+  // and show a clean bill of health nothing had earned yet.
+  if (DIAGNOSTIC_COMMANDS.has(command) && result.envelope
+      && !result.transportError) {
+    diagnostics.replace(folder, command, result.envelope.findings ?? []);
+  }
   report(command, folder, result);
 
   if (command === "test-gaps" && result.exitCode === EXIT.OK) {
