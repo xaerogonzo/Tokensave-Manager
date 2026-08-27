@@ -17,7 +17,8 @@ import time
 import tkinter as tk
 from typing import TYPE_CHECKING
 
-from helpers.git import _format_git_status_cell, _parse_git_status_v2
+from helpers.git import (_format_git_status_cell, _parse_git_status_v2,
+                         git_status_argv)
 
 if TYPE_CHECKING:
     from typing import Callable
@@ -92,9 +93,10 @@ class ProjectSyncCtrl:
                     if cached is not None and idx_mtime == cached_mtime:
                         continue
                     try:
+                        # Shared argv: the CLI runs the same command
+                        # directly, and one builder keeps them honest.
                         out, _rc = self._on_shell(
-                            [self._cfg.git_exe, "-C", path,
-                             "status", "--porcelain=v2", "--branch"],
+                            git_status_argv(path, self._cfg.git_exe),
                             path,
                         )
                         status = _parse_git_status_v2(out)
