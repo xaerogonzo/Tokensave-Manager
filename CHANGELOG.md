@@ -3,6 +3,8 @@
 
 ## [Unreleased]
 
+## [2.3.1] — 2026-08-27
+
 ### 2.3.1 — two things 2.3.0 got wrong, found by running it on a real project
 
 - (cli) **`test-run` reported "could not verify the result" for a project that simply has no Python tests.** pytest collected 0 items and said so — `===== no tests ran in 0.17s =====` — which is a result, read successfully. But `_parse_pytest_summary` scans for `passed`/`failed`/`error` and that footer contains none of them, so it returns `(0, 0)`: the same value it returns when the output could not be read at all. The command then took the second reading. That is precisely the conflation `EXIT_VERIFY_FAILED` was added to prevent, committed by the code enforcing it. A run pytest positively reports as empty is now `EXIT_OK` with `collected: 0`; a timeout or a crashed collection still exits 4. Surfaced on a **PowerShell** project with a `tests/` directory — the kind of tree the Python-shaped assumption never considered
