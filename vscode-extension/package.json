@@ -5,6 +5,11 @@
   "version": "2.3.1",
   "publisher": "tokensave",
   "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/xaerogonzo/Tokensave-Manager.git",
+    "directory": "vscode-extension"
+  },
   "engines": {
     "vscode": "^1.85.0",
     "node": ">=20"
