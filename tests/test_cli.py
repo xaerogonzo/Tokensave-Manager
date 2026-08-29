@@ -123,9 +123,27 @@ def test_invalid_usage_exits_2_with_empty_stdout(capsys, argv):
     assert out == "", "a usage error must never put anything on stdout"
 
 
-@pytest.mark.parametrize("command", sorted(cli._COMMANDS))
+#: Commands that act on a repository. `commands` describes the Manager itself
+#: and is deliberately project-less, so it is not subject to the two contract
+#: tests below — but it IS asserted to be the only exception, so a future
+#: command cannot quietly opt out of passing an explicit project.
+_PROJECT_COMMANDS = sorted(set(cli._COMMANDS) - cli.PROJECTLESS_COMMANDS)
+
+
+def test_the_project_less_commands_are_the_ones_about_the_manager():
+    """The cwd-inference guard's exceptions, pinned by name.
+
+    Both describe or act on the Manager itself rather than a repository:
+    `commands` emits the vocabulary, `focus` raises the window. Demanding a
+    project would mean an editor had to open a folder before it could ask what
+    it may invoke, or bring the Manager forward.
+    """
+    assert cli.PROJECTLESS_COMMANDS == {"commands", "focus"}
+
+
+@pytest.mark.parametrize("command", _PROJECT_COMMANDS)
 def test_every_command_requires_an_explicit_project(capsys, command):
-    """No command may fall back to the ambient cwd."""
+    """No command that touches a repository may fall back to the ambient cwd."""
     with pytest.raises(SystemExit) as exc:
         main([command])
     assert exc.value.code == EXIT_USAGE
@@ -186,14 +204,47 @@ def test_an_unexpected_exception_still_yields_a_valid_envelope(capsys, project, 
 
 # ── read-only vs mutating is documented and complete ────────────────────────
 
-def test_every_command_is_classified_as_read_only_or_mutating():
-    classified = cli.READ_ONLY_COMMANDS | cli.MUTATING_COMMANDS
-    assert classified == set(cli._COMMANDS)
-    assert not (cli.READ_ONLY_COMMANDS & cli.MUTATING_COMMANDS)
+def test_every_command_is_classified_exactly_once():
+    """The three classes partition the command set — no gaps, no overlaps."""
+    classes = (cli.PURE_READ_COMMANDS, cli.OBSERVE_REFRESH_COMMANDS,
+               cli.MUTATING_COMMANDS)
+    assert set().union(*classes) == set(cli._COMMANDS)
+    for i, first in enumerate(classes):
+        for second in classes[i + 1:]:
+            assert not (first & second)
 
 
-def test_doctor_is_read_only_so_it_never_applies_a_fix():
-    assert "doctor" in cli.READ_ONLY_COMMANDS
+def test_doctor_never_touches_the_project_but_is_not_a_pure_read():
+    """Measured, not assumed — and the reason the old label was wrong.
+
+    `doctor` still never applies a fix, which is the promise that matters to a
+    user. But it is not write-free: it rewrites `~/.tokensave/state.toml` with
+    byte-identical content, moving only the mtime, while touching neither
+    `global.db` nor its WAL. A WAL-only check would have cleared it, which is
+    exactly why the classification is measured against a broader snapshot and
+    against an idle control run.
+    """
+    assert "doctor" in cli.OBSERVE_REFRESH_COMMANDS
+    assert "doctor" in cli.UNATTENDED_SAFE_COMMANDS   # safe for the project
+    assert "doctor" not in cli.PURE_READ_COMMANDS     # but not write-free
+    assert "doctor" not in cli.MUTATING_COMMANDS
+
+
+def test_cost_is_not_read_only_because_it_ingests():
+    """`cost` and `discover` write rows into ~/.tokensave/global.db."""
+    assert "cost" in cli.OBSERVE_REFRESH_COMMANDS
+    assert "cost" not in cli.PURE_READ_COMMANDS
+
+
+def test_unattended_safe_spans_both_non_mutating_classes():
+    """"Does not touch your repository" is a weaker claim than "writes nothing".
+
+    Both are worth being able to ask for; conflating them is what produced a
+    `READ_ONLY_COMMANDS` set two of whose members wrote to disk.
+    """
+    assert cli.UNATTENDED_SAFE_COMMANDS == (
+        cli.PURE_READ_COMMANDS | cli.OBSERVE_REFRESH_COMMANDS)
+    assert not (cli.UNATTENDED_SAFE_COMMANDS & cli.MUTATING_COMMANDS)
 
 
 # ── the contamination guard ─────────────────────────────────────────────────
@@ -402,7 +453,7 @@ def test_without_config_the_beside_exe_file_is_still_used(capsys, project, mocke
     beside.assert_called_once()
 
 
-@pytest.mark.parametrize("command", sorted(cli._COMMANDS))
+@pytest.mark.parametrize("command", _PROJECT_COMMANDS)
 def test_every_command_accepts_config(capsys, project, command):
     """A caller should not have to remember which commands read config."""
     parser = cli._build_parser()
@@ -668,8 +719,8 @@ def test_scout_does_not_publish_its_internal_suppression_id(capsys, project,
     assert "id" not in env["findings"][0]
 
 
-def test_scout_is_read_only():
-    assert "scout" in cli.READ_ONLY_COMMANDS
+def test_scout_is_a_pure_read():
+    assert "scout" in cli.PURE_READ_COMMANDS
 
 
 # ── status: cheap, closed, and non-probing ──────────────────────────────────
@@ -679,7 +730,72 @@ def test_status_payload_is_closed(capsys, project):
     The keys are fixed so that stays a decision rather than a drift."""
     _, env, _ = _run(capsys, ["status", "--project", project, "--json"])
     assert set(env["data"]) == {"git", "tokensave", "mcp", "commit_request"}
-    assert set(env["data"]["git"]) == {"branch", "dirty"}
+    assert set(env["data"]["git"]) == {
+        "branch", "dirty", "ahead", "behind", "has_remote", "changed_files",
+        "changed_truncated"}
+
+
+def test_status_names_the_changed_files(capsys, tmp_path, mocker):
+    """The commit-request composer's data source.
+
+    It lives here rather than in a `git-status` command of its own because it
+    is free: the porcelain-v2 parser already visited every per-file record to
+    decide `dirty` and threw the paths away. That is what keeps this inside the
+    "tens of milliseconds" budget the command's own docstring sets.
+    """
+    mocker.patch("helpers.git.read_git_status", return_value={
+        "branch": "main", "dirty": True, "ahead": 2, "behind": 1,
+        "has_remote": True, "changed_truncated": False,
+        "changed_files": [
+            {"path": "src/app.py", "status": "modified"},
+            {"path": "notes.txt", "status": "untracked"},
+            {"path": "b.py", "status": "renamed", "old_path": "a.py"},
+        ],
+    })
+    _, env, _ = _run(capsys, ["status", "--project", str(tmp_path), "--json"])
+    git = env["data"]["git"]
+
+    assert git["ahead"] == 2 and git["behind"] == 1
+    assert git["has_remote"] is True
+    assert [f["path"] for f in git["changed_files"]] == [
+        "src/app.py", "notes.txt", "b.py"]
+    assert git["changed_files"][2]["old_path"] == "a.py"
+
+
+def test_status_reports_an_unreadable_repo_as_unknown_not_clean(
+        capsys, tmp_path, mocker):
+    """`None`, not `[]`. An unreadable repository is not a clean one, and a
+    composer offering "no files changed" would be inventing an answer."""
+    mocker.patch("helpers.git.read_git_status", return_value=None)
+    _, env, _ = _run(capsys, ["status", "--project", str(tmp_path), "--json"])
+    git = env["data"]["git"]
+
+    assert git["changed_files"] is None
+    assert git["dirty"] is None
+    assert git["ahead"] is None
+
+
+def test_status_says_it_did_not_probe_mcp(capsys, project):
+    """`configured` is a fact about a file; it is not an effective-scope verdict.
+
+    Without `probed`, a consumer reading `configured: true` could reasonably
+    render a bare "MCP ✓" — which is the claim this command specifically cannot
+    make, because probing is what creates `~/.claude.json` entries.
+    """
+    _, env, _ = _run(capsys, ["status", "--project", project, "--json"])
+    assert env["data"]["mcp"]["probed"] is False
+
+
+def test_status_reports_a_truncated_file_list_as_truncated(
+        capsys, tmp_path, mocker):
+    mocker.patch("helpers.git.read_git_status", return_value={
+        "branch": "main", "dirty": True, "ahead": 0, "behind": 0,
+        "has_remote": False,
+        "changed_files": [{"path": "f.py", "status": "modified"}],
+        "changed_truncated": True,
+    })
+    _, env, _ = _run(capsys, ["status", "--project", str(tmp_path), "--json"])
+    assert env["data"]["git"]["changed_truncated"] is True
 
 
 def test_status_never_probes_effective_scope(capsys, project, mocker):
@@ -780,7 +896,7 @@ def test_status_answers_even_when_the_config_does_not(capsys, project, mocker,
 
 
 def test_status_is_read_only():
-    assert "status" in cli.READ_ONLY_COMMANDS
+    assert "status" in cli.PURE_READ_COMMANDS
 
 
 # ── contract fixes: sync `changed`, request identity, base-ref honesty ──────
@@ -1015,10 +1131,15 @@ def test_two_different_projects_can_run_at_once(capsys, tmp_path):
             pytest.fail("a lock in one project blocked another")
 
 
-def test_test_run_is_classified_read_only():
-    """It runs a suite but writes nothing to the project beyond its own lock."""
-    assert "test-run" in cli.READ_ONLY_COMMANDS
-    assert "tests" in cli.READ_ONLY_COMMANDS
+def test_test_run_is_observe_refresh_and_tests_is_a_pure_read():
+    """`tests` only discovers; `test-run` actually runs pytest.
+
+    Running a suite leaves `.pytest_cache` and coverage artefacts behind, so it
+    is not a pure read even though it changes no source. Discovery writes
+    nothing at all.
+    """
+    assert "test-run" in cli.OBSERVE_REFRESH_COMMANDS
+    assert "tests" in cli.PURE_READ_COMMANDS
 
 
 # ── found in real use, 2026-08-27 ───────────────────────────────────────────

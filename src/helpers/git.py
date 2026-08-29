@@ -157,22 +157,103 @@ def _is_local_git_repo(path: str) -> bool:
     return os.path.exists(os.path.join(path, ".git"))
 
 
+#: How many changed files `_parse_git_status_v2` will name before it stops.
+#: A commit-request picker is a human-scale list; a repository mid-rebase can
+#: report tens of thousands of paths, and shipping all of them through a JSON
+#: envelope to fill a QuickPick helps nobody. The cap is reported rather than
+#: applied silently — see `changed_truncated`.
+MAX_CHANGED_FILES = 1000
+
+#: porcelain-v2 record type -> the vocabulary the envelope publishes. Type `1`
+#: is refined further by its XY field; the rest map straight through.
+_RECORD_STATUS = {"2": "renamed", "u": "unmerged", "?": "untracked"}
+
+
+def _xy_status(xy: str) -> str:
+    """A type-`1` record's two-character XY field, as one word.
+
+    XY is (staged, unstaged): `.M` is modified in the worktree only, `A.`
+    staged-added, `MM` both. The first non-`.` character is the one worth
+    naming — a file that was added and then edited is still an addition.
+    """
+    for char in xy:
+        if char == "A":
+            return "added"
+        if char == "D":
+            return "deleted"
+        if char in ("M", "T"):
+            return "modified"
+        if char == "R":
+            return "renamed"
+        if char == "C":
+            return "copied"
+    return "modified"
+
+
+def _status_fields(text: str) -> "tuple[list, bool]":
+    """Split porcelain-v2 output into records, and say which mode it was in.
+
+    Returns `(fields, nul_separated)`.
+
+    `git_status_argv` passes `-z`, so NUL is the expected separator and the
+    only one that is unambiguous: it stops `core.quotePath` from C-quoting
+    non-ASCII paths, and gives a rename's original path its own field instead
+    of hiding it behind a TAB.
+
+    The newline branch is not a convenience — it is a guard. A caller that
+    builds the argv itself and forgets `-z` would otherwise hand this function
+    one enormous field, and the parse would miss `# branch.upstream`, report
+    `has_remote: False` for a repository that has one, and name a single
+    mangled path. Answering a slightly harder question correctly beats
+    answering the wrong question quietly.
+
+    The modes are distinguished by the presence of a NUL rather than by a flag,
+    because the text is the only evidence available at this layer.
+    """
+    if "\0" in text:
+        return [f for f in text.split("\0") if f], True
+    return [line for line in text.splitlines() if line], False
+
+
 def _parse_git_status_v2(text: str) -> dict:
-    """Parse `git status --porcelain=v2 --branch` output.
+    """Parse `git status --porcelain=v2 --branch` output, `-z` or not.
 
     Returns a dict with keys:
-      dirty      — True if any working-tree or index changes exist
-      ahead      — int, commits ahead of upstream (0 if no upstream)
-      behind     — int, commits behind upstream
-      has_remote — True if `# branch.upstream <name>` line is present
+      dirty            — True if any working-tree or index changes exist
+      ahead            — int, commits ahead of upstream (0 if no upstream)
+      behind           — int, commits behind upstream
+      has_remote       — True if `# branch.upstream <name>` line is present
+      changed_files    — list of {path, status[, old_path]}, capped
+      changed_truncated— True when the cap dropped some
+
+    **`changed_files` costs nothing extra.** This function already walked every
+    per-file record to set `dirty`, and threw the paths away. Collecting them
+    is one list append, which is what lets `cli.py`'s `status` — documented as
+    the one command a UI may call on every refresh, and required to stay in the
+    tens of milliseconds — carry them without a second subprocess or a tree
+    walk.
+
+    **The input is NUL-separated (`-z`), and that is load-bearing.** Without
+    it, `core.quotePath` defaults to true and git C-quotes any path containing
+    non-ASCII bytes, wrapping it in `"` with backslash escapes — so the paths
+    most likely to matter are the ones a naive parse mangles. `-z` also
+    replaces the TAB that would otherwise separate a rename's new path from its
+    original, removing the second ambiguity at the same time.
 
     Pure function — never raises; bad input returns the empty default.
     """
-    result = {"dirty": False, "ahead": 0, "behind": 0, "has_remote": False}
-    for line in text.splitlines():
+    result = {"dirty": False, "ahead": 0, "behind": 0, "has_remote": False,
+              "changed_files": [], "changed_truncated": False}
+
+    fields, nul = _status_fields(text)
+    i = 0
+    while i < len(fields):
+        line = fields[i]
+        i += 1
         if line.startswith("# branch.upstream "):
             result["has_remote"] = True
-        elif line.startswith("# branch.ab "):
+            continue
+        if line.startswith("# branch.ab "):
             # Format: "# branch.ab +N -M"
             try:
                 parts = line.split()
@@ -181,10 +262,63 @@ def _parse_git_status_v2(text: str) -> dict:
                 result["behind"] = int(parts[3].lstrip("-"))
             except (ValueError, IndexError):
                 pass
-        elif line and line[0] in ("1", "2", "u", "?"):
-            # Tracked-modified (1), renamed/copied (2), unmerged (u), untracked (?)
-            result["dirty"] = True
+            continue
+        if not line or line[0] not in ("1", "2", "u", "?"):
+            continue
+
+        # Tracked-modified (1), renamed/copied (2), unmerged (u), untracked (?)
+        result["dirty"] = True
+        kind = line[0]
+        old_path = ""
+        if kind == "2":
+            if nul and i < len(fields):
+                # Under `-z` the original path is its own NUL-separated field.
+                old_path = fields[i]
+                i += 1
+            elif not nul and "\t" in line:
+                # Legacy mode puts it after a TAB on the same line.
+                line, _, old_path = line.partition("\t")
+
+        entry = _changed_entry(kind, line, old_path)
+        if entry is None:
+            continue
+        if len(result["changed_files"]) >= MAX_CHANGED_FILES:
+            # Say so rather than quietly returning a short list, which would
+            # read as "that is all of them".
+            result["changed_truncated"] = True
+            continue
+        result["changed_files"].append(entry)
     return result
+
+
+def _changed_entry(kind: str, line: str, old_path: str) -> "dict | None":
+    """One porcelain-v2 record as {path, status[, old_path]}, or None.
+
+    `path` is always the *current* path; `old_path` appears only on a rename,
+    carrying where the file came from. Getting that round the wrong way would
+    have a picker offer a path that no longer exists.
+    """
+    if kind == "?":
+        # "? <path>" — untracked, no XY field.
+        path = line[2:]
+        return {"path": path, "status": "untracked"} if path else None
+
+    # "1 <XY> <sub> <mH> <mI> <mW> <hH> <hI> <path>"
+    # "2 <XY> <sub> <mH> <mI> <mW> <hH> <hI> <X><score> <path>"
+    # "u <XY> <sub> <m1> <m2> <m3> <mW> <h1> <h2> <h3> <path>"
+    leading = {"1": 8, "2": 9, "u": 10}[kind]
+    parts = line.split(" ", leading)
+    if len(parts) <= leading:
+        return None
+    path = parts[leading]
+    if not path:
+        return None
+
+    status = _RECORD_STATUS.get(kind) or _xy_status(parts[1])
+    entry = {"path": path, "status": status}
+    if kind == "2" and old_path:
+        entry["old_path"] = old_path
+    return entry
 
 
 def _format_git_status_cell(status: dict | None, has_git: bool) -> tuple:
@@ -319,7 +453,11 @@ def git_status_argv(path: str, git_exe: str) -> list:
     parser (`_parse_git_status_v2`) was already shared; this makes the input
     shared too.
     """
-    return [git_exe, "-C", path, "status", "--porcelain=v2", "--branch"]
+    # `-z` is not optional. Without it `core.quotePath` (which defaults to
+    # true) C-quotes any path containing non-ASCII bytes, and a rename's two
+    # paths arrive TAB-separated inside one line. Both are silent corruptions
+    # of exactly the paths a user is most likely to notice.
+    return [git_exe, "-C", path, "status", "--porcelain=v2", "--branch", "-z"]
 
 
 def read_git_status(path: str, git_exe: str) -> "dict | None":
@@ -330,6 +468,8 @@ def read_git_status(path: str, git_exe: str) -> "dict | None":
     this codebase keeps designing against.
 
     Cheap by construction: one `git status` and one `rev-parse`, no tree walk.
+    The returned dict also carries `changed_files` — see
+    `_parse_git_status_v2`, which was already walking those records.
     """
     try:
         proc = subprocess.run(

@@ -17,12 +17,17 @@
 import * as fs from "fs";
 import * as path from "path";
 import * as vscode from "vscode";
-import { CliResult, EXIT, runCli } from "./cli";
+import { CliResult, EXIT, runCli, runProjectlessCli } from "./cli";
+import { commandByAction } from "./commands";
+import { proposeCommit } from "./commit";
 import { DiagnosticStore } from "./diagnostics";
+import { SavingsViewProvider } from "./savings";
+import { StatusBar } from "./status";
 import { ACTIONS, DIAGNOSTIC_COMMANDS, ProjectsProvider } from "./tree";
 
 let output: vscode.OutputChannel;
 let diagnostics: DiagnosticStore;
+let statusBar: StatusBar | undefined;
 
 export function activate(context: vscode.ExtensionContext): void {
   output = vscode.window.createOutputChannel("TokenSave Manager");
@@ -69,10 +74,213 @@ export function activate(context: vscode.ExtensionContext): void {
     vscode.commands.registerCommand("tokensaveManager.setManagerPath",
       () => setManagerPath(provider)));
 
+  registerStatusBar(context);
+  registerSavingsView(context);
+  registerCommitComposer(context);
+  registerFileScopedActions(context);
   registerRefreshTriggers(context, provider);
 }
 
-export function deactivate(): void { /* nothing to unwind */ }
+export function deactivate(): void {
+  statusBar?.dispose();
+  statusBar = undefined;
+}
+
+/**
+ * The status bar, and the commands that drive it.
+ *
+ * Pinned to a folder rather than following the active editor — see status.ts
+ * for why an item whose subject changes as you navigate is the worse of the
+ * two options.
+ */
+function registerStatusBar(context: vscode.ExtensionContext): void {
+  statusBar = new StatusBar(context);
+  context.subscriptions.push(
+    { dispose: () => statusBar?.dispose() },
+    vscode.commands.registerCommand("tokensaveManager.statusBarMenu",
+      () => showStatusMenu(context)),
+    vscode.commands.registerCommand("tokensaveManager.focus",
+      () => openManager(context)),
+  );
+  statusBar.start();
+  void statusBar.refreshManagerState();
+}
+
+/** Bring the Manager forward, and say plainly when it is not there. */
+async function openManager(context: vscode.ExtensionContext): Promise<void> {
+  const result = await runProjectlessCli(context, "focus");
+  if (result.exitCode === EXIT.PREREQUISITE) {
+    vscode.window.showWarningMessage(
+      "TokenSave Manager: the Manager is not running — start it first.");
+    return;
+  }
+  const data = result.envelope?.data as
+    | { focused?: boolean; reason?: string } | undefined;
+  // Running-but-not-raised is a normal outcome, not a failure: Windows
+  // routinely refuses SetForegroundWindow to a background process. Saying so
+  // beats reporting the Manager as absent.
+  if (data && data.focused === false) {
+    vscode.window.setStatusBarMessage(
+      `TokenSave: Manager is running (${data.reason ?? "not raised"})`, 4000);
+  }
+}
+
+/** Click the status bar: every action, plus the pin and the Manager. */
+async function showStatusMenu(context: vscode.ExtensionContext): Promise<void> {
+  const folders = vscode.workspace.workspaceFolders ?? [];
+  const items: Array<vscode.QuickPickItem & { run: () => Promise<void> }> = [];
+
+  const pinned = statusBar?.pinnedFolder();
+  if (pinned) {
+    for (const action of ACTIONS) {
+      items.push({
+        label: action.label,
+        description: action.detail,
+        run: async () => {
+          await vscode.commands.executeCommand(
+            "tokensaveManager.runAction", pinned, action.id);
+        },
+      });
+    }
+    items.push({
+      label: "$(git-commit) Propose a commit…",
+      description: "Pick changed files and file a request",
+      run: async () => proposeCommit(context, pinned),
+    });
+  }
+  items.push({
+    label: "$(window) Open Manager",
+    description: "Bring the running Manager forward",
+    run: async () => openManager(context),
+  });
+  if (folders.length > 1) {
+    for (const folder of folders) {
+      items.push({
+        label: `$(pin) Track ${folder.name}`,
+        description: folder.uri.fsPath,
+        // Explicit, because the alternative — following the active editor —
+        // makes the item's subject change without the user asking.
+        run: async () => statusBar?.pin(folder),
+      });
+    }
+  }
+
+  const picked = await vscode.window.showQuickPick(items, {
+    title: pinned ? `TokenSave — ${pinned.name}` : "TokenSave Manager",
+    placeHolder: "Choose an action",
+  });
+  await picked?.run();
+}
+
+function registerSavingsView(context: vscode.ExtensionContext): void {
+  const provider = new SavingsViewProvider(
+    context, () => statusBar?.pinnedFolder()
+      ?? (vscode.workspace.workspaceFolders ?? [])[0]);
+  context.subscriptions.push(
+    vscode.window.registerWebviewViewProvider(
+      SavingsViewProvider.viewType, provider),
+    vscode.commands.registerCommand("tokensaveManager.savings", async () => {
+      await vscode.commands.executeCommand(
+        `${SavingsViewProvider.viewType}.focus`);
+      await provider.refresh();
+    }),
+  );
+}
+
+function registerCommitComposer(context: vscode.ExtensionContext): void {
+  context.subscriptions.push(
+    vscode.commands.registerCommand("tokensaveManager.proposeCommit",
+      async (resource?: vscode.Uri) => {
+        const folder = resource
+          ? vscode.workspace.getWorkspaceFolder(resource)
+          : (statusBar?.pinnedFolder() ?? await pickFolder());
+        if (folder) {
+          await proposeCommit(context, folder, resource);
+        }
+      }),
+  );
+}
+
+/**
+ * "Checks this file" / "Test gaps for this file".
+ *
+ * `--paths` is what makes these honest: without it they would run
+ * whole-workspace work under a per-file label. The CLI refuses a path outside
+ * the project rather than returning an empty result, so a stale URI reports an
+ * error instead of a clean bill of health.
+ */
+function registerFileScopedActions(context: vscode.ExtensionContext): void {
+  const scoped: Array<[string, string]> = [
+    ["tokensaveManager.checksFile", "checks"],
+    ["tokensaveManager.testGapsFile", "test-gaps"],
+  ];
+  for (const [id, command] of scoped) {
+    context.subscriptions.push(
+      vscode.commands.registerCommand(id, async (resource?: vscode.Uri) => {
+        const uri = resource ?? vscode.window.activeTextEditor?.document.uri;
+        if (!uri) {
+          vscode.window.showWarningMessage(
+            "TokenSave Manager: open or select a file first.");
+          return;
+        }
+        const folder = vscode.workspace.getWorkspaceFolder(uri);
+        if (!folder) {
+          vscode.window.showWarningMessage(
+            "TokenSave Manager: that file is not in an open workspace folder.");
+          return;
+        }
+        // Only at the CLI boundary does a Uri become a string.
+        await runScoped(context, command, folder, uri.fsPath);
+      }));
+  }
+}
+
+async function runScoped(context: vscode.ExtensionContext, command: string,
+                         folder: vscode.WorkspaceFolder,
+                         file: string): Promise<void> {
+  const entry = commandByAction(command);
+  if (entry && !entry.acceptsPaths) {
+    // The generated table says which commands may be scoped, so this cannot
+    // drift from what the CLI actually accepts.
+    return;
+  }
+  const result = await vscode.window.withProgress(
+    { location: vscode.ProgressLocation.Window,
+      title: `TokenSave: ${command} — ${file}` },
+    () => runCli(context, command, folder, ["--paths", file]));
+
+  if (result.transportError || result.exitCode === EXIT.PREREQUISITE) {
+    vscode.window.showWarningMessage(
+      `TokenSave Manager: ${result.envelope?.error ?? result.transportError}`);
+    return;
+  }
+  if (DIAGNOSTIC_COMMANDS.has(command) && result.envelope) {
+    // Replace only this file's findings for this producer — a scoped run must
+    // not wipe the rest of the folder's diagnostics.
+    diagnostics.replace(folder, command, result.envelope.findings ?? [],
+                        [toRelative(folder, file)]);
+  }
+  const data = result.envelope?.data as
+    | { matched_paths?: unknown[] } | undefined;
+  if (Array.isArray(data?.matched_paths) && data.matched_paths.length === 0) {
+    // "clean" and "not part of this project" both render as zero findings, so
+    // the CLI reports which one it was and this says so.
+    vscode.window.showWarningMessage(
+      `TokenSave Manager: ${file} is not part of this project's sources, `
+      + "so nothing was checked.");
+    return;
+  }
+  const count = result.envelope?.findings?.length ?? 0;
+  vscode.window.setStatusBarMessage(
+    count ? `TokenSave: ${count} finding(s) in this file`
+          : "TokenSave: no findings in this file", 4000);
+}
+
+function toRelative(folder: vscode.WorkspaceFolder, file: string): string {
+  const root = folder.uri.fsPath;
+  const rest = file.startsWith(root) ? file.slice(root.length) : file;
+  return rest.replace(/^[\\/]+/, "").split("\\").join("/");
+}
 
 /**
  * Ask for the Manager checkout and save it, with a folder picker.
@@ -141,11 +349,18 @@ function registerRefreshTriggers(context: vscode.ExtensionContext,
 
   const watcher = vscode.workspace.createFileSystemWatcher(
     "**/{.mcp.json,.tokensave-manager/commit_request.json}");
+  // The status bar rides the same watcher, but through its debouncer: a
+  // branch switch fires a dozen events in a second, and one subprocess per
+  // event would all report the same answer.
+  const touched = () => {
+    provider.refresh();
+    statusBar?.schedule();
+  };
   context.subscriptions.push(
     watcher,
-    watcher.onDidChange(() => provider.refresh()),
-    watcher.onDidCreate(() => provider.refresh()),
-    watcher.onDidDelete(() => provider.refresh()),
+    watcher.onDidChange(touched),
+    watcher.onDidCreate(touched),
+    watcher.onDidDelete(touched),
   );
 }
 

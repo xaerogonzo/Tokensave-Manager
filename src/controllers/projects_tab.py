@@ -274,6 +274,31 @@ class ProjectsTabController:
             return iid[5:]
         return None
 
+    def select_project(self, path: str) -> bool:
+        """Select a project row by path. True if the row existed.
+
+        Added for the request inbox: every action a request can ask for is
+        reached through code that reads the *selected* project, so a handoff
+        from VS Code has to be able to move that selection rather than hope the
+        right row is already highlighted.
+
+        Returns False rather than raising when the row is absent — a project
+        the Manager has not discovered yet is a transient condition the drain
+        retries, not a malformed request.
+        """
+        if self._tree is None:
+            return False
+        iid = f"proj:{path}"
+        try:
+            if not self._tree.exists(iid):
+                return False
+            self._tree.selection_set(iid)
+            self._tree.focus(iid)
+            self._tree.see(iid)
+        except tk.TclError:
+            return False
+        return True
+
     def get_selected_paths(self) -> list:
         """Every selected project path, in tree order.
 

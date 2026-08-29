@@ -195,8 +195,8 @@ Token Save Manager Source/
 │   │   │                          ^## \[ line; falls back to insertion under
 │   │   │                          ## [Unreleased]. Wired into ReleaseWizard.)
 │   │   ├── pr_draft.py            generate_pr_draft (LLM-based PR description drafting)
-│   │   ├── daemon_cost.py         get_daemon_status, toggle_daemon, toggle_autostart,
-│   │   │                          parse_tokensave_cost
+│   │   ├── savings.py             parse/fetch gain, gain --history, cost, discover;
+│   │   │                          three-state Result — unavailable is never zero
 │   │   ├── claude_cli.py          spawn_claude_cli (detached terminal via CREATE_NEW_CONSOLE)
 │   │   └── precommit_hook.py      install/remove/detect git pre-commit hook + review
 │   │                              runner (P5b). 3-value backend dispatch
@@ -224,7 +224,7 @@ Token Save Manager Source/
 │   │   ├── switch_branch.py       SwitchBranchDialog (+ static pick() helper)
 │   │   ├── assign_category.py     AssignCategoryDialog
 │   │   ├── untrack_ignored.py     UntrackIgnoredDialog
-│   │   ├── cost_viewer.py         CostViewerDialog (📊 button in app footer)
+│   │   ├── cost_viewer.py         SavingsDialog (Savings button in app footer)
 │   │   └── proposal.py            WriteProposal dataclass + ProposalDialog +
 │   │                              ProposalBridge (P1 — race-safe agent worker ↔ Tk main
 │   │                              coordinator; 5-min event.wait; first-resolution-wins;

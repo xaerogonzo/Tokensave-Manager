@@ -78,6 +78,16 @@ rather than quietly diffed against nothing, because an empty diff renders
 as "0 test gaps" — the most reassuring way to report a question that was
 never asked.
 
+`tokensaveManager.statusPollSeconds` — how often the status bar re-reads
+`status`, in seconds. Deliberately slow (default 300): file changes already
+trigger a refresh through the watcher, so the timer only exists to catch
+changes made outside the editor.
+
+`tokensaveManager.statusDebounceMs` — how long the status bar waits after a
+file change before refreshing (default 750). A branch switch fires a dozen
+watcher events in a second, and without this each one would spawn its own
+process to compute the same answer.
+
 ## Platform
 
 Source mode runs anywhere Python does. The **bundled** fallback is a Nuitka

@@ -30,9 +30,15 @@ import { Finding } from "./cli";
  * nothing in the new result would name it. The producer still travels on each
  * diagnostic, as `source`.
  */
-function partitionKey(folder: vscode.WorkspaceFolder, command: string): string {
-  return `${folder.uri.toString()}|${command}`;
-}
+/**
+ * The scope of a replacement.
+ *
+ * `"all"` is a whole-project run replacing everything it owns. A path list is
+ * a `--paths`-scoped run, which may only replace the files it actually looked
+ * at — otherwise "Checks this file" would clear the rest of the folder's
+ * findings on the strength of having examined one file.
+ */
+export type ReplaceScope = "all" | readonly string[];
 
 /** `pyflakes` out of `pyflakes`, `compileall` out of `compileall/SyntaxError`. */
 function producerOf(rule: string): string {
@@ -104,8 +110,16 @@ export function toDiagnostic(finding: Finding): vscode.Diagnostic {
  */
 export class DiagnosticStore {
   private readonly collection: vscode.DiagnosticCollection;
-  /** partition key → (file fsPath → diagnostics) */
-  private readonly partitions = new Map<string, Map<string, vscode.Diagnostic[]>>();
+  /**
+   * folder URI → command → (file fsPath → diagnostics).
+   *
+   * Nested rather than keyed by a joined `folder|command` string. The joined
+   * form worked, but it made `forgetFolder` a prefix match over composed keys
+   * and left a separator to be accidentally significant if a component ever
+   * contained one. Nesting removes the question rather than answering it.
+   */
+  private readonly partitions =
+    new Map<string, Map<string, Map<string, vscode.Diagnostic[]>>>();
 
   constructor(collection: vscode.DiagnosticCollection) {
     this.collection = collection;
@@ -123,9 +137,15 @@ export class DiagnosticStore {
    * Findings carry repo-relative paths; joining them to the folder is this
    * side's job, because only the caller knows which project the result came
    * from. That is the same reason the CLI insists on an explicit `--project`.
+   *
+   * `scope` is what makes the per-file editor actions safe. A `--paths`-scoped
+   * run looked at one file, so it may only replace that file's findings —
+   * replacing the whole partition would let "Checks this file" quietly clear
+   * every other finding the same command had reported.
    */
   replace(folder: vscode.WorkspaceFolder, command: string,
-          findings: readonly Finding[]): void {
+          findings: readonly Finding[],
+          scope: ReplaceScope = "all"): void {
     const next = new Map<string, vscode.Diagnostic[]>();
     for (const finding of findings) {
       if (!finding?.file) {
@@ -138,18 +158,51 @@ export class DiagnosticStore {
       next.set(key, list);
     }
 
-    const key = partitionKey(folder, command);
-    const previous = this.partitions.get(key);
-    if (next.size === 0) {
-      this.partitions.delete(key);
+    const folderKey = folder.uri.toString();
+    const commands = this.partitions.get(folderKey)
+      ?? new Map<string, Map<string, vscode.Diagnostic[]>>();
+    const previous = commands.get(command);
+
+    // Which files this replacement is entitled to touch. A whole-project run
+    // owns everything the command reported before or reports now; a scoped run
+    // owns only the files it was asked about, so a clean result for one file
+    // cannot erase findings in another that was never examined.
+    const owned = scope === "all"
+      ? new Set<string>([...(previous?.keys() ?? []), ...next.keys()])
+      : new Set<string>(scope.map(
+          (rel) => vscode.Uri.joinPath(folder.uri, rel).fsPath));
+
+    const merged = new Map<string, vscode.Diagnostic[]>();
+    if (scope !== "all" && previous) {
+      // Everything outside the scope survives untouched.
+      for (const [fsPath, list] of previous) {
+        if (!owned.has(fsPath)) {
+          merged.set(fsPath, list);
+        }
+      }
+    }
+    for (const [fsPath, list] of next) {
+      if (scope === "all" || owned.has(fsPath)) {
+        merged.set(fsPath, list);
+      }
+    }
+
+    if (merged.size === 0) {
+      commands.delete(command);
     } else {
-      this.partitions.set(key, next);
+      commands.set(command, merged);
+    }
+    if (commands.size === 0) {
+      this.partitions.delete(folderKey);
+    } else {
+      this.partitions.set(folderKey, commands);
     }
 
     // Only files this partition touched — before or after — can have changed.
     const affected = new Set<string>([
       ...(previous?.keys() ?? []),
-      ...next.keys(),
+      ...merged.keys(),
+      ...owned,
     ]);
     for (const fsPath of affected) {
       this.rebuild(fsPath);
@@ -158,16 +211,18 @@ export class DiagnosticStore {
 
   /** Drop everything for one folder, e.g. when it leaves the workspace. */
   forgetFolder(folder: vscode.WorkspaceFolder): void {
-    const prefix = `${folder.uri.toString()}|`;
+    const folderKey = folder.uri.toString();
+    const commands = this.partitions.get(folderKey);
+    if (!commands) {
+      return;
+    }
     const affected = new Set<string>();
-    for (const [key, files] of this.partitions) {
-      if (key.startsWith(prefix)) {
-        for (const fsPath of files.keys()) {
-          affected.add(fsPath);
-        }
-        this.partitions.delete(key);
+    for (const files of commands.values()) {
+      for (const fsPath of files.keys()) {
+        affected.add(fsPath);
       }
     }
+    this.partitions.delete(folderKey);
     for (const fsPath of affected) {
       this.rebuild(fsPath);
     }
@@ -181,10 +236,12 @@ export class DiagnosticStore {
   /** Diagnostics currently shown for a file, across every partition. */
   private rebuild(fsPath: string): void {
     const merged: vscode.Diagnostic[] = [];
-    for (const files of this.partitions.values()) {
-      const list = files.get(fsPath);
-      if (list) {
-        merged.push(...list);
+    for (const commands of this.partitions.values()) {
+      for (const files of commands.values()) {
+        const list = files.get(fsPath);
+        if (list) {
+          merged.push(...list);
+        }
       }
     }
     const uri = vscode.Uri.file(fsPath);

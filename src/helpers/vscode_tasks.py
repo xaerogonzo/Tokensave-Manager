@@ -43,6 +43,7 @@ import shlex
 import subprocess
 
 from constants import CREATE_NO_WINDOW
+from helpers import commands
 
 #: Commands the packaged CLI cannot run. See the module docstring.
 FROZEN_UNSUPPORTED = frozenset({"checks"})
@@ -81,21 +82,20 @@ class TaskSpec:
     extra_args: tuple = ()
 
 
-#: The task catalogue. Deliberately small: the Manager stays the rich UI and
-#: these are the operations worth reaching without leaving the editor.
-TASKS: tuple = (
-    TaskSpec("Manager: Doctor", "doctor",
-             "Scan for stale tokensave entries. Read-only - never applies a fix."),
-    TaskSpec("Manager: Sync tokensave", "sync",
-             "Refresh shadow links, then re-index this project."),
-    TaskSpec("Manager: Test gaps", "test-gaps",
-             "Suggest tests for what changed against the base ref."),
-    TaskSpec("Manager: MCP status", "mcp-status",
-             "Report the MCP binding for this project, layer by layer."),
-    TaskSpec("Manager: Run checks", "checks",
-             "Syntax + pyflakes over src/."),
-    TaskSpec("Manager: Pending commit request", "commit-request",
-             "Show the commit request waiting for approval in the Manager."),
+#: The task catalogue, derived from the single command table in
+#: `helpers/commands.py` rather than restated here.
+#:
+#: It used to be a hand-written tuple, which meant the same six operations were
+#: named in four places — this file, `cli.py`, the extension's tree, and the
+#: extension's command ids — with nothing to notice when one drifted. A label
+#: corrected in one list and not the others produces two names for one
+#: operation, and nothing fails.
+#:
+#: Deliberately still small: `task=True` marks the operations worth reaching
+#: without leaving the editor, and the Manager stays the rich UI.
+TASKS: tuple = tuple(
+    TaskSpec(f"Manager: {c.label}", c.cli, c.detail)
+    for c in commands.COMMANDS if c.task
 )
 
 

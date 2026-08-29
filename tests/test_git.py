@@ -329,7 +329,9 @@ class TestParseGitStatusV2:
     def test_returns_default_dict_on_empty_input(self):
         """Returns default dict on empty input."""
         result = git._parse_git_status_v2("")
-        assert result == {"dirty": False, "ahead": 0, "behind": 0, "has_remote": False}
+        assert result == {"dirty": False, "ahead": 0, "behind": 0,
+                          "has_remote": False, "changed_files": [],
+                          "changed_truncated": False}
 
     def test_parses_branch_upstream_line(self):
         """Sets has_remote=True when # branch.upstream line is present."""
@@ -554,3 +556,175 @@ class TestFmtAgeKeepsTheYear:
         a = now.replace(year=now.year - 1, month=5, day=13).timestamp()
         b = now.replace(year=now.year - 3, month=5, day=13).timestamp()
         assert fmt_age(a) != fmt_age(b)
+
+
+class TestChangedFiles:
+    """The per-file records `_parse_git_status_v2` used to walk past.
+
+    `cli.py`'s `status` is documented as the one command a UI may call on every
+    refresh and has to stay in the tens of milliseconds, so its docstring says
+    anything not cheap "belongs in its own command". Collecting these costs one
+    list append inside a loop that already ran — which is what lets `status`
+    answer "which files changed" without a second subprocess or a new command.
+
+    `-z` is the other half. `core.quotePath` defaults to true, so without it
+    git C-quotes any path containing non-ASCII bytes, and a rename arrives with
+    its two paths TAB-separated inside one line. Both silently corrupt exactly
+    the paths a user is most likely to notice.
+    """
+
+    NUL = chr(0)
+
+    def _z(self, *records: str) -> str:
+        """Join records the way `-z` emits them: NUL-terminated."""
+        return "".join(r + self.NUL for r in records)
+
+    def test_argv_passes_dash_z(self):
+        """The parser's guarantees depend on it, so the argv is pinned."""
+        assert "-z" in git.git_status_argv("/repo", "git")
+
+    def test_modified_file_is_named(self):
+        text = self._z("1 .M N... 100644 100644 100644 aaa bbb src/app.py")
+        result = git._parse_git_status_v2(text)
+        assert result["dirty"] is True
+        assert result["changed_files"] == [
+            {"path": "src/app.py", "status": "modified"}]
+
+    def test_added_and_deleted_come_from_the_xy_field(self):
+        text = self._z(
+            "1 A. N... 000000 100644 100644 000 aaa src/new.py",
+            "1 .D N... 100644 100644 000000 aaa bbb src/gone.py",
+        )
+        result = git._parse_git_status_v2(text)
+        assert result["changed_files"] == [
+            {"path": "src/new.py", "status": "added"},
+            {"path": "src/gone.py", "status": "deleted"},
+        ]
+
+    def test_untracked_files_are_named(self):
+        text = self._z("? notes.txt")
+        result = git._parse_git_status_v2(text)
+        assert result["changed_files"] == [
+            {"path": "notes.txt", "status": "untracked"}]
+
+    def test_unmerged_files_are_named(self):
+        text = self._z(
+            "u UU N... 100644 100644 100644 100644 aaa bbb ccc src/conflict.py")
+        result = git._parse_git_status_v2(text)
+        assert result["changed_files"] == [
+            {"path": "src/conflict.py", "status": "unmerged"}]
+
+    def test_a_rename_reports_the_new_path_with_the_old_one_beside_it(self):
+        """`path` is where the file IS; `old_path` is where it came from.
+
+        Round the wrong way, a commit-request picker would offer a path that no
+        longer exists.
+        """
+        text = self._z(
+            "2 R. N... 100644 100644 100644 aaa bbb R100 src/new_name.py",
+            "src/old_name.py",
+        )
+        result = git._parse_git_status_v2(text)
+        assert result["changed_files"] == [{
+            "path": "src/new_name.py",
+            "status": "renamed",
+            "old_path": "src/old_name.py",
+        }]
+
+    def test_a_renames_extra_field_does_not_swallow_the_next_record(self):
+        """The original path is consumed, not mistaken for another record."""
+        text = self._z(
+            "2 R. N... 100644 100644 100644 aaa bbb R100 b.py", "a.py",
+            "1 .M N... 100644 100644 100644 aaa bbb c.py",
+        )
+        result = git._parse_git_status_v2(text)
+        assert [f["path"] for f in result["changed_files"]] == ["b.py", "c.py"]
+
+    def test_paths_with_spaces_survive(self):
+        """The reference machine's own checkout lives under a spaced path."""
+        text = self._z(
+            "1 .M N... 100644 100644 100644 aaa bbb Token Save Manager/app.py")
+        result = git._parse_git_status_v2(text)
+        assert result["changed_files"][0]["path"] == "Token Save Manager/app.py"
+
+    def test_non_ascii_paths_are_not_quoted_under_dash_z(self):
+        """The `core.quotePath` hazard, in the mode the argv actually uses.
+
+        With `-z` git emits the raw bytes; the parser must not re-interpret
+        them. Without it the same path would arrive wrapped in quotes with
+        backslash escapes.
+        """
+        text = self._z("1 .M N... 100644 100644 100644 aaa bbb src/caf\u00e9.py")
+        result = git._parse_git_status_v2(text)
+        assert result["changed_files"][0]["path"] == "src/caf\u00e9.py"
+
+    def test_branch_fields_still_parse_alongside_files(self):
+        """The pre-existing answers must be unchanged by the new ones."""
+        text = self._z(
+            "# branch.oid abc123",
+            "# branch.head main",
+            "# branch.upstream origin/main",
+            "# branch.ab +3 -2",
+            "1 .M N... 100644 100644 100644 aaa bbb src/app.py",
+        )
+        result = git._parse_git_status_v2(text)
+        assert result["has_remote"] is True
+        assert result["ahead"] == 3
+        assert result["behind"] == 2
+        assert result["dirty"] is True
+        assert len(result["changed_files"]) == 1
+
+    def test_a_clean_tree_reports_no_files(self):
+        text = self._z("# branch.oid abc123", "# branch.head main")
+        result = git._parse_git_status_v2(text)
+        assert result["dirty"] is False
+        assert result["changed_files"] == []
+        assert result["changed_truncated"] is False
+
+    def test_the_cap_is_reported_not_applied_silently(self):
+        """A short list that says nothing reads as "that is all of them"."""
+        records = [f"1 .M N... 100644 100644 100644 aaa bbb f{i}.py"
+                   for i in range(git.MAX_CHANGED_FILES + 25)]
+        result = git._parse_git_status_v2(self._z(*records))
+        assert len(result["changed_files"]) == git.MAX_CHANGED_FILES
+        assert result["changed_truncated"] is True
+        assert result["dirty"] is True          # still true for every record
+
+    def test_a_truncated_run_still_counts_every_record_as_dirty(self):
+        records = [f"1 .M N... 100644 100644 100644 aaa bbb f{i}.py"
+                   for i in range(git.MAX_CHANGED_FILES + 1)]
+        assert git._parse_git_status_v2(self._z(*records))["dirty"] is True
+
+    def test_a_malformed_record_is_skipped_not_crashed_on(self):
+        text = self._z("1 .M", "1 .M N... 100644 100644 100644 aaa bbb ok.py")
+        result = git._parse_git_status_v2(text)
+        assert [f["path"] for f in result["changed_files"]] == ["ok.py"]
+
+
+class TestLegacyNewlineSeparatedStatus:
+    """A caller that builds the argv itself and forgets `-z`.
+
+    Not a convenience branch. Without it that caller hands the parser one
+    enormous field: `# branch.upstream` is missed, `has_remote` comes back
+    False for a repository that has an upstream, and a single mangled path is
+    reported. Answering a slightly harder question correctly beats answering
+    the wrong question quietly.
+    """
+
+    def test_newline_separated_input_still_parses(self):
+        text = ("# branch.upstream origin/main\n"
+                "# branch.ab +1 -0\n"
+                "1 .M N... 100644 100644 100644 aaa bbb src/app.py\n")
+        result = git._parse_git_status_v2(text)
+        assert result["has_remote"] is True
+        assert result["ahead"] == 1
+        assert result["changed_files"] == [
+            {"path": "src/app.py", "status": "modified"}]
+
+    def test_legacy_renames_use_the_tab_separator(self):
+        """Without `-z`, the original path hides behind a TAB on the same line."""
+        text = ("2 R. N... 100644 100644 100644 aaa bbb R100 "
+                "new.py\told.py\n")
+        result = git._parse_git_status_v2(text)
+        assert result["changed_files"] == [{
+            "path": "new.py", "status": "renamed", "old_path": "old.py"}]

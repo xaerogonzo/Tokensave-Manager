@@ -36,11 +36,14 @@ run *while* the Manager is open.
 from __future__ import annotations
 
 import argparse
+import dataclasses
 import json
 import os
 import sys
 
 from constants import APP_VERSION
+from helpers import commands
+from helpers.detection import _root_path
 from helpers.findings import to_envelope
 
 #: Bumped only when the envelope's shape changes incompatibly.
@@ -164,6 +167,59 @@ def _is_frozen() -> bool:
 
 # ── commands ─────────────────────────────────────────────────────────────────
 
+def _resolve_paths(project: str, raw_paths: list) -> "tuple[list, list]":
+    """Repo-relative paths to filter findings by, plus which of them exist.
+
+    Returns `(requested, matched)`, both repo-relative with forward slashes.
+
+    **A path outside the project is an error, not an empty result.** Silently
+    returning no findings for an out-of-root path is indistinguishable from a
+    clean file, so an editor sending a stale or mistyped URI would be told
+    everything was fine. Same reasoning as the request inbox's containment
+    rule, applied to the other direction of travel.
+
+    `matched` is reported separately so a consumer can tell "this file is
+    clean" from "that path is not part of this project" — a distinction the
+    finding list alone cannot carry, because both look like zero rows.
+    """
+    root = os.path.normcase(os.path.realpath(project))
+    requested, matched = [], []
+    for raw in raw_paths:
+        candidate = str(raw).replace(chr(92), "/").strip()
+        if not candidate:
+            continue
+        absolute = (candidate if os.path.isabs(candidate)
+                    else os.path.join(project, candidate))
+        resolved = os.path.normcase(os.path.realpath(absolute))
+        if resolved != root and not resolved.startswith(
+                root.rstrip("\\/") + os.sep):
+            raise _Prerequisite(
+                f"path is outside the project: {raw}")
+        relative = os.path.relpath(resolved, root).replace(chr(92), "/")
+        requested.append(relative)
+        if os.path.exists(absolute):
+            matched.append(relative)
+    return requested, matched
+
+
+def _filter_findings(findings: list, relative_paths: list) -> list:
+    """Only the findings whose file is one of `relative_paths`.
+
+    A filter, not a second format: same producer, same fields, fewer rows. A
+    consumer must not have to know whether `--paths` was used to read the
+    result.
+    """
+    if not relative_paths:
+        return findings
+    wanted = {p.replace(chr(92), "/").lstrip("./") for p in relative_paths}
+    kept = []
+    for finding in findings:
+        name = str(getattr(finding, "file", "") or "").replace(chr(92), "/")
+        if name.lstrip("./") in wanted:
+            kept.append(finding)
+    return kept
+
+
 def _cmd_checks(args) -> Result:
     """Syntax + pyflakes over the project. Read-only."""
     from helpers.quality_checks import run_pyflakes, run_syntax
@@ -181,6 +237,8 @@ def _cmd_checks(args) -> Result:
             "which the packaged CLI does not provide — run it from a source "
             "checkout, or use the Manager's Run Checks dialog")
 
+    requested, matched = _resolve_paths(project, args.paths)
+
     syntax = run_syntax(project)
     flakes = run_pyflakes(project)
     # `output` stays the one-line summary the Manager's dialogs show; the full
@@ -191,6 +249,20 @@ def _cmd_checks(args) -> Result:
         "pyflakes": {"ok": flakes.ok, "output": flakes.summary},
     }
     findings = syntax.findings + flakes.findings
+    if requested:
+        findings = _filter_findings(findings, requested)
+        # Reported so "this file is clean" and "that path is not in this
+        # project" are distinguishable; both otherwise render as zero rows.
+        data["requested_paths"] = requested
+        data["matched_paths"] = matched
+        # The pass/fail verdict has to follow the filter too, or a scoped run
+        # on a clean file would still report the whole project's failures.
+        clean = not findings
+        return Result(EXIT_OK if clean else EXIT_FAILED, data,
+                      findings=findings,
+                      human=("checks passed" if clean else
+                             f"{len(findings)} finding(s) in "
+                             f"{len(requested)} file(s)"))
     if syntax.ok and flakes.ok:
         return Result(EXIT_OK, data, human="checks passed")
     failed = [n for n, ok in (("syntax", syntax.ok), ("pyflakes", flakes.ok))
@@ -436,6 +508,40 @@ def _cmd_tests(args) -> Result:
                         f"with no test, {len(stale)} stale signal(s)")
 
 
+#: What a `test-run` actually did, beyond its pass/fail counts.
+#:
+#: `passed / failed / skipped` cannot distinguish "your tests failed" from
+#: "pytest never started" from "the Manager killed the run on a timeout", and a
+#: consumer needs to, because the remedy is different in each case. The exit
+#: code already says whether the result could be trusted — this says why not.
+RUN_COMPLETED = "completed"          # a summary was read
+RUN_NO_TESTS = "no_tests"            # pytest said it collected nothing
+RUN_TIMEOUT = "timeout"              # the Manager stopped it
+RUN_COLLECTION_ERROR = "collection_error"   # it started but could not collect
+RUN_PYTEST_MISSING = "pytest_missing"       # it never started
+RUN_UNREADABLE = "unreadable"        # it ran, but the output made no sense
+
+
+def _classify_run(output: str) -> str:
+    """Why no pytest summary could be read. Never guesses `completed`.
+
+    Ordered most-specific first, and every branch keyed on something pytest or
+    the runner actually prints. A pattern that does not match falls through to
+    `unreadable`, which is honest — inventing a more specific cause from an
+    unrecognised message would be the same class of confident wrongness this
+    roadmap exists to remove.
+    """
+    text = (output or "").lower()
+    if "no module named pytest" in text or "pytest: command not found" in text:
+        return RUN_PYTEST_MISSING
+    if "timed out" in text or "timeout" in text:
+        return RUN_TIMEOUT
+    if ("error collecting" in text or "errors during collection" in text
+            or "internalerror" in text):
+        return RUN_COLLECTION_ERROR
+    return RUN_UNREADABLE
+
+
 def _cmd_test_run(args) -> Result:
     """Run the suite once and report structured counts.
 
@@ -465,8 +571,8 @@ def _cmd_test_run(args) -> Result:
             passed, total, output = run_smoke_tests(project)
             duration = time.monotonic() - started
     except TestRunBusy as exc:
-        return Result(EXIT_FAILED, {"running": True}, error=str(exc),
-                      human=str(exc))
+        return Result(EXIT_FAILED, {"running": True, "run_state": "busy"},
+                      error=str(exc), human=str(exc))
 
     # `_parse_pytest_summary` returns (passed, passed + failed + errored) and
     # deliberately leaves SKIPPED out of the total, so failures are the
@@ -485,14 +591,21 @@ def _cmd_test_run(args) -> Result:
         # Python tests (a PowerShell repo with a tests/ directory, say) as
         # unverifiable was this command reporting its own contract backwards.
         data["collected"] = 0
+        data["run_state"] = RUN_NO_TESTS
         return Result(EXIT_OK, data,
                       human="test-run: no tests collected")
     if total == 0:
-        # It ran, but no summary could be read — a timeout, a launch failure,
-        # or a collection error. Reporting EXIT_OK here would say "it passed".
+        # It ran, but no summary could be read. Reporting EXIT_OK here would
+        # say "it passed"; reporting only EXIT_VERIFY_FAILED says "we could not
+        # find out" without saying why, and the remedies differ — install
+        # pytest, fix a collection error, or raise the timeout.
+        state = _classify_run(output)
+        data["run_state"] = state
         return Result(EXIT_VERIFY_FAILED, data,
-                      error="could not read a pytest summary from the output",
-                      human="test-run: could not verify the result")
+                      error=f"could not read a pytest summary from the output "
+                            f"({state})",
+                      human=f"test-run: could not verify the result ({state})")
+    data["run_state"] = RUN_COMPLETED
     human = (f"test-run: {passed} passed, {failed} failed, {skipped} skipped "
              f"in {duration:.1f}s")
     return Result(EXIT_OK if not failed else EXIT_FAILED, data, human=human)
@@ -587,8 +700,19 @@ def _cmd_test_gaps(args) -> Result:
             for s in suggestions
         ],
     }
+    requested, matched = _resolve_paths(project, args.paths)
+    if requested:
+        wanted = {r.lstrip("./") for r in requested}
+        data["suggestions"] = [
+            s for s in data["suggestions"]
+            if str(s.get("source", "")).replace(chr(92), "/").lstrip("./")
+            in wanted]
+        data["count"] = len(data["suggestions"])
+        data["requested_paths"] = requested
+        data["matched_paths"] = matched
+
     return Result(EXIT_OK, data,
-                  human=f"{len(suggestions)} test gap(s) against {base}")
+                  human=f"{data['count']} test gap(s) against {base}")
 
 
 def _cmd_mcp_status(args) -> Result:
@@ -657,15 +781,54 @@ def _index_summary(project: str) -> dict:
         return {"indexed": True, "readable": False, "error": str(exc)}
 
 
+def _git_section(git: "dict | None") -> dict:
+    """The `status` envelope's git half.
+
+    `changed_files` is here because `_parse_git_status_v2` was already walking
+    every per-file record to set `dirty` and discarding the paths — so naming
+    them costs one list append, not a second subprocess. That is what keeps
+    this command inside the budget its own docstring sets, and is why the
+    commit-request composer does not need a `git-status` command of its own.
+
+    `ahead`/`behind`/`has_remote` are here for the same reason: already
+    computed upstream, previously dropped on the floor.
+
+    Every field is `None` when git could not answer. An unreadable repository
+    is not a clean one, and a consumer must be able to tell those apart.
+    """
+    if not git:
+        return {"branch": None, "dirty": None, "ahead": None, "behind": None,
+                "has_remote": None, "changed_files": None,
+                "changed_truncated": None}
+    return {
+        "branch": git.get("branch"),
+        "dirty": git.get("dirty"),
+        "ahead": git.get("ahead"),
+        "behind": git.get("behind"),
+        "has_remote": git.get("has_remote"),
+        "changed_files": git.get("changed_files", []),
+        # True when the cap dropped some. Reported rather than applied
+        # silently, so a short list is never mistaken for a complete one.
+        "changed_truncated": git.get("changed_truncated", False),
+    }
+
+
 def _cmd_status(args) -> Result:
     """One cheap roll-up, so the editor's tree is useful the moment it opens.
 
-    **The payload is closed**, not "whatever the Manager knows": git branch and
-    dirtiness, the tokensave index counts, the MCP verdict, and whether a
-    commit request is pending. Nothing here walks the tree, runs Doctor, runs
-    scout or runs pytest — this is the one command a UI may call on refresh,
-    so it has to stay in the tens of milliseconds. If a field cannot be made
-    cheap it belongs in its own command, not in here.
+    **The payload is closed**, not "whatever the Manager knows": git branch,
+    dirtiness, remote drift and changed files; the tokensave index counts; the
+    MCP verdict; and whether a commit request is pending. Nothing here walks
+    the tree, runs Doctor, runs scout or runs pytest — this is the one command
+    a UI may call on refresh, so it has to stay in the tens of milliseconds. If
+    a field cannot be made cheap it belongs in its own command, not in here.
+
+    `changed_files` passes that bar rather than bending it. The porcelain-v2
+    parser was already visiting every per-file record to decide `dirty` and
+    throwing the paths away, so naming them adds a list append to a loop that
+    already ran — no second subprocess, no tree walk. Same for `ahead`,
+    `behind` and `has_remote`, which `read_git_status` has always computed and
+    this command used to drop.
 
     **It never probes.** No `--probe-effective`, no `claude mcp get`: that
     spawn CREATES a project entry in `~/.claude.json`, and this Manager once
@@ -691,7 +854,14 @@ def _cmd_status(args) -> Result:
 
     git = read_git_status(project, git_exe)
     mcp_path = _project_mcp_path(project)
-    mcp: dict = {"configured": os.path.isfile(mcp_path)}
+    # `probed: False`, always, and stated rather than implied. This command
+    # never runs `claude mcp get` — that spawn CREATES a project entry in
+    # `~/.claude.json`, and this Manager once littered that file with eight
+    # duplicate keys exactly that way. So what follows is a reading of
+    # configuration on disk, not a verdict about which scope actually wins, and
+    # a consumer that renders a bare "MCP ✓" from it would be overstating what
+    # was checked. Effective-scope probing stays opt-in, on `mcp-status`.
+    mcp: dict = {"configured": os.path.isfile(mcp_path), "probed": False}
     if mcp["configured"]:
         try:
             with open(mcp_path, encoding="utf-8") as fh:
@@ -704,8 +874,7 @@ def _cmd_status(args) -> Result:
     data = {
         # `None` where git could not answer — an unreadable repo is not a
         # clean one, and the UI needs to be able to say so.
-        "git": {"branch": (git or {}).get("branch"),
-                "dirty": (git or {}).get("dirty") if git else None},
+        "git": _git_section(git),
         "tokensave": _index_summary(project),
         "mcp": mcp,
         "commit_request": {"pending": bool(pending)},
@@ -759,6 +928,218 @@ def _cmd_commit_request(args) -> Result:
                         f"file(s)")
 
 
+def _cmd_focus(args) -> Result:
+    """Raise the running Manager window.
+
+    **Running and focused are separate facts.** Windows routinely refuses
+    `SetForegroundWindow` to a background process — the same constraint that
+    made driving this app by synthetic mouse input unusable — so "the Manager
+    is open but the desktop declined to raise it" is a normal outcome carrying
+    a reason, not a failure. Collapsing the two would have the extension report
+    the Manager as absent whenever Windows said no.
+
+    Not running is `EXIT_PREREQUISITE`, which is the code the extension already
+    treats as "a prerequisite is missing, here is how to fix it".
+
+    `--probe` answers without raising anything. It exists because the status
+    bar polls for "is the Manager open?", and a poll that foregrounded the
+    window would make the act of asking change the thing being asked about.
+    """
+    from helpers import manager_ipc
+    if args.probe:
+        # Report only. The status bar polls this, and a poll that raised the
+        # window would steal focus every few minutes — the surface asking the
+        # question must not be the thing that changes the answer.
+        running = manager_ipc.manager_running()
+        result = {"running": running, "focused": False,
+                  "reason": "probe only; the window was not raised"}
+    else:
+        result = manager_ipc.focus_manager()
+    if not result["running"]:
+        return Result(EXIT_PREREQUISITE, result,
+                      error="the Manager is not running",
+                      human="the Manager is not running - start it first")
+    return Result(EXIT_OK, result,
+                  human="Manager focused" if result["focused"]
+                        else f"Manager is running ({result['reason']})")
+
+
+def _cmd_request(args) -> Result:
+    """File a request for the running Manager, or ask what became of one.
+
+    **Propose-only holds.** Every action opens a dialog in front of a person;
+    none commits, applies or approves. Writing the request file *is* a state
+    change - that is what the inbox is - so this is classified `MUTATING`
+    rather than pretending otherwise.
+
+    **The project is checked against the Manager's configured search roots.**
+    `--project` is an argument, not an authorization: without that check a
+    request could steer the GUI at any directory on the machine.
+    """
+    from helpers import manager_ipc
+    project = _resolve_project(args.project)
+    raw = _load_manager_config(args.config)
+    roots = [_root_path(r) for r in (raw.get("search_roots") or [])] or None
+
+    if args.status:
+        state = manager_ipc.status_of(project, args.status, project=project)
+        # `unknown` is a real answer, not an error: it is what the ledger says
+        # when nothing was ever filed under that id for this project.
+        return Result(EXIT_OK, state,
+                      human=f"{args.status}: {state['state']}")
+
+    if not args.action:
+        return Result(EXIT_USAGE, error="pass --action or --status",
+                      human="pass --action or --status")
+
+    payload = {}
+    if args.payload_json:
+        try:
+            payload = json.loads(args.payload_json)
+        except ValueError as exc:
+            return Result(EXIT_USAGE, error=f"--payload-json is not JSON: {exc}",
+                          human=f"--payload-json is not JSON: {exc}")
+
+    try:
+        written = manager_ipc.write_request(project, args.action, payload,
+                                            known_roots=roots)
+    except manager_ipc.RequestError as exc:
+        # A refused request is the CLI reporting the protocol's own rules, not
+        # a crash: exit 2 so a caller can tell it from a transport failure.
+        return Result(EXIT_USAGE, {"accepted": False}, error=str(exc),
+                      human=f"refused: {exc}")
+
+    running = manager_ipc.manager_running()
+    warnings = ([] if running else
+                ["the Manager is not running; the request will be picked up "
+                 "when it next starts"])
+    return Result(EXIT_OK,
+                  {"accepted": True, "id": written["id"],
+                   "path": written["path"], "duplicate": written["duplicate"],
+                   "manager_running": running},
+                  warnings,
+                  human=f"queued request {written['id']}"
+                        + (" (already pending)" if written["duplicate"] else ""))
+
+
+def _cmd_commands(args) -> Result:
+    """Emit the command vocabulary. The source of truth for four surfaces.
+
+    Project-less on purpose — it describes the Manager's operations rather than
+    performing one on a repository, and requiring `--project` would mean the
+    extension had to have a folder open before it could learn what it may
+    invoke.
+    """
+    return Result(EXIT_OK, commands.as_json(),
+                  human=f"{len(commands.COMMANDS)} command(s)")
+
+
+def _cmd_cost(args) -> Result:
+    """Savings, spend and opportunity, as one envelope.
+
+    Classified `OBSERVE_REFRESH`, not read-only: `cost` and `discover` both
+    ingest accounting rows into `~/.tokensave/global.db`. A caller wiring this
+    to a control a user operates casually turns a display into repeated
+    ingestion, which is why the Manager's own dialog refreshes spend only on an
+    explicit click.
+
+    Each section reports independently. One unreadable source degrades that
+    section to `ok: false` with a reason; it never blanks the others, and it
+    never becomes a zero — "we could not find out" and "you saved nothing" are
+    different answers and this envelope keeps them apart.
+    """
+    from helpers import savings
+    project = _resolve_project(args.project)
+    raw = _load_manager_config(args.config)
+    exe = _tokensave_exe_from(raw, args.config or "the Manager's config")
+
+    range_ = args.range
+    gain = savings.fetch_gain(exe, project, range_, all_projects=args.all)
+    history = savings.fetch_gain_history(exe, project, range_)
+    spend = savings.fetch_spend(exe, range_, project)
+    found = savings.fetch_discover(exe, project, range_)
+
+    def _section(result, shape):
+        if not result:
+            return {"ok": False, "reason": result.reason}
+        return {"ok": True, **shape(result.value)}
+
+    def _gain_shape(value):
+        out = {"range": value.range, "project": value.project,
+               "saved_tokens": value.saved_tokens, "calls": value.calls,
+               "usd": value.usd, "all_projects": value.all_projects,
+               # The valuation basis travels with the number. A bare dollar
+               # figure with no basis is what made the old panel untrustworthy.
+               "usd_basis": savings.Gain.USD_BASIS,
+               "scope": "all projects" if value.all_projects else project}
+        if args.raw:
+            out["raw"] = value.raw
+        return out
+
+    def _spend_shape(value):
+        out = {
+            "range": value.range,
+            "total_cost_usd": value.total_cost_usd,
+            "total_input_tokens": value.total_input_tokens,
+            "total_output_tokens": value.total_output_tokens,
+            # Always null, never derived: the only available derivation is
+            # provably zero on every payload, so computing it would invent a
+            # number. Consumers render "not reported".
+            "cache_read_tokens": value.cache_read_tokens,
+            "by_model": [dataclasses.asdict(m) for m in value.by_model],
+            "by_category": [dataclasses.asdict(c) for c in value.by_category],
+            # Reported so a consumer can say so: the totals agree with each
+            # other yet do not follow from the token counts beside them.
+            "totals_reconcile": value.totals_reconcile(),
+            "implied_usd_per_mtok": value.implied_usd_per_mtok(),
+            # `cost` has no project filter, and a consumer must not present it
+            # beside the project-scoped savings without saying so.
+            "scope": "machine-global, all projects",
+        }
+        if args.raw:
+            out["raw"] = value.raw
+        return out
+
+    def _discover_shape(value):
+        out = {"since": value.since, "total_turns": value.total_turns,
+               "replaceable_turns": value.replaceable_turns,
+               "buckets": [dataclasses.asdict(b) for b in value.buckets],
+               "tokens_trustworthy": value.tokens_trustworthy,
+               "token_evidence": value.token_evidence}
+        if args.raw:
+            out["raw"] = value.raw
+        return out
+
+    data = {
+        "savings": _section(gain, _gain_shape),
+        "savings_history": ({"ok": True,
+                             "days": [dataclasses.asdict(d)
+                                      for d in history.value]}
+                            if history else
+                            {"ok": False, "reason": history.reason}),
+        "spend": _section(spend, _spend_shape),
+        "opportunity": _section(found, _discover_shape),
+        "side_effect": commands.OBSERVE_REFRESH,
+    }
+    warnings = [f"{name}: {section['reason']}"
+                for name, section in data.items()
+                if isinstance(section, dict) and section.get("ok") is False]
+
+    if not gain:
+        # Savings is the headline. Without it there is no answer to the
+        # question this command exists to answer, so it does not exit 0 —
+        # EXIT_VERIFY_FAILED is this CLI's existing way of saying "it ran but
+        # could not be verified" rather than "there is nothing to report".
+        return Result(EXIT_VERIFY_FAILED, data, warnings,
+                      error=gain.reason,
+                      human=f"savings unavailable: {gain.reason}")
+    value = gain.value
+    return Result(EXIT_OK, data, warnings,
+                  human=f"saved {value.saved_tokens:,} tokens over "
+                        f"{value.calls} call(s) "
+                        f"(${value.usd:,.2f}, {savings.Gain.USD_BASIS})")
+
+
 _COMMANDS = {
     "checks": _cmd_checks,
     "doctor": _cmd_doctor,
@@ -770,16 +1151,48 @@ _COMMANDS = {
     "test-gaps": _cmd_test_gaps,
     "mcp-status": _cmd_mcp_status,
     "commit-request": _cmd_commit_request,
+    "cost": _cmd_cost,
+    "focus": _cmd_focus,
+    "request": _cmd_request,
+    "commands": _cmd_commands,
 }
 
-#: Documented so a caller knows what is safe to run unattended.
-READ_ONLY_COMMANDS = frozenset(
-    {"checks", "doctor", "scout", "status", "tests", "test-run",
-     "test-gaps", "mcp-status"})
-MUTATING_COMMANDS = frozenset({"sync", "commit-request"})
+#: Commands that describe the Manager rather than acting on a project, so
+#: `--project` would be noise. Derived from the table rather than restated, so
+#: adding a project-less command cannot leave the parser and this set
+#: disagreeing about which one it is.
+PROJECTLESS_COMMANDS = frozenset(
+    c.cli for c in commands.COMMANDS if c.cli and not c.requires_project)
+
+# Side-effect classification, derived from the single command table in
+# `helpers/commands.py` rather than restated here.
+#
+# The previous `READ_ONLY_COMMANDS` frozenset promised something two of its
+# members did not deliver, and the replacements were measured rather than
+# reasoned about: `doctor` rewrites `~/.tokensave/state.toml` (byte-identical
+# content, mtime moves) and the new `cost` command ingests accounting rows into
+# `~/.tokensave/global.db`. Neither touches the project, but neither is a read
+# either, so they sit in their own class instead of being filed under a label
+# that overstates the guarantee.
+PURE_READ_COMMANDS = frozenset(
+    c.cli for c in commands.by_side_effect(commands.PURE_READ) if c.cli)
+OBSERVE_REFRESH_COMMANDS = frozenset(
+    c.cli for c in commands.by_side_effect(commands.OBSERVE_REFRESH) if c.cli)
+MUTATING_COMMANDS = frozenset(
+    c.cli for c in commands.by_side_effect(commands.MUTATING) if c.cli)
+
+#: Safe to run unattended: nothing here changes the project. It spans two
+#: classes because "does not touch your repository" and "writes nothing at all"
+#: are different promises, and only the first one is true of `doctor`.
+UNATTENDED_SAFE_COMMANDS = PURE_READ_COMMANDS | OBSERVE_REFRESH_COMMANDS
 
 
 def _build_parser() -> argparse.ArgumentParser:
+    # Imported here rather than at module scope: this is the only place that
+    # needs these, and `cli.py` keeps its import surface small so a frozen
+    # build does not drag the whole helper tree in.
+    from helpers.manager_ipc import ACTIONS as request_actions
+    from helpers.savings import RANGES as savings_ranges
     p = argparse.ArgumentParser(
         prog="manager-cli",
         description="Headless access to TokenSave Manager operations. "
@@ -789,11 +1202,16 @@ def _build_parser() -> argparse.ArgumentParser:
                            f"(schema {SCHEMA_VERSION})")
     subs = p.add_subparsers(dest="command", required=True)
 
-    def add(name: str, help_text: str) -> argparse.ArgumentParser:
+    def add(name: str, help_text: str,
+            project: bool = True) -> argparse.ArgumentParser:
         sp = subs.add_parser(name, help=help_text)
-        # Required everywhere: see the module docstring on cwd inference.
-        sp.add_argument("--project", required=True,
-                        help="absolute path to the project root")
+        # Required for everything that acts on a repository: see the module
+        # docstring on cwd inference. `commands` describes the Manager itself,
+        # so demanding a project would mean an editor had to open a folder
+        # before it could ask what it may invoke.
+        if project:
+            sp.add_argument("--project", required=True,
+                            help="absolute path to the project root")
         sp.add_argument("--json", action="store_true",
                         help="suppress the human summary on stderr "
                              "(stdout is JSON either way)")
@@ -802,7 +1220,13 @@ def _build_parser() -> argparse.ArgumentParser:
                              "file beside this executable")
         return sp
 
-    add("checks", "run syntax + pyflakes checks (read-only)")
+    def add_paths(sp: argparse.ArgumentParser) -> None:
+        """`--paths`: scope the findings, without changing their shape."""
+        sp.add_argument("--paths", nargs="*", default=[],
+                        help="limit findings to these files (repo-relative or "
+                             "absolute, but inside the project)")
+
+    add_paths(add("checks", "run syntax + pyflakes checks (read-only)"))
 
     d = add("doctor", "scan for stale tokensave entries (read-only, never fixes)")
     d.add_argument("--timeout", type=float, default=120.0)
@@ -826,6 +1250,7 @@ def _build_parser() -> argparse.ArgumentParser:
     t.add_argument("--base", default=AUTO_BASE,
                    help="git ref to compare against; 'auto' asks the "
                         "repository for its default branch")
+    add_paths(t)
 
     m = add("mcp-status", "report MCP binding across layers (read-only)")
     m.add_argument("--probe-effective", action="store_true",
@@ -839,6 +1264,33 @@ def _build_parser() -> argparse.ArgumentParser:
     c.add_argument("--note", default="")
     c.add_argument("--replace", action="store_true",
                    help="overwrite a different pending request")
+
+    money = add("cost", "savings, spend and opportunity metrics "
+                        "(refreshes tokensave bookkeeping)")
+    money.add_argument("--range", default="30d", choices=list(savings_ranges),
+                       help="today, 7d, 30d or all")
+    money.add_argument("--all", action="store_true",
+                       help="savings across every project, not just this one")
+    money.add_argument("--raw", action="store_true",
+                       help="include the untouched upstream payloads")
+
+    foc = add("focus", "raise the running Manager window (no project needed)",
+              project=False)
+    foc.add_argument("--probe", action="store_true",
+                     help="report whether the Manager is running without "
+                          "raising its window")
+
+    req = add("request", "file a Manager request, or read its status")
+    req.add_argument("--action", default="",
+                     choices=sorted(request_actions) or None,
+                     help="which dialog the Manager should open")
+    req.add_argument("--payload-json", default="",
+                     help="the action's payload, as JSON")
+    req.add_argument("--status", default="",
+                     help="report what became of a request id instead")
+
+    add("commands", "emit the Manager's command vocabulary (no project needed)",
+        project=False)
     return p
 
 

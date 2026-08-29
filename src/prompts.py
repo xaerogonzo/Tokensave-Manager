@@ -553,7 +553,7 @@ PROMPT_SNIPPETS: list[tuple[str, str]] = [
         "  • v7.2.0: .tokensave/project.json lets users index extensionless files\n"
         "    with a language override — an alternative to shadow links.\n\n"
         "STEP 5 — Manager integration code\n"
-        "  Read helpers/daemon_cost.py, agent_tools.py.\n"
+        "  Read helpers/savings.py, agent_tools.py.\n"
         "  Flag any function that wraps a tokensave CLI command or MCP\n"
         "  tool that was removed or renamed in Step 1.\n\n"
         "STEP 6 — Output a structured action list:\n"
