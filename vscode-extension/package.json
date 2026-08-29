@@ -34,13 +34,19 @@
           "id": "tokensaveManager.projects",
           "name": "Projects",
           "contextualTitle": "TokenSave Manager"
+        },
+        {
+          "id": "tokensaveManager.savings",
+          "name": "Savings & Spend",
+          "type": "webview",
+          "contextualTitle": "TokenSave Manager"
         }
       ]
     },
     "commands": [
       {
         "command": "tokensaveManager.setManagerPath",
-        "title": "Set Manager Path…",
+        "title": "Set Manager Path\u2026",
         "category": "TokenSave Manager"
       },
       {
@@ -98,6 +104,38 @@
         "command": "tokensaveManager.testRun",
         "title": "Run Tests",
         "category": "TokenSave Manager"
+      },
+      {
+        "command": "tokensaveManager.savings",
+        "title": "Savings & Spend",
+        "category": "TokenSave Manager",
+        "icon": "$(graph)"
+      },
+      {
+        "command": "tokensaveManager.proposeCommit",
+        "title": "Propose a Commit\u2026",
+        "category": "TokenSave Manager",
+        "icon": "$(git-commit)"
+      },
+      {
+        "command": "tokensaveManager.focus",
+        "title": "Open Manager",
+        "category": "TokenSave Manager"
+      },
+      {
+        "command": "tokensaveManager.checksFile",
+        "title": "Checks This File",
+        "category": "TokenSave Manager"
+      },
+      {
+        "command": "tokensaveManager.testGapsFile",
+        "title": "Test Gaps for This File",
+        "category": "TokenSave Manager"
+      },
+      {
+        "command": "tokensaveManager.statusBarMenu",
+        "title": "Status Bar Menu",
+        "category": "TokenSave Manager"
       }
     ],
     "menus": {
@@ -106,6 +144,47 @@
           "command": "tokensaveManager.refresh",
           "when": "view == tokensaveManager.projects",
           "group": "navigation"
+        },
+        {
+          "command": "tokensaveManager.savings",
+          "when": "view == tokensaveManager.savings",
+          "group": "navigation"
+        }
+      ],
+      "scm/title": [
+        {
+          "command": "tokensaveManager.proposeCommit",
+          "when": "scmProvider == git",
+          "group": "navigation"
+        }
+      ],
+      "explorer/context": [
+        {
+          "command": "tokensaveManager.proposeCommit",
+          "when": "!explorerResourceIsFolder",
+          "group": "tokensave@1"
+        },
+        {
+          "command": "tokensaveManager.checksFile",
+          "when": "resourceExtname == .py",
+          "group": "tokensave@2"
+        },
+        {
+          "command": "tokensaveManager.testGapsFile",
+          "when": "resourceExtname == .py",
+          "group": "tokensave@3"
+        }
+      ],
+      "editor/context": [
+        {
+          "command": "tokensaveManager.checksFile",
+          "when": "resourceExtname == .py",
+          "group": "tokensave@1"
+        },
+        {
+          "command": "tokensaveManager.testGapsFile",
+          "when": "resourceExtname == .py",
+          "group": "tokensave@2"
         }
       ]
     },
@@ -125,17 +204,29 @@
         "tokensaveManager.cliPath": {
           "type": "string",
           "default": "",
-          "markdownDescription": "Absolute path to a built `tokensave-manager-cli.exe`. Takes precedence over `managerPath`. Leave empty unless you have no checkout — a compiled CLI is a snapshot and goes stale whenever the Manager changes."
+          "markdownDescription": "Absolute path to a built `tokensave-manager-cli.exe`. Takes precedence over `managerPath`. Leave empty unless you have no checkout \u2014 a compiled CLI is a snapshot and goes stale whenever the Manager changes."
         },
         "tokensaveManager.configPath": {
           "type": "string",
           "default": "",
-          "markdownDescription": "Absolute path to `manager-config.json`, passed to the CLI as `--config`. **Not needed in source mode** — the CLI finds the config beside the checkout. Required only when running a relocated binary."
+          "markdownDescription": "Absolute path to `manager-config.json`, passed to the CLI as `--config`. **Not needed in source mode** \u2014 the CLI finds the config beside the checkout. Required only when running a relocated binary."
         },
         "tokensaveManager.testGapsBase": {
           "type": "string",
           "default": "auto",
           "markdownDescription": "Git ref that Test Gaps compares against. `auto` asks the repository for its own default branch (`refs/remotes/origin/HEAD`), which is right whether it uses `main` or `master`. Set an explicit ref to override."
+        },
+        "tokensaveManager.statusPollSeconds": {
+          "type": "number",
+          "default": 300,
+          "minimum": 30,
+          "markdownDescription": "How often the status bar re-reads `status`, in seconds. Deliberately slow \u2014 file-system changes already trigger a (debounced) refresh, so this only catches changes made outside the editor."
+        },
+        "tokensaveManager.statusDebounceMs": {
+          "type": "number",
+          "default": 750,
+          "minimum": 100,
+          "markdownDescription": "How long to wait after a file change before refreshing the status bar. A branch switch fires many events at once; without this each one would spawn its own process to compute the same answer."
         }
       }
     }
@@ -145,7 +236,7 @@
     "watch": "tsc -watch -p ./",
     "vscode:prepublish": "npm run compile",
     "package": "vsce package --target win32-x64",
-    "test": "node --test test/cli.test.js test/diagnostics.test.js",
+    "test": "node --test test/cli.test.js test/diagnostics.test.js test/surfaces.test.js",
     "pretest": "npm run compile"
   },
   "devDependencies": {

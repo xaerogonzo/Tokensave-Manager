@@ -204,6 +204,33 @@ export async function runCli(
   folder: vscode.WorkspaceFolder,
   extraArgs: string[] = [],
 ): Promise<CliResult> {
+  return invoke(context, command,
+                ["--project", folder.uri.fsPath, ...extraArgs]);
+}
+
+/**
+ * Run a command that describes the Manager rather than a project.
+ *
+ * `focus` and `commands` take no `--project`, and the reason is not an
+ * inconsistency: one raises the Manager's window and the other emits the
+ * command vocabulary, so demanding a folder would mean the extension had to
+ * have one open before it could ask what it may invoke, or bring the Manager
+ * forward. `commands.ts` marks them with `requiresProject: false`, so a caller
+ * never has to remember which is which.
+ */
+export async function runProjectlessCli(
+  context: vscode.ExtensionContext,
+  command: string,
+  extraArgs: string[] = [],
+): Promise<CliResult> {
+  return invoke(context, command, extraArgs);
+}
+
+async function invoke(
+  context: vscode.ExtensionContext,
+  command: string,
+  commandArgs: string[],
+): Promise<CliResult> {
   const runner = resolveRunner(context);
   if (runner === null) {
     return {
@@ -217,8 +244,7 @@ export async function runCli(
   const settings = vscode.workspace.getConfiguration("tokensaveManager");
   const configPath = settings.get<string>("configPath", "").trim();
 
-  const args = [...runner.prefixArgs,
-                command, "--project", folder.uri.fsPath, "--json", ...extraArgs];
+  const args = [...runner.prefixArgs, command, "--json", ...commandArgs];
   // Source mode finds manager-config.json beside the checkout on its own, so
   // --config is only needed when a relocated binary is being used.
   if (configPath) {
