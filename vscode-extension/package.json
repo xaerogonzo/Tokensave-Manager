@@ -2,7 +2,7 @@
   "name": "tokensave-manager",
   "displayName": "TokenSave Manager",
   "description": "Run TokenSave Manager checks, sync, doctor and test gaps from inside VS Code.",
-  "version": "2.3.1",
+  "version": "2.4.0",
   "publisher": "tokensave",
   "license": "MIT",
   "repository": {
