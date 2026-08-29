@@ -27,6 +27,7 @@ The script is a JSON list of steps, run in order:
       {"do": "dialog", "name": "mcp"},          // or "settings", "savings"
       {"do": "click",  "text": "show"},
       {"do": "report", "what": "mcp", "after_ms": 3000},
+      {"do": "report", "what": "geometry"},     // laid-out geometry defects
       {"do": "shot",   "path": "C:/tmp/mcp.png", "target": "dialog"},
       {"do": "quit"}
     ]
@@ -288,11 +289,36 @@ class _Driver:
         if what == "mcp":
             self._report_mcp(target)
             return
+        if what == "geometry":
+            self._report_geometry(target)
+            return
         lines = [t for t in (_widget_text(w).strip() for w in _walk(target))
                  if t]
         _say("drive: report (%d labels)" % len(lines))
         for line in lines:
             _say("    " + line)
+
+    def _report_geometry(self, target) -> None:
+        """Assert geometric invariants on what is actually on screen.
+
+        The step that turns a drive run from something a human reads into
+        something that can fail. `report what=text` says what a window
+        claims; this says whether the window is laid out such that a user
+        could reach it — the class of defect that has shipped here repeatedly
+        with a green suite (buttons off-screen, a tab strip wider than its
+        own minimum width, a clipped list).
+
+        Always prints the population it measured, so "0 findings" can never
+        be confused with "nothing was looked at".
+        """
+        try:
+            from helpers.geometry_scan import format_result, scan_window
+        except Exception as exc:                       # pragma: no cover
+            _say("drive: report: geometry scan unavailable (%s)" % exc)
+            return
+        result = scan_window(target)
+        for line in format_result(result).splitlines():
+            _say("drive: " + line)
 
     def _report_mcp(self, dialog) -> None:
         """The MCP dialog's per-row verdicts, as state + badge + path."""
