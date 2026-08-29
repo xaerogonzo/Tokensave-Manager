@@ -1,0 +1,26 @@
+{
+  "since": "7d",
+  "recoverable_fraction": 0.5,
+  "total_turns": 12780,
+  "replaceable_turns": 239,
+  "total_addressable_input_tokens": 478,
+  "total_recoverable_input_tokens": 239,
+  "buckets": [
+    {
+      "bucket": "read",
+      "tool": "Read",
+      "suggestion": "outline / read / node",
+      "turns": 226,
+      "addressable_input_tokens": 452,
+      "recoverable_input_tokens": 226
+    },
+    {
+      "bucket": "grep",
+      "tool": "Grep",
+      "suggestion": "search / callers / callees / impact",
+      "turns": 13,
+      "addressable_input_tokens": 26,
+      "recoverable_input_tokens": 13
+    }
+  ]
+}

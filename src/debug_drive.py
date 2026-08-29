@@ -24,7 +24,7 @@ The script is a JSON list of steps, run in order:
 
     [
       {"do": "tab",    "name": "Projects"},
-      {"do": "dialog", "name": "mcp"},
+      {"do": "dialog", "name": "mcp"},          // or "settings", "savings"
       {"do": "click",  "text": "show"},
       {"do": "report", "what": "mcp", "after_ms": 3000},
       {"do": "shot",   "path": "C:/tmp/mcp.png", "target": "dialog"},
@@ -206,6 +206,12 @@ class _Driver:
         elif name in ("settings", "settingsdialog"):
             from dialogs.settings import SettingsDialog
             self._dialog = SettingsDialog(self._app, self._app._cfg)
+        elif name in ("savings", "cost", "savingsdialog"):
+            # Reads `tokensave gain`/`cost`/`discover` in worker threads, so a
+            # `report` step needs an `after_ms` long enough for them to land.
+            from dialogs.cost_viewer import SavingsDialog
+            self._dialog = SavingsDialog(
+                self._app, self._app._cfg, str(step.get("project", "")))
         else:
             _say("drive: dialog: unknown name %r" % name)
             return

@@ -1,0 +1,107 @@
+{
+  "range": "all",
+  "total_cost_usd": 15949.34146283,
+  "total_input_tokens": 449657,
+  "total_output_tokens": 58322202,
+  "tokens_saved": 14499614,
+  "efficiency_ratio": 0.19788893830481613,
+  "by_model": [
+    {
+      "model": "claude-opus-5",
+      "cost": 12989.07971875,
+      "tokens": 39239413
+    },
+    {
+      "model": "claude-opus-4-7",
+      "cost": 1457.622092,
+      "tokens": 5713001
+    },
+    {
+      "model": "claude-sonnet-4-6",
+      "cost": 517.257891,
+      "tokens": 7041454
+    },
+    {
+      "model": "claude-opus-4-8",
+      "cost": 437.6875075,
+      "tokens": 1585489
+    },
+    {
+      "model": "claude-sonnet-5",
+      "cost": 370.9502106,
+      "tokens": 2726104
+    },
+    {
+      "model": "claude-fable-5",
+      "cost": 140.1049235,
+      "tokens": 476169
+    },
+    {
+      "model": "claude-haiku-4-5-20251001",
+      "cost": 33.46795623,
+      "tokens": 1973226
+    },
+    {
+      "model": "claude-opus-4-6",
+      "cost": 3.17116325,
+      "tokens": 17003
+    },
+    {
+      "model": "<synthetic>",
+      "cost": 0.0,
+      "tokens": 0
+    }
+  ],
+  "by_category": [
+    {
+      "category": "conversation",
+      "cost": 9820.36080756,
+      "turns": 38926
+    },
+    {
+      "category": "general",
+      "cost": 2812.46232402,
+      "turns": 11028
+    },
+    {
+      "category": "coding",
+      "cost": 1260.56663128,
+      "turns": 6279
+    },
+    {
+      "category": "testing",
+      "cost": 920.6741131,
+      "turns": 3220
+    },
+    {
+      "category": "git_ops",
+      "cost": 527.8905352,
+      "turns": 1722
+    },
+    {
+      "category": "exploration",
+      "cost": 502.01974212,
+      "turns": 3287
+    },
+    {
+      "category": "refactoring",
+      "cost": 61.67889735,
+      "turns": 200
+    },
+    {
+      "category": "planning",
+      "cost": 39.0150115,
+      "turns": 165
+    },
+    {
+      "category": "build_deploy",
+      "cost": 4.0885555,
+      "turns": 12
+    },
+    {
+      "category": "delegation",
+      "cost": 0.5848452,
+      "turns": 5
+    }
+  ]
+}

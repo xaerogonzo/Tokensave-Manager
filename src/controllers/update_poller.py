@@ -396,7 +396,7 @@ class UpdatePollerController:
         "STEP 4 — Read docs/upstream-issues/*.md. For each file lacking\n"
         "  STATUS: FIXED/SHIPPED/MOOT in first 8 lines, check if the changelog\n"
         "  change resolves it and propose the correct STATUS line.\n\n"
-        "STEP 5 — Read src/helpers/daemon_cost.py and src/agent_tools.py.\n"
+        "STEP 5 — Read src/helpers/savings.py and src/agent_tools.py.\n"
         "  Flag any function wrapping a tool removed or renamed in Step 1.\n"
         "  If codegraph MCP tools are available, use them for structural\n"
         "  cross-references alongside tokensave_context.\n\n"

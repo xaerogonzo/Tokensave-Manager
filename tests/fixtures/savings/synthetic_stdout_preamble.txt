@@ -1,0 +1,68 @@
+Ingested or refreshed 3 local accounting rows.
+{
+  "range": "7d",
+  "total_cost_usd": 4177.12976335,
+  "total_input_tokens": 25531,
+  "total_output_tokens": 11569716,
+  "tokens_saved": 14499614,
+  "efficiency_ratio": 0.5556501718863343,
+  "by_model": [
+    {
+      "model": "claude-opus-5",
+      "cost": 4176.24675975,
+      "tokens": 11592924
+    },
+    {
+      "model": "claude-sonnet-5",
+      "cost": 0.8830036000000001,
+      "tokens": 2323
+    },
+    {
+      "model": "<synthetic>",
+      "cost": 0.0,
+      "tokens": 0
+    }
+  ],
+  "by_category": [
+    {
+      "category": "conversation",
+      "cost": 2504.7108114,
+      "turns": 7430
+    },
+    {
+      "category": "general",
+      "cost": 955.1733107,
+      "turns": 3061
+    },
+    {
+      "category": "testing",
+      "cost": 248.8808625,
+      "turns": 805
+    },
+    {
+      "category": "coding",
+      "cost": 192.0176715,
+      "turns": 642
+    },
+    {
+      "category": "git_ops",
+      "cost": 162.40021525,
+      "turns": 474
+    },
+    {
+      "category": "exploration",
+      "cost": 71.7168795,
+      "turns": 240
+    },
+    {
+      "category": "refactoring",
+      "cost": 40.63492675,
+      "turns": 123
+    },
+    {
+      "category": "build_deploy",
+      "cost": 1.59508575,
+      "turns": 5
+    }
+  ]
+}

@@ -93,7 +93,7 @@ Token Save Manager Source/
 │   │   │                          _zip_dist, _release_basename, _fmt_size
 │   │   │                          (Roadmap-2 P2: _patch_changelog removed; canonical
 │   │   │                          implementation now lives in helpers/changelog_patch.py)
-│   │   ├── daemon_cost.py         parse_tokensave_cost(tokensave_exe, scope) ONLY.
+│   │   ├── savings.py             gain/cost/discover parsers + fetchers.
 │   │   │                          All daemon functions removed in tokensave v6.0.0
 │   │   │                          integration (daemon mode dropped upstream).
 │   │   │                          Previously held: get_daemon_status, toggle_daemon,
@@ -336,7 +336,7 @@ Token Save Manager Source/
 │   │   │                              blank; live preview + Generate).
 │   │   │                          Visual template: roadmap_mgr.py (Notebook + Treeview).
 │   │   │                          See memory/test_manager.md for the decision tree.
-│   │   ├── cost_viewer.py         CostViewerDialog (2x2 metric grid; bg-threaded fetch)
+│   │   ├── cost_viewer.py         SavingsDialog (savings/spend/opportunity; bg-threaded)
 │   │   ├── refactor_scout.py      RefactorScoutDialog — scrollable findings panel grouped
 │   │   │                          by kind. Per-card checkboxes + selection toolbar (All/None/
 │   │   │                          per-kind). Three batch footer actions: clipboard briefing,
