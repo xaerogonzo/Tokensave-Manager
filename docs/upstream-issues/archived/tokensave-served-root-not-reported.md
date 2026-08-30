@@ -1,6 +1,6 @@
 # No surface reports which project the server is actually serving
 
-STATUS: FILED 2026-08-19 — https://github.com/aovestdipaperino/tokensave/issues/437
+STATUS: CLOSED — verified via GitHub API 2026-08-29
 
 **Version observed:** tokensave 7.10.0, Windows 11
 **Relationship to prior issues:** follow-up to #372 (a fifth ask it did not
