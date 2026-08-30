@@ -173,3 +173,127 @@ def test_merging_touches_only_pending_state(tmp_path):
     dialog._inject_patterns_list(["*.log", "src/__pycache__/"])
 
     assert gitignore.read_text(encoding="utf-8") == "dist/\n"
+
+
+# ── the template-button reflow ──────────────────────────────────────────
+# The shipped defect: a fixed six columns of variable-width buttons inside a
+# hard-coded 640px window put "+ .NET / Visual Studio" entirely past the right
+# edge — invisible, with no way to discover the template existed. Found by the
+# geometry oracle (docs/VERIFICATION.md), fixed by measuring the column count.
+#
+# Stubbed rather than realised: the reflow only reads winfo_reqwidth() and
+# calls grid(), so a Toplevel would be testing Tk rather than the arithmetic
+# and the re-entrancy guard, which are the parts that can be wrong.
+
+
+class _StubButton:
+    def __init__(self, width: int) -> None:
+        self._w = width
+        self.grid_calls: list = []
+
+    def winfo_reqwidth(self) -> int:
+        return self._w
+
+    def grid(self, **kw) -> None:
+        self.grid_calls.append(kw)
+
+
+class _StubWrap:
+    def __init__(self, width: int) -> None:
+        self._w = width
+
+    def winfo_width(self) -> int:
+        return self._w
+
+
+def _reflow_dialog(widths, wrap_width=604):
+    dialog = object.__new__(GitignoreDialog)
+    dialog._tmpl_btns = [_StubButton(w) for w in widths]
+    dialog._tmpl_wrap = _StubWrap(wrap_width)
+    dialog._tmpl_last_width = -1
+    return dialog
+
+
+def _placements(dialog):
+    """(row, column) per button, in button order."""
+    return [(b.grid_calls[-1]["row"], b.grid_calls[-1]["column"])
+            for b in dialog._tmpl_btns]
+
+
+def test_the_reflow_lays_out_every_button():
+    """No button may be dropped — one of them being unreachable is the bug."""
+    dialog = _reflow_dialog([100] * 11)
+    dialog._reflow_template_buttons()
+    assert all(b.grid_calls for b in dialog._tmpl_btns)
+
+
+def test_the_reflow_is_row_major():
+    dialog = _reflow_dialog([100] * 6, wrap_width=320)   # 3 per row at 100px
+    dialog._reflow_template_buttons()
+    rows = [r for r, _ in _placements(dialog)]
+    assert rows == sorted(rows), "buttons must fill left-to-right, top-to-bottom"
+
+
+def test_a_narrow_frame_uses_fewer_columns_than_a_wide_one():
+    narrow = _reflow_dialog([100] * 11, wrap_width=320)
+    narrow._reflow_template_buttons()
+    wide = _reflow_dialog([100] * 11, wrap_width=2000)
+    wide._reflow_template_buttons()
+    cols_narrow = max(c for _, c in _placements(narrow)) + 1
+    cols_wide = max(c for _, c in _placements(wide)) + 1
+    assert cols_narrow < cols_wide
+
+
+def test_nothing_is_placed_past_the_available_width():
+    """The whole point: the laid-out grid must fit the room it was given."""
+    widths = [188, 78, 88, 66, 99, 150, 89, 118, 82, 92, 99]
+    dialog = _reflow_dialog(widths, wrap_width=604)
+    dialog._reflow_template_buttons()
+    cols = max(c for _, c in _placements(dialog)) + 1
+    col_w = [0] * cols
+    for i, w in enumerate(widths):
+        col_w[i % cols] = max(col_w[i % cols], w)
+    total = sum(col_w) + dialog._TMPL_GAP_PX * (cols - 1)
+    assert total <= 604, f"grid needs {total}px in 604px of room"
+
+
+def test_a_repeat_at_the_same_width_does_not_re_grid():
+    """Re-gridding fires <Configure> again; without the guard it re-enters."""
+    dialog = _reflow_dialog([100] * 4)
+    dialog._reflow_template_buttons()
+    before = [len(b.grid_calls) for b in dialog._tmpl_btns]
+    dialog._reflow_template_buttons()
+    assert [len(b.grid_calls) for b in dialog._tmpl_btns] == before
+
+
+def test_a_changed_width_does_re_grid():
+    """The guard must not be so eager that a real resize is ignored."""
+    dialog = _reflow_dialog([100] * 4, wrap_width=320)
+    dialog._reflow_template_buttons()
+    before = [len(b.grid_calls) for b in dialog._tmpl_btns]
+    dialog._tmpl_wrap = _StubWrap(2000)
+    dialog._reflow_template_buttons()
+    assert all(n > b for n, b in
+               zip([len(x.grid_calls) for x in dialog._tmpl_btns], before))
+
+
+def test_an_unlaid_out_frame_falls_back_to_the_minimum_width():
+    """Before the first <Configure> the frame reports 1px.
+
+    Laying out against that would put every button on its own row; laying out
+    against nothing at all would leave them ungridded and invisible. The
+    fallback is the narrowest width the dialog claims to support.
+    """
+    dialog = _reflow_dialog([100] * 11, wrap_width=1)
+    dialog._reflow_template_buttons()
+    assert all(b.grid_calls for b in dialog._tmpl_btns)
+    assert dialog._tmpl_last_width == GitignoreDialog._TMPL_FALLBACK_W
+
+
+def test_the_reflow_survives_being_called_before_the_buttons_exist():
+    """<Configure> can arrive during construction."""
+    dialog = object.__new__(GitignoreDialog)
+    dialog._tmpl_btns = []
+    dialog._tmpl_wrap = _StubWrap(600)
+    dialog._tmpl_last_width = -1
+    dialog._reflow_template_buttons()          # must not raise
