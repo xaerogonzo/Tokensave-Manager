@@ -174,6 +174,51 @@ signal with it.
 That is the general lesson in miniature: **a fixture is not big or small, it
 is degenerate or not with respect to a specific defect.**
 
+### What the first live run found
+
+Built, then pointed at the real application via
+`scripts/drive/geometry-sweep.json` — because *testing a helper is not testing
+the wiring*, and until this ran, the oracle had only ever seen `Toplevel`s
+that its own test file constructed.
+
+Five tabs, 26–60 mapped widgets each. One finding, on the Help tab:
+
+```
+[collapsed] Frame .!notebook.!frame5.!frame.!frame2.!frame  1741x1+163+910
+```
+
+**It was a false positive**, and a useful one. That frame is the Help tab's
+footer, which holds three buttons `_help_show()` packs per section — so on a
+freshly-opened tab it is genuinely empty, and Tk lays an empty container out
+1px tall. Correct behaviour.
+
+Two fixes came out of it, neither visible from the unit tests:
+
+- **The collapse check now requires the widget to carry content** — a
+  non-empty `text`, or a class that displays something. An empty container at
+  1px is Tk working. A container squeezing *real* content is still caught,
+  because its mapped children are measured in their own right.
+- **Findings carry the full Tk path**, not the bare class and name. The first
+  run reported `Frame:!frame`, which occurs dozens of times in one window and
+  cost a second run to place — despite a test asserting findings are
+  actionable without a re-run. The test was satisfied by a subject that was
+  not, in practice, enough.
+
+Both are pinned by regression tests named after this run.
+
+### Proving it live, not just in the suite
+
+`scripts/drive/geometry-selftest.json` reports the Git tab twice against the
+same geometry:
+
+```
+drive: geometry:  0 finding(s) across 60 mapped widget(s)
+drive: geometry: 60 finding(s) across 60 mapped widget(s)   # impossible tolerance
+```
+
+Run it whenever a clean sweep looks too good. "0 findings" and "the scan is
+broken" are the same output otherwise.
+
 ### Deliberate scope limits
 
 Stated so that "no findings" is not read as coverage this does not have:

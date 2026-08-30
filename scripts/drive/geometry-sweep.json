@@ -1,0 +1,15 @@
+[
+  {"do": "wait",   "after_ms": 2500},
+  {"do": "report", "what": "geometry", "after_ms": 600},
+  {"do": "tab",    "name": "Projects", "after_ms": 900},
+  {"do": "report", "what": "geometry", "after_ms": 600},
+  {"do": "tab",    "name": "Git",      "after_ms": 900},
+  {"do": "report", "what": "geometry", "after_ms": 600},
+  {"do": "tab",    "name": "Tasks",    "after_ms": 900},
+  {"do": "report", "what": "geometry", "after_ms": 600},
+  {"do": "tab",    "name": "Help",     "after_ms": 900},
+  {"do": "report", "what": "geometry", "after_ms": 600},
+  {"do": "tab",    "name": "Ask",      "after_ms": 900},
+  {"do": "report", "what": "geometry", "after_ms": 600},
+  {"do": "quit"}
+]

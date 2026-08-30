@@ -51,6 +51,32 @@ _THIN_BY_DESIGN = frozenset({
     "TSeparator", "Separator", "TSizegrip", "Sizegrip", "TProgressbar",
 })
 
+# Classes that carry content even with no `text` option set.
+_CONTENT_CLASSES = frozenset({
+    "Entry", "TEntry", "Text", "Listbox", "Treeview", "TCombobox",
+    "Spinbox", "TSpinbox", "Canvas", "Scale", "TScale",
+})
+
+
+def _carries_content(widget, cls: str) -> bool:
+    """True when collapsing this widget would actually hide something.
+
+    An empty *container* at 1px is Tk working correctly, not a defect: the
+    Help tab's footer holds three buttons that are packed per section, so on
+    a freshly-opened tab it is legitimately empty and legitimately 1px tall.
+    Reporting that is how a check earns a reputation for crying wolf and
+    stops being read.
+
+    A container squeezing real content is still caught — its mapped children
+    are measured in their own right and report as collapsed or escaping.
+    """
+    if cls in _CONTENT_CLASSES:
+        return True
+    try:
+        return bool(str(widget.cget("text")).strip())
+    except Exception:
+        return False
+
 
 class ScanResult(NamedTuple):
     """Findings plus the population they were drawn from.
@@ -127,12 +153,16 @@ def scan_window(top, *, tolerance: int = 2) -> ScanResult:
             continue
 
         measured += 1
-        name = widget.winfo_name()
         cls = widget.winfo_class()
-        subject = f"{cls}:{name}"
+        # The Tk path (".!frame.!frame2.!label") rather than the bare name:
+        # a finding has to be locatable without re-running the app, and
+        # "Frame:!frame" appears dozens of times in one window.
+        subject = f"{cls} {widget}"
 
-        if cls not in _THIN_BY_DESIGN and is_collapsed(
-                rect, min_w=_COLLAPSE_MIN_PX, min_h=_COLLAPSE_MIN_PX):
+        if (cls not in _THIN_BY_DESIGN
+                and _carries_content(widget, cls)
+                and is_collapsed(rect, min_w=_COLLAPSE_MIN_PX,
+                                 min_h=_COLLAPSE_MIN_PX)):
             findings.append(Finding(
                 kind="collapsed",
                 subject=subject,
