@@ -151,6 +151,52 @@ def test_a_separator_is_not_reported_as_collapsed(tk_root):
         win.destroy()
 
 
+def test_an_empty_container_is_not_reported_as_collapsed(tk_root):
+    """Regression: the first real drive-and-scan run reported exactly this.
+
+    The Help tab's footer holds three buttons that `_help_show()` packs per
+    section, so on a freshly-opened tab it is genuinely empty and Tk lays it
+    out 1px tall. That is correct behaviour. Reporting it is how a check
+    earns a reputation for crying wolf and stops being read.
+
+    A container squeezing real content is still caught, because its mapped
+    children are measured in their own right — see the test below.
+    """
+    win = tk.Toplevel(tk_root)
+    win.geometry("300x200+0+0")
+    body = ttk.Frame(win)
+    body.pack(fill=tk.BOTH, expand=True)
+    ttk.Label(body, text="content").pack(anchor="w")
+    # An empty footer, packed but with nothing in it — the real shape.
+    footer = tk.Frame(win)
+    footer.pack(side=tk.BOTTOM, fill=tk.X)
+    win.update_idletasks()
+    win.update()
+    try:
+        assert footer.winfo_height() <= 2, (
+            f"the fixture needs an actually-collapsed empty container; Tk "
+            f"gave it {footer.winfo_height()}px"
+        )
+        result = scan_window(win)
+        assert result.clean, format_result(result)
+    finally:
+        win.destroy()
+
+
+def test_findings_are_locatable_by_widget_path(laid_out_window):
+    """A finding must say WHICH widget, not just its class.
+
+    The first real run reported `Frame:!frame`, which appears dozens of times
+    in one window and cost a second run to place. Subjects carry the full Tk
+    path so a finding can be acted on without re-driving the app.
+    """
+    forced = scan_window(laid_out_window, tolerance=-10_000)
+    assert any("." in f.subject for f in forced.findings), (
+        f"expected a Tk widget path in the subject, got "
+        f"{[f.subject for f in forced.findings][:3]}"
+    )
+
+
 def test_format_result_always_states_the_population(laid_out_window):
     """A log line must never be able to say 'clean' without saying over what."""
     text = format_result(scan_window(laid_out_window))

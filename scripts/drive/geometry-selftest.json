@@ -1,0 +1,7 @@
+[
+  {"do": "wait",   "after_ms": 2500},
+  {"do": "tab",    "name": "Git", "after_ms": 1200},
+  {"do": "report", "what": "geometry", "after_ms": 400},
+  {"do": "report", "what": "geometry", "tolerance": -10000, "after_ms": 400},
+  {"do": "quit"}
+]

@@ -290,7 +290,7 @@ class _Driver:
             self._report_mcp(target)
             return
         if what == "geometry":
-            self._report_geometry(target)
+            self._report_geometry(target, step)
             return
         lines = [t for t in (_widget_text(w).strip() for w in _walk(target))
                  if t]
@@ -298,7 +298,7 @@ class _Driver:
         for line in lines:
             _say("    " + line)
 
-    def _report_geometry(self, target) -> None:
+    def _report_geometry(self, target, step: "dict[str, Any]") -> None:
         """Assert geometric invariants on what is actually on screen.
 
         The step that turns a drive run from something a human reads into
@@ -310,13 +310,22 @@ class _Driver:
 
         Always prints the population it measured, so "0 findings" can never
         be confused with "nothing was looked at".
+
+        `tolerance` is the live equivalent of the suite's
+        test_the_scan_can_still_say_no: pass a negative value and every child
+        becomes a finding against the same geometry. A clean run is only
+        worth something once you have seen the same window report, because
+        otherwise "0 findings" and "the scan is broken" look identical.
         """
         try:
             from helpers.geometry_scan import format_result, scan_window
         except Exception as exc:                       # pragma: no cover
             _say("drive: report: geometry scan unavailable (%s)" % exc)
             return
-        result = scan_window(target)
+        if "tolerance" in step:
+            result = scan_window(target, tolerance=int(step["tolerance"]))
+        else:
+            result = scan_window(target)
         for line in format_result(result).splitlines():
             _say("drive: " + line)
 
