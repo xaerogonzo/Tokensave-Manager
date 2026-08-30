@@ -61,12 +61,25 @@ Token Save Manager Source/
 │   │                              review hook — reads `git diff --cached`, dispatches
 │   │                              to backend, parses severity, exits 0 (warn) or 1
 │   │                              (block per threshold). Fail-open on every error.
+│   ├── debug_drive.py             Scripts the RUNNING window: TOKENSAVE_MANAGER_DRIVE=
+│   │                              <script.json> python src/app.py. Steps run on Tk's own
+│   │                              timer inside the process — no cursor, no focus stealing;
+│   │                              `shot` renders via PrintWindow so the window may sit
+│   │                              behind anything. 8 steps: tab/dialog/click/scroll/shot/
+│   │                              report/wait/quit. `report what=geometry` runs the visual
+│   │                              oracle. Committed scripts live in scripts/drive/.
 │   │
-│   ├── helpers/                   55 modules of pure / IO helpers — no UI deps.
+│   ├── helpers/                   82 modules of pure / IO helpers — no UI deps.
 │   │   ├── config.py              _load_config, _save_config, _migrate_config
 │   │   ├── detection.py           _detect_git/_gh/_npm/_codegraph/_claude_cli,
 │   │   │                          _root_path/_label, _version_lt
 │   │   ├── runtime.py             log, _setup_logger, _acquire_instance_lock, _make_tray_icon
+│   │   ├── geometry.py            Pure geometric predicates over laid-out UI — no Tk,
+│   │   │                          no font measurement (that would make a test a claim
+│   │   │                          about the machine it runs on). docs/VERIFICATION.md
+│   │   ├── geometry_scan.py       Walks a real widget tree, measures it, reports the
+│   │   │                          findings WITH the population measured — no widgets
+│   │   │                          and no defects are the same empty list otherwise.
 │   │   ├── project_discovery.py   find_projects(roots), get/set/clear_pinned, fmt_age
 │   │   ├── git.py                 _is_git_repo, _parse_git_status_v2, _format_git_status_cell,
 │   │   │                          _find_tracked_but_ignored, _fetch_tags, _git_tag, _git_push_with_tags
@@ -434,7 +447,7 @@ Token Save Manager Source/
 │                                  (avoids cmd.exe /k newline-as-Enter quirk).
 │
 ├── scripts/                       Source-only developer tools (NOT shipped in dist\)
-│   └── check_tokensave_integration.py
+│   ├── check_tokensave_integration.py
 │                                  Free deterministic audit script (~130 lines, pure
 │                                  stdlib). Checks: (1) installed tokensave version via
 │                                  --version, (2) upstream-issues/ STATUS fields,
@@ -445,6 +458,16 @@ Token Save Manager Source/
 │                                  match the new version. Launched by the manager's
 │                                  "🔍 Check integration" button (Settings) or right-click
 │                                  menu; also runnable standalone from a terminal.
+│   ├── gen_commands_ts.py         Generates the VS Code extension's command table.
+│   ├── split_doc_drafter.py       One-shot refactor helpers, kept for reference.
+│   ├── split_help_tab.py          Ditto — the help-tab split.
+│   └── drive/                     Committed inputs for the in-process drive harness
+│                                  (src/debug_drive.py). geometry-sweep.json walks every
+│                                  tab reporting laid-out geometry; geometry-selftest.json
+│                                  reports the same window twice, the second pass with an
+│                                  impossible tolerance — run it whenever a clean sweep
+│                                  looks too good, because '0 findings' and 'the scan is
+│                                  broken' are otherwise identical output. See its README.
 │
 ├── templates/                     Data files used by the manager + shipped in dist\
 │   ├── claude-md-template.md      BASIC_INSTRUCTIONS.md template for other projects
@@ -482,6 +505,11 @@ Token Save Manager Source/
 │   ├── test_ci_yaml_semantics.py  14 tests — which CI job gates vs warns.
 │   ├── test_runner_io.py          12 tests — hook GUI fallback when stderr
 │   │                              is swallowed (never fails the hook).
+│   ├── test_geometry_predicates.py 25 tests — pure predicates on CONSTRUCTED rectangles.
+│   │                              Each reports its defect AND stays silent when clean.
+│   ├── test_geometry_scan.py      9 tests (@mark.tk) — extraction against a real window.
+│   │                              Asserts the POPULATION measured, and forces a finding
+│   │                              from clean geometry so a clean run means something.
 │   ├── test_no_import_time_path_resolution.py
 │   │                              G-L pre-flight: imports every src/ module with
 │   │                              sentinel env vars; fails if any module captured
@@ -512,19 +540,42 @@ Token Save Manager Source/
     ├── ARCHITECTURE.md             This file
     ├── ARCHITECTURE_TOKENSAVE.md   tokensave tool internals reference
     ├── AGENT_ARCHITECTURE.md       LocalAgent loop + tool registry + propose-only rules
+    ├── AGENT_BACKENDS.md           How dispatch_llm / _call_llm resolve a configured
+    │                               provider to a transport, and what each tier supports
     ├── UPGRADE_INTEGRATION.md      Tokensave upgrade workflow — 4-step sequence (upgrade →
     │                               git pull → 🔍 Check integration → 🔄 audit snippet)
     ├── ROADMAP.md                  Staged plan for local AI features (Stages 0–8)
+    ├── VERIFICATION.md             Which technique owns which failure, and what this
+    │                               project's guards are actually worth — the mutation
+    │                               results, the population arithmetic, and the rules
+    │                               for adding a guard that can fail
     ├── MCP_INTEGRATION_GOTCHAS.md  Field manual: UWP path redirection, wrapper stdio bug,
     │                               Connectors UI vs legacy config, live-reload paths
+    ├── WINDOWS_WORKTREE_CLEANUP.md Field manual: why deleting a Claude Code worktree
+    │                               half-works, the two lock holders, and how to find
+    │                               which tokensave serve pins an index
+    ├── WINDOWS_CONPTY_FINDINGS.md  Why the pseudoconsole transport was built and
+    │                               abandoned, with the full diagnostic
+    ├── vscode-mcp-matrix.md        Which client, through which host, reads which
+    │                               config — and so which tokensave serves which project
     ├── GITHUB_GUIDE.md             Beginner GitHub guide (concepts, setup, daily workflow)
+    ├── tracked-issues.json         Upstream issue numbers the integration check follows
     └── upstream-issues/            Drafts of bugs filed against upstream tools
         ├── tokensave-hook-quoting.md       [FIXED v6.0.0 #81] path-quoting bug in install --agent claude
         ├── tokensave-health-details.md     [FIXED v6.0.0 #82] tokensave_health details=true sub-scores
-        ├── tokensave-redundancy-tool.md    [SHIPPED v6.0.0 #83] tokensave_redundancy AST duplicate detector
         ├── tokensave-daemon-stop-windows.md    [MOOT v6.0.0] --stop broken on Windows (daemon removed)
         ├── tokensave-daemon-child-no-window.md [MOOT v6.0.0] Daemon worker cmd-window flash (daemon removed)
-        └── tokensave-daemon-status-autostart.md [MOOT v6.0.0] Daemon autostart state in --status (daemon removed)
+        ├── tokensave-daemon-status-autostart.md [MOOT v6.0.0] Daemon autostart state in --status (daemon removed)
+        ├── tokensave-settings-write-on-readonly-query.md [FILED #419] read-only query rewrites settings.json
+        ├── tokensave-serve-db-lock-unidentifiable.md [FILED #421] serve locks the index and won't say which
+        ├── tokensave-cost-export-token-fields.md   [FILED #472] cost export token fields
+        ├── tokensave-cost-tokens-saved-unscoped.md [FILED #473] tokens-saved counter is unscoped
+        ├── tokensave-discover-token-estimates.md   [FILED #474] discover token estimates
+        └── archived/                       Issues confirmed closed upstream
+            ├── tokensave-redundancy-tool.md         [SHIPPED v6.0.0 #83]
+            ├── tokensave-glob-matcher-coverage.md   [closed]
+            ├── tokensave-served-root-not-reported.md [CLOSED #437]
+            └── tokensave-worktree-index-resolution.md [closed]
 ```
 
 ---
