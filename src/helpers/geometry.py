@@ -148,3 +148,28 @@ def still_elided(displayed: str, full: str, available_px: int,
     if not full or displayed == full:
         return False
     return available_px >= required_px
+
+
+def fitting_columns(widths: "list[int]", available_px: int,
+                    gap_px: int = 0) -> int:
+    """Most grid columns whose measured total still fits *available_px*.
+
+    For a row-major grid (``row, col = divmod(index, cols)``), a widget's own
+    width is not what it costs — a grid column is as wide as its widest
+    member, so the cost of a column is a maximum over every row. Summing those
+    maxima is what makes this agree with what the toolkit will actually do; a
+    greedy row-fill over individual widths does not, and produces a layout
+    that overflows anyway.
+
+    Returns at least 1: one column per row is always "fitting" in the sense
+    that there is no narrower arrangement to fall back to.
+    """
+    if not widths:
+        return 1
+    for cols in range(len(widths), 0, -1):
+        col_w = [0] * cols
+        for i, w in enumerate(widths):
+            col_w[i % cols] = max(col_w[i % cols], w)
+        if sum(col_w) + gap_px * (cols - 1) <= available_px:
+            return cols
+    return 1

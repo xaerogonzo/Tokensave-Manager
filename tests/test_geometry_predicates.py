@@ -20,6 +20,7 @@ import pytest
 from helpers.geometry import (
     Rect,
     escapes_container,
+    fitting_columns,
     exceeds_width_budget,
     is_collapsed,
     overlaps,
@@ -170,3 +171,52 @@ def test_every_predicate_stays_silent_on_a_clean_surface(predicate, clean_args):
     predicate is added and only its positive test is written.
     """
     assert predicate(*clean_args) is False
+
+
+# ── fitting_columns ───────────────────────────────────────────────────────
+# The shipped defect: GitignoreDialog laid its 11 template buttons out at a
+# fixed 6 per row inside a hard-coded 640px window, which put
+# "+ .NET / Visual Studio" entirely past the right edge — invisible, with no
+# way to discover the template existed.
+
+# Indices 4, 5 and 10 ("+ Java / JVM" 99px, "+ .NET / Visual Studio" 150px,
+# "+ Nuitka" 99px) are MEASURED from the running dialog — they are the three
+# the oracle reported. The rest are representative widths for the remaining
+# labels; the assertions below depend on the profile, not on those exact
+# numbers.
+_GITIGNORE_LABEL_WIDTHS = [188, 78, 88, 66, 99, 150, 89, 118, 82, 92, 99]
+
+
+def test_fitting_columns_rejects_the_layout_that_shipped():
+    """Six columns of these buttons do not fit the dialog's 604px of room."""
+    assert fitting_columns(_GITIGNORE_LABEL_WIDTHS, 604, gap_px=4) < 6
+
+
+def test_fitting_columns_picks_a_width_that_actually_fits():
+    cols = fitting_columns(_GITIGNORE_LABEL_WIDTHS, 604, gap_px=4)
+    col_w = [0] * cols
+    for i, w in enumerate(_GITIGNORE_LABEL_WIDTHS):
+        col_w[i % cols] = max(col_w[i % cols], w)
+    assert sum(col_w) + 4 * (cols - 1) <= 604
+
+
+def test_fitting_columns_costs_a_column_its_WIDEST_member():
+    """A greedy fill over individual widths would answer 2 here and overflow.
+
+    Column 0 takes rows 0 and 2 (10 and 100), so it costs 100, not 10. Two
+    columns therefore cost 100 + 100 = 200 > 150, and only one fits.
+    """
+    assert fitting_columns([10, 100, 100, 10], 150, gap_px=0) == 1
+
+
+def test_fitting_columns_uses_every_column_when_there_is_room():
+    assert fitting_columns([10, 10, 10], 1000, gap_px=0) == 3
+
+
+def test_fitting_columns_never_returns_zero():
+    """One-per-row is the floor; there is no narrower arrangement."""
+    assert fitting_columns([9999], 10, gap_px=0) == 1
+
+
+def test_fitting_columns_handles_an_empty_grid():
+    assert fitting_columns([], 500, gap_px=4) == 1
