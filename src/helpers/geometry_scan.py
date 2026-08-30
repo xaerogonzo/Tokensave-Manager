@@ -20,6 +20,15 @@ cannot fail:
     content frame extends past its viewport by definition, so comparing them
     reports a finding forever. Any widget with a Canvas ancestor is skipped
     for containment (it is still checked for collapse).
+  * **The width-budget check is per-component, not window-level.** Comparing
+    a window's whole ``winfo_reqwidth()`` against its ``minsize`` was tried and
+    removed: it fired on 3 of 3 dialogs, including two with no visible defect,
+    because a minsize is the floor a user may shrink to and content wider than
+    it usually just scrolls. The useful form measures the specific
+    non-scrolling component — `tests/test_dialog_doc_drafter.py::TestTabStripFits`
+    does exactly that for the notebook tab strip, which is the defect
+    ``exceeds_width_budget`` was written for. A check that fires on everything
+    is one that gets switched off, taking the real signal with it.
   * **Overlap is not wired up here yet.** Detecting it properly needs the
     caption/value association from the layout manager rather than raw
     rectangle collision, since Tk composites children legitimately all the
@@ -157,7 +166,15 @@ def scan_window(top, *, tolerance: int = 2) -> ScanResult:
         # The Tk path (".!frame.!frame2.!label") rather than the bare name:
         # a finding has to be locatable without re-running the app, and
         # "Frame:!frame" appears dozens of times in one window.
-        subject = f"{cls} {widget}"
+        label = ""
+        try:
+            label = str(widget.cget("text")).strip()
+        except Exception:
+            pass
+        # The visible text is what makes a finding identifiable to a human
+        # reading a log: ".!frame6.!button5" says where, "+ Java / Kotlin"
+        # says WHICH control the user cannot reach.
+        subject = f"{cls} {widget}" + (f" {label!r}" if label else "")
 
         if (cls not in _THIN_BY_DESIGN
                 and _carries_content(widget, cls)

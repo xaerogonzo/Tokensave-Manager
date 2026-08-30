@@ -163,8 +163,21 @@ class GitignoreDialog(UiPumpMixin, tk.Toplevel):
 
         self._populate_current_entries()
 
+    #: Horizontal gap between template buttons, in pixels.
+    _TMPL_GAP_PX = 4
+    #: Width to lay out against before the frame has a real size. The dialog's
+    #: own minsize is 560 and the section is padded 18px a side.
+    _TMPL_FALLBACK_W = 560 - 36
+
     def _build_template_buttons_section(self):
-        """6-per-row grid of `+ <category>` buttons; tooltips show what each adds."""
+        """`+ <category>` buttons, in as many columns as actually FIT.
+
+        This was a fixed six-per-row grid, which put `+ .NET / Visual Studio`
+        entirely past the right edge of the dialog's own 640px width — not
+        cramped, invisible, with no way to discover the template existed. The
+        column count is measured rather than assumed, and re-measured when the
+        dialog is resized.
+        """
         tmpl_label = tk.Label(self,
             text="INJECT TEMPLATE PATTERNS  (one-click — hover to see what each adds)",
             bg=C["base"], fg=C["overlay0"], font=("Segoe UI", 8, "bold"))
@@ -172,14 +185,53 @@ class GitignoreDialog(UiPumpMixin, tk.Toplevel):
         tmpl_wrap = tk.Frame(self, bg=C["base"])
         tmpl_wrap.pack(fill=tk.X, padx=18, pady=(0, 8))
 
-        per_row = 6
-        for i, cat_name in enumerate(_GITIGNORE_TEMPLATES.keys()):
-            row, col = divmod(i, per_row)
+        self._tmpl_wrap = tmpl_wrap
+        self._tmpl_btns = []
+        for cat_name in _GITIGNORE_TEMPLATES.keys():
             btn = ttk.Button(tmpl_wrap, text=f"+ {cat_name}",
                              command=lambda n=cat_name: self._inject_template(n))
-            btn.grid(row=row, column=col, padx=(0, 4), pady=(0, 4),
-                     sticky=tk.W)
             _Tooltip(btn, self._template_tooltip_text(cat_name))
+            self._tmpl_btns.append(btn)
+
+        #: Last width laid out against. Re-gridding changes the frame's height
+        #: and fires <Configure> again, so without this the handler re-enters
+        #: itself for as long as Tk keeps reporting a new size.
+        self._tmpl_last_width = -1
+        tmpl_wrap.bind("<Configure>", self._reflow_template_buttons)
+        self._reflow_template_buttons()
+
+    def _fitting_template_columns(self, avail: int) -> int:
+        """How many columns of template buttons fit in *avail* pixels.
+
+        The arithmetic lives in ``helpers.geometry.fitting_columns`` so it can
+        be tested on constructed widths without a Tk window; this method only
+        supplies the measurements.
+        """
+        from helpers.geometry import fitting_columns
+        return fitting_columns([b.winfo_reqwidth() for b in self._tmpl_btns],
+                               avail, self._TMPL_GAP_PX)
+
+    def _reflow_template_buttons(self, event=None):
+        """Re-grid the template buttons for the width now available."""
+        wrap = getattr(self, "_tmpl_wrap", None)
+        if wrap is None or not self._tmpl_btns:
+            return
+        avail = int(event.width) if event is not None else int(wrap.winfo_width())
+        if avail <= 1:
+            # Called before the frame has been laid out: use the narrowest
+            # width the dialog claims to support, so there is always a sane
+            # layout even if <Configure> never arrives.
+            avail = self._TMPL_FALLBACK_W
+        if avail == self._tmpl_last_width:
+            return
+        self._tmpl_last_width = avail
+
+        cols = self._fitting_template_columns(avail)
+        gap = self._TMPL_GAP_PX
+        for i, btn in enumerate(self._tmpl_btns):
+            row, col = divmod(i, cols)
+            btn.grid(row=row, column=col, padx=(0, gap), pady=(0, gap),
+                     sticky=tk.W)
 
     def _build_ai_suggest_section(self):
         """AI-powered pattern suggestion row — sits above the template buttons."""
@@ -587,7 +639,13 @@ class GitignoreDialog(UiPumpMixin, tk.Toplevel):
     def _centre_on_parent(self, parent):
         """Position the dialog roughly centred on the parent window."""
         self.update_idletasks()
-        w, h = 640, 620
+        # Height follows the content instead of being asserted. Reflowing the
+        # template buttons to fit the width costs rows, and at a hard-coded
+        # 620 the extra row came straight out of the untracked-files section,
+        # which collapsed to 1px — present in the tree, invisible on screen.
+        # Never SMALLER than the size this dialog has always opened at.
+        w = 640
+        h = max(620, int(self.winfo_reqheight()))
         try:
             px = parent.winfo_x() + (parent.winfo_width()  - w) // 2
             py = parent.winfo_y() + (parent.winfo_height() - h) // 2

@@ -1,0 +1,12 @@
+[
+  {"do": "wait",   "after_ms": 2500},
+  {"do": "dialog", "name": "gitignore",   "after_ms": 1500},
+  {"do": "report", "what": "geometry",    "after_ms": 400},
+  {"do": "dialog", "name": "docdrafter",  "after_ms": 1800},
+  {"do": "report", "what": "geometry",    "after_ms": 400},
+  {"do": "dialog", "name": "testmanager", "after_ms": 1800},
+  {"do": "report", "what": "geometry",    "after_ms": 400},
+  {"do": "dialog", "name": "prdraft",     "after_ms": 2000},
+  {"do": "report", "what": "geometry",    "after_ms": 400},
+  {"do": "quit"}
+]
