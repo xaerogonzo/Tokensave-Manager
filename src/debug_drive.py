@@ -24,7 +24,9 @@ The script is a JSON list of steps, run in order:
 
     [
       {"do": "tab",    "name": "Projects"},
-      {"do": "dialog", "name": "mcp"},          // or "settings", "savings"
+      {"do": "dialog", "name": "mcp"},          // also: settings, savings,
+                                                //  gitignore, docdrafter,
+                                                //  testmanager, testgaps, prdraft
       {"do": "click",  "text": "show"},
       {"do": "report", "what": "mcp", "after_ms": 3000},
       {"do": "report", "what": "geometry"},     // laid-out geometry defects
@@ -196,6 +198,36 @@ class _Driver:
                 return
         _say("drive: tab: no tab matching %r" % want)
 
+    def _project(self, step: "dict[str, Any]") -> str:
+        """Which project a dialog step operates on.
+
+        Defaults to the Manager's own checkout rather than whatever happens to
+        be selected. A committed drive script must not depend on today's
+        project list, or it stops working tomorrow for reasons unrelated to
+        the code under test.
+        """
+        explicit = str(step.get("project", "")).strip()
+        if explicit:
+            return explicit
+        return str(Path(__file__).resolve().parent.parent)
+
+    def _capture_new_window(self, action) -> "tk.Toplevel | None":
+        """Run *action* and return the Toplevel it created, if any.
+
+        The controller-built windows (Test Gaps, PR draft) construct a
+        `tk.Toplevel` inline and do not return it, so there is nothing to
+        assign. Diffing the root's children is independent of that: it works
+        whatever the callee chooses to return, and does not require the
+        controller to grow an API that exists only for this harness.
+        """
+        def tops():
+            return [w for w in self._app.winfo_children()
+                    if isinstance(w, tk.Toplevel)]
+        before = set(map(id, tops()))
+        action()
+        fresh = [w for w in tops() if id(w) not in before]
+        return fresh[-1] if fresh else None
+
     def _do_dialog(self, step: "dict[str, Any]") -> None:
         """Open a dialog and remember it as the default target."""
         name = str(step.get("name", "")).strip().lower()
@@ -213,6 +245,37 @@ class _Driver:
             from dialogs.cost_viewer import SavingsDialog
             self._dialog = SavingsDialog(
                 self._app, self._app._cfg, str(step.get("project", "")))
+        elif name in ("docdrafter", "doc_drafter", "docs"):
+            from dialogs.doc_drafter import DocDrafterDialog
+            self._dialog = DocDrafterDialog(
+                self._app, self._project(step), self._app._cfg)
+        elif name in ("gitignore", "ignore"):
+            from dialogs.gitignore import GitignoreDialog
+            self._dialog = GitignoreDialog(
+                self._app, self._project(step), self._app._cfg)
+        elif name in ("testmanager", "tests", "test_manager"):
+            from dialogs.test_manager import TestManagerDialog
+            self._dialog = TestManagerDialog(
+                self._app, self._project(step), self._app._cfg)
+        elif name in ("testgaps", "gaps", "test_gaps"):
+            ctrl = getattr(getattr(self._app, "_git", None), "_test_gap", None)
+            if ctrl is None:
+                _say("drive: dialog: the Git tab has no test-gap controller")
+                return
+            base = str(step.get("base", "master"))
+            # suggestions=[] so opening the window does not kick off a scan;
+            # this step is about how the window LAYS OUT, not what it finds.
+            self._dialog = self._capture_new_window(
+                lambda: ctrl._open_test_gaps_window(
+                    self._project(step), base, suggestions=[]))
+        elif name in ("prdraft", "pr", "pr_draft"):
+            ctrl = getattr(getattr(self._app, "_git", None), "_pr_draft", None)
+            if ctrl is None:
+                _say("drive: dialog: the Git tab has no PR-draft controller")
+                return
+            base = str(step.get("base", "master"))
+            self._dialog = self._capture_new_window(
+                lambda: ctrl._open_pr_draft_dialog(self._project(step), base))
         else:
             _say("drive: dialog: unknown name %r" % name)
             return

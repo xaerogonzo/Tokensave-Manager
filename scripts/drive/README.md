@@ -24,6 +24,7 @@ what that cost.
 | script | what it does |
 | --- | --- |
 | `geometry-sweep.json` | Walks every main-window tab and reports laid-out geometry defects on each. The routine check. |
+| `dialog-sweep.json` | Opens the dialogs with a track record of geometry defects and reports each. **This is where the findings are** — the main window has no history of them. |
 | `geometry-selftest.json` | Reports the Git tab twice — once normally, once with an impossible tolerance. **Run this whenever you doubt a clean result.** |
 
 ## Why the self-test exists
@@ -43,6 +44,25 @@ first line evidence rather than an absence.
 Note that every report states the population it measured. A run that says
 "0 findings across 0 widgets" is not a pass — it means the walk found
 nothing to look at.
+
+## Which dialogs a script can open
+
+`{"do": "dialog", "name": ...}` knows: `mcp`, `settings`, `savings`,
+`gitignore`, `docdrafter`, `testmanager`, `testgaps`, `prdraft`.
+
+The last two are built inline by controllers rather than by a dialog class,
+so the harness captures them by diffing the root's children instead of relying
+on a return value — no controller has to grow an API that exists only for this.
+
+`testgaps` is deliberately **not** in `dialog-sweep.json`. Opening it with an
+empty suggestion set (so the step does not kick off a scan) renders a panel of
+three widgets, and "0 findings across 3 widgets" is not evidence of anything.
+It stays available for ad-hoc use against a branch that actually has gaps.
+
+They default to the Manager's **own checkout**, not whatever project happens to
+be selected, so a committed script does not depend on today's project list.
+Override with `"project": "<path>"`, and `"base": "<branch>"` for the two that
+diff against a branch.
 
 ## Adding one
 
