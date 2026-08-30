@@ -294,22 +294,18 @@ Cleaning up a Claude Code worktree is manual, confusing, and undocumented —
 yet the Manager already solves the same problem shape for CodeGraph. Both
 items below come out of a real cleanup on 2026-08-19 that took several
 rounds of trial and error to get right.
-- 🔮 tokensave daemon list/stop, mirroring `CodegraphDaemonManagerDialog`
-  (Tool Manager → CodeGraph → "🔌 Manage daemons…"). tokensave's own daemon
-  UI was deleted in v6.0.0 along with its daemon — but `tokensave serve` MCP
-  processes still exist and still hold `.tokensave/tokensave.db`, so that
-  removal rested on an assumption that no longer holds. `serve` does not
-  report which project it serves, so map PID→project by correlating the
-  `tokensave.db-shm` mtime against each process's start time (SQLite writes
-  `-shm` when it opens the DB in WAL mode). Note the daemons are respawned
-  by Claude Code, so "stop all" does not converge — stop the one holder
-- 🔮 Worktree cleanup surface — list stale/orphaned worktrees, deregister
-  and delete, and report which are lock-blocked and by what. `git worktree
-  remove` **deregisters even when the file delete fails**, so a half-state
-  (metadata pruned, directory still on disk) is the normal outcome rather
-  than an error worth retrying. Two distinct lock holders to tell apart: a
-  live session's own working directory, and a daemon holding the index. The
-  Tasks tab already scans worktrees
+- ✅ tokensave daemon list/stop, mirroring `CodegraphDaemonManagerDialog`.
+  Shipped Roadmap-10 (`f7d85b3`) as `helpers/tokensave_daemon.py` +
+  `dialogs/tokensave_daemon_manager.py`. Went further than this entry asked:
+  attribution is three-state (attributed / ambiguous / unattributed) rather
+  than a guess, because a server that attaches to an already-open database
+  does not restamp the `-shm` — so no match is the expected case for a second
+  server on one project, not a failure to report as one
+- ✅ Worktree cleanup surface. Shipped Roadmap-10 as
+  `helpers/worktree_cleanup.py`, wired into the Tasks tab. `remove_worktree`
+  treats the deregistered-but-not-deleted half-state as normal, and
+  `classify_lock` names the likely holder from the stderr — explicitly
+  "EVIDENCE ONLY — never a decision input"
 
 ---
 
