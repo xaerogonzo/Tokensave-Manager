@@ -348,8 +348,27 @@ class GitOpsController:
                 parent=self._root)
             return
 
-        from helpers.precommit_hook import is_pre_commit_hook_installed
-        if is_pre_commit_hook_installed(path):
+        from helpers.git_hooks_env import read_hooks_env, remediation
+        from helpers.precommit_hook import INERT, INSTALLED, pre_commit_hook_state
+
+        state = pre_commit_hook_state(path)
+        if state == INERT:
+            # The file is already there. Installing would rewrite the same
+            # bytes into a directory git has been told to ignore, report
+            # success, and change nothing a commit would notice — so say what
+            # is actually wrong instead.
+            env = read_hooks_env(path)
+            messagebox.showwarning(
+                "Hook installed, but git ignores it",
+                f"The pre-commit hook is present in\n"
+                f"  {env.default_hooks_dir}\n\n"
+                f"but core.hooksPath sends git to\n"
+                f"  {env.hooks_dir}\n\n"
+                f"so it never runs. Re-installing would not help.\n\n"
+                f"{remediation(env)}",
+                parent=self._root)
+            return
+        if state == INSTALLED:
             self._do_precommit_remove(path)
         else:
             self._do_precommit_install(path)

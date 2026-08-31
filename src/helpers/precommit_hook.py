@@ -52,6 +52,8 @@ import re
 import sys
 from typing import TYPE_CHECKING
 
+from helpers.git_hooks_env import read_hooks_env
+
 if TYPE_CHECKING:
     from state import ManagerConfig
 
@@ -60,6 +62,7 @@ if TYPE_CHECKING:
 # Version suffix lets us evolve the hook script later without false-positives
 # on detect/remove for old versions.
 _HOOK_MARKER = "# TOKENSAVE-PRECOMMIT-MARKER v1"
+#: Only a fallback now, for when git cannot be asked. `hook_path` explains why.
 _HOOK_PATH_REL = os.path.join(".git", "hooks", "pre-commit")
 
 # Stage 1 reviewer system prompt — copied verbatim from
@@ -90,25 +93,87 @@ _REVIEW_SYSTEM_PROMPT = (
 
 # ── Install / remove / detect ─────────────────────────────────────────────
 
+# ── Where git will actually look, and the third state that needs ──────────
+#
+# `INSTALLED` / `ABSENT` / `INERT`. The third is not a shade of the second:
+# a hook that exists somewhere git does not read needs the *routing* fixed,
+# and re-installing writes the same bytes to the same ignored place. See
+# `helpers/git_hooks_env` for why the directory is asked of git rather than
+# composed from the project path — `core.hooksPath` and linked worktrees each
+# break the composed answer, silently and in opposite directions.
+
+INSTALLED = "installed"
+ABSENT = "absent"
+INERT = "inert"
+
+
 def hook_path(project_path: str) -> str:
-    """Absolute path to the project's .git/hooks/pre-commit file."""
-    return os.path.join(project_path, _HOOK_PATH_REL)
+    """Absolute path of the pre-commit hook, **where git will look for it**.
 
+    Asked of git rather than composed. `<project>/.git/hooks/pre-commit` is
+    wrong in two situations that both fail silently:
 
-def is_pre_commit_hook_installed(project_path: str) -> bool:
-    """True if `.git/hooks/pre-commit` exists AND contains our marker.
+    * `core.hooksPath` is set — git then reads every hook from there and never
+      falls back, so a file written here is never run;
+    * this is a linked worktree — `<worktree>/.git` is a *file*, so
+      `<worktree>/.git/hooks` is not a directory and cannot be created.
+      Worktrees share the main checkout's hook directory.
 
-    A hook the user installed themselves doesn't count — we won't touch it
-    on remove() either, so detect/remove stay symmetric.
+    Falls back to the composed path only when git cannot be reached at all,
+    so a missing git degrades to the old behaviour rather than to "".
     """
-    p = hook_path(project_path)
-    if not os.path.isfile(p):
+    env = read_hooks_env(project_path)
+    return env.hook_file("pre-commit") if env.ok else os.path.join(
+        project_path, _HOOK_PATH_REL)
+
+
+def pre_commit_hook_state(project_path: str) -> str:
+    """`INSTALLED`, `INERT` or `ABSENT` — what git will actually do.
+
+    `INERT` means our hook is on disk in the repository's own hook directory
+    but `core.hooksPath` sends git somewhere else. Reporting that as `ABSENT`
+    would prompt an install that changes nothing; reporting it as `INSTALLED`
+    is the bug this module was rewritten for.
+
+    Reads the hooks environment **once**. `hook_path` reads it too, so calling
+    that from here would run four git subprocesses per check on a function the
+    UI calls whenever a dialog opens.
+    """
+    env = read_hooks_env(project_path)
+    effective = (env.hook_file("pre-commit") if env.ok
+                 else os.path.join(project_path, _HOOK_PATH_REL))
+    if _has_marker(effective):
+        return INSTALLED
+    if env.ok and env.redirected and _has_marker(
+            os.path.join(env.default_hooks_dir, "pre-commit")):
+        # Ours exists where git no longer looks.
+        return INERT
+    return ABSENT
+
+
+def _has_marker(path: str) -> bool:
+    """Does *path* exist and carry our marker?"""
+    if not path or not os.path.isfile(path):
         return False
     try:
-        with open(p, encoding="utf-8", errors="replace") as f:
+        with open(path, encoding="utf-8", errors="replace") as f:
             return _HOOK_MARKER in f.read()
     except OSError:
         return False
+
+
+def is_pre_commit_hook_installed(project_path: str) -> bool:
+    """True if git will actually run our pre-commit hook.
+
+    A hook the user installed themselves doesn't count — we won't touch it
+    on remove() either, so detect/remove stay symmetric.
+
+    Deliberately **False for `INERT`**: this answers "will it run", and a
+    stranded hook will not. Callers that need to tell the two apart — and
+    every user-facing one should, since they need opposite advice — call
+    `pre_commit_hook_state`.
+    """
+    return pre_commit_hook_state(project_path) == INSTALLED
 
 
 def install_pre_commit_hook(

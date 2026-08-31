@@ -16,6 +16,19 @@ Three things make this NOT a copy of ``dialogs/codegraph_mcp_picker.py``
      on a TTY and silently skipping otherwise.  We run non-TTY so it would skip,
      but relying on that is fragile — ``--git-hook no`` is always passed
      explicitly, with an opt-in checkbox for users who do want it.
+
+     That checkbox has a consequence worth stating plainly, because it is
+     invisible until something stops working: the global hooks claim
+     ``core.hooksPath``, and git then resolves **every** hook from that one
+     directory with no fallback to ``.git/hooks``.  So turning this on
+     switches off the Manager's own pre-commit and pre-push hooks, in every
+     repository on the machine, without touching either file.  Since
+     tokensave 7.11.0 the per-repository alternative is
+     ``tokensave githooks on --local``, which installs the same hooks into
+     ``.git/hooks`` and writes no git config at all — verified against 7.11.0
+     by diffing ``git config --list --show-origin`` across the call — so both
+     sets coexist.  ``helpers/git_hooks_env`` detects the claimed state and
+     the Doctor reports it.
   3. There is no global ``--yes``.  Pinning ``--git-hook`` is what makes the run
      fully non-interactive.
 
@@ -201,6 +214,20 @@ class TokensaveMCPPickerDialog(UiPumpMixin, tk.Toplevel):
                   "`tokensave sync` after every commit in every repo on this "
                   "machine, not just this project."),
             bg=C["base"], fg=C["overlay0"],
+            font=("Segoe UI", 8), wraplength=540, justify=tk.LEFT,
+        ).pack(anchor=tk.W, pady=(0, 6))
+        # Peach rather than grey: this is a consequence, not a footnote, and
+        # it is the kind that is invisible until a hook someone relies on
+        # quietly stops running.
+        tk.Label(
+            adv,
+            text=("    ⚠ It claims core.hooksPath, so git reads EVERY hook "
+                  "from tokensave's directory and ignores .git/hooks — "
+                  "including the Manager's own pre-commit and pre-push hooks, "
+                  "in every repo. For one repository instead, close this and "
+                  "run `tokensave githooks on --local`, which writes no git "
+                  "config and lets both sets coexist."),
+            bg=C["base"], fg=C["peach"],
             font=("Segoe UI", 8), wraplength=540, justify=tk.LEFT,
         ).pack(anchor=tk.W, pady=(0, 6))
 
