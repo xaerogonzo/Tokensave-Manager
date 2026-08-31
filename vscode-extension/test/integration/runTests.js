@@ -28,7 +28,7 @@
 "use strict";
 
 const path = require("node:path");
-const { runTests } = require("@vscode/test-electron");
+const { downloadAndUnzipVSCode } = require("@vscode/test-electron");
 
 const shared = require("./shared");
 
@@ -37,39 +37,48 @@ const TEST_HOME = path.join(EXTENSION_ROOT, ".vscode-test");
 
 async function main() {
   const workspace = shared.prepareWorkspace(TEST_HOME).file;
-  const stopMinder = shared.keepOutOfTheWay();
+  const exe = shared.installedVSCode() || await downloadAndUnzipVSCode();
+
+  const args = shared.buildLaunchArgs({
+    extensionDevelopmentPath: EXTENSION_ROOT,
+    extensionTestsPath: path.resolve(__dirname, "suite", "index.js"),
+    launchArgs: [
+      workspace,   // the .code-workspace file, so both roots open
+      // Suppresses *installed* extensions. The one under test arrives via
+      // extensionDevelopmentPath and still activates — which is the point:
+      // another extension's hovers and diagnostics land in the same buffers
+      // these tests read back, and a test that passes because a language
+      // server agreed is worth nothing.
+      "--disable-extensions",
+      // A profile of its own, so nothing here touches real settings and
+      // nothing in real settings decides whether tests pass.
+      "--user-data-dir", path.join(TEST_HOME, "user-data"),
+      "--extensions-dir", path.join(TEST_HOME, "extensions"),
+      // Otherwise the first run blocks on a modal nobody is there to click.
+      // Trust is not under test; this is bypassing a real safety mechanism
+      // for a reason, rather than by oversight.
+      "--disable-workspace-trust",
+      "--disable-gpu",
+    ],
+  });
+
+  const env = {
+    TOKENSAVE_TEST_WORKSPACE: shared.workspacePaths(TEST_HOME).first,
+    TOKENSAVE_TEST_WORKSPACE_2: shared.workspacePaths(TEST_HOME).second,
+    TOKENSAVE_TEST_REPO: shared.REPO_ROOT,
+    TOKENSAVE_TEST_GREP: process.env.TOKENSAVE_TEST_GREP || "",
+  };
+
+  // The window minder is only needed when the editor is on the desktop you
+  // are looking at. On a private desktop there is no window to put down, so
+  // starting one would be a PowerShell process doing nothing.
+  const stopMinder = shared.desktopAvailable()
+    ? () => {} : shared.keepOutOfTheWay();
   try {
-    await runTests({
-      extensionDevelopmentPath: EXTENSION_ROOT,
-      extensionTestsPath: path.resolve(__dirname, "suite", "index.js"),
-      vscodeExecutablePath: shared.installedVSCode(),
-      launchArgs: [
-        workspace,   // the .code-workspace file, so both roots open
-        // Suppresses *installed* extensions. The one under test arrives via
-        // extensionDevelopmentPath and still activates — which is the point:
-        // another extension's hovers and diagnostics land in the same buffers
-        // these tests read back, and a test that passes because a language
-        // server agreed is worth nothing.
-        "--disable-extensions",
-        // A profile of its own, so nothing here touches real settings and
-        // nothing in real settings decides whether tests pass.
-        "--user-data-dir", path.join(TEST_HOME, "user-data"),
-        "--extensions-dir", path.join(TEST_HOME, "extensions"),
-        // Otherwise the first run blocks on a modal nobody is there to click.
-        // Trust is not under test; this is bypassing a real safety mechanism
-        // for a reason, rather than by oversight.
-        "--disable-workspace-trust",
-        "--disable-gpu",
-        "--skip-release-notes",
-        "--skip-welcome",
-      ],
-      extensionTestsEnv: {
-        TOKENSAVE_TEST_WORKSPACE: shared.workspacePaths(TEST_HOME).first,
-        TOKENSAVE_TEST_WORKSPACE_2: shared.workspacePaths(TEST_HOME).second,
-        TOKENSAVE_TEST_REPO: shared.REPO_ROOT,
-        TOKENSAVE_TEST_GREP: process.env.TOKENSAVE_TEST_GREP || "",
-      },
-    });
+    const code = await shared.launchVSCode({ exe, args, env });
+    if (code !== 0) {
+      throw new Error(`the live suite failed (exit ${code})`);
+    }
   } finally {
     stopMinder();
   }

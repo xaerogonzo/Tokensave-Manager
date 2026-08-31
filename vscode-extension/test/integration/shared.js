@@ -239,6 +239,99 @@ function keepOutOfTheWay() {
   return () => { try { child.kill(); } catch { /* already gone */ } };
 }
 
+// ── launching, on a private desktop where possible ───────────────────────────
+
+/**
+ * The arguments `runTests` would have built, so the spawn can be routed.
+ *
+ * Copied deliberately from `@vscode/test-electron`'s `runTest.js` rather than
+ * imported, because it does not export them — it builds the list inside the
+ * function that also does the spawning, and the spawning is the part that has
+ * to change. Re-read that file if a version bump changes the flags; the
+ * failure mode of drifting is a test host launched slightly differently from
+ * the one CI runs.
+ *
+ * `--user-data-dir` / `--extensions-dir` are NOT added here: test-electron
+ * only supplies its own defaults when the caller passed neither, and both
+ * callers pass both.
+ */
+function buildLaunchArgs({ extensionTestsPath, extensionDevelopmentPath,
+                           launchArgs = [] }) {
+  const args = [
+    "--no-sandbox",
+    "--disable-gpu-sandbox",
+    "--disable-updates",
+    "--skip-welcome",
+    "--skip-release-notes",
+    "--no-cached-data",
+    "--disable-workspace-trust",
+    `--extensionTestsPath=${extensionTestsPath}`,
+  ];
+  if (extensionDevelopmentPath) {
+    args.push(`--extensionDevelopmentPath=${extensionDevelopmentPath}`);
+  }
+  return launchArgs.concat(args);
+}
+
+/** Is the private-desktop launcher usable, and wanted? */
+function desktopAvailable() {
+  if (process.platform !== "win32") return false;
+  // The same switch that turns off the window minder: someone who asked to
+  // watch a run must not have it moved somewhere they cannot see it.
+  if (process.env.TOKENSAVE_TEST_FOCUS === "1") return false;
+  // Escape hatch, in case a future Electron stops tolerating it.
+  if (process.env.TOKENSAVE_TEST_DESKTOP === "0") return false;
+  return true;
+}
+
+/**
+ * Run VS Code and resolve with its exit code.
+ *
+ * On Windows this puts the editor on a **private desktop**, where its window
+ * cannot take the foreground because it is not on the desktop you are looking
+ * at. That is a complete fix rather than a mitigation: the window-minder
+ * reacts to a window that has already appeared and leaves a flash as long as
+ * its detection latency, and this leaves nothing to react to.
+ *
+ * Everywhere else — and when the desktop is declined — it is a plain spawn,
+ * which is what CI does under xvfb, where nothing has a foreground to steal.
+ */
+function launchVSCode({ exe, args, env = {}, timeoutSeconds = 900 }) {
+  const fullEnv = { ...process.env, ...env };
+
+  if (!desktopAvailable()) {
+    return new Promise((resolve, reject) => {
+      const child = cp.spawn(exe, args, { env: fullEnv });
+      child.stdout.on("data", (d) => process.stdout.write(d));
+      child.stderr.on("data", (d) => process.stderr.write(d));
+      child.on("error", reject);
+      child.on("close", (code) => resolve(code ?? 1));
+    });
+  }
+
+  // The spec goes through a file rather than the command line: the argument
+  // list contains a dozen Windows paths, and handing them to PowerShell as a
+  // single string means quoting them twice and getting it right both times.
+  const spec = path.join(os.tmpdir(),
+                         `tokensave-desktop-${process.pid}-${Date.now()}.json`);
+  fs.writeFileSync(spec, JSON.stringify({ exe, args, timeoutSeconds }), "utf8");
+
+  return new Promise((resolve, reject) => {
+    const child = cp.spawn("powershell.exe", [
+      "-NoProfile", "-NonInteractive", "-ExecutionPolicy", "Bypass",
+      "-File", path.join(__dirname, "run-on-desktop.ps1"),
+      "-SpecPath", spec,
+    ], { env: fullEnv, windowsHide: true });
+    child.stdout.on("data", (d) => process.stdout.write(d));
+    child.stderr.on("data", (d) => process.stderr.write(d));
+    child.on("error", reject);
+    child.on("close", (code) => {
+      try { fs.unlinkSync(spec); } catch { /* best effort */ }
+      resolve(code ?? 1);
+    });
+  });
+}
+
 module.exports = {
   EXTENSION_ROOT,
   REPO_ROOT,
@@ -246,4 +339,7 @@ module.exports = {
   installedVSCode,
   prepareWorkspace,
   keepOutOfTheWay,
+  buildLaunchArgs,
+  desktopAvailable,
+  launchVSCode,
 };

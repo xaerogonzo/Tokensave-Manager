@@ -31,52 +31,56 @@ reuses the live suite's activation, command and tree files rather than keeping
 a second copy, because a smoke suite that has drifted from what it mirrors is
 worse than none.
 
-## The window that keeps taking your focus
+## The editor never appears on your screen
 
-A mutation run launches an editor per live arm — fourteen on the current set —
-and each one activates itself.
+A mutation run launches an editor per live arm — fourteen on the current set.
+On Windows every one of them runs on a **private desktop**, so none of them
+appears on yours, takes the foreground, or flashes.
 
-`test/integration/keep-out-of-the-way.ps1` watches for windows whose title
-contains `Extension Development Host` and minimises them. That marker appears
-only on windows opened for extension testing, so an editor you are working in
-is never touched; the filter is the safety property and is preferred to
-matching on process id, since the test host is a `Code.exe` like any other.
+`test/integration/run-on-desktop.ps1` creates a desktop with `CreateDesktop`,
+launches VS Code onto it via `STARTUPINFO.lpDesktop`, waits, and returns the
+exit code. A window on a desktop that is not the active one cannot raise
+itself and is not composited onto your screen — so there is nothing to react
+to, rather than something reacted to quickly.
 
-Two things make it effective enough to be worth having:
+Measured before it was built, because it was not obvious a GPU-accelerated
+Electron app would tolerate it: VS Code was alive after 25 s, had drawn five
+windows on the private desktop, and had **zero** on the active one.
 
-* It enumerates windows through `EnumWindows` rather than `Get-Process`.
-  Measured on this machine: **0.20 ms per sweep against 78 ms**. The old
-  version's effective latency was its 120 ms poll *plus* a 78 ms sweep; it is
-  now about 15 ms, and the flash is exactly as long as the detection latency.
-* It re-minimises a window for 25 seconds after first seeing it, because VS
-  Code shows its window, loads the extension host, and then activates itself
-  again. A one-shot minimise gets undone a second later — which is what it
-  looked like from the outside: a watcher reporting success while the window
-  sat in the foreground.
+Two switches:
 
-The mutation runner starts **one** minder for the whole run. Starting one per
-arm was worse than none for the first seconds of each, because PowerShell
-compiles the interop at startup.
+* `TOKENSAVE_TEST_FOCUS=1` — run on your own desktop and do nothing about the
+  windows, for when you want to watch a run.
+* `TOKENSAVE_TEST_DESKTOP=0` — run on your own desktop but fall back to the
+  window minder below. The escape hatch if a future Electron stops tolerating
+  a private desktop.
 
-`TOKENSAVE_TEST_FOCUS=1` disables it when you want to watch a run.
+### The fallback, and why it is still here
 
-### What does *not* fix the rest
+`keep-out-of-the-way.ps1` minimises windows titled `Extension Development
+Host` as they appear. It is no longer on the default path, but it is what
+`TOKENSAVE_TEST_DESKTOP=0` uses, and it is worth keeping for the same reason
+any fallback is.
 
-A brief flash remains, and the usual advice — raising
-`HKCU:\Control Panel\Desktop\ForegroundLockTimeout` — **does not apply**. That
-was checked rather than repeated: this machine already has it at `150000`, and
-the windows still take focus.
+It reacts rather than prevents, so it leaves a flash as long as its detection
+latency. Two things kept that short: it enumerates windows with `EnumWindows`
+rather than `Get-Process` (**0.20 ms per sweep against 78 ms** here, which is
+what makes a 15 ms poll affordable), and it re-minimises for 25 s because VS
+Code activates itself again once the extension host has loaded — a one-shot
+minimise gets undone a second later, which looked from outside like a watcher
+reporting success while the window sat in the foreground.
 
-The setting governs whether a *background* process may steal the foreground.
-These launches are not background. VS Code is spawned by the terminal running
-the tests, and Windows grants foreground rights to a child of the foreground
-process, so the activation is legitimate under exactly the rule that setting
-enforces.
+### What did *not* fix it
 
-The complete fix is launching onto a separate desktop (`CreateDesktop` plus
-`STARTUPINFO.lpDesktop`), whose windows cannot take focus from the active
-desktop at all. That has not been done: it is a real change with real risk for
-a GPU-accelerated Electron app, and the remaining flash is now milliseconds.
+Raising `HKCU:\Control Panel\Desktop\ForegroundLockTimeout` is the usual
+advice and **does not apply**. Checked rather than repeated: this machine
+already has it at `150000` and the windows still took focus. The setting
+governs whether a *background* process may steal the foreground, and these
+launches are not background — VS Code is spawned by the terminal running the
+tests, and Windows grants foreground rights to a child of the foreground
+process, so the activation was legitimate under exactly the rule that setting
+enforces. That is why the fix had to change where the window lives rather than
+who is allowed to raise it.
 
 ## Gotchas worth knowing before you touch this
 
@@ -99,6 +103,13 @@ still activates, which is what you want. Once the extension is genuinely
 installed it switches the subject off — and there is no `--enable-extension` to
 pair with it. The vsix runner therefore omits the flag entirely and gets its
 isolation from a fresh `--extensions-dir` containing exactly one extension.
+
+**`.vscodeignore` has to know about new scratch directories.** The live
+suites write profiles and downloaded editors under `.vscode-test*/`, and
+nothing excluded them at first — the packaged extension went from 43 KB to
+**5.3 MB across 392 files**, most of it a VS Code user profile. The size
+assertion in `runTestsVsix.js` caught it; without that it would have been
+found at publish time, or not at all.
 
 **The webview's page script lives inside a TypeScript template literal.** A
 backtick anywhere in `savings.ts`'s `html()` — including in a comment — closes

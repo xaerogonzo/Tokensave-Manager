@@ -321,3 +321,30 @@ reaching the moment it claims to check.
 Arms are tiered `fast` / `live`, and the fast ones run against the stub suite —
 spending a minute of Electron on a severity-mapping mutation that `node --test`
 catches in a second is how a mutation suite becomes too slow to run.
+
+### What the packaged-extension suite does and does not prove
+
+`npm run test:vsix` packages the extension, installs it into a throwaway
+profile, and runs a subset against the unpacked result. So it covers what
+`.vscodeignore` and `vscode:prepublish` produce — a file excluded that turns
+out to be needed, a compile that did not happen, a package that has silently
+grown by two orders of magnitude.
+
+It does **not** cover the installed-extension activation path, and the reason
+is worth recording because the earlier version of this suite appeared to.
+
+VS Code honours `--extensionTestsPath` only in extension-development mode,
+which is entered by `--extensionDevelopmentPath`. The first version passed no
+dev path, intending to exercise the installed copy, and it ran — because
+`@vscode/test-electron` pushes
+`--extensionDevelopmentPath=${options.extensionDevelopmentPath}`
+*unconditionally*, so an absent value reached VS Code as the literal string
+`undefined`. A nonexistent path, which VS Code tolerates while still switching
+into test mode.
+
+Rebuilding the argument list correctly removed that accident, and the suite
+stopped running at all — four minutes of an editor sitting idle with no test
+output. It now points the dev path at the directory the `.vsix` was unpacked
+into: the packaged bytes, read from where the installer put them. That is a
+weaker claim than "the installed extension activates", and it is the one the
+suite actually supports.

@@ -35,7 +35,6 @@ const cp = require("node:child_process");
 const fs = require("node:fs");
 const path = require("node:path");
 const {
-  runTests,
   downloadAndUnzipVSCode,
   resolveCliArgsFromVSCodeExecutablePath,
 } = require("@vscode/test-electron");
@@ -98,6 +97,12 @@ function npxCli() {
   return candidate;
 }
 
+/** The version vsce stamped on the package, which names the installed dir. */
+function version() {
+  return JSON.parse(fs.readFileSync(
+    path.join(EXTENSION_ROOT, "package.json"), "utf8")).version;
+}
+
 function packageVsix() {
   fs.mkdirSync(TEST_HOME, { recursive: true });
   // `npx --yes` rather than a devDependency: vsce is needed by this one path
@@ -147,37 +152,61 @@ async function main() {
                      "--force"]);
   console.log("installed the packaged extension into an isolated profile");
 
-  const stopMinder = shared.keepOutOfTheWay();
+  // VS Code honours `--extensionTestsPath` only in extension-development
+  // mode, and that mode is entered by `--extensionDevelopmentPath`. So this
+  // points at the directory the .vsix was UNPACKED INTO — the packaged bytes,
+  // read from where the installer put them, rather than the `out/` tree the
+  // live suite uses.
+  //
+  // The previous version of this file passed no dev path at all and appeared
+  // to work. It was working by accident: `runTests` pushes
+  // `--extensionDevelopmentPath=${options.extensionDevelopmentPath}`
+  // unconditionally, so an absent value arrived as the literal string
+  // "undefined" — a nonexistent path, which VS Code tolerates while still
+  // switching into the mode that runs tests. Rebuilding the argument list
+  // correctly removed the bogus flag and the suite stopped running entirely,
+  // which is how this was found.
+  const installed = path.join(extensionsDir, `${EXTENSION_ID}-${version()}`);
+  if (!fs.existsSync(installed)) {
+    throw new Error(
+      `the installer did not leave an unpacked extension at ${installed}. ` +
+      "Its layout is what this suite reads; if the naming changed, this is " +
+      "the line to update.");
+  }
+
+  const args = shared.buildLaunchArgs({
+    extensionDevelopmentPath: installed,
+    extensionTestsPath: path.resolve(__dirname, "suite", "vsix-index.js"),
+    launchArgs: [
+      workspace,
+      "--user-data-dir", userDataDir,
+      "--extensions-dir", extensionsDir,
+      // Deliberately NO --disable-extensions here. See the module header:
+      // that flag switches off *installed* extensions, and the subject is now
+      // installed. There is no --enable-extension to pair with it — VS Code
+      // has --disable-extension <id> (singular) but no positive form — so the
+      // flag cannot be used at all on this path. The isolation comes from
+      // --extensions-dir: this profile is built fresh and contains exactly
+      // one extension, so there is nothing else to suppress.
+      "--disable-gpu",
+    ],
+  });
+
+  const stopMinder = shared.desktopAvailable()
+    ? () => {} : shared.keepOutOfTheWay();
   try {
-    await runTests({
-      // Deliberately NO extensionDevelopmentPath: the point is to exercise
-      // the installed copy, not the compiled tree beside it.
-      vscodeExecutablePath: vscodeExe,
-      extensionTestsPath: path.resolve(__dirname, "suite", "vsix-index.js"),
-      launchArgs: [
-        workspace,
-        "--user-data-dir", userDataDir,
-        "--extensions-dir", extensionsDir,
-        // Deliberately NO --disable-extensions here. See the module header:
-        // that flag switches off *installed* extensions, and the subject is
-        // now installed. There is no --enable-extension to pair with it —
-        // VS Code has --disable-extension <id> (singular) but no positive
-        // form — so the flag cannot be used at all on this path.
-        //
-        // The isolation comes from --extensions-dir instead: this profile is
-        // built fresh and contains exactly one extension, so there is nothing
-        // else to suppress.
-        "--disable-workspace-trust",
-        "--disable-gpu",
-        "--skip-release-notes",
-        "--skip-welcome",
-      ],
-      extensionTestsEnv: {
+    const code = await shared.launchVSCode({
+      exe: vscodeExe,
+      args,
+      env: {
         TOKENSAVE_TEST_WORKSPACE: shared.workspacePaths(TEST_HOME).first,
         TOKENSAVE_TEST_WORKSPACE_2: shared.workspacePaths(TEST_HOME).second,
         TOKENSAVE_TEST_VSIX: "1",
       },
     });
+    if (code !== 0) {
+      throw new Error(`the packaged-extension smoke suite failed (exit ${code})`);
+    }
   } finally {
     stopMinder();
   }

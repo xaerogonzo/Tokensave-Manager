@@ -1,7 +1,12 @@
 <#
 .SYNOPSIS
-    Put Extension Development Host windows back down the instant they appear,
-    so a test run does not repeatedly steal the foreground.
+    FALLBACK: put Extension Development Host windows back down the instant
+    they appear, so a test run does not repeatedly steal the foreground.
+
+    Not on the default path any more. `run-on-desktop.ps1` launches the editor
+    onto a private desktop, where no window appears on your screen at all —
+    prevention rather than reaction. This is what `TOKENSAVE_TEST_DESKTOP=0`
+    falls back to, kept for the day a future Electron stops tolerating that.
 
 .DESCRIPTION
     `@vscode/test-electron`'s `runTests` spawns VS Code with a plain

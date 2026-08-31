@@ -245,6 +245,13 @@ function startMinder() {
   if (process.platform !== "win32" || process.env.TOKENSAVE_TEST_FOCUS === "1") {
     return () => {};
   }
+  // Each arm now launches its editor onto a private desktop, where there is
+  // no window on your screen to put down. Starting a minder anyway would be a
+  // PowerShell process watching for windows that never appear.
+  if (require("./shared").desktopAvailable()) {
+    console.log("  [focus] editors run on a private desktop; no minder needed");
+    return () => {};
+  }
   const child = cp.spawn("powershell.exe", [
     "-NoProfile", "-NonInteractive", "-ExecutionPolicy", "Bypass",
     "-File", path.join(__dirname, "keep-out-of-the-way.ps1"),
