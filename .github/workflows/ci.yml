@@ -117,3 +117,91 @@ jobs:
         run: npm run compile
       - name: Extension tests
         run: npm test
+
+  # The live suite boots a real VS Code with the extension loaded and asks it
+  # questions the stub suite cannot: whether a contributed command is actually
+  # registered, what a tree row renders as, what reaches the Problems panel.
+  #
+  # Separate from `extension` rather than appended to it, for two reasons. It
+  # needs Python and an X server that the fast job does not, and it starts
+  # non-blocking (see `continue-on-error`) — folding it in would make the fast
+  # job's verdict depend on a suite that is not yet trusted to gate merges.
+  extension-live:
+    runs-on: ubuntu-latest
+    # NON-BLOCKING FOR NOW. Promote by deleting this line once the job has
+    # been green on 10 consecutive pull-request runs — a named number,
+    # because "after a few PRs" is how a non-blocking job becomes permanently
+    # advisory. Nothing else needs to change when it is promoted.
+    continue-on-error: true
+    defaults:
+      run:
+        working-directory: vscode-extension
+    steps:
+      - uses: actions/checkout@v5
+      - uses: actions/setup-node@v5
+        with:
+          node-version: "20"
+      # The fixture's states come from a real `src/cli.py` run, so the Manager
+      # has to be runnable here. It imports no third-party package at module
+      # scope (enforced by tests/test_no_thirdparty_module_imports.py), so the
+      # standard library plus tkinter is enough.
+      - uses: actions/setup-python@v6
+        with:
+          python-version: "3.13"
+      - name: Editor prerequisites
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y xvfb python3-tk
+      # Keyed on the resolved VS Code build rather than on a path: a partially
+      # downloaded or architecture-mismatched Electron must never be reused,
+      # and `.vscode-test/` itself stays disposable.
+      - name: Cache the editor download
+        uses: actions/cache@v4
+        with:
+          path: vscode-extension/.vscode-test
+          key: vscode-test-${{ runner.os }}-${{ runner.arch }}-stable
+      - name: Install (locked)
+        run: npm ci
+      - name: Compile
+        run: npm run compile
+      - name: Live suite
+        run: xvfb-run -a npm run test:live
+      # A mutation suite that only ever runs locally rots exactly like the
+      # coverage it exists to police.
+      - name: Mutation runner
+        run: xvfb-run -a npm run test:mutations
+
+  # The live suite loads `out/` through --extensionDevelopmentPath; users
+  # install a .vsix. If those ever diverge, the most valuable test is
+  # exercising an artifact nobody ships — so this packages the real thing and
+  # runs a smoke subset against it.
+  extension-vsix:
+    runs-on: ubuntu-latest
+    continue-on-error: true
+    defaults:
+      run:
+        working-directory: vscode-extension
+    steps:
+      - uses: actions/checkout@v5
+      - uses: actions/setup-node@v5
+        with:
+          node-version: "20"
+      - uses: actions/setup-python@v6
+        with:
+          python-version: "3.13"
+      - name: Editor prerequisites
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y xvfb python3-tk
+      - name: Install (locked)
+        run: npm ci
+      # No separate packaging step: the runner packages, installs into a
+      # throwaway profile, and boots that copy, so a step here would build a
+      # second .vsix that nothing tests.
+      # copy — see test/integration/runTestsVsix.js. It does NOT pass
+      # --disable-extensions: correct for the development-path suite, that
+      # flag switches off an extension that is genuinely installed, and VS
+      # Code has no --enable-extension to pair with it. Isolation comes from
+      # the fresh --extensions-dir holding exactly one extension.
+      - name: Smoke the packaged extension
+        run: xvfb-run -a npm run test:vsix

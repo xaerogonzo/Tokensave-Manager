@@ -214,6 +214,18 @@ export class StatusBar {
     return this.pinned;
   }
 
+  /**
+   * What the item currently reads, as a person sees it.
+   *
+   * `renderText` is already unit-tested against a summary; this is the other
+   * half — that the string actually reached the StatusBarItem. A pure
+   * function returning the right text into a widget nobody updated is a bug
+   * no test of that function can see.
+   */
+  currentText(): string {
+    return this.item.text;
+  }
+
   pin(folder: vscode.WorkspaceFolder): void {
     this.pinned = folder;
     void this.refresh();

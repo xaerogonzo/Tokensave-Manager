@@ -250,3 +250,61 @@ Stated so that "no findings" is not read as coverage this does not have:
    a coverage win.
 6. An inconclusive probe raises. "I could not find out" is not "it is
    absent".
+
+---
+
+## VS Code extension — the live suite
+
+`vscode-extension/test/integration/` boots a real editor with the extension
+loaded and runs assertions inside it. It exists because `test/vscode-stub.js`
+says in its own header what it does **not** cover: the tree and the command
+wiring. Those were verified by a person opening a window and looking, which is
+slow, subjective, and stops happening exactly when the project gets busy.
+
+### What it covers that nothing else could
+
+| Surface | Why the stub suite cannot reach it |
+|---|---|
+| Contributed commands | A command in `package.json` that nothing registers fails only when clicked |
+| Tree rows | Label, description and icon are decided together in `getTreeItem`; a node-graph assertion passes with all three wrong |
+| Problems panel | The mapping is unit-tested; that it *reaches* the editor is not |
+| Webview document | CSP, nonce wiring and escaping are properties of a string only the host produces |
+| Status bar | A pure function returning the right text into a widget nobody updated is invisible to a test of that function |
+
+### What stays unverified
+
+The live suite loads the real webview and checks browser-visible invariants of
+the document it is given — structure, ordering, CSP, the script nonce matching
+the one the CSP allows, and that no workspace data reaches the shell at all.
+
+What stays outside the oracle is **appearance**: whether a label truncates at a
+real sidebar width, whether two panels read as different, whether text is
+legible. This is not a visual regression suite, and there is no VS Code
+equivalent of the Tk geometry oracle above — pretending otherwise would be
+worse than the gap.
+
+### The mutation runner is the evidence
+
+A suite that passes on its first run is what a suite testing nothing looks
+like, and booting a real editor makes it *look* convincing. So
+`test/integration/mutations.js` removes each protected property from the
+compiled output and requires the test written for it to object.
+
+**13/13 arms are caught by their own test.** Three of those took a fixture
+change rather than an assertion change, and the runner is why they were found:
+
+* The status-bar pin test was called decorative **three times**. With one
+  workspace root, "pinned to a folder" and "follows the active editor" name the
+  same folder. With two roots that were merely both dirty, the bar rendered the
+  same marker either way. And a predicate waiting for "the bar says something"
+  was satisfied by the *startup* render, so the assertion ran before the editor
+  had moved — passing against mutated code in 256 ms.
+
+The general lesson, which generalises past this suite: **asserting that
+something did not change needs an observable transition to wait on.** Without
+one, the wait is satisfied by the state that was already there, and the test
+passes without ever reaching the moment it claims to check.
+
+Arms are tiered `fast` / `live`, and the fast ones run against the stub suite —
+spending a minute of Electron on a severity-mapping mutation that `node --test`
+catches in a second is how a mutation suite becomes too slow to run.

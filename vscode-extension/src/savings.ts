@@ -130,6 +130,31 @@ export class SavingsViewProvider implements vscode.WebviewViewProvider {
   private range: Range = "30d";
   private busy = false;
   private spendFetchedAt: number | null = null;
+  /** How many times the document has been replaced. See `renderCount`. */
+  private renders = 0;
+
+  /**
+   * The webview's current HTML, or undefined before it has been resolved.
+   *
+   * A webview's *rendered DOM* is genuinely out of reach — no test can read a
+   * computed colour or measure a gap. But every decision this panel makes is
+   * a decision about what goes into this string, so the appearance stays
+   * unverified while the logic does not.
+   */
+  public currentHtml(): string | undefined {
+    return this.view?.webview.html;
+  }
+
+  /**
+   * How many times the document has been replaced.
+   *
+   * Often the more interesting half: a whole refresh must replace the
+   * document exactly once, which is how we know a later render cannot
+   * rewrite the deterministic section above it.
+   */
+  public renderCount(): number {
+    return this.renders;
+  }
 
   constructor(private readonly context: vscode.ExtensionContext,
               private readonly folder: () => vscode.WorkspaceFolder |
@@ -143,6 +168,7 @@ export class SavingsViewProvider implements vscode.WebviewViewProvider {
       localResourceRoots: [],
     };
     view.webview.html = this.html(view.webview);
+    this.renders++;
     view.webview.onDidReceiveMessage((message: { type?: string;
                                                  range?: unknown }) => {
       if (message?.type === "range" && isRange(message.range)) {
