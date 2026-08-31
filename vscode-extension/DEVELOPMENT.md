@@ -1,6 +1,6 @@
 # Developing the extension
 
-Three test suites, in increasing cost and decreasing frequency.
+Four commands, in increasing cost and decreasing frequency.
 
 | Command | What it runs | Needs |
 |---|---|---|
@@ -105,8 +105,8 @@ backtick anywhere in `savings.ts`'s `html()` — including in a comment — clos
 the string. `tsc` catches it, but the error points at the next line and reads
 as nonsense until you know why.
 
-**The fixture's `src/broken.py` is defective on purpose.** The launcher refuses
-to start if it stops producing findings, because a fixture that cannot produce
-the interesting case makes every test about it vacuous *and green*. None of the
-repository's six `test_no_*` guards see it — they all walk `src/` only — so no
-exception has to be named for it today.
+**The fixture's `test/workspace/src/broken.py` is defective on purpose.** The
+launcher refuses to start if it stops producing findings, because a fixture
+that cannot produce the interesting case makes every test about it vacuous
+*and green*. None of the repository's six `test_no_*` guards see it — they all
+walk `src/` only — so no exception has to be named for it today.

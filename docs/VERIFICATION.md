@@ -290,20 +290,33 @@ like, and booting a real editor makes it *look* convincing. So
 `test/integration/mutations.js` removes each protected property from the
 compiled output and requires the test written for it to object.
 
-**13/13 arms are caught by their own test.** Three of those took a fixture
-change rather than an assertion change, and the runner is why they were found:
+**13/13 arms are caught by their own test.** Getting there separated two
+failures that look identical in a summary and need opposite fixes.
 
-* The status-bar pin test was called decorative **three times**. With one
-  workspace root, "pinned to a folder" and "follows the active editor" name the
-  same folder. With two roots that were merely both dirty, the bar rendered the
-  same marker either way. And a predicate waiting for "the bar says something"
-  was satisfied by the *startup* render, so the assertion ran before the editor
-  had moved — passing against mutated code in 256 ms.
+*The runner was miscalibrated* on several arms: a `find` pattern that no longer
+matched the compiled output, and a failure parser written for TAP against a
+reporter that emits `✖ name`. Both reported a genuinely-caught mutation as
+uncaught. That is why NOT APPLIED is loud and why the expected test is named —
+a runner that is wrong looks exactly like a suite that is wrong.
 
-The general lesson, which generalises past this suite: **asserting that
-something did not change needs an observable transition to wait on.** Without
-one, the wait is satisfied by the state that was already there, and the test
-passes without ever reaching the moment it claims to check.
+*One test was actually decorative* — the status-bar pin — and it took three
+attempts, each of which looked sufficient at the time:
+
+1. With one workspace root, "pinned to a folder" and "follows the active
+   editor" name the same folder, so the mutation changed nothing observable.
+2. With two roots that were merely both dirty, the bar rendered the same
+   change marker whichever it was reporting.
+3. With a predicate waiting for "the bar says something", the *startup* render
+   already satisfied it — so the assertion ran before the editor had moved and
+   passed against mutated code in 256 ms.
+
+The fixture now gives the two roots different change counts, so the bar's own
+text says which one it is describing.
+
+The lesson generalises past this suite: **asserting that something did not
+change needs an observable transition to wait on.** Without one, the wait is
+satisfied by the state that was already there, and the test passes without ever
+reaching the moment it claims to check.
 
 Arms are tiered `fast` / `live`, and the fast ones run against the stub suite —
 spending a minute of Electron on a severity-mapping mutation that `node --test`

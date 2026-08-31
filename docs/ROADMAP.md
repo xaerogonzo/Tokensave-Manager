@@ -11,10 +11,15 @@ Status legend:
   it is not re-proposed. Not the same as blocked.
 
 > **Where the recent history lives.** The per-roadmap sections below stop at
-> Roadmap 8. Roadmaps 9 through 12 are recorded in
+> Roadmap 8. Roadmaps 9 onward are recorded in
 > [CHANGELOG.md](../CHANGELOG.md), which carries the narrative detail; the
 > deferred-item registry is `memory/roadmap_backlog.md`. Roadmap 12 (VS Code
-> integration) shipped 2026-08-26.
+> integration) shipped 2026-08-26; Roadmap 15 (tokensave 7.11 integration and
+> the extension's live test suite) is the most recent.
+>
+> The range is deliberately open-ended rather than a number that has to be
+> edited on every roadmap — it said "9 through 12" for three roadmaps after
+> that stopped being true.
 
 ---
 
