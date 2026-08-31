@@ -1,0 +1,58 @@
+[
+  {
+    "pid": 7936,
+    "started_at": 1788131037,
+    "project_path": "D:\\Random Projects\\Pet Python",
+    "argv_path": null,
+    "db_path": "D:\\Random Projects\\Pet Python\\.tokensave\\tokensave.db",
+    "version": "7.11.0"
+  },
+  {
+    "pid": 9420,
+    "started_at": 1788132457,
+    "project_path": "D:\\Random Projects\\KicomAI_Project",
+    "argv_path": ".",
+    "db_path": "D:\\Random Projects\\KicomAI_Project\\.tokensave\\tokensave.db",
+    "version": "7.11.0"
+  },
+  {
+    "pid": 13308,
+    "started_at": 1788130798,
+    "project_path": "D:\\Random Projects\\OpenChem Studio",
+    "argv_path": ".",
+    "db_path": "D:\\Random Projects\\OpenChem Studio\\.tokensave\\tokensave.db",
+    "version": "7.11.0"
+  },
+  {
+    "pid": 26436,
+    "started_at": 1788130486,
+    "project_path": "D:\\Claude Co worker\\Token Save Manager Source",
+    "argv_path": ".",
+    "db_path": "D:\\Claude Co worker\\Token Save Manager Source\\.tokensave\\tokensave.db",
+    "version": "7.11.0"
+  },
+  {
+    "pid": 28588,
+    "started_at": 1788130652,
+    "project_path": "D:\\Random Projects\\File Converter",
+    "argv_path": ".",
+    "db_path": "D:\\Random Projects\\File Converter\\.tokensave\\tokensave.db",
+    "version": "7.11.0"
+  },
+  {
+    "pid": 32860,
+    "started_at": 1788130631,
+    "project_path": "D:\\Random Projects\\Fortuna Lab",
+    "argv_path": ".",
+    "db_path": "D:\\Random Projects\\Fortuna Lab\\.tokensave\\tokensave.db",
+    "version": "7.11.0"
+  },
+  {
+    "pid": 34988,
+    "started_at": 1788130649,
+    "project_path": "D:\\Random Projects\\LexForge",
+    "argv_path": ".",
+    "db_path": "D:\\Random Projects\\LexForge\\.tokensave\\tokensave.db",
+    "version": "7.11.0"
+  }
+]

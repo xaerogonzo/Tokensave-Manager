@@ -17,8 +17,9 @@ one masks the next. Knowing that up front is most of the fix.
    the path in the error message to tell them apart.
 3. A session **cannot delete the worktree it is running in**, no matter what
    it tries. That one only clears on exit.
-4. `tokensave serve` holds the index DB and **does not say which project it
-   serves.** Correlate `tokensave.db-shm` mtime against process start time.
+4. `tokensave serve` holds the index DB. Since **tokensave 7.11.0** it says
+   which project it serves — `tokensave servers --json`. On anything older,
+   correlate `tokensave.db-shm` mtime against process start time.
 5. MCP servers **respawn**. "Kill them all" never converges. Kill the one.
 
 ---
@@ -74,6 +75,41 @@ Get-CimInstance Win32_Process -Filter "Name LIKE '%tokensave%'" |
 # PID 46000: tokensave.exe serve      <- which index?
 ```
 
+### On tokensave 7.11.0 and later: just ask
+
+Upstream #421 shipped a registry. Every `serve` writes
+`~/.tokensave/servers/<pid>.json` once its database is open, and:
+
+```powershell
+tokensave servers --json
+```
+
+answers both directions directly — **index → process**, by matching `db_path`,
+which is what deleting a stuck checkout needs, and **enumerate all**, by
+listing. Each entry carries `pid`, `started_at`, `project_path`, `argv_path`,
+`db_path` and `version`.
+
+`started_at` is the **OS-reported process start time**, which turns the
+correlation below from inference into an identity check: a live process at
+that PID whose start time disagrees is a different process, so PID reuse is
+detected rather than guessed.
+
+Two things worth knowing. There is deliberately **no `servers --stop`** —
+MCP clients restart their servers, so "stop them all" does not converge, and
+terminating is only safe for a caller who can stop the host first. And
+`tokensave servers` reaps dead entries as it lists them, so prefer it over
+reading the directory yourself; the files are not reaped by anything else.
+
+The Manager reads this in `helpers/tokensave_daemon.py` and shows it in
+Tool Manager → tokensave → "🔌 Manage servers…". Re-measured on this machine
+after the upgrade: seven servers, all seven named, where six were previously
+unattributable.
+
+### On tokensave 7.10 and earlier: the `-shm` correlation
+
+Still needed, because a server started by an older binary registers nothing
+and still holds its lock.
+
 SQLite creates the `-shm` sidecar when it opens the DB in WAL mode, so the
 holder's **start time matches the `-shm` mtime**, in practice to the second:
 
@@ -89,7 +125,8 @@ Sysinternals `handle.exe -a tokensave.db`, which names the owner directly;
 PowerShell cannot enumerate file handles natively.
 
 Filed upstream as
-[`tokensave-serve-db-lock-unidentifiable.md`](upstream-issues/tokensave-serve-db-lock-unidentifiable.md).
+[`tokensave-serve-db-lock-unidentifiable.md`](upstream-issues/archived/tokensave-serve-db-lock-unidentifiable.md)
+— **fixed in tokensave 7.11.0**, see the section above.
 
 ## 4. The servers respawn
 
