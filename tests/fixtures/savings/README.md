@@ -1,8 +1,15 @@
 # `tokensave` savings/spend fixtures
 
-Captured verbatim from **tokensave 7.10.0** so that an upstream schema change
-breaks a test rather than passing silently through hand-trimmed JSON. Do not
-tidy, reformat, or "fix" these files — their exact bytes are the contract.
+Captured verbatim so that an upstream schema change breaks a test rather than
+passing silently through hand-trimmed JSON. Do not tidy, reformat, or "fix"
+these files — their exact bytes are the contract.
+
+**Two tokensave versions are represented, and both are load-bearing.** The
+7.10.0 captures are not stale leftovers: that shape is still a supported input,
+and it is the only way to test the "this binary did not report it" path, which
+must never render as a zero. Deleting them would delete half the contract.
+
+### tokensave 7.10.0
 
 | File | Produced by |
 |---|---|
@@ -13,6 +20,29 @@ tidy, reformat, or "fix" these files — their exact bytes are the contract.
 | `cost_all.json` | `tokensave cost all --export json` |
 | `cost_all.stderr` | the **stderr** of that same invocation |
 | `discover_7d.json` | `tokensave discover --json --since 7d` |
+
+### tokensave 7.11.0
+
+Added for the #472 / #473 fixes. `cost --export json` gained
+`total_cache_read_tokens`, `total_cache_creation_tokens` and `total_tokens`,
+and its `tokens_saved` became range-scoped.
+
+| File | Produced by |
+|---|---|
+| `cost_711_today.json` … `cost_711_all.json` | `tokensave cost <RANGE> --export json` |
+| `gain_711_all_today.json` … `gain_711_all_all.json` | `tokensave gain --all --json --range <RANGE>` |
+
+All four ranges are kept for each, and that is deliberate — two of the
+properties under test are only visible across ranges:
+
+* `tokens_saved` **differs per range** (under 7.10 one lifetime figure was
+  returned for every range, which is what #473 fixed).
+* `cost`'s `tokens_saved` equals `gain --all` **exactly, at every range**, and
+  does *not* equal project-scoped `gain`. The paired `gain_711_all_*` captures
+  exist so that agreement is asserted against real bytes rather than asserted
+  in prose. Measured: today 97,704 · 7d 550,983 · 30d 876,775 · all 31,322,215.
+
+A single range would let a regression that re-broke the scoping pass.
 
 ## The one edit
 
@@ -58,4 +88,22 @@ Re-capture with stderr redirected separately, never merged:
     tokensave gain --json --range 30d           > gain_project_30d.json  2>/dev/null
     tokensave cost all --export json            > cost_all.json          2>cost_all.stderr
 
+    for R in today 7d 30d all; do
+      tokensave cost $R --export json           > cost_711_$R.json       2>/dev/null
+      tokensave gain --all --range $R --json    > gain_711_all_$R.json   2>/dev/null
+    done
+
 Then re-apply the one `project` edit above.
+
+**Re-capture the `cost_711_*` and `gain_711_all_*` files together, in one
+run.** Their agreement is the property under test, and capturing them minutes
+apart lets ordinary traffic land in between and breaks it for a reason that has
+nothing to do with tokensave.
+
+**Do not re-capture the 7.10 files against a newer binary.** They would silently
+become 7.11 captures under a 7.10 name, and the old-shape tests would then pass
+without ever exercising the old shape. If they are ever lost, the tests that
+depend on them should fail rather than be pointed at a modern capture.
+
+No test hardcodes a figure from these files — the assertions read the value out
+of the fixture — so a re-capture does not require editing test code.

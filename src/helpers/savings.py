@@ -18,29 +18,43 @@ Those are different quantities with different scopes, and nothing here is
 allowed to blur them.
 
 **Everything is measured, not assumed.** The facts below were established
-against tokensave 7.10.0 with the streams separated, and each one changed the
-code:
+against tokensave **7.11.0** with the streams separated, and each one changed
+the code. Three of them replace findings taken against 7.10.0, which upstream
+fixed in #472 and #473 — the superseded readings are kept in the notes below
+because they are what the old comments in this file were defending.
 
-* `cost --export json` **has no cache-read field**, and
-  `sum(by_model.tokens) - (total_input + total_output)` is exactly `0`. An
-  earlier design derived cache reads from that subtraction, which would have
-  rendered `Cache reads: 0` forever — inventing a number in the module written
-  to stop inventing numbers. `Spend.cache_read_tokens` is therefore `None`,
-  permanently, and callers must render "not reported".
-* `cost`'s own numbers do not explain each other. All three totals reconcile
-  ($4158.4742 = total = sum(by_model) = sum(by_category)) but imply
-  **$361.51 per million tokens**, which matches no Claude price. The cost is
-  computed from usage this export does not contain, so the figures are
-  reported as tokensave's, never recomputed or "corrected" here.
-* `cost`'s `tokens_saved` is a **lifetime, all-projects** counter, identical
-  for every range, and `efficiency_ratio` is that fixed numerator over a
-  moving denominator. Both are parsed so a caller can see they exist; neither
-  is fit to display, and `Spend` says so in its own docstring.
+* `cost --export json` **now exports every priced token category** (#472):
+  `total_cache_read_tokens`, `total_cache_creation_tokens` and a `total_tokens`
+  summing all four. Under 7.10.0 there was no cache field at all and
+  `sum(by_model.tokens) - (total_input + total_output)` was exactly `0`, so an
+  earlier design that derived cache reads from that subtraction would have
+  rendered `Cache reads: 0` forever. `cache_read_tokens` therefore stays
+  `int | None`: a **number** on 7.11+, and `None` on an older binary, which
+  callers must still render as "not reported". It is never derived.
+* `sum(by_model.tokens)` now equals `total_tokens` — measured exact on all four
+  ranges — and no longer equals `total_input + total_output`. `by_model` counts
+  the same four categories the totals do, so the payload's own cross-check
+  reconciles instead of agreeing with a wrong number.
+* `cost`'s cost/token ratio is explicable once the cache is counted. Over
+  `total_input + total_output` alone it reads **$272-$342/Mtok** across ranges,
+  which matches no Claude price and is what the 7.10.0-era comments called out;
+  over `total_tokens` it reads **$0.58-$0.65/Mtok**, stable across every range.
+  `implied_usd_per_mtok` therefore reports its **basis** alongside the rate, so
+  the two can never be rendered as one statistic.
+* `cost`'s `tokens_saved` is now **range-scoped** (#473) and reads from the
+  same `savings_ledger` `gain` reads. Measured: `today` 97,704 / `7d` 550,983 /
+  `30d` 876,775 / `all` 31,322,215 — four different values where 7.10.0
+  returned one lifetime figure for every range. **It agrees with `gain --all`
+  exactly, and does not agree with project-scoped `gain`** (7d: 550,983 against
+  19,644 here). So it became fit to display, but only as the machine-global
+  quantity it is — putting it beside the project-scoped `Gain` would reproduce
+  the scope blur this module exists to remove, in a new form.
 * `discover`'s token estimates are currently degenerate — recoverable tokens
   equal replaceable turns exactly, in every bucket. Turn counts are
   authoritative; the token estimate is quarantined behind a recorded piece of
   evidence rather than a heuristic, so an upstream fix that legitimately
-  produces one token per turn is not hidden forever.
+  produces one token per turn is not hidden forever. Still open upstream as
+  **#474**, so this one is unchanged.
 
 **Streams are never merged.** `cost` and `discover` sometimes print
 `Ingested or refreshed N local accounting rows.` before answering. That was
@@ -170,17 +184,23 @@ class Spend:
     agent: tokensave offers no project filter for it, so a caller must not
     present it beside a project-scoped figure without saying which is which.
 
-    Three fields carry warnings rather than data:
+    The three token fields beyond input/output are **version-dependent, and
+    `None` means "this binary did not say"** — never zero. tokensave 7.11.0
+    (#472) added `total_cache_read_tokens`, `total_cache_creation_tokens` and
+    `total_tokens`; a 7.10 payload carries none of them. They are read straight
+    from the export and never derived: under 7.10 the only available derivation
+    was provably zero, so computing one would invent a number.
 
-    `cache_read_tokens` is always `None`. The export contains no such field and
-    it cannot be derived — `sum(by_model.tokens)` equals
-    `total_input_tokens + total_output_tokens` exactly, so any subtraction
-    yields zero. Render "not reported", never a number.
+    `tokens_saved` became **range-scoped** in 7.11.0 (#473) and now agrees
+    exactly with `gain --all` over the same range. That makes it displayable
+    for the first time — but it is still machine-global across every project,
+    like everything else on this class, so it must not be shown beside the
+    project-scoped `Gain` without saying which is which. On a 7.10 payload the
+    same field is a lifetime counter identical for every range; `spans_range`
+    records which of the two you have.
 
-    `lifetime_tokens_saved` and `efficiency_ratio` are parsed only so callers
-    can see they exist. The first is a lifetime, all-projects counter identical
-    for every range; the second divides it by a moving denominator. Neither is
-    displayable, and `Gain` is where savings actually come from.
+    `efficiency_ratio` is `tokens_saved` over the range's own denominator and
+    inherits its scope. `Gain` remains where project-scoped savings come from.
     """
 
     range: str
@@ -189,34 +209,96 @@ class Spend:
     total_output_tokens: int
     by_model: tuple = ()
     by_category: tuple = ()
-    #: Always None — see the class docstring. Present so the absence is typed.
+    #: 7.11+ only. `None` on an older binary — "not reported", never 0.
     cache_read_tokens: "int | None" = None
-    lifetime_tokens_saved: int = 0
+    #: 7.11+ only. Same contract as `cache_read_tokens`.
+    cache_creation_tokens: "int | None" = None
+    #: 7.11+ only: all four categories summed, by tokensave rather than by us.
+    total_tokens: "int | None" = None
+    #: Machine-global. Range-scoped on 7.11+, a lifetime counter before that —
+    #: `spans_range` says which, and callers must not display it without.
+    tokens_saved: int = 0
     efficiency_ratio: float = 0.0
     raw: dict = field(default_factory=dict, repr=False)
+
+    @property
+    def spans_range(self) -> bool:
+        """Is `tokens_saved` scoped to `range`, or a 7.10 lifetime counter?
+
+        Keyed off `total_tokens`, which arrived in the same release (#472/#473)
+        — a payload carrying the cache fields is one whose savings figure was
+        also fixed. Cheaper and more honest than parsing a version string that
+        this export does not contain.
+        """
+        return self.total_tokens is not None
 
     def totals_reconcile(self) -> bool:
         """Do `by_model` and `by_category` sum to `total_cost_usd`?
 
         They did on every payload measured. This is here so a caller can notice
         if that stops being true, not because anything depends on it.
+
+        Money is compared at 4 decimal places because these are floats built by
+        summing floats; tokens are integers and are compared **exactly** in
+        `tokens_reconcile` — rounding those would hide a real disagreement.
         """
         cents = round(self.total_cost_usd, 4)
         return (round(sum(m.cost for m in self.by_model), 4) == cents
                 and round(sum(c.cost for c in self.by_category), 4) == cents)
 
-    def implied_usd_per_mtok(self) -> "float | None":
-        """`total_cost_usd` per million tokens, or None with no tokens.
+    def tokens_reconcile(self) -> "bool | None":
+        """Does `sum(by_model.tokens)` equal `total_tokens`? None if unknown.
 
-        Observed at **$361.51/Mtok**, which matches no Claude price — the cost
-        is computed from usage the export does not carry. Exposed so the
-        mismatch can be shown or filed upstream rather than silently papered
-        over by recomputing the cost from the tokens shown.
+        Measured exact on all four ranges under 7.11.0, where `by_model` counts
+        the same four categories the totals do. Under 7.10 the same sum equalled
+        `total_input + total_output` instead, and there is no `total_tokens` to
+        compare against — hence `None` rather than a verdict, so a caller cannot
+        read "old binary" as "disagreement".
+
+        Integer comparison, deliberately exact.
         """
+        if self.total_tokens is None:
+            return None
+        return sum(m.tokens for m in self.by_model) == self.total_tokens
+
+    def category_totals_sum(self) -> "int | None":
+        """`total_input + total_output + cache_read + cache_creation`, or None.
+
+        `None` when the cache fields are absent, so this cannot silently become
+        a two-field sum masquerading as a four-field one. Measured equal to
+        `total_tokens` on every 7.11.0 range.
+        """
+        if self.cache_read_tokens is None or self.cache_creation_tokens is None:
+            return None
+        return (self.total_input_tokens + self.total_output_tokens
+                + self.cache_read_tokens + self.cache_creation_tokens)
+
+    #: `basis` values for `implied_usd_per_mtok`.
+    BASIS_TOTAL = "total_tokens"
+    BASIS_IO_ONLY = "input_output_only"
+
+    def implied_usd_per_mtok(self) -> "tuple[float, str] | None":
+        """`(rate, basis)` — cost per million tokens — or None with no tokens.
+
+        **The rate is meaningless without the basis**, so the two travel
+        together and a caller cannot render one without the other. Over
+        `total_tokens` (7.11+) it reads **$0.58-$0.65/Mtok** across every range
+        measured. Over input+output alone — all a 7.10 payload can offer — the
+        same machine reads **$272-$342/Mtok**, because the dominant category is
+        cache reads and they were not in the export. That figure is not a
+        pricing anomaly to file upstream, as this module previously recorded;
+        it is a denominator missing three quarters of its tokens.
+
+        Still never recomputed into the cost: the cost is tokensave's, reported
+        as given.
+        """
+        if self.total_tokens is not None and self.total_tokens > 0:
+            return (self.total_cost_usd / self.total_tokens * 1_000_000,
+                    self.BASIS_TOTAL)
         tokens = self.total_input_tokens + self.total_output_tokens
         if tokens <= 0:
             return None
-        return self.total_cost_usd / tokens * 1_000_000
+        return (self.total_cost_usd / tokens * 1_000_000, self.BASIS_IO_ONLY)
 
 
 @dataclass(frozen=True)
@@ -292,6 +374,18 @@ def _num(value, default=0):
     """
     return value if isinstance(value, (int, float)) and not isinstance(
         value, bool) else default
+
+
+def _opt_int(data: dict, key: str) -> "int | None":
+    """An integer field that an older tokensave simply does not send.
+
+    `None` means "this binary did not report it"; `0` means it reported zero.
+    Keeping those distinct is the whole three-value contract — a version check
+    collapsed into `or 0` is how the old panel came to show a fabricated
+    figure. Never call this for a field whose absence should fail the parse.
+    """
+    value = _num(data.get(key), None)
+    return None if value is None else int(value)
 
 
 def parse_gain(text: str) -> Result:
@@ -385,10 +479,13 @@ def parse_spend(text: str) -> Result:
         total_output_tokens=int(_num(data.get("total_output_tokens"))),
         by_model=by_model,
         by_category=by_category,
-        # Not read from the payload, because there is no such field, and not
-        # derived, because the derivation is provably always zero.
-        cache_read_tokens=None,
-        lifetime_tokens_saved=int(_num(data.get("tokens_saved"))),
+        # Read, never derived. tokensave 7.11.0 (#472) publishes all three;
+        # an older binary sends none of them and they stay None, which the
+        # renderers show as "not reported" rather than as zero.
+        cache_read_tokens=_opt_int(data, "total_cache_read_tokens"),
+        cache_creation_tokens=_opt_int(data, "total_cache_creation_tokens"),
+        total_tokens=_opt_int(data, "total_tokens"),
+        tokens_saved=int(_num(data.get("tokens_saved"))),
         efficiency_ratio=float(_num(data.get("efficiency_ratio"), 0.0)),
         raw=data,
     ))

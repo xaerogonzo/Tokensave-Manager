@@ -247,46 +247,135 @@ def test_the_cache_read_derivation_would_have_been_exactly_zero():
                              + raw["total_output_tokens"]) == 0
 
 
-def test_no_cache_read_field_exists_upstream():
+def test_the_710_payloads_carry_no_cache_field():
+    """Why `cache_read_tokens` is `int | None` rather than `int`.
+
+    These captures predate tokensave 7.11.0 (#472). They are kept precisely
+    because the older shape is still a supported input, and "this binary did
+    not report it" must stay distinguishable from "it reported zero".
+    """
     for name in ("cost_7d.json", "cost_all.json"):
         raw = json.loads(fixture(name))
         assert not [k for k in raw if "cache" in k.lower()]
 
 
-def test_lifetime_tokens_saved_is_parsed_but_is_not_savings():
-    """`cost.tokens_saved` is a lifetime, all-projects counter.
+def test_the_711_payloads_carry_every_priced_category():
+    """The #472 fix, pinned against real captures.
 
-    It is four orders of magnitude away from `gain`'s project figure for the
-    same machine, and identical for every range. Parsed so a caller can see it
-    exists; named so nobody mistakes it for the savings number.
+    All four categories present, and `total_tokens` equal to their sum — so a
+    consumer never has to add them up itself and get a different answer.
     """
+    for name in ("cost_711_today.json", "cost_711_7d.json",
+                 "cost_711_30d.json", "cost_711_all.json"):
+        spend: Spend = parse_spend(fixture(name)).value
+        assert spend.cache_read_tokens is not None
+        assert spend.cache_creation_tokens is not None
+        assert spend.total_tokens is not None
+        assert spend.category_totals_sum() == spend.total_tokens
+        assert spend.tokens_reconcile() is True
+        # Cache reads dominate: that is the whole reason the old denominator
+        # produced a rate in the hundreds per million.
+        assert spend.cache_read_tokens > spend.total_output_tokens
+
+
+def test_a_710_payload_still_reports_absence_rather_than_zero():
     spend: Spend = parse_spend(fixture("cost_7d.json")).value
-    gain: Gain = parse_gain(fixture("gain_project_30d.json")).value
+    assert spend.cache_read_tokens is None
+    assert spend.cache_creation_tokens is None
+    assert spend.total_tokens is None
+    assert spend.category_totals_sum() is None
+    # "Cannot say" — a caller must not read this as "the totals disagree".
+    assert spend.tokens_reconcile() is None
+    assert spend.spans_range is False
 
-    assert spend.lifetime_tokens_saved > 0
-    assert spend.lifetime_tokens_saved > gain.saved_tokens * 100
-    assert not hasattr(spend, "saved_tokens")     # no name collision with Gain
+
+def test_tokens_saved_never_collides_with_gains_own_field():
+    """Two different quantities, so two different names, on both versions."""
+    for name in ("cost_7d.json", "cost_711_7d.json"):
+        spend: Spend = parse_spend(fixture(name)).value
+        assert spend.tokens_saved > 0
+        assert not hasattr(spend, "saved_tokens")   # `Gain`'s name, not ours
 
 
-def test_lifetime_counter_is_identical_across_ranges():
-    """The reason it is unscoped, shown rather than asserted in prose."""
+def test_a_710_tokens_saved_is_a_lifetime_counter():
+    """Identical for every range — the #473 defect, kept as the old contract.
+
+    `spans_range` is False here, which is what forbids a caller from labelling
+    this figure with the range it was requested for.
+    """
     seven: Spend = parse_spend(fixture("cost_7d.json")).value
     every: Spend = parse_spend(fixture("cost_all.json")).value
     assert seven.range != every.range
-    assert seven.lifetime_tokens_saved == every.lifetime_tokens_saved
+    assert seven.tokens_saved == every.tokens_saved
+    assert seven.spans_range is False
 
 
-def test_spend_totals_reconcile_but_the_implied_rate_does_not():
-    """Both halves of the M3 finding, pinned against the real payload.
+def test_a_711_tokens_saved_is_scoped_to_its_range():
+    """The #473 fix: four ranges, four different figures, strictly growing."""
+    figures = [parse_spend(fixture("cost_711_%s.json" % r)).value
+               for r in ("today", "7d", "30d", "all")]
+    assert all(s.spans_range for s in figures)
+    saved = [s.tokens_saved for s in figures]
+    assert len(set(saved)) == 4, saved
+    assert saved == sorted(saved), saved
 
-    The three totals agree exactly, so the export is internally consistent —
-    yet the implied price per million tokens matches no Claude rate, because
-    the cost is computed from usage the export does not carry. Callers surface
-    this rather than recomputing the cost from the tokens shown.
+
+def test_a_711_tokens_saved_equals_gain_all_and_not_project_gain():
+    """The scope that survived the #473 fix, and the trap it leaves.
+
+    `cost` has no project filter, so its savings figure matches `gain --all`
+    **exactly** — measured equal on all four ranges — and does not match
+    project-scoped `gain`. Showing it beside the project figure would rebuild
+    the scope blur this module exists to remove, so the agreement is asserted
+    against the all-projects reading and the disagreement against the other.
+    """
+    for range_ in ("today", "7d", "30d", "all"):
+        spend: Spend = parse_spend(fixture("cost_711_%s.json" % range_)).value
+        every: Gain = parse_gain(fixture("gain_711_all_%s.json" % range_)).value
+        assert spend.tokens_saved == every.saved_tokens, range_
+
+    project: Gain = parse_gain(fixture("gain_project_30d.json")).value
+    thirty: Spend = parse_spend(fixture("cost_711_30d.json")).value
+    assert thirty.tokens_saved != project.saved_tokens
+
+
+def test_the_710_implied_rate_is_high_because_its_denominator_is_short():
+    """The old M3 finding, re-read correctly.
+
+    The three cost totals agree exactly, so the export is internally
+    consistent. The implied price per million still matches no Claude rate —
+    but the cause is a denominator counting only input and output while the
+    dominant category is cache reads, not a cost tokensave mispriced. The
+    basis says which denominator was used, so the number cannot be mistaken
+    for the 7.11 one.
     """
     spend: Spend = parse_spend(fixture("cost_7d.json")).value
     assert spend.totals_reconcile()
-    assert spend.implied_usd_per_mtok() > 300      # observed ≈ $361.51/Mtok
+    rate, basis = spend.implied_usd_per_mtok()
+    assert rate > 300                             # observed ≈ $361.51/Mtok
+    assert basis == Spend.BASIS_IO_ONLY
+
+
+def test_the_711_implied_rate_lands_in_a_plausible_band():
+    """Counting all four categories, the arithmetic closes.
+
+    Measured $0.58–$0.65/Mtok across every range — a blended rate a reader can
+    sanity-check, where the same machine read $272–$342 on the short
+    denominator. The band is deliberately loose: this pins "explicable", not a
+    price list.
+    """
+    for range_ in ("today", "7d", "30d", "all"):
+        spend: Spend = parse_spend(fixture("cost_711_%s.json" % range_)).value
+        rate, basis = spend.implied_usd_per_mtok()
+        assert basis == Spend.BASIS_TOTAL
+        assert 0.01 < rate < 10.0, (range_, rate)
+
+
+def test_the_basis_is_never_returned_without_the_rate():
+    """They travel as one value, so a caller cannot drop half of it."""
+    for name in ("cost_7d.json", "cost_711_7d.json"):
+        result = parse_spend(fixture(name)).value.implied_usd_per_mtok()
+        assert isinstance(result, tuple) and len(result) == 2
 
 
 def test_implied_rate_is_none_with_no_tokens():
@@ -294,6 +383,24 @@ def test_implied_rate_is_none_with_no_tokens():
         {"range": "today", "total_cost_usd": 0.0,
          "total_input_tokens": 0, "total_output_tokens": 0})).value
     assert spend.implied_usd_per_mtok() is None
+
+
+def test_a_zero_total_tokens_does_not_divide():
+    """`total_tokens: 0` is present-and-zero, and must not become a ZeroDivision
+    nor silently fall through to the input+output denominator."""
+    spend: Spend = parse_spend(json.dumps(
+        {"range": "today", "total_cost_usd": 1.0, "total_input_tokens": 0,
+         "total_output_tokens": 0, "total_cache_read_tokens": 0,
+         "total_cache_creation_tokens": 0, "total_tokens": 0})).value
+    assert spend.total_tokens == 0                # present, not absent
+    assert spend.implied_usd_per_mtok() is None
+
+
+def test_tokens_reconcile_is_exact_not_rounded():
+    """Tokens are integers. A one-token disagreement is a disagreement."""
+    raw = json.loads(fixture("cost_711_7d.json"))
+    raw["by_model"][0]["tokens"] += 1
+    assert parse_spend(json.dumps(raw)).value.tokens_reconcile() is False
 
 
 def test_spend_tolerates_the_synthetic_model_row():

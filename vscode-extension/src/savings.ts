@@ -9,8 +9,9 @@
  * * **savings and spend are different quantities with different scopes.**
  *   `gain` is per-project; `cost` is machine-global with no project filter, and
  *   the heading says so rather than a subtitle.
- * * **nothing is derived that upstream did not report.** Cache reads render as
- *   "not reported", because the only available derivation is provably zero.
+ * * **nothing is derived that upstream did not report.** Cache reads come
+ *   straight from the export on tokensave 7.11+ and render as "not reported"
+ *   on anything older, where the only available derivation was provably zero.
  * * **unknown is never zero.** Each section has its own state, and a section
  *   that could not be read says so with the reason.
  *
@@ -352,10 +353,15 @@ export class SavingsViewProvider implements vscode.WebviewViewProvider {
       stat(content, "Estimated spend", money(p.total_cost_usd));
       stat(content, "Input tokens", num(p.total_input_tokens));
       stat(content, "Output tokens", num(p.total_output_tokens));
-      // Never a number. The only available derivation is provably zero on
-      // every payload, so computing it would fabricate a figure.
-      stat(content, "Cache reads", "not reported",
-           "tokensave does not export this");
+      // Read, never derived. A null means this tokensave did not report it,
+      // which is not the same as zero — so the check is explicitly against
+      // null rather than falsy, or a genuine 0 would read as "not reported".
+      if (p.cache_read_tokens === null || p.cache_read_tokens === undefined) {
+        stat(content, "Cache reads", "not reported", "needs tokensave 7.11+");
+      } else {
+        stat(content, "Cache reads", num(p.cache_read_tokens),
+             "usually the dominant category");
+      }
 
       if (p.by_model && p.by_model.length) {
         table(content, ["Model", "Cost", "Tokens"],
@@ -366,11 +372,23 @@ export class SavingsViewProvider implements vscode.WebviewViewProvider {
               p.by_category.map((c) => [c.category, money(c.cost),
                                         num(c.turns)]));
       }
-      let note = "These are tokensave's reported figures. The spend above "
-        + "cannot be derived from the token counts beside it";
-      if (p.implied_usd_per_mtok) {
-        note += " — they imply " + money(p.implied_usd_per_mtok)
-          + " per million tokens";
+      // The basis travels with the rate. Counting all four token categories
+      // the arithmetic closes; counting only input and output — all an older
+      // export offers — it reads in the hundreds per million, because the
+      // denominator is missing its dominant category, not because anything
+      // was mispriced.
+      let note = "These are tokensave's reported figures";
+      if (p.implied_usd_per_mtok === null
+          || p.implied_usd_per_mtok === undefined) {
+        note += " (no tokens in this range)";
+      } else if (p.implied_usd_basis === "total_tokens") {
+        note += " — " + money(p.implied_usd_per_mtok)
+          + " per million tokens across all four token categories";
+      } else {
+        note += " — " + money(p.implied_usd_per_mtok)
+          + " per million tokens, but counting only input and output: this"
+          + " tokensave does not export cache tokens, so the denominator is"
+          + " incomplete";
       }
       content.appendChild(el("p", note + ".", "muted"));
     }

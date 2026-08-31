@@ -1,0 +1,85 @@
+{
+  "range": "30d",
+  "total_cost_usd": 13816.60467355,
+  "total_input_tokens": 146978,
+  "total_output_tokens": 41922151,
+  "total_cache_read_tokens": 22452833135,
+  "total_cache_creation_tokens": 239112153,
+  "total_tokens": 22734014417,
+  "tokens_saved": 876775,
+  "efficiency_ratio": 0.020415800305426102,
+  "by_model": [
+    {
+      "model": "claude-opus-5",
+      "cost": 13661.09709875,
+      "tokens": 22553201990
+    },
+    {
+      "model": "claude-fable-5",
+      "cost": 140.1049235,
+      "tokens": 118605111
+    },
+    {
+      "model": "claude-sonnet-5",
+      "cost": 15.402651299999999,
+      "tokens": 62207316
+    },
+    {
+      "model": "<synthetic>",
+      "cost": 0.0,
+      "tokens": 0
+    }
+  ],
+  "by_category": [
+    {
+      "category": "conversation",
+      "cost": 8372.6369093,
+      "turns": 26377
+    },
+    {
+      "category": "general",
+      "cost": 2716.85368955,
+      "turns": 9506
+    },
+    {
+      "category": "testing",
+      "cost": 908.262854,
+      "turns": 3104
+    },
+    {
+      "category": "coding",
+      "cost": 897.11986245,
+      "turns": 3307
+    },
+    {
+      "category": "git_ops",
+      "cost": 539.9111805,
+      "turns": 1617
+    },
+    {
+      "category": "exploration",
+      "cost": 283.49810875,
+      "turns": 1174
+    },
+    {
+      "category": "refactoring",
+      "cost": 59.3256039,
+      "turns": 191
+    },
+    {
+      "category": "planning",
+      "cost": 26.73901485,
+      "turns": 93
+    },
+    {
+      "category": "build_deploy",
+      "cost": 11.8967835,
+      "turns": 35
+    },
+    {
+      "category": "delegation",
+      "cost": 0.36066675,
+      "turns": 1
+    }
+  ]
+}

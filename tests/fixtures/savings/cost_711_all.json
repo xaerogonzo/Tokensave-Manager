@@ -1,0 +1,110 @@
+{
+  "range": "all",
+  "total_cost_usd": 17057.96478783,
+  "total_input_tokens": 456500,
+  "total_output_tokens": 62089107,
+  "total_cache_read_tokens": 28769755204,
+  "total_cache_creation_tokens": 347198016,
+  "total_tokens": 29179498827,
+  "tokens_saved": 31322215,
+  "efficiency_ratio": 0.33368426296287135,
+  "by_model": [
+    {
+      "model": "claude-opus-5",
+      "cost": 14097.70304375,
+      "tokens": 23312158985
+    },
+    {
+      "model": "claude-opus-4-7",
+      "cost": 1457.622092,
+      "tokens": 2289069803
+    },
+    {
+      "model": "claude-sonnet-4-6",
+      "cost": 517.257891,
+      "tokens": 1032588184
+    },
+    {
+      "model": "claude-opus-4-8",
+      "cost": 437.6875075,
+      "tokens": 666636818
+    },
+    {
+      "model": "claude-sonnet-5",
+      "cost": 370.9502106,
+      "tokens": 1574941090
+    },
+    {
+      "model": "claude-fable-5",
+      "cost": 140.1049235,
+      "tokens": 199693456
+    },
+    {
+      "model": "claude-haiku-4-5-20251001",
+      "cost": 33.46795623,
+      "tokens": 101644073
+    },
+    {
+      "model": "claude-opus-4-6",
+      "cost": 3.17116325,
+      "tokens": 2766418
+    },
+    {
+      "model": "<synthetic>",
+      "cost": 0.0,
+      "tokens": 0
+    }
+  ],
+  "by_category": [
+    {
+      "category": "conversation",
+      "cost": 10542.89781731,
+      "turns": 41077
+    },
+    {
+      "category": "general",
+      "cost": 3027.46810327,
+      "turns": 11766
+    },
+    {
+      "category": "coding",
+      "cost": 1311.08497778,
+      "turns": 6444
+    },
+    {
+      "category": "testing",
+      "cost": 974.7040201,
+      "turns": 3411
+    },
+    {
+      "category": "git_ops",
+      "cost": 583.1052502,
+      "turns": 1863
+    },
+    {
+      "category": "exploration",
+      "cost": 503.54008862,
+      "turns": 3295
+    },
+    {
+      "category": "refactoring",
+      "cost": 63.66789035,
+      "turns": 209
+    },
+    {
+      "category": "planning",
+      "cost": 39.0150115,
+      "turns": 165
+    },
+    {
+      "category": "build_deploy",
+      "cost": 11.8967835,
+      "turns": 35
+    },
+    {
+      "category": "delegation",
+      "cost": 0.5848452,
+      "turns": 5
+    }
+  ]
+}

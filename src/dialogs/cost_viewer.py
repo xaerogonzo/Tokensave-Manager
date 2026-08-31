@@ -500,11 +500,16 @@ class SavingsDialog(UiPumpMixin, tk.Toplevel):
                    _thousands(value.total_input_tokens), C["subtext"])
         self._stat(cards, 2, "Output tokens",
                    _thousands(value.total_output_tokens), C["subtext"])
-        # Not a number, and never derived. The only available derivation —
-        # by_model total minus input minus output — is exactly zero on every
-        # payload, so computing it would fabricate a figure.
-        self._stat(cards, 3, "Cache reads", "not reported", C["overlay0"],
-                   note="tokensave does not export this")
+        # Read from the export on tokensave 7.11+ (#472), never derived.
+        # `None` is "this binary did not report it", which is not zero — the
+        # distinction the whole module exists to preserve.
+        if value.cache_read_tokens is None:
+            self._stat(cards, 3, "Cache reads", "not reported", C["overlay0"],
+                       note="needs tokensave 7.11+")
+        else:
+            self._stat(cards, 3, "Cache reads",
+                       _thousands(value.cache_read_tokens), C["subtext"],
+                       note="usually the dominant category")
 
         if value.by_model:
             self._table(body, ["Model", "Cost", "Tokens"],
@@ -515,15 +520,22 @@ class SavingsDialog(UiPumpMixin, tk.Toplevel):
                         [(c.category, f"${c.cost:,.2f}", _thousands(c.turns))
                          for c in value.by_category])
 
-        # Said plainly, so a user who checks the arithmetic blames the right
-        # party. The totals agree with each other; they just do not follow
-        # from the token counts shown, because the cost is computed from usage
-        # this export does not carry.
-        rate = value.implied_usd_per_mtok()
-        note = ("These are tokensave's reported figures. The spend above "
-                "cannot be derived from the token counts beside it")
-        if rate:
-            note += f" — they imply ${rate:,.2f} per million tokens"
+        # The basis travels with the rate. Over all four token categories the
+        # arithmetic closes (~$0.61/Mtok measured); over input+output alone —
+        # all an older export can offer — it reads in the hundreds, because
+        # three quarters of the tokens are missing from the denominator, not
+        # because tokensave priced anything strangely.
+        implied = value.implied_usd_per_mtok()
+        note = "These are tokensave's reported figures"
+        if implied is None:
+            note += " (no tokens in this range)"
+        elif implied[1] == value.BASIS_TOTAL:
+            note += (f" — ${implied[0]:,.2f} per million tokens "
+                     f"across all four token categories")
+        else:
+            note += (f" — ${implied[0]:,.2f} per million tokens, but counting "
+                     f"only input and output: this tokensave does not export "
+                     f"cache tokens, so the denominator is incomplete")
         note += ". Savings are not shown here; see the Savings section."
         tk.Label(body, text=note, fg=C["overlay0"], bg=C["base"],
                  font=("Segoe UI", 8), anchor="w", justify=tk.LEFT,
