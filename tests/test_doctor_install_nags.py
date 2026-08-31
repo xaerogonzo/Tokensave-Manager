@@ -132,3 +132,55 @@ def test_wired_check_short_circuits_uninstalled_agents(mocker):
     ])
     assert actionable == []
     assert other == 1
+
+
+#: A rules path as doctor prints it on Windows, built rather than written
+#: so the backslashes survive every layer that handles this file.
+WIN_RULES = 'C:\\Users\\u\\.claude\\rules\\tokensave.md'
+
+
+# ── tokensave 7.11.0 added two sections to doctor's output ───────────────────
+
+def test_the_711_index_scope_section_produces_no_nags(mocker):
+    """Upstream #450 added an "Index scope" block; #441 added a rules-version
+    line. Neither offers an agent to install, so neither may reach the picker.
+
+    Lines taken from a real `tokensave doctor v7.11.0` run, warning forms
+    included — the failing shapes matter more than the passing ones, since a
+    ✔ line was never going to match anything. One carries a real Windows path,
+    because that is what the line looks like on the machine this ran on.
+    """
+    mocker.patch("helpers.mcp._tokensave_agent_installed", return_value=True)
+    mocker.patch("helpers.mcp._tokensave_agent_wired", return_value=False)
+    actionable, other = extract_install_nags([
+        "Index scope",
+        "  ✔ Home directory is not indexed as a project",
+        "  ✔ Index size is unremarkable: 78.2 MB",
+        "  ✔ No stale projects in global DB",
+        "  ✔ rules up to date in %s (version 95f0007b664a86ae)" % WIN_RULES,
+        # The warning forms of both, which is where a loose pattern would bite.
+        "  ! $HOME is initialized as a tokensave project",
+        "  ! Index has grown past 5 GB: 29.9 GB",
+        "  ! rules are out of date in %s" % WIN_RULES,
+    ])
+    assert actionable == []
+    assert other == 0
+
+
+def test_a_real_nag_still_surfaces_from_alongside_the_new_sections(mocker):
+    """The filter must be narrow, not merely quiet.
+
+    A test that only asserted "the new lines produce nothing" would also pass
+    against a function that had stopped working entirely, so the genuine nag
+    is interleaved with them here.
+    """
+    mocker.patch("helpers.mcp._tokensave_agent_installed", return_value=True)
+    mocker.patch("helpers.mcp._tokensave_agent_wired", return_value=False)
+    actionable, other = extract_install_nags([
+        "Index scope",
+        "  ✔ Home directory is not indexed as a project",
+        "  ! cursor/mcp.json not found - run `tokensave install --agent cursor`",
+        "  ✔ rules up to date in ~/.claude/rules/tokensave.md (version abc123)",
+    ])
+    assert actionable == ["cursor"]
+    assert other == 0

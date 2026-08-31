@@ -1,5 +1,32 @@
 <!--
-STATUS: FILED 2026-08-19 — https://github.com/aovestdipaperino/tokensave/issues/419
+STATUS: CLOSED — verified via GitHub API 2026-08-30
+
+RESOLVED: fixed in tokensave 7.11.0 (issue #419).
+  Two commits on master, 92e0c2e (#425) and 23eca6d, closed 2026-08-30 —
+  hours before 7.11.0 was published, so the fix ships in it. NOTE: it has no
+  bullet in the 7.11.0 release notes, so a changelog-driven audit does not
+  see it. That is why this was verified directly rather than inferred from
+  the closure.
+
+  Both halves addressed. A config write whose rendered bytes match what is
+  already on disk is skipped entirely — no write, no .bak, no `✔ Wrote` line
+  — with the guard placed BEFORE the backup, since the spurious
+  settings.json.bak was half of what was reported. And the trigger itself was
+  found: `Gitignore` was missing from should_skip_agent_install_maintenance,
+  so a documented query ran the startup maintenance block, whose
+  external_upgrade_needs_reinstall branch fires when the running version is
+  newer than last_installed_version — i.e. exactly once, after an in-place
+  upgrade, which is why the report could not reproduce it on demand.
+
+  Verified here against 7.11.0 with a disposable HOME: `tokensave gitignore`
+  in its read-only form printed `gitignore: on` and nothing else. The
+  disposable settings.json mtime was unchanged across the call, the real
+  ~/.claude/settings.json mtime was unchanged (still 2026-08-19, the date of
+  the original occurrence), and no .bak was created. The acceptance criterion
+  was mtime-before == mtime-after, not "we used a copy".
+
+  The original settings.json.bak from the 2026-08-19 occurrence is still
+  present in ~/.claude/ — harmless, and the only remaining trace.
 Found against tokensave v7.10.0 on Windows 11, first CLI invocation after an
 in-place 7.9.0 → 7.10.0 upgrade.
 

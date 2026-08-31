@@ -110,38 +110,88 @@ def test_missing_issues_dir_returns_none(tmp_path, monkeypatch):
 
 # ── the real repo docs stay matchable ─────────────────────────────────────────
 
-@pytest.mark.parametrize("relpath,number", [
-    ("archived/tokensave-worktree-index-resolution.md", 372),
-    ("archived/tokensave-glob-matcher-coverage.md",     389),
-    ("tokensave-settings-write-on-readonly-query.md",   419),
-])
-def test_real_repo_docs_cite_a_matchable_issue_number(relpath, number):
+#: Docs whose citation form broke the original pattern, pinned by NAME rather
+#: than by path. Archiving moves a file between two directories and changes
+#: nothing about how it names its issue — an earlier version of this list
+#: carried `archived/` prefixes and had to be edited every time an issue
+#: closed, which is churn that teaches nothing. `_real_doc` resolves either
+#: location.
+CITATION_FORMS = [
+    ("tokensave-worktree-index-resolution.md", 372, "issue #NNN"),
+    ("tokensave-glob-matcher-coverage.md",     389, "issue NNN, no hash"),
+    ("tokensave-settings-write-on-readonly-query.md", 419, "bare URL only"),
+]
+
+
+def _real_doc(name):
+    """A doc from the real repo, active or archived. None if it is neither."""
+    base = _REPO / "docs" / "upstream-issues"
+    for candidate in (base / name, base / "archived" / name):
+        if candidate.is_file():
+            return candidate
+    return None
+
+
+@pytest.mark.parametrize("name,number,form", CITATION_FORMS)
+def test_real_repo_docs_cite_a_matchable_issue_number(name, number, form):
     """Every real doc must cite its issue in a form the pattern recognises.
 
     Deliberately checks the PATTERN against file content rather than calling
     `_find_issue_doc`, so it is independent of whether a doc has since been
     archived — archiving is a lifecycle move, not a change to how the doc
-    names its issue.
+    names its issue. The lookup is by name across both directories so that
+    independence is real rather than merely claimed; it was claimed here
+    while the parameters carried hardcoded `archived/` prefixes, and the
+    test duly broke the first time one of these was archived.
 
     #389 cites its issue as "issue 389" (no hash) and #419 only as a
     `.../issues/419` URL. Both were invisible to the original pattern, which
     is what this file exists to prevent recurring.
     """
     mod = _load_script_module()
-    text = (_REPO / "docs" / "upstream-issues" / relpath).read_text(
-        encoding="utf-8", errors="replace")
-    found = {int(m.group(1)) for m in mod._ISSUE_DOC_RE.finditer(text)}
+    doc = _real_doc(name)
+    assert doc is not None, f"{name} is in neither the active nor archived dir"
+    found = {int(m.group(1)) for m in mod._ISSUE_DOC_RE.finditer(
+        doc.read_text(encoding="utf-8", errors="replace"))}
     assert number in found, (
-        f"{relpath} tracks issue #{number} but cites it in a form "
+        f"{name} tracks issue #{number} as {form} but cites it in a form "
         f"_ISSUE_DOC_RE cannot see (found: {sorted(found) or 'nothing'})")
 
 
-def test_active_doc_is_discoverable_end_to_end():
-    """The one still-open issue resolves through the real lookup path."""
+def test_every_active_doc_resolves_through_the_real_lookup():
+    """Whatever is currently un-archived must be findable.
+
+    Derived from the directory rather than naming an issue number, because
+    naming one makes this a snapshot of which issues happened to be open on
+    the day it was written — and the previous version, pinned to #419, failed
+    the moment #419 was archived, reporting a lifecycle event as a defect.
+
+    The stake is real: `--fix` writes an AUTO_GENERATED stub over any issue it
+    cannot find a doc for, so a doc that exists but does not resolve gets
+    clobbered by a TODO placeholder.
+    """
     mod = _load_script_module()
-    found = mod._find_issue_doc(419)
-    assert found is not None and found.name == (
-        "tokensave-settings-write-on-readonly-query.md")
+    active = sorted(p for p in mod._ISSUES.glob("*.md"))
+    assert active, "no active upstream-issue docs — nothing to check"
+
+    unresolvable, checked = [], 0
+    for doc in active:
+        numbers = {int(m.group(1)) for m in mod._ISSUE_DOC_RE.finditer(
+            doc.read_text(encoding="utf-8", errors="replace"))}
+        if not numbers:
+            continue          # a MOOT doc that never got an issue number
+        checked += 1
+        if not any(mod._find_issue_doc(n) == doc for n in numbers):
+            unresolvable.append((doc.name, sorted(numbers)))
+    assert not unresolvable, (
+        "these active docs cite an issue number that does not resolve back to "
+        "them, so `--fix` would stub over them: %r" % unresolvable)
+    # Report the population, not just the verdict. Every active doc could hit
+    # the `continue` above and this would pass having checked nothing — the
+    # same shape as the guard that scanned 71% of src/ and never said so.
+    assert checked >= 2, (
+        f"only {checked} of {len(active)} active docs cited an issue number; "
+        f"this assertion is close to vacuous")
 
 
 def test_archived_issue_is_not_returned_by_lookup():

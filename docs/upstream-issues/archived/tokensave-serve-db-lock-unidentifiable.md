@@ -1,5 +1,26 @@
 <!--
-STATUS: FILED 2026-08-19 — https://github.com/aovestdipaperino/tokensave/issues/421
+STATUS: CLOSED — verified via GitHub API 2026-08-30
+
+RESOLVED: fixed in tokensave 7.11.0 (issue #421).
+  Every `serve` now writes ~/.tokensave/servers/<pid>.json once its database
+  is open — pid, started_at, project_path, argv_path, db_path, version — and
+  `tokensave servers [--json]` lists them, reaping dead entries as it reads.
+  That answers both directions the report needed: index -> process by matching
+  db_path, and enumerate-all by listing.
+
+  Verified on the reporting machine after upgrading: 7 servers running, all 7
+  named. Before the fix 6 of them were bare `serve` processes with no project
+  in argv and would have been `unattributed`, hence unstoppable.
+
+  started_at is the OS-reported PROCESS start time, which is what turns the
+  workaround this repo had been using — correlating the SQLite -shm sidecar's
+  mtime against process start times — from inference into an identity check.
+
+  Manager side: helpers/tokensave_daemon.py now reads the registry first and
+  keeps the -shm correlation as a fallback for servers started by an older
+  tokensave, which register nothing and still hold their lock. There is
+  deliberately no `servers --stop` upstream, and the Manager still stops one
+  identified server at a time. docs/WINDOWS_WORKTREE_CLEANUP.md updated.
 Found against tokensave 7.x on Windows 11 while cleaning up the git worktrees
 Claude Code creates per task.
 
