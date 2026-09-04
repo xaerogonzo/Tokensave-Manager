@@ -473,3 +473,66 @@ def audit_shadow_links(project_path: str) -> list:
             "nothing will touch them automatically."
             % counts[SHADOW_CANDIDATE])
     return notes
+
+
+def audit_graph_trust(project_path: str) -> list:
+    """Warn-only notes about how much of tokensave's call graph is real.
+
+    Not a cap violation and deliberately not counted as one: this is a fact
+    about the *index*, not about the code, and folding it into the violation
+    count would move a number that other things are measured against. It
+    must never block a push for the same reason -- the source is fine; the
+    graph describing it is not.
+
+    Says nothing when the graph is sound, so a healthy project does not gain
+    a permanent line. But `unknown` and `insufficient` are NOT silent: an
+    inspection that could not reach a population is a different fact from
+    one that found nothing, and letting them share the quiet path is exactly
+    how an unread graph starts reading as a clean bill of health.
+
+    Imported lazily so this module's import surface stays exactly ``ast``,
+    ``os`` and ``re`` for the CI one-liner in ``helpers/ci_workflow.py``.
+    """
+    try:
+        from helpers.graph_trust import (
+            STATE_INSUFFICIENT, STATE_TAINTED, STATE_UNKNOWN, inspect_graph,
+        )
+    except ImportError:
+        return []
+
+    report = inspect_graph(project_path)
+
+    if report.state == STATE_UNKNOWN:
+        if "no tokensave index" in report.detail:
+            return []          # not a tokensave project; nothing to say
+        return ["  Graph trust could not be established: %s. Health "
+                "sub-scores that read call edges (acyclicity, and the "
+                "quality_signal aggregate over it) are unverified."
+                % report.detail]
+
+    if report.state == STATE_INSUFFICIENT:
+        return ["  Graph trust inconclusive: %s." % report.detail]
+
+    if report.state != STATE_TAINTED:
+        return []
+
+    notes = [
+        "  %d call edge(s) run from production code INTO the test tree, "
+        "across %d source file(s) -- impossible by construction, since "
+        "tests import production code and never the reverse. tokensave "
+        "binds an unqualified call on an untracked receiver to the only "
+        "symbol of that name in the project, and test doubles are named "
+        "after what they stand in for."
+        % (report.impossible_edges, report.source_files_affected),
+        "  Examined %d edge(s) to find them."
+        % report.edges_examined,
+        "  Treat acyclicity -- and quality_signal, which is the geometric "
+        "mean over it -- as unusable for trend comparison until upstream "
+        "fixes this. See docs/upstream-issues/"
+        "tokensave-python-bare-name-fallback.md.",
+    ]
+    if report.collisions:
+        top = ", ".join("%s x%d" % (c.target_name, c.count)
+                        for c in report.collisions[:5])
+        notes.append("  Most-bound test-double names: %s." % top)
+    return notes

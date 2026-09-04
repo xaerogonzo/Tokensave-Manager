@@ -35,6 +35,36 @@ from dataclasses import dataclass, field
 from typing import Optional
 
 
+# ── Where this project keeps its tests ───────────────────────────────────
+#
+# One definition, because there were two and there was about to be a third:
+# this module hard-coded the literal in `list_test_files` and again in
+# `_candidate_test_paths`, and `helpers/graph_trust.py` needs the same answer
+# to tell a production file from a test file. A predicate duplicated per
+# caller is a predicate that drifts per caller.
+
+TESTS_DIRNAME = "tests"
+
+
+def tests_dir(project_root: str) -> str:
+    """Return the project's test directory (not created, may not exist)."""
+    return os.path.join(project_root, TESTS_DIRNAME)
+
+
+def is_test_path(rel_path: str) -> bool:
+    """True when a **repo-relative** path lies inside the test tree.
+
+    Takes a relative path rather than an absolute one because its other
+    caller reads paths out of tokensave's index, where they are stored
+    repo-relative with forward slashes. Separators are normalised here so
+    the answer does not depend on which side produced the string.
+    """
+    norm = (rel_path or "").replace("\\", "/").strip("/")
+    if not norm:
+        return False
+    return norm.split("/")[0] == TESTS_DIRNAME
+
+
 # ── Cache directory (V-B: .tokensave-manager/, NOT .tokensave/) ──────────
 
 MANAGER_CACHE_DIRNAME = ".tokensave-manager"
@@ -141,18 +171,18 @@ def list_test_files(project_root: str) -> list[TestFileInfo]:
     any ``*.tmp.*`` atomic-write artifacts. Empty list if no
     ``tests/`` directory exists.
     """
-    tests_dir = os.path.join(project_root, "tests")
-    if not os.path.isdir(tests_dir):
+    tests_dir_ = tests_dir(project_root)
+    if not os.path.isdir(tests_dir_):
         return []
     out: list[TestFileInfo] = []
-    for entry in sorted(os.listdir(tests_dir)):
+    for entry in sorted(os.listdir(tests_dir_)):
         if not entry.startswith("test_") or not entry.endswith(".py"):
             # Also include the original smoke_test.py — single special case.
             if entry != "smoke_test.py":
                 continue
         if ".tmp." in entry:
             continue
-        path = os.path.join(tests_dir, entry)
+        path = os.path.join(tests_dir_, entry)
         if not os.path.isfile(path):
             continue
         try:
@@ -203,7 +233,7 @@ def _candidate_test_paths(project_root: str, source_path: str) -> list[str]:
     Returned in order of preference (most-specific subpkg form first).
     """
     src_root  = os.path.join(project_root, "src")
-    tests_dir = os.path.join(project_root, "tests")
+    tests_dir_ = tests_dir(project_root)
     rel = os.path.relpath(source_path, src_root).replace("\\", "/")
     parts = rel.split("/")
     basename = parts[-1][:-len(".py")]    # strip .py
@@ -230,7 +260,7 @@ def _candidate_test_paths(project_root: str, source_path: str) -> list[str]:
         candidates.append(f"test_{basename_short}.py")
     else:
         candidates = [f"test_{basename}.py"]
-    return [os.path.join(tests_dir, c) for c in candidates]
+    return [os.path.join(tests_dir_, c) for c in candidates]
 
 
 def scan_coverage_gaps(project_root: str) -> list[CoverageRow]:

@@ -124,7 +124,7 @@ def test_pure_read_members_touch_nothing():
     """
     assert {c.action for c in commands.by_side_effect(PURE_READ)} == {
         "status", "checks", "scout", "tests", "test-gaps", "mcp-status",
-        "commands", "focus"}
+        "commands", "focus", "graph-trust"}
 
 
 # ── Consumers derive rather than restate ──────────────────────────────────

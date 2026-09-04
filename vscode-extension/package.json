@@ -86,6 +86,11 @@
         "category": "TokenSave Manager"
       },
       {
+        "command": "tokensaveManager.graphTrust",
+        "title": "Graph trust",
+        "category": "TokenSave Manager"
+      },
+      {
         "command": "tokensaveManager.status",
         "title": "Status",
         "category": "TokenSave Manager"

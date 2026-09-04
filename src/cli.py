@@ -1156,6 +1156,49 @@ def _cmd_cost(args) -> Result:
                         f"(${value.usd:,.2f}, {savings.Gain.USD_BASIS})")
 
 
+def _cmd_graph_trust(args) -> Result:
+    """Report how many call edges in the index are impossible.
+
+    Exit is `EXIT_OK` even when the graph is tainted, matching `test-gaps`:
+    this describes the indexer, not the project, and a caller wiring it into
+    a gate would be failing a build over someone else's bug. The state is in
+    the payload for anything that wants to act on it.
+
+    `EXIT_VERIFY_FAILED` is reserved for the two states that could not reach
+    a population, because "we could not find out" must not be readable as
+    "it is fine" — the same distinction `test-run` already makes.
+    """
+    from helpers import graph_trust as gt
+    project = _resolve_project(args.project)
+    report = gt.inspect_graph(project)
+
+    data = {
+        "state": report.state,
+        "detail": report.detail,
+        "edges_examined": report.edges_examined,
+        "impossible_edges": report.impossible_edges,
+        "source_files_affected": report.source_files_affected,
+        "collisions": [{"name": c.target_name, "file": c.target_file,
+                        "count": c.count} for c in report.collisions],
+        "db_path": report.db_path,
+        # Named in the payload rather than left for a consumer to infer:
+        # every dimension that reads call edges is affected, and so is the
+        # aggregate computed over them.
+        "quarantined_metrics": (["acyclicity", "quality_signal"]
+                                if report.is_tainted else []),
+    }
+    # Deliberately emits NO findings. A finding is a diagnostic about a line
+    # of source, and the only line a phantom edge can be anchored to is the
+    # test double's definition -- which is correct code doing its job. The
+    # same reasoning keeps `test-run` out of DIAGNOSTIC_COMMANDS in the
+    # extension: a red suite is a fact, but not a fact about that line. The
+    # collisions travel in `data` instead, where nothing will render them as
+    # a squiggle on a file with nothing wrong with it.
+    if not report.is_conclusive:
+        return Result(EXIT_VERIFY_FAILED, data, human=report.summary())
+    return Result(EXIT_OK, data, human=report.summary())
+
+
 _COMMANDS = {
     "checks": _cmd_checks,
     "doctor": _cmd_doctor,
@@ -1164,6 +1207,7 @@ _COMMANDS = {
     "tests": _cmd_tests,
     "test-run": _cmd_test_run,
     "sync": _cmd_sync,
+    "graph-trust": _cmd_graph_trust,
     "test-gaps": _cmd_test_gaps,
     "mcp-status": _cmd_mcp_status,
     "commit-request": _cmd_commit_request,
@@ -1267,6 +1311,9 @@ def _build_parser() -> argparse.ArgumentParser:
                    help="git ref to compare against; 'auto' asks the "
                         "repository for its default branch")
     add_paths(t)
+
+    add("graph-trust", "report how much of the tokensave call graph "
+                       "is real (read-only)")
 
     m = add("mcp-status", "report MCP binding across layers (read-only)")
     m.add_argument("--probe-effective", action="store_true",

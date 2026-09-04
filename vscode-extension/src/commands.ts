@@ -131,6 +131,17 @@ export const COMMANDS: readonly ManagerCommand[] = [
     task: true,
   },
   {
+    action: "graph-trust",
+    cli: "graph-trust",
+    vscode: "tokensaveManager.graphTrust",
+    label: "Graph trust",
+    detail: "How much of tokensave's call graph is real.",
+    sideEffect: "pure_read",
+    requiresProject: true,
+    acceptsPaths: false,
+    task: true,
+  },
+  {
     action: "sync",
     cli: "sync",
     vscode: "tokensaveManager.sync",
