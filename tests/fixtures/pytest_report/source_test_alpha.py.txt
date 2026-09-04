@@ -1,0 +1,51 @@
+import pytest
+
+
+def test_ordinary():
+    assert True
+
+
+def test_fails():
+    assert 1 == 2, "deliberate"
+
+
+def test_errors(undefined_fixture):
+    assert True
+
+
+@pytest.mark.skip(reason="deliberate skip")
+def test_skipped():
+    assert True
+
+
+@pytest.mark.parametrize("value", ["plain", "with space", "sl/ash", "br[ack]et", 3, None])
+def test_parametrised(value):
+    assert True
+
+
+def test_same_name_in_two_files():
+    assert True
+
+
+class TestOne:
+    def test_method(self):
+        assert True
+
+    def test_shared_method_name(self):
+        assert True
+
+
+class TestTwo:
+    def test_shared_method_name(self):
+        assert True
+
+
+class TestOuter:
+    class TestInner:
+        def test_nested(self):
+            assert True
+
+
+@pytest.mark.parametrize("value", ["a::b", "c[d]::e"])
+def test_param_containing_separator(value):
+    assert True

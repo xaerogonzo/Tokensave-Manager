@@ -1,0 +1,2 @@
+def test_same_name_in_two_files():
+    assert True
