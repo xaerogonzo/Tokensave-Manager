@@ -84,6 +84,18 @@ who is allowed to raise it.
 
 ## Gotchas worth knowing before you touch this
 
+**The suite needs `pyflakes`, and its absence looks like a broken fixture.**
+Every finding the diagnostics tests assert about comes from
+`python -m pyflakes`. Without it, `cli.py checks` returns `ok:false` with an
+**empty** findings list -- which is indistinguishable, at the findings level,
+from a fixture that has no defects, and `ok:false` does not separate them
+either, because a check that found real problems reports that too.
+
+This is the whole reason `assertFixtureProducesFindings` runs before the editor
+launches: it caught this on the first Linux CI run, where the message initially
+accused the fixture. It now prints every failing check's output alongside, so a
+missing analyser names itself. The CI jobs install pyflakes explicitly.
+
 **Do not run two live suites at once.** `npm run test:live` and
 `npm run test:mutations` share `.vscode-test/`, and a concurrent run deletes
 the workspace out from under the other. The vsix runner uses its own

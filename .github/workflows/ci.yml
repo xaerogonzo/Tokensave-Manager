@@ -152,6 +152,14 @@ jobs:
         run: |
           sudo apt-get update
           sudo apt-get install -y xvfb python3-tk
+      # The fixture's findings come from `python -m pyflakes`, so without it
+      # `checks` returns ok:false with an EMPTY findings list -- which is
+      # byte-identical to a fixture that has no defects. Every diagnostics
+      # assertion would be vacuously green. The suite's own pre-flight refuses
+      # to launch in that state (see assertFixtureProducesFindings), which is
+      # how this was caught rather than shipped.
+      - name: Analyser the fixture depends on
+        run: pip install pyflakes --quiet
       # Keyed on the resolved VS Code build rather than on a path: a partially
       # downloaded or architecture-mismatched Electron must never be reused,
       # and `.vscode-test/` itself stays disposable.
@@ -193,6 +201,14 @@ jobs:
         run: |
           sudo apt-get update
           sudo apt-get install -y xvfb python3-tk
+      # The fixture's findings come from `python -m pyflakes`, so without it
+      # `checks` returns ok:false with an EMPTY findings list -- which is
+      # byte-identical to a fixture that has no defects. Every diagnostics
+      # assertion would be vacuously green. The suite's own pre-flight refuses
+      # to launch in that state (see assertFixtureProducesFindings), which is
+      # how this was caught rather than shipped.
+      - name: Analyser the fixture depends on
+        run: pip install pyflakes --quiet
       - name: Install (locked)
         run: npm ci
       # No separate packaging step: the runner packages, installs into a

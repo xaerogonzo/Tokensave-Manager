@@ -164,6 +164,35 @@ function prepareWorkspace(testHome) {
   return workspacePaths(testHome);
 }
 
+/**
+ * Explain a zero-finding `checks` run, when the explanation is in the envelope.
+ *
+ * A check that COULD NOT RUN and a check that found nothing are the same thing
+ * at the `findings` level -- both are an empty list -- and `ok:false` does not
+ * separate them either, because a check that found real problems is also
+ * `ok:false`. The distinguishing evidence sits in `data.<check>.output`, and
+ * it is worth surfacing: the first time this guard fired on CI it said the
+ * fixture was not defective, when the truth was that the Linux runner had no
+ * pyflakes and the fixture was fine.
+ *
+ * Reports every failing check rather than pattern-matching "No module named":
+ * an analyser can fail to start for reasons that phrase does not cover, and a
+ * guard that recognises one of them reads as a guard that has ruled out the
+ * rest.
+ */
+function describeSilentChecks(envelope) {
+  const data = envelope.data || {};
+  const failed = Object.keys(data).filter((k) => data[k] && data[k].ok === false);
+  if (failed.length === 0) { return ""; }
+  const lines = failed.map(
+    (k) => "  " + k + ": " + (data[k].output || "").slice(0, 300));
+  return (
+    "\nEvery check that reported failure, in case one of them could not " +
+    "run at all -- a missing analyser produces exactly this state, " +
+    "ok:false with no findings, and is not a fixture problem:\n" +
+    lines.join("\n") + "\n\n");
+}
+
 /** Run the real CLI and require the defective file to actually be defective. */
 function assertFixtureProducesFindings(WORKSPACE) {
   const python = process.env.TOKENSAVE_TEST_PYTHON || "python";
@@ -190,6 +219,7 @@ function assertFixtureProducesFindings(WORKSPACE) {
       `about: expected >=2 findings in broken.py, got ${broken.length}. ` +
       "Fix the fixture rather than the assertions — a workspace that cannot " +
       "produce findings makes every diagnostics test vacuously green.\n" +
+      describeSilentChecks(envelope) +
       JSON.stringify(findings, null, 2));
   }
   const clean = findings.filter((f) => (f.file || "").includes("clean"));
