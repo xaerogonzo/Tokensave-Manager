@@ -528,6 +528,30 @@ Token Save Manager Source/
 │   ├── src/commands.ts            GENERATED from helpers/commands.py by
 │   │                              scripts/gen_commands_ts.py. A test fails when
 │   │                              it goes stale.
+│   ├── src/testing.ts             Test Explorer. Discovers nothing and attributes
+│   │                              nothing itself — `tests --detail` and
+│   │                              `test-run` do both in Python. No Debug
+│   │                              profile: that is ms-python's job. Item ids are
+│   │                              percent-encoded because VS Code rejects a NUL.
+│   ├── src/discovery.ts           ONE test-discovery cache with ONE invalidation
+│   │                              source, shared by the Explorer and the lens.
+│   │                              Two caches would refresh on two schedules.
+│   ├── src/manager.ts             Opens the RUNNING Manager's dialogs through the
+│   │                              request inbox. Files through the CLI so Python
+│   │                              keeps sole authority over request identity.
+│   │                              Renders all five ledger states distinctly.
+│   ├── src/tasks.ts               TaskProvider over the table's `task` flag.
+│   │                              ProcessExecution, never Shell — a shell task
+│   │                              re-splits `D:\Claude Co worker\...` on the space.
+│   ├── src/lens.ts                CodeLens. Says "no filename-matched test", never
+│   │                              "no tests": the scan underneath is a filename
+│   │                              heuristic and cannot prove the stronger claim.
+│   ├── src/onsave.ts              Checks on save, off by default. Per-file
+│   │                              generation counters so a slow run cannot
+│   │                              resurrect findings a newer one superseded.
+│   ├── src/setup.ts               Three states, not two: unconfigured, CONFIGURED
+│   │                              BUT BROKEN, working. Verification runs the CLI
+│   │                              rather than checking a string is non-empty.
 │   ├── test/*.test.js             Stub suite — the decisions, headless, in under a
 │   │                              second against `test/vscode-stub.js`.
 │   ├── test/integration/          LIVE suite: boots a real editor and holds the

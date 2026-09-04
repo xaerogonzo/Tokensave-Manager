@@ -773,7 +773,7 @@ def test_status_names_the_changed_files(capsys, tmp_path, mocker):
     assert git["changed_files"][2]["old_path"] == "a.py"
 
 
-def test_status_reports_an_unreadable_repo_as_unknown_not_clean(
+def test_status_unreadable_repo_reports_changed_files_and_ahead_as_unknown(
         capsys, tmp_path, mocker):
     """`None`, not `[]`. An unreadable repository is not a clean one, and a
     composer offering "no files changed" would be inventing an answer."""
@@ -1097,8 +1097,10 @@ def test_an_unreadable_summary_is_unverified_not_passing(capsys, tmp_path,
                                                          mocker):
     """A timeout or a collection error must never render as a green run."""
     project = _suite(tmp_path, "def test_a(): assert 1\n")
-    mocker.patch("helpers.smoke_runner.run_smoke_tests",
-                 return_value=(0, 0, "pytest timed out after 300 s."))
+    # `run_pytest_selection` returns (combined_output, junit_xml); a killed
+    # run has no XML, which is the case this timeout stands for.
+    mocker.patch("helpers.smoke_runner.run_pytest_selection",
+                 return_value=("pytest timed out after 300 s.", ""))
     code, env, _ = _run(capsys, ["test-run", "--project", project, "--json"])
     assert code == EXIT_VERIFY_FAILED
     assert "could not read" in env["error"]
@@ -1178,8 +1180,10 @@ def test_an_actually_unreadable_run_is_still_unverifiable(capsys, tmp_path,
                                                           mocker):
     """The fix must not swallow the case it was carved out of."""
     project = _suite(tmp_path, "def test_a(): assert 1\n")
-    mocker.patch("helpers.smoke_runner.run_smoke_tests",
-                 return_value=(0, 0, "pytest timed out after 300 s."))
+    # `run_pytest_selection` returns (combined_output, junit_xml); a killed
+    # run has no XML, which is the case this timeout stands for.
+    mocker.patch("helpers.smoke_runner.run_pytest_selection",
+                 return_value=("pytest timed out after 300 s.", ""))
     code, env, _ = _run(capsys, ["test-run", "--project", project, "--json"])
     assert code == EXIT_VERIFY_FAILED
     assert "could not read" in env["error"]
@@ -1311,3 +1315,230 @@ def test_an_untruncated_stale_list_is_not_marked_truncated(capsys, project,
     _, env, _ = _run(capsys, ["doctor", "--project", project, "--json"])
     assert env["data"]["stale_count"] == 2
     assert env["data"]["stale_truncated"] is False
+
+
+# ── test-run: selectors, and the option name that is not pytest's ───────────
+
+def _fake_pytest(mocker):
+    """Patch the subprocess boundary and hand back the Popen mock.
+
+    Patched at `helpers.smoke_runner.subprocess.Popen` rather than globally:
+    the argv is the thing under test, and a mock that intercepted every
+    subprocess in the suite would also intercept the ones these assertions do
+    not own.
+    """
+    popen = mocker.patch("helpers.smoke_runner.subprocess.Popen")
+    popen.return_value.communicate.return_value = ("", "")
+    popen.return_value.returncode = 0
+    mocker.patch("helpers.smoke_runner.os.path.isdir", return_value=True)
+    return popen
+
+
+def test_markers_reaches_pytest_as_dash_m_not_as_dash_dash_markers(mocker):
+    """The Manager's `--markers` is its own option name, not a passthrough.
+
+    pytest's own `--markers` *lists the registered markers* and runs nothing,
+    so passing it through would print a catalogue and then report a green
+    suite that never executed a test. The translation to `-m` is asserted on
+    the constructed argv rather than on the result, because a result cannot
+    tell those two runs apart.
+    """
+    popen = _fake_pytest(mocker)
+    from helpers.smoke_runner import run_pytest_selection
+    run_pytest_selection("/proj", markers="not tk")
+
+    # argv is [python, "-m", "pytest", ...], so pytest's own arguments start
+    # at index 3. Searching the whole list for "-m" finds the interpreter's
+    # module flag instead, which would pass while pytest received nothing.
+    argv = popen.call_args[0][0]
+    assert argv[1:3] == ["-m", "pytest"], argv
+    pytest_args = argv[3:]
+    assert "-m" in pytest_args, pytest_args
+    assert pytest_args[pytest_args.index("-m") + 1] == "not tk"
+    assert "--markers" not in argv, (
+        "--markers means 'list the registered markers' to pytest")
+
+
+def test_a_selector_run_passes_node_ids_and_not_the_whole_tree(mocker):
+    popen = _fake_pytest(mocker)
+    from helpers.smoke_runner import run_pytest_selection
+    run_pytest_selection("/proj", nodeids=["tests/t.py::test_a"])
+
+    argv = popen.call_args[0][0]
+    assert "tests/t.py::test_a" in argv
+    assert "tests/" not in argv, "a selector run must not also run everything"
+
+
+def test_a_run_asks_for_verbose_output_rather_than_inheriting_it(mocker):
+    """This repository's addopts forces `-v`; other people's do not.
+
+    The verbose progress lines are the only place pytest prints exact node
+    ids, so the flag is passed explicitly. Inheriting it from a config file
+    the CLI does not own would make result identity depend on the target
+    project's settings.
+    """
+    popen = _fake_pytest(mocker)
+    from helpers.smoke_runner import run_pytest_selection
+    run_pytest_selection("/proj")
+
+    argv = popen.call_args[0][0]
+    assert "-v" in argv
+    assert any(a.startswith("--junitxml=") for a in argv)
+
+
+def test_a_run_does_not_leave_a_cache_behind_in_the_target_project(mocker):
+    """Looking at a project should not modify it."""
+    popen = _fake_pytest(mocker)
+    from helpers.smoke_runner import run_pytest_selection
+    run_pytest_selection("/proj")
+
+    argv = popen.call_args[0][0]
+    assert argv[argv.index("-p") + 1] == "no:cacheprovider"
+
+
+def test_tests_and_markers_together_are_a_usage_error(capsys, tmp_path):
+    """Neither intersection nor precedence is defined, so neither is invented.
+
+    Exit 2 rather than a silent choice: a caller that meant one of them is
+    told so, instead of quietly receiving the other one's answer.
+    """
+    project = _suite(tmp_path, "def test_a(): assert 1\n")
+    code, env, _ = _run(capsys, ["test-run", "--project", project,
+                                 "--tests", "tests/test_x.py::test_a",
+                                 "--markers", "not tk", "--json"])
+    assert code == EXIT_USAGE
+    assert "--tests" in env["error"] and "--markers" in env["error"]
+
+
+def test_test_run_always_reports_per_test_results(capsys, tmp_path):
+    """`data.tests` is an additive field, present on every run.
+
+    Additive, not "unchanged": the envelope gained a key, `schema_version`
+    stays 1 because adding an optional field is compatible, and every field
+    that was here before still means exactly what it did.
+    """
+    project = _suite(tmp_path, "import pytest\n"
+                               "def test_a(): assert 1\n"
+                               "@pytest.mark.skip\n"
+                               "def test_b(): assert 1\n"
+                               "def test_c(): assert 0\n")
+    _, env, _ = _run(capsys, ["test-run", "--project", project, "--json"])
+    outcomes = {t["nodeid"].rsplit("::", 1)[-1]: t["outcome"]
+                for t in env["data"]["tests"]}
+    assert outcomes == {"test_a": "passed", "test_b": "skipped",
+                        "test_c": "failed"}
+
+
+def test_per_test_results_carry_a_message_and_a_duration(capsys, tmp_path):
+    """Both come from the JUnit XML, which is why it is requested at all."""
+    project = _suite(tmp_path, "def test_a():\n    assert 1 == 2, 'nope'\n")
+    _, env, _ = _run(capsys, ["test-run", "--project", project, "--json"])
+    failed = [t for t in env["data"]["tests"] if t["outcome"] == "failed"]
+    assert len(failed) == 1
+    assert "nope" in failed[0]["message"]
+    assert failed[0]["duration_seconds"] is not None
+
+
+def test_the_envelope_records_what_was_selected(capsys, tmp_path):
+    """So a stored envelope says what it is a result of, not just what it is."""
+    project = _suite(tmp_path, "def test_a(): assert 1\n")
+    _, env, _ = _run(capsys, ["test-run", "--project", project,
+                              "--markers", "not tk", "--json"])
+    assert env["data"]["selection"] == {"tests": [], "markers": "not tk"}
+
+
+def test_a_busy_run_still_carries_an_empty_tests_array(capsys, tmp_path,
+                                                       mocker):
+    """A refusal must not be shaped like a run that found nothing.
+
+    A consumer reads `data.tests` unconditionally; `run_state` is what
+    distinguishes the two, and keeping the key present keeps the shape stable
+    so the Explorer can say "it did not run" rather than showing an outcome
+    nobody earned.
+    """
+    from helpers.test_lock import TestRunBusy
+    project = _suite(tmp_path, "def test_a(): assert 1\n")
+    mocker.patch("helpers.test_lock.test_run_lock",
+                 side_effect=TestRunBusy("a run is already in progress"))
+    code, env, _ = _run(capsys, ["test-run", "--project", project, "--json"])
+    assert code == EXIT_FAILED
+    assert env["data"]["run_state"] == "busy"
+    assert env["data"]["tests"] == []
+
+
+def test_disagreeing_counts_are_reported_rather_than_reconciled(capsys,
+                                                                tmp_path,
+                                                                mocker):
+    """Two measurements of one run differing is information.
+
+    The headline counts come from pytest's footer and `data.tests` is counted
+    from the progress lines. Silently preferring one would discard the fact
+    that they disagreed, which is the only signal that something was misread.
+    """
+    project = _suite(tmp_path, "def test_a(): assert 1\n")
+    mocker.patch("helpers.smoke_runner.run_pytest_selection",
+                 return_value=("tests/t.py::test_a PASSED\n"
+                               "===== 7 passed in 1.00s =====\n", ""))
+    _, env, _ = _run(capsys, ["test-run", "--project", project, "--json"])
+    assert env["data"]["total"] == 7
+    assert len(env["data"]["tests"]) == 1
+    assert any("progress lines" in w for w in env["warnings"]), env["warnings"]
+
+
+# ── tests --detail ──────────────────────────────────────────────────────────
+
+def test_tests_omits_the_detail_by_default(capsys, tmp_path):
+    """The default payload feeds a tree that only shows counts, and this
+    repository alone has ~3000 definitions."""
+    project = _suite(tmp_path, "def test_a(): assert 1\n")
+    _, env, _ = _run(capsys, ["tests", "--project", project, "--json"])
+    assert "test_cases" not in env["data"]
+
+
+def test_tests_detail_lists_every_definition_with_a_runnable_nodeid(
+        capsys, tmp_path):
+    project = _suite(tmp_path,
+                     "import pytest\n"
+                     "@pytest.mark.tk\n"
+                     "def test_a(): assert 1\n"
+                     "class TestC:\n"
+                     "    def test_b(self): assert 1\n")
+    _, env, _ = _run(capsys, ["tests", "--project", project, "--detail",
+                              "--json"])
+    cases = {c["nodeid"]: c for c in env["data"]["test_cases"]}
+    assert set(cases) == {"tests/test_x.py::test_a",
+                          "tests/test_x.py::TestC::test_b"}
+    assert cases["tests/test_x.py::test_a"]["markers"] == ["tk"]
+    assert cases["tests/test_x.py::TestC::test_b"]["class_name"] == "TestC"
+
+
+def test_detail_paths_are_repo_relative_with_forward_slashes(capsys, tmp_path):
+    """The extension joins these to a workspace folder in exactly one place,
+    so a native separator here would resolve against the wrong thing."""
+    project = _suite(tmp_path, "def test_a(): assert 1\n")
+    _, env, _ = _run(capsys, ["tests", "--project", project, "--detail",
+                              "--json"])
+    for case in env["data"]["test_cases"]:
+        assert chr(92) not in case["file"], case["file"]
+        assert not case["file"].startswith("/")
+
+
+def test_detail_ranges_are_one_based(capsys, tmp_path):
+    """Coordinates are 1-based everywhere in Python and in the envelope; the
+    single conversion to VS Code's 0-based Position happens in TypeScript."""
+    project = _suite(tmp_path, "def test_a():\n    assert 1\n")
+    _, env, _ = _run(capsys, ["tests", "--project", project, "--detail",
+                              "--json"])
+    case = env["data"]["test_cases"][0]
+    assert case["line"] == 1 and case["end_line"] == 2
+
+
+def test_the_detail_count_matches_the_headline_count(capsys, tmp_path):
+    """One walker feeds both, so they cannot drift."""
+    project = _suite(tmp_path, "def test_a(): assert 1\n"
+                               "def test_b(): assert 1\n"
+                               "class TestC:\n"
+                               "    def test_d(self): assert 1\n")
+    _, env, _ = _run(capsys, ["tests", "--project", project, "--detail",
+                              "--json"])
+    assert len(env["data"]["test_cases"]) == env["data"]["test_count"] == 3

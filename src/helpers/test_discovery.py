@@ -34,6 +34,11 @@ import tempfile
 from dataclasses import dataclass, field
 from typing import Optional
 
+# The one place repo-relative/forward-slash normalisation lives; a second
+# implementation here is how two spellings of the same path start reaching
+# the extension.
+from helpers.findings import relative_to
+
 
 # ── Where this project keeps its tests ───────────────────────────────────
 #
@@ -139,29 +144,146 @@ class StaleSignal:
 
 # ── list_test_files (V-C: count both module-level and class-indented) ────
 
+@dataclass(frozen=True)
+class TestCase:
+    """One statically discovered test definition (Roadmap-17).
+
+    **This is a definition found in source, not a promise that pytest will
+    collect it.** The distinction matters because the VS Code Test Explorer
+    renders these as runnable items, and an item that cannot run needs to fail
+    honestly rather than look like a passing test that was skipped. pytest may
+    decline to collect a definition for reasons an AST walk cannot see --
+    collection rules, an import that raises, an unusual class layout, a
+    ``conftest`` that deselects it. **A run result is authoritative for
+    execution state; this is authoritative only for "there is a `def` here".**
+
+    Discovery is AST-based rather than ``pytest --collect-only`` on purpose:
+    it must be fast, must not spawn a subprocess, and must work with pytest
+    absent -- the same reasoning :func:`list_test_files` already follows.
+
+    ``nodeid`` is a **pytest selector**, and for a parametrised test it is a
+    *prefix* of the ids pytest will report: an AST walk cannot see
+    ``@pytest.mark.parametrize`` expansion, so ``tests/t.py::test_x`` here may
+    run as ``tests/t.py::test_x[case-3]``. pytest accepts the prefix as a
+    selector, so running is correct; matching results back is
+    ``helpers/pytest_report.py``'s job, and it refuses to guess when a prefix
+    is ambiguous.
+
+    Fields:
+        nodeid      -- ``<rel-file>::<Class>::<name>``, forward slashes
+        name        -- the function name (``test_foo``)
+        class_name  -- ``::``-joined enclosing classes, or "" at module level
+        file        -- repo-relative, forward-slash path (see findings.py)
+        line        -- 1-based line of the ``def``
+        end_line    -- 1-based last line of the definition
+        markers     -- syntactic ``pytest.mark.<name>`` spellings; advisory
+    """
+
+    nodeid:     str
+    name:       str
+    class_name: str
+    file:       str
+    line:       int
+    end_line:   int
+    markers:    tuple = ()
+
+
+# ── The shared walker (Roadmap-17) ────────────────────────────────────────
+#
+# There were two things that needed the same walk: the test COUNT that Tab 1
+# has always shown, and the per-test records the VS Code Test Explorer needs.
+# Two walks over the same AST asking the same question is how the count and
+# the list start disagreeing, so there is one walker and the count is derived
+# from its length.
+#
+# It yields records carrying the enclosing class chain rather than bare nodes.
+# A walker that returned only functions would force every caller to redo the
+# traversal to find out which class a method sits in -- the shared function
+# would exist while the metadata logic got duplicated immediately after it,
+# which is the shape of a refactor that did not happen.
+
+
+@dataclass(frozen=True)
+class _TestDef:
+    """One ``def test_*`` found in source, with the context it was found in.
+
+    ``class_chain`` is outermost-first and empty for a module-level test.
+    """
+
+    node: object
+    class_chain: tuple
+
+
+def _marker_names(node) -> tuple:
+    """Syntactic ``pytest.mark.<name>`` decorator spellings on *node*.
+
+    **Advisory metadata only.** These are the names as they are spelled in
+    the source, not pytest's marker semantics: ``-m`` remains the authority
+    for what actually runs. Modelling the rest -- ``skipif`` conditions,
+    aliased imports, decorators built at runtime -- would mean reimplementing
+    pytest's marker engine here, badly, and then having two answers to the
+    same question.
+
+    So exactly two shapes are recognised, and anything else is ignored rather
+    than guessed at::
+
+        @pytest.mark.tk                 -> "tk"
+        @pytest.mark.parametrize(...)   -> "parametrize"
+    """
+    names = []
+    for decorator in getattr(node, "decorator_list", []):
+        target = decorator.func if isinstance(decorator, ast.Call) else decorator
+        # pytest.mark.<name> -- Attribute(Attribute(Name("pytest"), "mark"), name)
+        if not isinstance(target, ast.Attribute):
+            continue
+        parent = target.value
+        if (isinstance(parent, ast.Attribute) and parent.attr == "mark"
+                and isinstance(parent.value, ast.Name)
+                and parent.value.id == "pytest"):
+            names.append(target.attr)
+    return tuple(names)
+
+
+def _collect_test_defs(tree: "ast.Module") -> list:
+    """Every ``def test_*`` in *tree*, with its enclosing class chain.
+
+    Walks explicitly rather than using ``ast.walk`` because the class context
+    is the whole point: ``ast.walk`` yields nodes with no record of how it
+    reached them. Nested classes accumulate, so ``Outer`` inside ``Inner``
+    produces the chain pytest addresses as ``Outer::Inner``.
+    """
+    found: list = []
+
+    def visit(body, chain: tuple) -> None:
+        for node in body:
+            if isinstance(node, ast.ClassDef):
+                visit(node.body, chain + (node.name,))
+            elif isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)):
+                if node.name.startswith("test_"):
+                    found.append(_TestDef(node=node, class_chain=chain))
+
+    visit(tree.body, ())
+    return found
+
+
 def _count_tests_via_ast(source: str) -> int:
     """Return the number of test functions/methods in *source*.
 
-    Walks the parsed AST counting any ``FunctionDef`` (or
-    ``AsyncFunctionDef``) whose name starts with ``test_``. This
-    catches BOTH:
+    Catches BOTH module-level ``def test_foo(): ...`` (pytest-native) and
+    class-indented ``def test_foo(self): ...`` (unittest.TestCase).
 
-      * module-level ``def test_foo(): ...``  (pytest-native)
-      * class-indented ``def test_foo(self): ...``  (unittest.TestCase)
+    Derived from :func:`_collect_test_defs` rather than counting separately,
+    so the number shown beside a file and the list of tests inside it cannot
+    drift apart.
 
-    Falls back to zero on syntax errors so a broken test file doesn't
-    blow up the dialog's treeview population.
+    Falls back to zero on syntax errors so a broken test file doesn't blow up
+    the dialog's treeview population.
     """
     try:
         tree = ast.parse(source)
     except (SyntaxError, ValueError):
         return 0
-    count = 0
-    for node in ast.walk(tree):
-        if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)):
-            if node.name.startswith("test_"):
-                count += 1
-    return count
+    return len(_collect_test_defs(tree))
 
 
 def list_test_files(project_root: str) -> list[TestFileInfo]:
@@ -191,6 +313,46 @@ def list_test_files(project_root: str) -> list[TestFileInfo]:
             continue
         count = _count_tests_via_ast(source)
         out.append(TestFileInfo(path=path, name=entry, test_count=count))
+    return out
+
+
+def list_test_cases(project_root: str) -> list:
+    """Every test definition under ``tests/``, as :class:`TestCase` records.
+
+    Walks the same files :func:`list_test_files` enumerates, so the two cannot
+    disagree about which files count as tests. A file that fails to parse
+    contributes nothing rather than aborting the scan -- one broken test file
+    must not empty the Test Explorer.
+
+    Ordered by file then by line, which is the order a reader sees them in.
+    """
+    out: list = []
+    for info in list_test_files(project_root):
+        try:
+            source = open(info.path, "r", encoding="utf-8",
+                          errors="replace").read()
+        except OSError:
+            continue
+        try:
+            tree = ast.parse(source)
+        except (SyntaxError, ValueError):
+            continue
+        rel = relative_to(info.path, project_root)
+        for found in _collect_test_defs(tree):
+            node = found.node
+            class_name = "::".join(found.class_chain)
+            parts = [rel] + list(found.class_chain) + [node.name]
+            out.append(TestCase(
+                nodeid="::".join(parts),
+                name=node.name,
+                class_name=class_name,
+                file=rel,
+                line=node.lineno,
+                # end_lineno is present from Python 3.8; the fallback keeps a
+                # zero-height range rather than raising on an odd node.
+                end_line=getattr(node, "end_lineno", None) or node.lineno,
+                markers=_marker_names(node),
+            ))
     return out
 
 

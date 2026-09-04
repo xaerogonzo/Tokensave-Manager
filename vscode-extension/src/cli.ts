@@ -63,6 +63,15 @@ export interface CliResult {
   envelope: Envelope | null;
   /** Set when the CLI could not be run or its output could not be parsed. */
   transportError: string | null;
+  /**
+   * The caller cancelled this run.
+   *
+   * Distinct from a failure on purpose: a cancelled test run must render as
+   * cancelled, not as a suite that went red. `transportError` is set too, so
+   * callers that do not know about cancellation still report something
+   * truthful rather than treating a killed run as a clean result.
+   */
+  cancelled?: boolean;
 }
 
 /** The highest schema this extension knows how to read. */
@@ -203,9 +212,10 @@ export async function runCli(
   command: string,
   folder: vscode.WorkspaceFolder,
   extraArgs: string[] = [],
+  token?: vscode.CancellationToken,
 ): Promise<CliResult> {
   return invoke(context, command,
-                ["--project", folder.uri.fsPath, ...extraArgs]);
+                ["--project", folder.uri.fsPath, ...extraArgs], token);
 }
 
 /**
@@ -222,14 +232,45 @@ export async function runProjectlessCli(
   context: vscode.ExtensionContext,
   command: string,
   extraArgs: string[] = [],
+  token?: vscode.CancellationToken,
 ): Promise<CliResult> {
-  return invoke(context, command, extraArgs);
+  return invoke(context, command, extraArgs, token);
+}
+
+/**
+ * Kill a process and everything it started.
+ *
+ * Killing only the parent orphans the pytest child, which then keeps running
+ * — burning CPU and, worse, still holding the project's test lock, so the
+ * next run is refused as busy by a process nobody can see. This is the same
+ * reasoning `helpers/proc_kill.py` records on the Python side.
+ *
+ * Best-effort by design: the tree may already be gone, which is a success,
+ * not an error.
+ */
+function killTree(pid: number | undefined): void {
+  if (pid === undefined) {
+    return;
+  }
+  try {
+    if (process.platform === "win32") {
+      spawn("taskkill", ["/F", "/T", "/PID", String(pid)],
+            { shell: false, windowsHide: true });
+    } else {
+      // Negative pid signals the whole group, which exists because the child
+      // was spawned detached.
+      process.kill(-pid, "SIGKILL");
+    }
+  } catch {
+    // Already exited, or never started. Nothing to clean up.
+  }
 }
 
 async function invoke(
   context: vscode.ExtensionContext,
   command: string,
   commandArgs: string[],
+  token?: vscode.CancellationToken,
 ): Promise<CliResult> {
   const runner = resolveRunner(context);
   if (runner === null) {
@@ -255,8 +296,44 @@ async function invoke(
     // No shell. The Manager and its projects routinely live under paths with
     // spaces ("D:\\Claude Co worker\\..."), and a shell would re-split them —
     // the same trap the generated tasks.json avoids by using process tasks.
-    const child = spawn(runner.command, args,
-                        { shell: false, windowsHide: true });
+    //
+    // `detached` off Windows puts the child in its own process group, which is
+    // what makes a group kill possible later. On Windows `taskkill /T` walks
+    // the tree instead, so no new console is needed.
+    const child = spawn(runner.command, args, {
+      shell: false,
+      windowsHide: true,
+      detached: process.platform !== "win32",
+    });
+
+    // Cancellation and completion race by nature: the process can exit at the
+    // same moment the user cancels. Settling once keeps that from producing
+    // two results, and makes a late cancel after a normal exit a no-op rather
+    // than a second, contradictory outcome.
+    let settled = false;
+    const settle = (result: CliResult): void => {
+      if (settled) {
+        return;
+      }
+      settled = true;
+      subscription?.dispose();
+      resolve(result);
+    };
+
+    let cancelled = false;
+    const subscription = token?.onCancellationRequested(() => {
+      cancelled = true;
+      killTree(child.pid);
+      // Deliberately not settled here: the kill produces a `close`, and
+      // reporting from there keeps whatever output arrived before it. A
+      // partially-run suite is still worth attributing.
+    });
+    if (token?.isCancellationRequested) {
+      // Already cancelled before the spawn returned. Kill it now rather than
+      // letting a run the caller has abandoned reach completion.
+      cancelled = true;
+      killTree(child.pid);
+    }
 
     let stdout = "";
     let stderr = "";
@@ -264,20 +341,33 @@ async function invoke(
     child.stderr.on("data", (chunk) => { stderr += chunk.toString(); });
 
     child.on("error", (err) => {
-      resolve({
+      settle({
         exitCode: EXIT.PREREQUISITE,
         envelope: null,
         transportError:
           `could not run ${path.basename(runner.command)}: ${err.message}`,
+        cancelled,
       });
     });
 
     child.on("close", (code) => {
       const exitCode = code ?? EXIT.FAILED;
+      if (cancelled) {
+        // A killed run's stdout is a truncated envelope at best. Reporting it
+        // as cancelled rather than as a parse failure is the difference
+        // between "you stopped this" and "the Manager is broken".
+        settle({
+          exitCode,
+          envelope: null,
+          transportError: "cancelled",
+          cancelled: true,
+        });
+        return;
+      }
       // A usage error deliberately leaves stdout empty, so an unparseable
       // stdout is expected there and is our bug, not the user's.
       if (!stdout.trim()) {
-        resolve({
+        settle({
           exitCode,
           envelope: null,
           transportError: exitCode === EXIT.USAGE
@@ -290,12 +380,12 @@ async function invoke(
         const envelope = JSON.parse(stdout) as Envelope;
         const problem = schemaProblem(envelope);
         if (problem !== null) {
-          resolve({ exitCode, envelope, transportError: problem });
+          settle({ exitCode, envelope, transportError: problem });
           return;
         }
-        resolve({ exitCode, envelope, transportError: null });
+        settle({ exitCode, envelope, transportError: null });
       } catch (err) {
-        resolve({
+        settle({
           exitCode,
           envelope: null,
           transportError:

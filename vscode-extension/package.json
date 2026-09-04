@@ -2,7 +2,7 @@
   "name": "tokensave-manager",
   "displayName": "TokenSave Manager",
   "description": "Run TokenSave Manager checks, sync, doctor and test gaps from inside VS Code.",
-  "version": "2.5.0",
+  "version": "2.6.0",
   "publisher": "tokensave",
   "license": "MIT",
   "repository": {
@@ -141,6 +141,41 @@
         "command": "tokensaveManager.statusBarMenu",
         "title": "Status Bar Menu",
         "category": "TokenSave Manager"
+      },
+      {
+        "command": "tokensaveManager.openDoctor",
+        "title": "Open Doctor in the Manager",
+        "category": "TokenSave Manager"
+      },
+      {
+        "command": "tokensaveManager.openTestManager",
+        "title": "Open the Test Manager",
+        "category": "TokenSave Manager"
+      },
+      {
+        "command": "tokensaveManager.openSavingsDialog",
+        "title": "Open Savings in the Manager",
+        "category": "TokenSave Manager"
+      },
+      {
+        "command": "tokensaveManager.openDocUpdates",
+        "title": "Open Doc Updates",
+        "category": "TokenSave Manager"
+      },
+      {
+        "command": "tokensaveManager.openInManager",
+        "title": "Open this project in the Manager",
+        "category": "TokenSave Manager"
+      },
+      {
+        "command": "tokensaveManager.verifySetup",
+        "title": "Verify Manager Connection",
+        "category": "TokenSave Manager"
+      },
+      {
+        "command": "tokensaveManager.openWalkthrough",
+        "title": "Open the Setup Walkthrough",
+        "category": "TokenSave Manager"
       }
     ],
     "menus": {
@@ -232,19 +267,89 @@
           "default": 750,
           "minimum": 100,
           "markdownDescription": "How long to wait after a file change before refreshing the status bar. A branch switch fires many events at once; without this each one would spawn its own process to compute the same answer."
+        },
+        "tokensaveManager.codeLens": {
+          "type": "string",
+          "enum": [
+            "off",
+            "source",
+            "tests",
+            "both"
+          ],
+          "default": "both",
+          "markdownDescription": "Annotate Python files with what the Manager knows about their tests. `source` marks modules with no filename-matched test file; `tests` shows each test file's count and any stale signals. The underlying scan is a **filename heuristic**, not coverage measurement, so it reports what was matched rather than claiming code is untested."
+        },
+        "tokensaveManager.checksOnSave": {
+          "type": "boolean",
+          "default": false,
+          "markdownDescription": "Run `checks` on a Python file when you save it, refreshing only that file's entries in the Problems panel. Debounced by `#tokensaveManager.statusDebounceMs#`. Needs a Manager checkout (`#tokensaveManager.managerPath#`) — the bundled CLI carries no Python interpreter to run the checks with."
         }
       }
-    }
+    },
+    "taskDefinitions": [
+      {
+        "type": "tokensave",
+        "required": [
+          "action"
+        ],
+        "properties": {
+          "action": {
+            "type": "string",
+            "description": "The Manager operation to run. Stable identifiers from src/helpers/commands.py — these survive label changes."
+          }
+        }
+      }
+    ],
+    "viewsWelcome": [
+      {
+        "view": "tokensaveManager.projects",
+        "contents": "TokenSave Manager needs to know where your Manager checkout is before it can do anything.\n[Select the Manager folder](command:tokensaveManager.setManagerPath)\nIt looks for `src/cli.py` inside the folder you pick, and says so if it is not there.\n[Open the walkthrough](command:tokensaveManager.openWalkthrough)",
+        "when": "!tokensaveManager.ready"
+      }
+    ],
+    "walkthroughs": [
+      {
+        "id": "tokensaveManager.setup",
+        "title": "Set up TokenSave Manager",
+        "description": "Point the extension at your Manager, check that it answers, and find the views it adds.",
+        "steps": [
+          {
+            "id": "managerPath",
+            "title": "Point at your Manager",
+            "description": "Pick the folder containing `src/cli.py`. Source mode runs your live checkout rather than a compiled snapshot, so it never goes stale and `checks` works.\n[Select the Manager folder](command:tokensaveManager.setManagerPath)",
+            "media": {
+              "markdown": "media/walkthrough-manager-path.md"
+            }
+          },
+          {
+            "id": "verify",
+            "title": "Check that it answers",
+            "description": "Runs the Manager's `commands` call and reports what came back. A path that looks right but cannot run is the state worth catching now rather than at the first real command.\n[Verify the connection](command:tokensaveManager.verifySetup)",
+            "media": {
+              "markdown": "media/walkthrough-verify.md"
+            }
+          },
+          {
+            "id": "explore",
+            "title": "Find the views",
+            "description": "A Projects tree and a Savings panel in the activity bar, your tests in the Test Explorer, and the Manager's own dialogs in the command palette under **TokenSave Manager**.\n[Open the Projects view](command:workbench.view.extension.tokensaveManager)",
+            "media": {
+              "markdown": "media/walkthrough-explore.md"
+            }
+          }
+        ]
+      }
+    ]
   },
   "scripts": {
     "compile": "tsc -p ./",
     "watch": "tsc -watch -p ./",
     "vscode:prepublish": "npm run compile",
     "package": "vsce package --target win32-x64",
-    "test": "node --test test/cli.test.js test/diagnostics.test.js test/surfaces.test.js",
+    "test": "node --test test/cli.test.js test/diagnostics.test.js test/surfaces.test.js test/testing.test.js test/manager.test.js test/surfaces4.test.js",
     "pretest": "npm run compile",
     "test:live": "node test/integration/runTests.js",
-    "test:compiled": "node --test test/cli.test.js test/diagnostics.test.js test/surfaces.test.js",
+    "test:compiled": "node --test test/cli.test.js test/diagnostics.test.js test/surfaces.test.js test/testing.test.js test/manager.test.js test/surfaces4.test.js",
     "test:mutations": "npm run compile && node test/integration/mutations.js",
     "test:vsix": "node test/integration/runTestsVsix.js"
   },

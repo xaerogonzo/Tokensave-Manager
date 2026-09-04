@@ -19,6 +19,7 @@ const FILES = [
   "diagnostics.test.js",
   "webview.test.js",
   "statusbar.test.js",
+  "testing.test.js",
 ];
 
 async function run() {

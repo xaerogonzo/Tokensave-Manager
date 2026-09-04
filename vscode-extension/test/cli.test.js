@@ -276,16 +276,30 @@ test("every contributed command has a declared handler id", () => {
   // failure in a different place.
   const manifest = JSON.parse(
     fs.readFileSync(path.join(__dirname, "..", "package.json"), "utf8"));
-  const source = fs.readFileSync(
-    path.join(__dirname, "..", "src", "extension.ts"), "utf8");
-  const tree = fs.readFileSync(
-    path.join(__dirname, "..", "src", "tree.ts"), "utf8");
+  // Every module under src/, not two named ones: commands are registered
+  // from extension.ts, setup.ts and (via the table) manager.ts, and a guard
+  // that reads a hand-maintained list of files silently stops covering the
+  // next module someone adds.
+  const srcDir = path.join(__dirname, "..", "src");
+  const source = fs.readdirSync(srcDir)
+    .filter((name) => name.endsWith(".ts"))
+    .map((name) => fs.readFileSync(path.join(srcDir, name), "utf8"))
+    .join("\n");
+  const tree = source;
+
+  // Manager-dialog commands are registered from a loop over the
+  // GENERATED table, so their ids appear in commands.ts rather than in
+  // any handwritten source. Reading the table is what keeps this guard
+  // honest: a row removed from it stops satisfying the check.
+  const { MANAGER_ACTIONS } = require("../out/commands.js");
+  const fromTable = new Set(MANAGER_ACTIONS.map((a) => a.vscode));
 
   for (const { command } of manifest.contributes.commands) {
     const short = command.replace(/^tokensaveManager\./, "");
     const registered = source.includes(`"${command}"`)
       // Action commands are registered from a loop over ACTIONS.
-      || tree.includes(`id: "${short}"`);
+      || tree.includes(`id: "${short}"`)
+      || fromTable.has(command);
     assert.ok(registered, `${command} is contributed but never registered`);
   }
 });

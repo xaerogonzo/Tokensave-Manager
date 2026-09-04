@@ -1,0 +1,48 @@
+============================= test session starts =============================
+platform win32 -- /python
+rootdir: /proj
+plugins: anyio-4.10.0, cov-7.1.0, mock-3.15.1
+collecting ... collected 18 items
+
+tests/test_alpha.py::test_ordinary PASSED                                [  5%]
+tests/test_alpha.py::test_fails FAILED                                   [ 11%]
+tests/test_alpha.py::test_errors ERROR                                   [ 16%]
+tests/test_alpha.py::test_skipped SKIPPED (deliberate skip)              [ 22%]
+tests/test_alpha.py::test_parametrised[plain] PASSED                     [ 27%]
+tests/test_alpha.py::test_parametrised[with space] PASSED                [ 33%]
+tests/test_alpha.py::test_parametrised[sl/ash] PASSED                    [ 38%]
+tests/test_alpha.py::test_parametrised[br[ack]et] PASSED                 [ 44%]
+tests/test_alpha.py::test_parametrised[3] PASSED                         [ 50%]
+tests/test_alpha.py::test_parametrised[None] PASSED                      [ 55%]
+tests/test_alpha.py::test_same_name_in_two_files PASSED                  [ 61%]
+tests/test_alpha.py::TestOne::test_method PASSED                         [ 66%]
+tests/test_alpha.py::TestOne::test_shared_method_name PASSED             [ 72%]
+tests/test_alpha.py::TestTwo::test_shared_method_name PASSED             [ 77%]
+tests/test_alpha.py::TestOuter::TestInner::test_nested PASSED            [ 83%]
+tests/test_alpha.py::test_param_containing_separator[a::b] PASSED        [ 88%]
+tests/test_alpha.py::test_param_containing_separator[c[d]::e] PASSED     [ 94%]
+tests/test_beta.py::test_same_name_in_two_files PASSED                   [100%]
+
+=================================== ERRORS ====================================
+________________________ ERROR at setup of test_errors ________________________
+file /proj\tests\test_alpha.py, line 12
+  def test_errors(undefined_fixture):
+E       fixture 'undefined_fixture' not found
+>       available fixtures: anyio_backend, anyio_backend_name, anyio_backend_options, capfd, capfdbinary, caplog, capsys, capsysbinary, capteesys, class_mocker, cov, doctest_namespace, free_tcp_port, free_tcp_port_factory, free_udp_port, free_udp_port_factory, mocker, module_mocker, monkeypatch, no_cover, package_mocker, pytestconfig, record_property, record_testsuite_property, record_xml_attribute, recwarn, session_mocker, subtests, tmp_path, tmp_path_factory, tmpdir, tmpdir_factory
+>       use 'pytest --fixtures [testpath]' for help on them.
+
+/proj\tests\test_alpha.py:12
+================================== FAILURES ===================================
+_________________________________ test_fails __________________________________
+
+    def test_fails():
+>       assert 1 == 2, "deliberate"
+E       AssertionError: deliberate
+E       assert 1 == 2
+
+tests\test_alpha.py:9: AssertionError
+- generated xml file: /proj\report.xml -
+=========================== short test summary info ===========================
+FAILED tests/test_alpha.py::test_fails - AssertionError: deliberate
+ERROR tests/test_alpha.py::test_errors
+============== 1 failed, 15 passed, 1 skipped, 1 error in 0.14s ===============
