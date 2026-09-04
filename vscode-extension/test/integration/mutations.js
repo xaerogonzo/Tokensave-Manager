@@ -183,7 +183,15 @@ function runSuite(tier) {
   //     mutation runner silently testing nothing, which is precisely the
   //     failure this file exists to detect in others.
   const args = tier === FAST
-    ? ["--test", "test/cli.test.js", "test/diagnostics.test.js",
+    // --test-reporter is PINNED rather than left to default. node --test picks
+    // its reporter from whether stdout is a TTY, and the default for the
+    // non-TTY case has not been the same across Node versions: this parser
+    // reads the spec reporter's marker, matched nothing against Node 20's
+    // output on CI, and reported four genuinely-caught arms as CAUGHT BY THE
+    // WRONG TEST. Naming the reporter makes the format a fact rather than a
+    // property of the runner, and it costs one flag.
+    ? ["--test", "--test-reporter=spec",
+       "test/cli.test.js", "test/diagnostics.test.js",
        "test/surfaces.test.js"]
     : ["test/integration/runTests.js"];
   const r = cp.spawnSync(process.execPath, args, {
@@ -213,11 +221,15 @@ function testCount(output, tier) {
  * trailing form differs — the harness appends ` — <message>`, node appends
  * ` (1.27ms)` — so the name is taken up to whichever arrives first.
  *
- * An earlier version matched TAP's `not ok N - name` for the fast tier. node
- * --test only emits TAP with `--test-reporter=tap`, so nothing matched, every
- * fast arm reported "(no named failures)", and a genuinely caught mutation
- * was reported as CAUGHT BY THE WRONG TEST. Worth stating: the parser being
- * wrong looks exactly like the suite being wrong.
+ * An earlier version matched TAP's `not ok N - name` for the fast tier, and
+ * nothing matched. The fix at the time said node --test "only emits TAP with
+ * --test-reporter=tap" -- true of the Node this was measured on, and NOT true
+ * in general: the default depends on the Node version and on whether stdout is
+ * a TTY, and Node 20 on CI emitted TAP into this same parser, reporting four
+ * genuinely-caught arms as CAUGHT BY THE WRONG TEST. runSuite now names the
+ * reporter, so the format no longer varies. Worth stating twice, since it has
+ * now happened twice: the parser being wrong looks exactly like the suite
+ * being wrong.
  */
 function failedTests(output) {
   const names = new Set();
@@ -229,6 +241,19 @@ function failedTests(output) {
     if (name && name !== "failing tests:") names.add(name);
   }
   return [...names];
+}
+
+/**
+ * The tail of a surviving arm's run, for the report.
+ *
+ * Trimmed rather than dumped whole: a live run is thousands of lines, and a
+ * report nobody reads is the same as no report.
+ */
+function survivorEvidence(output) {
+  const lines = (output || "").trimEnd().split(/\r?\n/).slice(-25);
+  if (!lines.length) { return ""; }
+  return ("\n  --- last 25 lines of that run ---\n  " +
+          lines.join("\n  "));
 }
 
 const sha = (buf) => crypto.createHash("sha256").update(buf).digest("hex");
@@ -318,8 +343,14 @@ async function main() {
         n.toLowerCase().includes(arm.expect.toLowerCase()));
 
       if (r.code === 0) {
+        // A survivor is the one verdict that cannot be acted on from the
+        // verdict alone -- "the suite passed" says nothing about WHY the
+        // property was unobservable. Carrying the tail of the run turns the
+        // next survivor into something diagnosable from the CI log, instead
+        // of a push-and-look round trip on a machine you do not have.
         outcome = { verdict: "SURVIVED",
-                    detail: "the suite passed with the property removed" };
+                    detail: "the suite passed with the property removed" +
+                            survivorEvidence(r.output) };
       } else if (count !== null && count < control[arm.tier]) {
         outcome = { verdict: "INCONCLUSIVE",
                     detail: `only ${count} of ${control[arm.tier]} tests ran; ` +

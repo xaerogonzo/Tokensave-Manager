@@ -161,7 +161,53 @@ function prepareWorkspace(testHome) {
   // that test to mean anything.
 
   assertFixtureProducesFindings(WORKSPACE);
+  assertRootsAreDistinguishable(WORKSPACE, WORKSPACE_2);
   return workspacePaths(testHome);
+}
+
+/**
+ * Require the two roots to render DIFFERENT change counts.
+ *
+ * The status-bar pin test reads the bar's count to decide which root the bar
+ * is about, so its entire premise is that the counts differ -- and nothing
+ * checked that premise. When it stopped holding, the test did not fail; it
+ * passed against a build with the pin removed, which is the third time that
+ * arm has been decorative and the second time for this reason.
+ *
+ * Measured through the same `cli.py status` the bar renders from, rather than
+ * by counting the files this function just wrote: what matters is what the
+ * CLI reports on THIS machine. The counts differ on Windows and were assumed
+ * to differ everywhere, which is exactly the assumption worth spending a
+ * subprocess on.
+ */
+function assertRootsAreDistinguishable(first, second) {
+  const counts = [first, second].map((root) => {
+    const python = process.env.TOKENSAVE_TEST_PYTHON || "python";
+    const r = cp.spawnSync(
+      python,
+      [path.join(REPO_ROOT, "src", "cli.py"), "status", "--project", root,
+       "--json"],
+      { encoding: "utf8" });
+    try {
+      const git = (JSON.parse(r.stdout).data || {}).git || {};
+      return (git.changed_files || []).length;
+    } catch {
+      throw new Error(
+        "could not read a change count for " + root + ": " +
+        ((r.stdout || "") + (r.stderr || "")).slice(0, 400));
+    }
+  });
+
+  if (counts[0] === counts[1]) {
+    throw new Error(
+      "both fixture roots report " + counts[0] + " changed files, so the " +
+      "status bar renders the same text whichever root it is about. The pin " +
+      "test cannot fail in that state -- it passed against a build with the " +
+      "pin removed. Give the roots different numbers of uncommitted files " +
+      "rather than relaxing this check.");
+  }
+  console.log("roots distinguishable: " + counts[0] + " vs " + counts[1] +
+              " changed files");
 }
 
 /**

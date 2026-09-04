@@ -84,17 +84,41 @@ function runVSCodeCli(cli, args) {
 }
 
 
-/** npm's own `npx` entry point, beside the running node binary. */
+/**
+ * npm's own `npx` entry point.
+ *
+ * npm does not sit in the same place relative to the node binary on every
+ * platform, and assuming it does is how this broke on its first Linux run:
+ *
+ *   Windows   <node dir>/node_modules/npm/bin/npx-cli.js
+ *   POSIX     <node dir>/../lib/node_modules/npm/bin/npx-cli.js
+ *
+ * `npm_execpath` is checked first and is the only non-guess here -- npm sets
+ * it to its own cli when it runs a script, so npx-cli.js is its sibling. It is
+ * absent when this file is invoked as plain `node`, which the mutation runner
+ * does deliberately, so the layout candidates have to stay as the fallback.
+ */
 function npxCli() {
-  const candidate = path.join(path.dirname(process.execPath),
-                              "node_modules", "npm", "bin", "npx-cli.js");
-  if (!fs.existsSync(candidate)) {
-    throw new Error(
-      `could not find npm's npx shim at ${candidate}. It is invoked directly ` +
-      "rather than as `npx` because Node refuses to spawn a .cmd without a " +
-      "shell; if npm's layout has moved, this is the line to update.");
+  const nodeDir = path.dirname(process.execPath);
+  const candidates = [];
+  if (process.env.npm_execpath) {
+    candidates.push(path.join(path.dirname(process.env.npm_execpath),
+                              "npx-cli.js"));
   }
-  return candidate;
+  candidates.push(path.join(nodeDir, "node_modules", "npm", "bin",
+                            "npx-cli.js"));
+  candidates.push(path.join(nodeDir, "..", "lib", "node_modules", "npm", "bin",
+                            "npx-cli.js"));
+
+  const found = candidates.find((c) => fs.existsSync(c));
+  if (!found) {
+    throw new Error(
+      "could not find npm's npx shim. It is invoked directly rather than as " +
+      "`npx` because Node refuses to spawn a .cmd without a shell; if npm's " +
+      "layout has moved, this is the line to update. Tried:\n  " +
+      candidates.join("\n  "));
+  }
+  return found;
 }
 
 /** The version vsce stamped on the package, which names the installed dir. */

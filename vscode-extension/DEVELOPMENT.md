@@ -84,6 +84,14 @@ who is allowed to raise it.
 
 ## Gotchas worth knowing before you touch this
 
+**`node --test`'s output format depends on the Node version and on whether
+stdout is a TTY.** The mutation runner reads test names out of that output to
+decide whether the *right* test objected, so a format change turns caught arms
+into "CAUGHT BY THE WRONG TEST". It has happened twice: once locally against
+TAP, and once on CI, where Node 20 emitted TAP into a parser that had been
+fixed by measuring Node 24. `runSuite` now passes `--test-reporter=spec`
+explicitly. Do not remove it to tidy up.
+
 **The suite needs `pyflakes`, and its absence looks like a broken fixture.**
 Every finding the diagnostics tests assert about comes from
 `python -m pyflakes`. Without it, `cli.py checks` returns `ok:false` with an
