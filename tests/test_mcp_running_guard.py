@@ -28,6 +28,12 @@ import time
 import pytest
 
 import helpers.mcp as mcp_helpers
+# Patch targets live on the OWNING module, not the facade: since the
+# Roadmap-16 split `_is_claude_running` resolves `claude_code_active`
+# from `helpers.mcp_scope`'s own globals, so patching the re-export
+# would be a no-op that still passes some assertions. Same G-E rule
+# as everywhere else -- mock at the import site.
+import helpers.mcp_scope as mcp_scope
 from dialogs.mcp_config import MCPConfigDialog
 from helpers.mcp import _CLAUDE_JSON_ACTIVE_SECS, claude_code_active
 
@@ -76,7 +82,7 @@ def test_the_window_boundary_counts_as_live(tmp_path):
 
 def test_is_claude_running_reports_code_and_its_reason(tmp_path, monkeypatch):
     """The dict grew `code_detail` so the UI can say HOW it decided."""
-    monkeypatch.setattr(mcp_helpers, "claude_code_active",
+    monkeypatch.setattr(mcp_scope, "claude_code_active",
                         lambda *a, **k: (True, "because I said so"))
     got = mcp_helpers._is_claude_running()
     assert got["code"] is True
@@ -86,10 +92,10 @@ def test_is_claude_running_reports_code_and_its_reason(tmp_path, monkeypatch):
 
 def test_is_claude_running_survives_a_broken_tasklist(monkeypatch):
     """Detection failing must not make the dialog unusable."""
-    monkeypatch.setattr(mcp_helpers, "claude_code_active",
+    monkeypatch.setattr(mcp_scope, "claude_code_active",
                         lambda *a, **k: (False, ""))
     monkeypatch.setattr(
-        mcp_helpers.subprocess, "run",
+        mcp_scope.subprocess, "run",
         lambda *a, **k: (_ for _ in ()).throw(OSError("no tasklist")))
     got = mcp_helpers._is_claude_running()
     assert got["desktop"] is False

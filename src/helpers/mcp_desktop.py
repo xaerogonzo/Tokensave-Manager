@@ -58,15 +58,18 @@ import sys
 import time
 from dataclasses import dataclass, field
 
-from helpers.mcp import (_resolve_desktop_cfg_path, _write_json_atomic,
-                         _mcp_desktop_cfg_path)
+# From the family leaf, not the `helpers.mcp` facade -- see
+# scripts/split_mcp.py for why the direction is one-way.
+from helpers.mcp_paths import (_resolve_desktop_cfg_path,
+                               _write_json_atomic,
+                               _mcp_desktop_cfg_path)
 #: Set when the Desktop-scoped ``tokensave`` entry is retired through this
 #: migration, so its later ABSENCE reads as a completed decision. Mirrors
-#: ``USER_SCOPE_RETIRED_KEY``, and defined in :mod:`helpers.mcp` beside it
+#: ``USER_SCOPE_RETIRED_KEY``, and defined in :mod:`helpers.mcp_paths` beside it
 #: because `_classify_mcp_entry` reads it too — defining it here and importing
 #: it back would be a cycle. Re-exported so callers can keep asking the module
 #: that owns the migration.
-from helpers.mcp import DESKTOP_SCOPE_RETIRED_KEY
+from helpers.mcp_paths import DESKTOP_SCOPE_RETIRED_KEY
 
 #: The verbatim entry that was removed, plus the digests written, so Undo can
 #: restore exactly what was there instead of a reconstructed canonical entry.

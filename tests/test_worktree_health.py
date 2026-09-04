@@ -207,7 +207,8 @@ def test_timeout_reported_not_raised(mocker, tmp_path):
 #    the other agent-state predicates this feature depends on) ────────────
 
 def test_agent_wired_true_when_config_mentions_tokensave(mocker, tmp_path):
-    import helpers.mcp as mcp
+    # The owning module, not the facade -- see test_mcp_split.py.
+    import helpers.mcp_agents as mcp
     cfg = tmp_path / "mcp.json"
     cfg.write_text('{"mcpServers": {"tokensave": {"command": "ts.exe"}}}',
                    encoding="utf-8")
@@ -217,7 +218,8 @@ def test_agent_wired_true_when_config_mentions_tokensave(mocker, tmp_path):
 
 
 def test_agent_wired_false_when_config_lacks_tokensave(mocker, tmp_path):
-    import helpers.mcp as mcp
+    # The owning module, not the facade -- see test_mcp_split.py.
+    import helpers.mcp_agents as mcp
     cfg = tmp_path / "mcp.json"
     cfg.write_text('{"mcpServers": {"other": {"command": "x"}}}',
                    encoding="utf-8")
@@ -227,7 +229,8 @@ def test_agent_wired_false_when_config_lacks_tokensave(mocker, tmp_path):
 
 
 def test_agent_wired_false_when_no_config_exists(mocker, tmp_path):
-    import helpers.mcp as mcp
+    # The owning module, not the facade -- see test_mcp_split.py.
+    import helpers.mcp_agents as mcp
     mocker.patch.object(mcp, "_tokensave_agent_path_candidates",
                         return_value=[str(tmp_path / "nope.json")])
     assert mcp._tokensave_agent_wired("copilot") is False
@@ -236,7 +239,8 @@ def test_agent_wired_false_when_no_config_exists(mocker, tmp_path):
 def test_agent_wired_handles_jsonc_comments(mocker, tmp_path):
     """These configs are JSON, JSONC and TOML — json.load would raise on
     comments, which is why the check is a raw substring match."""
-    import helpers.mcp as mcp
+    # The owning module, not the facade -- see test_mcp_split.py.
+    import helpers.mcp_agents as mcp
     cfg = tmp_path / "kilo.jsonc"
     cfg.write_text('// a comment\n{"servers": {"tokensave": {}}}',
                    encoding="utf-8")
@@ -247,7 +251,8 @@ def test_agent_wired_handles_jsonc_comments(mocker, tmp_path):
 
 def test_agent_wired_true_if_any_candidate_is_wired(mocker, tmp_path):
     """Copilot has multiple config surfaces; one wired is enough."""
-    import helpers.mcp as mcp
+    # The owning module, not the facade -- see test_mcp_split.py.
+    import helpers.mcp_agents as mcp
     a = tmp_path / "a.json"; a.write_text("{}", encoding="utf-8")
     b = tmp_path / "b.json"
     b.write_text('{"tokensave": {}}', encoding="utf-8")
