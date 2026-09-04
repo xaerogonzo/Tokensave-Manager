@@ -192,6 +192,70 @@ COMMANDS: tuple = (
 )
 
 
+
+# ── Manager dialogs the editor may ask for ───────────────────────────────────
+#
+# `request` is ONE cli subcommand carrying an action, but an editor wants one
+# command per dialog: "Open Doctor" and "Open Savings" are different menu
+# entries, and folding them into a single "Manager request…" that then asks
+# which one is a worse version of a menu VS Code already draws.
+#
+# Adding five rows to COMMANDS would misdescribe the CLI, which really does
+# have one subcommand here. So this is a second, smaller table, generated into
+# the same TypeScript module and checked by the same drift test.
+#
+# **This is a strict SUBSET of `manager_ipc.ACTIONS`, not a copy of it**, and
+# the omission is recorded rather than left to be noticed. Asserting the two
+# are equal would be a brittle test that fails the day someone adds an action,
+# and gets "fixed" by exposing a dialog nobody decided to expose.
+
+
+@dataclasses.dataclass(frozen=True)
+class ManagerAction:
+    """One dialog the running Manager can be asked to open."""
+
+    #: The `manager_ipc` action. Must be in `manager_ipc.ACTIONS`.
+    action: str
+    #: The VS Code command id. Always non-empty — that is the point of the row.
+    vscode: str
+    label: str
+    detail: str
+
+
+MANAGER_ACTIONS: tuple = (
+    ManagerAction(
+        action="doctor", vscode="tokensaveManager.openDoctor",
+        label="Open Doctor in the Manager",
+        detail="Raise the Manager on its Doctor tab for this project."),
+    ManagerAction(
+        action="test-manager", vscode="tokensaveManager.openTestManager",
+        label="Open the Test Manager",
+        detail="Coverage gaps, stale tests and the scaffold generator."),
+    ManagerAction(
+        action="savings", vscode="tokensaveManager.openSavingsDialog",
+        label="Open Savings in the Manager",
+        detail="The full cost and savings view, beside the editor's summary."),
+    ManagerAction(
+        action="doc-updates", vscode="tokensaveManager.openDocUpdates",
+        label="Open Doc Updates",
+        detail="Draft CHANGELOG and README entries for recent commits."),
+    ManagerAction(
+        action="open-project", vscode="tokensaveManager.openInManager",
+        label="Open this project in the Manager",
+        detail="Select this folder in the Manager's Projects tab. Distinct "
+               "from Open Manager, which only raises the window."),
+)
+
+#: Deliberately NOT exposed, with the reason, so its absence is a decision.
+#:
+#: `commit` — the extension already has a commit composer (`proposeCommit`)
+#: that lets a person pick files and write a note before anything is filed.
+#: A second entry point that opens the same dialog with no proposal in it
+#: would be a worse door to the same room.
+UNEXPOSED_MANAGER_ACTIONS = frozenset({"commit"})
+
+BY_MANAGER_ACTION = {a.action: a for a in MANAGER_ACTIONS}
+
 #: Lookup by stable identifier.
 BY_ACTION = {c.action: c for c in COMMANDS}
 
@@ -296,6 +360,30 @@ def as_typescript() -> str:
         "  return COMMANDS.find((c) => c.action === action);",
         "}",
         "",
+        "/** One dialog the running Manager can be asked to open. */",
+        "export interface ManagerAction {",
+        "  /** The `manager_ipc` action this files. */",
+        "  action: string;",
+        "  /** The VS Code command id. Never empty. */",
+        "  vscode: string;",
+        "  label: string;",
+        "  detail: string;",
+        "}",
+        "",
+        "export const MANAGER_ACTIONS: readonly ManagerAction[] = [",
+    ]
+    for a in MANAGER_ACTIONS:
+        lines += [
+            "  {",
+            f'    action: {json.dumps(a.action)},',
+            f'    vscode: {json.dumps(a.vscode)},',
+            f'    label: {json.dumps(a.label)},',
+            f'    detail: {json.dumps(a.detail)},',
+            "  },",
+        ]
+    lines += [
+        "];",
+        "",
     ]
     return chr(10).join(lines)
 
@@ -312,4 +400,6 @@ def as_json() -> dict:
             name: SIDE_EFFECT_MEANING[name] for name in SIDE_EFFECT_CLASSES
         },
         "commands": [dataclasses.asdict(c) for c in COMMANDS],
+        "manager_actions": [dataclasses.asdict(a) for a in MANAGER_ACTIONS],
+        "unexposed_manager_actions": sorted(UNEXPOSED_MANAGER_ACTIONS),
     }

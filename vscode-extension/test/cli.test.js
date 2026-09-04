@@ -281,11 +281,19 @@ test("every contributed command has a declared handler id", () => {
   const tree = fs.readFileSync(
     path.join(__dirname, "..", "src", "tree.ts"), "utf8");
 
+  // Manager-dialog commands are registered from a loop over the
+  // GENERATED table, so their ids appear in commands.ts rather than in
+  // any handwritten source. Reading the table is what keeps this guard
+  // honest: a row removed from it stops satisfying the check.
+  const { MANAGER_ACTIONS } = require("../out/commands.js");
+  const fromTable = new Set(MANAGER_ACTIONS.map((a) => a.vscode));
+
   for (const { command } of manifest.contributes.commands) {
     const short = command.replace(/^tokensaveManager\./, "");
     const registered = source.includes(`"${command}"`)
       // Action commands are registered from a loop over ACTIONS.
-      || tree.includes(`id: "${short}"`);
+      || tree.includes(`id: "${short}"`)
+      || fromTable.has(command);
     assert.ok(registered, `${command} is contributed but never registered`);
   }
 });

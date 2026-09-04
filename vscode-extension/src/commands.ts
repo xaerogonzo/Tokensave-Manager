@@ -231,3 +231,46 @@ export function commandByAction(
   action: string): ManagerCommand | undefined {
   return COMMANDS.find((c) => c.action === action);
 }
+
+/** One dialog the running Manager can be asked to open. */
+export interface ManagerAction {
+  /** The `manager_ipc` action this files. */
+  action: string;
+  /** The VS Code command id. Never empty. */
+  vscode: string;
+  label: string;
+  detail: string;
+}
+
+export const MANAGER_ACTIONS: readonly ManagerAction[] = [
+  {
+    action: "doctor",
+    vscode: "tokensaveManager.openDoctor",
+    label: "Open Doctor in the Manager",
+    detail: "Raise the Manager on its Doctor tab for this project.",
+  },
+  {
+    action: "test-manager",
+    vscode: "tokensaveManager.openTestManager",
+    label: "Open the Test Manager",
+    detail: "Coverage gaps, stale tests and the scaffold generator.",
+  },
+  {
+    action: "savings",
+    vscode: "tokensaveManager.openSavingsDialog",
+    label: "Open Savings in the Manager",
+    detail: "The full cost and savings view, beside the editor's summary.",
+  },
+  {
+    action: "doc-updates",
+    vscode: "tokensaveManager.openDocUpdates",
+    label: "Open Doc Updates",
+    detail: "Draft CHANGELOG and README entries for recent commits.",
+  },
+  {
+    action: "open-project",
+    vscode: "tokensaveManager.openInManager",
+    label: "Open this project in the Manager",
+    detail: "Select this folder in the Manager's Projects tab. Distinct from Open Manager, which only raises the window.",
+  },
+];

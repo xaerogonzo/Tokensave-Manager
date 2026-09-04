@@ -22,6 +22,7 @@ import { commandByAction } from "./commands";
 import { proposeCommit } from "./commit";
 import { DiagnosticStore } from "./diagnostics";
 import { DiscoveryCache } from "./discovery";
+import { registerManagerBridge } from "./manager";
 import { SavingsViewProvider } from "./savings";
 import { StatusBar } from "./status";
 import { TestExplorer } from "./testing";
@@ -157,6 +158,7 @@ export function activate(context: vscode.ExtensionContext): TestApi {
 
   registerStatusBar(context);
   registerSavingsView(context);
+  registerManagerBridge(context, pickFolder);
   registerCommitComposer(context);
   registerFileScopedActions(context);
   registerRefreshTriggers(context, provider);

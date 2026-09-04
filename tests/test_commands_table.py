@@ -274,3 +274,90 @@ def test_the_generated_file_carries_the_new_selector_flag():
     generated = commands.as_typescript()
     assert "acceptsTests: true," in generated
     assert "acceptsTests: boolean;" in generated
+
+
+# ── the Manager-dialog table ────────────────────────────────────────────────
+
+def test_every_exposed_dialog_is_an_action_the_protocol_allows():
+    """The editor cannot invent an action the inbox will not accept.
+
+    `manager_ipc.ACTIONS` is an allowlist checked at write time and again at
+    drain time; a row here naming something outside it would produce a command
+    that always fails, and would fail at the far end where the reason is
+    hardest to see.
+    """
+    from helpers import manager_ipc
+    exposed = {a.action for a in commands.MANAGER_ACTIONS}
+    assert exposed <= manager_ipc.ACTIONS, exposed - manager_ipc.ACTIONS
+
+
+def test_the_relation_is_a_subset_and_not_an_equality():
+    """Asserting equality would be the wrong test.
+
+    It fails the day someone adds an IPC action, and the cheapest way to make
+    it pass is to expose a dialog nobody decided to expose. So the invariant is
+    containment, plus a declared reason for anything left out — which is a
+    thing a reviewer can disagree with, unlike a silently missing row.
+    """
+    from helpers import manager_ipc
+    exposed = {a.action for a in commands.MANAGER_ACTIONS}
+    omitted = manager_ipc.ACTIONS - exposed
+    assert omitted == set(commands.UNEXPOSED_MANAGER_ACTIONS), (
+        "an IPC action is neither exposed nor recorded as deliberately "
+        f"unexposed: {omitted ^ set(commands.UNEXPOSED_MANAGER_ACTIONS)}")
+
+
+def test_commit_is_the_one_left_out_and_the_composer_is_why():
+    """Pinned by name: the extension already has a commit composer, and a
+    second door to the same dialog with no proposal in it is worse."""
+    assert commands.UNEXPOSED_MANAGER_ACTIONS == frozenset({"commit"})
+
+
+def test_every_dialog_row_carries_a_command_id():
+    """A row exists precisely to give a dialog a command id; an empty one
+    would register a command nothing could invoke."""
+    for action in commands.MANAGER_ACTIONS:
+        assert action.vscode.startswith("tokensaveManager."), action
+        assert action.label and action.detail, action
+
+
+def test_dialog_command_ids_are_unique():
+    ids = [a.vscode for a in commands.MANAGER_ACTIONS]
+    assert len(ids) == len(set(ids)), ids
+
+
+def test_dialog_ids_do_not_collide_with_operation_ids():
+    """Two tables, one command namespace. A collision would mean one
+    registration silently replacing the other at activation."""
+    operations = {c.vscode for c in COMMANDS if c.vscode}
+    dialogs = {a.vscode for a in commands.MANAGER_ACTIONS}
+    assert not (operations & dialogs), operations & dialogs
+
+
+def test_open_project_and_focus_stay_distinct_operations():
+    """`focus` raises the window and takes no project; `open-project` selects
+    one specific folder in the Manager. Collapsing them into a single
+    "open the Manager" would lose the half that names a project.
+    """
+    focus = commands.BY_ACTION["focus"]
+    assert focus.requires_project is False
+    assert focus.vscode == "tokensaveManager.focus"
+
+    open_project = commands.BY_MANAGER_ACTION["open-project"]
+    assert open_project.vscode == "tokensaveManager.openInManager"
+    assert open_project.vscode != focus.vscode
+
+
+def test_the_generated_file_carries_the_dialog_table():
+    generated = commands.as_typescript()
+    assert "MANAGER_ACTIONS: readonly ManagerAction[]" in generated
+    for action in commands.MANAGER_ACTIONS:
+        assert f'vscode: "{action.vscode}"' in generated
+
+
+def test_the_json_form_reports_what_it_left_out():
+    """A consumer reading the vocabulary should be able to see the omission,
+    not just fail to find a row."""
+    payload = commands.as_json()
+    assert [a["action"] for a in payload["manager_actions"]]
+    assert payload["unexposed_manager_actions"] == ["commit"]
