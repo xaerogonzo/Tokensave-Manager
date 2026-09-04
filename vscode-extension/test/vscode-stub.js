@@ -33,7 +33,20 @@ class Position {
 }
 
 class Range {
+  /**
+   * Both real overloads, because the extension uses both.
+   *
+   * `vscode.Range` accepts either four numbers or two Positions.
+   * Supporting only the numeric form made `new Range(pos, pos)` produce a
+   * Position whose `.line` was itself a Position — which reads as a plain
+   * assertion failure and sends you looking in the wrong file.
+   */
   constructor(startLine, startChar, endLine, endChar) {
+    if (startLine instanceof Position) {
+      this.start = startLine;
+      this.end = startChar;
+      return;
+    }
     this.start = new Position(startLine, startChar);
     this.end = new Position(endLine, endChar);
   }
@@ -47,8 +60,106 @@ class Diagnostic {
   }
 }
 
+/**
+ * A recording stand-in for `TestRun`.
+ *
+ * Behavioural like the rest of this stub: it stores which item was told what,
+ * because "the right test went green" is the only assertion worth making about
+ * a test run, and it is invisible if the calls are merely counted.
+ */
+class FakeTestRun {
+  constructor() {
+    this.states = new Map();
+    this.messages = new Map();
+    this.output = "";
+    this.ended = false;
+  }
+
+  _record(item, state, message) {
+    this.states.set(item.id, state);
+    if (message !== undefined) {
+      this.messages.set(item.id, message);
+    }
+  }
+
+  enqueued(item) { this._record(item, "enqueued"); }
+  started(item) { this._record(item, "started"); }
+  passed(item) { this._record(item, "passed"); }
+  skipped(item) { this._record(item, "skipped"); }
+  failed(item, message) { this._record(item, "failed", message); }
+  errored(item, message) { this._record(item, "errored", message); }
+  appendOutput(text) { this.output += text; }
+  end() { this.ended = true; }
+}
+
+/** A `TestItemCollection` that really stores and really iterates. */
+function itemCollection() {
+  const store = new Map();
+  return {
+    add(item) { store.set(item.id, item); },
+    replace(items) {
+      store.clear();
+      for (const item of items) { store.set(item.id, item); }
+    },
+    forEach(fn) { for (const item of store.values()) { fn(item); } },
+    get(id) { return store.get(id); },
+    get size() { return store.size; },
+  };
+}
+
+/** The controller `vscode.tests.createTestController` hands back. */
+function fakeController(id, label) {
+  return {
+    id,
+    label,
+    items: itemCollection(),
+    profiles: [],
+    runs: [],
+    resolveHandler: undefined,
+    refreshHandler: undefined,
+    createTestItem(itemId, itemLabel, uri) {
+      return {
+        id: itemId,
+        label: itemLabel,
+        uri,
+        children: itemCollection(),
+        range: undefined,
+        description: undefined,
+      };
+    },
+    createRunProfile(profileLabel, kind, handler, isDefault) {
+      const profile = { label: profileLabel, kind, handler, isDefault };
+      this.profiles.push(profile);
+      return profile;
+    },
+    createTestRun(request) {
+      const run = new FakeTestRun();
+      run.request = request;
+      this.runs.push(run);
+      return run;
+    },
+    dispose() {},
+  };
+}
+
+/** The most recently created controller, for tests to reach into. */
+const controllers = [];
+
+class EventEmitter {
+  constructor() { this.listeners = []; }
+  get event() {
+    return (listener) => {
+      this.listeners.push(listener);
+      return { dispose: () => {} };
+    };
+  }
+  fire(value) { for (const listener of this.listeners) { listener(value); } }
+  dispose() { this.listeners = []; }
+}
+
 const vscodeStub = {
   workspace: {
+    workspaceFolders: [],
     getConfiguration() {
       return {
         get(key, fallback) {
@@ -56,7 +167,23 @@ const vscodeStub = {
         },
       };
     },
+    getWorkspaceFolder(uri) {
+      return (vscodeStub.workspace.workspaceFolders || []).find(
+        (f) => uri.fsPath.startsWith(f.uri.fsPath));
+    },
   },
+  tests: {
+    createTestController(id, label) {
+      const controller = fakeController(id, label);
+      controllers.push(controller);
+      return controller;
+    },
+  },
+  TestRunProfileKind: { Run: 1, Debug: 2, Coverage: 3 },
+  TestMessage: class TestMessage {
+    constructor(message) { this.message = message; }
+  },
+  EventEmitter,
   Position,
   Range,
   Diagnostic,
@@ -106,4 +233,31 @@ function folder(fsPath) {
   return { name: path.basename(fsPath), uri: vscodeStub.Uri.file(fsPath) };
 }
 
-module.exports = { vscodeStub, setSettings, fakeCollection, folder };
+/** A `CancellationToken` a test can trip by hand. */
+function cancellation() {
+  const listeners = [];
+  const token = {
+    isCancellationRequested: false,
+    onCancellationRequested(listener) {
+      listeners.push(listener);
+      return { dispose: () => {} };
+    },
+  };
+  return {
+    token,
+    cancel() {
+      token.isCancellationRequested = true;
+      for (const listener of listeners) { listener(); }
+    },
+  };
+}
+
+/** Set the folders `workspace.workspaceFolders` will report. */
+function setFolders(folders) {
+  vscodeStub.workspace.workspaceFolders = folders;
+}
+
+module.exports = {
+  vscodeStub, setSettings, fakeCollection, folder, controllers, cancellation,
+  setFolders, FakeTestRun,
+};

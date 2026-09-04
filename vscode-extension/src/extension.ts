@@ -21,14 +21,18 @@ import { CliResult, EXIT, runCli, runProjectlessCli } from "./cli";
 import { commandByAction } from "./commands";
 import { proposeCommit } from "./commit";
 import { DiagnosticStore } from "./diagnostics";
+import { DiscoveryCache } from "./discovery";
 import { SavingsViewProvider } from "./savings";
 import { StatusBar } from "./status";
+import { TestExplorer } from "./testing";
 import { ACTIONS, DIAGNOSTIC_COMMANDS, ProjectsProvider } from "./tree";
 
 let output: vscode.OutputChannel;
 let diagnostics: DiagnosticStore;
 let statusBar: StatusBar | undefined;
 let savingsProvider: SavingsViewProvider | undefined;
+let discovery: DiscoveryCache | undefined;
+let testExplorer: TestExplorer | undefined;
 
 /**
  * What `activate` hands back, for the live integration suite.
@@ -61,6 +65,14 @@ export interface TestApi {
   webviewRenderCount(): number;
   statusBarText(): string;
   pinnedFolderName(): string | undefined;
+  /**
+   * The Test Explorer tree as rendered rows.
+   *
+   * Same rule as `renderTree`: strings, because a tree whose nodes are right
+   * and whose labels are wrong is a broken tree, and only one of those two is
+   * what a person sees.
+   */
+  renderTests(): Promise<string[]>;
 }
 
 /**
@@ -139,6 +151,10 @@ export function activate(context: vscode.ExtensionContext): TestApi {
     vscode.commands.registerCommand("tokensaveManager.setManagerPath",
       () => setManagerPath(provider)));
 
+  discovery = new DiscoveryCache(context);
+  context.subscriptions.push({ dispose: () => discovery?.dispose() });
+  testExplorer = new TestExplorer(context, discovery);
+
   registerStatusBar(context);
   registerSavingsView(context);
   registerCommitComposer(context);
@@ -166,6 +182,10 @@ export function activate(context: vscode.ExtensionContext): TestApi {
     webviewRenderCount: () => savingsProvider?.renderCount() ?? 0,
     statusBarText: () => statusBar?.currentText() ?? "",
     pinnedFolderName: () => statusBar?.pinnedFolder()?.name,
+    renderTests: async () => {
+      await testExplorer?.discoverAll();
+      return testExplorer?.renderTests() ?? [];
+    },
   };
 }
 
@@ -175,6 +195,9 @@ const lastTreeCommands = new Map<string, string | undefined>();
 export function deactivate(): void {
   statusBar?.dispose();
   statusBar = undefined;
+  discovery?.dispose();
+  discovery = undefined;
+  testExplorer = undefined;
 }
 
 /**
@@ -429,8 +452,10 @@ function registerRefreshTriggers(context: vscode.ExtensionContext,
       // A folder that left the workspace must not keep contributing squiggles.
       for (const folder of event.removed) {
         diagnostics.forgetFolder(folder);
+        discovery?.forget(folder);
       }
       provider.refresh();
+      void testExplorer?.discoverAll();
     }),
     vscode.workspace.onDidChangeConfiguration((event) => {
       if (event.affectsConfiguration("tokensaveManager")) {
@@ -453,6 +478,29 @@ function registerRefreshTriggers(context: vscode.ExtensionContext,
     watcher.onDidChange(touched),
     watcher.onDidCreate(touched),
     watcher.onDidDelete(touched),
+  );
+
+  // Test files get their own watcher, and it is the ONE place test discovery
+  // is invalidated. The Explorer and the CodeLens provider both read the same
+  // cache, so a second watcher here would mean two caches refreshing on two
+  // schedules and disagreeing an hour later.
+  //
+  // A create or delete changes which tests exist; a change can too, since
+  // adding a `def test_` is an edit like any other. All three drop the folder's
+  // answer and let whoever needs it ask again.
+  const testWatcher =
+    vscode.workspace.createFileSystemWatcher("**/tests/**/*.py");
+  const testTouched = (uri: vscode.Uri) => {
+    const folder = vscode.workspace.getWorkspaceFolder(uri);
+    if (folder) {
+      discovery?.invalidate(folder);
+    }
+  };
+  context.subscriptions.push(
+    testWatcher,
+    testWatcher.onDidChange(testTouched),
+    testWatcher.onDidCreate(testTouched),
+    testWatcher.onDidDelete(testTouched),
   );
 }
 

@@ -241,10 +241,10 @@
     "watch": "tsc -watch -p ./",
     "vscode:prepublish": "npm run compile",
     "package": "vsce package --target win32-x64",
-    "test": "node --test test/cli.test.js test/diagnostics.test.js test/surfaces.test.js",
+    "test": "node --test test/cli.test.js test/diagnostics.test.js test/surfaces.test.js test/testing.test.js",
     "pretest": "npm run compile",
     "test:live": "node test/integration/runTests.js",
-    "test:compiled": "node --test test/cli.test.js test/diagnostics.test.js test/surfaces.test.js",
+    "test:compiled": "node --test test/cli.test.js test/diagnostics.test.js test/surfaces.test.js test/testing.test.js",
     "test:mutations": "npm run compile && node test/integration/mutations.js",
     "test:vsix": "node test/integration/runTestsVsix.js"
   },

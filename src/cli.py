@@ -633,9 +633,31 @@ def _cmd_test_run(args) -> Result:
                       error=str(exc), human=str(exc))
 
     outcomes = pytest_report.parse_run(output, junit)
-    per_test = [{"nodeid": o.nodeid, "outcome": o.outcome,
-                 "duration_seconds": o.duration, "message": o.message}
-                for o in outcomes]
+
+    # Attribution is done HERE, not in the extension. A parametrised test
+    # reports one result per case (`test_x[a]`, `test_x[b]`) against a single
+    # discovered definition (`test_x`), so something has to map the two — and
+    # that mapping is where a plausible implementation quietly guesses. Doing
+    # it in Python keeps one tested implementation instead of a second,
+    # approximate one in TypeScript.
+    #
+    # The set attributed against is what the caller asked for when it asked by
+    # id, and everything discoverable otherwise: a whole-suite run still needs
+    # each result tied to the definition an editor can put a cursor on.
+    if nodeids:
+        requested = list(nodeids)
+    else:
+        from helpers.test_discovery import list_test_cases
+        requested = [c.nodeid for c in list_test_cases(project)]
+
+    per_test = [{"nodeid": a.outcome.nodeid, "outcome": a.outcome.outcome,
+                 "duration_seconds": a.outcome.duration,
+                 "message": a.outcome.message,
+                 # "" means "this result belongs to no requested test", and
+                 # `ambiguous` means "it belongs to more than one and picking
+                 # would be a guess". Neither may render as a result.
+                 "requested": a.requested, "ambiguous": a.ambiguous}
+                for a in pytest_report.resolve_identities(outcomes, requested)]
     counted = pytest_report.summarise(outcomes)
     warnings: list = []
     from_lines = counted["passed"] + counted["failed"] + counted["error"]
