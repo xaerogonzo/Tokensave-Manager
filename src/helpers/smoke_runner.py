@@ -160,6 +160,98 @@ def run_single_test_file(project_root: str, test_relpath: str,
     return proc.returncode == 0, (out or "")
 
 
+def run_pytest_selection(project_root: str, nodeids: "tuple | list" = (),
+                         markers: str = "",
+                         timeout: int = 300) -> "tuple[str, str]":
+    """Run part or all of the suite; return ``(combined_output, junit_xml)``.
+
+    The per-test counterpart of :func:`run_smoke_tests`, and the one the
+    headless CLI drives. Three deliberate differences:
+
+    * **``-v`` is passed explicitly.** This project's own ``addopts`` forces
+      it, but the CLI runs against *other* people's repositories, and the
+      verbose progress lines are the only place pytest prints exact nodeids.
+      Passing it twice is harmless; relying on someone else's config is not.
+
+    * **``--junitxml`` goes to a temp file that is always cleaned up.** It
+      supplies per-test duration and failure messages, which the progress
+      lines do not carry. It is *not* an identity source — see
+      ``helpers/pytest_report.py`` for the measurement behind that.
+
+    * **``-p no:cacheprovider``**, so running one test from an editor does not
+      write ``.pytest_cache`` into the user's tree as a side effect of looking.
+
+    ``nodeids`` and ``markers`` are alternatives, not a pair: the caller
+    (``cli.py``) refuses them together rather than inventing a composition
+    rule. With neither, the whole ``tests/`` tree runs.
+
+    On timeout the entire process tree is killed (see :func:`_kill_tree`), and
+    whatever pytest managed to print is returned — a partial run is still
+    worth attributing, and the caller decides what an unreadable summary means.
+    """
+    import tempfile
+
+    tests_path = os.path.join(project_root, "tests")
+    if not os.path.isdir(tests_path):
+        return f"tests/ directory not found: {tests_path}", ""
+
+    tmpdir = tempfile.mkdtemp(prefix="tsm-pytest-")
+    report = os.path.join(tmpdir, "report.xml")
+
+    argv = [sys.executable, "-m", "pytest"]
+    argv += list(nodeids) if nodeids else ["tests/"]
+    if markers:
+        # The Manager's `--markers` is its own option name; pytest's selector
+        # is `-m`. `--markers` means "list the registered markers" to pytest,
+        # so passing it through would print a catalogue and run nothing.
+        argv += ["-m", markers]
+    argv += ["-v", "-p", "no:cacheprovider", f"--junitxml={report}"]
+
+    popen_kw = dict(
+        stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
+        text=True, encoding="utf-8", errors="replace",
+        cwd=project_root, creationflags=_CREATE_NO_WINDOW,
+    )
+    if sys.platform != "win32":
+        popen_kw["start_new_session"] = True       # own group → killpg
+    try:
+        proc = subprocess.Popen(argv, **popen_kw)
+    except OSError as exc:
+        _rmtree(tmpdir)
+        return f"Failed to launch pytest: {exc}", ""
+
+    try:
+        out, _ = proc.communicate(timeout=timeout)
+    except subprocess.TimeoutExpired:
+        _kill_tree(proc)
+        try:
+            out, _ = proc.communicate(timeout=5)   # reap; keep partial output
+        except Exception:
+            out = ""
+        out = (out or "") + f"\npytest timed out after {timeout} s."
+
+    junit = ""
+    try:
+        with open(report, encoding="utf-8", errors="replace") as fh:
+            junit = fh.read()
+    except OSError:
+        # A run killed before pytest wrote its report has no XML. The progress
+        # lines are still there, so results degrade to "no duration" rather
+        # than disappearing.
+        pass
+    _rmtree(tmpdir)
+    return (out or ""), junit
+
+
+def _rmtree(path: str) -> None:
+    """Best-effort cleanup of the temp report directory."""
+    import shutil
+    try:
+        shutil.rmtree(path, ignore_errors=True)
+    except Exception:                              # noqa: BLE001 - cleanup
+        pass
+
+
 def run_gate(project_root: str, timeout: int = 180) -> "tuple[bool, str]":
     """Run the project's `-m "not tk"` gate once: ``(all_passed, combined_output)``.
 
@@ -257,7 +349,7 @@ class PytestRun:
             pass
 
 
-def _parse_pytest_summary(output: str) -> tuple[int, int]:
+def parse_pytest_summary(output: str) -> tuple[int, int]:
     """Extract (passed, total) from pytest's footer line.
 
     Recognises ``===== N passed [, M skipped] [, K failed] in Xs =====``
@@ -277,6 +369,12 @@ def _parse_pytest_summary(output: str) -> tuple[int, int]:
         if m_fail:   failed  = int(m_fail.group(1))
         if m_error:  errored = int(m_error.group(1))
     return passed, passed + failed + errored
+
+
+#: The name this was known by before `cli.py` needed it too. An alias rather
+#: than a second implementation: two parsers of one footer is how two callers
+#: start reporting different totals for the same run.
+_parse_pytest_summary = parse_pytest_summary
 
 
 def run_pytest_in_background(

@@ -239,3 +239,38 @@ def test_pure_read_excludes_os_ui_effects_in_writing():
     claim than it makes.
     """
     assert "OS-level UI effects" in commands.SIDE_EFFECT_MEANING[PURE_READ]
+
+
+def test_a_taskable_command_can_actually_be_run_as_a_task():
+    """`task=True` has to mean "launchable with no further input".
+
+    The VS Code TaskProvider builds one task per `task=True` row, filling in
+    `--project ${workspaceFolder}` and nothing else. A row that carried no CLI
+    subcommand, or that did not take `--project`, would produce a task that
+    cannot be constructed — so marking, say, `focus` as taskable should fail
+    here rather than ship a menu entry that errors when clicked.
+    """
+    for command in COMMANDS:
+        if not command.task:
+            continue
+        assert command.cli, (
+            f"{command.action} is taskable but has no CLI subcommand")
+        assert command.requires_project, (
+            f"{command.action} is taskable but takes no --project; the task "
+            "provider has nothing to pass it")
+
+
+def test_only_test_run_selects_individual_tests():
+    """`accepts_tests` is about running tests, `accepts_paths` about scoping
+    a report to files. They are different questions and a row answering the
+    first without being able to run anything would be a contradiction.
+    """
+    selectors = [c.action for c in COMMANDS if c.accepts_tests]
+    assert selectors == ["test-run"], selectors
+
+
+def test_the_generated_file_carries_the_new_selector_flag():
+    """A flag the extension reads has to survive the round trip."""
+    generated = commands.as_typescript()
+    assert "acceptsTests: true," in generated
+    assert "acceptsTests: boolean;" in generated

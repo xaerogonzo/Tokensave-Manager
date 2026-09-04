@@ -483,9 +483,22 @@ def _cmd_tests(args) -> Result:
     """Test discovery: what exists, what is uncovered, what looks stale.
 
     Read-only and AST-only — no pytest runs here. Use `test-run` for that.
+
+    `--detail` adds `data.test_cases`: one record per `def test_*`, with the
+    nodeid to run it by and the 1-based range to put a cursor on. It is opt-in
+    because the default payload feeds a tree that only shows counts, and this
+    repository alone has ~3000 definitions.
+
+    **A `test_case` is a definition, not a promise pytest will collect it.**
+    Discovery is an AST walk, which is what lets it answer with pytest absent
+    and without spawning anything; what pytest actually collects is decided by
+    a run. Measured on this repository: 2928 definitions against 2927 distinct
+    collected bases, the difference being one shadowed name that has since
+    been fixed, with nothing discovered that was not collected and nothing
+    collected that was not discovered.
     """
-    from helpers.test_discovery import (detect_stale_tests, list_test_files,
-                                        scan_coverage_gaps)
+    from helpers.test_discovery import (detect_stale_tests, list_test_cases,
+                                        list_test_files, scan_coverage_gaps)
     project = _resolve_project(args.project)
 
     files = list_test_files(project)
@@ -502,6 +515,16 @@ def _cmd_tests(args) -> Result:
                                            "reason": s.reason,
                                            "detail": s.detail}),
     }
+    if getattr(args, "detail", False):
+        # Deliberately uncapped, like `test-run`'s results and for the same
+        # reason: a Test Explorer missing the tail of its own tree is worse
+        # than a large payload, and a cap here would be invisible to it.
+        data["test_cases"] = [
+            {"nodeid": c.nodeid, "name": c.name, "class_name": c.class_name,
+             "file": c.file, "line": c.line, "end_line": c.end_line,
+             "markers": list(c.markers)}
+            for c in list_test_cases(project)]
+
     return Result(EXIT_OK, data,
                   human=f"tests: {data['test_count']} test(s) in "
                         f"{len(files)} file(s), {len(uncovered)} source file(s) "
@@ -553,11 +576,40 @@ def _cmd_test_run(args) -> Result:
     **No findings are emitted.** A failing test is not a diagnostic about a
     line of source, and turning a red suite into thousands of Problems entries
     would bury the ones that are.
+
+    **`data.tests` is always present, and is not capped.** It is an *additive*
+    extension to this envelope, not an unchanged one: `schema_version` stays 1
+    because adding an optional field is compatible, and every field that was
+    here before still means what it did. It is exempt from `_LIST_CAP` on
+    purpose -- a truncated result set would leave Test Explorer items silently
+    un-attributed, which is a worse failure than a large payload. Measured on
+    this repository's own suite under `--markers "not tk"`: 2785 records, a
+    436 KB array in a 456 KB envelope.
+
+    **`--tests` and `--markers` are alternatives.** No composition rule is
+    defined for the pair -- intersection and precedence are both defensible,
+    which is exactly why guessing one would be wrong -- so passing both is a
+    usage error naming them.
+
+    **The headline counts still come from pytest's footer.** `data.tests` is
+    counted independently from the progress lines, and when the two disagree
+    that is reported as a warning rather than reconciled: two measurements of
+    one run differing is information, and silently preferring one discards it.
     """
     import time
-    from helpers.smoke_runner import run_smoke_tests
+    from helpers import pytest_report
+    from helpers.smoke_runner import parse_pytest_summary, run_pytest_selection
     from helpers.test_lock import TestRunBusy, test_run_lock
     project = _resolve_project(args.project)
+
+    nodeids = tuple(getattr(args, "tests", ()) or ())
+    markers = (getattr(args, "markers", "") or "").strip()
+    if nodeids and markers:
+        return Result(EXIT_USAGE,
+                      error="--tests and --markers are mutually exclusive; "
+                            "pass a marker expression or a list of test ids, "
+                            "not both",
+                      human="--tests and --markers are mutually exclusive")
 
     # Checked here rather than inferred from an empty result: "there is no
     # suite" is a prerequisite the user can fix, and it must not look like
@@ -568,11 +620,29 @@ def _cmd_test_run(args) -> Result:
     try:
         with test_run_lock(project):
             started = time.monotonic()
-            passed, total, output = run_smoke_tests(project)
+            output, junit = run_pytest_selection(project, nodeids=nodeids,
+                                                 markers=markers)
+            passed, total = parse_pytest_summary(output)
             duration = time.monotonic() - started
     except TestRunBusy as exc:
-        return Result(EXIT_FAILED, {"running": True, "run_state": "busy"},
+        # A per-test run during a full run is refused, not queued and not
+        # silently skipped: the Explorer has to be able to say "it did not
+        # run, and here is why" rather than showing an outcome nobody earned.
+        return Result(EXIT_FAILED, {"running": True, "run_state": "busy",
+                                    "tests": []},
                       error=str(exc), human=str(exc))
+
+    outcomes = pytest_report.parse_run(output, junit)
+    per_test = [{"nodeid": o.nodeid, "outcome": o.outcome,
+                 "duration_seconds": o.duration, "message": o.message}
+                for o in outcomes]
+    counted = pytest_report.summarise(outcomes)
+    warnings: list = []
+    from_lines = counted["passed"] + counted["failed"] + counted["error"]
+    if total != from_lines:
+        warnings.append(
+            f"pytest's footer reports {total} test(s) and its progress lines "
+            f"report {from_lines}; the counts below are the footer's")
 
     # `_parse_pytest_summary` returns (passed, passed + failed + errored) and
     # deliberately leaves SKIPPED out of the total, so failures are the
@@ -582,7 +652,9 @@ def _cmd_test_run(args) -> Result:
     skipped = _count_skipped(output)
     data = {"passed": passed, "failed": failed, "skipped": skipped,
             "total": total, "duration_seconds": round(duration, 2),
-            "output": output[-_OUTPUT_CAP:]}
+            "output": output[-_OUTPUT_CAP:],
+            "selection": {"tests": list(nodeids), "markers": markers},
+            "tests": per_test}
 
     if total == 0 and _collected_nothing(output):
         # pytest SAID "no tests ran". That is a result, read successfully, and
@@ -592,7 +664,7 @@ def _cmd_test_run(args) -> Result:
         # unverifiable was this command reporting its own contract backwards.
         data["collected"] = 0
         data["run_state"] = RUN_NO_TESTS
-        return Result(EXIT_OK, data,
+        return Result(EXIT_OK, data, warnings,
                       human="test-run: no tests collected")
     if total == 0:
         # It ran, but no summary could be read. Reporting EXIT_OK here would
@@ -601,14 +673,15 @@ def _cmd_test_run(args) -> Result:
         # pytest, fix a collection error, or raise the timeout.
         state = _classify_run(output)
         data["run_state"] = state
-        return Result(EXIT_VERIFY_FAILED, data,
+        return Result(EXIT_VERIFY_FAILED, data, warnings,
                       error=f"could not read a pytest summary from the output "
                             f"({state})",
                       human=f"test-run: could not verify the result ({state})")
     data["run_state"] = RUN_COMPLETED
     human = (f"test-run: {passed} passed, {failed} failed, {skipped} skipped "
              f"in {duration:.1f}s")
-    return Result(EXIT_OK if not failed else EXIT_FAILED, data, human=human)
+    return Result(EXIT_OK if not failed else EXIT_FAILED, data, warnings,
+                  human=human)
 
 
 #: Tail of pytest output kept in the envelope. Enough to see the failures
@@ -1323,10 +1396,21 @@ def _build_parser() -> argparse.ArgumentParser:
     add("status", "one cheap roll-up: git, index, MCP, pending request "
                   "(read-only, never probes)")
 
-    add("tests", "discovery only: what exists, what is uncovered, what "
-                 "looks stale (read-only, no pytest run)")
+    ts = add("tests", "discovery only: what exists, what is uncovered, what "
+                      "looks stale (read-only, no pytest run)")
+    ts.add_argument("--detail", action="store_true",
+                    help="also list every test definition with its nodeid "
+                         "and source range")
 
-    add("test-run", "run the suite once and report structured counts")
+    tr = add("test-run", "run the suite once and report structured counts")
+    tr.add_argument("--tests", nargs="*", default=[],
+                    help="pytest node ids to run; omit to run the whole suite")
+    tr.add_argument("--markers", default="",
+                    help="a pytest marker expression, e.g. \"not tk\". This "
+                         "is the Manager's own option name: it is passed to "
+                         "pytest as -m, because pytest's own --markers lists "
+                         "registered markers rather than selecting tests. "
+                         "Mutually exclusive with --tests")
 
     t = add("test-gaps", "suggest tests for changes against a base ref")
     t.add_argument("--base", default=AUTO_BASE,

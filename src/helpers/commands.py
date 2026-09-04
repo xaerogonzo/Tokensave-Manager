@@ -85,6 +85,10 @@ class Command:
     requires_project: bool = True
     #: Whether the command accepts `--paths` to scope its findings to files.
     accepts_paths: bool = False
+    #: Whether the command accepts `--tests` to run individual node ids.
+    #: Separate from `accepts_paths` because they scope different things: one
+    #: narrows which files a report covers, the other selects which tests run.
+    accepts_tests: bool = False
     #: Whether this operation is offered as a generated VS Code task.
     task: bool = False
 
@@ -131,8 +135,10 @@ COMMANDS: tuple = (
         action="test-run", cli="test-run", vscode="tokensaveManager.testRun",
         label="Run tests",
         detail="Run the suite once and report the counts.",
-        # Runs pytest, which writes .pytest_cache and coverage artefacts.
-        side_effect=OBSERVE_REFRESH),
+        # Runs pytest, which writes coverage artefacts. It passes
+        # `-p no:cacheprovider`, so running one test from an editor does not
+        # leave a .pytest_cache behind as a side effect of looking.
+        side_effect=OBSERVE_REFRESH, accepts_tests=True),
     Command(
         action="mcp-status", cli="mcp-status",
         vscode="tokensaveManager.mcpStatus", label="MCP status",
@@ -259,6 +265,8 @@ def as_typescript() -> str:
         "  sideEffect: SideEffect;",
         "  requiresProject: boolean;",
         "  acceptsPaths: boolean;",
+        "  /** Whether `--tests` may select individual node ids. */",
+        "  acceptsTests: boolean;",
         "  task: boolean;",
         "}",
         "",
@@ -275,6 +283,7 @@ def as_typescript() -> str:
             f'    sideEffect: {json.dumps(c.side_effect)},',
             f'    requiresProject: {"true" if c.requires_project else "false"},',
             f'    acceptsPaths: {"true" if c.accepts_paths else "false"},',
+            f'    acceptsTests: {"true" if c.accepts_tests else "false"},',
             f'    task: {"true" if c.task else "false"},',
             "  },",
         ]

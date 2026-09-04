@@ -38,6 +38,8 @@ export interface ManagerCommand {
   sideEffect: SideEffect;
   requiresProject: boolean;
   acceptsPaths: boolean;
+  /** Whether `--tests` may select individual node ids. */
+  acceptsTests: boolean;
   task: boolean;
 }
 
@@ -51,6 +53,7 @@ export const COMMANDS: readonly ManagerCommand[] = [
     sideEffect: "pure_read",
     requiresProject: true,
     acceptsPaths: false,
+    acceptsTests: false,
     task: false,
   },
   {
@@ -62,6 +65,7 @@ export const COMMANDS: readonly ManagerCommand[] = [
     sideEffect: "pure_read",
     requiresProject: true,
     acceptsPaths: true,
+    acceptsTests: false,
     task: true,
   },
   {
@@ -73,6 +77,7 @@ export const COMMANDS: readonly ManagerCommand[] = [
     sideEffect: "observe_refresh",
     requiresProject: true,
     acceptsPaths: false,
+    acceptsTests: false,
     task: true,
   },
   {
@@ -84,6 +89,7 @@ export const COMMANDS: readonly ManagerCommand[] = [
     sideEffect: "pure_read",
     requiresProject: true,
     acceptsPaths: false,
+    acceptsTests: false,
     task: false,
   },
   {
@@ -95,6 +101,7 @@ export const COMMANDS: readonly ManagerCommand[] = [
     sideEffect: "pure_read",
     requiresProject: true,
     acceptsPaths: false,
+    acceptsTests: false,
     task: false,
   },
   {
@@ -106,6 +113,7 @@ export const COMMANDS: readonly ManagerCommand[] = [
     sideEffect: "pure_read",
     requiresProject: true,
     acceptsPaths: true,
+    acceptsTests: false,
     task: true,
   },
   {
@@ -117,6 +125,7 @@ export const COMMANDS: readonly ManagerCommand[] = [
     sideEffect: "observe_refresh",
     requiresProject: true,
     acceptsPaths: false,
+    acceptsTests: true,
     task: false,
   },
   {
@@ -128,6 +137,7 @@ export const COMMANDS: readonly ManagerCommand[] = [
     sideEffect: "pure_read",
     requiresProject: true,
     acceptsPaths: false,
+    acceptsTests: false,
     task: true,
   },
   {
@@ -139,6 +149,7 @@ export const COMMANDS: readonly ManagerCommand[] = [
     sideEffect: "pure_read",
     requiresProject: true,
     acceptsPaths: false,
+    acceptsTests: false,
     task: true,
   },
   {
@@ -150,6 +161,7 @@ export const COMMANDS: readonly ManagerCommand[] = [
     sideEffect: "mutating",
     requiresProject: true,
     acceptsPaths: false,
+    acceptsTests: false,
     task: true,
   },
   {
@@ -161,6 +173,7 @@ export const COMMANDS: readonly ManagerCommand[] = [
     sideEffect: "mutating",
     requiresProject: true,
     acceptsPaths: false,
+    acceptsTests: false,
     task: true,
   },
   {
@@ -172,6 +185,7 @@ export const COMMANDS: readonly ManagerCommand[] = [
     sideEffect: "observe_refresh",
     requiresProject: true,
     acceptsPaths: false,
+    acceptsTests: false,
     task: false,
   },
   {
@@ -183,6 +197,7 @@ export const COMMANDS: readonly ManagerCommand[] = [
     sideEffect: "pure_read",
     requiresProject: false,
     acceptsPaths: false,
+    acceptsTests: false,
     task: false,
   },
   {
@@ -194,6 +209,7 @@ export const COMMANDS: readonly ManagerCommand[] = [
     sideEffect: "mutating",
     requiresProject: true,
     acceptsPaths: false,
+    acceptsTests: false,
     task: false,
   },
   {
@@ -205,6 +221,7 @@ export const COMMANDS: readonly ManagerCommand[] = [
     sideEffect: "pure_read",
     requiresProject: false,
     acceptsPaths: false,
+    acceptsTests: false,
     task: false,
   },
 ];
