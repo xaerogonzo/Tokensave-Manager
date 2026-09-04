@@ -91,7 +91,7 @@ MAX_DEPTH = 4
 # describe` is not an option: the Nuitka onefile build ships without a
 # repository, and a version that silently reads "unknown" in the artifact users
 # actually run is worse than one maintained deliberately.
-APP_VERSION = "2.5.0"
+APP_VERSION = "2.6.0"
 
 
 # Hide the cmd.exe window when spawning subprocesses from a Tk app under

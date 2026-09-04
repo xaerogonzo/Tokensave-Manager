@@ -136,6 +136,105 @@ Rows refresh when a command completes, when the workspace folders change, when
 the extension's settings change, and when a watcher sees `.mcp.json` or a
 pending commit request move underneath you.
 
+## The Test Explorer
+
+Your `tests/` tree appears in VS Code's Testing view, one item per `def
+test_*`. Run one, run a selection, run the lot; a failure shows up on the line
+its `def` is on.
+
+Two Run profiles:
+
+| Profile | What it runs |
+|---|---|
+| **Run** | The selection, or the whole suite when nothing is selected |
+| **Gate (not tk)** | `-m "not tk"` — what CI enforces, and what keeps a run from opening real Tk windows over your editor on Windows |
+
+**There is no Debug profile, deliberately.** Debugging pytest means launching
+debugpy with the right interpreter, working directory, path and port. The
+Python extension does that properly and is already installed by anyone
+debugging Python here; a second, worse copy would be a second thing to be
+wrong. Both controllers can be present at once — ours is labelled
+**TokenSave** and adds the Manager's run lock, the gate profile, and its view
+of coverage and staleness.
+
+### Discovery is static, and says so
+
+Test items come from an AST walk in `helpers/test_discovery.py`, not from
+`pytest --collect-only`. That is what lets the tree appear instantly, with no
+subprocess, and even with pytest not installed.
+
+The trade is that a test item is a **definition found in source**, not a
+promise pytest will collect it. Collection rules, an import that raises, or an
+unusual class layout can all mean a definition never runs — and a *run result*
+is what settles that. Measured on the Manager's own repository: 2928
+definitions against 2927 distinct bases from a real collection, with nothing
+discovered that was not collected and nothing collected that was not
+discovered.
+
+A parametrised test shows as **one** item, because that is one definition. It
+runs as several node ids, and `test-run` maps those back before the results
+reach the editor. When a result cannot be tied to exactly one item — which
+should not happen, but "should not" is not "cannot" — it is reported as
+unattributable rather than attributed to a guess. A green tick on the wrong
+test is worse than no tick, and invisible.
+
+### Cancelling really stops it
+
+Cancelling a run kills the whole process tree. Killing only the parent would
+orphan the pytest child, which keeps running *and* keeps holding the project's
+test lock — so the next run gets refused as busy by a process you cannot see.
+A cancelled run reports as cancelled, never as a suite that went red.
+
+## Reaching the running Manager
+
+Five commands ask the Manager you already have open to bring up one of its own
+dialogs, through the request inbox in `helpers/manager_ipc.py`:
+
+| Command | Opens |
+|---|---|
+| **Open Doctor in the Manager** | The Doctor tab for this project |
+| **Open the Test Manager** | Coverage gaps, stale tests, the scaffold generator |
+| **Open Savings in the Manager** | The full cost and savings view |
+| **Open Doc Updates** | Draft CHANGELOG and README entries |
+| **Open this project in the Manager** | Selects this folder in the Projects tab |
+
+The last one is **not** *Open Manager*, which only raises the window and needs
+no project. Both exist because they are different operations.
+
+Every one of these opens a dialog in front of a person. None of them commits,
+applies or approves anything — the same propose-only rule the rest of the
+extension follows.
+
+Requests are filed *through the CLI* rather than written here, so Python stays
+the only thing that knows how a request id is built: it is a hash of the
+canonicalised request, and canonicalisation resolves symlinks before folding
+case, because two spellings of one directory must not produce two
+authorization verdicts.
+
+**You are told which of five things happened**, because they are five
+different things:
+
+| Outcome | What you see |
+|---|---|
+| opened | a quiet status-bar note |
+| refused | a warning carrying the protocol's own reason |
+| quarantined | an error — the Manager tried repeatedly and gave up |
+| queued, not yet acknowledged | said as such; whether the Manager is running is a **separate** sentence |
+| no record of it | a warning, which is not the same as "still waiting" |
+
+## Tasks
+
+Every operation marked taskable appears in **Terminal → Run Task** under
+**TokenSave**, with no `.vscode/tasks.json` written into your repository.
+
+Tasks are process executions, never shell executions. A shell task would
+re-split a path like `D:\Claude Co worker\...` on the space — the same failure
+that once produced `bash: D:/Claude: No such file or directory` from a
+generated hook.
+
+The Manager can still write a `tasks.json` for people who do not have this
+extension installed; that is a different path and it stays.
+
 ## The Problems panel
 
 **Checks**, **Doctor** and **Scout** put their findings in VS Code's Problems

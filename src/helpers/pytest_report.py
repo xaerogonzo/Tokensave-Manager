@@ -279,21 +279,29 @@ def parse_run(verbose_text: str, junit_text: str = "") -> list:
 def resolve_identities(outcomes: list, requested: list) -> list:
     """Attach each result to the requested test it belongs to.
 
-    *requested* is a list of AST-discovered nodeids (`TestCase.nodeid`). Those
-    are **prefixes** of what pytest reports for a parametrised test, so the
-    match is:
+    *requested* is what the caller asked to run: AST-discovered nodeids
+    (`TestCase.nodeid`), or file paths, both of which pytest accepts as
+    selectors. Neither is necessarily what it reports back, so the match is:
 
       1. **exact** — the run reported the same id that was asked for;
       2. **parametrised** — the run's id is ``<requested>[...]``;
-      3. neither — the result is returned unattributed (``requested == ""``),
-         which is the honest answer for a test the caller never asked about.
+      3. **inside a requested file** — the run's id is ``<requested>::...``
+         and the request named a file rather than a test;
+      4. none of those — the result is returned unattributed
+         (``requested == ""``), which is the honest answer for a test the
+         caller never asked about.
 
-    Rule 2 is applied only when it lands on **exactly one** candidate. It
-    cannot normally collide, because two definitions with the same nodeid are
-    the shadowing defect `tests/test_no_shadowed_tests.py` exists to prevent —
-    but "cannot normally" is not "cannot", and a best guess between two
-    candidate tests is precisely the failure this module is shaped to avoid.
-    So a collision sets ``ambiguous`` and attributes to neither.
+    Rules 2 and 3 both require the prefix to be followed by a **separator**,
+    so ``test_a`` cannot claim ``test_ab`` and ``tests/test_a.py`` cannot claim
+    ``tests/test_ab.py``. Without that boundary a prefix match silently
+    mis-attributes between two genuinely different things.
+
+    A prefix rule is applied only when it lands on **exactly one** candidate.
+    It cannot normally collide, because two definitions with the same nodeid
+    are the shadowing defect `tests/test_no_shadowed_tests.py` exists to
+    prevent — but "cannot normally" is not "cannot", and a best guess between
+    two candidates is precisely the failure this module is shaped to avoid. So
+    a collision sets ``ambiguous`` and attributes to neither.
     """
     exact = {}
     for nodeid in requested:
@@ -306,7 +314,11 @@ def resolve_identities(outcomes: list, requested: list) -> list:
             out.append(Attribution(outcome=outcome, requested=outcome.nodeid,
                                    ambiguous=exact[outcome.nodeid] > 1))
             continue
-        candidates = [n for n in exact if outcome.nodeid.startswith(n + "[")]
+        # Both separators, so a requested test matches its parameter cases
+        # and a requested file matches the tests inside it.
+        candidates = [n for n in exact
+                      if outcome.nodeid.startswith(n + "[")
+                      or outcome.nodeid.startswith(n + "::")]
         if len(candidates) == 1 and exact[candidates[0]] == 1:
             out.append(Attribution(outcome=outcome, requested=candidates[0]))
         elif len(candidates) > 1 or (candidates and exact[candidates[0]] > 1):

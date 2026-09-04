@@ -31,6 +31,20 @@ reuses the live suite's activation, command and tree files rather than keeping
 a second copy, because a smoke suite that has drifted from what it mirrors is
 worse than none.
 
+### The Test Explorer, specifically
+
+Its *decisions* — which node ids reach the command line, how a per-test record
+becomes Explorer state, what a cancelled run reports — go in the stub suite;
+none of that needs an editor.
+
+Its *tree* goes in the live suite, for the same reason the projects tree does:
+the stub's `TestController` stores what it is handed, which proves the code
+called it and nothing about whether a person would see their tests.
+
+And **invalidation belongs in the live suite only**. "A test file appears and
+the tree picks it up" runs through a real `FileSystemWatcher`, which is exactly
+the part a fake would assume away.
+
 ## The editor never appears on your screen
 
 A mutation run launches an editor per live arm — fourteen on the current set.
@@ -141,3 +155,47 @@ launcher refuses to start if it stops producing findings, because a fixture
 that cannot produce the interesting case makes every test about it vacuous
 *and green*. None of the repository's six `test_no_*` guards see it — they all
 walk `src/` only — so no exception has to be named for it today.
+
+**The stub was more permissive than the editor, and 22 tests passed against an
+id VS Code rejects.** Test item ids joined the folder and the node id with a
+NUL. The stub stored whatever it was handed; the live suite came back with
+*"Test IDs may not include the ... symbol"* and the whole tree had failed to
+build. Ids are percent-encoded now, and **the stub refuses control characters
+too**, so the same mistake fails in the one-second suite. Reverting the id
+format makes 17 headless tests fail, which is the check that this actually
+closed. When you add a stub method, make it refuse what the real one refuses.
+
+Underneath that is a smaller one: the NUL had been *typed literally* into the
+source, where it is invisible in every editor and every diff — so the first
+symptom was a test failing with "cannot read properties of undefined" and an
+investigation in the wrong module. Write the escape.
+
+**`until(description, predicate)` takes the description FIRST.** Passing them
+the other way round does not fail fast; it times out after 30 seconds with
+"last threw: predicate is not a function", once per test.
+
+**Piping a suite through `tail` throws away its exit code.** `npm run
+test:live | tail -30` reports the exit status of `tail`, which is always 0. A
+run with 7 failures looked green until the "7 test(s) failed" line was read out
+of the middle of the output. Redirect to a file and check `$?`.
+
+**Patch at the boundary the test is about, and check the code reaches it.**
+Two `setup.ts` tests patched `runProjectlessCli` and passed for the wrong
+reason: `verifySetup` checks `resolveRunner` first, and against a fictional
+root it returned "broken" without ever calling the CLI.
+
+**A counter attached to a function you later replace records nothing.** The
+stale-response test swapped `runCli` mid-test, then asserted on a counter
+belonging to the swapped-out version. Instrument once and vary the behaviour
+inside.
+
+**Bound a poll loop by attempts, not by wall-clock time.** The Manager bridge's
+loop originally ran to a `Date.now()` deadline, so a test supplying a no-op
+`sleep` spun as fast as the machine allowed for six real seconds. The backoff
+list is the budget now, and a test and a user get the same number of polls.
+
+**The live fixture has a `tests/` directory and the Explorer tests write into
+it.** They clean up in a `finally`, but an interrupted run can leave
+`test_added_later.py` or `test_transient.py` behind. Both are in the disposable
+copy under `.vscode-test/`, not in `test/workspace/`, so the next run starts
+clean.

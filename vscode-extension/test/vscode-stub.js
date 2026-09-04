@@ -118,6 +118,13 @@ function fakeController(id, label) {
     resolveHandler: undefined,
     refreshHandler: undefined,
     createTestItem(itemId, itemLabel, uri) {
+      // The real API refuses control characters in a test id, and a stub that
+      // accepts them lets 22 headless tests pass against an id the editor
+      // rejects outright. That happened; hence this line.
+      if (/[\u0000-\u001f]/.test(itemId)) {
+        throw new Error(
+          `Test IDs may not include the ${JSON.stringify(itemId)} symbol`);
+      }
       return {
         id: itemId,
         label: itemLabel,

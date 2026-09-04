@@ -363,3 +363,42 @@ def test_discovery_ids_attribute_to_the_fixture_run():
     assert unattributed == [], (
         "every result should map back to a discovered definition; these did "
         f"not: {unattributed}")
+
+
+def test_a_requested_file_claims_the_tests_inside_it():
+    """`--tests tests/test_x.py` is a legal pytest selector.
+
+    Found by running the plan's own verification command by hand: every result
+    came back unattributed, because the only prefix rule was the parametrised
+    one. The Explorer never hit it — it descends to leaf node ids before
+    running — which is exactly the gap a suite built around one caller leaves.
+    """
+    results = [
+        TestOutcome(nodeid="tests/test_x.py::test_a", outcome=PASSED),
+        TestOutcome(nodeid="tests/test_x.py::TestC::test_b", outcome=PASSED),
+    ]
+    attributed = resolve_identities(results, ["tests/test_x.py"])
+    assert [a.requested for a in attributed] == ["tests/test_x.py"] * 2
+
+
+def test_a_requested_file_does_not_claim_a_similarly_named_one():
+    """The separator boundary, in the file direction.
+
+    Without requiring `::` after the prefix, `tests/test_a.py` would claim
+    every result from `tests/test_ab.py` — two genuinely different files.
+    """
+    results = [TestOutcome(nodeid="tests/test_ab.py::test_x", outcome=PASSED)]
+    attributed = resolve_identities(results, ["tests/test_a.py"])
+    assert attributed[0].requested == ""
+    assert not attributed[0].ambiguous
+
+
+def test_a_file_and_a_test_inside_it_requested_together_are_ambiguous():
+    """Asking for both is a genuine ambiguity, and it is reported as one
+    rather than resolved by whichever rule happens to run first."""
+    results = [TestOutcome(nodeid="tests/test_x.py::test_a[1]",
+                           outcome=PASSED)]
+    attributed = resolve_identities(
+        results, ["tests/test_x.py", "tests/test_x.py::test_a"])
+    assert attributed[0].ambiguous
+    assert attributed[0].requested == ""

@@ -165,7 +165,140 @@ const MUTATIONS = [
     expect: "writes the document exactly once",
     tier: LIVE,
   },
+  {
+    name: "an ambiguous result is attributed anyway",
+    file: "testing.js",
+    find: "            if (result.ambiguous) {",
+    replace: "            if (false) {",
+    expect: "ambiguous result is reported, never attributed",
+    tier: FAST,
+  },
+  {
+    name: "an unrecognised outcome counts as a pass",
+    file: "testing.js",
+    find: "                    run.failed(item, this.messageFor(result), ms);",
+    replace: "                    run.passed(item, ms);",
+    expect: "unrecognised outcome fails rather than passing",
+    tier: FAST,
+  },
+  {
+    name: "a cancelled run is reported as a failure",
+    file: "testing.js",
+    find: "                run.skipped(item);\n            }\n            run.appendOutput",
+    replace: "                run.failed(item, new vscode.TestMessage(\"x\"));\n            }\n            run.appendOutput",
+    expect: "cancelled run reports cancelled, not failed",
+    tier: FAST,
+  },
+  {
+    name: "the gate profile sends node ids instead of a marker",
+    file: "testing.js",
+    find: "        const args = markers\n            ? [\"--markers\", markers]",
+    replace: "        const args = false\n            ? [\"--markers\", markers]",
+    expect: "gate profile passes a marker expression",
+    tier: FAST,
+  },
+  {
+    name: "a pending request is reported as delivered",
+    file: "manager.js",
+    find: "            await reportStillPending(ui, label, written.manager_running);",
+    replace: "            ui.status(`TokenSave: ${label} \u2014 opened in the Manager`);",
+    expect: "queued",
+    tier: FAST,
+  },
+  {
+    name: "quarantined is rendered as an ordinary refusal",
+    file: "manager.js",
+    find: "            ui.error(`TokenSave Manager quarantined the request:",
+    replace: "            ui.warning(`TokenSave Manager quarantined the request:",
+    expect: "quarantined is an error",
+    tier: FAST,
+  },
+  {
+    name: "a retired invocation still overwrites a newer one",
+    file: "manager.js",
+    find: "    if (ticket !== generation) {\n        // A later invocation has taken over.",
+    replace: "    if (false) {\n        // A later invocation has taken over.",
+    expect: "slower earlier invocation does not overwrite",
+    tier: FAST,
+  },
+  {
+    name: "the code lens claims the code has no tests",
+    file: "lens.js",
+    find: '        return ["$(beaker) no filename-matched test"];',
+    replace: '        return ["$(beaker) no tests"];',
+    expect: "filename-matched, not 'no tests'",
+    tier: FAST,
+  },
+  {
+    name: "a stale run may overwrite a newer one's findings",
+    file: "onsave.js",
+    find: "    return generations.get(key) === generation;",
+    replace: "    return true;",
+    expect: "newer run retires an older one",
+    tier: FAST,
+  },
+  {
+    name: "a frozen runner is offered checks it cannot run",
+    file: "tasks.js",
+    find: "        && !(kind === \"bundled\" && exports.FROZEN_UNSUPPORTED.has(command.cli)));",
+    replace: "        && true);",
+    expect: "frozen runner is not offered checks",
+    tier: FAST,
+  },
+  {
+    name: "a configured-but-broken Manager reports as unconfigured",
+    file: "setup.js",
+    find: "            state: configured ? \"broken\" : \"unconfigured\",",
+    replace: "            state: \"unconfigured\",",
+    expect: "does not resolve is BROKEN",
+    tier: FAST,
+  },
+  {
+    name: "a test id uses a character the editor rejects",
+    file: "testing.js",
+    find: "    return `${encodeURIComponent(folder.uri.fsPath)}`\n        + `/${encodeURIComponent(nodeid)}`;",
+    replace: "    return `${folder.uri.fsPath}\\u0000${nodeid}`;",
+    expect: "0-based range",
+    tier: FAST,
+  },
+  {
+    name: "the test tree never refreshes after activation",
+    file: "extension.js",
+    find: "            discovery?.invalidate(folder);",
+    replace: "            void folder;",
+    expect: "picks up a test file that appears",
+    tier: LIVE,
+  },
+  {
+    name: "test items lose their labels",
+    file: "testing.js",
+    find: "            ? `${testCase.class_name}::${testCase.name}`",
+    replace: "            ? `${testCase.name}`",
+    expect: "names a class method with its class",
+    tier: LIVE,
+  },
 ];
+
+
+/**
+ * The fast suite's test files, read from the `test` script in package.json.
+ *
+ * This list used to be written out here, and it silently stopped matching:
+ * three new suites were added to `npm test` and never ran under mutation, so
+ * every property they protect was unverified while the runner reported a green
+ * control. Deriving it means adding a file to `npm test` adds it here too.
+ */
+function fastSuiteFiles() {
+  const manifest = JSON.parse(fs.readFileSync(
+    path.join(EXTENSION_ROOT, "package.json"), "utf8"));
+  const script = manifest.scripts.test;
+  const files = script.split(/\s+/).filter((a) => a.endsWith(".test.js"));
+  if (files.length === 0) {
+    throw new Error(
+      `no test files found in the package.json test script: ${script}`);
+  }
+  return files;
+}
 
 // ── running a suite ──────────────────────────────────────────────────────────
 
@@ -190,9 +323,7 @@ function runSuite(tier) {
     // output on CI, and reported four genuinely-caught arms as CAUGHT BY THE
     // WRONG TEST. Naming the reporter makes the format a fact rather than a
     // property of the runner, and it costs one flag.
-    ? ["--test", "--test-reporter=spec",
-       "test/cli.test.js", "test/diagnostics.test.js",
-       "test/surfaces.test.js"]
+    ? ["--test", "--test-reporter=spec", ...fastSuiteFiles()]
     : ["test/integration/runTests.js"];
   const r = cp.spawnSync(process.execPath, args, {
     cwd: EXTENSION_ROOT,

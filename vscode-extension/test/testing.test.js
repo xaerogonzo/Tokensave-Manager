@@ -26,6 +26,17 @@ const { byFile } = require("../out/discovery.js");
 
 const ROOT = process.platform === "win32" ? "C:\\proj" : "/proj";
 
+/**
+ * The id `testing.ts` builds for a folder-plus-nodeid.
+ *
+ * Percent-encoded rather than joined with a separator, because there is no
+ * character that cannot appear in a path AND cannot appear in a node id — and
+ * the obvious candidate, NUL, is rejected by the real editor.
+ */
+function id(nodeid) {
+  return `${encodeURIComponent(ROOT)}/${encodeURIComponent(nodeid)}`;
+}
+
 function testCase(nodeid, overrides) {
   return Object.assign({
     nodeid,
@@ -118,8 +129,8 @@ test("a discovered definition becomes an item with a 0-based range", async () =>
 
   const controller = controllers[0];
   const root = controller.items.get(ROOT);
-  const file = root.children.get(`${ROOT}\u0000tests/a.py`);
-  const item = file.children.get(`${ROOT}\u0000tests/a.py::test_one`);
+  const file = root.children.get(id("tests/a.py"));
+  const item = file.children.get(id("tests/a.py::test_one"));
   // 1-based in the envelope, 0-based here, converted at this boundary only.
   assert.strictEqual(item.range.start.line, 11);
   assert.strictEqual(item.range.end.line, 14);
@@ -141,8 +152,8 @@ test("markers are shown as a description, not baked into the label", async () =>
   await explorer.discoverAll();
   restore();
   const item = controllers[0].items.get(ROOT)
-    .children.get(`${ROOT}\u0000tests/a.py`)
-    .children.get(`${ROOT}\u0000tests/a.py::test_one`);
+    .children.get(id("tests/a.py"))
+    .children.get(id("tests/a.py::test_one"));
   assert.strictEqual(item.description, "tk, parametrize");
   assert.strictEqual(item.label, "test_one");
 });
@@ -156,8 +167,13 @@ test("item ids carry the folder, so two projects cannot collide", async () => {
   controllers[0].items.forEach((root) => {
     root.children.forEach((file) => file.children.forEach((i) => ids.push(i.id)));
   });
-  assert.ok(ids[0].startsWith(ROOT),
+  // The encoded folder path, since the id is percent-encoded — the property
+  // that matters is that the project is IN the id, not how it is spelled.
+  assert.ok(ids[0].startsWith(encodeURIComponent(ROOT)),
             `${ids[0]} does not identify its project`);
+  // And a second folder would produce a different prefix for the same test.
+  const other = process.platform === "win32" ? "C:' + chr(92)*2 + 'other" : "/other";
+  assert.notStrictEqual(encodeURIComponent(other), encodeURIComponent(ROOT));
 });
 
 // ── two run profiles ────────────────────────────────────────────────────────
@@ -178,7 +194,7 @@ test("the gate profile passes a marker expression, never node ids", async () => 
   const { explorer, calls, restore } = explorerWith(cases, envelope([]));
   await explorer.discoverAll();
   const item = controllers[0].items.get(ROOT).children
-    .get(`${ROOT}\u0000tests/a.py`).children.get(`${ROOT}\u0000tests/a.py::test_one`);
+    .get(id("tests/a.py")).children.get(id("tests/a.py::test_one"));
 
   const gate = controllers[0].profiles[1];
   await gate.handler({ include: [item], exclude: [] }, cancellation().token);
@@ -211,8 +227,8 @@ test("running a subset passes exactly those node ids", async () => {
   ];
   const { explorer, calls, restore } = explorerWith(cases, envelope([]));
   await explorer.discoverAll();
-  const file = controllers[0].items.get(ROOT).children.get(`${ROOT}\u0000tests/a.py`);
-  const one = file.children.get(`${ROOT}\u0000tests/a.py::test_one`);
+  const file = controllers[0].items.get(ROOT).children.get(id("tests/a.py"));
+  const one = file.children.get(id("tests/a.py::test_one"));
 
   await controllers[0].profiles[0].handler(
     { include: [one], exclude: [] }, cancellation().token);
@@ -230,7 +246,7 @@ test("selecting a file runs the tests inside it", async () => {
   ];
   const { explorer, calls, restore } = explorerWith(cases, envelope([]));
   await explorer.discoverAll();
-  const file = controllers[0].items.get(ROOT).children.get(`${ROOT}\u0000tests/a.py`);
+  const file = controllers[0].items.get(ROOT).children.get(id("tests/a.py"));
 
   await controllers[0].profiles[0].handler(
     { include: [file], exclude: [] }, cancellation().token);
@@ -246,7 +262,7 @@ test("selecting a file runs the tests inside it", async () => {
 async function runAll(cases, results, extra) {
   const { explorer, restore } = explorerWith(cases, envelope(results, extra));
   await explorer.discoverAll();
-  const file = controllers[0].items.get(ROOT).children.get(`${ROOT}\u0000tests/a.py`);
+  const file = controllers[0].items.get(ROOT).children.get(id("tests/a.py"));
   const items = [];
   file.children.forEach((i) => items.push(i));
   await controllers[0].profiles[0].handler(
@@ -261,9 +277,9 @@ test("a passing test goes green and a failing one carries its message", async ()
     [result("tests/a.py::test_one", "passed"),
      result("tests/a.py::test_two", "failed")]);
 
-  assert.strictEqual(run.states.get(`${ROOT}\u0000tests/a.py::test_one`), "passed");
-  assert.strictEqual(run.states.get(`${ROOT}\u0000tests/a.py::test_two`), "failed");
-  assert.match(run.messages.get(`${ROOT}\u0000tests/a.py::test_two`).message,
+  assert.strictEqual(run.states.get(id("tests/a.py::test_one")), "passed");
+  assert.strictEqual(run.states.get(id("tests/a.py::test_two")), "failed");
+  assert.match(run.messages.get(id("tests/a.py::test_two")).message,
                /assert 1 == 2/);
 });
 
@@ -272,7 +288,7 @@ test("six parametrised results land on the one definition they belong to",
        const results = ["a", "b", "c", "d", "e", "f"].map((p) =>
          result(`tests/a.py::test_one[${p}]`, "passed", "tests/a.py::test_one"));
        const run = await runAll([testCase("tests/a.py::test_one")], results);
-       assert.strictEqual(run.states.get(`${ROOT}\u0000tests/a.py::test_one`),
+       assert.strictEqual(run.states.get(id("tests/a.py::test_one")),
                           "passed");
      });
 
@@ -282,7 +298,7 @@ test("one failing parameter case fails the definition", async () => {
     result("tests/a.py::test_one[b]", "failed", "tests/a.py::test_one"),
   ];
   const run = await runAll([testCase("tests/a.py::test_one")], results);
-  assert.strictEqual(run.states.get(`${ROOT}\u0000tests/a.py::test_one`), "failed");
+  assert.strictEqual(run.states.get(id("tests/a.py::test_one")), "failed");
 });
 
 test("an ambiguous result is reported, never attributed", async () => {
@@ -292,7 +308,7 @@ test("an ambiguous result is reported, never attributed", async () => {
 
   // Not passed. The result could belong to more than one test, and a green
   // tick on the wrong one is worse than no tick.
-  assert.strictEqual(run.states.get(`${ROOT}\u0000tests/a.py::test_one`), "skipped");
+  assert.strictEqual(run.states.get(id("tests/a.py::test_one")), "skipped");
   assert.match(run.output, /could not attribute/);
 });
 
@@ -300,14 +316,14 @@ test("a result attributed to nothing is not applied to anything", async () => {
   const run = await runAll(
     [testCase("tests/a.py::test_one")],
     [result("tests/a.py::test_elsewhere", "failed", "")]);
-  assert.strictEqual(run.states.get(`${ROOT}\u0000tests/a.py::test_one`), "skipped");
+  assert.strictEqual(run.states.get(id("tests/a.py::test_one")), "skipped");
 });
 
 test("a requested test with no result is skipped, not left spinning", async () => {
   const run = await runAll(
     [testCase("tests/a.py::test_one"), testCase("tests/a.py::test_two")],
     [result("tests/a.py::test_one", "passed")]);
-  assert.strictEqual(run.states.get(`${ROOT}\u0000tests/a.py::test_two`), "skipped");
+  assert.strictEqual(run.states.get(id("tests/a.py::test_two")), "skipped");
 });
 
 test("an unrecognised outcome fails rather than passing", async () => {
@@ -315,7 +331,7 @@ test("an unrecognised outcome fails rather than passing", async () => {
   const run = await runAll(
     [testCase("tests/a.py::test_one")],
     [result("tests/a.py::test_one", "something_new")]);
-  assert.strictEqual(run.states.get(`${ROOT}\u0000tests/a.py::test_one`), "failed");
+  assert.strictEqual(run.states.get(id("tests/a.py::test_one")), "failed");
 });
 
 test("a busy suite errors with the reason instead of failing the tests",
@@ -325,9 +341,9 @@ test("a busy suite errors with the reason instead of failing the tests",
          { error: "a test run is already in progress",
            data: { tests: [], run_state: "busy", output: "" } });
 
-       assert.strictEqual(run.states.get(`${ROOT}\u0000tests/a.py::test_one`),
+       assert.strictEqual(run.states.get(id("tests/a.py::test_one")),
                           "errored");
-       assert.match(run.messages.get(`${ROOT}\u0000tests/a.py::test_one`).message,
+       assert.match(run.messages.get(id("tests/a.py::test_one")).message,
                     /already in progress/);
      });
 
@@ -344,7 +360,7 @@ test("a cancelled run reports cancelled, not failed", async () => {
     exitCode: 1, envelope: null, transportError: "cancelled", cancelled: true,
   });
   await explorer.discoverAll();
-  const file = controllers[0].items.get(ROOT).children.get(`${ROOT}\u0000tests/a.py`);
+  const file = controllers[0].items.get(ROOT).children.get(id("tests/a.py"));
   const items = [];
   file.children.forEach((i) => items.push(i));
   await controllers[0].profiles[0].handler(
@@ -353,7 +369,7 @@ test("a cancelled run reports cancelled, not failed", async () => {
 
   const run = controllers[0].runs[0];
   // Skipped, not failed: the user stopped it, the suite did not go red.
-  assert.strictEqual(run.states.get(`${ROOT}\u0000tests/a.py::test_one`), "skipped");
+  assert.strictEqual(run.states.get(id("tests/a.py::test_one")), "skipped");
   assert.match(run.output, /cancelled/i);
 });
 
@@ -381,8 +397,8 @@ test("a transport failure errors every selected test with the reason",
        restore();
 
        const run = controllers[0].runs[0];
-       assert.strictEqual(run.states.get(`${ROOT}\u0000tests/a.py::test_one`),
+       assert.strictEqual(run.states.get(id("tests/a.py::test_one")),
                           "errored");
-       assert.match(run.messages.get(`${ROOT}\u0000tests/a.py::test_one`).message,
+       assert.match(run.messages.get(id("tests/a.py::test_one")).message,
                     /ENOENT/);
      });

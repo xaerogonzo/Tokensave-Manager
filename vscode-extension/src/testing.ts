@@ -50,18 +50,25 @@ interface TestResult {
 }
 
 /**
- * Item ids are `<folder fsPath>\u0000<nodeid>`.
+ * Item ids are `<encoded folder path>/<encoded nodeid>`.
  *
  * The folder has to be part of the identity: two projects in one multi-root
  * workspace routinely have a `tests/test_cli.py::test_status`, and an id that
  * was only the nodeid would make one folder's result land on the other's item.
- * NUL is the separator because it cannot occur in either half.
+ *
+ * Joining them needs a separator that cannot occur in either half, and there
+ * isn't one. A NUL looked like the answer and **VS Code rejects it** — "Test
+ * IDs may not include the ... symbol" — which the stub-backed tests could not
+ * see, because the stub stored whatever it was handed. The live suite caught
+ * it, and the stub now refuses NUL too.
+ *
+ * Percent-encoding each half sidesteps the question: `encodeURIComponent`
+ * escapes `/`, so `/` is safe as the join, and the result is printable ASCII
+ * that survives being persisted between sessions.
  */
 function itemId(folder: vscode.WorkspaceFolder, nodeid: string): string {
-  // Written as an escape rather than typed literally: a raw NUL in a
-  // source file is invisible in every editor and every diff, so a test
-  // asserting the wrong separator cannot be read as wrong.
-  return `${folder.uri.fsPath}\u0000${nodeid}`;
+  return `${encodeURIComponent(folder.uri.fsPath)}`
+    + `/${encodeURIComponent(nodeid)}`;
 }
 
 export class TestExplorer {
