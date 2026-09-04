@@ -1542,3 +1542,34 @@ def test_the_detail_count_matches_the_headline_count(capsys, tmp_path):
     _, env, _ = _run(capsys, ["tests", "--project", project, "--detail",
                               "--json"])
     assert len(env["data"]["test_cases"]) == env["data"]["test_count"] == 3
+
+
+def test_test_run_under_a_frozen_build_names_the_cause(capsys, tmp_path,
+                                                       monkeypatch):
+    """A packaged CLI cannot run pytest, and should say so.
+
+    `run_pytest_selection` invokes `sys.executable -m pytest`, and under a
+    Nuitka onefile build `sys.executable` is the extracted binary rather than
+    an interpreter — so the subprocess dies with a bare "[WinError 2] The
+    system cannot find the file specified". True, and useless.
+
+    Found by the v2.6.0 release smoke test rather than by this suite, because
+    nothing here runs against a real frozen build. Same limitation and same
+    exit code as `checks` (R12-9).
+    """
+    project = _suite(tmp_path, "def test_a(): assert 1\n")
+    monkeypatch.setenv("NUITKA_ONEFILE_PARENT", "12345")
+    code, env, _ = _run(capsys, ["test-run", "--project", project, "--json"])
+    assert code == EXIT_PREREQUISITE
+    assert "pytest" in env["error"]
+    # Names a way out, not just a refusal.
+    assert "managerPath" in env["error"] or "Test Manager" in env["error"]
+
+
+def test_the_frozen_guard_does_not_fire_in_source_mode(capsys, tmp_path,
+                                                       monkeypatch):
+    """The other half: the guard must not disable the normal path."""
+    monkeypatch.delenv("NUITKA_ONEFILE_PARENT", raising=False)
+    project = _suite(tmp_path, "def test_a(): assert 1\n")
+    code, _, _ = _run(capsys, ["test-run", "--project", project, "--json"])
+    assert code == EXIT_OK

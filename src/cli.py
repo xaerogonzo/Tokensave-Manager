@@ -602,6 +602,18 @@ def _cmd_test_run(args) -> Result:
     from helpers.test_lock import TestRunBusy, test_run_lock
     project = _resolve_project(args.project)
 
+    if _is_frozen():
+        # `run_pytest_selection` invokes `sys.executable -m pytest`, and under
+        # a Nuitka onefile build sys.executable is the EXTRACTED BINARY rather
+        # than an interpreter. The subprocess therefore dies with a bare
+        # "[WinError 2] The system cannot find the file specified", which is
+        # true and useless. Same limitation and same treatment as `checks`.
+        raise _Prerequisite(
+            "`test-run` needs a Python interpreter with pytest installed, "
+            "which the packaged CLI does not provide — point the extension at "
+            "a source checkout (tokensaveManager.managerPath), or run the "
+            "suite from the Manager's Test Manager dialog")
+
     nodeids = tuple(getattr(args, "tests", ()) or ())
     markers = (getattr(args, "markers", "") or "").strip()
     if nodeids and markers:
