@@ -246,3 +246,61 @@ def test_the_vscode_layer_does_not_decide_binding(capsys, tmp_path, mocker):
 
     assert layer["logs_found"] == 1            # it did see the crash
     assert code_with == code_without           # and it changed nothing
+
+
+# ── blanket MCP auto-approval (R12-4) ────────────────────────────────────
+#
+# Lives here rather than in a file of its own because it is the same
+# question the log scan asks -- how is MCP actually wired on this machine --
+# answered from a different surface.
+
+def test_auto_approve_is_silent_when_the_key_is_absent(fake_home):
+    """The default, and every machine that has not opted in."""
+    from helpers.doctor_rules import audit_mcp_auto_approve
+    assert audit_mcp_auto_approve() == []
+
+
+def test_auto_approve_is_reported_as_posture_not_a_fault(fake_home):
+    """Measured: it is honoured ONLY at user scope, and it is machine-wide.
+
+    Both project-scope placements were silently ignored under a disposable
+    HOME, so the wording must not imply a per-project setting, and Doctor
+    must not present a deliberate trust choice as brokenness.
+    """
+    import io
+    import os
+    from helpers.doctor_rules import audit_mcp_auto_approve
+    d = os.path.join(os.path.expanduser("~"), ".claude")
+    os.makedirs(d, exist_ok=True)
+    io.open(os.path.join(d, "settings.json"), "w", encoding="utf-8").write(
+        '{"enableAllProjectMcpServers": true}')
+
+    notes = audit_mcp_auto_approve()
+    assert notes
+    joined = " ".join(notes).lower()
+    assert "every project on this machine" in joined
+    # posture, not brokenness
+    for forbidden in ("error", "broken", "invalid", "must fix", "violation"):
+        assert forbidden not in joined, f"reads as a fault: {forbidden!r}"
+    assert "not a fault" in joined
+
+
+def test_auto_approve_ignores_a_project_scoped_copy(fake_home, tmp_path):
+    """The trap: the obvious place to put it does nothing, silently.
+
+    A tool that wrote this into a project's `.claude/settings.json` would
+    report success and change nothing, so the detector must not read one.
+    """
+    import io
+    import os
+    from helpers.doctor_rules import audit_mcp_auto_approve
+    proj = tmp_path / "proj" / ".claude"
+    proj.mkdir(parents=True)
+    io.open(str(proj / "settings.json"), "w", encoding="utf-8").write(
+        '{"enableAllProjectMcpServers": true}')
+    cwd = os.getcwd()
+    try:
+        os.chdir(str(tmp_path / "proj"))
+        assert audit_mcp_auto_approve() == []
+    finally:
+        os.chdir(cwd)

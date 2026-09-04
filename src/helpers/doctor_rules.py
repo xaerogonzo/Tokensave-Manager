@@ -536,3 +536,36 @@ def audit_graph_trust(project_path: str) -> list:
                         for c in report.collisions[:5])
         notes.append("  Most-bound test-double names: %s." % top)
     return notes
+
+
+def audit_mcp_auto_approve() -> list:
+    """Report blanket MCP auto-approval as posture, never as brokenness.
+
+    `enableAllProjectMcpServers` in `~/.claude/settings.json` approves every
+    MCP server in every repository on the machine, including ones not cloned
+    yet. That is a legitimate choice for a single-user machine and a bad one
+    on a shared box, and Doctor is not the place to enforce either -- so this
+    states what is true and what it implies, and offers no fix.
+
+    Silent when the setting is absent, which is the default.
+
+    Imported lazily so this module's import surface stays exactly ``ast``,
+    ``os`` and ``re`` for the CI one-liner in ``helpers/ci_workflow.py``.
+    """
+    try:
+        from helpers.mcp_approval import AUTO_APPROVE_KEY, blanket_auto_approve
+    except ImportError:
+        return []
+
+    enabled, path = blanket_auto_approve()
+    if not enabled:
+        return []
+    return [
+        "  %s is on in %s." % (AUTO_APPROVE_KEY, path),
+        "  Every MCP server in every project on this machine is approved "
+        "automatically, including repositories cloned in future. Measured, "
+        "not inferred: a scratch project never opened before was approved by "
+        "this flag alone.",
+        "  Not a fault -- a trust setting. Remove the key to go back to "
+        "approving each project's .mcp.json on its own merits.",
+    ]

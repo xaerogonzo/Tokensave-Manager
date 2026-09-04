@@ -66,6 +66,7 @@ from helpers import doctor_service
 from helpers.doctor_rules import (                      # noqa: E402
     _audit_project_tree,
     audit_graph_trust,
+    audit_mcp_auto_approve,
     audit_shadow_links,
 )
 
@@ -757,6 +758,7 @@ class DoctorController:
         self._log_audit_results(violations, exempt_notes, files_scanned)
         self._log_shadow_health(project_path)
         self._log_graph_trust(project_path)
+        self._log_mcp_posture()
 
     def _log_shadow_health(self, project_path: str) -> None:
         """Warn-only, and silent for projects that do not use shadow links.
@@ -783,6 +785,15 @@ class DoctorController:
         if not notes:
             return
         self._on_log("=== Graph trust ===", C["mauve"])
+        for note in notes:
+            self._on_log(note, C["peach"])
+
+    def _log_mcp_posture(self) -> None:
+        """Machine-wide, so it takes no project. Posture, not a violation."""
+        notes = audit_mcp_auto_approve()
+        if not notes:
+            return
+        self._on_log("=== MCP trust posture ===", C["mauve"])
         for note in notes:
             self._on_log(note, C["peach"])
 

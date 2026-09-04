@@ -407,3 +407,53 @@ def annotate_project_binding(info: dict, project_root: str,
                           "Which one applies depends on the directory spelling "
                           "the session was started with." % got.detail)}
     return info
+
+
+# ── Blanket auto-approval (measured 2026-09-04) ──────────────────────────
+
+#: The key the Claude Code extension documents in its bundled
+#: `claude-code-settings.schema.json` as "Whether to automatically approve
+#: all MCP servers in the project".
+AUTO_APPROVE_KEY = "enableAllProjectMcpServers"
+
+
+def blanket_auto_approve() -> "tuple[bool, str]":
+    """Is every project's `.mcp.json` auto-approved on this machine?
+
+    Returns ``(enabled, detail)``. Detection only — nothing here writes the
+    setting, and the Manager deliberately does not offer to.
+
+    **Measured rather than read off the schema**, under a disposable HOME so
+    the real config was never touched, with a probe `.mcp.json` and
+    `claude mcp list` as the oracle:
+
+    * a scratch server reports ``Pending approval``;
+    * with the key in the project's ``.claude/settings.local.json`` --
+      **still Pending**;
+    * with it in the project's ``.claude/settings.json`` -- **still Pending**;
+    * with it in ``~/.claude/settings.json`` -- approval is bypassed and the
+      server is actually dialled.
+
+    Removing it returned the server to Pending and restoring it flipped it
+    again, so that is causation and not drift.
+
+    Two consequences the schema's wording does not convey. It says "in the
+    project", but the setting is **only honoured at user scope** -- writing it
+    where a per-project tool would naturally put it does nothing at all, and
+    does it silently. And it is **not per-project**: a second scratch project
+    that had never been opened was auto-approved by the same flag, so this
+    approves every MCP server in every repository on the machine, including
+    ones cloned tomorrow.
+
+    That makes it a security posture, not a convenience toggle, which is why
+    this reports it and stops.
+    """
+    path = os.path.join(os.path.expanduser("~"), ".claude", "settings.json")
+    try:
+        with open(path, "r", encoding="utf-8") as fh:
+            raw = json.load(fh)
+    except (OSError, ValueError):
+        return False, ""
+    if not isinstance(raw, dict) or not raw.get(AUTO_APPROVE_KEY):
+        return False, ""
+    return True, path
