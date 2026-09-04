@@ -139,6 +139,11 @@ COMMANDS: tuple = (
         detail="Which tokensave server serves this project.",
         side_effect=PURE_READ, task=True),
     Command(
+        action="graph-trust", cli="graph-trust",
+        vscode="tokensaveManager.graphTrust", label="Graph trust",
+        detail="How much of tokensave's call graph is real.",
+        side_effect=PURE_READ, task=True),
+    Command(
         action="sync", cli="sync", vscode="tokensaveManager.sync",
         label="Sync tokensave",
         detail="Refresh shadow links, then re-index this project.",

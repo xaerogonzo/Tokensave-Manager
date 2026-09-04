@@ -45,7 +45,10 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 
-from helpers.mcp import _same_project
+# From the family leaf, not the `helpers.mcp` facade: the facade imports
+# every family module, so importing it back from a sibling would close a
+# runtime cycle. See scripts/split_mcp.py.
+from helpers.mcp_paths import _same_project
 
 #: Selection reasons the manager's wrapper writes into its run record. A
 #: server carrying one of these was spawned by the wrapper — i.e. by Claude

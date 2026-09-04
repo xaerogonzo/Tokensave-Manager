@@ -23,6 +23,7 @@ Choosing wrong produces a guard that cannot see its own subject.
 | wrong **structure** in source | static analysis over the AST | the six `tests/test_no_*.py` guards |
 | wrong **geometry** in a laid-out UI | a driven visual oracle | `helpers/geometry.py` + `helpers/geometry_scan.py` |
 | wrong **appearance over time** | golden-image diffing | not present, and not currently justified |
+| wrong **facts in a derived index** | a contradiction the source cannot produce | `helpers/graph_trust.py` |
 | the residue | a human | glyphs, colour, "does this look right" |
 
 The worked example for why the mapping matters: a doc comment attached to the
@@ -232,6 +233,61 @@ Stated so that "no findings" is not read as coverage this does not have:
 - **No golden-image diffing.** A golden tells you something changed; it
   cannot tell you a value is painted over its caption. The measurable layer
   comes first, and it works on a screen that has no baseline yet.
+
+---
+
+## Verifying a tool you did not write
+
+Every technique above assumes the thing under test is this repository's code.
+Some of what the Manager reports is not: `tokensave_health`,
+`tokensave_circular`, `file_dependents` and `impact` are all read out of an
+index built by another program, and a defect in that program arrives here as
+a confident number rather than as an error.
+
+The technique that owns this class is **a contradiction the source cannot
+produce**. Not a plausibility check, and not a comparison against a
+remembered value — a claim that would have to be false whatever the code
+says.
+
+The worked example is `helpers/graph_trust.py`. tokensave reported one
+140-file cycle spanning `src/` and `tests/`. Deciding whether a 140-file
+cycle is "too big" would have been a judgement call and gone nowhere. But a
+cycle containing a test file requires production code to call *into* the test
+tree, and the test tree is what imports production code — never the reverse.
+That is not unlikely; it is impossible. It made the whole finding decidable,
+and the count fell out: 559 such edges across 93 source files, from
+tokensave binding an unqualified call on an untracked receiver to the only
+symbol of that name in the project. Test doubles are named after what they
+stand in for, so `log.info(...)` binds to a fake logger's `info`.
+
+Three rules this left behind:
+
+**Report the population, not just the findings.** The same rule the geometric
+oracle needed, for the same reason. `graph_trust` has four states, and the
+two that mean "we did not reach a population" (`unknown`, `insufficient`) are
+kept distinct from the one that means "we looked and it was clean". Zero
+examined edges can never read as trustworthy.
+
+**Quarantine the aggregate, not only the component.** `quality_signal` is the
+geometric mean over six dimensions including the contaminated one, so it is
+just as unusable — and it is the number a consumer actually watches.
+`src/prompts.py` used to tell agents to move it "to 8000+"; it now says the
+number is unsafe to optimise while a dimension is quarantined, and gives the
+workflow to use instead. Removing a bad target without replacing it leaves a
+hole someone fills with the bad target.
+
+**A finding needs a line that is actually wrong.** The graph-trust CLI
+command deliberately emits no `findings`. The only line a phantom edge can be
+anchored to is the test double's definition, which is correct code — a
+diagnostic there would put a warning on a file with nothing wrong with it.
+Same reasoning that keeps `test-run` out of the extension's
+`DIAGNOSTIC_COMMANDS`.
+
+**Do not pin the number.** 557 when first measured, 559 an hour later, because
+the index re-syncs. `tests/test_graph_trust.py` asserts the *shape* of the
+answer against this repository and the exact counts only against fixtures it
+builds itself. A test pinned to the day's figure turns an honest re-sync into
+a red build.
 
 ---
 

@@ -443,6 +443,43 @@ indirection — bypassing the wrapper entirely.
 
 ## Other gotchas discovered along the way
 
+### `enableAllProjectMcpServers` is user-scope-only, and it is machine-wide
+
+The Claude Code extension ships `claude-code-settings.schema.json`, which
+documents `enableAllProjectMcpServers` as *"Whether to automatically approve
+all MCP servers in the project"*. Both halves of that sentence mislead.
+
+Measured 2026-09-04 under a disposable `HOME` (so the real `~/.claude.json`
+and `~/.claude/settings.json` were never touched), with a scratch project
+holding a probe `.mcp.json` and `claude mcp list` as the oracle:
+
+| where the key was written | result |
+|---|---|
+| nowhere (control) | `⏸ Pending approval` |
+| project `.claude/settings.local.json` | `⏸ Pending approval` — **ignored** |
+| project `.claude/settings.json` | `⏸ Pending approval` — **ignored** |
+| user `~/.claude/settings.json` | approval bypassed; the server is dialled |
+
+Removing the user-scope key returned the probe to `Pending` and restoring it
+flipped it again, so this is causation rather than drift. A **second scratch
+project that had never been opened** was auto-approved by the same flag.
+
+So:
+
+* **It is not "in the project".** Writing it where a per-project tool would
+  naturally put it does nothing, and does it silently — the worst failure
+  shape, and the reason this was measured before anything was built on it.
+* **It is not per-project.** It approves every MCP server in every repository
+  on the machine, including ones cloned tomorrow.
+
+**The Manager does not write this key**, and offers no button that would.
+Per-project `enabledMcpjsonServers` stays the right mechanism because it is
+the one that expresses a per-project decision. Doctor *detects* the flag and
+reports it as a trust posture — a legitimate choice on a single-user machine,
+a poor one on a shared box — and offers no fix, because enforcing either
+answer would be Doctor taking a side on someone's security model.
+
+
 ### `tokensave doctor` writes its report to STDERR, and colours regardless
 
 Measured on v7.9.0. Two consequences for anything capturing it:
