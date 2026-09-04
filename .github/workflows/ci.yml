@@ -65,6 +65,12 @@ jobs:
         # catching that here reports the actual cause rather than a confusing
         # failure buried in whichever test happened to touch the code path.
         run: python tests/test_no_windows_only_subprocess_flags.py
+      - name: No shadowed tests in tests/
+        # A test name defined twice means the earlier one is never collected:
+        # it cannot pass and cannot fail, and the suite count drops silently.
+        # pyflakes reports it, but this job only lints src/ -- and linting the
+        # whole test tree would mean gating on 78 unused-import findings first.
+        run: python tests/test_no_shadowed_tests.py
       - name: No cross-thread Tk calls in src/
         # A worker calling self.after() does not raise on Linux, it
         # BLOCKS with no log line. Ratcheted: known offenders may not

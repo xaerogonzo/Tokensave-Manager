@@ -773,7 +773,7 @@ def test_status_names_the_changed_files(capsys, tmp_path, mocker):
     assert git["changed_files"][2]["old_path"] == "a.py"
 
 
-def test_status_reports_an_unreadable_repo_as_unknown_not_clean(
+def test_status_unreadable_repo_reports_changed_files_and_ahead_as_unknown(
         capsys, tmp_path, mocker):
     """`None`, not `[]`. An unreadable repository is not a clean one, and a
     composer offering "no files changed" would be inventing an answer."""
