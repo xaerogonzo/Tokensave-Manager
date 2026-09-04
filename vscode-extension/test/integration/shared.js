@@ -190,7 +190,7 @@ function assertRootsAreDistinguishable(first, second) {
       { encoding: "utf8" });
     try {
       const git = (JSON.parse(r.stdout).data || {}).git || {};
-      return (git.changed_files || []).length;
+      return (git.changed_files || []).map((f) => f.path);
     } catch {
       throw new Error(
         "could not read a change count for " + root + ": " +
@@ -198,16 +198,19 @@ function assertRootsAreDistinguishable(first, second) {
     }
   });
 
-  if (counts[0] === counts[1]) {
+  if (counts[0].length === counts[1].length) {
     throw new Error(
-      "both fixture roots report " + counts[0] + " changed files, so the " +
+      "both fixture roots report " + counts[0].length + " changed files, so " +
+      "the " +
       "status bar renders the same text whichever root it is about. The pin " +
       "test cannot fail in that state -- it passed against a build with the " +
       "pin removed. Give the roots different numbers of uncommitted files " +
       "rather than relaxing this check.");
   }
-  console.log("roots distinguishable: " + counts[0] + " vs " + counts[1] +
-              " changed files");
+  console.log("roots distinguishable: " + counts[0].length + " vs " +
+              counts[1].length + " changed files" +
+              "\n  pinned root: " + counts[0].join(", ") +
+              "\n  other root:  " + counts[1].join(", "));
 }
 
 /**

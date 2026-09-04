@@ -71,22 +71,51 @@ describe("status bar", () => {
     assert.ok(vscode.window.activeTextEditor,
               "no active editor — the mutation this guards could not fire");
 
-    // A third uncommitted file in the PINNED root. Only a bar reporting that
-    // root can render a count of three; the other root has one.
+    // The count to wait for is READ, not hardcoded.
+    //
+    // This test previously wrote a third file and waited for the literal 3,
+    // on the reasoning that the pinned root had two changes and the other had
+    // one. That was measured on Windows and is not true everywhere: on the
+    // Linux runner the pinned root starts with THREE, so the bar already read
+    // 3 before the file was written, the wait was satisfied by the startup
+    // render, and the arm survived -- the same "no observable transition"
+    // failure this test has now had four times, in its fourth disguise.
+    //
+    // Taking the count from the bar and requiring one more makes the
+    // transition real on any machine, whatever the starting state.
+    const before = Number(/●(\d+)/.exec(
+      await until("the bar to report a change count",
+                  () => (/●\d+/.test(api.statusBarText())
+                         ? api.statusBarText() : null)))[1]);
+
     fs.writeFileSync(path.join(workspaceRoot(), "uncommitted-c.txt"),
                      "third", "utf8");
     // Fire the watcher. Touching a committed file changes no root's count.
     fs.writeFileSync(path.join(secondRoot(), ".mcp.json"), "{}", "utf8");
 
+    // Only a bar about the PINNED root can reach this number: the other root
+    // has fewer changes and gained none, and the pre-flight in shared.js
+    // refuses to launch if the two roots report the same count.
+    const countIn = (t) => {
+      const m = /●(\d+)/.exec(t);
+      return m ? Number(m[1]) : null;
+    };
+    // GREATER than the starting count, not exactly one more: the pinned root
+    // is a live directory and something else appearing at the same moment
+    // would make an exact target unreachable. Growth is still a real
+    // transition, and it is one only the pinned root can produce -- the other
+    // root gained nothing.
     const text = await until(
-      "the bar to report the pinned root's three changed files", () => {
+      `the bar to report more than ${before} changed files in the pinned root`,
+      () => {
         const current = api.statusBarText();
-        return /●3/.test(current) ? current : null;
+        const now = countIn(current);
+        return now !== null && now > before ? current : null;
       }, 25000);
 
     assert.strictEqual(api.pinnedFolderName(), pinned,
                        "the pin moved when the active editor changed root");
-    assert.ok(!/●1/.test(text),
+    assert.ok(!/●1(?!\d)/.test(text),
               `the bar reported the other root's single change: ${text}`);
   });
 
