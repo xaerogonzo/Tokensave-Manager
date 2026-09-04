@@ -46,7 +46,7 @@
     "commands": [
       {
         "command": "tokensaveManager.setManagerPath",
-        "title": "Set Manager Path\u2026",
+        "title": "Set Manager Path…",
         "category": "TokenSave Manager"
       },
       {
@@ -113,7 +113,7 @@
       },
       {
         "command": "tokensaveManager.proposeCommit",
-        "title": "Propose a Commit\u2026",
+        "title": "Propose a Commit…",
         "category": "TokenSave Manager",
         "icon": "$(git-commit)"
       },
@@ -204,12 +204,12 @@
         "tokensaveManager.cliPath": {
           "type": "string",
           "default": "",
-          "markdownDescription": "Absolute path to a built `tokensave-manager-cli.exe`. Takes precedence over `managerPath`. Leave empty unless you have no checkout \u2014 a compiled CLI is a snapshot and goes stale whenever the Manager changes."
+          "markdownDescription": "Absolute path to a built `tokensave-manager-cli.exe`. Takes precedence over `managerPath`. Leave empty unless you have no checkout — a compiled CLI is a snapshot and goes stale whenever the Manager changes."
         },
         "tokensaveManager.configPath": {
           "type": "string",
           "default": "",
-          "markdownDescription": "Absolute path to `manager-config.json`, passed to the CLI as `--config`. **Not needed in source mode** \u2014 the CLI finds the config beside the checkout. Required only when running a relocated binary."
+          "markdownDescription": "Absolute path to `manager-config.json`, passed to the CLI as `--config`. **Not needed in source mode** — the CLI finds the config beside the checkout. Required only when running a relocated binary."
         },
         "tokensaveManager.testGapsBase": {
           "type": "string",
@@ -220,7 +220,7 @@
           "type": "number",
           "default": 300,
           "minimum": 30,
-          "markdownDescription": "How often the status bar re-reads `status`, in seconds. Deliberately slow \u2014 file-system changes already trigger a (debounced) refresh, so this only catches changes made outside the editor."
+          "markdownDescription": "How often the status bar re-reads `status`, in seconds. Deliberately slow — file-system changes already trigger a (debounced) refresh, so this only catches changes made outside the editor."
         },
         "tokensaveManager.statusDebounceMs": {
           "type": "number",
@@ -237,11 +237,16 @@
     "vscode:prepublish": "npm run compile",
     "package": "vsce package --target win32-x64",
     "test": "node --test test/cli.test.js test/diagnostics.test.js test/surfaces.test.js",
-    "pretest": "npm run compile"
+    "pretest": "npm run compile",
+    "test:live": "node test/integration/runTests.js",
+    "test:compiled": "node --test test/cli.test.js test/diagnostics.test.js test/surfaces.test.js",
+    "test:mutations": "npm run compile && node test/integration/mutations.js",
+    "test:vsix": "node test/integration/runTestsVsix.js"
   },
   "devDependencies": {
     "@types/node": "^20.11.0",
     "@types/vscode": "^1.85.0",
+    "@vscode/test-electron": "^3.1.0",
     "typescript": "^5.4.0"
   }
 }

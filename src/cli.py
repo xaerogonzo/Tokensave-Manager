@@ -1082,20 +1082,36 @@ def _cmd_cost(args) -> Result:
             "total_cost_usd": value.total_cost_usd,
             "total_input_tokens": value.total_input_tokens,
             "total_output_tokens": value.total_output_tokens,
-            # Always null, never derived: the only available derivation is
-            # provably zero on every payload, so computing it would invent a
-            # number. Consumers render "not reported".
+            # Read from the payload on tokensave 7.11+ (#472), null on an older
+            # binary. Null means "not reported" and must never render as 0 —
+            # these are not derived, and under 7.10 the only derivation
+            # available was provably zero.
             "cache_read_tokens": value.cache_read_tokens,
+            "cache_creation_tokens": value.cache_creation_tokens,
+            "total_tokens": value.total_tokens,
             "by_model": [dataclasses.asdict(m) for m in value.by_model],
             "by_category": [dataclasses.asdict(c) for c in value.by_category],
-            # Reported so a consumer can say so: the totals agree with each
-            # other yet do not follow from the token counts beside them.
+            # Reported so a consumer can say so. `tokens_reconcile` is null on
+            # a payload with no `total_tokens` to compare against — "cannot
+            # say", which a consumer must not read as "disagrees".
             "totals_reconcile": value.totals_reconcile(),
-            "implied_usd_per_mtok": value.implied_usd_per_mtok(),
+            "tokens_reconcile": value.tokens_reconcile(),
+            # Range-scoped and equal to `gain --all` since 7.11 (#473); a
+            # lifetime counter before that. `tokens_saved_spans_range` is the
+            # flag a consumer must check before displaying it.
+            "tokens_saved": value.tokens_saved,
+            "tokens_saved_spans_range": value.spans_range,
             # `cost` has no project filter, and a consumer must not present it
-            # beside the project-scoped savings without saying so.
+            # beside the project-scoped savings without saying so. That applies
+            # to `tokens_saved` too: it matches `gain --all`, never `gain`.
             "scope": "machine-global, all projects",
         }
+        # The rate is meaningless without its basis, so they ship together or
+        # not at all — a consumer cannot end up rendering a 7.10 figure and a
+        # 7.11 figure as the same statistic.
+        implied = value.implied_usd_per_mtok()
+        out["implied_usd_per_mtok"] = None if implied is None else implied[0]
+        out["implied_usd_basis"] = None if implied is None else implied[1]
         if args.raw:
             out["raw"] = value.raw
         return out

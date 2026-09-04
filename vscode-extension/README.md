@@ -181,10 +181,13 @@ reading text:
 ## Developing
 
 ```bash
-npm ci          # the lockfile is committed, so builds are reproducible
+npm ci                   # the lockfile is committed, so builds are reproducible
 npm run compile
-npm test        # node --test, no test framework dependency
-npm run package # vsce package --target win32-x64
+npm test                 # stub suite — the decisions, headless, ~0.2s
+npm run test:live        # a real editor, extension loaded from out/
+npm run test:vsix        # a real editor, extension installed from a packaged .vsix
+npm run test:mutations   # break each property, require the suite to notice
+npm run package          # vsce package --target win32-x64
 ```
 
 `npm test` runs against a stubbed `vscode` module (`test/vscode-stub.js`), so
@@ -192,8 +195,24 @@ it needs no editor download and no extension host. The stub is behavioural
 rather than a mock — ranges keep their numbers and URIs really join — because
 the properties worth asserting only mean something if those parts behave.
 
-CI runs exactly these three commands on a pinned Node, so a green run here is a
-green run there.
+The stub deliberately does **not** cover the tree or the command wiring; it
+says so in its own header. `npm run test:live` does, by booting a real VS Code
+and holding the real `vscode` module — a command in `package.json` that nothing
+registers fails only when somebody clicks it, and nothing else catches that.
+
+`npm run test:mutations` is what says whether any of it is load-bearing: it
+removes each protected property from the compiled output and requires the test
+written for it to object. A suite that passes on its first run is what a suite
+testing nothing looks like, and booting a real editor makes it *look*
+convincing.
+
+**Read `DEVELOPMENT.md` before adding a test** — it covers which suite a new
+test belongs in, why the editor keeps stealing your focus and what actually
+helps, and the handful of gotchas that cost the most time to rediscover.
+
+CI gates on `npm test` today. The live and packaged suites run in their own
+non-blocking jobs; the condition for promoting them is written into
+`.github/workflows/ci.yml` as a number rather than "after a few PRs".
 
 The exit-code table and envelope schema are restated in `src/cli.ts` so
 TypeScript can branch on them; the Manager's Python suite cross-checks both

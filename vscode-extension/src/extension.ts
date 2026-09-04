@@ -28,8 +28,73 @@ import { ACTIONS, DIAGNOSTIC_COMMANDS, ProjectsProvider } from "./tree";
 let output: vscode.OutputChannel;
 let diagnostics: DiagnosticStore;
 let statusBar: StatusBar | undefined;
+let savingsProvider: SavingsViewProvider | undefined;
 
-export function activate(context: vscode.ExtensionContext): void {
+/**
+ * What `activate` hands back, for the live integration suite.
+ *
+ * Tree providers are not reachable from outside the extension; `activate`'s
+ * return value is the documented seam, read via
+ * `extensions.getExtension(id).exports`. This is deliberately the whole of
+ * it.
+ *
+ * **Rendered strings, not the nodes behind them.** A tree whose nodes are
+ * correct and whose labels are wrong is a broken tree, and only one of those
+ * two is what a person sees — so asserting against a node graph produces
+ * tests that pass while the UI is visibly broken.
+ *
+ * `treeCommandFor` is the single deliberate exception, and it earns its
+ * place: the "Manager CLI unavailable" row's whole value is that clicking it
+ * opens the fix, and a row that renders "click to fix" while wired to the
+ * wrong command is a defect no string assertion can see. It returns one
+ * command id per row and nothing else.
+ *
+ * Resist widening this further. An API that can reach past the UI and assert
+ * something a user could never observe eventually will — and will then pass
+ * while the user's experience is broken.
+ */
+export interface TestApi {
+  whenReady(): Promise<void>;
+  renderTree(): Promise<string[]>;
+  treeCommandFor(row: string): string | undefined;
+  webviewHtml(): string | undefined;
+  webviewRenderCount(): number;
+  statusBarText(): string;
+  pinnedFolderName(): string | undefined;
+}
+
+/**
+ * Render a `TreeDataProvider` the way the sidebar does.
+ *
+ * Walks children depth-first and returns one string per row: indentation,
+ * label, and the description in brackets when there is one. That is what a
+ * person reads, so it is what the tests assert on.
+ */
+async function renderTree(
+  provider: vscode.TreeDataProvider<any>,
+): Promise<{ rows: string[]; commands: Map<string, string | undefined> }> {
+  const rows: string[] = [];
+  const commands = new Map<string, string | undefined>();
+  const walk = async (node: any, depth: number): Promise<void> => {
+    const children = (await provider.getChildren(node)) ?? [];
+    for (const child of children) {
+      const item = await provider.getTreeItem(child);
+      const label = typeof item.label === "string"
+        ? item.label : (item.label as any)?.label ?? "";
+      const description = typeof item.description === "string"
+        ? item.description : "";
+      const row = "  ".repeat(depth) + label +
+        (description ? `  [${description}]` : "");
+      rows.push(row);
+      commands.set(row, item.command?.command);
+      await walk(child, depth + 1);
+    }
+  };
+  await walk(undefined, 0);
+  return { rows, commands };
+}
+
+export function activate(context: vscode.ExtensionContext): TestApi {
   output = vscode.window.createOutputChannel("TokenSave Manager");
   context.subscriptions.push(output);
 
@@ -79,7 +144,33 @@ export function activate(context: vscode.ExtensionContext): void {
   registerCommitComposer(context);
   registerFileScopedActions(context);
   registerRefreshTriggers(context, provider);
+
+  return {
+    // Activation does no async work of its own beyond constructing the
+    // status bar, whose first read is fired-and-forgotten. Tests that need
+    // that read to have landed wait on the value with `until`, rather than
+    // having this resolve on a timer and pretend to be a barrier.
+    whenReady: async () => { await Promise.resolve(); },
+    renderTree: async () => {
+      const { rows, commands } = await renderTree(provider);
+      // Recorded on every render so `treeCommandFor` answers about the rows
+      // the caller just received, rather than about a stale walk.
+      lastTreeCommands.clear();
+      for (const [row, command] of commands) {
+        lastTreeCommands.set(row, command);
+      }
+      return rows;
+    },
+    treeCommandFor: (row: string) => lastTreeCommands.get(row),
+    webviewHtml: () => savingsProvider?.currentHtml(),
+    webviewRenderCount: () => savingsProvider?.renderCount() ?? 0,
+    statusBarText: () => statusBar?.currentText() ?? "",
+    pinnedFolderName: () => statusBar?.pinnedFolder()?.name,
+  };
 }
+
+/** Command ids from the most recent `renderTree`, keyed by rendered row. */
+const lastTreeCommands = new Map<string, string | undefined>();
 
 export function deactivate(): void {
   statusBar?.dispose();
@@ -176,6 +267,7 @@ function registerSavingsView(context: vscode.ExtensionContext): void {
   const provider = new SavingsViewProvider(
     context, () => statusBar?.pinnedFolder()
       ?? (vscode.workspace.workspaceFolders ?? [])[0]);
+  savingsProvider = provider;
   context.subscriptions.push(
     vscode.window.registerWebviewViewProvider(
       SavingsViewProvider.viewType, provider),

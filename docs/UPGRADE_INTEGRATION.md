@@ -75,13 +75,22 @@ The prompt instructs Claude to:
 1. Call `tokensave_changelog` — reads tokensave's own release notes directly
 2. Cross-reference new/removed tool names against `src/prompts.py` snippet bodies
 3. Read `docs/upstream-issues/*.md` and flag which issues the changelog resolves
-4. Scan `helpers/daemon_cost.py`, `ai_tasks_ctrl.py`, `agent_tools.py` for wrappers
-   of removed tools
+4. Scan the modules that wrap a tokensave CLI command or MCP tool for wrappers
+   of removed ones — currently `helpers/savings.py` (gain / cost / discover),
+   `helpers/tokensave_daemon.py` (the server registry) and `agent_tools.py`
+   (`tool search` / `tool context`)
 5. Produce a structured action list: new snippets needed / issue docs to update /
    code changes / no-action confirmed
 
 A companion snippet **"🔄  Generate snippet for [[new tool name]]"** then writes the
 `src/prompts.py` entry for each new tool the audit surfaces.
+
+> **That module list rots, and rotted once already.** It named
+> `helpers/daemon_cost.py` for three releases after v2.4.0 deleted the file —
+> so step 4 was sending each audit to read something that had not existed for
+> months, and nothing failed to say so. When a module that wraps tokensave is
+> renamed or removed, update the list in the same commit; a step naming a
+> missing file reads as "nothing to check there" rather than as an error.
 
 ---
 

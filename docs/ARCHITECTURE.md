@@ -69,7 +69,7 @@ Token Save Manager Source/
 │   │                              report/wait/quit. `report what=geometry` runs the visual
 │   │                              oracle. Committed scripts live in scripts/drive/.
 │   │
-│   ├── helpers/                   82 modules of pure / IO helpers — no UI deps.
+│   ├── helpers/                   84 modules of pure / IO helpers — no UI deps.
 │   │   ├── config.py              _load_config, _save_config, _migrate_config
 │   │   ├── detection.py           _detect_git/_gh/_npm/_codegraph/_claude_cli,
 │   │   │                          _root_path/_label, _version_lt
@@ -106,11 +106,18 @@ Token Save Manager Source/
 │   │   │                          _zip_dist, _release_basename, _fmt_size
 │   │   │                          (Roadmap-2 P2: _patch_changelog removed; canonical
 │   │   │                          implementation now lives in helpers/changelog_patch.py)
-│   │   ├── savings.py             gain/cost/discover parsers + fetchers.
+│   │   ├── savings.py             gain/cost/discover parsers + fetchers. Pure
+│   │   │                          parse_* over a stdout string; fetch_* owns the
+│   │   │                          subprocess. Every claim in its docstring is a
+│   │   │                          recorded measurement, versioned: the cache-token
+│   │   │                          fields and a range-scoped `tokens_saved` arrived
+│   │   │                          in tokensave 7.11 (#472/#473), so the fields stay
+│   │   │                          `int | None` — absent means "this binary did not
+│   │   │                          say", never zero. `implied_usd_per_mtok` returns
+│   │   │                          (rate, basis) as one value so a 7.10 figure and a
+│   │   │                          7.11 one cannot render as the same statistic.
 │   │   │                          All daemon functions removed in tokensave v6.0.0
 │   │   │                          integration (daemon mode dropped upstream).
-│   │   │                          Previously held: get_daemon_status, toggle_daemon,
-│   │   │                          toggle_autostart, _stop_daemon, _kill_pid.
 │   │   ├── pr_draft.py            generate_pr_draft — LLM-backed structured PR description
 │   │   │                          (Summary / Technical / Threat Model / Verification)
 │   │   ├── changelog_patch.py     insert_changelog_release (versioned release patcher);
@@ -131,6 +138,16 @@ Token Save Manager Source/
 │   │   │                          .github/workflows/quality-checks.yml from the
 │   │   │                          dialog's checks_enabled dict. Omits doctor/Claude
 │   │   │                          steps (CI-incompatible). Idempotent re-generate.
+│   │   ├── git_hooks_env.py       Where git will ACTUALLY look for a hook, and who
+│   │   │                          owns it. `core.hooksPath` REPLACES the hooks
+│   │   │                          directory rather than adding to it, and a linked
+│   │   │                          worktree's `.git` is a file — so joining
+│   │   │                          `.git/hooks` onto a project path is wrong in two
+│   │   │                          ways that both fail silently. Asks git
+│   │   │                          (`rev-parse --git-path hooks`) instead. Ownership
+│   │   │                          compares resolved paths and exact markers, never a
+│   │   │                          substring: the Manager's own marker contains the
+│   │   │                          word TOKENSAVE.
 │   │   ├── precommit_hook.py      install/remove/detect git pre-commit AI review hook
 │   │   │                          + the review runner (run_review, parse_severity_summary,
 │   │   │                          severity_blocks_commit, backend dispatch for
@@ -487,6 +504,53 @@ Token Save Manager Source/
 │   ├── templates\                 All template files (copied by build.ps1)
 │   └── docs\                      GITHUB_GUIDE.md, ARCHITECTURE.md, ARCHITECTURE_TOKENSAVE.md
 │
+├── vscode-extension/              The VS Code extension. TypeScript in `src/`,
+│   │                              compiled to `out/`; `.vscodeignore` keeps both
+│   │                              `src/` and `test/` out of the shipped .vsix.
+│   ├── src/extension.ts           activate(), command registration, the refresh
+│   │                              triggers, and the narrow TestApi activate()
+│   │                              returns for the live suite. Propose-only: it may
+│   │                              file a commit request and nothing else.
+│   ├── src/tree.ts                Projects view. Every action node carries the
+│   │                              folder it belongs to, so a command cannot be
+│   │                              aimed at a sibling in a multi-root workspace.
+│   ├── src/savings.ts             Savings & Spend webview. The page script lives
+│   │                              inside a TS template literal — a backtick
+│   │                              anywhere in it, comments included, closes the
+│   │                              string. Data arrives by postMessage and is never
+│   │                              concatenated into the document.
+│   ├── src/status.ts              Status bar, PINNED to a folder rather than
+│   │                              following the active editor: an item whose
+│   │                              subject moves as you navigate is never *known*
+│   │                              to be wrong. Plus Debouncer and Sequence.
+│   ├── src/cli.ts                 Runner resolution + the envelope/exit-code
+│   │                              contract, restated from `src/cli.py`.
+│   ├── src/commands.ts            GENERATED from helpers/commands.py by
+│   │                              scripts/gen_commands_ts.py. A test fails when
+│   │                              it goes stale.
+│   ├── test/*.test.js             Stub suite — the decisions, headless, in under a
+│   │                              second against `test/vscode-stub.js`.
+│   ├── test/integration/          LIVE suite: boots a real editor and holds the
+│   │   │                          real `vscode` module. Covers what the stub
+│   │   │                          cannot — command registration, rendered tree
+│   │   │                          rows, the Problems panel, the webview document.
+│   │   ├── runTests.js            Launcher; builds the disposable multi-root
+│   │   │                          fixture and REFUSES to start if it stops
+│   │   │                          producing the states the tests assert about.
+│   │   ├── runTestsVsix.js        Same, against the packaged .vsix. Note
+│   │   │                          `--disable-extensions` inverts here — see the
+│   │   │                          module header.
+│   │   ├── shared.js              Everything before the launch, so the two
+│   │   │                          launchers cannot drift.
+│   │   ├── mutations.js           Breaks each protected property and requires the
+│   │   │                          test written for it to object. 13/13 caught.
+│   │   ├── keep-out-of-the-way.ps1 Minimises test-host windows so a run does not
+│   │   │                          repeatedly steal the foreground.
+│   │   └── suite/harness.js       ~100 lines replacing Mocha; refuses a run of
+│   │                              zero tests.
+│   └── DEVELOPMENT.md             Which suite a new test belongs in, the focus
+│                                  problem, and the gotchas worth knowing first.
+│
 ├── tests/                         v4.12 pytest test suite — wired into CI as a
 │   │                              first-class gate (`.github/workflows/ci.yml`).
 │   │                              One file per module or dialog; no catch-all
@@ -548,7 +612,9 @@ Token Save Manager Source/
     ├── VERIFICATION.md             Which technique owns which failure, and what this
     │                               project's guards are actually worth — the mutation
     │                               results, the population arithmetic, and the rules
-    │                               for adding a guard that can fail
+    │                               for adding a guard that can fail. Covers the Tk
+    │                               geometry oracle and the VS Code live suite, and
+    │                               states what neither reaches: appearance
     ├── MCP_INTEGRATION_GOTCHAS.md  Field manual: UWP path redirection, wrapper stdio bug,
     │                               Connectors UI vs legacy config, live-reload paths
     ├── WINDOWS_WORKTREE_CLEANUP.md Field manual: why deleting a Claude Code worktree
@@ -566,16 +632,24 @@ Token Save Manager Source/
         ├── tokensave-daemon-stop-windows.md    [MOOT v6.0.0] --stop broken on Windows (daemon removed)
         ├── tokensave-daemon-child-no-window.md [MOOT v6.0.0] Daemon worker cmd-window flash (daemon removed)
         ├── tokensave-daemon-status-autostart.md [MOOT v6.0.0] Daemon autostart state in --status (daemon removed)
-        ├── tokensave-settings-write-on-readonly-query.md [FILED #419] read-only query rewrites settings.json
-        ├── tokensave-serve-db-lock-unidentifiable.md [FILED #421] serve locks the index and won't say which
-        ├── tokensave-cost-export-token-fields.md   [FILED #472] cost export token fields
-        ├── tokensave-cost-tokens-saved-unscoped.md [FILED #473] tokens-saved counter is unscoped
         ├── tokensave-discover-token-estimates.md   [FILED #474] discover token estimates
-        └── archived/                       Issues confirmed closed upstream
+        └── archived/                       Issues confirmed closed upstream.
+            │                               Each carries a RESOLVED: block beneath
+            │                               its STATUS line, because the archiver
+            │                               rewrites STATUS to a generic "CLOSED,
+            │                               verified via GitHub API" — true, and
+            │                               silent about which release fixed it.
             ├── tokensave-redundancy-tool.md         [SHIPPED v6.0.0 #83]
             ├── tokensave-glob-matcher-coverage.md   [closed]
             ├── tokensave-served-root-not-reported.md [CLOSED #437]
-            └── tokensave-worktree-index-resolution.md [closed]
+            ├── tokensave-worktree-index-resolution.md [closed]
+            ├── tokensave-settings-write-on-readonly-query.md [FIXED v7.11.0 #419]
+            │                               NOT in the 7.11 release notes, so a
+            │                               changelog-driven audit reports it open
+            │                               forever — verified directly instead
+            ├── tokensave-serve-db-lock-unidentifiable.md [FIXED v7.11.0 #421]
+            ├── tokensave-cost-export-token-fields.md   [FIXED v7.11.0 #472]
+            └── tokensave-cost-tokens-saved-unscoped.md [FIXED v7.11.0 #473]
 ```
 
 ---

@@ -77,7 +77,7 @@ def metrics(mocker, configured):
                             by_category=(SpendCategory("conversation", 4132.75,
                                                        7335),),
                             cache_read_tokens=None,
-                            lifetime_tokens_saved=14499614)))
+                            tokens_saved=14499614)))
     mocker.patch.object(savings, "fetch_discover", lambda exe, p, s:
                         Result.good(Discover(since=s, total_turns=12780,
                                              replaceable_turns=239,
@@ -153,21 +153,55 @@ def test_cache_read_tokens_is_null_never_a_number(capsys, project, metrics):
     assert env["data"]["spend"]["cache_read_tokens"] is None
 
 
-def test_spend_reports_that_its_totals_do_not_follow_from_its_tokens(
+def test_spend_publishes_the_basis_beside_the_implied_rate(
         capsys, project, metrics):
-    """Both halves: the totals agree, the implied rate matches no real price."""
+    """A rate without its basis is the bug, not the rate.
+
+    This fixture is a **7.10-shaped** payload: no cache fields, so the only
+    denominator available is input+output and the rate lands in the hundreds
+    per million. That is not a pricing anomaly — it is three quarters of the
+    tokens missing from the divisor — and the envelope has to say which
+    denominator produced the number so a consumer cannot show it beside a
+    7.11 figure as though they were the same statistic.
+    """
     _, env, _ = _run(capsys, ["cost", "--project", project, "--json"])
     spend = env["data"]["spend"]
     assert spend["totals_reconcile"] is True
     assert spend["implied_usd_per_mtok"] > 300
+    assert spend["implied_usd_basis"] == "input_output_only"
+
+    # And the fields that only 7.11 carries are absent, not zeroed.
+    assert spend["cache_read_tokens"] is None
+    assert spend["total_tokens"] is None
+    assert spend["tokens_reconcile"] is None      # cannot say, ≠ disagrees
+    assert spend["tokens_saved_spans_range"] is False
 
 
-def test_lifetime_counter_is_not_in_the_envelope(capsys, project, metrics):
-    """`cost.tokens_saved` is a lifetime all-projects figure. Savings come from
-    `gain`, so the misleading one is parsed but never published."""
+def test_tokens_saved_is_published_only_with_the_flag_that_qualifies_it(
+        capsys, project, metrics):
+    """tokensave 7.11.0 (#473) made `cost.tokens_saved` range-scoped, so it
+    stopped being a figure that had to be withheld. It is still machine-global
+    though — it equals `gain --all`, never project-scoped `gain` — and on an
+    older binary it is still a lifetime counter wearing a range label.
+
+    So publishing the number alone would just move the old ambiguity into the
+    envelope. It ships with `tokens_saved_spans_range`, and this test fails if
+    either ever appears without the other.
+    """
     _, env, _ = _run(capsys, ["cost", "--project", project, "--json"])
-    assert "tokens_saved" not in env["data"]["spend"]
-    assert "efficiency_ratio" not in env["data"]["spend"]
+    spend = env["data"]["spend"]
+    assert ("tokens_saved" in spend) == ("tokens_saved_spans_range" in spend)
+    assert "tokens_saved" in spend
+
+    # This fixture is 7.10-shaped, so the flag must say "do not label me".
+    assert spend["tokens_saved_spans_range"] is False
+
+    # `efficiency_ratio` is derived from it and inherits the scope, so it
+    # stays unpublished — nothing consumes it and it has no qualifying flag.
+    assert "efficiency_ratio" not in spend
+
+    # The scope note still travels with the section, unchanged by any of this.
+    assert "all projects" in spend["scope"]
 
 
 def test_opportunity_publishes_its_suppression_evidence(

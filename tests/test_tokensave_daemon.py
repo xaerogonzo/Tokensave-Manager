@@ -6,9 +6,15 @@ instead of the one holding the lock you wanted released. So most of what is
 asserted here is the *refusal* path: which states decline to be stopped, and
 why.
 
-The last test is different in kind — it cross-checks the heuristic against
-processes that declare their project on the command line, which are free
-ground truth. It skips when the machine has none.
+Two tests are different in kind — they cross-check against processes that
+declare their project on the command line, which are free ground truth. They
+skip when the machine has none.
+
+Since tokensave 7.11.0 the server registry (upstream #421) answers directly
+what the `-shm` correlation could only guess at, so the tests below split by
+`source`: what the registry said, what `-p` said, and what the heuristic had
+to infer. The heuristic tests are **not** legacy — a server started by an
+older tokensave writes no registry entry and still holds its lock.
 """
 from __future__ import annotations
 
@@ -22,6 +28,11 @@ from helpers.tokensave_daemon import (
     AMBIGUOUS,
     AUTHORITATIVE,
     HEURISTIC,
+    SOURCE_DECLARED,
+    SOURCE_LIVE_REGISTRY,
+    SOURCE_NONE,
+    SOURCE_REGISTRY_FILE,
+    SOURCE_SHM,
     UNATTRIBUTED,
     TokensaveServer,
     attribute_servers,
@@ -40,6 +51,191 @@ def _shm(mocker, mapping):
     """Pretend each project's database was opened at the given epoch time."""
     mocker.patch.object(td, "_shm_mtime",
                         side_effect=lambda p: mapping.get(p))
+
+
+def _registry(pid, project, started_at, source=SOURCE_LIVE_REGISTRY,
+              db_path=None, version="7.11.0"):
+    """One `~/.tokensave/servers/<pid>.json` record, as the reader yields it."""
+    return {pid: {
+        "pid": pid, "project_path": project, "started_at": started_at,
+        "argv_path": ".", "version": version,
+        "db_path": db_path or os.path.join(project, ".tokensave",
+                                           "tokensave.db"),
+        "_source": source,
+    }}
+
+
+# ── authoritative: the server registry (tokensave 7.11+, upstream #421) ──────
+
+def test_a_bare_server_the_registry_names_is_authoritative(mocker):
+    """The whole point of #421, and the case the heuristic could never win.
+
+    No `-p`, and no `-shm` match available — before 7.11 this was
+    `unattributed` and therefore unstoppable, which is what left a locked
+    worktree with no nameable owner.
+    """
+    _shm(mocker, {})
+    out = attribute_servers([_srv(1, 1000.0)], [PROJ_A],
+                            registry=_registry(1, PROJ_A, 1000.0))
+    assert out[0].source == SOURCE_LIVE_REGISTRY
+    assert out[0].attribution == AUTHORITATIVE
+    assert out[0].project == PROJ_A
+    assert out[0].can_stop and not out[0].needs_confirmation
+    assert not out[0].is_guess
+
+
+def test_the_registry_carries_the_db_path_and_version(mocker):
+    """`db_path` is the field that answers "what is locking this directory".
+
+    It is deliberately not derived from `project`: a per-branch database does
+    not sit at a fixed path under the project root, so composing one would
+    miss exactly when it matters.
+    """
+    _shm(mocker, {})
+    db = os.path.join(PROJ_A, ".tokensave", "branch-feature.db")
+    out = attribute_servers([_srv(1, 1000.0)], [PROJ_A],
+                            registry=_registry(1, PROJ_A, 1000.0, db_path=db))
+    assert out[0].db_path == db
+    assert out[0].version == "7.11.0"
+
+
+def test_the_registry_beats_a_disagreeing_command_line(mocker):
+    """`project_path` is what the server resolved; `-p` is what it was asked.
+
+    They differ whenever the argument was relative — the registry's own
+    `argv_path` is frequently a bare "." — so the resolved value has to win.
+    """
+    _shm(mocker, {})
+    out = attribute_servers(
+        [_srv(1, 1000.0, 'tokensave.exe serve -p "%s"' % PROJ_B)], [PROJ_A, PROJ_B],
+        registry=_registry(1, PROJ_A, 1000.0))
+    assert out[0].project == PROJ_A
+    assert out[0].source == SOURCE_LIVE_REGISTRY
+
+
+def test_a_registry_project_we_do_not_track_is_still_identified(mocker):
+    """Not in the Manager's project list is not the same as unidentified.
+
+    We know exactly what it serves, so it stays stoppable — the same contract
+    `-p` naming an untracked project has always had.
+    """
+    _shm(mocker, {})
+    out = attribute_servers([_srv(1, 1000.0)], [PROJ_A],
+                            registry=_registry(1, PROJ_B, 1000.0))
+    assert out[0].attribution == AUTHORITATIVE
+    assert out[0].project == PROJ_B
+    assert "not a known project" in out[0].detail
+
+
+# ── the registry file is not the registry ────────────────────────────────────
+
+def test_a_file_sourced_entry_is_believed_when_the_start_time_agrees(mocker):
+    _shm(mocker, {})
+    out = attribute_servers(
+        [_srv(1, 1000.0)], [PROJ_A],
+        registry=_registry(1, PROJ_A, 1000.0, source=SOURCE_REGISTRY_FILE))
+    assert out[0].source == SOURCE_REGISTRY_FILE
+    assert out[0].attribution == AUTHORITATIVE
+
+
+def test_a_recycled_pid_discards_the_stale_entry_rather_than_downgrading_it(
+        mocker):
+    """The safety property the upstream feature exists to provide.
+
+    Nothing reaps the files we read ourselves, so a record can outlive its
+    process and name a project for a PID that has since been reused. Upstream
+    records the OS-reported **process** start time so this is detectable
+    rather than guessable.
+
+    It must be **discarded**, not downgraded to a guess: a record about a dead
+    process is not weak evidence about this one, it is evidence about
+    something else. Downgrading would put a wrong project behind a
+    "confirm?" prompt, which is how a user confirms a mistake.
+    """
+    _shm(mocker, {})
+    out = attribute_servers(
+        [_srv(1, 9999.0)], [PROJ_A],          # live process started much later
+        registry=_registry(1, PROJ_A, 1000.0, source=SOURCE_REGISTRY_FILE))
+    assert out[0].project is None
+    assert out[0].source == SOURCE_NONE
+    assert out[0].attribution == UNATTRIBUTED
+    assert not out[0].can_stop
+
+
+def test_a_live_registry_entry_is_not_second_guessed_on_start_time(mocker):
+    """`tokensave servers` reaps as it lists, so its answer is already live.
+
+    Re-validating it here would replace an authoritative answer with our own
+    inference — the exact move this module exists to stop.
+    """
+    _shm(mocker, {})
+    out = attribute_servers(
+        [_srv(1, 9999.0)], [PROJ_A],
+        registry=_registry(1, PROJ_A, 1000.0, source=SOURCE_LIVE_REGISTRY))
+    assert out[0].attribution == AUTHORITATIVE
+
+
+def test_an_unverifiable_file_entry_is_not_claimed(mocker):
+    """A record with no usable start time cannot be checked, so it is not used."""
+    _shm(mocker, {})
+    entry = _registry(1, PROJ_A, 0, source=SOURCE_REGISTRY_FILE)
+    out = attribute_servers([_srv(1, 1000.0)], [PROJ_A], registry=entry)
+    assert out[0].attribution == UNATTRIBUTED
+
+
+# ── the heuristic survives for servers older tokensave started ───────────────
+
+def test_a_server_missing_from_the_registry_still_reaches_the_heuristic(mocker):
+    """A 7.10 server registers nothing and still holds its lock.
+
+    One registered server and one not, so this also pins that a populated
+    registry does not suppress the fallback for everything else in the list.
+    """
+    _shm(mocker, {PROJ_B: 2000.0})
+    out = attribute_servers([_srv(1, 1000.0), _srv(2, 2000.0)],
+                            [PROJ_A, PROJ_B],
+                            registry=_registry(1, PROJ_A, 1000.0))
+    by_pid = {s.pid: s for s in out}
+    assert by_pid[1].source == SOURCE_LIVE_REGISTRY
+    assert by_pid[2].source == SOURCE_SHM
+    assert by_pid[2].attribution == HEURISTIC
+    assert by_pid[2].needs_confirmation
+
+
+def test_no_registry_at_all_leaves_every_prior_behaviour_intact(mocker):
+    """The 7.10 world, unchanged — `registry` defaults to nothing."""
+    _shm(mocker, {PROJ_A: 1000.0})
+    out = attribute_servers([_srv(1, 1000.0)], [PROJ_A])
+    assert out[0].attribution == HEURISTIC
+    assert out[0].source == SOURCE_SHM
+
+
+# ── source and attribution cannot disagree ───────────────────────────────────
+
+def test_every_attribution_follows_from_its_source(mocker):
+    """The invariant that keeps a guess from being presented as a fact.
+
+    Walks every path that can set a project and asserts the pair agrees with
+    `_attribution_for`. Two independently-assigned fields would eventually
+    drift, and the one gating a kill is the wrong one to let drift.
+    """
+    _shm(mocker, {PROJ_B: 2000.0})
+    servers = [
+        _srv(1, 1000.0),                                        # registry
+        _srv(2, 2000.0),                                        # -shm
+        _srv(3, 3000.0, 'tokensave.exe serve -p "%s"' % PROJ_A),  # declared
+        _srv(4, 8000.0),                                        # nothing
+    ]
+    out = attribute_servers(servers, [PROJ_A, PROJ_B],
+                            registry=_registry(1, PROJ_A, 1000.0))
+    seen = set()
+    for srv in out:
+        seen.add(srv.source)
+        if srv.attribution == AMBIGUOUS:
+            continue          # a count of candidates, not a quality of one
+        assert srv.attribution == td._attribution_for(srv.source), srv
+    assert seen == {SOURCE_LIVE_REGISTRY, SOURCE_SHM, SOURCE_DECLARED,
+                    SOURCE_NONE}
 
 
 # ── authoritative: -p on the command line ────────────────────────────────

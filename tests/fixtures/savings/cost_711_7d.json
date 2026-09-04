@@ -1,0 +1,70 @@
+{
+  "range": "7d",
+  "total_cost_usd": 4813.30495985,
+  "total_input_tokens": 29540,
+  "total_output_tokens": 14063469,
+  "total_cache_read_tokens": 7780855643,
+  "total_cache_creation_tokens": 91594755,
+  "total_tokens": 7886543407,
+  "tokens_saved": 550983,
+  "efficiency_ratio": 0.03762519127298076,
+  "by_model": [
+    {
+      "model": "claude-opus-5",
+      "cost": 4812.42195625,
+      "tokens": 7885519725
+    },
+    {
+      "model": "claude-sonnet-5",
+      "cost": 0.8830036000000001,
+      "tokens": 1023682
+    },
+    {
+      "model": "<synthetic>",
+      "cost": 0.0,
+      "tokens": 0
+    }
+  ],
+  "by_category": [
+    {
+      "category": "conversation",
+      "cost": 2946.57952015,
+      "turns": 8821
+    },
+    {
+      "category": "general",
+      "cost": 1072.1777997,
+      "turns": 3447
+    },
+    {
+      "category": "testing",
+      "cost": 271.9188205,
+      "turns": 894
+    },
+    {
+      "category": "coding",
+      "cost": 229.13108925,
+      "turns": 764
+    },
+    {
+      "category": "git_ops",
+      "cost": 208.04654425,
+      "turns": 585
+    },
+    {
+      "category": "exploration",
+      "cost": 53.67260175,
+      "turns": 175
+    },
+    {
+      "category": "refactoring",
+      "cost": 22.3752705,
+      "turns": 74
+    },
+    {
+      "category": "build_deploy",
+      "cost": 9.40331375,
+      "turns": 28
+    }
+  ]
+}

@@ -19,6 +19,15 @@ package-lock.json
 # ABSENT, so the accident cannot ship even if this file is edited by mistake.
 bin/**
 
+# Test-run scratch: profiles, downloaded editors, the disposable fixture. These
+# did not exist before the live suite, and nothing excluded them — the packaged
+# extension went from 43 KB to 5.3 MB with 392 files, most of it a VS Code user
+# profile. Caught by the size assertion in test/integration/runTestsVsix.js
+# rather than at publish time, which is the whole reason that assertion exists.
+.vscode-test/**
+.vscode-test-vsix/**
+.vscode-test-desktop/**
+
 **/*.map
 **/*.ts
 !out/**/*.js

@@ -27,6 +27,7 @@ from theme import UiPumpMixin, _Tooltip, themed_checkbutton
 from helpers.quality_checks import run_syntax_check, run_pyflakes_check
 from helpers.prepush_hook import (
     is_pre_push_hook_installed,
+    pre_push_hook_state,
     install_pre_push_hook,
     remove_pre_push_hook,
     prepush_runner_script_path,
@@ -431,7 +432,20 @@ class ChecksDialog(UiPumpMixin, tk.Toplevel):
         self._ci_status_lbl.configure(text=f"{prefix} {msg}", fg=colour)
 
     def _on_toggle_hook(self) -> None:
-        """Install or remove the pre-push git hook."""
+        """Install, remove, or explain why git is ignoring the pre-push hook."""
+        from helpers.git_hooks_env import read_hooks_env, remediation
+        from helpers.prepush_hook import INERT
+
+        if pre_push_hook_state(self._path) == INERT:
+            # Installing again would write the same file to the same ignored
+            # directory and report success. The routing is the problem.
+            env = read_hooks_env(self._path)
+            self._ci_status_lbl.configure(
+                text="✗ pre-push hook present but core.hooksPath sends git to "
+                     f"{env.hooks_dir} — it never runs. {remediation(env)}",
+                fg=C["peach"])
+            return
+
         if self._hook_installed:
             ok, msg = remove_pre_push_hook(self._path)
             if ok:

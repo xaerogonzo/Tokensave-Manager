@@ -6,18 +6,27 @@ The sibling of ``CodegraphDaemonManagerDialog``, for the same class of problem:
 a server spawned by Claude Code holds ``.tokensave/tokensave.db`` open, and
 until Roadmap-10 the only fix was hunting the OS process by hand. tokensave's
 own daemon UI was removed in v6.0.0 along with its daemon — but ``tokensave
-serve`` processes still exist and still hold that lock, which is the premise
-upstream issue #421 disputes.
+serve`` processes still exist and still hold that lock, which is what upstream
+issue #421 reported.
 
-## Why this dialog is more cautious than the CodeGraph one
+## Why this dialog was more cautious than the CodeGraph one
 
 ``codegraph daemon`` prints each daemon's project path, so that dialog can
-label every row with certainty. ``tokensave serve`` mostly does not: measured
+label every row with certainty. ``tokensave serve`` mostly did not: measured
 on one machine, two of eight servers declared ``-p <path>`` and six declared
-nothing. ``helpers/tokensave_daemon.py`` recovers what it can by correlating
-each project's ``tokensave.db-shm`` mtime against process start times, but
-that is a heuristic with a documented failure mode, so rows carry four
-different confidence levels and the Stop control differs for each:
+nothing. ``helpers/tokensave_daemon.py`` recovered what it could by
+correlating each project's ``tokensave.db-shm`` mtime against process start
+times.
+
+**tokensave 7.11.0 fixed #421**, and every server it starts now registers its
+own project, so on a current binary the rows are authoritative and the
+heuristic never runs. Re-measured on the same machine after the upgrade:
+**seven servers, all seven named**, where six would previously have been
+unattributed and therefore unstoppable.
+
+The four confidence levels stay regardless, because a server started by an
+older tokensave registers nothing and still holds its lock. The Stop control
+differs for each:
 
   * **authoritative** — declared its project. Stop, after the usual confirm.
   * **heuristic** — matched on timing. Stop only after a second confirmation
@@ -234,8 +243,25 @@ class TokensaveDaemonManagerDialog(UiPumpMixin, tk.Toplevel):
         tk.Label(title, text="  " + label, bg=C["mantle"], fg=C[colour],
                  font=("Segoe UI", 8, "bold")).pack(side=tk.LEFT)
 
-        tk.Label(info, text=f"pid {srv.pid}", bg=C["mantle"],
+        # The version is worth a glyph of its own: it is what separates a
+        # server that registered itself from one that could only ever be
+        # guessed at, which is the difference between the two halves of this
+        # dialog's contract.
+        meta = f"pid {srv.pid}"
+        if srv.version:
+            meta += f"  ·  tokensave {srv.version}"
+        tk.Label(info, text=meta, bg=C["mantle"],
                  fg=C["overlay0"], font=("Segoe UI", 8)).pack(anchor=tk.W)
+
+        # The index, when the registry named one. This is the row's actual
+        # payload for the job people open this dialog to do — finding what
+        # holds a directory open so it can be deleted — and it is not
+        # derivable from the project path, because a per-branch database does
+        # not live at a fixed place beneath it.
+        if srv.db_path:
+            tk.Label(info, text=srv.db_path, bg=C["mantle"], fg=C["overlay0"],
+                     font=("Consolas", 8), wraplength=460,
+                     justify=tk.LEFT).pack(anchor=tk.W)
         if srv.detail:
             # The most-recent-index fallback is the one selection worth
             # noticing: it is not a decision anyone made, and it moves the

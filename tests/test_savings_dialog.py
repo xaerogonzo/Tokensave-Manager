@@ -23,6 +23,9 @@ the generation counter, not through wall-clock races.
 """
 from __future__ import annotations
 
+import dataclasses
+import pathlib
+
 import pytest
 
 tk = pytest.importorskip("tkinter")
@@ -35,6 +38,7 @@ from helpers.savings import (
     Spend,
     SpendCategory,
     SpendModel,
+    parse_spend,
 )
 import dialogs.cost_viewer as cost_viewer
 from dialogs.cost_viewer import SavingsDialog
@@ -61,7 +65,19 @@ def _spend(range_="30d", total=4132.75):
         total_input_tokens=25231, total_output_tokens=11394156,
         by_model=(SpendModel("claude-opus-5", total, 11419387),),
         by_category=(SpendCategory("conversation", total, 7335),),
-        cache_read_tokens=None, lifetime_tokens_saved=14499614))
+        cache_read_tokens=None, tokens_saved=14499614))
+
+
+#: A genuine `tokensave cost 7d --export json` capture from **7.11.0**.
+#: Read through the real parser rather than hand-built, so this test moves if
+#: the payload shape does — which is the whole reason the file is kept.
+_FIXTURES = pathlib.Path(__file__).parent / "fixtures" / "savings"
+
+
+def _spend_711(range_="30d"):
+    payload = (_FIXTURES / "cost_711_7d.json").read_text(encoding="utf-8")
+    value = parse_spend(payload).value
+    return Result.good(dataclasses.replace(value, range=range_))
 
 
 def _discover():
@@ -398,10 +414,48 @@ def test_spend_heading_states_its_scope_inline(tk_root, mock_config, seams):
     dlg.destroy()
 
 
-def test_spend_says_its_totals_do_not_follow_from_its_tokens(
+def test_a_711_payload_renders_the_cache_figure_instead_of_not_reported(
+        tk_root, mock_config, seams, mocker):
+    """The other half of the boundary, and the one nobody was checking.
+
+    A correct parser is not enough: the panel hardcoded the words "not
+    reported" beside a comment arguing the number could never exist. With a
+    real 7.11 capture the card must show the figure, and the explanatory note
+    must stop apologising for a denominator that is no longer short.
+    """
+    mocker.patch.object(cost_viewer, "fetch_spend",
+                        lambda exe, range_, project="": _spend_711(range_))
+    dlg = _dialog(tk_root, mock_config)
+    rendered = _texts(dlg._spend.frame)
+
+    assert "not reported" not in rendered
+    assert "Cache reads" in rendered
+    # Derived from the capture rather than pasted in: a re-captured fixture
+    # carries a new figure, and a hardcoded one would fail for that alone.
+    # Asserted in its grouped form, because that is what a user reads.
+    expected = _spend_711().value.cache_read_tokens
+    assert expected > 1_000_000_000                # the capture is not trivial
+    assert f"{expected:,}" in rendered
+    assert "denominator is incomplete" not in rendered
+    assert "all four token categories" in rendered
+    dlg.destroy()
+
+
+def test_spend_explains_a_short_denominator_rather_than_blaming_the_price(
         tk_root, mock_config, seams):
-    """So a user checking the arithmetic blames the right party."""
-    assert "cannot be derived" in _texts(_dialog(tk_root, mock_config)._spend.frame)
+    """So a user checking the arithmetic blames the right party.
+
+    The seam feeds a **7.10-shaped** payload with no cache fields, so the rate
+    the panel can compute counts only input and output and lands in the
+    hundreds per million. The panel has to say *why* — an incomplete
+    denominator — rather than implying tokensave priced something oddly, which
+    is what the previous "cannot be derived from the token counts" wording did.
+    """
+    rendered = _texts(_dialog(tk_root, mock_config)._spend.frame)
+    assert "denominator is incomplete" in rendered
+    assert "only input and output" in rendered
+    # And it must not have quietly started showing a fabricated cache figure.
+    assert "not reported" in rendered
 
 
 def test_savings_history_column_is_labelled_utc(tk_root, mock_config, seams):

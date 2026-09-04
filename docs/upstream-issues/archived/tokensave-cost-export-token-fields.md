@@ -1,7 +1,28 @@
 <!--
-STATUS: FILED 2026-08-29 as issue #472 — awaiting maintainer response.
+STATUS: CLOSED — verified via GitHub API 2026-08-30
   https://github.com/aovestdipaperino/tokensave/issues/472
   (the exported token fields cannot account for the exported cost)
+
+RESOLVED: fixed in tokensave 7.11.0 (issue #472).
+  `cost --export json` now carries total_cache_read_tokens,
+  total_cache_creation_tokens and a total_tokens summing all four categories;
+  cost_by_model_since counts the same four, so sum(by_model[].tokens) now
+  reconciles with total_tokens instead of agreeing with a wrong number.
+
+  Verified against 7.11.0 on all four ranges: the four categories sum exactly
+  to total_tokens, and sum(by_model[].tokens) == total_tokens exactly.
+
+  The report's central complaint — that dividing cost by tokens implied
+  ~$270-$360/Mtok, several times any published Anthropic rate — is resolved
+  and the diagnosis was right: the dominant category was cache reads, absent
+  from the export. Over total_tokens the same machine now reads $0.58-$0.65
+  per million, stable across every range.
+
+  Manager side: helpers/savings.py reads the three new fields (still typed
+  `int | None`, because a 7.10 payload carries none of them and "not
+  reported" must stay distinct from zero), and implied_usd_per_mtok returns
+  its basis alongside the rate so the two versions' figures cannot be
+  rendered as one statistic.
 
 Filed against tokensave 7.10.0. Searched for duplicates first (gh search
 over all issues): none. #457 is the same CLASS of bug — a count whose name

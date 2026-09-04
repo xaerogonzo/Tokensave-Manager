@@ -1,25 +1,37 @@
 """tokensave_daemon — find running ``tokensave serve`` processes, and say
 honestly how confident we are about which project each one serves.
 
-## Why this is harder than the CodeGraph equivalent
+## Why this was harder than the CodeGraph equivalent — and mostly is not now
 
 ``codegraph daemon`` prints its own table, project path included, so
-``codegraph_daemon.py`` only has to parse it. ``tokensave serve`` prints
-nothing and most instances carry no project argument, which is filed upstream
-as tokensave #421. Measured on one developer machine: **eight** servers
-running, two with ``-p "<path>"`` and six bare.
+``codegraph_daemon.py`` only has to parse it. ``tokensave serve`` printed
+nothing and most instances carried no project argument, which was filed
+upstream as tokensave #421. Measured on one developer machine at the time:
+**eight** servers running, two with ``-p "<path>"`` and six bare.
 
-That gap is not academic. A server pinned to the wrong project answers
+That gap was not academic. A server pinned to the wrong project answers
 queries about a codebase you are not in, with a plausible-looking result and
 no warning — which is exactly what happened while planning this module.
+
+**tokensave 7.11.0 closed it.** Every ``serve`` now writes
+``~/.tokensave/servers/<pid>.json`` once its database is open — recording
+``pid``, ``started_at``, ``project_path``, ``argv_path``, ``db_path`` and
+``version`` — and ``tokensave servers [--json]`` lists them. So the reverse
+lookup the ``-shm`` correlation below was invented to approximate is now a
+direct read, and a bare server is identifiable for the first time.
+
+The heuristic stays anyway, for one reason: a server started by an **older
+tokensave** is still running and still holds its lock, and it writes no
+registry entry. Registry first, ``-shm`` second, and the two never blur —
+``source`` records which one answered.
 
 ## The attribution contract
 
 Every server carries one of four states, and the UI must not blur them:
 
 ===============  ==========================================================
-authoritative    Verified tokensave binary AND ``-p <path>`` resolving to a
-                 known project. Directly stoppable.
+authoritative    The server registry named this PID's project (7.11+), or the
+                 process declares ``-p <path>``. Directly stoppable.
 heuristic        The ``-shm`` correlation below matched exactly one project.
                  A guess with good evidence. Must be labelled as a guess and
                  must not be stopped without the user confirming the project.
@@ -27,6 +39,34 @@ unattributed     No match. Never stoppable — we do not know what it serves.
 ambiguous        More than one candidate. Never stoppable, for the same
                  reason, only worse.
 ===============  ==========================================================
+
+``attribution`` is **derived**, never assigned independently: it is computed
+from ``source`` in one place, :func:`_attribution_for`. Two fields that can be
+set separately are two fields that will eventually disagree, and the one that
+gates a kill is the wrong one to let drift.
+
+===============  ==========================================================
+``source``       how the project was learned
+===============  ==========================================================
+live_registry    ``tokensave servers --json`` — the running binary answered
+registry_file    a ``~/.tokensave/servers/<pid>.json`` we read ourselves,
+                 **after** its ``started_at`` matched the live process
+declared         ``-p`` on the command line
+shm_heuristic    the ``-shm`` mtime correlation
+none             nothing identified it
+===============  ==========================================================
+
+### Why a registry *file* is not a registry
+
+``tokensave servers`` reaps entries for dead PIDs as it lists them; reading the
+directory ourselves skips that reaping, so a leftover file will happily name a
+project for a PID that died and was reused. Upstream records ``started_at`` as
+the **OS-reported process start time** precisely so this is detectable: a live
+process at that PID whose start time disagrees is a different process. So a
+file-sourced entry is validated against the enumerated process before it is
+believed, and **discarded** when it fails — not quietly downgraded to a guess,
+because a stale record is not weak evidence, it is evidence about something
+else.
 
 ## The ``-shm`` heuristic, and precisely where it breaks
 
@@ -93,6 +133,33 @@ HEURISTIC = "heuristic"
 UNATTRIBUTED = "unattributed"
 AMBIGUOUS = "ambiguous"
 
+# How a project was learned. `attribution` is derived from this, never set
+# beside it -- see `_attribution_for`.
+SOURCE_LIVE_REGISTRY = "live_registry"
+SOURCE_REGISTRY_FILE = "registry_file"
+SOURCE_DECLARED = "declared"
+SOURCE_SHM = "shm_heuristic"
+SOURCE_NONE = "none"
+
+#: Sources that name a project we can act on without asking the user first.
+_AUTHORITATIVE_SOURCES = frozenset(
+    (SOURCE_LIVE_REGISTRY, SOURCE_REGISTRY_FILE, SOURCE_DECLARED))
+
+
+def _attribution_for(source: str) -> str:
+    """The one place a source becomes a confidence level.
+
+    Called on every path that sets a project, so `attribution` cannot be set
+    to something `source` does not justify. `AMBIGUOUS` is not produced here:
+    it describes a *count* of candidates rather than the quality of one, and
+    the `-shm` path assigns it directly.
+    """
+    if source in _AUTHORITATIVE_SOURCES:
+        return AUTHORITATIVE
+    if source == SOURCE_SHM:
+        return HEURISTIC
+    return UNATTRIBUTED
+
 #: Seconds of slack between a process start and an ``-shm`` mtime. The
 #: measured pairs agreed to the second; this allows for clock granularity and
 #: filesystem timestamp rounding without opening the window wide enough to
@@ -118,6 +185,16 @@ class TokensaveServer:
     image: str = ""
     project: "str | None" = None
     attribution: str = UNATTRIBUTED
+    #: How `project` was learned. Always set alongside it — see
+    #: `_attribution_for`, which is what turns this into `attribution`.
+    source: str = SOURCE_NONE
+    #: The index this server holds open, when the registry reported one. This
+    #: is the field that answers "what is locking this directory", and it is
+    #: not derivable from `project`: a per-branch database does not live at a
+    #: fixed path under the project root.
+    db_path: "str | None" = None
+    #: tokensave's own version string, when the registry reported one.
+    version: str = ""
     detail: str = ""
     identity: "ProcessIdentity | None" = None
     candidates: tuple = field(default_factory=tuple)
@@ -208,6 +285,136 @@ def _record_for(server, records: dict) -> "dict | None":
     return record
 
 
+# -- the tokensave server registry (tokensave 7.11+, upstream #421) --------
+
+#: Tolerance between a registry entry's `started_at` and the process start
+#: time we enumerated. Both are OS-reported process start times for the same
+#: PID, so they should be identical; this only absorbs the second-vs-float
+#: granularity difference between the two readers, and is deliberately far
+#: tighter than `_RECORD_MAX_SKEW_S` — that one spans a *write* after a spawn,
+#: this one compares the same quantity twice.
+_REGISTRY_MAX_SKEW_S = 2.0
+
+_REGISTRY_TIMEOUT = 15
+
+
+def _registry_dir() -> str:
+    return os.path.join(os.environ.get("USERPROFILE", "") or
+                        os.path.expanduser("~"), ".tokensave", "servers")
+
+
+def read_server_registry(tokensave_exe: str = "") -> dict:
+    """Every registry entry tokensave will admit to, keyed by PID.
+
+    Two sources, and the difference matters. `tokensave servers --json` reaps
+    entries whose process is gone as it lists them, so what it returns is
+    live. Reading the directory ourselves does not reap, so a leftover file
+    for a recycled PID reads exactly like a live one — every entry from that
+    path is tagged `registry_file` and must be validated against the process
+    before it is believed.
+
+    Each value gains a `"_source"` key saying which path produced it. Nothing
+    else in the dict is ours; the rest is upstream's shape, untouched.
+
+    Fail-open, like everything else here.
+    """
+    entries = _registry_via_cli(tokensave_exe) if tokensave_exe else None
+    if entries is not None:
+        return entries
+    return _registry_via_files()
+
+
+def _registry_via_cli(tokensave_exe: str) -> "dict | None":
+    """Ask the binary. None — not {} — when it could not answer at all.
+
+    The distinction is load-bearing: an empty registry (`[]`, no servers
+    running) is an answer, and must not send us to the unreaped files. Only a
+    missing binary, an old one with no `servers` subcommand, or a crash is a
+    non-answer.
+    """
+    if not os.path.isfile(tokensave_exe):
+        return None
+    try:
+        proc = subprocess.run(
+            [tokensave_exe, "servers", "--json"],
+            capture_output=True, text=True, timeout=_REGISTRY_TIMEOUT,
+            creationflags=CREATE_NO_WINDOW if sys.platform == "win32" else 0)
+    except (OSError, subprocess.SubprocessError):
+        return None
+    if proc.returncode != 0:
+        return None                       # older tokensave: no such subcommand
+    try:
+        data = json.loads(proc.stdout or "[]")
+    except (ValueError, UnicodeDecodeError):
+        return None
+    return _index_registry(data, SOURCE_LIVE_REGISTRY)
+
+
+def _registry_via_files() -> dict:
+    """The same records, read straight off disk and therefore unreaped."""
+    entries = []
+    try:
+        names = os.listdir(_registry_dir())
+    except OSError:
+        return {}
+    for name in names:
+        if not name.endswith(".json"):
+            continue
+        try:
+            with open(os.path.join(_registry_dir(), name),
+                      encoding="utf-8") as fh:
+                entries.append(json.load(fh))
+        except (OSError, ValueError, UnicodeDecodeError):
+            continue
+    return _index_registry(entries, SOURCE_REGISTRY_FILE)
+
+
+def _index_registry(data, source: str) -> dict:
+    """Key a list of registry records by PID, dropping anything unusable."""
+    out: dict = {}
+    if not isinstance(data, list):
+        return out
+    for item in data:
+        if not isinstance(item, dict):
+            continue
+        try:
+            pid = int(item["pid"])
+        except (KeyError, TypeError, ValueError):
+            continue
+        record = dict(item)
+        record["_source"] = source
+        out[pid] = record
+    return out
+
+
+def _registry_entry_for(server, registry: dict) -> "dict | None":
+    """The entry describing *server*, or None if it cannot be trusted.
+
+    A `live_registry` entry is taken as given: the binary that owns the
+    registry already reaped the dead ones, and second-guessing it would just
+    reintroduce our own inference on top of an authoritative answer.
+
+    A `registry_file` entry is checked against the process we enumerated,
+    because nothing reaped it. Upstream records the OS-reported **process**
+    start time, so this is a real identity check rather than a freshness
+    guess: disagreement means PID reuse, and the entry is dropped.
+    """
+    entry = registry.get(server.pid)
+    if not entry:
+        return None
+    if entry.get("_source") == SOURCE_LIVE_REGISTRY:
+        return entry
+    try:
+        started = float(entry.get("started_at") or 0)
+    except (TypeError, ValueError):
+        return None
+    if not started or not server.started_at:
+        return None                # cannot verify, so do not claim
+    if abs(started - server.started_at) > _REGISTRY_MAX_SKEW_S:
+        return None                # a dead server's record wearing a live PID
+    return entry
+
+
 #: Human-readable explanation per selection reason.
 _SELECTION_DETAIL = {
     "pin": "chosen by the pinned project",
@@ -239,6 +446,7 @@ def list_tokensave_servers(tokensave_exe: str = "",
     procs = _enumerate_processes()
     if not procs:
         return []
+    registry = read_server_registry(tokensave_exe)
     expected = _normalise_path(tokensave_exe) if tokensave_exe else ""
     servers = []
     for proc in procs:
@@ -252,37 +460,74 @@ def list_tokensave_servers(tokensave_exe: str = "",
             identity=process_identity(proc["pid"]),
         ))
     return attribute_servers(servers, known_projects or [],
-                             tolerance_s=tolerance_s)
+                             tolerance_s=tolerance_s, registry=registry)
 
 
 def attribute_servers(servers: "list[TokensaveServer]",
                       known_projects: list,
-                      *, tolerance_s: float = DEFAULT_TOLERANCE_S
+                      *, tolerance_s: float = DEFAULT_TOLERANCE_S,
+                      registry: "dict | None" = None
                       ) -> "list[TokensaveServer]":
     """Assign each server an attribution state. Pure — no process access.
 
     Split out from :func:`list_tokensave_servers` so the interesting logic can
     be tested against constructed inputs rather than whatever happens to be
     running on the machine.
+
+    *registry* is the already-read output of :func:`read_server_registry`. It
+    is passed in rather than read here on purpose: reading it is IO, and the
+    validation this function performs on a file-sourced entry compares the
+    entry's `started_at` against the `started_at` already captured on the
+    server, so it needs no process access of its own. That keeps the whole of
+    the interesting logic — including PID-reuse rejection — testable from
+    constructed inputs.
     """
     projects = [p for p in (known_projects or []) if p]
     shm_times = {p: _shm_mtime(p) for p in projects}
     shm_times = {p: t for p, t in shm_times.items() if t is not None}
     records = read_wrapper_records()
+    registry = registry or {}
 
     # Pass 1 — the authoritative ones, which also stake a claim on a project.
+    #
+    # The registry is consulted before `-p` because it is strictly better
+    # evidence: it is what the server itself resolved, whereas `-p` is what it
+    # was asked for. `argv_path` in the registry is often a relative "." that
+    # only means anything from the server's own working directory, which is
+    # exactly the ambiguity `project_path` resolves.
     out, claimed = [], {}
     for srv in servers:
+        entry = _registry_entry_for(srv, registry)
+        listed = str((entry or {}).get("project_path") or "")
+        if listed:
+            resolved = _match_known(listed, projects) or listed
+            known = _match_known(listed, projects) is not None
+            source = entry.get("_source", SOURCE_LIVE_REGISTRY)
+            if known:
+                claimed.setdefault(resolved, []).append(srv.pid)
+            out.append(_with(
+                srv, project=resolved, source=source,
+                attribution=_attribution_for(source),
+                db_path=str(entry.get("db_path") or "") or None,
+                version=str(entry.get("version") or ""),
+                detail=("named by the tokensave server registry"
+                        if known else
+                        "named by the tokensave server registry "
+                        "(not a known project)")))
+            continue
+
         declared = _declared_project(srv.command_line)
         if declared and _match_known(declared, projects):
             resolved = _match_known(declared, projects)
             claimed.setdefault(resolved, []).append(srv.pid)
-            out.append(_with(srv, project=resolved, attribution=AUTHORITATIVE,
+            out.append(_with(srv, project=resolved, source=SOURCE_DECLARED,
+                             attribution=_attribution_for(SOURCE_DECLARED),
                              detail="declared with -p on the command line"))
         elif declared:
             # It named a project we do not know about. Still not a guess —
             # but not a project the manager can act on either.
-            out.append(_with(srv, project=declared, attribution=AUTHORITATIVE,
+            out.append(_with(srv, project=declared, source=SOURCE_DECLARED,
+                             attribution=_attribution_for(SOURCE_DECLARED),
                              detail="declared with -p (not a known project)"))
         else:
             out.append(srv)
@@ -344,10 +589,12 @@ def _attribute_by_shm(srv, matches, claimed, all_servers, shm_times,
                      detail="%s also matches PID(s) %s" % (
                          os.path.basename(project) or project,
                          ", ".join(str(p) for p in sorted(set(rivals + peers)))))
-    return _with(srv, project=project, attribution=HEURISTIC,
+    return _with(srv, project=project, source=SOURCE_SHM,
+                 attribution=_attribution_for(SOURCE_SHM),
                  candidates=(project,),
                  detail="database-open timestamp matches this process's start "
-                        "time; no other server matches it")
+                        "time; no other server matches it. This tokensave is "
+                        "older than 7.11 or did not register itself")
 
 
 # ── stopping ──────────────────────────────────────────────────────────────

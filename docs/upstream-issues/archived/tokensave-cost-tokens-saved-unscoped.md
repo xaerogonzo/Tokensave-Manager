@@ -1,7 +1,29 @@
 <!--
-STATUS: FILED 2026-08-29 as issue #473 — awaiting maintainer response.
+STATUS: CLOSED — verified via GitHub API 2026-08-30
   https://github.com/aovestdipaperino/tokensave/issues/473
   (tokens_saved ignores the requested range)
+
+RESOLVED: fixed in tokensave 7.11.0 (issue #473).
+  cost_summary now derives tokens_saved from the same `since` the rest of the
+  summary uses, reading the savings_ledger that `gain` reads. The parameter
+  is gone, so a caller can no longer pass a value scoped differently from the
+  summary it lands in.
+
+  Verified against 7.11.0: today 97,704 / 7d 550,983 / 30d 876,775 /
+  all 31,322,215 — four different figures where 7.10.0 returned one lifetime
+  number for every range.
+
+  ONE THING THE FIX DOES NOT CHANGE, and it matters to any consumer: the
+  figure is still MACHINE-GLOBAL. It equals `gain --all` exactly at every
+  range measured, and does NOT equal project-scoped `gain` (7d: 550,983
+  against 19,644 on this machine). `cost` has no project filter, so this is
+  correct — but a UI that puts it beside the project-scoped Gain reproduces
+  the scope ambiguity this issue was about, in a new form.
+
+  Manager side: the field is published with a `tokens_saved_spans_range`
+  flag, and a test asserts neither can appear in the envelope without the
+  other. The agreement with `gain --all` and the disagreement with `gain` are
+  both pinned against captured fixtures.
 
 Filed against tokensave 7.10.0. Searched for duplicates first (gh search
 over all issues): none. #457 is the same CLASS of bug — a count whose name
