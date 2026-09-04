@@ -266,12 +266,23 @@ def test_mcp_status_probes_only_when_explicitly_asked(capsys, project, mocker):
 
 
 def test_mcp_status_reports_the_layers_separately(capsys, project):
-    """Configuration truth and behavioural truth must not be collapsed."""
+    """Configuration truth and behavioural truth must not be collapsed.
+
+    An exact-set assertion, so adding a layer is a decision rather than
+    drift. `vscode_logs` was added in Roadmap-16 and is a THIRD kind of
+    truth, which is why it is its own layer rather than folded into
+    either of the first two: it is **observed history** -- what VS Code
+    did in windows that are already closed. It cannot say what the
+    configuration is now, and it cannot say what a client would do next.
+    """
     _, env, _ = _run(capsys, ["mcp-status", "--project", project, "--json"])
     layers = env["data"]["layers"]
-    assert set(layers) == {"project_config", "effective_scope", "behavioural"}
+    assert set(layers) == {"project_config", "effective_scope",
+                           "behavioural", "vscode_logs"}
     assert layers["behavioural"]["probed"] is False, \
         "the CLI cannot observe behavioural truth and must not imply it can"
+    assert "content_observable" in layers["vscode_logs"], \
+        "the log layer must say whether it could read anything at all"
 
 
 # ── commit-request: never destroy a pending approval ────────────────────────

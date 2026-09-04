@@ -251,6 +251,39 @@ Log filenames are machine-readable identifiers for the surface:
 independent confirmation that it reads that file, and a cheap detection hook
 for a future Doctor rule.
 
+### Correction (2026-09-04): the filenames carry the signal, the contents do not
+
+The detection hook above was built in Roadmap-16, and building it corrected
+the assumption underneath it. The backlog entry said parsing these files
+"gives connection state and stderr without spawning anything". Re-measured
+before writing any code:
+
+| | |
+|---|---|
+| log generations present | 14 |
+| generations holding any MCP log | **3** |
+| MCP server logs found | 25 |
+| **non-empty** | **0** |
+
+Every one is zero bytes — including Pylance's and Azure MCP's, servers that
+demonstrably work, and including the crashed user-scope entry whose contents
+are quoted verbatim above from the 2026-08-26 capture. So the content shape is
+real, but it is not what is on disk now.
+
+The reading that survives is a three-state one, and it matches the
+`configured → started → connected` distinction this document already drew:
+
+* **log exists, empty** — VS Code knew about the server from that scope and
+  did not start it in that window. Not a failure.
+* **log has content** — it was started; the content says how that went.
+* **no log** — nothing. The newest generation here holds no MCP log at all,
+  so absence is about which windows were opened, not about the server.
+
+`helpers/vscode_mcp_logs.py` therefore reports scope and state per generation
+and refuses to convert absence into a verdict. It also never says "shadowing":
+two scopes for one name is reported as a thing to check, because these logs do
+not record which one VS Code picked.
+
 ## The two Copilots are not one client
 
 A correction to this document's own earlier rows, and exactly the conflation

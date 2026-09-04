@@ -749,6 +749,28 @@ def _cmd_mcp_status(args) -> Result:
         got = effective_scope(project)
         layers["effective_scope"] = {"probed": True, "scope": str(got)}
 
+    # VS Code's own logs, as a fourth layer. Detect-only and deliberately
+    # weak: an empty log means VS Code knew about a server and did not start
+    # it, and an absent one means nothing at all -- only 3 of 14 log
+    # generations on the machine this was measured on hold any MCP log, and
+    # the newest holds none. So this layer never produces a verdict, and the
+    # `bound` decision below does not consult it.
+    from helpers import vscode_mcp_logs as vsl
+    vs = vsl.scan()
+    layers["vscode_logs"] = {
+        "generations_scanned": vs.generations_scanned,
+        "logs_found": vs.logs_found,
+        "content_observable": vs.content_observable,
+        "summary": vs.summary(),
+        "scopes_seen": {
+            scope: {"generation": e.generation, "state": e.state,
+                    "detail": e.detail,
+                    "vscode_label": vsl.VSCODE_LABEL.get(scope, scope)}
+            for scope, e in vsl.scopes_for(vs, "tokensave").items()
+        },
+        "notes": vsl.describe_server(vs, "tokensave"),
+    }
+
     data = {"layers": layers}
     bound = (layers["project_config"].get("verdict") or {}).get("state") == "ok"
     human = "mcp: project binding looks correct" if bound else \
