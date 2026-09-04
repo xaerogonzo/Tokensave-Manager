@@ -178,6 +178,29 @@ reading text:
 | 3 | prerequisite missing | warning + Open Settings |
 | 4 | ran but unverifiable | shown as "could not verify", never as "clean" |
 
+### `tokensaveManager.codeLens`
+
+Annotates Python files with what the Manager knows about their tests: `off`,
+`source`, `tests` or `both` (the default).
+
+On a source file it reports **"no filename-matched test"** — not "no tests".
+The scan underneath is a filename heuristic that looks for
+`tests/test_<name>.py` beside `src/<name>.py`, and it cannot prove the stronger
+claim: a module tested thoroughly from a differently-named file would be
+labelled untested. On a test file it shows the count and any **stale signals**
+— reasons to look, such as an import that no longer resolves, rather than a
+verdict that the test is dead.
+
+### `tokensaveManager.checksOnSave`
+
+Off by default. Runs `checks` on a Python file when you save it and refreshes
+only that file's entries in the Problems panel, debounced by
+`tokensaveManager.statusDebounceMs`.
+
+Needs a checkout (`tokensaveManager.managerPath`): `checks` shells out to a
+real interpreter, which the bundled CLI does not carry. With a bundled runner
+it says so once rather than failing on every save.
+
 ## Developing
 
 ```bash

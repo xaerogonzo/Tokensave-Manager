@@ -22,9 +22,13 @@ import { commandByAction } from "./commands";
 import { proposeCommit } from "./commit";
 import { DiagnosticStore } from "./diagnostics";
 import { DiscoveryCache } from "./discovery";
+import { registerCodeLens } from "./lens";
 import { registerManagerBridge } from "./manager";
+import { registerChecksOnSave } from "./onsave";
+import { refreshReadyContext, registerSetup } from "./setup";
 import { SavingsViewProvider } from "./savings";
 import { StatusBar } from "./status";
+import { registerTaskProvider } from "./tasks";
 import { TestExplorer } from "./testing";
 import { ACTIONS, DIAGNOSTIC_COMMANDS, ProjectsProvider } from "./tree";
 
@@ -159,6 +163,19 @@ export function activate(context: vscode.ExtensionContext): TestApi {
   registerStatusBar(context);
   registerSavingsView(context);
   registerManagerBridge(context, pickFolder);
+  registerTaskProvider(context);
+  registerSetup(context, () => {
+    void refreshReadyContext(context);
+    provider.refresh();
+  });
+  registerCodeLens(context, discovery);
+  registerChecksOnSave(context, {
+    // The store already scopes replacement by producer AND by file, which
+    // is what stops a per-file run wiping the rest of the folder. That
+    // property is load-bearing here, not incidental.
+    apply: (folder, relative, result) => diagnostics.replace(
+      folder, "checks", result.envelope?.findings ?? [], [relative]),
+  });
   registerCommitComposer(context);
   registerFileScopedActions(context);
   registerRefreshTriggers(context, provider);
@@ -462,6 +479,9 @@ function registerRefreshTriggers(context: vscode.ExtensionContext,
     vscode.workspace.onDidChangeConfiguration((event) => {
       if (event.affectsConfiguration("tokensaveManager")) {
         provider.refresh();
+        // The welcome view keys on this, so a path fixed in Settings has to
+        // dismiss it without a reload.
+        void refreshReadyContext(context);
       }
     }),
   );

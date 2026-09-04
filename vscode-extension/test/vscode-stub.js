@@ -145,6 +145,9 @@ function fakeController(id, label) {
 /** The most recently created controller, for tests to reach into. */
 const controllers = [];
 
+/** Task providers registered during activation. */
+const taskProviders = [];
+
 class EventEmitter {
   constructor() { this.listeners = []; }
   get event() {
@@ -179,6 +182,36 @@ const vscodeStub = {
       return controller;
     },
   },
+  tasks: {
+    registerTaskProvider(type, provider) {
+      taskProviders.push({ type, provider });
+      return { dispose() {} };
+    },
+  },
+  Task: class Task {
+    constructor(definition, scope, name, source, execution) {
+      this.definition = definition;
+      this.scope = scope;
+      this.name = name;
+      this.source = source;
+      this.execution = execution;
+    }
+  },
+  ProcessExecution: class ProcessExecution {
+    constructor(process, args) {
+      this.process = process;
+      this.args = args;
+    }
+  },
+  ShellExecution: class ShellExecution {
+    constructor() {
+      // Present only so a test can prove nothing constructs one: a shell task
+      // re-splits `D:\\Claude Co worker\\...` on the space.
+      throw new Error("ShellExecution must never be used for Manager tasks");
+    }
+  },
+  TaskRevealKind: { Always: 1, Silent: 2, Never: 3 },
+  TaskPanelKind: { Shared: 1, Dedicated: 2, New: 3 },
   TestRunProfileKind: { Run: 1, Debug: 2, Coverage: 3 },
   TestMessage: class TestMessage {
     constructor(message) { this.message = message; }
@@ -259,5 +292,5 @@ function setFolders(folders) {
 
 module.exports = {
   vscodeStub, setSettings, fakeCollection, folder, controllers, cancellation,
-  setFolders, FakeTestRun,
+  setFolders, FakeTestRun, taskProviders,
 };
