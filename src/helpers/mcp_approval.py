@@ -344,9 +344,15 @@ def approve_project_binding(project_root: str, server: str = "tokensave"
 #: only one no config file can reveal: Claude Desktop defines its own
 #: ``tokensave`` in ``claude_desktop_config.json``, which ``claude mcp get``
 #: never reads. See :mod:`helpers.mcp_shadow`.
+#:
+#: ``project_untrusted`` is the strongest member: Claude Code does not load a
+#: project's ``.mcp.json`` in a folder it has not been trusted in, and trust
+#: is granted interactively and cannot be written to a file at all. Offering
+#: any button here would be offering one that cannot work.
 ADVISORY_STATES = frozenset({
     "project_unapproved", "project_rejected", "project_key_ambiguous",
     "project_local_shadow", "project_shadowed", "project_desktop_shadowed",
+    "project_untrusted",
 })
 
 

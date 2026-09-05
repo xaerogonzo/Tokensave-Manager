@@ -116,6 +116,82 @@ def canonical_launch_dir(project_root: str, projects: "dict | None" = None,
         return project_root
 
 
+#: Trust states. Claude Code will not load a project's `.mcp.json` servers in
+#: a directory it has not been trusted in, so this gates MCP binding BEFORE
+#: `enabledMcpjsonServers` does — and a project blocked here looks exactly
+#: like one losing a precedence contest, with a completely different fix.
+TRUST_TRUSTED = "trusted"
+TRUST_UNTRUSTED = "untrusted"
+TRUST_UNKNOWN = "unknown"
+
+
+def project_trust_state(project_root: str, projects: "dict | None" = None,
+                        claude_json_path: str = "") -> str:
+    """Has Claude Code been trusted in `project_root`?
+
+    Read off the **forward-slash** spelling specifically, not whatever
+    `canonical_launch_dir` returns. Measured 2026-09-05 against a
+    `~/.claude.json` holding 49 project keys: **all 8 keys carrying session
+    history are forward-slash, and none of the 34 backslash keys carry any.**
+    Claude Code writes forward slashes; the backslash keys are artifacts of
+    tools running `claude` in a directory — this manager's own status checks
+    included, as `canonical_launch_dir` says above.
+
+    That distinction is the whole point. `canonical_launch_dir` falls back to
+    `os.path.normpath`, which on Windows produces backslashes, so for a
+    project with no session history it can return a spelling Claude Code does
+    not key by — and the trust flag read from it describes a record nothing
+    consults.
+
+    Absence is **untrusted**, not unknown: trust is granted, never assumed,
+    and a directory Claude Code has no record of is one it will ask about.
+    Until it does, that project's `.mcp.json` is not loaded. `UNKNOWN` is
+    reserved for not being able to read `~/.claude.json` at all, which is a
+    fact about this tool rather than about the user's setup.
+
+    Verified against the live dialog on six projects with byte-identical
+    `.mcp.json` files and `enabledMcpjsonServers: ['tokensave']` in every
+    one: the two reporting "verified serving" were exactly the two whose
+    forward-slash key had `hasTrustDialogAccepted: true`, and the four
+    reporting "shadowed" were the three with `false` plus one with no
+    forward-slash key at all.
+    """
+    if projects is None:
+        # Read directly rather than through `read_claude_projects`, which
+        # deliberately flattens an unreadable file to `{}` for callers that
+        # only decorate a status row. Here that distinction is the whole
+        # point: "no record of this project" is untrusted, but "could not
+        # read the config" is a fact about this tool, and reporting it as
+        # untrusted would overwrite a correct row with our own failure.
+        path = claude_json_path or _claude_json_path()
+        try:
+            with open(path, encoding="utf-8-sig") as fh:
+                data = json.load(fh)
+        except (OSError, ValueError):
+            return TRUST_UNKNOWN
+        found = data.get("projects") if isinstance(data, dict) else None
+        projects = found if isinstance(found, dict) else {}
+    try:
+        forward = os.path.abspath(project_root).replace("\\", "/")
+    except (OSError, ValueError):
+        return TRUST_UNKNOWN
+
+    # Compared against the forward-slash spelling and NOT normalised, which
+    # is the whole mechanism: a backslash-spelled key cannot equal `wanted`,
+    # so a trust flag sitting on one of those leftovers is ignored without
+    # needing a rule of its own. Normalising `key` here would quietly undo
+    # that and let a leftover confer trust. (An explicit "skip backslash
+    # keys" guard stood here briefly and was removed as dead — a mutation
+    # proved it could be deleted with nothing failing.)
+    wanted = forward.rstrip("/").lower()
+    for key, value in projects.items():
+        if key.rstrip("/").lower() != wanted:
+            continue
+        if isinstance(value, dict) and value.get("hasTrustDialogAccepted"):
+            return TRUST_TRUSTED
+        return TRUST_UNTRUSTED
+    return TRUST_UNTRUSTED
+
 
 def duplicate_project_keys(claude_json_path: str = "",
                            projects: "dict | None" = None) -> dict:

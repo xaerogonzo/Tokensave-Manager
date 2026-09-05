@@ -478,7 +478,18 @@ the background verification pass.
                                         projects=self._claude_projects).state
         except Exception:                                    # noqa: BLE001
             approval = None
-        verdict = describe_effective(got, approval=approval)
+        # Trust gates before precedence does. Without this the row says
+        # "shadowed" and tells the user to retire the user-scoped entry — for
+        # an untrusted folder that is not a fix, it is the removal of the only
+        # thing still answering.
+        from helpers.mcp import (TRUST_TRUSTED, TRUST_UNKNOWN,
+                                 project_trust_state)
+        try:
+            trust = project_trust_state(root, projects=self._claude_projects)
+        except Exception:                                    # noqa: BLE001
+            trust = TRUST_UNKNOWN
+        trusted = None if trust == TRUST_UNKNOWN else trust == TRUST_TRUSTED
+        verdict = describe_effective(got, approval=approval, trusted=trusted)
         if verdict is None:
             # Could not tell. Restore the file-level verdict rather than
             # leaving "checking…" on screen forever or inventing a failure:
