@@ -36,9 +36,19 @@ class DuplicateKeysMixin:
         true. It warned that duplicates mean "two independent sets of MCP
         approvals" — but approval lives in each project's own
         `.claude/settings.local.json`, not in these keys, so the part that
-        actually mattered does not depend on the spelling any more. What is
-        left is the trust flag, allowed-tools and session history: a re-prompt
-        at worst.
+        actually mattered does not depend on the spelling any more.
+
+        What is left is the trust flag, allowed-tools and session history, and
+        the summary line used to call that "no action needed". Measured
+        2026-09-05, that was too strong: trust is per spelling, Claude Code
+        does not load a project's `.mcp.json` in an untrusted folder, and a
+        spelling nothing launches with never gets the re-prompt that would
+        clear it. Four projects were sitting untrusted under their
+        forward-slash key while the MCP row blamed shadowing and advised
+        retiring the user-scoped entry — which would have left them with no
+        server at all. The block stays collapsed and actionless, because the
+        duplicates still are not the thing to fix; the line no longer promises
+        there is nothing to know.
 
         And nothing is being asked of the user. The manager no longer mints
         duplicates, and merging existing ones means choosing whose settings
@@ -54,7 +64,8 @@ class DuplicateKeysMixin:
             strip.pack(fill=tk.X, padx=4, pady=(8, 2))
             tk.Label(strip,
                      text="•  %d project%s recorded under more than one path "
-                          "spelling in ~/.claude.json — no action needed"
+                          "spelling in ~/.claude.json — the trust flag is "
+                          "recorded per spelling"
                           % (len(dups), "" if len(dups) == 1 else "s"),
                      font=("Segoe UI", 9), bg=C["base"],
                      fg=C["overlay0"], anchor=tk.W).pack(side=tk.LEFT)
@@ -80,8 +91,16 @@ class DuplicateKeysMixin:
                        "spelled it. This does NOT affect MCP approval — that "
                        "lives in each project's own .claude/settings.local.json. "
                        "What is split across spellings is the trust flag, "
-                       "allowed-tools and session history, so an unfamiliar "
-                       "spelling may re-ask the trust question once."),
+                       "allowed-tools and session history.\n\n"
+                       "  The trust flag is the one that bites. Claude Code "
+                       "does not load a project's .mcp.json in a folder it "
+                       "has not been trusted in, so a spelling that no "
+                       "session has ever used reads as untrusted — and the "
+                       "re-prompt that would fix it never happens, because "
+                       "nothing launches with that spelling. Measured here: "
+                       "of the keys carrying real session history, every one "
+                       "is forward-slash; the backslash ones are leftovers, "
+                       "and a trust flag set on a leftover governs nothing."),
                  font=("Segoe UI", 9), bg=C["surface0"], fg=C["text"],
                  justify=tk.LEFT, wraplength=720, anchor=tk.W).pack(
             fill=tk.X, padx=8)

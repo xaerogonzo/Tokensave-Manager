@@ -344,10 +344,33 @@ def approve_project_binding(project_root: str, server: str = "tokensave"
 #: only one no config file can reveal: Claude Desktop defines its own
 #: ``tokensave`` in ``claude_desktop_config.json``, which ``claude mcp get``
 #: never reads. See :mod:`helpers.mcp_shadow`.
+#:
+#: ``project_untrusted`` is the strongest member: Claude Code does not load a
+#: project's ``.mcp.json`` in a folder it has not been trusted in, and trust
+#: is granted interactively and cannot be written to a file at all. Offering
+#: any button here would be offering one that cannot work.
 ADVISORY_STATES = frozenset({
     "project_unapproved", "project_rejected", "project_key_ambiguous",
     "project_local_shadow", "project_shadowed", "project_desktop_shadowed",
+    "project_untrusted",
 })
+
+
+#: Advisory states that the user-scope retirement makes WORSE, not better.
+#:
+#: Every other advisory state is usually blocked *by* the user-scoped entry,
+#: which is why the readiness guard counts them as bound — withholding the
+#: button there would withhold it precisely when it is the fix. Trust inverts
+#: that relationship. An untrusted project is not losing a contest with the
+#: user-scoped entry, it is **depending** on it: its own `.mcp.json` is never
+#: loaded, so removing the fallback takes away the only server still
+#: answering and leaves it with nothing.
+#:
+#: Measured on a real setup that made the point: the dialog read "13 bound ·
+#: 13 approved · 0 still to bind" while three of those thirteen had never had
+#: the trust prompt accepted. The retirement button was one click away from
+#: breaking all three, and the counter said the migration was complete.
+MIGRATION_BLOCKED_STATES = frozenset({"project_untrusted"})
 
 
 

@@ -39,8 +39,12 @@ from helpers.mcp_projects import (
     matching_project_keys,
     _SESSION_FIELDS,
     _has_session,
+    TRUST_TRUSTED,
+    TRUST_UNKNOWN,
+    TRUST_UNTRUSTED,
     canonical_launch_dir,
     duplicate_project_keys,
+    project_trust_state,
 )
 from helpers.mcp_classify import (
     _canonical_mcp_entry,
@@ -71,6 +75,7 @@ from helpers.mcp_approval import (
     local_scope_shadow,
     approve_project_binding,
     ADVISORY_STATES,
+    MIGRATION_BLOCKED_STATES,
     annotate_project_binding,
 )
 from helpers.mcp_scope import (
@@ -133,8 +138,12 @@ __all__ = [
     "_SESSION_FIELDS",
     "_has_session",
     "stale_duplicate_keys",
+    "TRUST_TRUSTED",
+    "TRUST_UNKNOWN",
+    "TRUST_UNTRUSTED",
     "canonical_launch_dir",
     "duplicate_project_keys",
+    "project_trust_state",
     "APPROVAL_APPROVED",
     "APPROVAL_PENDING",
     "APPROVAL_REJECTED",
@@ -148,6 +157,7 @@ __all__ = [
     "local_scope_shadow",
     "approve_project_binding",
     "ADVISORY_STATES",
+    "MIGRATION_BLOCKED_STATES",
     "annotate_project_binding",
     "SCOPE_PROJECT",
     "SCOPE_USER",

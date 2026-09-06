@@ -170,18 +170,26 @@ def _update_header_labels(ctl, name, is_repo, branch, remote) -> None:
                                    fg=C["overlay0"])
 
 
-def _update_button_states(ctl, is_repo, remote) -> None:
+def _update_button_states(ctl, is_repo, remote, has_project=True) -> None:
     """Enable/disable the Git action-bar buttons for the current repo state.
 
     All buttons are disabled while a git operation is in flight; otherwise
     repo-gated, push/pull additionally remote-gated, and release/merge-PR
     additionally gh-gated.
+
+    `_git_project_btns` is the exception: it needs a selected project and
+    nothing else. Opening a Claude CLI session in a folder is not a git
+    operation, and gating it on `is_repo` made it unavailable on precisely
+    the projects that have no repository yet — including, in practice, the
+    ones a user had to visit to grant MCP trust.
     """
     if ctl._git_op_in_flight:
-        groups = [(ctl._git_all_btns, False)]
+        groups = [(ctl._git_all_btns, False),
+                  (ctl._git_project_btns, False)]
     else:
         groups = [
             (ctl._git_all_btns,       bool(is_repo)),
+            (ctl._git_project_btns,   bool(has_project)),
             (ctl._git_push_pull_btns, bool(is_repo and remote)),
             (ctl._git_release_btns,   bool(is_repo and remote
                                            and shutil.which("gh"))),
@@ -605,11 +613,19 @@ class GitTabController(UiPumpMixin):
                                      btn_commit, btn_undo, btn_new,
                                      btn_switch, btn_merge, btn_del, btn_openpr,
                                      btn_mergepr, btn_release, btn_draft_pr,
-                                     btn_test_gaps, btn_claude_cli]
+                                     btn_test_gaps]
         self._git_push_pull_btns = [btn_push, btn_pull, btn_openpr]
         self._git_release_btns   = [btn_release, btn_mergepr]
+        # Opening a CLI session is not a git operation. This lived in
+        # `_git_all_btns` — the convenient list — and inherited its `is_repo`
+        # gate, so it was disabled on exactly the projects with no repo yet.
+        # Its own tooltip sells it as "no need to open a terminal and cd there
+        # yourself", which is the case it was refusing. It needs a selected
+        # project and a configured CLI path, and `cmd_open_claude_cli` already
+        # checks both.
+        self._git_project_btns   = [btn_claude_cli]
 
-        for btn in self._git_all_btns:
+        for btn in self._git_all_btns + self._git_project_btns:
             btn.configure(state=tk.DISABLED)
 
     def _build_git_diff_pane(self) -> None:
@@ -694,7 +710,8 @@ class GitTabController(UiPumpMixin):
                        status_raw, log_text):
         """Main-thread update of all Git tab widgets."""
         _update_header_labels(self, name, is_repo, branch, remote)
-        _update_button_states(self, is_repo, remote)
+        _update_button_states(self, is_repo, remote,
+                              has_project=bool(path))
         self._commit_req.update(path, is_repo)
 
         self._git_status_lb.configure(state=tk.NORMAL)

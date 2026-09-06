@@ -305,3 +305,59 @@ def test_a_dead_action_button_does_not_break_the_state_update():
     dlg._action_buttons = [_Dead(), live]
     dlg._set_state()
     assert _last_state(live) == tk.NORMAL
+
+
+# ── Git tab: opening a CLI session is not a git operation ─────────────────
+# `btn_claude_cli` was added to `_git_all_btns` -- the convenient list -- and
+# inherited its `is_repo` gate, so it was disabled on exactly the projects
+# with no repository yet. Its own tooltip sells it as "no need to open a
+# terminal and cd there yourself", which is the case it was refusing. Found
+# when a user had to grant MCP trust in several folders, three of which were
+# not git repos, and the button that exists to do that was greyed out.
+
+
+def _git_ctl(in_flight=False):
+    from controllers.git_tab import GitTabController
+
+    ctl = object.__new__(GitTabController)
+    ctl._git_op_in_flight = in_flight
+    ctl._git_all_btns = [_Widget()]
+    ctl._git_project_btns = [_Widget()]
+    ctl._git_push_pull_btns = []
+    ctl._git_release_btns = []
+    return ctl
+
+
+def test_the_cli_button_is_available_on_a_project_with_no_repo():
+    from controllers.git_tab import _update_button_states
+
+    ctl = _git_ctl()
+    _update_button_states(ctl, is_repo=False, remote="", has_project=True)
+
+    assert _last_state(ctl._git_project_btns[0]) == tk.NORMAL, (
+        "the Claude CLI button is disabled on a non-repo project, which is "
+        "the one case it is most needed -- granting MCP trust in a folder "
+        "that is not a git repository"
+    )
+    assert _last_state(ctl._git_all_btns[0]) == tk.DISABLED, (
+        "the genuinely git-gated buttons must still be disabled; ungating one "
+        "button must not ungate the rest"
+    )
+
+
+def test_the_cli_button_needs_a_selected_project():
+    from controllers.git_tab import _update_button_states
+
+    ctl = _git_ctl()
+    _update_button_states(ctl, is_repo=False, remote="", has_project=False)
+    assert _last_state(ctl._git_project_btns[0]) == tk.DISABLED
+
+
+def test_an_in_flight_git_operation_still_disables_everything():
+    """The one gate that must keep covering it: a run in progress."""
+    from controllers.git_tab import _update_button_states
+
+    ctl = _git_ctl(in_flight=True)
+    _update_button_states(ctl, is_repo=True, remote="origin", has_project=True)
+    assert _last_state(ctl._git_project_btns[0]) == tk.DISABLED
+    assert _last_state(ctl._git_all_btns[0]) == tk.DISABLED
