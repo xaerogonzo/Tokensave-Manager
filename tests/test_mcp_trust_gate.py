@@ -22,6 +22,7 @@ No Tk and no subprocess here: `project_trust_state` reads a dict and
 """
 from __future__ import annotations
 
+import os
 import pytest
 
 from helpers.mcp_approval import ADVISORY_STATES
@@ -33,9 +34,25 @@ from helpers.mcp_projects import (
 )
 from helpers.mcp_scope import SCOPE_PROJECT, SCOPE_USER, EffectiveScope, describe_effective
 
-_ROOT = r"D:\Random Projects\LexForge"
-_FWD = "D:/Random Projects/LexForge"
-_BACK = "D:\\Random Projects\\LexForge"
+# Windows-shaped literals on Windows, POSIX-shaped ones elsewhere -- because
+# `project_trust_state` normalises with `os.path.abspath`, and a Windows
+# absolute path is NOT absolute to Linux. On the ubuntu-latest gate,
+# abspath(r"D:\Random Projects\LexForge") prepends the runner cwd, so the
+# forward-slash key never matched: two of the five tests below failed, and two
+# more PASSED VACUOUSLY -- they assert UNTRUSTED and got it because nothing
+# matched at all, not because the logic worked. The backslash-does-not-confer-
+# trust case, which is the load-bearing one, was among the vacuous pair.
+#
+# The logic under test is OS-independent; only the example spellings are not,
+# so the spellings follow the platform and every assertion stays meaningful.
+if os.name == "nt":
+    _ROOT = r"D:\Random Projects\LexForge"
+    _FWD  = "D:/Random Projects/LexForge"
+    _BACK = "D:\\Random Projects\\LexForge"
+else:
+    _ROOT = "/random projects/LexForge"
+    _FWD  = "/random projects/LexForge"       # abspath is a no-op; no slashes to flip
+    _BACK = "\\random projects\\LexForge"    # a decoy key that must not be consulted
 
 
 def test_a_trusted_forward_key_is_trusted():
