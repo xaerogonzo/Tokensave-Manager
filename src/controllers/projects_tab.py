@@ -26,6 +26,8 @@ from typing import TYPE_CHECKING
 
 from theme import _Tooltip
 from constants import C
+from helpers.graph_trust import (INDEX_ABSENT, INDEX_PRESENT,
+                                 index_state)
 from helpers.detection import _root_label
 from helpers.git import (
     _format_git_status_cell,
@@ -421,17 +423,38 @@ class ProjectsTabController:
         return iid[5:]
 
     def _require_tokensave(self, path: str) -> bool:
-        if os.path.isfile(os.path.join(path, ".tokensave", "tokensave.db")):
+        """Gate an action on this project actually having a usable index.
+
+        Asks :func:`helpers.graph_trust.index_state` rather than looking for
+        ``.tokensave/tokensave.db`` directly. The direct check missed
+        per-branch indexes named in ``branch-meta.json`` entirely, telling
+        the user a fully indexed project had no index at all.
+        """
+        state = index_state(path)
+        if state.state == INDEX_PRESENT:
             return True
         name = os.path.basename(path)
-        messagebox.showinfo(
-            "Not indexed with tokensave",
-            f"'{name}' is a git project but doesn't have a tokensave index yet.\n\n"
-            "Tokensave builds a code-graph that lets Claude navigate your project "
-            "efficiently without reading every file.\n\n"
-            "To add it:  right-click → ⚙ Retrofit…  and tick "
-            "'Add tokensave @include + init'.",
-            parent=self._root)
+        if state.state == INDEX_ABSENT:
+            messagebox.showinfo(
+                "Not indexed with tokensave",
+                f"'{name}' is a git project but doesn't have a tokensave index yet.\n\n"
+                "Tokensave builds a code-graph that lets Claude navigate your project "
+                "efficiently without reading every file.\n\n"
+                "To add it:  right-click -> Retrofit...  and tick "
+                "'Add tokensave rules + index the project'.",
+                parent=self._root)
+        else:
+            # There IS an index; it just cannot be used. Saying "not indexed
+            # yet" here would send the user to a Retrofit that deliberately
+            # refuses to overwrite it, which is the loop this all came from.
+            messagebox.showwarning(
+                "Tokensave index unusable",
+                f"'{name}' has a tokensave index that cannot be read.\n\n"
+                f"{state.detail}\n\n"
+                "It is left alone rather than rebuilt, because re-indexing "
+                "discards it. To rebuild deliberately, run 'tokensave init' "
+                "in the project directory.",
+                parent=self._root)
         return False
 
     # _require_codegraph_installed was moved to CodeGraphController._require_installed

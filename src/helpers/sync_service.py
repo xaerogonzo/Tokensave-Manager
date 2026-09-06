@@ -184,3 +184,82 @@ def run_sync(project_root: str, tokensave_exe: str, *,
         shadows=shadows,
         counts=parse_sync_counts(output),
     )
+
+
+# ── Initialisation ───────────────────────────────────────────────────────
+#
+# `init` is not `sync` with a different flag, and the Manager must not treat
+# it as one. tokensave's own model is that `init` is an explicit per-project
+# opt-in which builds a full index, while `sync` assumes initialisation has
+# already happened. Keeping the two argv builders separate is what stops a
+# caller "helpfully" reaching for whichever one is nearest.
+
+
+def init_argv(*, git_hook: bool = False) -> list:
+    """Arguments for an index initialisation, without the executable.
+
+    ``--no-git-hook`` by default, and that is a correctness requirement
+    rather than a preference: bare ``tokensave init`` *offers* to install the
+    repository's git hooks, and an offer needs a terminal. Spawned from the
+    GUI with no stdin attached, the prompt has nobody to answer it and the
+    subprocess sits there until the timeout. Installing git hooks is also a
+    separate decision from indexing a project, and the Manager already
+    exposes it as its own retrofit option.
+    """
+    return ["init", "--git-hook"] if git_hook else ["init", "--no-git-hook"]
+
+
+@dataclasses.dataclass(frozen=True)
+class InitResult:
+    """What a completed initialisation produced."""
+    ok: bool
+    returncode: int
+    output: str
+    argv: list
+    error: str = ""
+
+
+def run_init(project_root: str, tokensave_exe: str, *,
+             git_hook: bool = False,
+             timeout: "float | None" = None) -> InitResult:
+    """Run ``tokensave init`` to completion over *project_root*.
+
+    Mirrors :func:`run_sync`'s contract deliberately -- same environment, same
+    no-window spawn, and a missing executable reported as a result rather than
+    raised, because every caller has to render it as a message either way.
+
+    This does **not** decide whether initialising is appropriate. That is
+    :func:`helpers.graph_trust.index_state`'s job, and the separation matters:
+    ``init`` overwrites an existing index, so the question "is there one?" must
+    be answered before this function is ever called.
+    """
+    argv = init_argv(git_hook=git_hook)
+    try:
+        proc = subprocess.run(
+            [tokensave_exe] + argv,
+            cwd=project_root,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.STDOUT,
+            stdin=subprocess.DEVNULL,
+            text=True, encoding="utf-8", errors="replace",
+            env=tokensave_env(),
+            creationflags=CREATE_NO_WINDOW,
+            timeout=timeout,
+        )
+    except FileNotFoundError:
+        return InitResult(ok=False, returncode=127, output="", argv=argv,
+                          error=f"tokensave executable not found: {tokensave_exe}")
+    except subprocess.TimeoutExpired:
+        return InitResult(ok=False, returncode=124, output="", argv=argv,
+                          error=f"tokensave init timed out after {timeout}s")
+    except OSError as exc:
+        return InitResult(ok=False, returncode=1, output="", argv=argv,
+                          error=str(exc))
+    output = proc.stdout or ""
+    return InitResult(
+        ok=proc.returncode == 0,
+        returncode=proc.returncode,
+        output=output,
+        argv=argv,
+        error="" if proc.returncode == 0 else f"tokensave init exited {proc.returncode}",
+    )

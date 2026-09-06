@@ -170,6 +170,86 @@ def _schema_gap(conn) -> str:
     return ""
 
 
+# ── Index presence ───────────────────────────────────────────────────────
+#
+# A different question from graph *trust* above, and the distinction is
+# load-bearing. Trust asks "can this graph be believed?"; presence asks "is
+# there an index here at all, and will it open?" Only one presence answer
+# justifies creating an index, because `tokensave init` overwrites whatever
+# is already there. Collapsing these into one "is it OK?" boolean is how a
+# repair path destroys a working index it merely failed to understand.
+
+INDEX_ABSENT       = "absent"        # nothing to open
+INDEX_UNOPENABLE   = "unopenable"    # a file is there; sqlite will not open it
+INDEX_SCHEMA_DRIFT = "schema_drift"  # opens, but not a schema we recognise
+INDEX_PRESENT      = "present"       # opens, schema usable
+
+
+@dataclass(frozen=True)
+class IndexState:
+    """Whether *this* project has a usable tokensave index, and why not."""
+    state: str
+    detail: str = ""
+    db_path: str = ""
+
+    @property
+    def may_initialise(self) -> bool:
+        """Whether an index may be created here without asking a human first.
+
+        ``absent`` only. Every other state has a file that ``tokensave init``
+        would discard, so the choice belongs to the user rather than to the
+        caller. Schema drift especially: it usually means the Manager is
+        older or newer than the CLI that wrote the index, and re-indexing is
+        not obviously the right remedy for a version mismatch.
+        """
+        return self.state == INDEX_ABSENT
+
+    def summary(self) -> str:
+        if self.state == INDEX_PRESENT:
+            return "index present"
+        return f"no usable index — {self.detail}"
+
+
+def index_state(project_root: str) -> IndexState:
+    """Classify the index at *project_root* without modifying anything.
+
+    Read-only (``mode=ro``), and deliberately says *which* way an index is
+    unusable. :func:`inspect_graph` flattens all three failures into
+    ``unknown`` because for trust purposes they are the same answer; for
+    deciding whether to run ``init`` they are emphatically not.
+    """
+    db = db_path_for(project_root)
+    if not db:
+        return IndexState(INDEX_ABSENT, "no tokensave index for this project")
+
+    conn = None
+    try:
+        conn = sqlite3.connect(f"file:{db}?mode=ro", uri=True)
+        # sqlite3.connect() is lazy -- it does not read the file until a
+        # statement runs, so a directory of random bytes named tokensave.db
+        # "connects" happily and only fails later, inside the schema check,
+        # where it would be misread as schema drift. Force the open here so
+        # "this is not a database" and "this is a database I do not
+        # recognise" stay the different answers they are: the first justifies
+        # offering to rebuild, the second is usually a version mismatch.
+        conn.execute("SELECT count(*) FROM sqlite_master").fetchone()
+    except sqlite3.Error as exc:
+        if conn is not None:
+            conn.close()
+        return IndexState(INDEX_UNOPENABLE, f"cannot open index ({exc})",
+                          db_path=db)
+    try:
+        gap = _schema_gap(conn)
+        if gap:
+            return IndexState(INDEX_SCHEMA_DRIFT,
+                              f"unsupported tokensave schema — {gap}",
+                              db_path=db)
+        return IndexState(INDEX_PRESENT, db_path=db)
+    finally:
+        if conn is not None:
+            conn.close()
+
+
 # ── The inspection ───────────────────────────────────────────────────────
 
 def inspect_graph(project_root: str, *,
