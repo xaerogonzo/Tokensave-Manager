@@ -153,3 +153,68 @@ def test_trust_that_is_not_false_keeps_the_precedence_verdict(trusted):
     state, _label, _issue = describe_effective(
         EffectiveScope(SCOPE_USER, connected=True), trusted=trusted)
     assert state == "project_shadowed"
+
+
+# ── the retirement guard must not count an untrusted project as bound ─────
+# "13 bound / 13 approved / 0 still to bind" was rendered on a machine where
+# three of the thirteen had never had the trust prompt accepted. The counter
+# read as a finished migration, and the button that would have broken all
+# three was one click away.
+
+
+def _status(rows, skips=()):
+    import types as _t
+    from dialogs.mcp_migration_panel import UserScopeMigrationMixin
+
+    host = UserScopeMigrationMixin()
+    host._cfg = _t.SimpleNamespace(raw={"mcp_skip_warnings": list(skips)})
+    return host._migration_status(rows)
+
+
+def _row(name, state):
+    return (name, "D:/Random Projects/" + name, {"state": state})
+
+
+def test_an_untrusted_project_is_not_counted_as_bound():
+    st = _status([_row("Good", "ok"), _row("Untrusted", "project_untrusted")])
+    assert [n for n, _ in st["blocked"]] == ["Untrusted"]
+    assert [n for n, _ in st["bound"]] == ["Good"]
+    assert st["ready"] is False, (
+        "the retirement was offered while a project depended on the very "
+        "entry it removes"
+    )
+
+
+def test_a_genuinely_shadowed_project_still_counts_as_bound():
+    """The existing rule stays: those ARE blocked by the entry being removed.
+
+    Withholding the button for them would withhold it exactly when it is the
+    fix, which is the trap the readiness rule already refuses. Trust is the
+    single exception, and it is an exception because it runs the other way.
+    """
+    st = _status([_row("Shadowed", "project_shadowed")])
+    assert [n for n, _ in st["bound"]] == ["Shadowed"]
+    assert st["blocked"] == []
+    assert st["ready"] is True
+
+
+def test_the_measured_case_reports_not_ready():
+    rows = [_row("P%d" % i, "ok") for i in range(10)]
+    rows += [_row("CleanForge", "project_untrusted"),
+             _row("ICO File Manager", "project_untrusted"),
+             _row("Uplift Messenger", "project_untrusted")]
+    st = _status(rows)
+    assert len(st["bound"]) == 10
+    assert len(st["blocked"]) == 3
+    assert st["ready"] is False
+
+
+def test_untrusted_is_the_only_state_that_blocks_the_migration():
+    """A second state added here silently would change the button's meaning."""
+    from helpers.mcp import ADVISORY_STATES, MIGRATION_BLOCKED_STATES
+
+    assert MIGRATION_BLOCKED_STATES == {"project_untrusted"}
+    assert MIGRATION_BLOCKED_STATES <= ADVISORY_STATES, (
+        "a blocking state must also be advisory, or the row would offer an "
+        "Apply button for something no file can fix"
+    )

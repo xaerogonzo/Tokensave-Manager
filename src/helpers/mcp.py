@@ -75,6 +75,7 @@ from helpers.mcp_approval import (
     local_scope_shadow,
     approve_project_binding,
     ADVISORY_STATES,
+    MIGRATION_BLOCKED_STATES,
     annotate_project_binding,
 )
 from helpers.mcp_scope import (
@@ -156,6 +157,7 @@ __all__ = [
     "local_scope_shadow",
     "approve_project_binding",
     "ADVISORY_STATES",
+    "MIGRATION_BLOCKED_STATES",
     "annotate_project_binding",
     "SCOPE_PROJECT",
     "SCOPE_USER",

@@ -23,7 +23,8 @@ import pytest
 pytestmark = pytest.mark.tk
 
 from dialogs.mcp_config import MCPConfigDialog
-from helpers.mcp import ADVISORY_STATES, _project_mcp_path
+from helpers.mcp import (ADVISORY_STATES, MIGRATION_BLOCKED_STATES,
+                         _project_mcp_path)
 
 
 class _Cfg:
@@ -101,7 +102,8 @@ def test_every_not_ok_state_blocks_until_bound_or_skipped(state):
     assert [n for n, _ in st["remaining"]] == ["b"]
 
 
-@pytest.mark.parametrize("state", sorted(ADVISORY_STATES))
+@pytest.mark.parametrize("state",
+                         sorted(ADVISORY_STATES - MIGRATION_BLOCKED_STATES))
 def test_an_advisory_state_still_counts_as_bound(state):
     """A shadowed or unapproved binding is a WRITTEN binding.
 
@@ -110,6 +112,11 @@ def test_an_advisory_state_still_counts_as_bound(state):
     would withhold the button at exactly the moment it is the fix — the same
     "demand the outcome beforehand" trap the readiness rule already refuses
     for shadowing.
+
+    `MIGRATION_BLOCKED_STATES` is excluded because it is the one family
+    where that reasoning inverts: an untrusted project's `.mcp.json` is not
+    loaded at all, so it is not blocked BY the user-scoped entry, it is
+    running ON it. See `test_a_blocked_state_is_not_counted_as_bound`.
     """
     st = _dialog()._migration_status([
         _row("a", "/a", "ok"), _row("b", "/b", state)])
@@ -324,3 +331,24 @@ def test_skip_and_unskip_round_trip_through_the_config():
     dlg._cfg.raw["mcp_skip_warnings"] = [
         s for s in dlg._cfg.raw["mcp_skip_warnings"] if s != path]
     assert dlg._cfg.raw["mcp_skip_warnings"] == []
+
+
+@pytest.mark.parametrize("state", sorted(MIGRATION_BLOCKED_STATES))
+def test_a_blocked_state_is_not_counted_as_bound(state):
+    """The one advisory family the retirement makes worse, not better.
+
+    An untrusted folder does not load its own `.mcp.json` at all, so it is not
+    losing a contest with the user-scoped entry — it is depending on it, and
+    removing that entry leaves it with nothing. The counterpart to
+    `test_an_advisory_state_still_counts_as_bound`, and the reason that test
+    now excludes this set rather than covering every advisory state.
+
+    Measured: the panel read "13 bound · 13 approved · 0 still to bind" with
+    three untrusted projects among the thirteen.
+    """
+    st = _dialog()._migration_status([
+        _row("a", "/a", "ok"), _row("b", "/b", state)])
+
+    assert st["ready"] is False
+    assert [n for n, _ in st["blocked"]] == ["b"]
+    assert [n for n, _ in st["bound"]] == ["a"]

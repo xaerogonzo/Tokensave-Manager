@@ -356,6 +356,23 @@ ADVISORY_STATES = frozenset({
 })
 
 
+#: Advisory states that the user-scope retirement makes WORSE, not better.
+#:
+#: Every other advisory state is usually blocked *by* the user-scoped entry,
+#: which is why the readiness guard counts them as bound — withholding the
+#: button there would withhold it precisely when it is the fix. Trust inverts
+#: that relationship. An untrusted project is not losing a contest with the
+#: user-scoped entry, it is **depending** on it: its own `.mcp.json` is never
+#: loaded, so removing the fallback takes away the only server still
+#: answering and leaves it with nothing.
+#:
+#: Measured on a real setup that made the point: the dialog read "13 bound ·
+#: 13 approved · 0 still to bind" while three of those thirteen had never had
+#: the trust prompt accepted. The retirement button was one click away from
+#: breaking all three, and the counter said the migration was complete.
+MIGRATION_BLOCKED_STATES = frozenset({"project_untrusted"})
+
+
 
 def annotate_project_binding(info: dict, project_root: str,
                              server: str = "tokensave",
