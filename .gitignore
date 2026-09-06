@@ -81,15 +81,18 @@ package-lock.json
 !vscode-extension/package-lock.json
 .pycache__/
 
-# Added by TokenSave Manager -- and half wrong for this repository.
-# The scaffolder ignores build.bat/build.ps1 because in the projects it
-# scaffolds they are generated boilerplate from templates/. Here build.ps1
-# is bespoke: 283 lines assembling three exes plus templates\, docs\ and
-# dist\. Untracked, its fixes lived on one machine -- including the
-# -Recurse that is the only reason templates/gotchas/ reaches end users.
-# build.bat stays ignored: it really is the 3-line launcher, byte-identical
-# to the template and regenerable.
-build.bat
+# NOTE: TokenSave Manager's scaffolder auto-ignores build.bat and build.ps1,
+# because in the projects it scaffolds they are generated boilerplate from
+# templates/. This repository is not one of those projects -- it is the tool
+# itself, and its build.ps1 is bespoke: 283 lines assembling three exes plus
+# templates\, docs\ and dist\. Both are now tracked.
+#
+# Untracked, build.ps1's fixes lived on one machine -- including the -Recurse
+# that is the only reason templates/gotchas/ reaches end users at all.
+#
+# If the scaffolder is ever re-run here it will re-add these entries. Delete
+# them again; the tool's convention for its consumers does not apply to the
+# tool.
 
 # Added by TokenSave Manager
 dist/
