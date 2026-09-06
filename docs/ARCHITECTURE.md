@@ -492,7 +492,12 @@ Token Save Manager Source/
 │   ├── nuitka-build.ps1.template  Generic Nuitka build script template (PowerShell)
 │   ├── nuitka-build.py.template   Python-based alternative build script
 │   ├── nuitka-build.bat.template  One-line bat launcher template for other projects
-│   └── NUITKA_GOTCHAS.md          Nuitka pitfalls reference (14 known issues with fixes)
+│   ├── NUITKA_GOTCHAS.md          Nuitka pitfalls reference (14 known issues with fixes)
+│   └── gotchas/                   Cross-project failure modes, indexed by project-baseline.md
+│       ├── windows-filesystem.md      Directory locks, 8.3 paths, venv moves
+│       ├── customtkinter.md           Appearance mode, Tk roots, after() teardown
+│       ├── shared-python-packages.md  Module aliasing, PEP 420, editable installs
+│       └── agent-scripting.md         Escape mangling, atomic edits, bulk renames
 │
 ├── dist/                          Build output — zip and ship this folder
 │   ├── tokensave-manager.exe
@@ -1224,8 +1229,10 @@ Every completion callback (refresh, messagebox, popup creation) is similarly sch
 
 ## Template System
 
-Five files in `templates/` drive the scaffold/retrofit and build-pipeline features.
-All five are copied into `dist\templates\` by `build.ps1` and shipped to end users.
+`templates/` drives the scaffold/retrofit and build-pipeline features. All of it is copied
+into `dist/templates/` by `build.ps1` -- **recursively**, because `gotchas/` is a
+subdirectory and without `-Recurse` the shipped baseline would index files that are not
+there -- and shipped to end users.
 
 ### `templates/claude-md-template.md`
 Written as `BASIC_INSTRUCTIONS.md` into scaffolded projects. Contains an `@include`
@@ -1237,8 +1244,9 @@ A universal rules file `@include`d at the top of every retrofitted project's CLA
 Updating this one file instantly propagates changes to all retrofitted projects without
 touching individual CLAUDE.md files.
 
-Contents: tokensave tool lookup table, documentation discipline table, code quality rules,
-git discipline, and a "Compiling with Nuitka" section pointing Claude at the build templates.
+Contents: tokensave tool lookup table, **gotchas index**, documentation discipline table,
+code quality rules, git discipline, and a "Compiling with Nuitka" section pointing Claude
+at the build templates.
 
 ### `templates/nuitka-build.ps1.template`
 Generic PowerShell build script for compiling any Python project to a standalone `.exe`.
@@ -1262,6 +1270,45 @@ Inherently avoids all PowerShell-specific pitfalls.
 ### `templates/nuitka-build.bat.template`
 One-line `.bat` launcher: `powershell -ExecutionPolicy Bypass -NoProfile -File build.ps1` + `pause`.
 Bypasses execution policy so users can double-click to build without configuring PowerShell.
+
+### `templates/gotchas/`
+
+Cross-project failure modes, indexed by `project-baseline.md` and read on demand
+rather than `@include`d. The distinction is the design:
+
+* **`project-baseline.md` carries rules** — stable, short, loaded on every
+  message in every project.
+* **`gotchas/` carries knowledge** — accumulates forever, ~40 KB and growing,
+  relevant to maybe one session in fifty.
+
+`@include`-ing the corpus would cost that 40 KB on every message everywhere, and
+worse, it would create pressure to *delete* entries to keep the file small —
+exactly backwards for something whose value is that it accumulates. So the
+baseline carries a four-row pointer table (cheap, always loaded) and the files
+stay on disk (expensive, read when the table says to).
+
+| File | Covers |
+|---|---|
+| `windows-filesystem.md` | Directory locks and the move-the-contents workaround, 8.3 paths breaking Nuitka binaries, venvs surviving a move while console shims do not, `os.walk` depth limiting, deriving system paths from the environment |
+| `customtkinter.md` | Appearance mode at module scope, the second-`CTk()`-root flake, `after()` raising from a worker thread after teardown, one-row-per-item gridding, off-screen capture vs a hidden desktop |
+| `shared-python-packages.md` | `sys.modules` aliasing vs re-export and the monkeypatch contract, PEP 420 across two distributions, Nuitka and editable installs, declaring a dependency in every install path |
+| `agent-scripting.md` | Backslash escapes eaten between tool call and Python (silent tabs and BEL characters in paths), assert-before-write so a failed edit is a no-op, CRLF in multi-line searches, bulk renames rewriting the document that explains the rename |
+
+**Admission criteria**, stated in the baseline so the corpus does not rot into a
+junk drawer: a gotcha earns a place when it (a) cost more than ~15 minutes,
+(b) failed **silently or misleadingly**, and (c) is not specific to one project.
+Format is Symptom -> Cause -> Fix, with the measurement where one exists.
+
+Criterion (b) is the load-bearing one. A failure with a good traceback teaches
+itself; the entries worth keeping are the ones where the application kept
+running and looked fine. Every entry in the initial three files came from a
+real incident, most of them from a single extraction that pulled ~2,300 lines
+out of PolyShield into PolyBedrock.
+
+**`build.ps1` copies `templates/` with `-Recurse`.** Without it this
+subdirectory does not ship, and the shipped `project-baseline.md` indexes three
+files that are not in `dist\` — a broken reference in every project the manager
+scaffolds thereafter.
 
 ### `templates/NUITKA_GOTCHAS.md`
 Reference doc covering 14 known Nuitka pitfalls with cause + fix:

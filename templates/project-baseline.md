@@ -25,6 +25,34 @@ Only fall back to `Read` when you need the exact implementation body to edit it 
 
 ---
 
+## Gotchas: read the relevant file BEFORE you start
+
+Hard-won failure modes, kept alongside this file in `templates/gotchas/`.
+They are **not** @included -- collectively they are ~40 KB, and paying that on
+every message in every project to be occasionally useful is the wrong trade.
+This index is the cheap part; the files are the expensive part.
+
+| If you are about to... | Read first |
+|---|---|
+| compile to a standalone `.exe` | `NUITKA_GOTCHAS.md` |
+| rename/move a directory, or chase a file lock | `gotchas/windows-filesystem.md` |
+| touch a CustomTkinter/Tk view, or screenshot one | `gotchas/customtkinter.md` |
+| extract shared code into a package two projects use | `gotchas/shared-python-packages.md` |
+| write files from a script, or run a bulk rename | `gotchas/agent-scripting.md` |
+
+**These describe failures that do not raise.** A wrong appearance mode renders a
+plausible-looking screenshot; a re-export shim passes its tests for the wrong
+reason; an unpinned git dependency ships a different product on each build.
+Reading the file costs a minute. Rediscovering its contents has repeatedly cost
+an afternoon.
+
+**When you hit a new one, add it.** A gotcha earns a place here when it (a) cost
+more than ~15 minutes, (b) failed *silently* or misleadingly, and (c) is not
+specific to one project. Symptom -> Cause -> Fix, and include the measurement if
+there was one.
+
+---
+
 ## Documentation Discipline
 
 After any code change, update the minimum set of docs necessary — **proportional to the significance of the change**. Never rewrite a whole file when a one-sentence addition covers it.

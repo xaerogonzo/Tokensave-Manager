@@ -81,9 +81,21 @@ package-lock.json
 !vscode-extension/package-lock.json
 .pycache__/
 
-# Added by TokenSave Manager
-build.bat
-build.ps1
+# build.bat and build.ps1 are TRACKED here, deliberately.
+#
+# They were ignored from 276914f (2026-05-27) out of a concern that a public
+# build script makes it trivial for someone to build and ship a release of
+# this program. A reasonable instinct, but the licence already answers it:
+# this repository is public and MIT, so building and redistributing --
+# commercially included -- is permitted outright. With src/ and the
+# requirements public, the script is convenience, not a key.
+#
+# The cost was not theoretical. Untracked, build.ps1's fixes lived in one
+# working copy -- including the -Recurse without which dist/ ships missing
+# templates/gotchas/ entirely, and a fresh clone builds a broken release.
+#
+# If controlling who ships binaries becomes the goal, the licence is the
+# lever, not this file.
 
 # Added by TokenSave Manager
 dist/
