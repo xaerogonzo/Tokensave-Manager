@@ -83,18 +83,19 @@ package-lock.json
 
 # build.bat and build.ps1 are TRACKED here, deliberately.
 #
-# They were ignored from 276914f (2026-05-27), "update .gitignore with
-# AI-suggested patterns", on the reasoning that they were "no longer needed
-# after integrating the new build process". They were needed: this repo's
-# build.ps1 is 283 bespoke lines assembling three exes plus templates/,
-# docs/ and dist/. The suggestion was wrong, and the header the dialog wrote
-# above it -- "# Added by TokenSave Manager" -- made a bad guess read as
-# deliberate tool convention for four months.
+# They were ignored from 276914f (2026-05-27) out of a concern that a public
+# build script makes it trivial for someone to build and ship a release of
+# this program. A reasonable instinct, but the licence already answers it:
+# this repository is public and MIT, so building and redistributing --
+# commercially included -- is permitted outright. With src/ and the
+# requirements public, the script is convenience, not a key.
 #
-# The cost was concrete: fixes to build.ps1 lived in one working copy, and a
-# fresh clone would have shipped a dist/ missing templates/gotchas/ entirely.
+# The cost was not theoretical. Untracked, build.ps1's fixes lived in one
+# working copy -- including the -Recurse without which dist/ ships missing
+# templates/gotchas/ entirely, and a fresh clone builds a broken release.
 #
-# Do not re-add them.
+# If controlling who ships binaries becomes the goal, the licence is the
+# lever, not this file.
 
 # Added by TokenSave Manager
 dist/
