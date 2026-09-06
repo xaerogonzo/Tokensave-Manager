@@ -111,7 +111,8 @@ def _parse_mcp_get(text: str) -> "EffectiveScope":
 
 
 def describe_effective(got: "EffectiveScope", server: str = "tokensave",
-                       approval: "str | None" = None) -> tuple:
+                       approval: "str | None" = None,
+                       trusted: "bool | None" = None) -> tuple:
     """`(state, label, issue)` for a row Claude Code has been asked about.
 
     Pure, so every verdict the dialog can display is testable without a CLI.
@@ -127,6 +128,16 @@ def describe_effective(got: "EffectiveScope", server: str = "tokensave",
     and serving that project's own graph, because it does not read
     `.claude/settings.local.json`. It IS reliable about scope resolution —
     which definition wins — so those verdicts are kept.
+
+    `trusted` is `helpers.mcp_projects.project_trust_state` as a tri-state
+    (`True` / `False` / `None` for unknown), and it changes the *advice*, not
+    just the wording. Claude Code does not load a project's `.mcp.json` in an
+    untrusted folder, so such a project falls back to the user-scoped entry
+    without any precedence contest having happened — and the old text told
+    that user to retire the entry, which would have left them with no server
+    at all. Measured on six projects with byte-identical `.mcp.json` files
+    and approval granted in every one: trust alone separated the two that
+    served from the four that did not.
     """
     if got is None or not got.is_known:
         return None
@@ -140,13 +151,36 @@ def describe_effective(got: "EffectiveScope", server: str = "tokensave",
                  "sessions here still fall back to the user-scoped entry. Run "
                  "`claude` once in this project and approve it."))
     if got.is_shadowed:
+        if trusted is False:
+            # Trust gates BEFORE precedence: Claude Code does not load a
+            # project's .mcp.json at all in a folder it has not been trusted
+            # in, so the user-scoped entry answers by default rather than by
+            # winning anything. Telling this user to retire that entry would
+            # not bind the project — it would leave it with no server at all.
+            return ("project_untrusted",
+                    "⚠ folder not trusted — .mcp.json is not loaded",
+                    ("Claude Code has not been trusted in this folder, so it "
+                     "does not load this project's .mcp.json at all and "
+                     "sessions fall back to the %s-scoped `%s`. Run `claude` "
+                     "once here and accept \"Do you trust the files in this "
+                     "folder?\" — that is the whole fix, and it cannot be "
+                     "done by editing a file. Do NOT retire the %s-scoped "
+                     "entry for this: trust is the blocker, not precedence, "
+                     "and removing it would leave this project with no `%s`."
+                     % (got.scope, server, got.scope, server)))
         return ("project_shadowed",
                 "⚠ shadowed by the %s-scoped entry" % got.scope,
                 ("This file is correct, but Claude Code reports it is serving "
-                 "the %s-scoped `%s` instead — that scope takes precedence. "
-                 "Editing .mcp.json will not change which server runs; retire "
-                 "the %s-scoped entry."
-                 % (got.scope, server, got.scope)))
+                 "the %s-scoped `%s` instead. Two different things produce "
+                 "that: the %s-scoped entry genuinely taking precedence, or "
+                 "this folder not being trusted — in which case the project "
+                 "entry is never loaded and the fallback is all there is. "
+                 "Run `claude` once here first; it settles the trust question "
+                 "and shows which server actually answers. Retire the "
+                 "%s-scoped entry only once trust is granted, because doing "
+                 "it while trust is the blocker leaves this project with no "
+                 "`%s` at all."
+                 % (got.scope, server, got.scope, got.scope, server)))
     if got.scope == SCOPE_ABSENT:
         return ("missing", "✗ Claude Code sees no %s at all" % server,
                 ("The file is on disk but Claude Code reports no `%s` server "

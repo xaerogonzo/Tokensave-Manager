@@ -17,6 +17,7 @@ from tkinter import messagebox
 from constants import C
 from helpers.mcp import (
     ADVISORY_STATES,
+    MIGRATION_BLOCKED_STATES,
     USER_SCOPE_RETIRED_KEY,
     _apply_mcp_fix,
     _canonical_mcp_entry,
@@ -49,10 +50,18 @@ the background verification pass.
         binding, so demanding proof of correct service *before* removing it
         would be asking for an outcome the removal itself produces.
         Verification happens after, on a representative bound project.
+
+        **Trust is the exception to that rule**, and it has to be, because it
+        runs the other way. `MIGRATION_BLOCKED_STATES` names the advisory
+        states the retirement makes worse: an untrusted project's `.mcp.json`
+        is never loaded, so it is not competing with the user-scoped entry —
+        it is living on it. Counting it as bound produced "13 bound · 13
+        approved · 0 still to bind" on a machine where three of the thirteen
+        had never been trusted, and offered the button anyway.
         """
         raw = self._cfg.raw if isinstance(self._cfg.raw, dict) else {}
         skips = raw.get("mcp_skip_warnings") or []
-        bound, skipped, remaining, approved = [], [], [], []
+        bound, skipped, remaining, approved, blocked = [], [], [], [], []
         for name, root, info in rows:
             # Advisory states count as bound here, and must. Their files are
             # correct by construction, and the thing blocking them is usually
@@ -60,7 +69,9 @@ the background verification pass.
             # unbound would withhold the button precisely when it is the fix,
             # which is the same "demand the outcome beforehand" trap the
             # readiness rule already refuses for shadowing.
-            if info["state"] == "ok" or info["state"] in ADVISORY_STATES:
+            if info["state"] in MIGRATION_BLOCKED_STATES:
+                blocked.append((name, root))
+            elif info["state"] == "ok" or info["state"] in ADVISORY_STATES:
                 bound.append((name, root))
                 if info["state"] != "project_unapproved":
                     approved.append((name, root))
@@ -69,8 +80,8 @@ the background verification pass.
             else:
                 remaining.append((name, root))
         return {"bound": bound, "skipped": skipped, "remaining": remaining,
-                "approved": approved,
-                "ready": not remaining and bool(bound)}
+                "approved": approved, "blocked": blocked,
+                "ready": not remaining and not blocked and bool(bound)}
 
     def _render_migration(self, rows):
         """Both retirement migrations, in the order they must be done.
@@ -116,11 +127,36 @@ the background verification pass.
             fill=tk.X, padx=8, pady=(4, 2))
         unapproved = len(st["bound"]) - len(st["approved"])
         tk.Label(box,
-                 text="  %d bound · %d approved · %d skipped · %d still to bind"
-                      % (len(st["bound"]), len(st["approved"]),
-                         len(st["skipped"]), len(st["remaining"])),
+                 text=("  %d bound · %d approved · %d skipped · %d still to "
+                       "bind · %d not trusted"
+                       % (len(st["bound"]), len(st["approved"]),
+                          len(st["skipped"]), len(st["remaining"]),
+                          len(st["blocked"]))),
                  font=("Consolas", 9), bg=C["surface0"], fg=C["text"],
                  anchor=tk.W).pack(fill=tk.X, padx=8)
+
+        # The one category the retirement would BREAK rather than fix. Said
+        # before the button and in its own colour, because the counter above
+        # is what let three untrusted projects read as a finished migration.
+        if st["blocked"]:
+            names = ", ".join(n for n, _ in st["blocked"][:6])
+            if len(st["blocked"]) > 6:
+                names += ", …"
+            tk.Label(
+                box,
+                text=("  ⚠  %d project%s in a folder Claude Code has not been "
+                      "trusted in: %s. Their .mcp.json is not loaded at all, "
+                      "so they are not shadowed by the user-scoped entry — "
+                      "they are running ON it, and removing it would leave "
+                      "them with no tokensave. Open each one and accept "
+                      "\"Do you trust the files in this folder?\" first; it "
+                      "cannot be done by editing a file."
+                      % (len(st["blocked"]),
+                         "" if len(st["blocked"]) == 1 else "s", names)),
+                font=("Segoe UI", 9, "bold"),
+                bg=C["surface0"], fg=C["red"],
+                justify=tk.LEFT, wraplength=740, anchor=tk.W).pack(
+                fill=tk.X, padx=8, pady=(4, 2))
 
         # Approval is the half of this the guard cannot speak for. "All bound"
         # does not mean "all working": an unapproved binding is not in the
@@ -478,7 +514,18 @@ the background verification pass.
                                         projects=self._claude_projects).state
         except Exception:                                    # noqa: BLE001
             approval = None
-        verdict = describe_effective(got, approval=approval)
+        # Trust gates before precedence does. Without this the row says
+        # "shadowed" and tells the user to retire the user-scoped entry — for
+        # an untrusted folder that is not a fix, it is the removal of the only
+        # thing still answering.
+        from helpers.mcp import (TRUST_TRUSTED, TRUST_UNKNOWN,
+                                 project_trust_state)
+        try:
+            trust = project_trust_state(root, projects=self._claude_projects)
+        except Exception:                                    # noqa: BLE001
+            trust = TRUST_UNKNOWN
+        trusted = None if trust == TRUST_UNKNOWN else trust == TRUST_TRUSTED
+        verdict = describe_effective(got, approval=approval, trusted=trusted)
         if verdict is None:
             # Could not tell. Restore the file-level verdict rather than
             # leaving "checking…" on screen forever or inventing a failure:

@@ -292,6 +292,11 @@ def test_every_advisory_state_is_produced_by_something():
             _ok_info(), WIN, projects=projects)["state"])
     produced.add(describe_effective(
         EffectiveScope(SCOPE_USER, connected=True))[0])
+    # Trust gates before precedence, so the same scope answer produces a
+    # different state -- and a different remedy -- once the folder is known
+    # to be untrusted.
+    produced.add(describe_effective(
+        EffectiveScope(SCOPE_USER, connected=True), trusted=False)[0])
     # The runtime tier's state has no config-file producer at all -- Claude
     # Desktop's own `tokensave` lives in a file `claude mcp get` never reads,
     # so it is emitted by the dialog from a live process scan instead. Named
@@ -330,7 +335,12 @@ def test_describe_effective_user_scope_is_shadowed():
         EffectiveScope(SCOPE_USER, connected=True))
     assert state == "project_shadowed"
     assert "user" in label
-    assert "will not change which server runs" in issue
+    assert "taking precedence" in issue
+    # With trust unknown the advice must name BOTH causes and must not
+    # recommend retiring the entry unconditionally -- doing that while trust
+    # is the blocker leaves the project with no server at all.
+    assert "not being trusted" in issue
+    assert "only once trust is granted" in issue
 
 
 def test_describe_effective_local_scope_is_shadowed():
