@@ -893,8 +893,11 @@ def _index_summary(project: str) -> dict:
     zeroes, because "no index" and "an empty index" are different answers.
     """
     import sqlite3
-    db_path = os.path.join(project, ".tokensave", "tokensave.db")
-    if not os.path.isfile(db_path):
+    # Resolve through db_path_for so a tracked feature branch reports on its
+    # own index rather than the default branch's.
+    from helpers.graph_trust import db_path_for
+    db_path = db_path_for(project)
+    if not db_path:
         return {"indexed": False}
     try:
         con = sqlite3.connect(f"file:{db_path}?mode=ro", uri=True, timeout=2.0)
