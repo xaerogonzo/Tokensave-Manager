@@ -18,9 +18,15 @@ See `docs/ARCHITECTURE_TOKENSAVE.md` for how tokensave itself works.
 Token Save Manager Source/
 ├── .github/
 │   └── workflows/
-│       └── ci.yml                 GitHub Actions CI — syntax + pyflakes on push/PR
-│                                  (free, deterministic only; Doctor + Claude review
-│                                  are local-only and run via ChecksDialog)
+│       ├── ci.yml                 Orchestrator — the `check` job (syntax + pyflakes)
+│                                  plus the extension jobs, and it calls the suite
+│                                  below. Doctor + Claude review stay local-only,
+│                                  run via ChecksDialog.
+│       ├── _test_suite.yml        Reusable test suite. `test-gate` runs on
+│                                  pull_request and blocks; `test-postmerge` runs on
+│                                  push to master. A green push run is NOT evidence
+│                                  the PR is green — they are different jobs.
+│       └── release-extension.yml  Publishes the VS Code extension.
 ├── manager-config.json            Machine-specific config (paths, search roots)  — gitignored
 ├── manager-config.example.json    Clean template with placeholder paths — committed
 ├── TOKENSAVE_GUIDE.md             Full tokensave CLI + MCP reference
@@ -69,7 +75,7 @@ Token Save Manager Source/
 │   │                              report/wait/quit. `report what=geometry` runs the visual
 │   │                              oracle. Committed scripts live in scripts/drive/.
 │   │
-│   ├── helpers/                   84 modules of pure / IO helpers — no UI deps.
+│   ├── helpers/                   92 modules of pure / IO helpers — no UI deps.
 │   │   ├── config.py              _load_config, _save_config, _migrate_config
 │   │   ├── detection.py           _detect_git/_gh/_npm/_codegraph/_claude_cli,
 │   │   │                          _root_path/_label, _version_lt
@@ -286,7 +292,7 @@ Token Save Manager Source/
 │   │   │                          automatically after the scrub; `preflight` dict now
 │   │   │                          includes `remote_url` so the dialog has it even if
 │   │   │                          the user-initiated scrub already cleared the remote.
-│   │   └── doc_drafter.py         LLM-backed documentation draft helpers (Roadmap-6 +
+│   │   ├── doc_drafter.py         LLM-backed documentation draft helpers (Roadmap-6 +
 │   │                              cascade v3-v4.4 hardening). Key exports:
 │   │                              `build_*_prompt` (all return `PromptBuildResult`);
 │   │                              `dispatch_llm` (routes claude_cli vs _call_llm;
@@ -299,8 +305,109 @@ Token Save Manager Source/
 │   │                              `[`()\[\]/=<>{}|&*]` + snake_case + dotted identifiers);
 │   │                              `_merge_wrapped_bullets` preprocessing (v4.1 Revision B
 │   │                              for qwen2.5-coder wrap-aggressive output).
+│   │   ├── mcp_paths.py           Where MCP config lives, and the primitives every
+│   │   │                          other mcp_* module builds on.
+│   │   ├── mcp_classify.py        What an MCP entry is, what is wrong with it, and
+│   │   │                          how to repair it.
+│   │   ├── mcp_approval.py        Whether a project's .mcp.json has actually been
+│   │   │                          approved — distinct from whether it exists.
+│   │   ├── mcp_scope.py           Which scope wins, and whether Claude Code is live
+│   │   │                          to care. Trust is granted, never assumed: a folder
+│   │   │                          with no record is one it will ask about.
+│   │   ├── mcp_shadow.py          Is Claude Desktop's global tokensave server
+│   │   │                          shadowing *this* project's entry?
+│   │   ├── mcp_desktop.py         Retire the `tokensave` entry Claude Desktop
+│   │   │                          defines globally.
+│   │   ├── mcp_projects.py        Project keys in ~/.claude.json — normalising,
+│   │   │                          matching, deduplicating. Forward-slash spellings
+│   │   │                          are the ones Claude Code writes.
+│   │   ├── mcp_agents.py          Per-agent wiring tables for codegraph and tokensave.
+│   │   ├── graph_trust.py         How much of tokensave's call graph can be believed,
+│   │   │                          and *where the index is*. Four trust states, because
+│   │   │                          'could not look' and 'looked and found nothing' are
+│   │   │                          different answers. db_path_for resolves the
+│   │   │                          checked-out branch (branch-meta.json, .git/HEAD read
+│   │   │                          directly — this module promises no subprocess);
+│   │   │                          index_state separates absent / unopenable / schema
+│   │   │                          drift / present, because only *absent* may be
+│   │   │                          initialised over. Pure: no Tk, mode=ro reads.
+│   │   ├── sync_service.py        The one implementation of 'sync this project' —
+│   │   │                          and of 'init this project'. sync_argv / init_argv
+│   │   │                          are single sources of truth so a GUI-invoked and a
+│   │   │                          CLI-invoked command cannot drift; run_sync/run_init
+│   │   │                          report a missing executable as a *result*, never an
+│   │   │                          exception. No Tk: the headless CLI imports this.
+│   │   ├── tokensave_config.py    Read tokensave's per-project config — currently the
+│   │   │                          `strict_tree` switch.
+│   │   ├── tokensave_daemon.py    Find running `tokensave serve` processes, and say
+│   │   │                          honestly how confident we are about which project
+│   │   │                          each one serves.
+│   │   ├── codegraph_daemon.py    List + stop running CodeGraph MCP daemons.
+│   │   │                          Fail-open: any subprocess or parse problem yields
+│   │   │                          [] rather than a wrong answer.
+│   │   ├── doctor_service.py      Running `tokensave doctor` and reading it back.
+│   │   ├── path_setup.py          Is `tokensave` resolvable as a bare command?
+│   │   ├── doc_drafter_prompts.py System prompts + prompt builders for every doc type.
+│   │   ├── doc_drafter_dispatch.py LLM dispatch — Claude CLI / _call_llm / agentic
+│   │   │                          loop routing.
+│   │   ├── doc_drafter_filters.py Draft quality filters, bullet parsing, parse_draft.
+│   │   ├── doc_drafter_apply.py   compute_apply (pure) + io_apply (write) per doc
+│   │   │                          type. The split is the testable seam.
+│   │   ├── doc_drafter_git.py     Commit-range resolution + git plumbing for the
+│   │   │                          doc drafter.
+│   │   ├── pytest_report.py       What a pytest run actually did, per test. parse_run
+│   │   │                          reads the output; resolve_identities decides which
+│   │   │                          requested test a result belongs to — kept apart
+│   │   │                          because only the second can be *ambiguous*, and an
+│   │   │                          ambiguity absorbed into a parser becomes a
+│   │   │                          confident wrong answer.
+│   │   ├── coverage_scan.py       Real line coverage for Test Manager Tab 2, and the
+│   │   │                          cache that dates it.
+│   │   ├── test_gap_report.py     Cross-references a branch diff with coverage gaps.
+│   │   ├── test_gen_llm.py        AI-powered test content generation.
+│   │   ├── test_lock.py           One test run per project at a time. A second run is
+│   │   │                          refused rather than queued.
+│   │   ├── doctor_rules.py        Anti-monolith audit rules — the Doctor's checks,
+│   │   │                          with no Tk in sight.
+│   │   ├── multi_remote.py        Pushing one branch to several remotes, safely.
+│   │   ├── remote_providers.py    What differs between GitHub, GitLab and Codeberg.
+│   │   ├── private_repo.py        Pure sync helper for private local git repos.
+│   │   ├── pr_body_refresh.py     Regenerate the manager-owned region of an existing
+│   │   │                          PR body, leaving the rest of it alone.
+│   │   ├── merge_body.py          Turn the CHANGELOG's [Unreleased] block into a
+│   │   │                          merge-commit body.
+│   │   ├── gh_ci_status.py        GitHub Actions status for the branch you are
+│   │   │                          actually on — a push run being green says nothing
+│   │   │                          about the PR's blocking job.
+│   │   ├── commit_request.py      Commit-request handoff — external tools propose
+│   │   │                          commits, the manager handles them.
+│   │   ├── worktree_cleanup.py    Removing a worktree, and surviving the half-state
+│   │   │                          Windows leaves when a directory is still held.
+│   │   ├── worktree_health.py     Detect + repair git worktrees with no tokensave
+│   │   │                          index.
+│   │   ├── claude_tasks.py        Pure functions for scanning Claude Code sessions and
+│   │   │                          git worktrees.
+│   │   ├── proc_kill.py           Terminate a process, with the semantics the caller
+│   │   │                          needs — a tree kill orphans nothing, which is what
+│   │   │                          leaves a lock nobody can see.
+│   │   ├── vscode_tasks.py        The VS Code project files the Manager writes.
+│   │   ├── vscode_mcp_logs.py     What VS Code's own logs say about MCP servers.
+│   │   ├── findings.py            The one shape every diagnostic producer emits.
+│   │   ├── manager_ipc.py         An inbox the running Manager drains, and a way to
+│   │   │                          raise it. Request ids are derived from a hash of the
+│   │   │                          canonicalised request, in Python only, so two
+│   │   │                          spellings of one directory cannot produce two
+│   │   │                          authorization verdicts.
+│   │   ├── cross_project_search.py Search several indexed projects at once.
+│   │   ├── source_watch.py        Detect that the manager's own source changed since
+│   │   │                          it started.
+│   │   ├── window_capture.py      Capture a window to a PNG without it being on
+│   │   │                          screen.
+│   │   ├── io_utils.py            Shared IO helpers for the patcher modules.
+│   │   └── ui.py                  UI helpers shared across controllers and dialogs.
 │   │
-│   ├── dialogs/                   23 tk.Toplevel dialog classes — one per file.
+│   ├── dialogs/                   46 dialog / panel modules — a tk.Toplevel per file,
+│   │                          plus the panels the bigger dialogs are built from.
 │   │   ├── settings.py            SettingsDialog (+ _probe_loaded_model helper)
 │   │   ├── release_wizard.py      ReleaseWizardDialog + _ReleaseCtx (paired)
 │   │   ├── mcp_config.py          MCPConfigDialog
@@ -386,7 +493,7 @@ Token Save Manager Source/
 │   │   │                          5-min event.wait timeout, WM_DELETE_WINDOW = reject,
 │   │   │                          post-timeout expired-state UX, automated test harness
 │   │   │                          in __main__ covering 4 race-safety paths)
-│   │   └── doc_drafter.py         DocDrafterDialog — 📝 Doc Updates… 7-tab registry-
+│   │   ├── doc_drafter.py         DocDrafterDialog — 📝 Doc Updates… 7-tab registry-
 │   │                              driven dialog (CHANGELOG / README / ARCHITECTURE /
 │   │                              ROADMAP / MEMORY / TOKENSAVE_GUIDE / Generic).
 │   │                              Per-tab thread isolation via _tab_state[key]["stop"]
@@ -397,6 +504,36 @@ Token Save Manager Source/
 │   │                              _draft_tick elapsed-time status bar, HARD_TIMEOUT
 │   │                              self-enforced at 310 s (G6). ALL applies route
 │   │                              through ProposalBridge.
+│   │   ├── mcp_blocks_panel.py    One block per MCP config file: header, badge,
+│   │   │                          diff, actions.
+│   │   ├── mcp_duplicates_panel.py The duplicate ~/.claude.json project-key panel.
+│   │   ├── mcp_migration_panel.py Drives the user-scope tokensave retirement,
+│   │   │                          including the background verification pass.
+│   │   │                          States that the migration would make *worse*
+│   │   │                          are counted separately from bound ones.
+│   │   ├── mcp_desktop_panel.py   The Claude Desktop retirement UI.
+│   │   ├── tokensave_mcp_picker.py TokensaveMCPPickerDialog — wire tokensave into AI
+│   │   │                          agents from the Manager.
+│   │   ├── tokensave_daemon_manager.py TokensaveDaemonManagerDialog — list + stop running
+│   │   │                          tokensave MCP servers.
+│   │   ├── codegraph_daemon_manager.py CodegraphDaemonManagerDialog — the CodeGraph
+│   │   │                          equivalent.
+│   │   ├── cross_project_search.py CrossProjectSearchDialog — one query across
+│   │   │                          several indexed projects.
+│   │   ├── doc_drafter_support.py DocDrafterDialog support objects — backend
+│   │   │                          resolution, draft tick, tab factory.
+│   │   ├── private_repo_setup.py  PrivateRepoSetupDialog — wizard for creating a
+│   │   │                          local-only git repo.
+│   │   ├── private_repo_mgr.py    PrivateRepoManagerDialog — manage an existing one.
+│   │   ├── remote_setup.py        RemoteSetupDialog — the first-push wizard, for any
+│   │   │                          forge.
+│   │   ├── remotes_manager.py     RemotesManagerDialog — choose which remotes a push
+│   │   │                          goes to.
+│   │   ├── workspace_builder.py   WorkspaceBuilderDialog — assemble a VS Code
+│   │   │                          .code-workspace descriptor.
+│   │   ├── settings_ai.py         AISection — the AI blocks of the Settings dialog.
+│   │   ├── settings_codegraph.py  CodegraphSection — the CodeGraph block.
+│   │   └── settings_paths.py      PathsSection — the Paths and Git-tools blocks.
 │   │
 │   └── controllers/               Tab controllers + Round-5 sub-controllers extracted
 │       │                          from the original god classes. Each takes cfg via
@@ -446,12 +583,19 @@ Token Save Manager Source/
 │       │                          DoctorController; asks helpers/housekeeping.py for
 │       │                          findings. Never shells out itself.
 │       ├── scaffold_ctrl.py       ScaffoldRetrofitController
+│       │                          Retrofit runs two INDEPENDENT steps: the CLAUDE.md
+│       │                          @include, and the index. Gating the second on the
+│       │                          first is what made every scaffolded project unable
+│       │                          to obtain an index through this button. Imports
+│       │                          graph_trust.index_state (may we initialise?) and
+│       │                          sync_service.run_init (do it) — never `tokensave
+│       │                          init` inline.
 │       ├── sync_ctrl.py           SyncStatusController (sync, sync_all, force_sync)
 │       ├── fileops_ctrl.py        FileOpsController (open folder/editor, copy path)
 │       ├── shadowlinks_ctrl.py    ShadowLinksController
 │       ├── git_ops_ctrl.py        GitOpsController (git log/commit/AI-review/init/
 │       │                          manage-gitignore/untrack-ignored from Projects tab)
-│       └── ai_tasks_ctrl.py       AITasksController — long-running AI write tasks.
+│       ├── ai_tasks_ctrl.py       AITasksController — long-running AI write tasks.
 │                                  Shipped: Stage 3 CHANGELOG drafter (cmd_draft_changelog),
 │                                  Stage 4 Refactor scout (cmd_refactor_scout),
 │                                  Roadmap-3 check runner (cmd_run_checks /
@@ -462,6 +606,20 @@ Token Save Manager Source/
 │                                  Orchestrates only; all shared infra in helpers/.
 │                                  CLI briefing via temp .md file-handoff pattern
 │                                  (avoids cmd.exe /k newline-as-Enter quirk).
+│       ├── tasks_tab.py           TasksController — owns the Tasks tab.
+│       ├── command_bar_ctrl.py    CommandBarCtrl sub-controller.
+│       ├── project_sync_ctrl.py   ProjectSyncCtrl sub-controller.
+│       ├── pr_draft_ctrl.py       PRDraftCtrl sub-controller — PR body generation and
+│       │                          the base-branch override.
+│       ├── test_gap_ctrl.py       TestGapCtrl sub-controller — branch diff to changed
+│       │                          files without tests to generated stubs.
+│       ├── commit_request_banner.py CommitRequestBanner — the Git tab's commit-request
+│       │                          handoff banner.
+│       ├── help_topics_basics.py  Help-tab topic renderers — projects, scaffold, tray.
+│       ├── help_topics_git.py     Help-tab topic renderers — git concepts, workflow,
+│       │                          GitHub.
+│       └── help_topics_tools.py   Help-tab topic renderers — CodeGraph, AI, checks,
+│       │                          settings, about.
 │
 ├── scripts/                       Source-only developer tools (NOT shipped in dist\)
 │   ├── check_tokensave_integration.py
@@ -822,7 +980,7 @@ file location changed.
 
 ## `src/app.py` — Main Application (legacy text)
 
-Single-file tkinter application (~12,500 lines as of [Unreleased]). Entry point is `if __name__ == "__main__": App().mainloop()`. Size has grown substantially this cycle from the addition of Stages 1–2 AI features, the MCP configurator, the Ollama Model Manager, and various dialog classes — see the "Dialog classes added [Unreleased]" subsection below for the new ones.
+**No longer a single file, and this section is kept only for the class hierarchy below.** `src/app.py` is **1,320 lines**; the application is **178 files / ~72,400 lines** across `helpers/`, `controllers/` and `dialogs/`. The line this replaced claimed ~12,500 lines in one file, which was true before the Round-5 controller extraction and has been wrong by an order of magnitude since. Entry point is unchanged: `if __name__ == "__main__": App().mainloop()`.
 
 ### Class hierarchy
 
