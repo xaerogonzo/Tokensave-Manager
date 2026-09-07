@@ -40,9 +40,11 @@ class RetrofitDialog(tk.Toplevel):
 
         # Checkbox: tokensave integration
         self.var_ts = self._opt_row(
-            "Add tokensave rules to CLAUDE.md",
+            "Add tokensave rules + index the project",
             "  Prepends an @include line so Claude always loads the\n"
-            "  tokensave lookup table. Non-destructive — existing content kept.",
+            "  tokensave lookup table, and builds the code-graph index if\n"
+            "  this project has none. Non-destructive: existing content and\n"
+            "  an existing index are both left alone.",
             pad, default=True)
 
         # Checkbox: BASIC_INSTRUCTIONS.md

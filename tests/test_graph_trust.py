@@ -17,12 +17,19 @@ so the `tests/` to `src/` direction gets an explicit negative control.
 """
 from __future__ import annotations
 
+import json
 import os
 import sqlite3
 
 import pytest
 
 from helpers.graph_trust import (
+    INDEX_ABSENT,
+    INDEX_PRESENT,
+    INDEX_SCHEMA_DRIFT,
+    INDEX_UNOPENABLE,
+    IndexState,
+    index_state,
     MIN_MEANINGFUL_EDGES,
     STATE_INSUFFICIENT,
     STATE_TAINTED,
@@ -447,3 +454,91 @@ def test_cli_emits_no_findings_because_nothing_is_wrong_at_that_line(capsys, tmp
     # ...but the sample is still capped, and the count is not
     assert len(env["data"]["collisions"]) == 20      # MAX_COLLISIONS
     assert env["data"]["impossible_edges"] == 40
+
+
+# ── index presence: a different question from index trust ───────────────────
+#
+# `inspect_graph` folds "absent", "unopenable" and "unknown schema" into
+# STATE_UNKNOWN, which is right for trust: all three mean "I cannot tell you
+# about this graph". It is wrong for deciding whether to *create* an index,
+# because `tokensave init` discards whatever is already there. Only one of
+# the three justifies acting without asking, so `index_state` keeps them apart.
+
+
+def _ts_dir(root):
+    d = os.path.join(str(root), ".tokensave")
+    os.makedirs(d, exist_ok=True)
+    return d
+
+
+def test_absent_when_there_is_no_tokensave_directory(tmp_path):
+    state = index_state(str(tmp_path))
+    assert state.state == INDEX_ABSENT
+    assert state.may_initialise is True
+
+
+def test_absent_when_the_directory_exists_but_holds_no_database(tmp_path):
+    _ts_dir(tmp_path)
+    assert index_state(str(tmp_path)).may_initialise is True
+
+
+def test_absent_when_branch_meta_points_at_a_database_that_is_gone(tmp_path):
+    """A stale pointer is not evidence that an index exists.
+
+    This is the case the Manager's old `os.path.isfile(tokensave.db)` check
+    got backwards in both directions: it missed real per-branch indexes, and
+    it would have trusted a pointer to nothing.
+    """
+    d = _ts_dir(tmp_path)
+    with open(os.path.join(d, "branch-meta.json"), "w", encoding="utf-8") as fh:
+        json.dump({"db_file": "indexes/gone.db"}, fh)
+    assert index_state(str(tmp_path)).state == INDEX_ABSENT
+
+
+def test_unopenable_is_not_reported_as_schema_drift(tmp_path):
+    """sqlite3.connect() is lazy: it does not touch the file until a statement
+    runs. Without an explicit probe, a file of random bytes 'connects' and
+    then fails inside the schema check, where it reads as drift -- and drift
+    is the one state we deliberately refuse to rebuild.
+    """
+    d = _ts_dir(tmp_path)
+    with open(os.path.join(d, "tokensave.db"), "w", encoding="utf-8") as fh:
+        fh.write("this is not a database")
+    state = index_state(str(tmp_path))
+    assert state.state == INDEX_UNOPENABLE
+    assert state.may_initialise is False
+
+
+def test_schema_drift_when_the_tables_are_not_the_ones_we_read(tmp_path):
+    d = _ts_dir(tmp_path)
+    conn = sqlite3.connect(os.path.join(d, "tokensave.db"))
+    conn.execute("CREATE TABLE nodes (id TEXT)")      # no file_path, no edges
+    conn.commit()
+    conn.close()
+    state = index_state(str(tmp_path))
+    assert state.state == INDEX_SCHEMA_DRIFT
+    assert state.may_initialise is False
+
+
+def test_present_for_a_usable_index(tmp_path):
+    d = _ts_dir(tmp_path)
+    conn = sqlite3.connect(os.path.join(d, "tokensave.db"))
+    conn.execute("CREATE TABLE nodes (id TEXT, file_path TEXT, name TEXT)")
+    conn.execute("CREATE TABLE edges (source TEXT, target TEXT, kind TEXT)")
+    conn.commit()
+    conn.close()
+    state = index_state(str(tmp_path))
+    assert state.state == INDEX_PRESENT
+    assert state.may_initialise is False, "a usable index is never overwritten"
+
+
+def test_only_absent_permits_initialising(tmp_path):
+    """The property the caller actually depends on, stated once.
+
+    Every non-absent state has a file that `init` would discard, so the
+    decision belongs to a human. If a future state is added and this
+    property is not considered, this test is where it surfaces.
+    """
+    for state_name in (INDEX_PRESENT, INDEX_UNOPENABLE, INDEX_SCHEMA_DRIFT):
+        assert IndexState(state_name).may_initialise is False
+    assert IndexState(INDEX_ABSENT).may_initialise is True

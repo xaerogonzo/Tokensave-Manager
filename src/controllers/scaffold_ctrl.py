@@ -27,9 +27,13 @@ from typing import TYPE_CHECKING, Callable
 import tkinter as tk
 
 from constants import C, CREATE_NO_WINDOW, _ANSI
+from helpers.graph_trust import INDEX_PRESENT, index_state
 from helpers.project_discovery import load_basic_instructions_template
 from helpers.runtime import log
 from helpers.scaffold import _scaffold_git_hook
+# Aliased: `run_init` is already a bool parameter on _scaffold_project,
+# and a function silently shadowed by a flag is a trap worth not setting.
+from helpers.sync_service import run_init as run_index_init
 from helpers.shadow_links import (
     DEFAULT_SHADOW_EXT_MAP,
     generate_shadow_links,
@@ -258,7 +262,13 @@ class ScaffoldRetrofitController:
         """Run each enabled retrofit step in order. Returns combined action list."""
         actions: list[str] = []
         if flags["tokensave"]:
+            # Two independent steps, and keeping them independent IS the fix.
+            # Conflating them meant a project whose CLAUDE.md already carried
+            # the @include -- which is every project this Manager scaffolds --
+            # could never obtain an index through this button, because the
+            # doc check short-circuited the whole option.
             actions.extend(self._retrofit_add_tokensave(path, name))
+            actions.extend(self._retrofit_init_index(path))
         if flags["basic_instructions"]:
             actions.extend(self._retrofit_add_basic_instructions(path))
         if flags["nuitka"]:
@@ -325,6 +335,57 @@ class ScaffoldRetrofitController:
         log.info("  created CLAUDE.md with @include")
         self._on_log("  Created CLAUDE.md with tokensave @include", C["green"])
         return ["Created CLAUDE.md with tokensave rules"]
+
+    def _retrofit_init_index(self, path: str) -> list[str]:
+        """Create a tokensave index when, and only when, there is not one.
+
+        Idempotent with respect to *project state*, not with respect to
+        whether some other file changed -- that conflation was the original
+        defect. Running this twice initialises once.
+
+        ``tokensave init`` discards any index already present, so every state
+        except "absent" is reported rather than acted on. Schema drift in
+        particular usually means the Manager and the CLI are different
+        versions, and silently rebuilding is not the remedy for that.
+        """
+        state = index_state(path)
+        if not state.may_initialise:
+            if state.state == INDEX_PRESENT:
+                log.info("  tokensave index already present — skipped")
+                self._on_log("  Tokensave index already present — skipped",
+                             C["overlay0"])
+            else:
+                # Not an error we can fix for them, and not one to paper over
+                # by rebuilding: say what is wrong and leave the index alone.
+                log.warning(f"  tokensave index unusable: {state.detail}")
+                self._on_log(f"  Tokensave index unusable — {state.detail}",
+                             C["yellow"])
+                self._on_log("  Left as-is; re-indexing would discard it. "
+                             "Run 'tokensave init' manually to rebuild.",
+                             C["overlay0"])
+            return []
+
+        exe = getattr(self._cfg, "tokensave_exe", "") or ""
+        if not exe:
+            log.warning("  no tokensave executable configured — cannot index")
+            self._on_log("  No tokensave executable configured — index skipped",
+                         C["yellow"])
+            return []
+
+        self._on_log("  Initialising tokensave index…", C["peach"])
+        # Bounded rather than unbounded: stdin is closed so the git-hook offer
+        # cannot stall us, but an index that has not finished in ten minutes
+        # has gone wrong in some way worth surfacing instead of hanging the
+        # retrofit for the rest of the session.
+        result = run_index_init(path, exe, timeout=600)
+        if not result.ok:
+            log.warning(f"  tokensave init failed: {result.error}")
+            self._on_log(f"  Tokensave init failed — {result.error}", C["red"])
+            return []
+
+        log.info("  initialised tokensave index")
+        self._on_log("  Initialised tokensave index", C["green"])
+        return ["Initialised tokensave index"]
 
     def _retrofit_add_basic_instructions(self, path: str) -> list[str]:
         """Write BASIC_INSTRUCTIONS.md from the template. Returns actions taken."""

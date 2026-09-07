@@ -18,7 +18,9 @@ import pytest
 
 from helpers.sync_service import (
     ShadowPrep,
+    init_argv,
     prepare_shadows,
+    run_init,
     run_sync,
     sync_argv,
     tokensave_env,
@@ -180,3 +182,93 @@ def test_shadow_outcome_survives_a_failed_sync(tmp_path, mocker):
     result = run_sync(str(tmp_path), "tokensave")
     assert result.ok is False
     assert result.shadows.created == 2
+
+
+# ── init: a different command, not sync with a flag ─────────────────────────
+#
+# These exist because the Manager had no init path at all: Retrofit edited
+# CLAUDE.md and called that "integrating tokensave", so a project whose
+# CLAUDE.md was already integrated could never obtain an index through the UI.
+# The argv is pinned for the same reason sync_argv is -- one source of truth,
+# so a GUI-invoked init and a CLI-invoked init cannot mean different things.
+
+def test_init_argv_declines_the_git_hook_by_default():
+    """Not politeness -- correctness.
+
+    Bare `tokensave init` *offers* to install the repository's git hooks, and
+    an offer needs someone to answer it. Spawned from the GUI there is nobody,
+    so the default must decline or the subprocess waits for a terminal that
+    does not exist.
+    """
+    assert init_argv() == ["init", "--no-git-hook"]
+
+
+def test_init_argv_can_still_ask_for_the_hook():
+    assert init_argv(git_hook=True) == ["init", "--git-hook"]
+
+
+def test_init_argv_returns_a_fresh_list_each_call():
+    first = init_argv()
+    first.append("--oops")
+    assert init_argv() == ["init", "--no-git-hook"]
+
+
+def test_run_init_invokes_the_real_command_shape(tmp_path, mocker):
+    """A mock asserting 'the helper was called' would pass even if the argv
+    were wrong. This crosses a process boundary, so pin the boundary."""
+    run = mocker.patch("helpers.sync_service.subprocess.run",
+                       return_value=_FakeCompleted(0, "Initialized TokenSave"))
+    result = run_init(str(tmp_path), "tokensave")
+    assert run.call_args.args[0] == ["tokensave", "init", "--no-git-hook"]
+    assert run.call_args.kwargs["cwd"] == str(tmp_path)
+    assert result.ok is True
+
+
+def test_run_init_closes_stdin_so_a_prompt_cannot_stall_it(tmp_path, mocker):
+    """Belt and braces with --no-git-hook: if any future prompt appears, it
+    reads EOF and fails fast instead of hanging until the timeout."""
+    run = mocker.patch("helpers.sync_service.subprocess.run",
+                       return_value=_FakeCompleted())
+    run_init(str(tmp_path), "tokensave")
+    assert run.call_args.kwargs["stdin"] is subprocess.DEVNULL
+
+
+def test_run_init_suppresses_colour_like_every_other_reader(tmp_path, mocker):
+    run = mocker.patch("helpers.sync_service.subprocess.run",
+                       return_value=_FakeCompleted())
+    run_init(str(tmp_path), "tokensave")
+    env = run.call_args.kwargs["env"]
+    assert env["NO_COLOR"] == "1" and env["TERM"] == "dumb"
+
+
+def test_run_init_reports_a_nonzero_exit_as_not_ok(tmp_path, mocker):
+    mocker.patch("helpers.sync_service.subprocess.run",
+                 return_value=_FakeCompleted(1, "already initialized"))
+    result = run_init(str(tmp_path), "tokensave")
+    assert result.ok is False
+    assert result.returncode == 1
+    assert "exited 1" in result.error
+
+
+def test_run_init_missing_executable_is_a_result_not_an_exception(tmp_path, mocker):
+    mocker.patch("helpers.sync_service.subprocess.run",
+                 side_effect=FileNotFoundError())
+    result = run_init(str(tmp_path), "no-such-tokensave")
+    assert result.ok is False
+    assert "not found" in result.error and "no-such-tokensave" in result.error
+
+
+def test_run_init_timeout_is_a_result_not_an_exception(tmp_path, mocker):
+    mocker.patch("helpers.sync_service.subprocess.run",
+                 side_effect=subprocess.TimeoutExpired("tokensave", 600))
+    result = run_init(str(tmp_path), "tokensave", timeout=600)
+    assert result.ok is False
+    assert "timed out" in result.error
+
+
+def test_run_init_os_error_is_a_result_not_an_exception(tmp_path, mocker):
+    mocker.patch("helpers.sync_service.subprocess.run",
+                 side_effect=OSError("permission denied"))
+    result = run_init(str(tmp_path), "tokensave")
+    assert result.ok is False
+    assert "permission denied" in result.error
