@@ -111,12 +111,93 @@ class GraphTrust:
 
 # ── Locating the index ───────────────────────────────────────────────────
 
-def db_path_for(project_root: str) -> str:
+def _checked_out_branch(project_root: str) -> "str | None":
+    """The branch this working tree is on, read from ``.git/HEAD``.
+
+    A file read rather than ``git rev-parse``, because this module promises no
+    subprocess and its callers run on a UI thread or inside a scan. ``.git`` is
+    a *file* rather than a directory in a worktree or a submodule, naming the
+    real git directory, so that one indirection is followed.
+
+    Returns None for a detached HEAD (where the file holds a raw SHA) and for
+    anything unreadable. Callers fall back to the default branch: "which branch
+    is this?" being unanswerable is not the same as "there is no index".
+    """
+    git = os.path.join(project_root, ".git")
+    try:
+        if os.path.isfile(git):
+            with open(git, "r", encoding="utf-8") as fh:
+                pointer = fh.read().strip()
+            if not pointer.startswith("gitdir:"):
+                return None
+            git = pointer.split(":", 1)[1].strip()
+            if not os.path.isabs(git):
+                git = os.path.join(project_root, git)
+        with open(os.path.join(git, "HEAD"), "r", encoding="utf-8") as fh:
+            head = fh.read().strip()
+    except (OSError, ValueError):
+        return None
+
+    if not head.startswith("ref:"):
+        return None                       # detached HEAD
+    ref = head.split(":", 1)[1].strip()
+    prefix = "refs/heads/"
+    if not ref.startswith(prefix):
+        return None
+    # A branch name may itself contain "/" ("feature/experiment"), so strip the
+    # prefix rather than taking the last path segment.
+    return ref[len(prefix):] or None
+
+
+def _candidate_db_files(raw, project_root: str,
+                        branch: "str | None") -> list:
+    """``db_file`` values worth trying, best first. Never raises.
+
+    Order is the whole point. The checked-out branch comes first; the default
+    branch second, because a branch tokensave is not tracking has no index of
+    its own and the default's is the best available answer -- but it must never
+    be preferred over the branch actually checked out.
+    """
+    if not isinstance(raw, dict):
+        return []
+
+    out: list = []
+    branches = raw.get("branches")
+    if isinstance(branches, dict):
+        wanted = branch or _checked_out_branch(project_root)
+        for key in (wanted, raw.get("default_branch")):
+            if not isinstance(key, str):
+                continue
+            entry = branches.get(key)
+            if isinstance(entry, dict):
+                name = entry.get("db_file")
+                if isinstance(name, str) and name and name not in out:
+                    out.append(name)
+
+    flat = raw.get("db_file")      # schema written by older tokensave versions
+    if isinstance(flat, str) and flat and flat not in out:
+        out.append(flat)
+    return out
+
+
+def db_path_for(project_root: str, *, branch: "str | None" = None) -> str:
     """Return the active tokensave DB for *project_root*, or "".
 
-    Per-branch indexes are named in ``.tokensave/branch-meta.json``; older
-    single-branch projects have only ``.tokensave/tokensave.db``. A
-    ``db_file`` naming a file that is not there is treated as absent rather
+    Resolves the **checked-out branch's** index, which is not always
+    ``tokensave.db``. ``tokensave branch add`` copies the ancestor DB to
+    ``.tokensave/branches/<name>.db`` and records it under ``branches`` in
+    ``branch-meta.json``, so a project on a feature branch has its own index.
+    Reading the wrong one fails silently in the worst way: the graph is valid,
+    it simply lacks every file that branch added, and nothing says so.
+
+    Measured before this was written: a scratch project on ``feature/experiment``
+    resolved to ``tokensave.db`` and could not see a file committed on that
+    branch. The earlier implementation looked for a **top-level** ``db_file``,
+    a shape no tokensave version on this machine writes -- 16 indexed projects,
+    zero with that key -- so the branch lookup never fired and every caller
+    silently got the default branch.
+
+    A ``db_file`` naming a file that is not there is treated as absent rather
     than trusted, because a stale pointer is not evidence about this branch.
     """
     ts = os.path.join(project_root, ".tokensave")
@@ -124,13 +205,14 @@ def db_path_for(project_root: str) -> str:
     try:
         with open(meta, "r", encoding="utf-8") as fh:
             raw = json.load(fh)
-        name = (raw or {}).get("db_file") or ""
-        if name:
-            cand = name if os.path.isabs(name) else os.path.join(ts, name)
-            if os.path.isfile(cand):
-                return cand
-    except (OSError, ValueError, AttributeError):
-        pass
+    except (OSError, ValueError):
+        raw = None
+
+    for name in _candidate_db_files(raw, project_root, branch):
+        cand = name if os.path.isabs(name) else os.path.join(ts, name)
+        if os.path.isfile(cand):
+            return cand
+
     fallback = os.path.join(ts, "tokensave.db")
     return fallback if os.path.isfile(fallback) else ""
 

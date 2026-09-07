@@ -29,6 +29,7 @@ import sqlite3
 import subprocess
 
 from constants import CREATE_NO_WINDOW
+from helpers.graph_trust import db_path_for
 
 
 _MAX_GROUNDING_CHARS = 8_000
@@ -516,8 +517,12 @@ def _count_tokensave_files(project_path: str) -> int:
     column. Fail-open throughout: any error returns 0, which the caller
     treats as "no cross-tool signal available".
     """
-    db_path = os.path.join(project_path, ".tokensave", "tokensave.db")
-    if not os.path.isfile(db_path):
+    # db_path_for, not a hardcoded tokensave.db: a project checked out on a
+    # tracked feature branch has its own index under .tokensave/branches/,
+    # and grounding docs against the default branch's graph is wrong in the
+    # quietest way -- the count is plausible and describes other code.
+    db_path = db_path_for(project_path)
+    if not db_path:
         return 0
     con = None
     try:

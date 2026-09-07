@@ -24,6 +24,7 @@ import sqlite3
 import pytest
 
 from helpers.graph_trust import (
+    _checked_out_branch,
     INDEX_ABSENT,
     INDEX_PRESENT,
     INDEX_SCHEMA_DRIFT,
@@ -542,3 +543,163 @@ def test_only_absent_permits_initialising(tmp_path):
     for state_name in (INDEX_PRESENT, INDEX_UNOPENABLE, INDEX_SCHEMA_DRIFT):
         assert IndexState(state_name).may_initialise is False
     assert IndexState(INDEX_ABSENT).may_initialise is True
+
+
+# ── locating the index: per-branch, which is the schema tokensave writes ──
+#
+# The tests above pin a **top-level** ``db_file``. No tokensave version on this
+# machine writes that shape -- 16 indexed projects surveyed, zero with the key
+# -- so the branch lookup never fired and every caller silently received the
+# default branch's index. Measured on a scratch project: checked out on
+# ``feature/experiment``, ``db_path_for`` returned ``tokensave.db`` and the
+# graph could not see a file committed on that branch.
+#
+# The flat shape is still read, for indexes written by older versions. These
+# cover the one that exists now.
+
+
+def _repo(tmp_path, branch: str):
+    """A working tree whose .git/HEAD names *branch*. No git binary needed."""
+    git = tmp_path / ".git"
+    git.mkdir(exist_ok=True)
+    (git / "HEAD").write_text(f"ref: refs/heads/{branch}\n", encoding="utf-8")
+    ts = tmp_path / ".tokensave"
+    ts.mkdir(exist_ok=True)
+    return ts
+
+
+def _meta(ts, default: str, branches: dict):
+    (ts / "branch-meta.json").write_text(
+        json.dumps({"default_branch": default,
+                    "branches": {name: {"db_file": db}
+                                 for name, db in branches.items()}}),
+        encoding="utf-8")
+
+
+def test_db_path_resolves_the_checked_out_branch_not_the_default(tmp_path):
+    """The bug this whole block exists for.
+
+    A project on a feature branch has its own DB. Returning the default's is
+    silent: the graph is valid and simply lacks everything that branch added.
+    """
+    ts = _repo(tmp_path, "feature/experiment")
+    (ts / "tokensave.db").write_text("")
+    (ts / "branches").mkdir()
+    (ts / "branches" / "feature_experiment.db").write_text("")
+    _meta(ts, "master", {"master": "tokensave.db",
+                         "feature/experiment": "branches/feature_experiment.db"})
+
+    assert db_path_for(str(tmp_path)).endswith("feature_experiment.db")
+
+
+def test_a_branch_name_containing_a_slash_survives_parsing(tmp_path):
+    """``refs/heads/feature/experiment`` -- the name is everything after the
+    prefix, not the last path segment. Taking the segment yields "experiment",
+    which matches no entry and falls back to the default without saying so."""
+    ts = _repo(tmp_path, "feature/experiment")
+    (ts / "tokensave.db").write_text("")
+    (ts / "branches").mkdir()
+    (ts / "branches" / "feature_experiment.db").write_text("")
+    _meta(ts, "master", {"master": "tokensave.db",
+                         "feature/experiment": "branches/feature_experiment.db"})
+
+    assert _checked_out_branch(str(tmp_path)) == "feature/experiment"
+    assert db_path_for(str(tmp_path)).endswith("feature_experiment.db")
+
+
+def test_an_untracked_branch_falls_back_to_the_default(tmp_path):
+    """tokensave only indexes branches you `branch add`. Being on an untracked
+    one is normal, and the default's index is the best available answer."""
+    ts = _repo(tmp_path, "some-scratch-branch")
+    (ts / "tokensave.db").write_text("")
+    _meta(ts, "master", {"master": "tokensave.db"})
+    assert db_path_for(str(tmp_path)).endswith("tokensave.db")
+
+
+def test_a_detached_head_falls_back_to_the_default(tmp_path):
+    """HEAD holds a raw SHA. Unanswerable is not the same as absent."""
+    ts = _repo(tmp_path, "master")
+    (tmp_path / ".git" / "HEAD").write_text("a" * 40 + "\n", encoding="utf-8")
+    (ts / "tokensave.db").write_text("")
+    _meta(ts, "master", {"master": "tokensave.db"})
+    assert _checked_out_branch(str(tmp_path)) is None
+    assert db_path_for(str(tmp_path)).endswith("tokensave.db")
+
+
+def test_a_worktree_git_file_is_followed(tmp_path):
+    """In a worktree or submodule ``.git`` is a file naming the real gitdir."""
+    real = tmp_path / "realgit"
+    real.mkdir()
+    (real / "HEAD").write_text("ref: refs/heads/feature/experiment\n",
+                               encoding="utf-8")
+    (tmp_path / ".git").write_text(f"gitdir: {real}\n", encoding="utf-8")
+
+    ts = tmp_path / ".tokensave"
+    ts.mkdir()
+    (ts / "tokensave.db").write_text("")
+    (ts / "branches").mkdir()
+    (ts / "branches" / "feature_experiment.db").write_text("")
+    _meta(ts, "master", {"master": "tokensave.db",
+                         "feature/experiment": "branches/feature_experiment.db"})
+
+    assert _checked_out_branch(str(tmp_path)) == "feature/experiment"
+    assert db_path_for(str(tmp_path)).endswith("feature_experiment.db")
+
+
+def test_a_branch_entry_pointing_at_nothing_falls_through(tmp_path):
+    """Same rule as the flat schema: a stale pointer is not evidence."""
+    ts = _repo(tmp_path, "feature/experiment")
+    (ts / "tokensave.db").write_text("")
+    _meta(ts, "master", {"master": "tokensave.db",
+                         "feature/experiment": "branches/gone.db"})
+    assert db_path_for(str(tmp_path)).endswith("tokensave.db")
+
+
+def test_the_branch_can_be_named_explicitly(tmp_path):
+    """A caller reasoning about a branch other than the checked-out one should
+    not have to change directory to ask."""
+    ts = _repo(tmp_path, "master")
+    (ts / "tokensave.db").write_text("")
+    (ts / "branches").mkdir()
+    (ts / "branches" / "feature_experiment.db").write_text("")
+    _meta(ts, "master", {"master": "tokensave.db",
+                         "feature/experiment": "branches/feature_experiment.db"})
+
+    assert db_path_for(str(tmp_path)).endswith("tokensave.db")
+    assert db_path_for(str(tmp_path),
+                       branch="feature/experiment").endswith("feature_experiment.db")
+
+
+def test_no_git_directory_at_all_still_resolves(tmp_path):
+    """tokensave indexes non-git directories too."""
+    ts = tmp_path / ".tokensave"
+    ts.mkdir()
+    (ts / "tokensave.db").write_text("")
+    _meta(ts, "master", {"master": "tokensave.db"})
+    assert _checked_out_branch(str(tmp_path)) is None
+    assert db_path_for(str(tmp_path)).endswith("tokensave.db")
+
+
+def test_index_state_reads_the_branch_it_is_standing_on(tmp_path):
+    """The consumer that made this matter: Retrofit asks index_state whether a
+    project has an index, and a wrong-branch answer decides whether to run
+    `tokensave init` over a real one."""
+    ts = _repo(tmp_path, "feature/experiment")
+    for name in ("tokensave.db",):
+        conn = sqlite3.connect(str(ts / name))
+        conn.execute("CREATE TABLE nodes (id TEXT, file_path TEXT, name TEXT)")
+        conn.execute("CREATE TABLE edges (source TEXT, target TEXT, kind TEXT)")
+        conn.commit()
+        conn.close()
+    (ts / "branches").mkdir()
+    conn = sqlite3.connect(str(ts / "branches" / "feature_experiment.db"))
+    conn.execute("CREATE TABLE nodes (id TEXT, file_path TEXT, name TEXT)")
+    conn.execute("CREATE TABLE edges (source TEXT, target TEXT, kind TEXT)")
+    conn.commit()
+    conn.close()
+    _meta(ts, "master", {"master": "tokensave.db",
+                         "feature/experiment": "branches/feature_experiment.db"})
+
+    state = index_state(str(tmp_path))
+    assert state.state == INDEX_PRESENT
+    assert state.db_path.endswith("feature_experiment.db")
