@@ -308,3 +308,52 @@ def test_dismiss_hides_and_latches():
     App._dismiss_source_banner(stub)
     assert stub._src_banner_dismissed is True
     assert hidden == [1]
+
+
+# ── Startup ordering: the pump exists before anything can post to it ─────────
+
+class TestStartupOrdering:
+    """`App.__init__` must start its UI pump before it starts any worker.
+
+    Asserted against the source rather than a constructed App: building the
+    real window pulls in the whole controller graph, and the property at stake
+    is purely an ordering one that a reader should be able to check too.
+
+    The defect this guards was live until 2026-09-08 and had a comment next to
+    it claiming the opposite — "Started before _build so nothing can post into
+    a queue that is not being drained" sat directly above a call that ran after
+    both `_build()` and `_update_poller.start()`. A comment is not a guard.
+    """
+
+    def _init_source(self):
+        import inspect
+        import app as app_mod
+        return inspect.getsource(app_mod.App.__init__)
+
+    def _line_of(self, src, needle):
+        for i, line in enumerate(src.splitlines()):
+            if needle in line and not line.strip().startswith("#"):
+                return i
+        raise AssertionError(f"{needle!r} not found in App.__init__")
+
+    def test_the_pump_starts_before_the_update_poller(self):
+        src = self._init_source()
+        pump = self._line_of(src, "_start_ui_pump()")
+        poller = self._line_of(src, "_update_poller.start()")
+        assert pump < poller, (
+            "App starts a worker before its UI pump exists. A poster on that "
+            "thread hits a queue that is not there, dies where nobody can see "
+            "it, and the message is lost."
+        )
+
+    def test_the_pump_starts_before_the_widgets_are_built(self):
+        """_build wires callbacks that workers reach; the channel comes first."""
+        src = self._init_source()
+        assert self._line_of(src, "_start_ui_pump()") < self._line_of(src, "self._build()")
+
+    def test_the_guard_can_still_say_no(self):
+        """The scan finds real lines, so a passing run is not an empty one."""
+        src = self._init_source()
+        assert self._line_of(src, "_start_ui_pump()") >= 0
+        with pytest.raises(AssertionError):
+            self._line_of(src, "_a_call_that_is_not_there()")

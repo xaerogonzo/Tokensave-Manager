@@ -407,6 +407,74 @@ class _PumpWindow(UiPumpMixin, tk.Toplevel):
         self._start_ui_pump()
 
 
+class _UnstartedPump(UiPumpMixin, tk.Toplevel):
+    """A host that deliberately does NOT start its pump in __init__."""
+
+    def __init__(self, parent):
+        super().__init__(parent)
+        self.seen: list = []
+
+
+class TestPostBeforeThePumpStarts:
+    """Posting too early must be survivable, visible, and not lossy.
+
+    This is a regression guard for a real defect measured on 2026-09-08:
+    `App` started its update poller fifteen lines before `_start_ui_pump()`,
+    so a poller thread that found an update called `_post` against a queue
+    that did not exist yet and died with `AttributeError`. On its own thread,
+    under `pythonw`, that is completely invisible — no dialog, no log line,
+    and the "tokensave X -> Y ready to install" message simply never arrived.
+
+    The ordering is fixed at the call site; these assert the mixin no longer
+    turns that class of mistake into a dead worker.
+    """
+
+    def test_posting_before_the_pump_does_not_kill_the_caller(self, tk_root):
+        win = _UnstartedPump(tk_root)
+        try:
+            win._post(win.seen.append, "early")      # must not raise
+        finally:
+            win.destroy()
+
+    def test_the_early_callback_is_delivered_once_the_pump_starts(
+            self, tk_root, wait_for):
+        """Late, not lost.
+
+        `_start_ui_pump` used to build a fresh Queue unconditionally, which
+        would have discarded exactly the message the ordering bug delayed.
+        """
+        win = _UnstartedPump(tk_root)
+        try:
+            win._post(win.seen.append, "early")
+            assert win.seen == [], "nothing drains the queue before the pump runs"
+            win._start_ui_pump()
+            wait_for(lambda: win.seen == ["early"], timeout_s=3.0)
+        finally:
+            win.destroy()
+
+    def test_the_ordering_mistake_is_reported_rather_than_swallowed(
+            self, tk_root, mocker):
+        """A queue that quietly accepts an early post is how this stays unfixed."""
+        spy = mocker.patch("theme.log.error")
+        win = _UnstartedPump(tk_root)
+        try:
+            win._post(win.seen.append, "early")
+            assert spy.called, "an early post must be logged"
+            assert "_start_ui_pump" in str(spy.call_args)
+        finally:
+            win.destroy()
+
+    def test_a_started_pump_does_not_warn(self, tk_root, mocker):
+        """Sanity: the warning fires on the defect, not on ordinary use."""
+        spy = mocker.patch("theme.log.error")
+        win = _PumpWindow(tk_root)
+        try:
+            win._post(win.seen.append, "normal")
+            assert not spy.called
+        finally:
+            win.destroy()
+
+
 class TestUiPumpMixin:
     """Worker -> UI hand-off.
 

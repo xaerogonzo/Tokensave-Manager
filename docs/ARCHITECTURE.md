@@ -1389,16 +1389,38 @@ _scaffold_nuitka_build(path)
 
 tkinter is single-threaded: **all widget updates must happen on the main thread**.
 
-| What runs in a thread | What runs on main thread |
-|-----------------------|--------------------------|
-| `subprocess.Popen` + stdout streaming | `self.after(0, _log)` — writes to log widget |
-| File I/O (scaffold, retrofit) | `self.after(0, self.refresh)` — rebuilds treeview |
-| `proc.wait()` | `self.after(0, messagebox.*)` — dialogs |
-| `_shell_capture(["git", ...])` | `self.after(0, lambda c=content: self._show_git_popup(name, c))` |
+| What runs in a worker thread | What the pump runs on the Tk thread |
+|------------------------------|--------------------------------------|
+| `subprocess.Popen` + stdout streaming | `_post(_do)` — writes to the log widget |
+| File I/O (scaffold, retrofit) | `_post(self.refresh)` — rebuilds the treeview |
+| `proc.wait()` | `_post(messagebox.*)` — dialogs |
+| `_shell_capture(["git", ...])` | `_post(self._show_git_popup, name, content)` |
+| a timer a worker wants set | `_post_after(delay_ms, fn, *args)` — posts the *timer setup* |
 
-Every `_log(msg, colour)` call schedules `_do()` on the main loop via `self.after(0, ...)`.
-Every completion callback (refresh, messagebox, popup creation) is similarly scheduled.
-**Never call Toplevel(), widget.configure(), or any other tkinter API directly from a background thread.**
+**Never call Toplevel(), widget.configure(), or any other tkinter API directly from a
+background thread** — and that includes `after()` itself. `after()` from a worker is a
+cross-thread Tk call: it usually works on Windows, raises "main thread is not in main
+loop" when it does not, and on Linux simply BLOCKS with no error and no log line.
+
+### The worker -> UI channel
+
+`theme.UiPumpMixin` is the one sanctioned route. A worker hands a callable to `_post()`;
+`_ui_pump()` drains the queue on the Tk thread every 50 ms. Windows mix it in beside a Tk
+base class; controllers are not widgets and override `_ui_host()` to name the widget they
+own. `tests/test_no_cross_thread_tk.py` enforces both halves — that workers post rather
+than call, and that every subclass starts its pump.
+
+**Start the pump before anything that can start a worker.** Until 2026-09-08 `App` started
+its update poller fifteen lines ahead of `_start_ui_pump()`, so a poller that found an
+update posted into a queue that did not exist and died with `AttributeError` on its own
+thread — invisible under `pythonw`, and the message was simply lost. The pump needs a live
+Tk and no widgets, so the earliest point in `__init__` is also the correct one, and
+`tests/test_app.py::TestStartupOrdering` now asserts it rather than a comment claiming it.
+
+`_post` is defensive as well as ordered: the queue is created on first use and
+`_start_ui_pump` **adopts** an existing one rather than replacing it, so an early post is
+delivered late instead of being discarded. It also logs an error, because a queue that
+silently accepts an early post is how the ordering defect stays unfixed.
 
 ---
 

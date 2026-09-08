@@ -228,15 +228,50 @@ class UiPumpMixin:
         return self
 
     def _start_ui_pump(self) -> None:
-        """Create the queue and begin draining it. Tk thread, once."""
-        self._ui_queue: queue.Queue = queue.Queue()
+        """Begin draining the queue. Tk thread, once.
+
+        Adopts an existing queue rather than replacing it. A caller that posted
+        before the pump started has its callback waiting in there, and building
+        a fresh Queue here would drop exactly the messages the ordering bug
+        already delayed.
+        """
+        self._ui_queue = self._ui_channel()
         self._ui_pump_id = None
         self._ui_host().bind("<Destroy>", self._stop_ui_pump, add="+")
         self._ui_pump()
 
+    def _ui_channel(self) -> "queue.Queue":
+        """The queue, created on first use by whoever needs it first.
+
+        Lazy because the alternative is worse than the ordering bug it covers.
+        ``_post`` runs on worker threads, and an ``AttributeError`` raised
+        there is the invisible failure this whole class exists to end: it kills
+        the worker, prints to a stderr that `pythonw` does not have, and leaves
+        nothing in the GUI or the log. Measured on 2026-09-08 — `App` started
+        its update poller fifteen lines before its pump, so a poller that found
+        an update lost the "ready to install" line entirely.
+
+        This does NOT make posting before ``_start_ui_pump`` correct: nothing
+        drains the queue until the pump runs, so the callback is late rather
+        than delivered. It makes it *survivable and visible*, which is the
+        difference between a delayed log line and a dead thread.
+        """
+        existing = getattr(self, "_ui_queue", None)
+        if isinstance(existing, queue.Queue):
+            return existing
+        self._ui_queue = queue.Queue()
+        return self._ui_queue
+
     def _post(self, fn, *args) -> None:
         """Run ``fn(*args)`` on the Tk thread. Safe from any thread."""
-        self._ui_queue.put((fn, args))
+        channel = getattr(self, "_ui_queue", None)
+        if not isinstance(channel, queue.Queue):
+            # Loud, because a post before the pump is a real ordering defect
+            # and a queue that swallowed it silently is how it stays unfixed.
+            log.error("posted to %s before _start_ui_pump(); the callback will "
+                      "not run until the pump starts", type(self).__name__)
+            channel = self._ui_channel()
+        channel.put((fn, args))
 
     def _post_after(self, delay_ms: int, fn, *args) -> None:
         """Run ``fn(*args)`` after ``delay_ms``. Safe from any thread.

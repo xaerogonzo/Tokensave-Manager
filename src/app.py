@@ -102,6 +102,21 @@ class App(UiPumpMixin, tk.Tk):
         self.geometry("760x600")
         self.minsize(600, 520)
         self.configure(bg=C["base"])
+        # ── Worker -> UI channel, before anything that can start a worker ──
+        # App's background workers used to call self.after() directly. That is
+        # a cross-thread Tk call: it usually works on Windows, raises "main
+        # thread is not in main loop" when it does not, and on Linux simply
+        # BLOCKS with no error and no log line. Workers post here and the pump
+        # runs it on the Tk thread.
+        #
+        # Started HERE, at the top, rather than beside _build(): the update
+        # poller below starts a thread, and until 2026-09-08 the pump was
+        # started fifteen lines after it. A poller that found an update called
+        # _log -> _post before the queue existed and died with AttributeError
+        # on its own thread — no dialog, no log line, and the "ready to
+        # install" message simply never appeared. The pump needs no widgets,
+        # only a live Tk, so the earliest safe point is also the correct one.
+        self._start_ui_pump()
         # Hold the canonical ManagerConfig instance. Future controllers and
         # dialogs (extracted in Phases B–E) receive this via __init__ and
         # read live values through cfg.git_exe / cfg.tokensave_exe / etc.
@@ -133,16 +148,8 @@ class App(UiPumpMixin, tk.Tk):
         log.info(f"  exe      : {self._cfg.tokensave_exe}")
         log.info(f"  templates: {self._cfg.template_dir}")
         log.info(f"  log file : {LOG_FILE}")
-        # ── Worker -> UI channel ──────────────────────────────────────
-        # App's background workers used to call self.after() directly. That
-        # is a cross-thread Tk call: it usually works on Windows, raises
-        # "main thread is not in main loop" when it does not, and on Linux
-        # simply BLOCKS with no error and no log line. Workers post here
-        # and the pump runs it on the Tk thread. Started before _build so
-        # nothing can post into a queue that is not being drained.
         self._style()
         self._build()
-        self._start_ui_pump()
         self.refresh()
         self.after(AUTO_REFRESH_MS, self._auto_refresh)
         # Soon, not in a minute: the extension files a request and then tells
