@@ -383,3 +383,83 @@ def test_a_readable_descriptor_round_trips(tmp_path):
     ok, _ = write_merged_workspace(str(out), {"folders": [], "settings": {}})
     assert ok
     assert read_workspace(str(out)) == {"folders": [], "settings": {}}
+
+
+# ── launching the configured editor ───────────────────────────────────────
+#
+# `Popen(["code", ...])` does not work on Windows and `& code` does, which is a
+# confusing pair of facts to meet at a bug report. The VS Code command line is
+# `code.CMD`, and CreateProcess only ever appends `.exe` to a bare name — it
+# does not consult PATHEXT, which is why PowerShell finds it and Python does
+# not. The symptom was an "Editor not found" dialog telling the user to correct
+# a setting that was already correct.
+
+def test_the_resolved_path_is_what_gets_launched(monkeypatch):
+    """Not the configured bare word. This is the entire fix."""
+    launched = {}
+
+    monkeypatch.setattr(vscode_tasks.shutil, "which",
+                        lambda name: r"C:\VS Code\bin\code.CMD")
+    monkeypatch.setattr(vscode_tasks.subprocess, "Popen",
+                        lambda argv, **kw: launched.setdefault("argv", argv))
+
+    ok, error = vscode_tasks.open_in_editor("code", r"C:\proj\file.py", 12)
+    assert (ok, error) == (True, "")
+    assert launched["argv"][0] == r"C:\VS Code\bin\code.CMD"
+    assert launched["argv"][-1] == r"C:\proj\file.py:12"
+
+
+def test_flags_survive_resolution(monkeypatch):
+    """Unlike the extension-listing path, which drops them: `-n` is meaningful
+    when the point of the call is to open a window."""
+    launched = {}
+    monkeypatch.setattr(vscode_tasks.shutil, "which",
+                        lambda name: f"/resolved/{name}")
+    monkeypatch.setattr(vscode_tasks.subprocess, "Popen",
+                        lambda argv, **kw: launched.setdefault("argv", argv))
+
+    vscode_tasks.open_in_editor("code -n", "/p/f.py")
+    assert launched["argv"][:2] == ["/resolved/code", "-n"]
+
+
+def test_an_editor_not_on_path_never_reaches_popen(monkeypatch):
+    """And says so specifically, rather than as a launch failure."""
+    def explode(*a, **k):
+        raise AssertionError("Popen must not be reached")
+
+    monkeypatch.setattr(vscode_tasks.shutil, "which", lambda name: None)
+    monkeypatch.setattr(vscode_tasks.subprocess, "Popen", explode)
+
+    ok, error = vscode_tasks.open_in_editor("code", "/p/f.py")
+    assert ok is False
+    assert "not found on PATH" in error
+    assert "code.CMD" in error, "the Windows-specific cause is worth naming"
+
+
+def test_a_launch_failure_reads_differently_from_a_missing_editor(monkeypatch):
+    """Two different problems with two different fixes; one message for both
+    is how a correct setting gets blamed."""
+    monkeypatch.setattr(vscode_tasks.shutil, "which", lambda name: "/resolved")
+
+    def boom(*a, **k):
+        raise OSError("access denied")
+
+    monkeypatch.setattr(vscode_tasks.subprocess, "Popen", boom)
+    ok, error = vscode_tasks.open_in_editor("code", "/p/f.py")
+    assert ok is False
+    assert "could not launch" in error and "not found on PATH" not in error
+
+
+def test_an_unparseable_editor_command_says_so(monkeypatch):
+    monkeypatch.setattr(vscode_tasks.shutil, "which", lambda name: "/resolved")
+    ok, error = vscode_tasks.open_in_editor('code "unbalanced', "/p/f.py")
+    assert ok is False and "could not parse" in error
+
+
+def test_resolve_editor_argv_separates_its_two_failure_modes(monkeypatch):
+    """None means 'parsed, but nothing on PATH'. ValueError means 'that is not
+    a command line'. Collapsing them loses which fix applies."""
+    monkeypatch.setattr(vscode_tasks.shutil, "which", lambda name: None)
+    assert vscode_tasks.resolve_editor_argv("ghost") is None
+    with pytest.raises(ValueError):
+        vscode_tasks.resolve_editor_argv('code "unbalanced')
