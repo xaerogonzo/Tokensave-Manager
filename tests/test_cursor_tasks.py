@@ -165,12 +165,44 @@ def test_a_non_string_title_renders_as_untitled(fake_home):
 
 # ── Project attribution ──────────────────────────────────────────────────────
 
+@pytest.mark.skipif(os.name != "nt",
+                    reason="case-insensitive path identity is a Windows property")
 def test_cwd_matches_a_known_project_case_insensitively(fake_home, tmp_path):
+    """On Windows a case variant names the SAME directory, so it must match.
+
+    Platform-gated deliberately. `_same_project` normalises with
+    `os.path.normcase`, which folds case on Windows and is a **no-op on
+    POSIX** — so this assertion is not a portable statement about the code,
+    it is a statement about NTFS. Asserting it everywhere claimed Linux
+    behaves like Windows and failed on the gate; the POSIX half of the
+    behaviour is asserted by the test below instead.
+    """
     proj = tmp_path / "MyProject"
     proj.mkdir()
     _chat(fake_home, "c1", _good(cwd=str(proj).upper()))
     row = scan_cursor_sessions([str(proj)])[0]
     assert row["project_display"] == "MyProject"
+
+
+@pytest.mark.skipif(os.name == "nt",
+                    reason="on Windows a case variant is the same directory")
+def test_a_case_variant_is_a_DIFFERENT_project_on_a_case_sensitive_fs(
+        fake_home, tmp_path):
+    """On POSIX it is genuinely another directory, and saying otherwise is the bug.
+
+    The tempting "fix" for the gate failure is to make matching
+    case-insensitive everywhere. That would be wrong: on a case-sensitive
+    filesystem `/x/MYPROJECT` and `/x/MyProject` can both exist and hold
+    different code, so attributing a session to the wrong one is exactly the
+    confident-but-wrong row this module is written to avoid. Falling through
+    to the untracked-directory branch is the correct answer.
+    """
+    proj = tmp_path / "MyProject"
+    proj.mkdir()
+    _chat(fake_home, "c1", _good(cwd=str(proj).upper()))
+    row = scan_cursor_sessions([str(proj)])[0]
+    assert row["project_display"] == "MYPROJECT"
+    assert row["project_display"] != "MyProject"
 
 
 def test_cwd_with_a_trailing_separator_still_matches(fake_home, tmp_path):
