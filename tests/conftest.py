@@ -504,6 +504,7 @@ class _MockConfig:
         self.raw: dict = {
             "tokensave_exe":             "",
             "codegraph_exe":             "",
+            "pyscope_exe":               "",
             "claude_cli_exe":            "",
             "python_exe":                sys.executable,
             "git_exe":                   "",
@@ -530,6 +531,8 @@ class _MockConfig:
     @property
     def codegraph_exe(self):       return self.raw.get("codegraph_exe", "")
     @property
+    def pyscope_exe(self):         return self.raw.get("pyscope_exe", "")
+    @property
     def claude_cli_exe(self):      return self.raw.get("claude_cli_exe", "")
     @property
     def python_exe(self):          return self.raw.get("python_exe", sys.executable)
@@ -546,6 +549,15 @@ class _MockConfig:
 
     def save(self) -> None:
         self._saved = True
+
+    def refresh_derived(self) -> None:
+        """No-op: the mock reads `raw` live, so there is nothing to recompute.
+
+        Present because the real contract is raw.update() + save() +
+        refresh_derived(), and a dialog that follows it must not crash here
+        for doing the right thing.
+        """
+        self._refreshed = True
 
 
 @pytest.fixture

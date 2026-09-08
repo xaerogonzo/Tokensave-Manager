@@ -32,8 +32,12 @@ def _proc(rc=0, stdout="", stderr=""):
 
 # ── Construction + initial state ─────────────────────────────────────────
 
-def test_dialog_constructs_with_two_rows(tk_root, mock_config, mocker):
-    """The dialog should render rows for both tools without crashing."""
+def test_dialog_constructs_with_three_rows(tk_root, mock_config, mocker):
+    """The dialog should render a row per tool without crashing.
+
+    A ratcheted set rather than a count, so adding a tool is a visible act
+    and so the failure names which row appeared or vanished.
+    """
     mocker.patch("dialogs.tool_manager._detect_codegraph", return_value="")
     mocker.patch("dialogs.tool_manager._detect_npm", return_value="")
     mocker.patch("dialogs.tool_manager._claude_code_mcp_has_codegraph",
@@ -42,8 +46,169 @@ def test_dialog_constructs_with_two_rows(tk_root, mock_config, mocker):
                         return_value=False)
 
     dialog = ToolManagerDialog(tk_root, mock_config)
-    assert set(dialog._tool_widgets.keys()) == {"tokensave", "codegraph"}
-    assert set(dialog._row_busy.keys()) == {"tokensave", "codegraph"}
+    assert set(dialog._tool_widgets.keys()) == {"tokensave", "codegraph", "pyscope"}
+    assert set(dialog._row_busy.keys()) == {"tokensave", "codegraph", "pyscope"}
+
+
+class TestPyScopeRow:
+    """The status-only row.
+
+    PyScope is a uv tool over a local checkout, not a package this manager
+    can fetch, so its row carries no lifecycle actions. The properties worth
+    holding are that it renders no dead buttons, that Locate stays usable
+    precisely when the row says "not installed", and that the machinery
+    written for rows WITH buttons does not fall over on a row without them.
+    """
+
+    def _dialog(self, tk_root, mock_config, mocker, status=None):
+        import helpers.pyscope as ps
+        mocker.patch("dialogs.tool_manager._detect_codegraph", return_value="")
+        mocker.patch("dialogs.tool_manager._detect_npm", return_value="")
+        mocker.patch("dialogs.tool_manager._claude_code_mcp_has_codegraph",
+                     return_value=(False, ""))
+        mocker.patch.object(ToolManagerDialog, "_tokensave_mcp_wired",
+                            return_value=False)
+        mocker.patch.object(ps, "status",
+                            return_value=status or ps.Status())
+        return ToolManagerDialog(tk_root, mock_config)
+
+    def test_the_row_offers_no_lifecycle_buttons(self, tk_root, mock_config, mocker):
+        """Three greyed-out buttons would claim a feature that never existed."""
+        dialog = self._dialog(tk_root, mock_config, mocker)
+        widgets = dialog._tool_widgets["pyscope"]
+        for key in ("install_btn", "update_btn", "uninstall_btn"):
+            assert key not in widgets
+        assert "locate_btn" in widgets
+
+    def test_locate_stays_enabled_while_the_row_reports_absent(
+            self, tk_root, mock_config, mocker):
+        """Saying where the binary is IS the remedy for "not installed".
+
+        Gating Locate on `installed`, the way Update and Uninstall are
+        gated, would disable it in exactly the state it exists to fix.
+        """
+        import tkinter as tk
+        dialog = self._dialog(tk_root, mock_config, mocker)
+        assert str(dialog._tool_widgets["pyscope"]["locate_btn"]["state"]) == str(tk.NORMAL)
+
+    def test_unhealthy_is_not_rendered_as_absent(self, tk_root, mock_config, mocker):
+        """The row keeps "broken" and "missing" apart, in words and colour."""
+        import helpers.pyscope as ps
+        from constants import C
+        broken = ps.Status(configured=r"C:\bin\pyscope.exe", executable=True,
+                           state=ps.STATE_UNHEALTHY,
+                           detail="pyscope version exited 2: ImportError")
+        dialog = self._dialog(tk_root, mock_config, mocker, status=broken)
+        label = dialog._tool_widgets["pyscope"]["bin_lbl"]
+        assert "not installed" not in label.cget("text")
+        assert "ImportError" in label.cget("text")
+        assert label.cget("fg") == C["yellow"]
+
+    def test_absent_offers_the_install_command_on_the_second_line(
+            self, tk_root, mock_config, mocker):
+        dialog = self._dialog(tk_root, mock_config, mocker)
+        second = dialog._tool_widgets["pyscope"]["mcp_lbl"].cget("text")
+        assert "uv tool install" in second
+
+    def test_the_second_line_claims_nothing_about_mcp_wiring(
+            self, tk_root, mock_config, mocker):
+        """Nothing in this build writes PyScope's MCP entry.
+
+        A wiring verdict here would be a claim about something no code has
+        looked at — the other two rows earn theirs by reading ~/.claude.json.
+        """
+        import helpers.pyscope as ps
+        healthy = ps.Status(configured="x", executable=True,
+                            state=ps.STATE_OK, version="0.1.0")
+        dialog = self._dialog(tk_root, mock_config, mocker, status=healthy)
+        second = dialog._tool_widgets["pyscope"]["mcp_lbl"].cget("text")
+        assert "MCP" not in second
+
+    def test_set_row_busy_survives_a_row_with_no_lifecycle_buttons(
+            self, tk_root, mock_config, mocker):
+        """_row_busy machinery was written for rows that have buttons."""
+        dialog = self._dialog(tk_root, mock_config, mocker)
+        dialog._set_row_busy("pyscope", True)
+        dialog._set_row_busy("pyscope", False)
+
+    def test_locate_persists_the_choice_and_refreshes(
+            self, tk_root, mock_config, mocker, tmp_path):
+        """G-F: every cfg mutation is followed by save + refresh_derived."""
+        exe = tmp_path / "pyscope.exe"
+        exe.write_text("", encoding="utf-8")
+        dialog = self._dialog(tk_root, mock_config, mocker)
+        mocker.patch("dialogs.tool_manager.filedialog.askopenfilename",
+                     return_value=str(exe))
+        dialog._on_locate("pyscope")
+        assert mock_config.raw["pyscope_exe"] == str(exe)
+        assert mock_config._saved is True
+
+    def test_the_dialog_is_tall_enough_for_every_row_it_builds(
+            self, tk_root, mock_config, mocker):
+        """The minimum size must cover what the content actually asks for.
+
+        Adding the third row broke this and nothing caught it. The row was
+        built, its LabelFrame border drew, and its children never mapped —
+        so it rendered as an empty titled box. The geometry oracle could
+        not see it either: it SKIPS unmapped widgets, because a widget may
+        be legitimately hidden, so five clipped children were counted as
+        "5 unmapped" rather than reported as findings.
+
+        Asserted as an invariant rather than a pixel count, so a fourth row
+        fails this instead of quietly clipping again.
+        """
+        dialog = self._dialog(tk_root, mock_config, mocker)
+        dialog.update_idletasks()
+        required = dialog.winfo_reqheight()
+        floor = dialog.minsize()[1]
+        assert floor >= required, (
+            f"minsize height {floor} is below the {required} its own content "
+            f"requests; the last row will be laid out with no room and its "
+            f"children will not map"
+        )
+
+    def test_no_button_row_asks_for_more_width_than_the_dialog_can_give(
+            self, tk_root, mock_config, mocker):
+        """The horizontal twin of the height invariant above.
+
+        The tokensave row used to pack six buttons onto one line in a 720px
+        dialog, and Tk squeezed the last one to a single pixel:
+        "Manage servers..." was in the widget tree and invisible to the
+        user for its entire life. Worse than a missing button, because the
+        surrounding code reads as though the feature is available — and
+        that button is the one someone reaches for when a stale
+        `tokensave serve` is holding a database lock.
+
+        Asserted as an invariant rather than a button count, so a seventh
+        button fails this instead of vanishing quietly.
+        """
+        dialog = self._dialog(tk_root, mock_config, mocker)
+        dialog.update_idletasks()
+        # padx=18 on the row wrapper plus padx=12 inside it, both sides.
+        usable = dialog.minsize()[0] - 2 * (18 + 12)
+        seen = set()
+        for tool_id, widgets in dialog._tool_widgets.items():
+            for key, widget in widgets.items():
+                if not key.endswith("_btn"):
+                    continue
+                row = widget.master
+                if row in seen:
+                    continue
+                seen.add(row)
+                assert row.winfo_reqwidth() <= usable, (
+                    f"the {tool_id} row needs {row.winfo_reqwidth()}px for "
+                    f"its buttons but has {usable}px; Tk will squeeze the "
+                    f"last one to a sliver rather than wrap it")
+        assert seen, "sanity: the scan found no button rows to measure"
+
+    def test_cancelling_locate_changes_nothing(
+            self, tk_root, mock_config, mocker):
+        dialog = self._dialog(tk_root, mock_config, mocker)
+        mocker.patch("dialogs.tool_manager.filedialog.askopenfilename",
+                     return_value="")
+        dialog._on_locate("pyscope")
+        assert mock_config.raw["pyscope_exe"] == ""
+        assert mock_config._saved is False
 
 
 def test_initial_state_shows_not_installed_when_paths_empty(

@@ -298,9 +298,77 @@ def _codegraph_index_health(project_path: str, codegraph_exe: str):
     return "healthy", f"{file_count} files indexed"
 
 
-def build_combined_grounding(tokensave_block: str, codegraph_block: str,
-                              per_source_cap: int = 4000) -> str:
-    """Combine tokensave + codegraph grounding into one block.
+# ── PyScope grounding (step 1.8) ─────────────────────────────────────────────
+
+#: Deliberately small. This block is a CAVEAT rather than content: the other
+#: two sources tell the model what exists, and this one tells it how much of
+#: that was actually proved. A few hundred characters that stop an
+#: over-confident claim are worth more than a few thousand that enable one.
+_MAX_PYSCOPE_CHARS = 900
+
+
+def build_pyscope_block(project_path: str, pyscope_exe: str) -> str:
+    """PyScope's "how much of this is established" summary, as markdown.
+
+    Returns "" on every failure, exactly like the other two builders —
+    grounding is purely additive and no caller's flow may depend on it.
+
+    What this contributes that the others cannot: tokensave and codegraph
+    both answer *what is there*. Neither says how much of it their resolver
+    actually proved, so a model reading either one has no way to tell a
+    certain call edge from a name that happened to match. PyScope counts that
+    directly, and a large `unknown` share is the single most useful thing to
+    put in front of a model about to describe a call graph.
+    """
+    if not pyscope_exe or not project_path:
+        return ""
+    try:
+        from helpers.pyscope import analyze
+        stats = analyze(pyscope_exe, project_path)
+    except Exception:
+        return ""
+    if not isinstance(stats, dict):
+        return ""
+
+    confidence = stats.get("confidence")
+    dispatch = stats.get("dispatch")
+    if not isinstance(confidence, dict) or not confidence:
+        # Without the breakdown there is no caveat to make, and the bare
+        # counts duplicate what the other two sources already said.
+        return ""
+
+    total = sum(v for v in confidence.values() if isinstance(v, int))
+    unknown = confidence.get("unknown", 0)
+    lines = [
+        "### PyScope — how much of this is established",
+        "",
+        f"- symbols: {stats.get('symbols', '?')}   "
+        f"relationships: {stats.get('edges', '?')}",
+        "- confidence: " + ", ".join(
+            f"{k} {v}" for k, v in confidence.items()),
+    ]
+    if isinstance(dispatch, dict) and dispatch:
+        lines.append("- call dispatch: " + ", ".join(
+            f"{k} {v}" for k, v in dispatch.items()))
+    if total and isinstance(unknown, int) and unknown:
+        pct = round(100.0 * unknown / total)
+        lines.append(
+            f"- **{pct}% of relationships are unresolved.** Describe call "
+            "relationships as reported rather than certain, and do not claim a "
+            "complete list of callers or callees.")
+    if stats.get("parse_failures"):
+        lines.append(f"- files that failed to parse: {stats['parse_failures']}")
+    lines.append("")
+    return _truncate_at_line("\n".join(lines), _MAX_PYSCOPE_CHARS)
+
+
+def build_combined_grounding(*blocks: str, per_source_cap: int = 4000) -> str:
+    """Combine grounding blocks from any number of sources into one.
+
+    Variadic since step 1.8, when PyScope became a third source. Every
+    existing call passes its two blocks positionally, so those are unchanged;
+    a fourth source is another argument rather than another parameter and
+    another `if`.
 
     v4.4 (Gemini #4): **dedup first, truncate after.** The previous
     v4.1 order (truncate-then-dedup) would chop the bottom 60% of
@@ -309,21 +377,22 @@ def build_combined_grounding(tokensave_block: str, codegraph_block: str,
     content. Dedup-first keeps every byte under the combined cap
     unique.
 
-    Combined cap is ``per_source_cap * 2`` (default 8000), matching
-    the v3 single-source ceiling — same prompt-size budget, just
-    every byte is now meaningful.
+    Combined cap stays ``per_source_cap * 2`` (default 8000) **regardless of
+    how many sources there are**. It is a prompt-size budget, not a per-source
+    allowance: letting it grow with each source would silently inflate every
+    prompt the moment a third one was added, and dedup-first already means
+    every byte under the cap is unique.
 
-    Returns "" when both inputs are empty (caller passes through to a
+    Returns "" when every input is empty (caller passes through to a
     bodiless prompt — same as v3 behaviour without grounding).
     """
-    tk_block = tokensave_block or ""
-    cg_block = codegraph_block or ""
-    if not tk_block and not cg_block:
+    present = [b for b in blocks if b]
+    if not present:
         return ""
-    # 1. Line-level dedup across both blocks, preserve first-seen order.
+    # 1. Line-level dedup across all blocks, preserve first-seen order.
     seen: set = set()
     merged: list = []
-    for block in (tk_block, cg_block):
+    for block in present:
         for line in block.splitlines():
             key = line.strip()
             if not key:

@@ -219,6 +219,14 @@ Token Save Manager Source/
 │   │   ├── pr_draft.py            generate_pr_draft (LLM-based PR description drafting)
 │   │   ├── savings.py             parse/fetch gain, gain --history, cost, discover;
 │   │   │                          three-state Result — unavailable is never zero
+│   │   ├── mcp_pyscope.py         PyScope's user-scoped MCP entry. Two states (mcp,
+│   │   │                          registration) that are never collapsed; reconcile()
+│   │   │                          is best-effort, ordered register-then-write, and
+│   │   │                          verdicts come from re-reading both.
+│   │   ├── pyscope.py             PyScope integration client — one `_run` subprocess
+│   │   │                          boundary; read-only surface plus the single mutating
+│   │   │                          register(). Configured / executable / healthy are
+│   │   │                          three separate answers, never inferred from each other.
 │   │   ├── claude_cli.py          spawn_claude_cli (detached terminal via CREATE_NEW_CONSOLE)
 │   │   └── precommit_hook.py      install/remove/detect git pre-commit hook + review
 │   │                              runner (P5b). 3-value backend dispatch
@@ -229,6 +237,8 @@ Token Save Manager Source/
 │   │   │                          via __init__ when it needs to read settings; bare-data
 │   │   │                          dialogs (NewBranch, SwitchBranch, AssignCategory, etc.) skip it.
 │   │   ├── settings.py            SettingsDialog (+_probe_loaded_model helper)
+│   │   ├── settings_pyscope.py    PyScopeSection — path row + three-state status.
+│   │   │                          No install action: the Manager does not install PyScope.
 │   │   ├── release_wizard.py      ReleaseWizardDialog + _ReleaseCtx (paired)
 │   │   ├── mcp_config.py          MCPConfigDialog — mutates cfg.raw["mcp_skip_warnings"]
 │   │   ├── ai_code_review.py      AICodeReviewDialog — takes both llm_cfg dict + cfg
@@ -272,6 +282,9 @@ Token Save Manager Source/
 │       ├── fileops_ctrl.py        File ops (open folder/editor, copy path, remove index)
 │       ├── shadowlinks_ctrl.py    Shadow links dialog + background generation
 │       ├── codegraph_ctrl.py      CodeGraph init / sync / status / remove
+│       ├── pyscope_ctrl.py        PyScope analyze / open / register / status.
+│                                  cmd_register is the Manager's ONLY mutation of
+│                                  PyScope state, reachable only from the menu item.
 │       ├── git_ops_ctrl.py        Git ops from Projects tab (init, log, commit, AI review,
 │       │                          gitignore, untrack, P5b pre-commit hook install/remove)
 │       └── ai_tasks_ctrl.py       Long-running AI write tasks (Stage 3 CHANGELOG drafter;
@@ -335,6 +348,7 @@ Must be updated when the project moves to a new location or machine.
 | `cursor_cli_exe` | Optional absolute path to the Cursor Agent CLI. Blank = auto-detect (`cursor-agent` on PATH, then `~/.local/bin`, where the Windows installer writes it — NOT `~/.cursor/bin`). Empty string when not installed. |
 | `cursor_cli_model` | Model passed to manager-spawned Cursor calls. Default `""` (let Cursor choose). Deliberately NOT mirrored from `claude_cli_model`: Anthropic model ids are not valid Cursor model ids. |
 | `gitignore_cursor_mcp` | Boolean, default `true`. Adds `.cursor/mcp.json` to a project's .gitignore after binding. Names the FILE, never the `.cursor/` directory — `.cursor/rules/` is shared project config and must stay committed. |
+| `pyscope_exe` | Optional absolute path to the PyScope CLI. Blank = auto-detect (`pyscope.exe` then `pyscope` on PATH, then `~/.local/bin`, where `uv tool install` writes its shims). Empty string when not installed — never the bare command name. Non-empty means *configured*, which is not the same as *executable* or *healthy* — see `helpers/pyscope.status`. **Not** a row in `helpers/agent_cli.py`: PyScope is an analysis tool, not a coding-agent CLI. |
 | `doctor_skip_monolith_paths` | Optional list of project-relative paths Doctor's monolith audit should skip (e.g. `["src/tokensave-wrapper.py"]` for intentionally single-file modules). Default `[]`. |
 
 ---
@@ -504,6 +518,7 @@ The same pattern lives in Fortuna Lab (`FORTUNA_DRIVE`) and OpenChem Studio
 ### Gitignore
 
 - **`.claude/` MUST be in `.gitignore`.** It holds Claude Code's local per-machine session settings (Stop hooks, transcripts) which should never be committed. `_BASELINE_GITIGNORE` (written by `cmd_git_init`) already includes it.
+- **`.pyscope/` is in the baseline for a functional reason, not a tidiness one.** PyScope writes `<project>/.pyscope/` ONLY when git ignores it, and otherwise keeps the project's analysis in per-user app data. Removing the pattern does not merely leak a cache directory into git status — it moves the cache somewhere else.
 - **`_BASELINE_GITIGNORE`** is written by `cmd_git_init` when no `.gitignore` exists. Covers Python cache, Nuitka build output, tokensave index, and virtual environments. Always write it *before* any `git add -A` call to avoid committing machine-specific binary files.
 - **`_ensure_gitignore(path)`** non-destructively merges `_BASELINE_GITIGNORE` entries into an existing `.gitignore`. Idempotent. NOT exposed as a right-click action anymore — the user-facing entry is `GitignoreDialog`.
 - **`GitignoreDialog`** is the user-facing `.gitignore` editor. Opened via right-click → **📋 Manage .gitignore…**. Template buttons are push buttons (not checkboxes) so reopening the dialog doesn't lie about which categories were "applied". Blank lines in `_original_lines` are tracked by index but not rendered — preserved verbatim on save. After Save, calls `_offer_commit_after_change(path, ".gitignore")`. Browse + untracked-files panel (Roadmap-1) add files via `_add_custom`; both go through the cross-drive / parent-traversal guards.

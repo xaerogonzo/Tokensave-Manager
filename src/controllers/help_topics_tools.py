@@ -14,6 +14,115 @@ from constants import _BASE_DIR
 from constants import _CONFIG_PATH
 
 
+def pyscope(ctl):
+    """The PyScope topic: what it adds that the other two tools do not."""
+
+    def _fill():
+        h1, h2, p, warn, ok, dim, br, ins = ctl._hw()
+        h1("PyScope")
+        p("PyScope is an optional third analysis tool. It is not another code "
+          "graph competing with tokensave and CodeGraph \u2014 it answers a "
+          "different question about the same source tree.")
+        br()
+
+        h2("The difference, in one line")
+        ins("  tokensave / CodeGraph  ", "body")
+        ins("where things are, and what touches what.\n", "dim")
+        ins("  PyScope                ", "body")
+        ins("how much of that is actually established.\n", "dim")
+        br()
+        p("That distinction matters because an AI assistant reading a code "
+          "graph cannot tell a proved call edge from a name that happened to "
+          "match. PyScope counts the difference and reports it. On its own "
+          "source tree, 4,191 of 9,906 relationships are unresolved \u2014 so "
+          "roughly 43% of what a graph shows was never proved by anything.")
+        br()
+
+        h2("Three separate answers, never merged")
+        ins("  Confidence    ", "body")
+        ins("does this NAME refer to this source symbol?\n", "dim")
+        ins("  Dispatch      ", "body")
+        ins("does the call actually REACH that callable at runtime?\n", "dim")
+        ins("  Completeness  ", "body")
+        ins("can we list all of these, or only the ones we found?\n", "dim")
+        br()
+        p("These are independent. \"from foo import run; run()\" has a certain "
+          "binding and a runtime target nobody can guarantee \u2014 rebinding, "
+          "conditional imports and decorators all break the link. A tool whose "
+          "most confident label is also its least honest one is worse than no "
+          "tool, so PyScope keeps them apart and so does this manager.")
+        br()
+
+        h2("Optional, in both directions")
+        p("The manager works completely without PyScope, and PyScope works "
+          "completely without the manager. When it is absent, the PyScope "
+          "surfaces simply do not appear \u2014 nothing errors and nothing is "
+          "disabled-looking.")
+        br()
+
+        h2("Installing it")
+        p("The manager does NOT install PyScope. It is a uv tool over a local "
+          "checkout rather than a package this manager can fetch, so there is "
+          "no Install button to press \u2014 that would be claiming a job the "
+          "manager does not do. Install it yourself with:")
+        ins("  uv tool install --editable <path to the PyScope checkout>\n", "body")
+        p("Then Settings \u2192 PyScope \u2192 Auto-detect, or point Browse at it. "
+          "The manager looks on PATH first, then in ~/.local/bin, which is "
+          "where uv writes its shims.")
+        br()
+
+        h2("Configured is not installed is not working")
+        p("The Settings section reports three separate things on purpose:")
+        ins("  Configured  ", "body")
+        ins("a path is set or was detected.\n", "dim")
+        ins("  Executable  ", "body")
+        ins("that path exists and can be launched.\n", "dim")
+        ins("  Status      ", "body")
+        ins("it ran and answered sensibly.\n", "dim")
+        p("\"Installed but crashing\" and \"not installed\" send you to "
+          "completely different fixes, so this manager never collapses them "
+          "into one word.")
+        br()
+
+        h2("Per-project actions")
+        p("Right-click a project \u2192 \U0001f52c PyScope:")
+        ins("  Analyze              ", "body")
+        ins("build the index and report what was established.\n", "dim")
+        ins("  Status               ", "body")
+        ins("binary, registration, and where the cache lives.\n", "dim")
+        ins("  Register with PyScope  ", "body")
+        ins("add it to PyScope's project list.\n", "dim")
+        ins("  Bind to Claude Code  ", "body")
+        ins("register it AND wire the MCP server.\n", "dim")
+        ins("  Open in PyScope      ", "body")
+        ins("launch PyScope's own desktop app here.\n", "dim")
+        br()
+
+        h2("Why binding is two things")
+        p("PyScope's MCP server answers about REGISTERED projects and takes "
+          "the project as an argument, so there is one server for the whole "
+          "machine rather than one per project. The MCP entry makes the server "
+          "reachable; registering makes a project answerable. An entry without "
+          "registration replies \"unknown project\" to everything, so the "
+          "manager reports both states separately and will tell you when only "
+          "one of them landed.")
+        warn("A user-scoped MCP entry is normally a problem in this manager "
+             "\u2014 it shadows a project's own .mcp.json. For PyScope it is "
+             "correct, because there is no project-scoped entry to shadow. The "
+             "manager knows the difference by server name.")
+        br()
+
+        h2("The .pyscope/ folder")
+        p("PyScope writes <project>/.pyscope/ ONLY when git ignores it, and "
+          "otherwise keeps the analysis in per-user app data. The manager's "
+          "baseline .gitignore includes .pyscope/ for exactly that reason. "
+          "Doctor mentions it if a project is analysed but has no local cache "
+          "\u2014 as a suggestion, not a warning. Nothing is broken either way.")
+        br()
+
+    ctl._help_show(_fill)
+
+
 def codegraph(ctl):
     _doc = os.path.join(_BASE_DIR, "README.md")
     _ask = ("tokensave sync finished but I still can't find a function "

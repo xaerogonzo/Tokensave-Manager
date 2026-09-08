@@ -42,6 +42,7 @@ from helpers.mcp import (DESKTOP_SCOPE_RETIRED_KEY, USER_SCOPE_RETIRED_KEY,
                          _mcp_configs, _classify_mcp_entry)
 from dialogs.settings_paths import PathsSection
 from dialogs.settings_codegraph import CodegraphSection
+from dialogs.settings_pyscope import PyScopeSection
 from dialogs.settings_ai import AISection
 
 if TYPE_CHECKING:
@@ -106,11 +107,15 @@ class SettingsDialog(tk.Toplevel):
             self, body, cfg, open_tool_manager=self._open_tool_manager)
         self._codegraph = CodegraphSection(
             self, body, cfg, open_tool_manager=self._open_tool_manager)
+        # PyScope sits beside CodeGraph because it is the same KIND of thing —
+        # an optional analysis tool — not because its lifecycle matches. It has
+        # no install action and its own three-state status; see the section.
+        self._pyscope = PyScopeSection(self, body, cfg)
         self._build_roots_section(body, raw)
         self._build_git_toggles_section(body, raw)
         self._build_mcp_section(body)
         self._ai = AISection(self, body, cfg)
-        self._sections = [self._paths, self._codegraph, self._ai]
+        self._sections = [self._paths, self._codegraph, self._pyscope, self._ai]
 
         # ── Save/Cancel — anchored outside the scroll area ────────────────
         btn_row = tk.Frame(self, bg=C["base"])

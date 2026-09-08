@@ -32,6 +32,13 @@ _BASELINE_GITIGNORE = """\
 .codegraph/codegraph.db
 .codegraph/codegraph.db-*
 
+# PyScope cache. Not merely tidiness: PyScope writes <project>/.pyscope/
+# ONLY when git ignores it, and otherwise exiles the project's analysis to
+# per-user app data. This one line is what keeps the cache beside the source
+# it describes. Harmless in a project that never runs PyScope, on the same
+# reasoning as the two index entries above.
+.pyscope/
+
 # Python cache
 __pycache__/
 *.pyc

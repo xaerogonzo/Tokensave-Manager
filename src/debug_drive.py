@@ -26,7 +26,8 @@ The script is a JSON list of steps, run in order:
       {"do": "tab",    "name": "Projects"},
       {"do": "dialog", "name": "mcp"},          // also: settings, savings,
                                                 //  gitignore, docdrafter,
-                                                //  testmanager, testgaps, prdraft
+                                                //  testmanager, toolmanager,
+                                                //  testgaps, prdraft
       {"do": "click",  "text": "show"},
       {"do": "report", "what": "mcp", "after_ms": 3000},
       {"do": "report", "what": "geometry"},     // laid-out geometry defects
@@ -258,6 +259,9 @@ class _Driver:
             from dialogs.gitignore import GitignoreDialog
             self._dialog = GitignoreDialog(
                 self._app, self._project(step), self._app._cfg)
+        elif name in ("toolmanager", "tools", "tool_manager"):
+            from dialogs.tool_manager import ToolManagerDialog
+            self._dialog = ToolManagerDialog(self._app, self._app._cfg)
         elif name in ("testmanager", "tests", "test_manager"):
             from dialogs.test_manager import TestManagerDialog
             self._dialog = TestManagerDialog(

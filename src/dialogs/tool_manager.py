@@ -37,7 +37,7 @@ import shutil
 import subprocess
 import threading
 import tkinter as tk
-from tkinter import messagebox, ttk
+from tkinter import filedialog, messagebox, ttk
 from typing import TYPE_CHECKING
 
 from constants import C, CREATE_NO_WINDOW
@@ -71,13 +71,14 @@ _TOKENSAVE_VERSION_RE = re.compile(r"(\d+\.\d+\.\d+(?:\.\d+)?)")
 # _set_row_busy restores labels by indexing that dict directly.
 _BTN_KEYS: tuple = (
     "install_btn", "update_btn", "uninstall_btn", "wire_btn", "refresh_btn",
-    "servers_btn", "daemons_btn",
+    "servers_btn", "daemons_btn", "locate_btn",
 )
 
 _BTN_DEFAULT_TEXT: dict = {
     "install_btn":   "Install",
     "update_btn":    "Update",
     "uninstall_btn": "Uninstall",
+    "locate_btn":    "Locate…",
     "wire_btn":      "🔌  Wire into agents…",
     "refresh_btn":   "♻  Refresh agent config",
     "servers_btn":   "🔌  Manage servers…",
@@ -128,13 +129,20 @@ class ToolManagerDialog(UiPumpMixin, tk.Toplevel):
         self.title("💾 Tool Manager — TokenSave Manager")
         self.configure(bg=C["base"])
         self.resizable(True, True)
-        self.minsize(640, 540)
+        # Three rows, a log pane and a sticky footer. Sized for the
+        # content: at the old 540 the third row was laid out with no
+        # vertical room left and rendered as an empty titled box — its
+        # children never mapped, which is also why the geometry oracle
+        # could not see it (it skips unmapped widgets, since a widget
+        # can be legitimately hidden).
+        self.minsize(640, 790)
         self.grab_set()
 
         # Per-tool widget bookkeeping (populated by _build_tool_row).
         self._tool_widgets: dict = {}
         # G-G concurrency: True while a worker is running for this tool.
-        self._row_busy: dict = {"tokensave": False, "codegraph": False}
+        self._row_busy: dict = {"tokensave": False, "codegraph": False,
+                                "pyscope": False}
 
         self._build_header()
         self._build_action_bar()       # bottom, packed first
@@ -145,6 +153,16 @@ class ToolManagerDialog(UiPumpMixin, tk.Toplevel):
             fill=tk.X, padx=18, pady=(8, 8))
         self._build_tool_row("codegraph", "CodeGraph",
                              "Alternative code-graph tool")
+        ttk.Separator(self, orient="horizontal").pack(
+            fill=tk.X, padx=18, pady=(8, 8))
+        # Status-only. PyScope is a uv tool over a local editable checkout
+        # rather than a package this manager can fetch, so there is no
+        # Install / Update / Uninstall to offer. The row says so rather than
+        # rendering three dead buttons, which would read as a broken feature
+        # instead of an absent one.
+        self._build_tool_row("pyscope", "PyScope",
+                             "Code comprehension — how much is established",
+                             actions=False)
 
         # Workers post to _ui_queue; nothing runs it until this starts.
         self._start_ui_pump()
@@ -168,7 +186,11 @@ class ToolManagerDialog(UiPumpMixin, tk.Toplevel):
                   "from one place. Each tool has its own row below with "
                   "current version + MCP-wiring status + the three "
                   "lifecycle actions. Uninstall is cascading — it strips "
-                  "MCP wiring first, then removes the binary."),
+                  "MCP wiring first, then removes the binary.\n\n"
+                  "PyScope is status-only: it is a uv tool over a local "
+                  "checkout rather than a package this manager can fetch, "
+                  "so the row reports where it is and whether it answers, "
+                  "and Locate… is the only action it offers."),
             bg=C["surface0"], fg=C["text"], font=("Segoe UI", 9),
             wraplength=600, justify=tk.LEFT,
         ).pack(anchor=tk.W, pady=(4, 0))
@@ -190,14 +212,22 @@ class ToolManagerDialog(UiPumpMixin, tk.Toplevel):
         )
         wrap.pack(fill=tk.X, side=tk.BOTTOM, padx=18, pady=(4, 4))
         self._log_txt = tk.Text(
-            wrap, height=8, font=("Consolas", 8),
+            wrap, height=6, font=("Consolas", 8),
             bg=C["mantle"], fg=C["text"],
             relief=tk.FLAT, padx=6, pady=4,
             wrap=tk.NONE, state=tk.DISABLED,
         )
         self._log_txt.pack(fill=tk.X, padx=8, pady=(6, 8))
 
-    def _build_tool_row(self, tool_id: str, label: str, subtitle: str) -> None:
+    def _build_tool_row(self, tool_id: str, label: str, subtitle: str,
+                        actions: bool = True) -> None:
+        """One tool's status block, and its lifecycle buttons when it has any.
+
+        ``actions=False`` builds a status-only row. A tool this manager cannot
+        install has no Install / Update / Uninstall to disable, and offering
+        them greyed out would claim the feature exists but is unavailable when
+        in fact it was never the manager's job.
+        """
         wrap = tk.LabelFrame(
             self, text=f"{label}  —  {subtitle}",
             fg=C["subtext"], bg=C["base"],
@@ -223,7 +253,24 @@ class ToolManagerDialog(UiPumpMixin, tk.Toplevel):
 
         # Action button row
         btn_row = tk.Frame(wrap, bg=C["base"])
-        btn_row.pack(fill=tk.X, padx=12, pady=(2, 8))
+        btn_row.pack(fill=tk.X, padx=12, pady=(2, 4))
+
+        if not actions:
+            locate_btn = ttk.Button(
+                btn_row, text="Locate…",
+                command=lambda t=tool_id: self._on_locate(t))
+            locate_btn.pack(side=tk.LEFT, padx=(0, 6))
+            tk.Label(
+                btn_row,
+                text="Not installed or updated from here — see Settings.",
+                bg=C["base"], fg=C["overlay0"], font=("Segoe UI", 8),
+            ).pack(side=tk.LEFT, padx=(4, 0))
+            self._tool_widgets[tool_id] = {
+                "wrap": wrap, "bin_lbl": bin_lbl, "mcp_lbl": mcp_lbl,
+                "locate_btn": locate_btn,
+            }
+            return
+
         install_btn = ttk.Button(
             btn_row, text="Install",
             command=lambda t=tool_id: self._on_install(t))
@@ -250,32 +297,49 @@ class ToolManagerDialog(UiPumpMixin, tk.Toplevel):
         # management is codegraph-only. This makes _tool_widgets hold
         # DIFFERENT keys per row, so every loop over button keys must
         # tolerate absence (see _set_row_busy / _apply_row_state / _row_buttons).
+        #
+        # They get their OWN row. Packed beside the three lifecycle buttons
+        # they overflowed a 720px dialog and the LAST one was squeezed to a
+        # single pixel: "Manage servers…" was in the widget tree and
+        # invisible to the user for its entire life. That is worse than a
+        # missing button, because the code around it reads as though the
+        # feature is available — and it is the one control someone reaches
+        # for when a stale `tokensave serve` is holding a database lock,
+        # which is why _apply_row_state deliberately leaves it enabled even
+        # when the binary is gone.
+        #
+        # A second row rather than a wider dialog: widening buys exactly one
+        # more button, and the next tool to gain an extra pushes a seventh
+        # off the same edge.
+        extra_row = tk.Frame(wrap, bg=C["base"])
         if tool_id == "tokensave":
+            extra_row.pack(fill=tk.X, padx=12, pady=(0, 8))
             wire_btn = ttk.Button(
-                btn_row, text="🔌  Wire into agents…",
+                extra_row, text="🔌  Wire into agents…",
                 command=self._on_wire_agents)
             wire_btn.pack(side=tk.LEFT, padx=(0, 6))
             refresh_btn = ttk.Button(
-                btn_row, text="♻  Refresh agent config",
+                extra_row, text="♻  Refresh agent config",
                 command=self._on_refresh_agents)
             refresh_btn.pack(side=tk.LEFT, padx=(0, 6))
             servers_btn = ttk.Button(
-                btn_row, text="🔌  Manage servers…",
+                extra_row, text="🔌  Manage servers…",
                 command=self._on_manage_tokensave_servers)
             servers_btn.pack(side=tk.LEFT, padx=(0, 6))
             self._tool_widgets[tool_id]["wire_btn"] = wire_btn
             self._tool_widgets[tool_id]["refresh_btn"] = refresh_btn
             self._tool_widgets[tool_id]["servers_btn"] = servers_btn
         elif tool_id == "codegraph":
+            extra_row.pack(fill=tk.X, padx=12, pady=(0, 8))
             daemons_btn = ttk.Button(
-                btn_row, text="🔌  Manage daemons…",
+                extra_row, text="🔌  Manage daemons…",
                 command=self._on_manage_codegraph_daemons)
             daemons_btn.pack(side=tk.LEFT, padx=(0, 6))
             self._tool_widgets[tool_id]["daemons_btn"] = daemons_btn
 
     def _centre_on_parent(self, parent) -> None:
         self.update_idletasks()
-        w, h = 720, 640
+        w, h = 720, 830
         try:
             px = parent.winfo_x() + (parent.winfo_width()  - w) // 2
             py = parent.winfo_y() + (parent.winfo_height() - h) // 2
@@ -337,6 +401,52 @@ class ToolManagerDialog(UiPumpMixin, tk.Toplevel):
             "codegraph", cg_installed,
             cg_bin_text, cg_bin_fg, cg_mcp_text, cg_mcp_fg)
 
+        # ── pyscope ─────────────────────────────────────────────
+        # Probed through helpers/pyscope.status rather than a bare version
+        # call, because this row reports three answers the other two collapse
+        # into one: a configured path, a launchable file, and a binary that
+        # answers. "Installed" would hide the middle state entirely, and the
+        # middle state is the one someone opens this dialog to diagnose.
+        #
+        # Bounded at TIMEOUT_DIALOG_PROBE for the same reason codegraph_version
+        # bounds itself at 5s: this refresh runs synchronously, so a hung
+        # binary here freezes the window.
+        from helpers.pyscope import status as _pyscope_status, TIMEOUT_DIALOG_PROBE
+        from helpers.pyscope import STATE_OK, STATE_ABSENT
+        ps_exe = self._cfg.pyscope_exe
+        ps_state = _pyscope_status(ps_exe, timeout=TIMEOUT_DIALOG_PROBE)
+        ps_installed = ps_state.executable
+        if ps_state.state == STATE_OK:
+            ps_bin_text = f"✓  v{ps_state.version} at {ps_state.configured}"
+            ps_bin_fg = C["green"]
+        elif ps_state.state == STATE_ABSENT:
+            ps_bin_text = "✗  not installed"
+            ps_bin_fg = C["red"]
+        else:
+            # Launchable but not answering. Yellow, never red: this row exists
+            # to keep "absent" and "broken" apart, and colouring them the same
+            # undoes that at a glance.
+            ps_bin_text = (f"⚠  {ps_state.configured}\n"
+                           f"   {ps_state.state} — {ps_state.detail}")
+            ps_bin_fg = C["yellow"]
+        self._apply_row_state(
+            "pyscope", ps_installed,
+            ps_bin_text, ps_bin_fg,
+            self._pyscope_second_line(ps_state), C["overlay0"])
+
+    @staticmethod
+    def _pyscope_second_line(ps_state) -> str:
+        """What the row can honestly say beyond the binary's own state.
+
+        Deliberately not an MCP-wiring verdict yet. The Manager does not write
+        PyScope's MCP entry, so rendering a wiring line here would be a claim
+        about something nothing in this build has looked at.
+        """
+        from helpers.pyscope import STATE_ABSENT
+        if ps_state.state == STATE_ABSENT:
+            return "   install with:  uv tool install --editable <PyScope checkout>"
+        return "   per-project actions: right-click a project → 🔬 PyScope"
+
     def _tokensave_mcp_wired(self) -> bool:
         """Lightweight presence-check for the tokensave MCP entry in
         ~/.claude.json. Mirrors _claude_code_mcp_has_codegraph's shape
@@ -368,12 +478,21 @@ class ToolManagerDialog(UiPumpMixin, tk.Toplevel):
         widgets["bin_lbl"].configure(text=bin_text, fg=bin_fg)
         widgets["mcp_lbl"].configure(text=mcp_text, fg=mcp_fg)
         busy = self._row_busy[tool_id]
-        widgets["install_btn"].configure(
-            state=tk.NORMAL if (not installed and not busy) else tk.DISABLED)
-        widgets["update_btn"].configure(
-            state=tk.NORMAL if (installed and not busy) else tk.DISABLED)
-        widgets["uninstall_btn"].configure(
-            state=tk.NORMAL if (installed and not busy) else tk.DISABLED)
+        # A status-only row has none of these. Same rule the per-tool extra
+        # buttons already follow: check membership, never index blindly.
+        if "install_btn" in widgets:
+            widgets["install_btn"].configure(
+                state=tk.NORMAL if (not installed and not busy) else tk.DISABLED)
+        for k in ("update_btn", "uninstall_btn"):
+            if k in widgets:
+                widgets[k].configure(
+                    state=tk.NORMAL if (installed and not busy) else tk.DISABLED)
+        if "locate_btn" in widgets:
+            # Always live: pointing at a binary is how a row reporting "not
+            # installed" gets corrected, so gating it on `installed` would
+            # disable it exactly when it is needed.
+            widgets["locate_btn"].configure(
+                state=tk.DISABLED if busy else tk.NORMAL)
         # Agent wiring / daemon management need the binary present, same
         # rule as update/uninstall.
         #
@@ -445,6 +564,29 @@ class ToolManagerDialog(UiPumpMixin, tk.Toplevel):
         self._post(self._log, line)
 
     # ── Action dispatchers ────────────────────────────────────────────────────
+
+    def _on_locate(self, tool_id: str) -> None:
+        """Point a status-only row at its binary and persist the choice.
+
+        The manager cannot install PyScope, so this is the whole remedy a
+        "not installed" row offers: say where it is. Writes the same config
+        key Settings writes, then refreshes so the row reports the result of
+        the choice rather than the intention behind it.
+        """
+        if tool_id != "pyscope":
+            return
+        path = filedialog.askopenfilename(
+            title="Select pyscope executable",
+            filetypes=[("Executable", "*.exe;*.cmd;*.bat"), ("All", "*.*")],
+            initialdir=os.path.join(os.path.expanduser("~"), ".local", "bin"),
+            parent=self)
+        if not path:
+            return
+        self._cfg.raw["pyscope_exe"] = path
+        self._cfg.save()
+        self._cfg.refresh_derived()
+        self._log(f"pyscope: located at {path}")
+        self._refresh_state()
 
     def _on_install(self, tool_id: str) -> None:
         if tool_id == "tokensave":

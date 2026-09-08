@@ -148,10 +148,58 @@ def _detect_cursor_cli() -> str:
     return detect(AGENT_CLIS["cursor"])
 
 
+def _detect_pyscope() -> str:
+    """Return the path to the PyScope CLI, else empty string.
+
+    PyScope ships as a uv tool rather than an npm package, so the probe order
+    differs from `_detect_codegraph`: PATH first (`.exe` before the bare name,
+    for the same Windows reason `.cmd` comes first there), then `~/.local/bin`,
+    which is where `uv tool install` writes its shims — the same directory the
+    Cursor installer uses, and the reason that path is already trusted here.
+
+    Deliberately NOT a row in `helpers/agent_cli.AGENT_CLIS`: that table
+    describes coding-agent CLIs by the way they carry a prompt
+    (`system_prompt_mode`, `prompt_transport`). PyScope carries no prompt and
+    drives no agent — it belongs with codegraph, and putting it in the agent
+    table would make a non-agent resolvable as one.
+
+    Returns "" (not the bare command name) so callers can test
+    `if cfg.pyscope_exe:` without accidentally shelling a bare command. Note
+    that a non-empty result means *configured*, not *healthy* — see
+    `helpers/pyscope.status` for the difference.
+    """
+    for name in ("pyscope.exe", "pyscope"):
+        found = shutil.which(name)
+        if found:
+            return found
+    # expanduser inside the function, never at import: the manager is launched
+    # with a fixed HOME in tests, and an import-time resolve would bake in
+    # whatever the environment said when the module first loaded.
+    for candidate in (
+        os.path.join(os.path.expanduser("~"), ".local", "bin", "pyscope.exe"),
+        os.path.join(os.path.expanduser("~"), ".local", "bin", "pyscope"),
+    ):
+        if os.path.isfile(candidate):
+            return candidate
+    return ""
+
+
 def _is_codegraph_project(path: str) -> bool:
     """True iff `path` has been initialised by CodeGraph (the .codegraph/
     SQLite database exists)."""
     return os.path.isfile(os.path.join(path, ".codegraph", "codegraph.db"))
+
+
+def _is_pyscope_project(path: str) -> bool:
+    """True iff PyScope keeps a project-local cache for `path`.
+
+    PyScope only writes `<project>/.pyscope/` when git ignores it; otherwise
+    the cache lives under user data and this returns False for a project it
+    nonetheless knows perfectly well. So this answers "is the cache local",
+    NOT "is this project registered with PyScope" — that question is only
+    answerable by asking PyScope, via `helpers/pyscope.registered`.
+    """
+    return os.path.isdir(os.path.join(path, ".pyscope"))
 
 
 # ── Search-root format normalisers (str OR {"path":..,"label":..} dict) ──────

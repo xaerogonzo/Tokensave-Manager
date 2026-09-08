@@ -448,7 +448,8 @@ class AskTabController:
         # The bridge is registered with the App's active-bridge set so the
         # WM_DELETE_WINDOW handler can cancel it on shutdown.
         tools = _agent_tools_mod.build_tools(
-            self._ask_path, self._cfg.tokensave_exe, with_write=True)
+            self._ask_path, self._cfg.tokensave_exe, with_write=True,
+            pyscope_exe=self._cfg.pyscope_exe)
         agent_instance = _agent_mod.LocalAgent(
             llm_cfg, self._ask_path, tools,
             on_write_proposal=self._ask_open_proposal,
