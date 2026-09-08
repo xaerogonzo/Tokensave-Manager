@@ -69,6 +69,12 @@ TIMEOUT_PROBE = 20
 TIMEOUT_REGISTER = 120
 TIMEOUT_ANALYZE = 900
 
+#: Shorter ceiling for probes that run while a dialog is opening. The Tool
+#: Manager refreshes every row synchronously, so a hung binary there freezes
+#: the window — `install_codegraph.codegraph_version` bounds itself at 5s for
+#: exactly this reason and this matches it.
+TIMEOUT_DIALOG_PROBE = 5
+
 
 # ── Status vocabulary ───────────────────────────────────────────────────────
 
@@ -244,7 +250,7 @@ def is_available(exe: str) -> bool:
     return bool(version(exe))
 
 
-def status(exe: str) -> Status:
+def status(exe: str, timeout: int = TIMEOUT_PROBE) -> Status:
     """Full diagnostic state — the one function that keeps the failure detail.
 
     Everything else here collapses an unusable answer to None/[]/False so a
@@ -258,14 +264,14 @@ def status(exe: str) -> Status:
         return Status(configured=exe, executable=False, state=STATE_ABSENT,
                       detail="The configured path does not name a file.")
 
-    run = _run(exe, ["version"], TIMEOUT_PROBE)
+    run = _run(exe, ["version"], timeout)
     if not run.launched:
         return Status(exe, False, STATE_ABSENT,
                       detail="Could not launch: " + run.spawn_error)
     if run.timed_out:
         return Status(exe, True, STATE_UNHEALTHY,
                       detail="pyscope version did not answer within "
-                             f"{TIMEOUT_PROBE}s.")
+                             f"{timeout}s.")
     if run.returncode != 0:
         return Status(exe, True, STATE_UNHEALTHY,
                       detail=f"pyscope version exited {run.returncode}: "
