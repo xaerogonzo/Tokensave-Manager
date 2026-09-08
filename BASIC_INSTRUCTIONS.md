@@ -219,6 +219,10 @@ Token Save Manager Source/
 │   │   ├── pr_draft.py            generate_pr_draft (LLM-based PR description drafting)
 │   │   ├── savings.py             parse/fetch gain, gain --history, cost, discover;
 │   │   │                          three-state Result — unavailable is never zero
+│   │   ├── mcp_pyscope.py         PyScope's user-scoped MCP entry. Two states (mcp,
+│   │   │                          registration) that are never collapsed; reconcile()
+│   │   │                          is best-effort, ordered register-then-write, and
+│   │   │                          verdicts come from re-reading both.
 │   │   ├── pyscope.py             PyScope integration client — one `_run` subprocess
 │   │   │                          boundary; read-only surface plus the single mutating
 │   │   │                          register(). Configured / executable / healthy are

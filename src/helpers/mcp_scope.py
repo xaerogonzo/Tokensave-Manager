@@ -39,6 +39,20 @@ SCOPE_ABSENT = "absent"
 SCOPE_UNKNOWN = "unknown"
 
 
+#: Servers for which USER scope is the correct configuration, not a hazard.
+#:
+#: Everywhere else in this manager a user-scoped entry is the shadowing problem
+#: recorded in the desktop-scope-collision and trust-gate findings: it wins over
+#: a project's own `.mcp.json` and the project stops being served by its own
+#: index. `pyscope` has no project-scoped competitor to shadow — it answers
+#: about REGISTERED projects and takes the project as a tool argument, so one
+#: entry for the machine is the whole design.
+#:
+#: A membership test rather than a branch, and keyed on the SERVER rather than
+#: on the scope. `if scope == SCOPE_USER: expected` would silently reclassify
+#: tokensave, which is the one verdict this module most needs to keep saying.
+USER_SCOPED_SERVERS = frozenset({"pyscope"})
+
 #: Claude Code resolves local > project > user and dedupes by server NAME, so a
 #: project `.mcp.json` does not automatically win: a local definition for the
 #: same name overrides it, and an unapproved project entry does not take effect
@@ -141,6 +155,13 @@ def describe_effective(got: "EffectiveScope", server: str = "tokensave",
     """
     if got is None or not got.is_known:
         return None
+    if got.scope == SCOPE_USER and server in USER_SCOPED_SERVERS:
+        # Checked BEFORE is_shadowed, which reports True for any user scope and
+        # whose own docstring says it cannot tell "shadowed" from "never bound".
+        # For a server that is meant to be user-scoped that reading is not
+        # merely unhelpful, it is backwards: it would tell the user to retire
+        # the only entry there is.
+        return ("ok", "✓ user-scoped — the correct place for this server", "")
     if got.is_project:
         return ("ok", "✓ bound — verified serving", "")
     if got.pending_approval:

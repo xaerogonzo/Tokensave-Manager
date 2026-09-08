@@ -696,6 +696,9 @@ class ProjectsTabController:
         ps_m.add_separator()
         ps_m.add_command(label="Register with PyScope",
                          command=self._cmd_bar.cmd_pyscope_register)
+        # "…" because it may ask about an entry that already differs.
+        ps_m.add_command(label="🔌  Bind to Claude Code…",
+                         command=self._cmd_bar.cmd_pyscope_bind)
         ps_m.add_command(label="Open in PyScope",
                          command=self._cmd_bar.cmd_pyscope_open)
         m.add_cascade(label="🔬  PyScope", menu=ps_m)

@@ -138,6 +138,11 @@ Token Save Manager Source/
 │   │   │                          Cursor Agent), three runners, and the Windows
 │   │   │                          command-line budgets for argv-transport agents.
 │   │   │                          New agent = one table row, never a new literal.
+│   │   ├── mcp_pyscope.py         PyScope's user-scoped MCP entry + the two-state
+│   │   │                          reconciler. MCP presence and project registration
+│   │   │                          are separate answers; binding is best-effort, not
+│   │   │                          a transaction, and the verdict comes from a
+│   │   │                          post-read rather than from return codes
 │   │   ├── pyscope.py             PyScope integration client. ONE `_run` subprocess
 │   │   │                          boundary; read-only surface plus the single
 │   │   │                          mutating register(). Configured / executable /

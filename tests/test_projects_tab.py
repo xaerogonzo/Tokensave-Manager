@@ -558,8 +558,8 @@ class TestContextMenuGrouping:
         # rather than something that slips in. 36 since Roadmap-13 added
         # "Generate VS Code workspace..." beside the tasks generator; 40
         # since the PyScope cascade added Analyze / Status / Register /
-        # Open in PyScope.
-        assert len(cmds) == 40, f"expected 40 commands, found {len(cmds)}"
+        # Open in PyScope; 41 with "Bind to Claude Code...".
+        assert len(cmds) == 41, f"expected 41 commands, found {len(cmds)}"
 
     def test_the_everyday_actions_stay_one_click_away(self):
         """Burying Sync in a submenu would make the common case worse."""

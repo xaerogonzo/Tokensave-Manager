@@ -164,6 +164,66 @@ class PyScopeController:
 
         threading.Thread(target=worker, daemon=True).start()
 
+    def cmd_bind(self, path: str) -> None:
+        """Make this project answerable through PyScope's MCP server.
+
+        Two separate things, reported separately (see helpers/mcp_pyscope):
+        `pyscope projects add` makes the project answerable, and the
+        user-scoped MCP entry makes the server reachable. Neither implies the
+        other, and this is a best-effort reconciliation rather than a
+        transaction — "registered, entry absent" is a real outcome the log has
+        to be able to show.
+
+        The drift question is asked HERE, on the Tk thread, before the worker
+        starts. A modal from a worker would need a cross-thread bridge for a
+        question that costs one cheap file read to answer up front.
+        """
+        if not self._require_installed():
+            return
+        from helpers.mcp_pyscope import (binding_state, STATE_STALE_COMMAND,
+                                         DRIFT_REPLACE, DRIFT_KEEP, DRIFT_CANCEL)
+        exe = self._cfg.pyscope_exe
+        state, detail = binding_state(exe)
+
+        choice = DRIFT_REPLACE
+        if state == STATE_STALE_COMMAND:
+            # Three answers, so askyesnocancel rather than a yes/no: keeping a
+            # differing entry is a legitimate choice, and forcing it into "no"
+            # would make declining a replacement indistinguishable from
+            # cancelling the whole action.
+            answer = messagebox.askyesnocancel(
+                "PyScope MCP entry differs",
+                f"{detail}\n\n"
+                "Replace it with the configured executable?\n\n"
+                "Yes  — point the entry at the configured executable\n"
+                "No   — keep the existing entry as it is\n"
+                "Cancel — change nothing",
+                parent=self._root)
+            if answer is None:
+                choice = DRIFT_CANCEL
+            elif answer:
+                choice = DRIFT_REPLACE
+            else:
+                choice = DRIFT_KEEP
+
+        name = os.path.basename(path)
+        self._on_log(f"Binding {name} to PyScope…", C["peach"])
+
+        def worker():
+            from helpers.mcp_pyscope import (reconcile, OVERALL_OK,
+                                             OVERALL_PARTIAL, STATE_LABELS)
+            result = reconcile(exe, path, choice)
+            colour = (C["green"] if result.overall == OVERALL_OK
+                      else C["yellow"] if result.overall == OVERALL_PARTIAL
+                      else C["red"])
+            self._on_log(f"  {result.overall}: {result.detail}", colour)
+            # Both halves, always, and never merged into one verdict.
+            self._on_log(f"  mcp: {STATE_LABELS.get(result.mcp_state, result.mcp_state)}",
+                         C["overlay0"])
+            self._on_log(f"  registration: {result.registration}", C["overlay0"])
+
+        threading.Thread(target=worker, daemon=True).start()
+
     def cmd_status(self, path: str) -> None:
         """Report what PyScope knows about this project.
 
@@ -195,6 +255,11 @@ class PyScopeController:
                              C["yellow"])
             else:
                 self._on_log("  not registered with PyScope", C["yellow"])
+
+            from helpers.mcp_pyscope import binding_state, STATE_PRESENT
+            mcp_state, mcp_detail = binding_state(self._cfg.pyscope_exe)
+            self._on_log(f"  mcp entry: {mcp_detail}",
+                         C["green"] if mcp_state == STATE_PRESENT else C["yellow"])
 
             if _is_pyscope_project(path):
                 self._on_log("  cache: project-local (.pyscope/)", C["green"])

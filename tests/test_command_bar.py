@@ -47,6 +47,7 @@ def _make(subs, *, path="/proj", tokensave_ok=True):
     ("cmd_pyscope_status",    "pyscope",     "cmd_status"),
     ("cmd_pyscope_register",  "pyscope",     "cmd_register"),
     ("cmd_pyscope_open",      "pyscope",     "cmd_open_gui"),
+    ("cmd_pyscope_bind",      "pyscope",     "cmd_bind"),
     ("cmd_git_log",           "gitops",      "cmd_git_log"),
     ("cmd_git_commit",        "gitops",      "cmd_git_commit"),
     ("cmd_ai_code_review",    "gitops",      "cmd_ai_code_review"),
@@ -159,6 +160,7 @@ def test_cmd_retrofit_always_delegates(subs):
     ("cmd_pyscope_status",   "cmd_status"),
     ("cmd_pyscope_register", "cmd_register"),
     ("cmd_pyscope_open",     "cmd_open_gui"),
+    ("cmd_pyscope_bind",     "cmd_bind"),
 ])
 def test_pyscope_runs_on_a_project_with_no_tokensave_index(subs, method, target):
     """PyScope reads a source tree, not an index.

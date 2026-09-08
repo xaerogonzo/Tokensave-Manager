@@ -177,6 +177,10 @@ class CommandBarCtrl:
         if path := self.get_path():
             self._pyscope.cmd_open_gui(path)
 
+    def cmd_pyscope_bind(self) -> None:
+        if path := self.get_path():
+            self._pyscope.cmd_bind(path)
+
     # ── Git commands ──────────────────────────────────────────────────────────
 
     def cmd_git_log(self) -> None:
