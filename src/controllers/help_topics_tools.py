@@ -123,6 +123,79 @@ def pyscope(ctl):
     ctl._help_show(_fill)
 
 
+def vscode_extension(ctl):
+    """The extension's build and install lifecycle, and why it needed one."""
+
+    def _fill():
+        h1, h2, p, warn, ok, dim, br, ins = ctl._hw()
+        h1("VS Code extension")
+        p("The Manager ships a VS Code extension, and for a while the copy "
+          "installed in your editor was three minor versions behind the one "
+          "in this repository. Nothing could say so, because the three "
+          "versions involved were never shown next to each other.")
+        br()
+
+        h2("The three versions")
+        ins("  Source     ", "body")
+        ins("vscode-extension/package.json\n", "dim")
+        ins("  Built      ", "body")
+        ins("the manifest INSIDE the .vsix on disk\n", "dim")
+        ins("  Installed  ", "body")
+        ins("what the editor reports\n", "dim")
+        br()
+        p("Built is read from inside the archive, never from the filename. A "
+          "filename is metadata anybody can rewrite; the manifest is what VS "
+          "Code installs the thing as, so a stale build renamed to look "
+          "current passes every filename check there is.")
+        br()
+
+        h2("Version parity is not freshness")
+        p("A fourth signal sits beside those three: whether the artefact is "
+          "older than the newest thing the build reads. That is a separate "
+          "question, and it is the only one that can catch a project whose "
+          "version number never moves \u2014 PyScope's extension was stale "
+          "for weeks with all three of its versions reading 0.1.0.")
+        br()
+        p("So a version mismatch and a stale timestamp are reported as "
+          "different states, because they ask you to do different things.")
+        br()
+
+        h2("Building it")
+        ins("  build-extension.ps1             ", "body")
+        ins("clean build + verify\n", "dim")
+        ins("  build-extension.ps1 -Install    ", "body")
+        ins("... and install it\n", "dim")
+        ins("  build-extension.ps1 -SkipTests  ", "body")
+        ins("... without the suite\n", "dim")
+        br()
+        p("One command, the same way every time: npm ci against the committed "
+          "lockfile, out\\ deleted before tsc, the test suite, package, then "
+          "the artefact verifier. Deliberately the same sequence the release "
+          "workflow runs, so a local build and a released one cannot differ.")
+        br()
+        ok("Verification failure is a build failure. There is no path where a "
+           "package is produced, judged unfit, and still reported as success.")
+        br()
+
+        h2("The Extension Manager")
+        p("Help tab \u2192 Extension Manager shows all four signals and "
+          "offers Build, Build & Install and Uninstall. It shells out to "
+          "build-extension.ps1 rather than reimplementing the steps \u2014 a "
+          "GUI with its own copy of the pipeline would drift from the release "
+          "path, which is the failure this feature exists to close.")
+        br()
+        p("There is deliberately no bare \"install the .vsix that is already "
+          "there\" button. Build & Install always rebuilds first, so a stale "
+          "artefact cannot reach your editor by one click.")
+        br()
+        warn("Install and Uninstall need an editor that answers "
+             "--list-extensions. editor_cmd is configurable and may not be VS "
+             "Code at all, so the buttons are disabled with the reason rather "
+             "than failing obscurely when it does not.")
+
+    ctl._help_show(_fill)
+
+
 def codegraph(ctl):
     _doc = os.path.join(_BASE_DIR, "README.md")
     _ask = ("tokensave sync finished but I still can't find a function "

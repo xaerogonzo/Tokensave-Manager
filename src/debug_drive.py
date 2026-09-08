@@ -27,6 +27,7 @@ The script is a JSON list of steps, run in order:
       {"do": "dialog", "name": "mcp"},          // also: settings, savings,
                                                 //  gitignore, docdrafter,
                                                 //  testmanager, toolmanager,
+                                                //  extensionmanager,
                                                 //  testgaps, prdraft
       {"do": "click",  "text": "show"},
       {"do": "report", "what": "mcp", "after_ms": 3000},
@@ -262,6 +263,10 @@ class _Driver:
         elif name in ("toolmanager", "tools", "tool_manager"):
             from dialogs.tool_manager import ToolManagerDialog
             self._dialog = ToolManagerDialog(self._app, self._app._cfg)
+        elif name in ("extensionmanager", "extension", "extension_manager"):
+            from dialogs.extension_manager import ExtensionManagerDialog
+            self._dialog = ExtensionManagerDialog(
+                self._app, self._app._cfg, app=self._app)
         elif name in ("testmanager", "tests", "test_manager"):
             from dialogs.test_manager import TestManagerDialog
             self._dialog = TestManagerDialog(
