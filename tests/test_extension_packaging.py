@@ -143,11 +143,30 @@ _GOOD_ENTRIES = (
 )
 
 
-def _package(tmp_path, version="9.9.9", entries=_GOOD_ENTRIES, extra=()):
+def _package(tmp_path, version="9.9.9", entries=_GOOD_ENTRIES, extra=(),
+             publisher="tokensave", name="tokensave-manager",
+             manifest_version=None, manifest_body=None):
+    """A synthetic .vsix carrying a real manifest.
+
+    `extension/package.json` used to be written as the string `"x"` like every
+    other entry, which was fine while the only version check read the
+    *filename*. It is not fine now: the artefact's identity is read from this
+    manifest, so a fixture without one would exercise the absent-manifest path
+    in every test rather than the one it is about.
+
+    `manifest_version` defaults to `version`, so the filename and the manifest
+    agree unless a test deliberately separates them.
+    """
     path = tmp_path / f"tokensave-manager-win32-x64-{version}.vsix"
+    body = manifest_body if manifest_body is not None else json.dumps({
+        "publisher": publisher,
+        "name": name,
+        "version": manifest_version or version,
+    })
     with zipfile.ZipFile(path, "w") as archive:
-        for name in tuple(entries) + tuple(extra):
-            archive.writestr(name, "x")
+        for entry in tuple(entries) + tuple(extra):
+            archive.writestr(
+                entry, body if entry == "extension/package.json" else "x")
     return path
 
 
@@ -200,7 +219,8 @@ def test_a_package_missing_something_essential_is_refused(tmp_path, missing):
 
 def test_a_version_mismatch_is_refused(tmp_path):
     """The third copy of the version — the one inside the built artefact —
-    can only be checked here."""
+    can only be checked here. This arm covers the filename; the manifest is
+    covered by the renamed-artefact test below."""
     verify = _verifier()
     problems = verify.check_package(_package(tmp_path, version="1.0.0"), "9.9.9")
     assert any("canonical version" in p for p in problems)
@@ -213,3 +233,49 @@ def test_an_oversized_package_is_refused(tmp_path, monkeypatch):
     monkeypatch.setattr(verify, "MAX_BYTES", 10)
     problems = verify.check_package(_package(tmp_path), "9.9.9")
     assert any("ceiling" in p for p in problems)
+
+
+# ── artefact identity ─────────────────────────────────────────────────────
+#
+# The filename is metadata and anybody can rewrite it. `publisher.name@version`
+# read from the manifest inside the archive is what VS Code actually installs
+# it as, so that is the identity these assert on.
+
+def test_a_renamed_artefact_is_refused(tmp_path):
+    """A stale 1.0.0 build renamed to look current passes every structural
+    rule and every filename rule. Only the packaged manifest gives it away."""
+    verify = _verifier()
+    package = _package(tmp_path, version="9.9.9", manifest_version="1.0.0")
+    problems = verify.check_package(package, "9.9.9")
+    assert any("packaged manifest identifies" in p for p in problems), problems
+
+
+@pytest.mark.parametrize("publisher,name", [
+    ("someone-else", "tokensave-manager"),
+    ("tokensave", "some-other-extension"),
+])
+def test_a_package_for_a_different_extension_is_refused(
+        tmp_path, publisher, name):
+    """Right version, right shape, wrong extension — which is exactly what a
+    stray .vsix left in the directory looks like."""
+    verify = _verifier()
+    problems = verify.check_package(
+        _package(tmp_path, publisher=publisher, name=name), "9.9.9")
+    assert any("packaged manifest identifies" in p for p in problems), problems
+
+
+def test_an_unreadable_manifest_is_refused(tmp_path):
+    """Present but not JSON. Reported as its own failure rather than being
+    silently treated as an absent manifest."""
+    verify = _verifier()
+    problems = verify.check_package(
+        _package(tmp_path, manifest_body="not json at all"), "9.9.9")
+    assert any("not readable JSON" in p for p in problems), problems
+
+
+def test_the_verifier_reads_its_expected_identity_from_the_source_manifest():
+    """Hardcoding `tokensave.tokensave-manager` in the verifier would leave it
+    checking the old identity after a rename, and passing."""
+    verify = _verifier()
+    assert verify.source_identity() == (
+        _manifest()["publisher"], _manifest()["name"])

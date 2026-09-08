@@ -59,8 +59,14 @@ jobs:
           npm run compile
           npm test
 
+      # `npm run package`, not `npx --yes @vscode/vsce`: the latter reached past
+      # the lockfile and fetched whatever vsce was latest that day, which was the
+      # one unpinned link in a pipeline whose whole point is `npm ci`. vsce is a
+      # pinned devDependency now, so this resolves the locked copy -- and it is
+      # the same command build-extension.ps1 runs, so local and CI cannot
+      # diverge in what they produce.
       - name: Package
-        run: npx --yes @vscode/vsce package --target win32-x64
+        run: npm run package
 
       - name: Verify the package before uploading
         working-directory: .
