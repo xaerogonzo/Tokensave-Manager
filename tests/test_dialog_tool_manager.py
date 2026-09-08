@@ -167,6 +167,40 @@ class TestPyScopeRow:
             f"children will not map"
         )
 
+    def test_no_button_row_asks_for_more_width_than_the_dialog_can_give(
+            self, tk_root, mock_config, mocker):
+        """The horizontal twin of the height invariant above.
+
+        The tokensave row used to pack six buttons onto one line in a 720px
+        dialog, and Tk squeezed the last one to a single pixel:
+        "Manage servers..." was in the widget tree and invisible to the
+        user for its entire life. Worse than a missing button, because the
+        surrounding code reads as though the feature is available — and
+        that button is the one someone reaches for when a stale
+        `tokensave serve` is holding a database lock.
+
+        Asserted as an invariant rather than a button count, so a seventh
+        button fails this instead of vanishing quietly.
+        """
+        dialog = self._dialog(tk_root, mock_config, mocker)
+        dialog.update_idletasks()
+        # padx=18 on the row wrapper plus padx=12 inside it, both sides.
+        usable = dialog.minsize()[0] - 2 * (18 + 12)
+        seen = set()
+        for tool_id, widgets in dialog._tool_widgets.items():
+            for key, widget in widgets.items():
+                if not key.endswith("_btn"):
+                    continue
+                row = widget.master
+                if row in seen:
+                    continue
+                seen.add(row)
+                assert row.winfo_reqwidth() <= usable, (
+                    f"the {tool_id} row needs {row.winfo_reqwidth()}px for "
+                    f"its buttons but has {usable}px; Tk will squeeze the "
+                    f"last one to a sliver rather than wrap it")
+        assert seen, "sanity: the scan found no button rows to measure"
+
     def test_cancelling_locate_changes_nothing(
             self, tk_root, mock_config, mocker):
         dialog = self._dialog(tk_root, mock_config, mocker)

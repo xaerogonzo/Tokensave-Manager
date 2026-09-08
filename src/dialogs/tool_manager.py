@@ -135,7 +135,7 @@ class ToolManagerDialog(UiPumpMixin, tk.Toplevel):
         # children never mapped, which is also why the geometry oracle
         # could not see it (it skips unmapped widgets, since a widget
         # can be legitimately hidden).
-        self.minsize(640, 740)
+        self.minsize(640, 790)
         self.grab_set()
 
         # Per-tool widget bookkeeping (populated by _build_tool_row).
@@ -253,7 +253,7 @@ class ToolManagerDialog(UiPumpMixin, tk.Toplevel):
 
         # Action button row
         btn_row = tk.Frame(wrap, bg=C["base"])
-        btn_row.pack(fill=tk.X, padx=12, pady=(2, 8))
+        btn_row.pack(fill=tk.X, padx=12, pady=(2, 4))
 
         if not actions:
             locate_btn = ttk.Button(
@@ -297,32 +297,49 @@ class ToolManagerDialog(UiPumpMixin, tk.Toplevel):
         # management is codegraph-only. This makes _tool_widgets hold
         # DIFFERENT keys per row, so every loop over button keys must
         # tolerate absence (see _set_row_busy / _apply_row_state / _row_buttons).
+        #
+        # They get their OWN row. Packed beside the three lifecycle buttons
+        # they overflowed a 720px dialog and the LAST one was squeezed to a
+        # single pixel: "Manage servers…" was in the widget tree and
+        # invisible to the user for its entire life. That is worse than a
+        # missing button, because the code around it reads as though the
+        # feature is available — and it is the one control someone reaches
+        # for when a stale `tokensave serve` is holding a database lock,
+        # which is why _apply_row_state deliberately leaves it enabled even
+        # when the binary is gone.
+        #
+        # A second row rather than a wider dialog: widening buys exactly one
+        # more button, and the next tool to gain an extra pushes a seventh
+        # off the same edge.
+        extra_row = tk.Frame(wrap, bg=C["base"])
         if tool_id == "tokensave":
+            extra_row.pack(fill=tk.X, padx=12, pady=(0, 8))
             wire_btn = ttk.Button(
-                btn_row, text="🔌  Wire into agents…",
+                extra_row, text="🔌  Wire into agents…",
                 command=self._on_wire_agents)
             wire_btn.pack(side=tk.LEFT, padx=(0, 6))
             refresh_btn = ttk.Button(
-                btn_row, text="♻  Refresh agent config",
+                extra_row, text="♻  Refresh agent config",
                 command=self._on_refresh_agents)
             refresh_btn.pack(side=tk.LEFT, padx=(0, 6))
             servers_btn = ttk.Button(
-                btn_row, text="🔌  Manage servers…",
+                extra_row, text="🔌  Manage servers…",
                 command=self._on_manage_tokensave_servers)
             servers_btn.pack(side=tk.LEFT, padx=(0, 6))
             self._tool_widgets[tool_id]["wire_btn"] = wire_btn
             self._tool_widgets[tool_id]["refresh_btn"] = refresh_btn
             self._tool_widgets[tool_id]["servers_btn"] = servers_btn
         elif tool_id == "codegraph":
+            extra_row.pack(fill=tk.X, padx=12, pady=(0, 8))
             daemons_btn = ttk.Button(
-                btn_row, text="🔌  Manage daemons…",
+                extra_row, text="🔌  Manage daemons…",
                 command=self._on_manage_codegraph_daemons)
             daemons_btn.pack(side=tk.LEFT, padx=(0, 6))
             self._tool_widgets[tool_id]["daemons_btn"] = daemons_btn
 
     def _centre_on_parent(self, parent) -> None:
         self.update_idletasks()
-        w, h = 720, 780
+        w, h = 720, 830
         try:
             px = parent.winfo_x() + (parent.winfo_width()  - w) // 2
             py = parent.winfo_y() + (parent.winfo_height() - h) // 2
