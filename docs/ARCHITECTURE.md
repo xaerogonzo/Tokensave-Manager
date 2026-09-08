@@ -138,6 +138,12 @@ Token Save Manager Source/
 │   │   │                          Cursor Agent), three runners, and the Windows
 │   │   │                          command-line budgets for argv-transport agents.
 │   │   │                          New agent = one table row, never a new literal.
+│   │   ├── pyscope.py             PyScope integration client. ONE `_run` subprocess
+│   │   │                          boundary; read-only surface plus the single
+│   │   │                          mutating register(). Configured / executable /
+│   │   │                          healthy are three answers, never inferred from
+│   │   │                          one another — read APIs collapse a failure to
+│   │   │                          None, status() keeps the reason
 │   │   ├── claude_cli.py          Thin compatibility shim over agent_cli — unchanged
 │   │   │                          signatures for ~12 existing call sites
 │   │   ├── agent_rules.py         AGENTS.md + .cursor/rules/*.mdc writers. Marked-block
@@ -550,6 +556,9 @@ Token Save Manager Source/
 │   │   │                          .code-workspace descriptor.
 │   │   ├── settings_ai.py         AISection — the AI blocks of the Settings dialog.
 │   │   ├── settings_codegraph.py  CodegraphSection — the CodeGraph block.
+│   │   ├── settings_pyscope.py    PyScopeSection — the PyScope block. Three status
+│   │   │                          rows and no install action; UiPumpMixin, because
+│   │   │                          the probe is a subprocess
 │   │   └── settings_paths.py      PathsSection — the Paths and Git-tools blocks.
 │   │
 │   └── controllers/               Tab controllers + Round-5 sub-controllers extracted
@@ -585,6 +594,9 @@ Token Save Manager Source/
 │       │                          background thread and shows output in a
 │       │                          scrolledtext Toplevel dialog)
 │       ├── codegraph_ctrl.py      CodeGraphController (init/sync/status/remove)
+│       ├── pyscope_ctrl.py        PyScopeController (analyze/open/register/status).
+│       │                          cmd_register is the Manager's only mutation of
+│       │                          PyScope state and never runs automatically
 │       ├── doctor_ctrl.py         DoctorController — the SINGLE authority on running
 │       │                          `tokensave doctor` (one env helper, one subprocess
 │       │                          shape). scan_stale / purge_stale / verify_purge /

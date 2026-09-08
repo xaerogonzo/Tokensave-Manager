@@ -16,9 +16,9 @@ from controllers.command_bar_ctrl import CommandBarCtrl
 
 @pytest.fixture
 def subs():
-    """The 8 sub-controller mocks, keyed by the constructor kwarg name."""
+    """The 9 sub-controller mocks, keyed by the constructor kwarg name."""
     return {name: mock.MagicMock(name=name) for name in (
-        "sync", "doctor", "codegraph", "gitops",
+        "sync", "doctor", "codegraph", "pyscope", "gitops",
         "fileops", "shadowlinks", "scaffold", "ai_tasks")}
 
 
@@ -43,6 +43,10 @@ def _make(subs, *, path="/proj", tokensave_ok=True):
     ("cmd_codegraph_reindex", "codegraph",   "cmd_reindex"),
     ("cmd_codegraph_status",  "codegraph",   "cmd_status"),
     ("cmd_codegraph_remove",  "codegraph",   "cmd_remove"),
+    ("cmd_pyscope_analyze",   "pyscope",     "cmd_analyze"),
+    ("cmd_pyscope_status",    "pyscope",     "cmd_status"),
+    ("cmd_pyscope_register",  "pyscope",     "cmd_register"),
+    ("cmd_pyscope_open",      "pyscope",     "cmd_open_gui"),
     ("cmd_git_log",           "gitops",      "cmd_git_log"),
     ("cmd_git_commit",        "gitops",      "cmd_git_commit"),
     ("cmd_ai_code_review",    "gitops",      "cmd_ai_code_review"),
@@ -148,6 +152,27 @@ def test_cmd_retrofit_always_delegates(subs):
     subs["scaffold"].cmd_retrofit.assert_called_once_with()
 
 
+# ── PyScope is not gated on a tokensave index ────────────────────────────────
+
+@pytest.mark.parametrize("method,target", [
+    ("cmd_pyscope_analyze",  "cmd_analyze"),
+    ("cmd_pyscope_status",   "cmd_status"),
+    ("cmd_pyscope_register", "cmd_register"),
+    ("cmd_pyscope_open",     "cmd_open_gui"),
+])
+def test_pyscope_runs_on_a_project_with_no_tokensave_index(subs, method, target):
+    """PyScope reads a source tree, not an index.
+
+    Gating these on ``require_tokensave`` would refuse the tool for exactly the
+    un-indexed project it is most useful on — someone trying to understand code
+    they have not set up yet.
+    """
+    ctrl, _gp, require = _make(subs, path="/proj", tokensave_ok=False)
+    getattr(ctrl, method)()
+    getattr(subs["pyscope"], target).assert_called_once_with("/proj")
+    require.assert_not_called()
+
+
 # ── Constructor stores all references ────────────────────────────────────────
 
 def test_constructor_stores_all_sub_controllers(subs):
@@ -157,6 +182,7 @@ def test_constructor_stores_all_sub_controllers(subs):
     assert ctrl._sync is subs["sync"]
     assert ctrl._doctor is subs["doctor"]
     assert ctrl._codegraph is subs["codegraph"]
+    assert ctrl._pyscope is subs["pyscope"]
     assert ctrl._gitops is subs["gitops"]
     assert ctrl._fileops is subs["fileops"]
     assert ctrl._shadowlinks is subs["shadowlinks"]

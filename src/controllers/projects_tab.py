@@ -37,6 +37,7 @@ from helpers.project_discovery import (
     fmt_age,
 )
 from controllers.codegraph_ctrl import CodeGraphController
+from controllers.pyscope_ctrl import PyScopeController
 from controllers.doctor_ctrl import DoctorController
 from controllers.housekeeping_ctrl import HousekeepingController
 from controllers.scaffold_ctrl import ScaffoldRetrofitController
@@ -160,6 +161,12 @@ class ProjectsTabController:
             on_commit_offer=self._offer_commit_after_change,
             on_settings=on_settings,
         )
+        self._pyscope = PyScopeController(
+            tab=self._tab,
+            cfg=cfg,
+            on_log=on_log,
+            on_settings=on_settings,
+        )
         self._doctor = DoctorController(
             tab=self._tab,
             cfg=cfg,
@@ -243,6 +250,7 @@ class ProjectsTabController:
             sync=self._sync,
             doctor=self._doctor,
             codegraph=self._codegraph,
+            pyscope=self._pyscope,
             gitops=self._gitops,
             fileops=self._fileops,
             shadowlinks=self._shadowlinks,
@@ -678,6 +686,19 @@ class ProjectsTabController:
         cg_m.add_command(label="Remove CodeGraph Index…",
                          command=self._cmd_bar.cmd_codegraph_remove)
         m.add_cascade(label="🧠  CodeGraph", menu=cg_m)
+
+        # PyScope — a peer of CodeGraph at this surface, not in its lifecycle.
+        # "Register" is the only entry here that changes PyScope's state, and
+        # it only ever runs because the user picked it.
+        ps_m = self._submenu(m)
+        ps_m.add_command(label="Analyze", command=self._cmd_bar.cmd_pyscope_analyze)
+        ps_m.add_command(label="Status",  command=self._cmd_bar.cmd_pyscope_status)
+        ps_m.add_separator()
+        ps_m.add_command(label="Register with PyScope",
+                         command=self._cmd_bar.cmd_pyscope_register)
+        ps_m.add_command(label="Open in PyScope",
+                         command=self._cmd_bar.cmd_pyscope_open)
+        m.add_cascade(label="🔬  PyScope", menu=ps_m)
 
         # ── Git ────────────────────────────────────────────────────────────
         git_m = self._submenu(m)

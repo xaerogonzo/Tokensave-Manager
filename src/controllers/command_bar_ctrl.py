@@ -53,6 +53,7 @@ class CommandBarCtrl:
         sync,
         doctor,
         codegraph,
+        pyscope,
         gitops,
         fileops,
         shadowlinks,
@@ -65,6 +66,7 @@ class CommandBarCtrl:
         self._sync             = sync
         self._doctor           = doctor
         self._codegraph        = codegraph
+        self._pyscope          = pyscope
         self._gitops           = gitops
         self._fileops          = fileops
         self._shadowlinks      = shadowlinks
@@ -152,6 +154,28 @@ class CommandBarCtrl:
     def cmd_codegraph_remove(self) -> None:
         if path := self.get_path():
             self._codegraph.cmd_remove(path)
+
+    # ── PyScope commands ──────────────────────────────────────────────────────
+    #
+    # No require_tokensave() gate: PyScope analyses a source tree directly and
+    # has nothing to say about a tokensave index. Requiring one would refuse
+    # the tool for exactly the un-indexed project it is most useful on.
+
+    def cmd_pyscope_analyze(self) -> None:
+        if path := self.get_path():
+            self._pyscope.cmd_analyze(path)
+
+    def cmd_pyscope_status(self) -> None:
+        if path := self.get_path():
+            self._pyscope.cmd_status(path)
+
+    def cmd_pyscope_register(self) -> None:
+        if path := self.get_path():
+            self._pyscope.cmd_register(path)
+
+    def cmd_pyscope_open(self) -> None:
+        if path := self.get_path():
+            self._pyscope.cmd_open_gui(path)
 
     # ── Git commands ──────────────────────────────────────────────────────────
 

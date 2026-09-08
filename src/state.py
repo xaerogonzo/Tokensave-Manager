@@ -219,6 +219,17 @@ class ManagerConfig:
         """Absolute path to the Cursor Agent CLI (empty string if not installed)."""
         return self._cached_cursor_cli_exe
 
+    @property
+    def pyscope_exe(self) -> str:
+        """Absolute path to the PyScope CLI (empty string if not configured).
+
+        Non-empty means *configured* only. Whether that path can actually be
+        launched, and whether PyScope answers a command sanely, are two further
+        questions with their own answers — see `helpers/pyscope.status`. The
+        UI must not report "installed" on the strength of this alone.
+        """
+        return self._cached_pyscope_exe
+
     # ── Agent-CLI resolution ──────────────────────────────────────────────
 
     def resolve_agent_cli(self) -> "object":
@@ -263,13 +274,15 @@ class ManagerConfig:
         """
         # Lazy import — keeps state.py at the bottom of the import graph.
         from helpers.detection import (_detect_git, _detect_codegraph,
-                                        _detect_claude_cli, _detect_cursor_cli)
+                                        _detect_claude_cli, _detect_cursor_cli,
+                                        _detect_pyscope)
         # An explicitly configured path always wins over detection — otherwise
         # a Settings save would be silently reverted by whatever is on PATH.
         self._cached_git_exe        = self.raw.get("git_exe")        or _detect_git()
         self._cached_codegraph_exe  = self.raw.get("codegraph_exe")  or _detect_codegraph()
         self._cached_claude_cli_exe = self.raw.get("claude_cli_exe") or _detect_claude_cli()
         self._cached_cursor_cli_exe = self.raw.get("cursor_cli_exe") or _detect_cursor_cli()
+        self._cached_pyscope_exe    = self.raw.get("pyscope_exe")    or _detect_pyscope()
 
     # ── Disk I/O ──────────────────────────────────────────────────────────
 
