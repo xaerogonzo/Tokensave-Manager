@@ -950,6 +950,12 @@ class App(UiPumpMixin, tk.Tk):
                 else:
                     self._log(f"Exited with code {proc.returncode}", C["red"])
                     log.warning(f"DONE exit={proc.returncode}  [{elapsed:.1f}s]")
+                if args and args[0] == "upgrade":
+                    # Outside the exit-code branch on purpose. The Settings
+                    # badge must reflect the binary on disk, so it is refreshed
+                    # by re-probing the installed version rather than by
+                    # trusting that a zero exit means a new version landed.
+                    self._update_poller.reprobe()
                 self._post(self.refresh)
             except Exception as e:
                 self._log(f"Error: {e}", C["red"])

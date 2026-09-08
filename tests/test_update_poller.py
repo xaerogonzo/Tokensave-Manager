@@ -226,13 +226,22 @@ class TestCmdUpgrade:
             cwd="/path/to",
             label="upgrade"
         )
-        assert controller.available_version is None
+        # The badge survives the call. cmd_upgrade only *starts* the upgrade;
+        # whether a new binary landed is decided by reprobe() afterwards, and
+        # clearing here reported a failed upgrade as a successful one.
+        assert controller.available_version == "1.5.0"
 
     @patch('os.path.dirname')
     @patch('os.path.isfile')
     @patch('tkinter.messagebox.askyesno')
-    def test_cmd_upgrade_clears_available_version(self, mock_askyesno, mock_isfile, mock_dirname):
-        """Test cmd_upgrade clears available_version on upgrade."""
+    def test_cmd_upgrade_keeps_available_version(self, mock_askyesno, mock_isfile, mock_dirname):
+        """cmd_upgrade must NOT clear the badge — the run has not happened yet.
+
+        This asserted the opposite until 2026-09-08. Clearing on entry made a
+        failed `tokensave upgrade` indistinguishable from a successful one in
+        the only place the user looks, which is exactly what happened when
+        v7.11.1 shipped with no Windows asset.
+        """
         mock_isfile.return_value = True
         mock_askyesno.return_value = True
         mock_dirname.return_value = "/dir"
@@ -245,7 +254,7 @@ class TestCmdUpgrade:
         controller._available_version = "2.0.0"
         controller.cmd_upgrade()
 
-        assert controller.available_version is None
+        assert controller.available_version == "2.0.0"
 
     @patch('os.path.dirname')
     @patch('os.path.isfile')
@@ -527,4 +536,6 @@ class TestIntegration:
         controller.cmd_upgrade()
 
         on_run.assert_called_once()
-        assert controller.available_version is None
+        # Same contract as TestCmdUpgrade: starting an upgrade is not evidence
+        # that one happened. App._run calls reprobe() when the run exits.
+        assert controller.available_version == "2.0.0"

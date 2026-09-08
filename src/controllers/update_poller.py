@@ -140,15 +140,33 @@ class UpdatePollerController:
         )
         if not messagebox.askyesno("Upgrade tokensave", msg, parent=self._root):
             return
-        # Clear cache so the Settings button hides until the next sync
-        # reports a fresh update.  If the upgrade fails, the next sync
-        # will re-populate it anyway.
-        self._available_version = None
+        # The badge is deliberately NOT cleared here. `tokensave upgrade` can
+        # fail well after this point — a release published with no asset for
+        # this platform reports "could not reach GitHub" and changes nothing —
+        # and hiding the button on entry made that failure indistinguishable
+        # from a success. App._run calls reprobe() once the run exits, so the
+        # badge follows the version actually on disk.
         self._on_run(
             ["upgrade"],
             cwd=os.path.dirname(self._cfg.tokensave_exe),
             label="upgrade",
         )
+
+    def reprobe(self) -> None:
+        """Re-read the installed version and re-check for updates.
+
+        Called by App._run after `tokensave upgrade` exits, whichever way it
+        exited. A successful upgrade clears the badge because the probe finds
+        the new version installed; a failed one leaves it standing because it
+        does not. Neither outcome is inferred from the exit code — `upgrade`
+        exits non-zero for reasons that have nothing to do with what is on
+        disk, and exits zero when it decides it is already current.
+        """
+        threading.Thread(
+            target=self._probe_worker,
+            daemon=True,
+            name="tokensave-version-reprobe",
+        ).start()
 
     def cmd_integration_check(self) -> None:
         """Run scripts/check_tokensave_integration.py and show the output.
@@ -750,7 +768,13 @@ class UpdatePollerController:
         latest = m.group(1)
         cur = self._current_version
         if not _version_lt(cur, latest):
-            return  # current is up-to-date or ahead
+            # Up to date, or ahead of the published release. Clear any badge a
+            # previous poll left standing: the Settings button is driven by
+            # what is measured here, in both directions. Returning without
+            # clearing is what forced cmd_upgrade to hide the button on entry,
+            # which then reported a failed upgrade as a successful one.
+            self._available_version = None
+            return
         prev_known = self._available_version
         self._available_version = latest
         if prev_known != latest:

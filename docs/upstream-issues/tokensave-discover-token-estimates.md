@@ -1,7 +1,27 @@
 <!--
-STATUS: FILED 2026-08-29 as issue #474 — awaiting maintainer response.
+STATUS: FIXED in tokensave v7.11.1 (issue #474, closed upstream 2026-09-06).
   https://github.com/aovestdipaperino/tokensave/issues/474
   (addressable_input_tokens is implausibly small)
+
+  The diagnosis in this file was accepted and the cause was the one it
+  argued: the analyzer summed `turns.input_tokens`, which under prompt
+  caching holds only the uncached remainder of a turn's prompt. Upstream
+  now sizes each `tool_result` block and attributes it to the turn that
+  issued the matching `tool_use`, stored in a new `tool_result_tokens`
+  column. Measured over 3,155 turns, the 15 replaceable navigation turns
+  go from 1.93 tokens each to 793.
+
+  NOT YET VERIFIED LOCALLY. v7.11.1 was published with no Windows asset
+  (upstream #512; see tokensave-upgrade-asset-vs-network-error.md), so this machine cannot
+  install the fix. Re-run `tokensave discover --json` and confirm
+  `total_recoverable_input_tokens != replaceable_turns` once it can.
+
+  Manager impact: none required. helpers/savings.py `_token_evidence`
+  suppresses the token figures on measured evidence rather than on a
+  version check, so it stops firing on its own once the payload changes.
+  One new caveat to carry if tokens are ever put on the typed surface —
+  upstream states turns ingested BEFORE the upgrade carry 0, so any range
+  spanning the upgrade under-reports.
 
 Filed against tokensave 7.10.0. Searched for duplicates first (gh search
 over all issues): none. #457 is the same CLASS of bug — a count whose name

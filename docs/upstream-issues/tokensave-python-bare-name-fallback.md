@@ -1,6 +1,26 @@
 <!--
-STATUS: FILED 2026-09-03 as issue #503 — awaiting maintainer response.
+STATUS: FIXED in tokensave v7.11.1 — issue #503 is still OPEN upstream.
   https://github.com/aovestdipaperino/tokensave/issues/503
+
+  The fix shipped without the issue being closed, so "open" here does NOT
+  mean "unfixed" and the integration check flagging it OPEN is correct
+  rather than stale. Verified against GitHub on 2026-09-08: state OPEN,
+  closedAt null, while the v7.11.1 release notes carry the fix by number.
+
+  The remedy is the one this report asked for: being the only candidate is
+  no longer evidence. The bare-name fallback now requires the candidate to
+  be in the caller's own file, in the same directory, or named by one of
+  the caller's imports. Measured upstream on a 992-file Python project, the
+  guard removes 2,606 of 31,901 call edges — `append` 1,654, `debug` 346,
+  `execute` 172, i.e. `list.append`, `logger.debug` and `cursor.execute`,
+  every one a call on a receiver the index never typed.
+
+  NOT YET VERIFIED LOCALLY. v7.11.1 was published with no Windows asset
+  (upstream #512; see tokensave-upgrade-asset-vs-network-error.md), so this machine cannot
+  install the fix. This repository is the natural regression case — the
+  8106 -> 7164 quality_signal movement recorded in Roadmap-16 was this bug
+  binding unqualified calls to same-named test doubles. Re-measure once the
+  fix is installable.
 
   Re-read from GitHub after filing: the published body is byte-identical
   to what was sent, and carries no path, project name or username. The
