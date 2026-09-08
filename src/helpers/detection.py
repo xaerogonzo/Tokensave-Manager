@@ -128,22 +128,24 @@ def _detect_codegraph() -> str:
 def _detect_claude_cli() -> str:
     """Return the path to the Claude Code CLI, else empty string.
 
-    npm installs `claude` as a .cmd shim on Windows — probe that first.
-    Returns "" (not a bare command name) so callers can test `if cfg.claude_cli_exe:` cleanly.
-    If auto-detect fails (e.g. npm global bin not on PATH in this launch context), the user
-    should set the full path manually in Settings (e.g. %APPDATA%\\npm\\claude.cmd).
+    Thin wrapper over the agent-CLI registry, which owns the probe order
+    (.cmd first on Windows, then npm's global bin). Kept as a named function
+    because `state.refresh_derived` and several call sites import it directly.
     """
-    for name in ("claude.cmd", "claude"):
-        found = shutil.which(name)
-        if found:
-            return found
-    for candidate in [
-        os.path.expandvars(r"%APPDATA%\npm\claude.cmd"),
-        os.path.expandvars(r"%USERPROFILE%\AppData\Roaming\npm\claude.cmd"),
-    ]:
-        if os.path.isfile(candidate):
-            return candidate
-    return ""
+    from helpers.agent_cli import AGENT_CLIS, detect
+    return detect(AGENT_CLIS["claude"])
+
+
+def _detect_cursor_cli() -> str:
+    """Return the path to the Cursor Agent CLI, else empty string.
+
+    The Windows installer writes to ~/.local/bin rather than ~/.cursor/bin,
+    and installs the binary under both `cursor-agent` and the generic `agent`
+    — see helpers/agent_cli.AgentCLISpec on why only the former is trusted
+    against PATH.
+    """
+    from helpers.agent_cli import AGENT_CLIS, detect
+    return detect(AGENT_CLIS["cursor"])
 
 
 def _is_codegraph_project(path: str) -> bool:

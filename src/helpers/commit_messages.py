@@ -32,7 +32,7 @@ from collections import Counter
 
 from constants import CREATE_NO_WINDOW
 from helpers.llm import _build_llm_prompt, _call_llm
-from helpers.claude_cli import call_claude_cli_print
+from helpers.agent_cli import CLAUDE, call_print
 
 
 # ── v4.2 grounding helpers ───────────────────────────────────────────────────
@@ -932,12 +932,17 @@ def _suggest_from_filenames(status_text: str) -> str:
 # ── Claude CLI strategy ───────────────────────────────────────────────────────
 
 
-def _strat_claude_cli(repo_path: str, git_exe: str,
-                      claude_cli_exe: str,
-                      claude_cli_model: str = "",
-                      grounding: str = "",
-                      tokensave_exe: str = "") -> "tuple[str, str] | None":
-    """Strategy: Claude CLI (claude --print). Returns (subject, body) or None.
+def _strat_agent_cli(repo_path: str, git_exe: str,
+                     agent_exe: str,
+                     agent_model: str = "",
+                     grounding: str = "",
+                     tokensave_exe: str = "",
+                     spec=None) -> "tuple[str, str] | None":
+    """Strategy: the selected agent CLI in print mode. (subject, body) or None.
+
+    `spec` selects which agent; it defaults to Claude so the many callers that
+    pass a plain config dict (with no ManagerConfig to resolve from) keep the
+    behaviour they had before Cursor existed.
 
     Reuses _build_llm_prompt from helpers.llm so Claude CLI produces the same
     rich subject+body output Ollama does. Quality differences between backends
@@ -950,7 +955,8 @@ def _strat_claude_cli(repo_path: str, git_exe: str,
     Embedding everything in the user message gives the model a single, focused
     task with no competing framing.
     """
-    if not claude_cli_exe or not repo_path or not git_exe:
+    spec = spec or CLAUDE
+    if not agent_exe or not repo_path or not git_exe:
         return None
     diff = _pending_diff(repo_path, git_exe=git_exe)
     if not diff:
@@ -965,13 +971,14 @@ def _strat_claude_cli(repo_path: str, git_exe: str,
     # puts smaller models like Haiku into "assistant mode" — they respond
     # conversationally to the diff instead of generating a commit message.
     # Pointing cwd at $HOME isolates this call from any project's CLAUDE.md.
-    result = call_claude_cli_print(
-        claude_cli_exe,
+    result = call_print(
+        spec,
+        agent_exe,
         "Do NOT run bash, git, or any tools. "
         "The complete staged diff is provided below — generate the commit message from it directly.\n\n"
         + system + "\n\n" + user,
         timeout=45,
-        model=claude_cli_model,
+        model=agent_model,
         cwd=os.path.expanduser("~"),
     )
     if not result:
@@ -1111,9 +1118,25 @@ def _suggest_commit_message(repo_path: str = "", status_text: str = "",
     cfg = cfg or {}
 
     backend          = (cfg.get("commit_message_backend") or "auto").lower()
-    claude_cli_exe   = cfg.get("claude_cli_exe", "")
-    # raw.get returns None if the JSON key is `null`; coerce defensively.
-    claude_cli_model = cfg.get("claude_cli_model") or ""
+    # Which agent CLI to shell out to. The persisted backend value is still
+    # spelled "claude_cli"; what it NAMES is now whichever agent the user
+    # selected, resolved through the ManagerConfig when one is in scope.
+    # Without one (callers that pass only a config dict) this falls back to
+    # the pre-Cursor behaviour: Claude, read straight from the dict.
+    agent_spec = CLAUDE
+    if mc is not None:
+        _res = mc.resolve_agent_cli()
+        # An unknown agent id resolves to no spec at all. Silently running
+        # Claude there would generate a commit message with an agent the
+        # settings file says is not selected, so skip the CLI strategy and
+        # let the chain fall through to the LLM/heuristic strategies.
+        agent_spec = _res.spec
+        agent_exe = _res.exe if _res.ok else ""
+        agent_model = mc.agent_model_for(_res.spec) if _res.spec else ""
+    else:
+        agent_exe = cfg.get("claude_cli_exe", "")
+        # raw.get returns None if the JSON key is `null`; coerce defensively.
+        agent_model = cfg.get("claude_cli_model") or ""
     ts_exe           = (getattr(mc, "tokensave_exe", "") or "") if mc is not None else ""
 
     # v4.2: build the tokensave+codegraph grounding block ONCE if the
@@ -1143,7 +1166,7 @@ def _suggest_commit_message(repo_path: str = "", status_text: str = "",
             )
 
     # Build strategy chain from backend setting — no if/elif cascade.
-    _cli   = ("claude_cli", lambda: _strat_claude_cli(repo_path, git_exe, claude_cli_exe, claude_cli_model, grounding=grounding, tokensave_exe=ts_exe) if git_exe else None)
+    _cli   = ("claude_cli", lambda: _strat_agent_cli(repo_path, git_exe, agent_exe, agent_model, grounding=grounding, tokensave_exe=ts_exe, spec=agent_spec) if git_exe else None)
     _llm   = ("llm",        lambda: _strat_llm(repo_path, has_source, cfg, git_exe, grounding=grounding, tokensave_exe=ts_exe) if git_exe else None)
     _cl    = ("changelog",  lambda: _strat_changelog(repo_path, files, git_exe) if git_exe else None)
     _diff  = ("diff",       lambda: _strat_diff(repo_path, files, git_exe) if git_exe else None)

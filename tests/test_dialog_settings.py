@@ -33,7 +33,8 @@ def _build_dialog(tk_root, cfg, mocker, save_fn=None, callback=None):
     Detection helpers are patched at each SECTION module's import site
     (G-E) — the Roadmap-8 split moved them out of dialogs.settings.
     """
-    for det in ("_detect_git", "_detect_gh", "_detect_claude_cli"):
+    for det in ("_detect_git", "_detect_gh", "_detect_claude_cli",
+                "_detect_cursor_cli"):
         mocker.patch(f"dialogs.settings_paths.{det}", return_value="")
     for det in ("_detect_codegraph", "_detect_npm"):
         mocker.patch(f"dialogs.settings_codegraph.{det}", return_value="")
@@ -135,3 +136,49 @@ def test_save_writes_ask_tab_llm_independently(tk_root, mock_config, mocker):
     ask = mock_config.raw["ask_tab_llm"]
     assert ask["enabled"] is True
     assert ask["provider"] == "claude_cli"
+
+
+# ── Agent-CLI selector + Cursor path row ─────────────────────────────────────
+
+def test_cursor_path_and_agent_selector_round_trip(tk_root, mock_config, mocker):
+    """Both halves of Cursor support have to survive an open/Save cycle.
+
+    They live in different sections (Paths owns the executable, AI owns the
+    selector), which is exactly the arrangement where one can be wired and the
+    other silently forgotten in save_into.
+    """
+    raw = mock_config.raw
+    raw.update({
+        "cursor_cli_exe": "C:/Users/x/.local/bin/cursor-agent.exe",
+        "agent_cli":      "cursor",
+    })
+    dialog = _build_dialog(tk_root, mock_config, mocker)
+    dialog._save()
+    assert raw["cursor_cli_exe"] == "C:/Users/x/.local/bin/cursor-agent.exe"
+    assert raw["agent_cli"] == "cursor"
+
+
+def test_agent_selector_defaults_to_claude_on_a_pre_cursor_config(
+        tk_root, mock_config, mocker):
+    """Opening and saving Settings must not migrate an existing install."""
+    assert "agent_cli" not in mock_config.raw
+    dialog = _build_dialog(tk_root, mock_config, mocker)
+    dialog._save()
+    assert mock_config.raw["agent_cli"] == "claude"
+
+
+def test_saved_selector_resolves_to_that_agent(tk_root, mock_config, mocker):
+    """End to end: what Settings writes is what resolve_agent_cli reads."""
+    mock_config.raw.update({
+        "agent_cli": "cursor",
+        "cursor_cli_exe": "C:/x/cursor-agent.exe",
+    })
+    dialog = _build_dialog(tk_root, mock_config, mocker)
+    dialog._save()
+    # Feed what Settings actually wrote into a REAL ManagerConfig: the point
+    # of the test is that the two halves agree, so resolving through the mock
+    # would only prove the mock agrees with itself.
+    from state import ManagerConfig
+    res = ManagerConfig(raw=dict(mock_config.raw)).resolve_agent_cli()
+    assert res.spec.id == "cursor"
+    assert res.exe == "C:/x/cursor-agent.exe"

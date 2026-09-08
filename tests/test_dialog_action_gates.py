@@ -67,6 +67,8 @@ def _retrofit(**flags):
     dlg.var_nuitka = _Var(flags.get("nuitka", False))
     dlg.var_shadow = _Var(flags.get("shadow", False))
     dlg.var_hook = _Var(flags.get("hook", False))
+    dlg.var_agents = _Var(flags.get("agents", False))
+    dlg.var_cursor_rule = _Var(flags.get("cursor_rule", False))
     dlg.path = "C:/other-project"
     dlg.callback = rec.callback
     dlg.destroy = rec.destroy
@@ -86,7 +88,8 @@ def test_retrofit_acts_when_any_single_option_is_ticked():
     dlg, rec = _retrofit(shadow=True)
     dlg._apply()
     assert rec.calls == [("C:/other-project", False, False, False, True)]
-    assert rec.kwargs == [{"add_git_hook": False}]
+    assert rec.kwargs == [{"add_git_hook": False, "add_agents": False,
+                           "add_cursor_rule": False}]
 
 
 def test_retrofit_passes_the_hook_flag_by_keyword():
@@ -94,7 +97,35 @@ def test_retrofit_passes_the_hook_flag_by_keyword():
     `shadow` and silently enable the wrong thing."""
     dlg, rec = _retrofit(ts=True, hook=True)
     dlg._apply()
-    assert rec.kwargs == [{"add_git_hook": True}]
+    assert rec.kwargs == [{"add_git_hook": True, "add_agents": False,
+                           "add_cursor_rule": False}]
+
+
+def test_retrofit_acts_when_only_a_rules_file_is_ticked():
+    """The guard has to list EVERY flag. When it did not, ticking only one of
+    the new boxes closed the dialog and did nothing, which reads as a broken
+    button rather than as an unimplemented option."""
+    dlg, rec = _retrofit(agents=True)
+    dlg._apply()
+    assert len(rec.calls) == 1
+    assert rec.kwargs == [{"add_git_hook": False, "add_agents": True,
+                           "add_cursor_rule": False}]
+
+
+def test_retrofit_reads_every_var_before_destroying_the_dialog():
+    """Reading a Tk var through a destroyed dialog is a race nobody needs."""
+    order = []
+    dlg, rec = _retrofit(cursor_rule=True)
+    for name in ("var_ts", "var_bi", "var_nuitka", "var_shadow",
+                 "var_hook", "var_agents", "var_cursor_rule"):
+        var = getattr(dlg, name)
+        original = var.get
+        setattr(var, "get",
+                (lambda o=original, n=name: (order.append(n), o())[1]))
+    real_destroy = dlg.destroy
+    dlg.destroy = lambda: (order.append("destroy"), real_destroy())[1]
+    dlg._apply()
+    assert order.index("destroy") == len(order) - 1
 
 
 # ── ScaffoldDialog ──────────────────────────────────────────────────────

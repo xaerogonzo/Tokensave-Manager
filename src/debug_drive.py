@@ -238,7 +238,12 @@ class _Driver:
                 focus_project=str(step.get("project", "")))
         elif name in ("settings", "settingsdialog"):
             from dialogs.settings import SettingsDialog
-            self._dialog = SettingsDialog(self._app, self._app._cfg)
+            # save_fn/callback are required. They are no-ops here on purpose:
+            # a diagnostic run must be able to open Settings and look at it
+            # without a stray Save writing manager-config.json.
+            self._dialog = SettingsDialog(
+                self._app, self._app._cfg,
+                lambda: None, lambda: None)
         elif name in ("savings", "cost", "savingsdialog"):
             # Reads `tokensave gain`/`cost`/`discover` in worker threads, so a
             # `report` step needs an `after_ms` long enough for them to land.

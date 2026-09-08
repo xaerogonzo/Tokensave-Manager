@@ -23,6 +23,36 @@ Status legend:
 
 ---
 
+## Multi-agent support (Cursor) — shipped
+
+### ✅ Cursor as a peer of Claude Code. Details in CHANGELOG.md.
+
+Four surfaces: the agent-CLI registry (`helpers/agent_cli.py`), project-scoped
+`.cursor/mcp.json`, inlined rules files (`AGENTS.md` + `.cursor/rules/*.mdc`),
+and Cursor CLI chats in the Tasks tab.
+
+**Fixture-verified, not live-verified** — Cursor was not installed on the
+machine this was built on. The open measurements are listed in
+`docs/AGENT_BACKENDS.md` under "Verification status".
+
+### 🔮 Third agent (Codex CLI / Gemini CLI / opencode)
+
+The registry exists so this is a table row. `AGENTS.md` already serves all three,
+and all three are already listed in the tokensave MCP picker. What each needs
+measuring for is its own capability row: print flag, whether it takes the prompt
+on stdin, and whether it has a system-prompt flag.
+
+### 🧊 Cursor IDE session history (`state.vscdb`)
+
+Deliberately out of scope. The Tasks tab reads the **CLI** chat store
+(`~/.cursor/chats/*/meta.json`), which is small JSON beside the transcript. The
+IDE keeps its own history in a SQLite `state.vscdb` that a running Cursor holds
+open, and reading it would mean a lock risk plus a second reverse-engineered
+schema for a surface the Manager does not otherwise touch. Revisit only if
+Cursor documents it.
+
+---
+
 ## Roadmap 6
 
 ### ✅ Tasks tab — Claude Code session + worktree visibility. Shipped Roadmap-5 (2026-05-25). Details in CHANGELOG.md.

@@ -56,6 +56,32 @@ class RetrofitDialog(tk.Toplevel):
 
         ttk.Separator(self, orient="horizontal").pack(fill=tk.X, padx=20, pady=(4, 4))
 
+        # Checkbox: portable AGENTS.md
+        has_agents = os.path.isfile(os.path.join(path, "AGENTS.md"))
+        self.var_agents = self._opt_row(
+            "Add AGENTS.md (portable agent rules)",
+            "  Inlines the same baseline rules CLAUDE.md gets, as plain\n"
+            "  markdown. Cursor, Codex, Gemini CLI and opencode read this;\n"
+            "  none of them can follow the @include CLAUDE.md uses.\n"
+            "  Updates only its own marked block, never your text.\n"
+            + ("  (AGENTS.md already exists — its block will be refreshed)"
+               if has_agents else "  (creates AGENTS.md)"),
+            pad, default=True)
+
+        # Checkbox: Cursor-native rule
+        has_mdc = os.path.isfile(
+            os.path.join(path, ".cursor", "rules", "tokensave.mdc"))
+        self.var_cursor_rule = self._opt_row(
+            "Add .cursor/rules/tokensave.mdc",
+            "  Cursor's native rule format, marked alwaysApply so it loads\n"
+            "  on every request. Cursor ignores plain .md files here, which\n"
+            "  is why this is a separate file from AGENTS.md.\n"
+            + ("  (already exists — its block will be refreshed)"
+               if has_mdc else "  (creates .cursor/rules/tokensave.mdc)"),
+            pad, default=True)
+
+        ttk.Separator(self, orient="horizontal").pack(fill=tk.X, padx=20, pady=(4, 4))
+
         # Checkbox: Nuitka build files
         has_ps1 = os.path.isfile(os.path.join(path, "build.ps1"))
         nuitka_note = (
@@ -125,11 +151,20 @@ class RetrofitDialog(tk.Toplevel):
         return var
 
     def _apply(self):
-        ts     = self.var_ts.get()
-        bi     = self.var_bi.get()
-        nuitka = self.var_nuitka.get()
-        shadow = self.var_shadow.get()
-        hook   = self.var_hook.get()
+        # Every var is read BEFORE destroy(): the widgets own them, and
+        # reading through a destroyed dialog is a race nobody needs.
+        ts      = self.var_ts.get()
+        bi      = self.var_bi.get()
+        nuitka  = self.var_nuitka.get()
+        shadow  = self.var_shadow.get()
+        hook    = self.var_hook.get()
+        agents  = self.var_agents.get()
+        cursor  = self.var_cursor_rule.get()
         self.destroy()
-        if ts or bi or nuitka or shadow or hook:
-            self.callback(self.path, ts, bi, nuitka, shadow, add_git_hook=hook)
+        # The guard lists EVERY flag. Omitting one makes ticking only that box
+        # close the dialog and do nothing, which reads as the button being broken.
+        if ts or bi or nuitka or shadow or hook or agents or cursor:
+            self.callback(self.path, ts, bi, nuitka, shadow,
+                          add_git_hook=hook,
+                          add_agents=agents,
+                          add_cursor_rule=cursor)

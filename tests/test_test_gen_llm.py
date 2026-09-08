@@ -127,11 +127,11 @@ def test_generate_empty_response_is_error(monkeypatch):
 def test_claude_cli_dispatch_uses_neutral_cwd(monkeypatch):
     captured = {}
 
-    def fake_print(**kwargs):
+    def fake_print(*_args, **kwargs):
         captured.update(kwargs)
         return _VALID
 
-    monkeypatch.setattr("helpers.claude_cli.call_claude_cli_print", fake_print)
+    monkeypatch.setattr("helpers.agent_cli.call_print", fake_print)
     cfg = SimpleNamespace(claude_cli_exe="/usr/bin/claude", claude_cli_model="")
     out, err = tg._dispatch_claude_cli(cfg, "sys", "user", "/some/project/root")
     assert out == _VALID
@@ -145,8 +145,8 @@ def test_claude_cli_dispatch_folds_system_into_stdin(monkeypatch):
     """Regression guard: the system prompt goes via stdin (combined prompt), NOT as
     --append-system-prompt argv — that argv blew the Windows command-line limit."""
     captured = {}
-    monkeypatch.setattr("helpers.claude_cli.call_claude_cli_print",
-                        lambda **k: captured.update(k) or _VALID)
+    monkeypatch.setattr("helpers.agent_cli.call_print",
+                        lambda *_a, **k: captured.update(k) or _VALID)
     cfg = SimpleNamespace(claude_cli_exe="/usr/bin/claude", claude_cli_model="")
     tg._dispatch_claude_cli(cfg, "SYS-MARKER conventions", "USER-MARKER source",
                             "/root")
@@ -157,9 +157,9 @@ def test_claude_cli_dispatch_folds_system_into_stdin(monkeypatch):
 
 def test_claude_cli_dispatch_surfaces_specific_error(monkeypatch):
     """On None content, the SPECIFIC get_last_cli_error cause is bubbled up."""
-    monkeypatch.setattr("helpers.claude_cli.call_claude_cli_print",
-                        lambda **k: None)
-    monkeypatch.setattr("helpers.claude_cli.get_last_cli_error",
+    monkeypatch.setattr("helpers.agent_cli.call_print",
+                        lambda *_a, **k: None)
+    monkeypatch.setattr("helpers.agent_cli.get_last_cli_error",
                         lambda: "exited 1: not logged in")
     cfg = SimpleNamespace(claude_cli_exe="/usr/bin/claude", claude_cli_model="")
     out, err = tg._dispatch_claude_cli(cfg, "sys", "user", "/root")
@@ -168,9 +168,9 @@ def test_claude_cli_dispatch_surfaces_specific_error(monkeypatch):
 
 
 def test_claude_cli_dispatch_falls_back_when_no_cause(monkeypatch):
-    monkeypatch.setattr("helpers.claude_cli.call_claude_cli_print",
-                        lambda **k: None)
-    monkeypatch.setattr("helpers.claude_cli.get_last_cli_error", lambda: None)
+    monkeypatch.setattr("helpers.agent_cli.call_print",
+                        lambda *_a, **k: None)
+    monkeypatch.setattr("helpers.agent_cli.get_last_cli_error", lambda: None)
     cfg = SimpleNamespace(claude_cli_exe="/usr/bin/claude", claude_cli_model="")
     out, err = tg._dispatch_claude_cli(cfg, "sys", "user", "/root")
     assert out is None
@@ -685,10 +685,10 @@ def test_prune_keeps_decorator_with_function():
 
 def test_cli_dispatch_uses_long_timeout(monkeypatch):
     captured = {}
-    def fake_print(**kwargs):
+    def fake_print(*_args, **kwargs):
         captured.update(kwargs)
         return _VALID
-    monkeypatch.setattr("helpers.claude_cli.call_claude_cli_print", fake_print)
+    monkeypatch.setattr("helpers.agent_cli.call_print", fake_print)
     cfg = SimpleNamespace(claude_cli_exe="/usr/bin/claude", claude_cli_model="")
     tg._dispatch_claude_cli(cfg, "sys", "user", "/root")
     assert captured["timeout"] == tg._CLI_GEN_TIMEOUT == 240

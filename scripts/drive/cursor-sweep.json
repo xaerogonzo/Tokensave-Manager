@@ -1,0 +1,8 @@
+[
+  {"do": "wait",   "after_ms": 3000},
+  {"do": "dialog", "name": "mcp",       "after_ms": 4000},
+  {"do": "report", "what": "geometry",  "after_ms": 800},
+  {"do": "dialog", "name": "settings",  "after_ms": 3000},
+  {"do": "report", "what": "geometry",  "after_ms": 800},
+  {"do": "quit"}
+]

@@ -6,6 +6,144 @@ and what each tier supports.
 
 ---
 
+## Which agent CLI, and what `"claude_cli"` means now
+
+The persisted backend values — `draft_pr_backend`, `commit_message_backend`,
+`precommit_review_backend`, the Ask tab's `provider` — still spell the CLI
+option `"claude_cli"`. **What that value NAMES changed.** It used to mean Claude
+Code specifically; it now means *the agent CLI selected in
+Settings → AI → Agent CLI*, resolved through `cfg.resolve_agent_cli()`.
+
+This is a deliberate semantic migration rather than a rename, and the reason is
+blast radius: renaming would have meant rewriting a per-feature setting in every
+existing `manager-config.json`. Nothing rewrites user config. A configuration
+saved before Cursor existed has no `agent_cli` key at all, defaults to Claude,
+and behaves exactly as it did — locked down by `tests/test_backend_compat.py`.
+
+`resolve_agent_cli()` returns three states, and callers must keep them apart:
+
+| State | Meaning | What to tell the user |
+|---|---|---|
+| `ok` | agent known, binary found | — |
+| `unavailable` | right agent, nothing to run | set its path in Settings → Paths |
+| `unknown_agent` | config names something unrecognised | fix `agent_cli`; **no agent is run** |
+
+An unknown id is never quietly mapped onto the default. Doing so would run one
+agent while the settings file named another, which is the failure the three-way
+split exists to prevent.
+
+**One surface stays pinned to Claude on purpose:** the Reference tab's skill
+runner (`controllers/snippets.py`). Claude Skills live in `.claude/skills` and
+are a Claude Code feature; handing that file to another agent CLI would open a
+terminal that cannot interpret it, so "follow the selected agent" would be the
+wrong behaviour there rather than a missing feature.
+
+---
+
+## The registry: `helpers/agent_cli.py`
+
+One capability table, one row per agent. Fields describe what an agent
+*supports*, not which vendor it is — that is what keeps "a new agent is one
+table row" true rather than aspirational. A field named `is_cursor` would
+re-create the cascade the table replaced.
+
+| Capability | Claude Code | Cursor Agent |
+|---|---|---|
+| `print_args` | `--print` | `-p --output-format text` |
+| `prompt_transport` | `stdin` | `argv` (see budgets) |
+| `system_prompt_mode` | `native` (`--append-system-prompt`) | `prepend` |
+| `model_flag` | `--model` | `--model` |
+| `interactive` | supported | supported |
+| default model | `claude-haiku-4-5-20251001` | `""` (let Cursor choose) |
+| binaries probed on PATH | `claude.cmd`, `claude` | `cursor-agent.{cmd,exe}`, `cursor-agent` |
+| extra install dirs | `%APPDATA%\npm` | `~/.local/bin` |
+
+Three runners, deliberately NOT derived from one another: `call_print`
+(captured one-shot), `spawn` (terminal **with** an instruction) and
+`spawn_interactive` (terminal, **no** trailing prompt argument). That last
+distinction is load-bearing: appending an empty instruction hands the CLI a
+blank positional argument, which it treats as an empty one-shot prompt instead
+of entering interactive mode.
+
+`helpers/claude_cli.py` remains as a thin shim with unchanged signatures.
+
+### Two asymmetries, stated rather than papered over
+
+**Cursor has no `--append-system-prompt`.** For `system_prompt_mode = prepend`
+the system prompt is folded into the user prompt with one frozen serialization
+(`PREPEND_TEMPLATE` in `agent_cli.py`):
+
+```
+[System instructions]
+<system prompt>
+
+[User request]
+<user prompt>
+```
+
+Frozen as a constant because two agents drifting into two different prompt
+structures is invisible until their output quality diverges and nobody can say
+why. The fallback **never** fires for a `native` agent — Claude keeps using its
+flag, and prepending as well would duplicate the instructions.
+
+**Cursor carries the prompt in argv, so it has a size budget.** Claude uses
+stdin precisely to dodge Windows argv mangling, and this manager's prompts are
+routinely multi-KB. The budget belongs to the **runner**, not the agent, because
+the two routes reach the OS differently:
+
+| Runner | Route | Practical limit |
+|---|---|---|
+| `call_print` | argv list → `CreateProcess` | ~32767 chars |
+| `spawn` / `spawn_interactive` | `cmd.exe /k "..."` | ~8191 chars |
+
+The check measures the **rendered** command line, so quoting expansion is
+counted rather than estimated. Over budget returns a distinct
+`"prompt too large for positional CLI input"`. It never truncates, never
+silently drops the prompt, and never pretends stdin is available. Windows only:
+a POSIX `ARG_MAX` ceiling would invent a failure the platform does not have.
+
+### Verification status
+
+**Every Cursor path in this manager is fixture-verified, not live-verified.**
+Cursor was not installed on the machine this was built on, and there is no
+Cursor subscription on the account. Those are two different blockers, and they
+gate different things, so the open items are split by what each actually needs.
+
+**Answerable by installing the CLI alone** — no IDE, no login, no plan.
+Argument parsing happens before authentication, which is what makes the most
+important one free to settle:
+
+* **Whether `cursor-agent -p` reads the prompt from stdin.** Run
+  `echo hi | cursor-agent -p`. A *"missing prompt"* error means stdin is NOT
+  read, so `prompt_transport` stays `argv` and the command-line budget above is
+  load-bearing. An auth or credit error means the prompt WAS accepted from
+  stdin — flip `prompt_transport` to `stdin`, and the budget stops applying to
+  Cursor (the guard stays for any future argv-only agent). This governs whether
+  multi-KB prompts from code review and test generation silently hit a ceiling,
+  so it is the first thing to measure.
+* The exact binary filenames the Windows installer writes to `~/.local/bin`
+  (assumed `cursor-agent` and `agent`; only the former is trusted against PATH).
+  If these are wrong, `_detect_cursor_cli` returns "" forever and the feature is
+  invisible rather than broken.
+* The real `--help` spellings of `print_args`, `--model`, `--output-format`.
+* That `tokensave install --agent cursor` writes `~/.cursor/mcp.json`, and that
+  the MCP dialog's Cursor panel renders its populated branch rather than the
+  "not detected" line.
+
+**Needs a working agent** — i.e. an account that can complete a turn. Cursor's
+published pricing lists only paid tiers, and the headless CLI appears to be tied
+to a Pro-level key, so treat "the free tier can run a turn" as unresolved:
+
+* the `~/.cursor/chats/*/meta.json` schema. This is the one item built on
+  community reverse-engineering rather than documentation, so it is the one that
+  most deserves a live check — and also the one that fails most safely, since
+  `helpers/cursor_tasks.py` is version-gated, skips bad records individually and
+  logs why.
+* end-to-end generation: a commit message, a PR draft or a review actually
+  produced by Cursor rather than Claude.
+
+---
+
 ## Three tiers
 
 ### Tier 1 — Anthropic API (`provider: "anthropic"`)

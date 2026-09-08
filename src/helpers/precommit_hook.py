@@ -429,17 +429,19 @@ def _dispatch_review_backend(
     cfg: "ManagerConfig", backend: str, user_prompt: str
 ) -> "str | None":
     """Pick a backend and run it. Returns review text or None on failure."""
-    has_cc = bool(cfg.claude_cli_exe)
+    from helpers.agent_cli import model_from, resolve_from
+    agent = resolve_from(cfg)
+    has_cc = agent.ok
     llm_cfg = cfg.raw.get("commit_message_llm") or {}
     has_llm = bool(llm_cfg.get("enabled"))
 
     if backend == "claude_cli":
         if not has_cc:
             print("[tokensave precommit] precommit_review_backend=claude_cli "
-                  "but claude_cli_exe is not configured — skipping review",
-                  file=sys.stderr)
+                  f"but no agent CLI is available: {agent.error_message()} "
+                  "— skipping review", file=sys.stderr)
             return None
-        return _call_claude_cli(cfg.claude_cli_exe, user_prompt, cfg.claude_cli_model)
+        return _call_agent_cli(agent, user_prompt, model_from(cfg, agent.spec))
 
     if backend == "llm":
         if not has_llm:
@@ -451,39 +453,43 @@ def _dispatch_review_backend(
 
     # "auto" — prefer CC subscription, fall back to per-token LLM provider
     if has_cc:
-        result = _call_claude_cli(cfg.claude_cli_exe, user_prompt, cfg.claude_cli_model)
+        result = _call_agent_cli(agent, user_prompt, model_from(cfg, agent.spec))
         if result is not None:
             return result
         # CC failed; fall through to LLM if available
     if has_llm:
         return _call_via_llm(llm_cfg, user_prompt)
     print("[tokensave precommit] no backend available "
-          "(claude_cli_exe not set, commit_message_llm.enabled false) — "
+          "(no agent CLI resolved, commit_message_llm.enabled false) — "
           "skipping review", file=sys.stderr)
     return None
 
 
-def _call_claude_cli(claude_exe: str, user_prompt: str, model: str = "") -> "str | None":
-    """Invoke `claude --print` with the review system prompt + diff.
+def _call_agent_cli(agent, user_prompt: str, model: str = "") -> "str | None":
+    """Invoke the selected agent CLI in print mode with the review prompt.
 
-    Thin wrapper around helpers.claude_cli.call_claude_cli_print — kept
-    here so the pre-commit entry point (precommit_review.py) doesn't need
-    to import from the full manager helper tree. Logs failures to stderr
-    with the [tokensave precommit] prefix expected by the hook script.
+    Thin wrapper around helpers.agent_cli.call_print — kept here so the
+    pre-commit entry point (precommit_review.py) doesn't need to import from
+    the full manager helper tree. Logs failures to stderr with the
+    [tokensave precommit] prefix expected by the hook script.
 
-    Timeout is 45 s (not 30) to give Opus 4.7 enough headroom on a
-    24 k-char capped diff when users intentionally pick the slower model.
+    Note the fail-open invariant: every failure path returns None, and the
+    caller lets the commit through. A review tool that can block a commit
+    when its own backend is down is worse than no review tool.
+
+    Timeout is 45 s (not 30) to give a slower model enough headroom on a
+    24 k-char capped diff when users intentionally pick one.
     """
-    from helpers.claude_cli import call_claude_cli_print
-    result = call_claude_cli_print(
-        claude_exe, user_prompt,
+    from helpers.agent_cli import call_print
+    result = call_print(
+        agent.spec, agent.exe, user_prompt,
         system_prompt=_REVIEW_SYSTEM_PROMPT,
         timeout=45,
         model=model,
     )
     if result is None:
-        print("[tokensave precommit] claude --print timed out or failed — "
-              "skipping review", file=sys.stderr)
+        print(f"[tokensave precommit] {agent.label} print mode timed out "
+              "or failed — skipping review", file=sys.stderr)
     return result
 
 

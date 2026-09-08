@@ -229,7 +229,9 @@ class ScaffoldRetrofitController:
                      add_nuitka: bool = False,
                      add_shadow_links: bool = False,
                      shadow_ext_map: dict | None = None,
-                     add_git_hook: bool = False) -> None:
+                     add_git_hook: bool = False,
+                     add_agents: bool = False,
+                     add_cursor_rule: bool = False) -> None:
         """Run the retrofit in a background thread."""
         name = os.path.basename(path)
         flags = {
@@ -239,6 +241,8 @@ class ScaffoldRetrofitController:
             "shadow_links":       add_shadow_links,
             "shadow_ext_map":     shadow_ext_map or DEFAULT_SHADOW_EXT_MAP,
             "git_hook":           add_git_hook,
+            "agents_md":          add_agents,
+            "cursor_rule":        add_cursor_rule,
         }
 
         def worker():
@@ -275,6 +279,13 @@ class ScaffoldRetrofitController:
             actions.extend(self._scaffold_nuitka_build(path))
         if flags["shadow_links"]:
             actions.extend(self._retrofit_add_shadow_links(path, flags["shadow_ext_map"]))
+        # .get(), not [] : the flags dict is an options bag that callers
+        # (and tests) build by hand, so a newly added option must not
+        # KeyError every existing caller that predates it.
+        if flags.get("agents_md") or flags.get("cursor_rule"):
+            actions.extend(self._retrofit_add_agent_rules(
+                path, name, flags.get("agents_md", False),
+                flags.get("cursor_rule", False)))
         if flags["git_hook"]:
             hook_actions = _scaffold_git_hook(path)
             for action in hook_actions:
@@ -335,6 +346,48 @@ class ScaffoldRetrofitController:
         log.info("  created CLAUDE.md with @include")
         self._on_log("  Created CLAUDE.md with tokensave @include", C["green"])
         return ["Created CLAUDE.md with tokensave rules"]
+
+    def _retrofit_add_agent_rules(self, path: str, name: str,
+                                  want_agents: bool,
+                                  want_cursor: bool) -> list[str]:
+        """Write the inlined rules files for agents that lack @include.
+
+        CLAUDE.md gets a POINTER at the shared baseline; Cursor, Codex,
+        Gemini CLI and opencode cannot resolve one, so they get the
+        baseline's CONTENT instead. Both outputs are rendered from the
+        same `templates/project-baseline.md`, and both manage only their
+        own marked block, so a re-run never touches the user's own text.
+        """
+        from helpers.agent_rules import (read_baseline, write_agents_md,
+                                         write_cursor_rule)
+        baseline = read_baseline(self._cfg.template_dir)
+        if not baseline:
+            # Writing an empty rules file would look configured while
+            # carrying no rules at all, which is worse than skipping.
+            self._on_log(
+                "  project-baseline.md not found — skipped agent rules",
+                C["peach"])
+            return []
+        actions: list[str] = []
+        targets = []
+        if want_agents:
+            targets.append(("AGENTS.md",
+                            lambda: write_agents_md(path, baseline, name)))
+        if want_cursor:
+            targets.append((".cursor/rules/tokensave.mdc",
+                            lambda: write_cursor_rule(path, baseline)))
+        for label, run in targets:
+            ok, err, changed = run()
+            if not ok:
+                self._on_log(f"  {label}: {err}", C["red"])
+                continue
+            if changed:
+                self._on_log(f"  Wrote {label}", C["green"])
+                actions.append(f"Wrote {label}")
+            else:
+                self._on_log(f"  {label} already up to date — skipped",
+                             C["overlay0"])
+        return actions
 
     def _retrofit_init_index(self, path: str) -> list[str]:
         """Create a tokensave index when, and only when, there is not one.

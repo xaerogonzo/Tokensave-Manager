@@ -40,12 +40,13 @@ from dialogs.mcp_desktop_panel import DesktopMigrationMixin
 from dialogs.mcp_duplicates_panel import DuplicateKeysMixin
 from dialogs.mcp_migration_panel import UserScopeMigrationMixin
 from dialogs.mcp_blocks_panel import EntryBlocksMixin
+from dialogs.mcp_cursor_panel import CursorBindingMixin
 
 if TYPE_CHECKING:
     from state import ManagerConfig
 
 
-class MCPConfigDialog(DesktopMigrationMixin, DuplicateKeysMixin, UserScopeMigrationMixin, EntryBlocksMixin,
+class MCPConfigDialog(DesktopMigrationMixin, DuplicateKeysMixin, UserScopeMigrationMixin, EntryBlocksMixin, CursorBindingMixin,
                      UiPumpMixin, tk.Toplevel):
     """Manage tokensave entries in Claude Desktop's and Claude Code's MCP
     config files.
@@ -77,6 +78,10 @@ class MCPConfigDialog(DesktopMigrationMixin, DuplicateKeysMixin, UserScopeMigrat
         # Bound projects collapse by default. With seventeen of them the
         # useful axis is "what needs attention", not "show everything".
         self._show_bound = bool(focus_project)
+        # Cursor's bound projects collapse independently of Claude's: the two
+        # sections answer different questions and a user checking one should
+        # not have the other unfold underneath them.
+        self._show_cursor_bound = bool(focus_project)
         self.title("MCP Integration")
         self.configure(bg=C["base"])
         self.resizable(True, True)
@@ -183,6 +188,7 @@ class MCPConfigDialog(DesktopMigrationMixin, DuplicateKeysMixin, UserScopeMigrat
 
         self._render_duplicate_keys()
         self._render_projects_section()
+        self._render_cursor_section()
 
     @staticmethod
     def _running_warning(running: dict) -> str:

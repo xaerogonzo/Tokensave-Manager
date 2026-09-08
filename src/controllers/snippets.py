@@ -540,10 +540,16 @@ class SnippetsController:
         skill = self._skills_cache[idx]
         skill_name = skill["name"]
 
+        # Deliberately pinned to Claude rather than routed through
+        # `cfg.resolve_agent_cli()`: this runs a Claude Skill from
+        # `.claude/skills`, which is a Claude Code feature. Handing the file
+        # to another agent CLI would launch a terminal that cannot interpret
+        # it, so "follow the selected agent" would be the wrong behaviour here.
         cli = self._cfg.claude_cli_exe
         if not cli:
             self._skill_run_status.configure(
-                text="Configure Claude CLI in Settings first.", fg=C["peach"])
+                text="Configure the Claude Code CLI in Settings first "
+                     "(skills are Claude-specific).", fg=C["peach"])
             return
 
         body = (skill.get("body") or "").strip()

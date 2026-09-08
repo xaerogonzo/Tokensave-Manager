@@ -151,6 +151,7 @@ def test_health_does_not_treat_a_blank_destination_as_healthy():
 # ── AISection.save_into ─────────────────────────────────────────────────
 
 _AI_VARS = {
+    "_var_agent_cli": "claude",
     "_var_draft_pr_backend": "auto",
     "_var_commit_msg_backend": "llm_first",
     "_var_enable_llm_grounding": True,
@@ -187,6 +188,15 @@ def test_save_into_writes_the_backend_choices():
     _ai_section().save_into(raw)
     assert raw["draft_pr_backend"] == "auto"
     assert raw["commit_message_backend"] == "llm_first"
+
+
+def test_save_into_persists_the_agent_cli_selector():
+    """The per-feature backends keep saying "claude_cli"; this key is what
+    decides which agent that resolves to, so it has to round-trip."""
+    raw: dict = {}
+    _ai_section(_var_agent_cli="cursor").save_into(raw)
+    assert raw["agent_cli"] == "cursor"
+    assert raw["draft_pr_backend"] == "auto"
 
 
 def test_save_into_preserves_keys_it_does_not_own():

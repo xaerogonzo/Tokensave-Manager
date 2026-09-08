@@ -603,11 +603,12 @@ class GitTabController(UiPumpMixin):
             "for the flagged files in one click.")
 
         _Tooltip(btn_claude_cli,
-            "Open an interactive Claude Code session in this project.\n\n"
-            "Launches a new terminal window running `claude` with the\n"
-            "project as its working directory — no need to open a\n"
-            "terminal and cd there yourself.\n\n"
-            "Requires the Claude Code CLI path to be set in Settings.")
+            "Open an interactive coding-agent session in this project.\n\n"
+            "Launches a new terminal window running the agent CLI you\n"
+            "picked in Settings → AI → Agent CLI, with the project as\n"
+            "its working directory — no need to open a terminal and cd\n"
+            "there yourself.\n\n"
+            "Requires that agent's path to be set in Settings.")
 
         self._git_all_btns       = [self._btn_set_remote, btn_push, btn_pull,
                                      btn_commit, btn_undo, btn_new,
@@ -624,6 +625,12 @@ class GitTabController(UiPumpMixin):
         # project and a configured CLI path, and `cmd_open_claude_cli` already
         # checks both.
         self._git_project_btns   = [btn_claude_cli]
+        # Held so the label can follow the selected agent — the user may
+        # switch from Claude to Cursor in Settings without this tab being
+        # rebuilt, and a button naming the wrong agent is a lie the user
+        # only discovers after clicking it.
+        self._btn_agent_cli = btn_claude_cli
+        self._sync_agent_cli_button()
 
         for btn in self._git_all_btns + self._git_project_btns:
             btn.configure(state=tk.DISABLED)
@@ -666,8 +673,21 @@ class GitTabController(UiPumpMixin):
         except (tk.TclError, AttributeError):
             return False
 
+    def _sync_agent_cli_button(self):
+        """Point the CLI button at whichever agent is currently selected.
+
+        Read at call time rather than captured at build time (Rule 3):
+        a Settings save rebinds the selector without rebuilding this tab.
+        """
+        btn = getattr(self, "_btn_agent_cli", None)
+        if btn is None or not btn.winfo_exists():
+            return
+        res = self._cfg.resolve_agent_cli()
+        btn.configure(text=f"\U0001F916 {res.label}")
+
     def _git_refresh(self):
         """Kick off a background thread that re-reads all git state."""
+        self._sync_agent_cli_button()
         path = self._git_path
         if not path:
             return
@@ -1414,24 +1434,30 @@ class GitTabController(UiPumpMixin):
                     parent=self._root)
 
     def cmd_open_claude_cli(self):
-        """Open an interactive Claude Code CLI session in the selected project."""
+        """Open an interactive session with the selected agent CLI.
+
+        Still named for Claude because the command table, the VS Code
+        extension and a dozen call sites already reference that id; the
+        agent it actually launches follows `cfg.agent_cli`.
+        """
         path = self._git_path
         if not path:
             return
-        cli = self._cfg.claude_cli_exe
-        if not cli:
-            messagebox.showinfo(
-                "No CLI configured",
-                "No Claude Code CLI path is set.\n"
-                "Configure it in Settings → Git tools.",
-                parent=self._root)
+        res = self._cfg.resolve_agent_cli()
+        if not res.ok:
+            # Three distinct faults deserve three distinct messages:
+            # "not installed" and "unknown agent in config" need
+            # different fixes, and the resolution knows which is which.
+            messagebox.showinfo("No agent CLI available",
+                                res.error_message(), parent=self._root)
             return
-        from helpers.claude_cli import spawn_claude_cli_interactive
-        ok, err = spawn_claude_cli_interactive(
-            cli, path, model=self._cfg.claude_cli_model)
+        from helpers import agent_cli
+        ok, err = agent_cli.spawn_interactive(
+            res.spec, res.exe, path,
+            model=self._cfg.agent_model_for(res.spec))
         if not ok:
             messagebox.showwarning(
-                "Could not open Claude CLI", err, parent=self._root)
+                f"Could not open {res.label}", err, parent=self._root)
 
     def cmd_show_test_gaps(self):
         """Open a standalone Test Gaps dialog for the current branch.

@@ -19,6 +19,7 @@ from typing import TYPE_CHECKING, Callable
 from constants import C, CREATE_NO_WINDOW
 from theme import _Tooltip
 from helpers.claude_tasks import scan_sessions, scan_worktrees
+from helpers.cursor_tasks import scan_cursor_sessions
 from helpers.worktree_cleanup import (
     LOCK_TOKENSAVE_DB,
     LOCK_WORKTREE_DIRECTORY,
@@ -107,13 +108,15 @@ class TasksController:
         self._wt_tree.bind("<Button-3>", self._wt_right_click)
 
     def _build_sessions_panel(self, parent: tk.Widget) -> None:
-        cols = ("status", "title", "project", "activity")
+        cols = ("status", "agent", "title", "project", "activity")
         self._sess_tree = ttk.Treeview(parent, columns=cols, show="headings")
         self._sess_tree.heading("status", text="")
+        self._sess_tree.heading("agent", text="Agent")
         self._sess_tree.heading("title", text="Title")
         self._sess_tree.heading("project", text="Project")
         self._sess_tree.heading("activity", text="Last Activity")
         self._sess_tree.column("status", width=24, minwidth=24, stretch=False)
+        self._sess_tree.column("agent", width=64, minwidth=50, stretch=False)
         self._sess_tree.column("title", width=260, minwidth=100)
         self._sess_tree.column("project", width=180, minwidth=80)
         self._sess_tree.column("activity", width=130, minwidth=80)
@@ -138,7 +141,11 @@ class TasksController:
 
     def _worker(self, req_id: int, path: str | None, known: list[str]) -> None:
         wt = scan_worktrees(path, self._cfg.git_exe) if path else []
-        sess = scan_sessions(known)
+        # Two scanners, one list. `scan_cursor_sessions` returns the same dict
+        # shape plus an "agent" key, so this is a concatenation rather than a
+        # second rendering path. It returns [] on a machine without Cursor.
+        sess = scan_sessions(known) + scan_cursor_sessions(known)
+        sess.sort(key=lambda row: row.get("last_activity") or 0, reverse=True)
 
         def _apply(req=req_id, w=wt, s=sess):
             if self._tasks_refresh_id != req:
@@ -205,17 +212,30 @@ class TasksController:
             else:
                 tree.insert("", tk.END, iid=iid, values=vals)
 
+    @staticmethod
+    def _sess_iid(row: dict) -> str:
+        """Row identity is (agent, session_id), never the id alone.
+
+        Two scanners now feed this tree, and nothing guarantees their ids are
+        drawn from disjoint spaces. Keying on the id alone would let a Cursor
+        chat and a Claude session that happen to share one silently collapse
+        into a single row — or have the wrong one selected. Follows
+        the project's existing iid-prefix convention (`proj:<path>`).
+        """
+        return "sess:%s:%s" % (row.get("agent") or "claude", row["session_id"])
+
     def _update_sess_tree(self, sessions: list[dict]) -> None:
         tree = self._sess_tree
         current_iids = set(tree.get_children())
-        new_iids = {s["session_id"] for s in sessions}
+        new_iids = {self._sess_iid(s) for s in sessions}
 
         for iid in current_iids - new_iids:
             tree.delete(iid)
 
         for s in sessions:
-            iid = s["session_id"]
+            iid = self._sess_iid(s)
             status = "🟢" if s["is_recent"] else "⚫"
+            agent = "Cursor" if s.get("agent") == "cursor" else "Claude"
             ts = s["last_activity"]
             try:
                 import datetime
@@ -223,7 +243,7 @@ class TasksController:
                 activity = dt.strftime("%d %b %H:%M")
             except Exception:
                 activity = ""
-            vals = (status, s["title"], s["project_display"], activity)
+            vals = (status, agent, s["title"], s["project_display"], activity)
             if iid in current_iids:
                 tree.item(iid, values=vals)
             else:
@@ -465,10 +485,10 @@ class TasksController:
         if not sel:
             return
         vals = self._sess_tree.item(sel[0], "values")
-        # vals: (status, title, project_display, activity)
+        # vals: (status, agent, title, project_display, activity)
         # We can't recover the original path from project_display alone — open
         # the first known path whose basename matches project_display.
-        proj_display = vals[2] if len(vals) > 2 else ""
+        proj_display = vals[3] if len(vals) > 3 else ""
         known = self._get_known_paths()
         for p in known:
             if os.path.basename(p) == proj_display:
