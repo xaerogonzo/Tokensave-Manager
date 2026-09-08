@@ -538,6 +538,70 @@ def audit_graph_trust(project_path: str) -> list:
     return notes
 
 
+def audit_pyscope_cache(project_path: str, pyscope_exe: str = "") -> list:
+    """A recommendation about where PyScope keeps this project's analysis.
+
+    A recommendation, not a warning, and deliberately not a violation. Nothing
+    is broken: PyScope works perfectly with its cache in per-user app data. The
+    only consequence is that the analysis does not live beside the source it
+    describes, which is a preference with a performance side-effect rather than
+    a defect.
+
+    **Measures the outcome rather than inferring it.** The test is not "does
+    .gitignore mention .pyscope/" -- git's matcher is what actually decides,
+    and reading the file's text would be guessing at its answer. It is
+    "PyScope analysed this project and did NOT leave a local cache", which is
+    PyScope's own decision, already made, observed after the fact.
+
+    Silent in every case where it would be speculating:
+
+      * PyScope not configured -- nothing to say;
+      * the registry could not be read -- "could not ask" is not "no";
+      * the project is not registered -- no advice to give about a project
+        PyScope does not know;
+      * registered but never analysed -- PyScope has not chosen a cache
+        location yet, so there is no outcome to report;
+      * the local cache exists -- the good case says nothing, so a healthy
+        project does not gain a permanent line.
+
+    Imported lazily to keep this module's import surface exactly ``ast``,
+    ``os`` and ``re`` for the CI one-liner in ``helpers/ci_workflow.py``.
+    """
+    if not pyscope_exe or not project_path:
+        return []
+    try:
+        from helpers.pyscope import registered, same_path, canonical_project
+        from helpers.detection import _is_pyscope_project
+    except ImportError:
+        return []
+
+    entries = registered(pyscope_exe)
+    if entries is None:
+        return []          # could not ask; not the same as "no"
+
+    canon = canonical_project(project_path)
+    match = None
+    for entry in entries:
+        if same_path(str(entry.get("root", "")), canon):
+            match = entry
+            break
+    if match is None:
+        return []          # not registered with PyScope
+    if not match.get("analyzed_at"):
+        return []          # no cache decision has been made yet
+    if _is_pyscope_project(project_path):
+        return []          # already local; the good case is quiet
+
+    return [
+        "  PyScope has analysed this project but keeps its cache in per-user "
+        "app data, because `.pyscope/` is not ignored here. PyScope writes "
+        "`<project>/.pyscope/` only when git ignores it.",
+        "  Optional: add `.pyscope/` to .gitignore (right-click -> Git -> "
+        "Manage .gitignore... -> Baseline) to keep the analysis beside the "
+        "source it describes. Nothing is broken either way.",
+    ]
+
+
 def audit_mcp_auto_approve() -> list:
     """Report blanket MCP auto-approval as posture, never as brokenness.
 

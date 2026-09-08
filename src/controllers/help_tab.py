@@ -183,6 +183,7 @@ class HelpTabController:
             ("  Git Tab Buttons",     self._help_git_tab),
             ("  GitHub Setup",        self._help_github_setup),
             ("  CodeGraph",           self._help_codegraph),
+            ("  PyScope",             self._help_pyscope),
             ("  AI Features",         self._help_ai_features),
             ("  Pre-commit Hook",     self._help_precommit_hook),
             ("  Run checks",          self._help_run_checks),
@@ -505,6 +506,9 @@ class HelpTabController:
 
     def _help_codegraph(self):
         help_topics_tools.codegraph(self)
+
+    def _help_pyscope(self):
+        help_topics_tools.pyscope(self)
 
     def _help_ai_features(self):
         help_topics_tools.ai_features(self)

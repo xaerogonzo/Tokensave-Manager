@@ -681,3 +681,131 @@ class TestCombinedGroundingIsVariadic:
     def test_all_empty_is_empty(self):
         from helpers.doc_grounding import build_combined_grounding
         assert build_combined_grounding("", "", "") == ""
+
+
+# ── The cheap, high-value pieces ─────────────────────────────────────────────
+
+class TestGitignoreBaseline:
+
+    def test_pyscope_is_in_the_baseline(self):
+        """Not tidiness. PyScope writes <project>/.pyscope/ ONLY when git
+        ignores it, so this one line is what keeps a project's analysis beside
+        the source instead of exiled to per-user app data."""
+        from helpers.gitignore import _baseline_patterns
+        assert ".pyscope/" in _baseline_patterns()
+
+    def test_the_baseline_category_offers_it_too(self):
+        """One source of truth between cmd_git_init and the dialog."""
+        from helpers.gitignore import _GITIGNORE_TEMPLATES
+        baseline = _GITIGNORE_TEMPLATES["Baseline (TokenSave standard)"]
+        assert ".pyscope/" in baseline
+
+    def test_it_names_the_directory_not_a_glob(self):
+        """`.pyscope` without the slash would also match a FILE of that name,
+        and PyScope's is always a directory."""
+        from helpers.gitignore import _baseline_patterns
+        pats = _baseline_patterns()
+        assert ".pyscope" not in pats
+        assert ".pyscope/" in pats
+
+
+class TestDoctorCacheRecommendation:
+    """A recommendation, and silent everywhere it would be speculating."""
+
+    def _entries(self, monkeypatch, entries):
+        monkeypatch.setattr(ps, "registered", lambda exe: entries)
+
+    def test_unconfigured_says_nothing(self, tmp_path):
+        from helpers.doctor_rules import audit_pyscope_cache
+        assert audit_pyscope_cache(str(tmp_path), "") == []
+
+    def test_an_unreadable_registry_says_nothing(self, tmp_path, monkeypatch):
+        """"Could not ask" is not "no", and must not become advice."""
+        self._entries(monkeypatch, None)
+        from helpers.doctor_rules import audit_pyscope_cache
+        assert audit_pyscope_cache(str(tmp_path), "ps.exe") == []
+
+    def test_an_unregistered_project_gets_no_advice(self, tmp_path, monkeypatch):
+        self._entries(monkeypatch, [{"root": r"C:\elsewhere", "analyzed_at": 1.0}])
+        from helpers.doctor_rules import audit_pyscope_cache
+        assert audit_pyscope_cache(str(tmp_path), "ps.exe") == []
+
+    def test_registered_but_never_analysed_says_nothing(self, tmp_path, monkeypatch):
+        """PyScope has not chosen a cache location yet, so there is no
+        outcome to report and nothing measured to report it from."""
+        self._entries(monkeypatch, [{"root": str(tmp_path), "analyzed_at": None}])
+        from helpers.doctor_rules import audit_pyscope_cache
+        assert audit_pyscope_cache(str(tmp_path), "ps.exe") == []
+
+    def test_a_local_cache_is_the_quiet_good_case(self, tmp_path, monkeypatch):
+        """A healthy project must not gain a permanent line."""
+        (tmp_path / ".pyscope").mkdir()
+        self._entries(monkeypatch, [{"root": str(tmp_path), "analyzed_at": 1.0}])
+        from helpers.doctor_rules import audit_pyscope_cache
+        assert audit_pyscope_cache(str(tmp_path), "ps.exe") == []
+
+    def test_analysed_with_no_local_cache_is_where_it_speaks(
+            self, tmp_path, monkeypatch):
+        self._entries(monkeypatch, [{"root": str(tmp_path), "analyzed_at": 1.0}])
+        from helpers.doctor_rules import audit_pyscope_cache
+        notes = audit_pyscope_cache(str(tmp_path), "ps.exe")
+        assert notes
+        joined = " ".join(notes)
+        assert "Optional" in joined
+        assert "Nothing is broken" in joined
+
+    def test_it_never_claims_something_is_wrong(self, tmp_path, monkeypatch):
+        """A recommendation, not a warning. Nothing IS broken when the cache
+        lives in app data, and wording it as a defect would send someone
+        hunting for a problem they do not have."""
+        self._entries(monkeypatch, [{"root": str(tmp_path), "analyzed_at": 1.0}])
+        from helpers.doctor_rules import audit_pyscope_cache
+        joined = " ".join(audit_pyscope_cache(str(tmp_path), "ps.exe")).lower()
+        for word in ("error", "invalid", "must ", "failed", "broken index"):
+            assert word not in joined
+
+    def test_it_measures_the_outcome_rather_than_reading_gitignore(self):
+        """git's matcher decides what is ignored; parsing the file's text would
+        be guessing at its answer. The rule observes what PyScope actually did.
+
+        Asserted against the calls the function makes, not against whether the
+        word appears — the advice it prints legitimately tells the user to edit
+        .gitignore, and a first version of this test failed on its own help
+        text.
+        """
+        import ast
+        import inspect
+        from helpers import doctor_rules
+        # No cleandoc: a module-level function's source is already
+        # unindented, and dedenting it again breaks the body.
+        tree = ast.parse(inspect.getsource(doctor_rules.audit_pyscope_cache))
+        called = set()
+        for node in ast.walk(tree):
+            if isinstance(node, ast.Call):
+                fn = node.func
+                if isinstance(fn, ast.Name):
+                    called.add(fn.id)
+                elif isinstance(fn, ast.Attribute):
+                    called.add(fn.attr)
+        assert "open" not in called
+        assert "_read_gitignore_lines" not in called
+        assert "check_output" not in called
+        assert "_is_pyscope_project" in called, (
+            "sanity: the scan can see the call the rule actually makes")
+
+
+class TestHelpTopic:
+
+    def test_the_topic_is_registered_in_the_section_list(self):
+        src = open("src/controllers/help_tab.py", encoding="utf-8").read()
+        assert '"  PyScope"' in src
+        assert "_help_pyscope" in src
+
+    def test_it_states_the_difference_from_the_other_two_tools(self):
+        """The topic exists to answer "why a third tool", so that answer has
+        to survive future edits."""
+        import inspect
+        from controllers import help_topics_tools
+        src = inspect.getsource(help_topics_tools.pyscope)
+        assert "how much of that is actually established" in src
+        assert "Confidence" in src and "Dispatch" in src and "Completeness" in src

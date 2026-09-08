@@ -66,6 +66,7 @@ from helpers import doctor_service
 from helpers.doctor_rules import (                      # noqa: E402
     _audit_project_tree,
     audit_graph_trust,
+    audit_pyscope_cache,
     audit_mcp_auto_approve,
     audit_shadow_links,
 )
@@ -758,6 +759,7 @@ class DoctorController:
         self._log_audit_results(violations, exempt_notes, files_scanned)
         self._log_shadow_health(project_path)
         self._log_graph_trust(project_path)
+        self._log_pyscope_cache(project_path)
         self._log_mcp_posture()
 
     def _log_shadow_health(self, project_path: str) -> None:
@@ -787,6 +789,20 @@ class DoctorController:
         self._on_log("=== Graph trust ===", C["mauve"])
         for note in notes:
             self._on_log(note, C["peach"])
+
+    def _log_pyscope_cache(self, project_path: str) -> None:
+        """A recommendation, rendered as one. Silent unless there is a choice.
+
+        Not a violation and not counted as one: nothing is broken when
+        PyScope keeps its cache in app data, so this must not touch the
+        number other things are measured against.
+        """
+        notes = audit_pyscope_cache(project_path, self._cfg.pyscope_exe)
+        if not notes:
+            return
+        self._on_log("=== PyScope cache ===", C["mauve"])
+        for note in notes:
+            self._on_log(note, C["overlay0"])
 
     def _log_mcp_posture(self) -> None:
         """Machine-wide, so it takes no project. Posture, not a violation."""
