@@ -1575,3 +1575,86 @@ Uses `pystray` + `Pillow`. The tray icon is generated at runtime (64×64 dark ci
 Closing the window (`WM_DELETE_WINDOW`) and minimizing both call `withdraw()` — the process stays alive.
 Quit is only available from the tray right-click menu.
 Single-instance lock via Windows named mutex (`CreateMutexW`) prevents duplicate manager windows.
+
+---
+
+## VS Code extension lifecycle
+
+The Manager ships an extension from `vscode-extension/`, and for a while the
+copy installed in the developer's editor was three minor versions behind the
+repository — `tokensave.tokensave-manager@2.3.0` against an `APP_VERSION` of
+`2.6.0`. The pipeline that would have caught it already existed, in
+`.github/workflows/release-extension.yml`, and existed *only* there: on a
+developer machine the sole route to a `.vsix` was hand-running `vsce`.
+
+### One pipeline, three callers
+
+`build-extension.ps1` is that workflow, runnable locally, step for step:
+
+```
+npm ci  ->  rm out/  ->  npm run compile  ->  npm test
+        ->  clear stale .vsix  ->  npm run package
+        ->  python .github/scripts/verify_vsix.py  ->  [-Install]
+```
+
+The release workflow runs the same commands, and `ExtensionManagerDialog`
+shells out to the script rather than reimplementing it. A GUI with its own copy
+of the steps would drift from the release path, which is the failure this
+closes.
+
+Three details are load-bearing:
+
+* **`npm ci`, never `npm install`.** A lockfile that disagrees with
+  `package.json` must fail loudly; that disagreement is the bug.
+* **`out/` is deleted before `tsc`.** TypeScript does not remove the `.js` of a
+  deleted `.ts`, and `.vscodeignore` keeps `out/**/*.js`, so a stale module
+  would ship indefinitely.
+* **`vsce` is a pinned devDependency.** The workflow used to run
+  `npx --yes @vscode/vsce`, which fetched whatever was latest that day — the
+  one unpinned link in a pipeline whose whole point is `npm ci`.
+
+Verification failure is a build failure. The verifier's exit code becomes the
+script's, the batch launcher captures `%ERRORLEVEL%` *before* `pause` (which
+always succeeds, and so used to mask every failure), and the dialog reports a
+failed verification differently from a failed compile — "the artefact is not
+trusted" is not the same diagnosis as "it did not build".
+
+### Four signals, deliberately not merged
+
+`helpers/vscode_extension.py` is Tk-free and testable, and answers:
+
+| Signal | Read from |
+|---|---|
+| Source version | `vscode-extension/package.json` |
+| Built version | the manifest **inside** the `.vsix` |
+| Installed version | `code --list-extensions --show-versions` |
+| Freshness | newest build input vs the artefact's mtime |
+
+**Built comes from inside the archive, never the filename.** A filename is
+metadata anybody can rewrite; the manifest is what VS Code installs the thing
+as. Artefact discovery opens every candidate and keeps only those whose
+`publisher`/`name` match — `max(mtime)` over the glob would be fooled both by a
+`.vsix` copied in from elsewhere and by a renamed stale build.
+
+**Freshness is a separate question from version parity**, and it is the only one
+that can catch a project whose version never moves. PyScope's extension was
+stale for weeks with all three of its versions reading `0.1.0`. So
+`derive_status` reports `BUILT_DIFFERS` and `SOURCE_NEWER` as different states,
+and checks the version first: bumping a version edits `package.json`, which is
+itself a freshness input, so testing freshness first would report `SOURCE_NEWER`
+for every bump and make `BUILT_DIFFERS` unreachable.
+
+When the editor cannot be asked at all, the state is `UNKNOWN` rather than
+`NOT_INSTALLED` — turning an absence of evidence into evidence of absence is
+the same class of quiet untruth the whole feature exists to prevent.
+
+### Spawning the editor
+
+`code` on Windows is `code.CMD`, and `CreateProcess` only ever appends `.exe`
+to a bare name — it does not consult `PATHEXT`. So `Popen(["code", ...])`
+raises `FileNotFoundError` while the identical word works in PowerShell.
+`helpers/vscode_tasks.resolve_editor_argv` resolves argv[0] through
+`shutil.which` and is the single place that knows this; `open_in_editor` had
+the bug and now shares the fix. Extension-listing calls drop any configured
+flags (`--wait` would hang forever on an editor nobody can see); `open_in_editor`
+keeps them, because opening a window is what they are for.

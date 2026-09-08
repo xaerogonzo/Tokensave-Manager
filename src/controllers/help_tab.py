@@ -112,6 +112,15 @@ class HelpTabController:
             command=self._open_test_manager,
         ).pack(side=tk.TOP, fill=tk.X, padx=(0, 0), pady=(0, 6))
 
+        # The VS Code extension's own lifecycle. It lives here rather than in
+        # Settings because the question it answers -- "is the extension I have
+        # installed the one this Manager builds?" -- is the same kind of
+        # question the Tool Manager above answers about the CLI tools.
+        ttk.Button(
+            left_wrap, text="🧩  Extension Manager…",
+            command=self._open_extension_manager,
+        ).pack(side=tk.TOP, fill=tk.X, padx=(0, 0), pady=(0, 6))
+
         list_wrap = tk.Frame(left_wrap, bg=C["mantle"])
         list_wrap.pack(side=tk.TOP, fill=tk.Y, expand=True)
 
@@ -184,6 +193,7 @@ class HelpTabController:
             ("  GitHub Setup",        self._help_github_setup),
             ("  CodeGraph",           self._help_codegraph),
             ("  PyScope",             self._help_pyscope),
+            ("  VS Code extension",   self._help_vscode_extension),
             ("  AI Features",         self._help_ai_features),
             ("  Pre-commit Hook",     self._help_precommit_hook),
             ("  Run checks",          self._help_run_checks),
@@ -273,6 +283,19 @@ class HelpTabController:
         except (tk.TclError, AttributeError):
             return
         ToolManagerDialog(root, self._cfg)
+
+    def _open_extension_manager(self) -> None:
+        """Open the Extension Manager dialog from the Help tab nav.
+
+        Lazy import for the same reason as the Tool Manager above: help_tab's
+        import graph stays light, and a dialog nobody opens costs nothing.
+        """
+        from dialogs.extension_manager import ExtensionManagerDialog
+        try:
+            root = self._help_lb.winfo_toplevel()
+        except (tk.TclError, AttributeError):
+            return
+        ExtensionManagerDialog(root, self._cfg)
 
     def _open_test_manager(self) -> None:
         """Open the v4.13 Test Manager dialog.
@@ -509,6 +532,9 @@ class HelpTabController:
 
     def _help_pyscope(self):
         help_topics_tools.pyscope(self)
+
+    def _help_vscode_extension(self):
+        help_topics_tools.vscode_extension(self)
 
     def _help_ai_features(self):
         help_topics_tools.ai_features(self)

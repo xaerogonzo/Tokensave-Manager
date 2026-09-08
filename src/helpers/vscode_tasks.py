@@ -40,6 +40,7 @@ import dataclasses
 import json
 import os
 import shlex
+import shutil
 import subprocess
 
 from constants import CREATE_NO_WINDOW
@@ -244,6 +245,37 @@ def write_workspace_file(out_path: str, folders: list,
 
 # ── jump-to-location ─────────────────────────────────────────────────────────
 
+def resolve_editor_argv(editor_cmd: str) -> "list | None":
+    """`[absolute executable, *flags]` for *editor_cmd*, or None if not found.
+
+    **`subprocess` cannot launch `code` by name on Windows, and the shell can.**
+    The VS Code command line is `code.CMD`, and `CreateProcess` only ever
+    appends `.exe` to a bare name — it does not consult `PATHEXT`. So
+    `Popen(["code", ...])` raises FileNotFoundError while the identical word
+    works in PowerShell, which is a confusing pair of facts to meet at a bug
+    report. Measured on a machine where `shutil.which("code")` returns the
+    full path ending `Microsoft VS Code/bin/code.CMD`, and running that
+    resolved path succeeds where the bare word raises.
+
+    Only argv[0] is resolved; **any further tokens are kept**. `editor_cmd` is
+    documented as supporting flags and they are about opening windows, which is
+    exactly what this call is for. (The extension-listing calls in
+    `helpers/vscode_extension.py` drop them instead, because `--wait` there
+    would hang forever on an editor nobody can see.)
+
+    Raises ValueError for a command string that cannot be parsed, and returns
+    None for one that parses but names nothing on PATH — two different
+    problems with two different fixes.
+    """
+    parts = shlex.split(editor_cmd)          # ValueError on unbalanced quotes
+    if not parts:
+        return None
+    exe = shutil.which(parts[0])
+    if exe is None:
+        return None
+    return [exe] + parts[1:]
+
+
 def goto_argv(editor_cmd_parts: list, path: str,
               line: "int | None" = None, column: "int | None" = None) -> list:
     """argv that opens *path*, optionally at a line, in a VS Code-like editor.
@@ -282,9 +314,18 @@ def open_in_editor(editor_cmd: str, path: str, line: "int | None" = None,
     the user pressed.
     """
     try:
-        argv = goto_argv(shlex.split(editor_cmd), path, line, column)
+        head = resolve_editor_argv(editor_cmd)
     except ValueError as exc:                      # unbalanced quotes in cfg
         return False, f"could not parse editor command {editor_cmd!r}: {exc}"
+    if head is None:
+        # Distinguished from a launch failure on purpose. Both used to render
+        # as "Editor not found — set the correct editor command in Settings",
+        # which sent the user to change a setting that was already right.
+        return False, (
+            f"{editor_cmd!r} was not found on PATH. On Windows the VS Code "
+            "command line is code.CMD; check that VS Code's bin directory is "
+            "on PATH, or set an absolute path as editor_cmd in Settings.")
+    argv = goto_argv(head, path, line, column)
     try:
         subprocess.Popen(argv, creationflags=CREATE_NO_WINDOW)
     except (OSError, ValueError) as exc:

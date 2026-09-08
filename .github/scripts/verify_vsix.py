@@ -17,10 +17,17 @@ version. The extension manifest carries its own copy, and the packaged artefact
 carries a third. The Python suite checks the first two against each other; only
 here can the third — what is actually inside the built package — be checked.
 
+**A correct-looking package that is not this extension.** The version used to be
+read from the *filename*, which anybody can rename; a `.vsix` for a different
+extension, or a renamed stale build, satisfied every structural rule. The
+identity that matters is `publisher` + `name` + `version` read from the manifest
+*inside* the archive, because that is what VS Code installs it as.
+
 Run from the repository root. Exits non-zero with a specific reason.
 """
 from __future__ import annotations
 
+import json
 import re
 import sys
 import zipfile
@@ -51,6 +58,37 @@ REQUIRED = (
 #: A package this big means a binary got in despite the checks above.
 MAX_BYTES = 2 * 1024 * 1024
 
+#: Where vsce puts the manifest inside the archive. Read rather than trusted:
+#: the filename is metadata, this is what the editor actually installs.
+PACKAGED_MANIFEST = "extension/package.json"
+
+
+def source_identity() -> tuple:
+    """`(publisher, name)` the artefact must claim, from the source manifest.
+
+    Read from `package.json` rather than hardcoded so that renaming the
+    extension cannot leave a verifier quietly checking the old identity.
+    """
+    manifest = json.loads(
+        (EXTENSION / "package.json").read_text(encoding="utf-8"))
+    return manifest["publisher"], manifest["name"]
+
+
+def packaged_manifest(archive: zipfile.ZipFile) -> dict:
+    """The manifest inside *archive*, or `{}` when it is absent or unreadable.
+
+    Absent is already reported by the REQUIRED patterns, so returning `{}`
+    here avoids a second, less specific complaint about the same fact.
+    """
+    try:
+        raw = archive.read(PACKAGED_MANIFEST)
+    except KeyError:
+        return {}
+    try:
+        return json.loads(raw)
+    except (ValueError, UnicodeDecodeError):
+        return {"__unreadable__": True}
+
 
 def app_version() -> str:
     sys.path.insert(0, str(ROOT / "src"))
@@ -71,7 +109,7 @@ def find_package() -> Path:
     return candidates[0]
 
 
-def check_package(package: Path, version: str) -> list:
+def check_package(package: Path, version: str, identity: tuple = None) -> list:
     """Everything wrong with *package*, as a list of reasons. Empty is a pass.
 
     Separated from `main` so the rules can be tested against synthetic
@@ -92,6 +130,25 @@ def check_package(package: Path, version: str) -> list:
 
     with zipfile.ZipFile(package) as archive:
         names = archive.namelist()
+        manifest = packaged_manifest(archive)
+
+    # Identity, from inside the archive. `-{version}.vsix` above checks what
+    # the file is *called*; this checks what it *is*.
+    if identity is None:
+        identity = source_identity()
+    want_publisher, want_name = identity
+
+    if manifest.get("__unreadable__"):
+        problems.append(
+            f"{PACKAGED_MANIFEST} inside the package is not readable JSON")
+    elif manifest:
+        got = (manifest.get("publisher"), manifest.get("name"),
+               manifest.get("version"))
+        want = (want_publisher, want_name, version)
+        if got != want:
+            problems.append(
+                "the packaged manifest identifies this as "
+                f"{got[0]}.{got[1]}@{got[2]}, not {want[0]}.{want[1]}@{want[2]}")
 
     for pattern in FORBIDDEN:
         hits = [n for n in names if pattern.search(n)]
