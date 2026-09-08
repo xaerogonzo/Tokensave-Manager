@@ -10,7 +10,7 @@ Covers:
 Monkeypatching
 --------------
 `subprocess` is imported at module scope in claude_cli.py, so all patches
-target `"helpers.claude_cli.subprocess.*"`. This scopes the patch to the
+target `"helpers.agent_cli.subprocess.*"`. This scopes the patch to the
 module under test and does not touch the global subprocess registry, making
 the tests safe to run in parallel (if pytest-xdist is ever added).
 
@@ -60,10 +60,10 @@ def test_spawn_strips_newlines_from_instruction(monkeypatch):
     """Stray \\n inside cmd.exe /k fires Enter prematurely — must be stripped."""
     captured = []
     monkeypatch.setattr(
-        "helpers.claude_cli.subprocess.Popen",
+        "helpers.agent_cli.subprocess.Popen",
         lambda argv, **kw: captured.append(argv) or MagicMock(),
     )
-    monkeypatch.setattr("helpers.claude_cli.sys.platform", "linux")
+    monkeypatch.setattr("helpers.agent_cli.sys.platform", "linux")
     spawn_claude_cli("/usr/bin/claude", "/path", "line1\nline2\r\nline3")
     assert captured, "Popen was not called"
     instruction = captured[0][-1]   # last element of argv on the Linux path
@@ -74,10 +74,10 @@ def test_spawn_strips_newlines_from_instruction(monkeypatch):
 def test_spawn_linux_path_builds_argv(monkeypatch):
     captured = []
     monkeypatch.setattr(
-        "helpers.claude_cli.subprocess.Popen",
+        "helpers.agent_cli.subprocess.Popen",
         lambda argv, **kw: captured.append(argv) or MagicMock(),
     )
-    monkeypatch.setattr("helpers.claude_cli.sys.platform", "linux")
+    monkeypatch.setattr("helpers.agent_cli.sys.platform", "linux")
     ok, err = spawn_claude_cli("/usr/bin/claude", "/path", "run tests")
     assert ok is True
     assert err == ""
@@ -87,20 +87,20 @@ def test_spawn_linux_path_builds_argv(monkeypatch):
 def test_spawn_linux_path_includes_model_flag(monkeypatch):
     captured = []
     monkeypatch.setattr(
-        "helpers.claude_cli.subprocess.Popen",
+        "helpers.agent_cli.subprocess.Popen",
         lambda argv, **kw: captured.append(argv) or MagicMock(),
     )
-    monkeypatch.setattr("helpers.claude_cli.sys.platform", "linux")
+    monkeypatch.setattr("helpers.agent_cli.sys.platform", "linux")
     spawn_claude_cli("/usr/bin/claude", "/path", "do x", model="claude-haiku")
     assert captured[0] == ["/usr/bin/claude", "--model", "claude-haiku", "do x"]
 
 
 def test_spawn_popen_oserror_returns_false(monkeypatch):
     monkeypatch.setattr(
-        "helpers.claude_cli.subprocess.Popen",
+        "helpers.agent_cli.subprocess.Popen",
         lambda *a, **kw: (_ for _ in ()).throw(OSError("No such file")),
     )
-    monkeypatch.setattr("helpers.claude_cli.sys.platform", "linux")
+    monkeypatch.setattr("helpers.agent_cli.sys.platform", "linux")
     ok, err = spawn_claude_cli("/bad/path/claude", "/path", "do x")
     assert ok is False
     assert "No such file" in err
@@ -120,10 +120,10 @@ def test_spawn_interactive_argv_has_no_instruction(monkeypatch):
     of entering interactive mode."""
     captured = []
     monkeypatch.setattr(
-        "helpers.claude_cli.subprocess.Popen",
+        "helpers.agent_cli.subprocess.Popen",
         lambda argv, **kw: captured.append(argv) or MagicMock(),
     )
-    monkeypatch.setattr("helpers.claude_cli.sys.platform", "linux")
+    monkeypatch.setattr("helpers.agent_cli.sys.platform", "linux")
     ok, err = spawn_claude_cli_interactive("/usr/bin/claude", "/path")
     assert ok is True
     assert err == ""
@@ -133,10 +133,10 @@ def test_spawn_interactive_argv_has_no_instruction(monkeypatch):
 def test_spawn_interactive_includes_model_flag(monkeypatch):
     captured = []
     monkeypatch.setattr(
-        "helpers.claude_cli.subprocess.Popen",
+        "helpers.agent_cli.subprocess.Popen",
         lambda argv, **kw: captured.append(argv) or MagicMock(),
     )
-    monkeypatch.setattr("helpers.claude_cli.sys.platform", "linux")
+    monkeypatch.setattr("helpers.agent_cli.sys.platform", "linux")
     spawn_claude_cli_interactive("/usr/bin/claude", "/path",
                                  model="claude-haiku")
     assert captured[0] == ["/usr/bin/claude", "--model", "claude-haiku"]
@@ -145,20 +145,20 @@ def test_spawn_interactive_includes_model_flag(monkeypatch):
 def test_spawn_interactive_uses_project_path_as_cwd(monkeypatch):
     captured_kwargs = {}
     monkeypatch.setattr(
-        "helpers.claude_cli.subprocess.Popen",
+        "helpers.agent_cli.subprocess.Popen",
         lambda argv, **kw: captured_kwargs.update(kw) or MagicMock(),
     )
-    monkeypatch.setattr("helpers.claude_cli.sys.platform", "linux")
+    monkeypatch.setattr("helpers.agent_cli.sys.platform", "linux")
     spawn_claude_cli_interactive("/usr/bin/claude", "/my/project")
     assert captured_kwargs.get("cwd") == "/my/project"
 
 
 def test_spawn_interactive_popen_oserror_returns_false(monkeypatch):
     monkeypatch.setattr(
-        "helpers.claude_cli.subprocess.Popen",
+        "helpers.agent_cli.subprocess.Popen",
         lambda *a, **kw: (_ for _ in ()).throw(OSError("No such file")),
     )
-    monkeypatch.setattr("helpers.claude_cli.sys.platform", "linux")
+    monkeypatch.setattr("helpers.agent_cli.sys.platform", "linux")
     ok, err = spawn_claude_cli_interactive("/bad/path/claude", "/path")
     assert ok is False
     assert "No such file" in err
@@ -172,7 +172,7 @@ def test_print_empty_exe_returns_none():
 
 def test_print_success_returns_stripped_stdout(monkeypatch):
     monkeypatch.setattr(
-        "helpers.claude_cli.subprocess.run",
+        "helpers.agent_cli.subprocess.run",
         lambda *a, **kw: _make_proc(stdout="  hello world\n"),
     )
     assert call_claude_cli_print("/usr/bin/claude", "prompt") == "hello world"
@@ -180,7 +180,7 @@ def test_print_success_returns_stripped_stdout(monkeypatch):
 
 def test_print_empty_stdout_returns_none(monkeypatch):
     monkeypatch.setattr(
-        "helpers.claude_cli.subprocess.run",
+        "helpers.agent_cli.subprocess.run",
         lambda *a, **kw: _make_proc(stdout="   "),
     )
     assert call_claude_cli_print("/usr/bin/claude", "prompt") is None
@@ -189,13 +189,13 @@ def test_print_empty_stdout_returns_none(monkeypatch):
 def test_print_timeout_returns_none(monkeypatch):
     def raise_timeout(*a, **kw):
         raise subprocess.TimeoutExpired(cmd="claude", timeout=5)
-    monkeypatch.setattr("helpers.claude_cli.subprocess.run", raise_timeout)
+    monkeypatch.setattr("helpers.agent_cli.subprocess.run", raise_timeout)
     assert call_claude_cli_print("/usr/bin/claude", "prompt", timeout=5) is None
 
 
 def test_print_oserror_returns_none(monkeypatch):
     monkeypatch.setattr(
-        "helpers.claude_cli.subprocess.run",
+        "helpers.agent_cli.subprocess.run",
         lambda *a, **kw: (_ for _ in ()).throw(OSError("not found")),
     )
     assert call_claude_cli_print("/usr/bin/claude", "prompt") is None
@@ -203,7 +203,7 @@ def test_print_oserror_returns_none(monkeypatch):
 
 def test_print_nonzero_exit_returns_none(monkeypatch):
     monkeypatch.setattr(
-        "helpers.claude_cli.subprocess.run",
+        "helpers.agent_cli.subprocess.run",
         lambda *a, **kw: _make_proc(stdout="out", returncode=1, stderr="auth error"),
     )
     assert call_claude_cli_print("/usr/bin/claude", "prompt") is None
@@ -214,7 +214,7 @@ def test_print_model_flag_included(monkeypatch):
     def fake_run(cmd, **kw):
         captured.append(cmd)
         return _make_proc(stdout="ok")
-    monkeypatch.setattr("helpers.claude_cli.subprocess.run", fake_run)
+    monkeypatch.setattr("helpers.agent_cli.subprocess.run", fake_run)
     call_claude_cli_print("/usr/bin/claude", "prompt", model="claude-haiku")
     assert "--model" in captured[0]
     assert "claude-haiku" in captured[0]
@@ -225,7 +225,7 @@ def test_print_system_prompt_flag_included(monkeypatch):
     def fake_run(cmd, **kw):
         captured.append(cmd)
         return _make_proc(stdout="ok")
-    monkeypatch.setattr("helpers.claude_cli.subprocess.run", fake_run)
+    monkeypatch.setattr("helpers.agent_cli.subprocess.run", fake_run)
     call_claude_cli_print("/usr/bin/claude", "prompt", system_prompt="be concise")
     assert "--append-system-prompt" in captured[0]
 
@@ -235,7 +235,7 @@ def test_print_cwd_passed_to_subprocess(monkeypatch):
     def fake_run(cmd, **kw):
         captured_kw.update(kw)
         return _make_proc(stdout="ok")
-    monkeypatch.setattr("helpers.claude_cli.subprocess.run", fake_run)
+    monkeypatch.setattr("helpers.agent_cli.subprocess.run", fake_run)
     call_claude_cli_print("/usr/bin/claude", "prompt", cwd="/my/project")
     assert captured_kw.get("cwd") == "/my/project"
 
@@ -243,7 +243,7 @@ def test_print_cwd_passed_to_subprocess(monkeypatch):
 # ── get_last_cli_error: the SPECIFIC failure cause (per-thread) ───────────────
 
 def test_cli_error_success_is_none(monkeypatch):
-    monkeypatch.setattr("helpers.claude_cli.subprocess.run",
+    monkeypatch.setattr("helpers.agent_cli.subprocess.run",
                         lambda *a, **kw: _make_proc(stdout="ok"))
     assert call_claude_cli_print("/usr/bin/claude", "p") == "ok"
     assert get_last_cli_error() is None
@@ -257,7 +257,7 @@ def test_cli_error_empty_exe(monkeypatch):
 def test_cli_error_timeout(monkeypatch):
     def raise_timeout(*a, **kw):
         raise subprocess.TimeoutExpired(cmd="claude", timeout=7)
-    monkeypatch.setattr("helpers.claude_cli.subprocess.run", raise_timeout)
+    monkeypatch.setattr("helpers.agent_cli.subprocess.run", raise_timeout)
     assert call_claude_cli_print("/usr/bin/claude", "p", timeout=7) is None
     err = get_last_cli_error() or ""
     assert "timed out" in err and "7" in err
@@ -265,7 +265,7 @@ def test_cli_error_timeout(monkeypatch):
 
 def test_cli_error_oserror_mentions_not_runnable(monkeypatch):
     monkeypatch.setattr(
-        "helpers.claude_cli.subprocess.run",
+        "helpers.agent_cli.subprocess.run",
         lambda *a, **kw: (_ for _ in ()).throw(OSError("No such file")),
     )
     assert call_claude_cli_print("/usr/bin/claude", "p") is None
@@ -276,7 +276,7 @@ def test_cli_error_oserror_mentions_not_runnable(monkeypatch):
 
 def test_cli_error_nonzero_exit_includes_stderr(monkeypatch):
     monkeypatch.setattr(
-        "helpers.claude_cli.subprocess.run",
+        "helpers.agent_cli.subprocess.run",
         lambda *a, **kw: _make_proc(stdout="", returncode=1, stderr="not logged in"),
     )
     assert call_claude_cli_print("/usr/bin/claude", "p") is None

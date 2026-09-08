@@ -9,6 +9,8 @@ from __future__ import annotations
 import os
 from types import SimpleNamespace
 
+from helpers.agent_cli import resolve as agent_cli_resolve
+
 import pytest
 import tkinter as tk
 from tkinter import ttk
@@ -20,7 +22,7 @@ pytestmark = pytest.mark.tk
 
 # ── test fixture factory ──────────────────────────────────────────────────────
 
-def _make_ctl(tk_root, project_path=None, llm_cfg=None, enable_grounding=False):
+def _make_ctl(tk_root, project_path=None, llm_cfg=None, enable_grounding=False, agent="claude", agent_exe="/usr/bin/claude"):
     """Build a minimal AskTabController attached to a real Notebook."""
     nb = ttk.Notebook(tk_root)
     nb.pack()
@@ -31,10 +33,17 @@ def _make_ctl(tk_root, project_path=None, llm_cfg=None, enable_grounding=False):
     cfg = SimpleNamespace(
         raw={"ask_tab_llm": llm_cfg},
         tokensave_exe="",
-        claude_cli_exe="",
+        claude_cli_exe=agent_exe if agent == "claude" else "",
+        cursor_cli_exe=agent_exe if agent == "cursor" else "",
         enable_llm_grounding=enable_grounding,
         codegraph_exe="",
     )
+    # Delegate to the REAL resolver rather than hand-rolling a verdict: a
+    # double that answers "ok" to everything would hide exactly the
+    # unknown-agent and unavailable cases the Ask tab now has to render.
+    cfg.resolve_agent_cli = lambda: agent_cli_resolve(
+        agent, lambda spec: getattr(cfg, spec.config_key_exe, ""))
+    cfg.agent_model_for = lambda spec: ""
 
     get_path = lambda: project_path  # noqa: E731
 
@@ -136,8 +145,19 @@ def test_set_intro_claude_cli_provider_mentions_no_tool_access(tk_root):
                     llm_cfg={"provider": "claude_cli", "enabled": True})
     ctl._ask_set_intro()
     text = ctl._ask_log.get("1.0", tk.END)
-    assert "Claude CLI" in text
+    assert "Claude Code CLI" in text
     assert "unavailable" in text.lower() or "No tool" in text
+
+
+def test_set_intro_names_the_selected_agent_not_the_hardcoded_one(tk_root):
+    """The backend value is still "claude_cli"; the agent it names is not."""
+    ctl = _make_ctl(tk_root,
+                    llm_cfg={"provider": "claude_cli", "enabled": True},
+                    agent="cursor", agent_exe="/usr/bin/cursor-agent")
+    ctl._ask_set_intro()
+    text = ctl._ask_log.get("1.0", tk.END)
+    assert "Cursor Agent CLI" in text
+    assert "Claude" not in text
 
 
 def test_set_intro_clears_previous_content(tk_root):

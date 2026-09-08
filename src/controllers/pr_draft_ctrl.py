@@ -256,7 +256,7 @@ class PRDraftCtrl:
             _accept)
 
     def _draft_pr_via_cli(self, path: str):
-        from helpers.claude_cli import spawn_claude_cli   # lazy import
+        from helpers.agent_cli import spawn as spawn_agent_cli  # lazy import
         base = self._resolve_pr_base(path)
         if base is None:
             messagebox.showerror(
@@ -388,14 +388,19 @@ class PRDraftCtrl:
             f"{gh_step}"
             f"{mcp_nudge}"
         )
-        ok, err = spawn_claude_cli(
-            self._cfg.claude_cli_exe, path, instruction,
-            model=self._cfg.claude_cli_model,
+        res = self._cfg.resolve_agent_cli()
+        if not res.ok:
+            messagebox.showerror("Draft PR — no agent CLI",
+                                 res.error_message(), parent=self._root)
+            return
+        ok, err = spawn_agent_cli(
+            res.spec, res.exe, path, instruction,
+            model=self._cfg.agent_model_for(res.spec),
         )
         if not ok:
             # Primary action failed — surface the error and STOP; don't pop the
             # secondary test-gap window into a disjoint "failed but soliciting" state.
-            messagebox.showerror("Claude Code CLI error", err, parent=self._root)
+            messagebox.showerror(f"{res.label} error", err, parent=self._root)
             return
         # CLI launched (non-blocking Popen) — open the manager's test-gap window
         # so CLI users get the same coverage visibility the Ollama dialog has.

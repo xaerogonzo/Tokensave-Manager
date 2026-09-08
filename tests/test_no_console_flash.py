@@ -44,8 +44,9 @@ _EXEMPT = {
     # these launch the Claude CLI for the user to look at and type into, so a
     # console is the feature. Suppressing it here would be a real regression.
     ("controllers/snippets.py", "_run_skill"),
-    ("helpers/claude_cli.py", "spawn_claude_cli"),
-    ("helpers/claude_cli.py", "spawn_claude_cli_interactive"),
+    # Both agent-CLI spawn paths funnel through one runner since the registry
+    # extraction; helpers/claude_cli.py is now a shim with no subprocess call.
+    ("helpers/agent_cli.py", "_spawn"),
 }
 
 

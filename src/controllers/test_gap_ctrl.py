@@ -485,8 +485,10 @@ class TestGapCtrl:
         ).pack(side=tk.LEFT)
 
         # AI master switch
+        from helpers.agent_cli import resolve_from
+        _agent = resolve_from(self._cfg)
         ai_available = bool(
-            getattr(self._cfg, "claude_cli_exe", "") or
+            _agent.ok or
             self._cfg.raw.get("commit_message_llm", {}).get("provider")
         )
         ctx.ai_enabled_var = tk.BooleanVar(value=ai_available)
@@ -502,7 +504,9 @@ class TestGapCtrl:
         ai_chk.pack(side=tk.RIGHT)
 
         # AI backend selector (persisted) — Auto / Claude CLI / Ollama.
-        _cli_ok = bool(getattr(self._cfg, "claude_cli_exe", ""))
+        # The persisted value is still spelled "claude_cli"; the radio
+        # label follows whichever agent is actually selected.
+        _cli_ok = _agent.ok
         _llm_ok = bool(self._cfg.raw.get("commit_message_llm", {}).get("provider"))
         ctx.backend_var = tk.StringVar(
             value=(self._cfg.raw.get("test_gen_backend") or "auto"))
@@ -519,7 +523,7 @@ class TestGapCtrl:
                  font=("Segoe UI", 8)).pack(side=tk.LEFT, padx=(0, 4))
         for _bval, _blabel, _ok in (
                 ("auto", "Auto", _cli_ok or _llm_ok),
-                ("claude_cli", "Claude CLI", _cli_ok),
+                ("claude_cli", _agent.label, _cli_ok),
                 ("llm", "Ollama", _llm_ok)):
             ttk.Radiobutton(
                 be_row, text=_blabel, value=_bval, variable=ctx.backend_var,

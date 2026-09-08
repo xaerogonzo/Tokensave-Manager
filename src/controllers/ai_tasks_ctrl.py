@@ -405,7 +405,8 @@ class AITasksController:
         def _export_all_cli() -> None:
             self._launch_scout_report_in_cli(path, findings, suppressed)
 
-        cli_available = bool(self._cfg.claude_cli_exe)
+        from helpers.agent_cli import resolve_from
+        cli_available = resolve_from(self._cfg).ok
 
         def _batch_clipboard(items) -> None:
             self._batch_scout_to_clipboard(path, items)
@@ -450,7 +451,7 @@ class AITasksController:
     def _launch_scout_briefing_in_cli(self, project_path: str, finding) -> None:
         """Write one finding to a temp .md and open a Claude CLI terminal."""
         from helpers.refactor_scout import write_finding_briefing
-        from helpers.claude_cli import spawn_claude_cli
+        from helpers.agent_cli import resolve_from, spawn as spawn_agent
         try:
             briefing_path = write_finding_briefing(finding)
         except OSError as e:
@@ -461,12 +462,13 @@ class AITasksController:
             f"explain why this finding fired, then suggest a concrete, scoped "
             f"refactor for the named symbol only."
         )
-        ok, err = spawn_claude_cli(self._cfg.claude_cli_exe, project_path,
+        _agent = resolve_from(self._cfg)
+        ok, err = spawn_agent(_agent.spec, _agent.exe, project_path,
                                     instruction)
         if not ok:
-            self._on_log(f"[scout] Could not launch Claude CLI: {err}", "red")
+            self._on_log(f"[scout] Could not launch the agent CLI: {err}", "red")
         else:
-            self._on_log(f"[scout] Opened Claude CLI with briefing → {briefing_path}")
+            self._on_log(f"[scout] Opened the agent CLI with briefing → {briefing_path}")
 
     def _batch_scout_to_clipboard(self, project_path: str, items) -> None:
         """Format the selected findings as one markdown briefing and copy.
@@ -493,7 +495,7 @@ class AITasksController:
     def _batch_scout_to_cli(self, project_path: str, items) -> None:
         """Write the selected findings to a temp briefing and open Claude CLI."""
         from helpers.refactor_scout import write_batch_briefing
-        from helpers.claude_cli import spawn_claude_cli
+        from helpers.agent_cli import resolve_from, spawn as spawn_agent
         try:
             briefing_path = write_batch_briefing(items, project_path)
         except OSError as e:
@@ -504,13 +506,14 @@ class AITasksController:
             f"and propose a prioritised refactoring plan. Group related "
             f"findings; suggest tackling order."
         )
-        ok, err = spawn_claude_cli(self._cfg.claude_cli_exe, project_path,
+        _agent = resolve_from(self._cfg)
+        ok, err = spawn_agent(_agent.spec, _agent.exe, project_path,
                                     instruction)
         if not ok:
-            self._on_log(f"[scout] Could not launch Claude CLI: {err}", "red")
+            self._on_log(f"[scout] Could not launch the agent CLI: {err}", "red")
         else:
             self._on_log(
-                f"[scout] Opened Claude CLI with {len(items)} findings "
+                f"[scout] Opened the agent CLI with {len(items)} findings "
                 f"→ {briefing_path}")
 
     def _batch_scout_to_ask(self, project_path: str, items) -> None:
@@ -528,7 +531,7 @@ class AITasksController:
                                      suppressed: int) -> None:
         """Write the full report to a temp .md and open a Claude CLI terminal."""
         from helpers.refactor_scout import write_full_report
-        from helpers.claude_cli import spawn_claude_cli
+        from helpers.agent_cli import resolve_from, spawn as spawn_agent
         try:
             report_path = write_full_report(findings, project_path, suppressed)
         except OSError as e:
@@ -539,12 +542,13 @@ class AITasksController:
             f"a prioritised refactoring plan grouped by impact. Do not re-run "
             f"analytics tools — the briefing IS the analytics output."
         )
-        ok, err = spawn_claude_cli(self._cfg.claude_cli_exe, project_path,
+        _agent = resolve_from(self._cfg)
+        ok, err = spawn_agent(_agent.spec, _agent.exe, project_path,
                                     instruction)
         if not ok:
-            self._on_log(f"[scout] Could not launch Claude CLI: {err}", "red")
+            self._on_log(f"[scout] Could not launch the agent CLI: {err}", "red")
         else:
-            self._on_log(f"[scout] Opened Claude CLI with full report → {report_path}")
+            self._on_log(f"[scout] Opened the agent CLI with full report → {report_path}")
 
     # ── Roadmap-3: pre-merge check runner ────────────────────────────────────
 

@@ -9,6 +9,7 @@ tk = pytest.importorskip("tkinter")
 from tkinter import ttk
 
 from constants import CREATE_NO_WINDOW
+from state import ManagerConfig
 from controllers.git_tab import (
     GitTabController,
     _detect_base_branch,
@@ -503,51 +504,94 @@ class TestGitTabControllerInit:
         assert controller._root is tk_root
 
 class TestCmdOpenClaudeCli:
-    """cmd_open_claude_cli guards + delegation, tested unbound on a stub."""
+    """cmd_open_claude_cli guards + delegation, tested unbound on a stub.
+
+    The stub carries a REAL ManagerConfig rather than a SimpleNamespace: the
+    command now asks it to resolve which agent to launch, and a hand-rolled
+    double would happily answer questions the real resolver refuses to.
+    """
 
     @staticmethod
     def _stub(git_path="/repo", cli_exe="/usr/bin/claude",
-              cli_model="claude-haiku"):
-        cfg = SimpleNamespace(claude_cli_exe=cli_exe,
-                              claude_cli_model=cli_model)
-        return SimpleNamespace(_git_path=git_path, _cfg=cfg, _root=None)
+              cli_model="claude-haiku", agent="claude", cursor_exe=""):
+        raw = {"agent_cli": agent,
+               "claude_cli_exe": cli_exe,
+               "claude_cli_model": cli_model,
+               "cursor_cli_exe": cursor_exe}
+        return SimpleNamespace(_git_path=git_path,
+                               _cfg=ManagerConfig(raw=raw), _root=None)
+
+    @staticmethod
+    def _no_binaries_anywhere(mocker):
+        """Stop detection finding this developer's own installed CLIs."""
+        mocker.patch("helpers.agent_cli.shutil.which", return_value=None)
+        mocker.patch("helpers.agent_cli.os.path.isfile", return_value=False)
 
     def test_no_project_selected_is_noop(self, mocker):
-        mock_spawn = mocker.patch(
-            "helpers.claude_cli.spawn_claude_cli_interactive")
+        mock_spawn = mocker.patch("helpers.agent_cli.spawn_interactive")
         mock_info = mocker.patch("controllers.git_tab.messagebox.showinfo")
         GitTabController.cmd_open_claude_cli(self._stub(git_path=None))
         mock_spawn.assert_not_called()
         mock_info.assert_not_called()
 
     def test_no_cli_configured_shows_info(self, mocker):
-        mock_spawn = mocker.patch(
-            "helpers.claude_cli.spawn_claude_cli_interactive")
+        self._no_binaries_anywhere(mocker)
+        mock_spawn = mocker.patch("helpers.agent_cli.spawn_interactive")
         mock_info = mocker.patch("controllers.git_tab.messagebox.showinfo")
         GitTabController.cmd_open_claude_cli(self._stub(cli_exe=""))
         mock_spawn.assert_not_called()
         mock_info.assert_called_once()
 
     def test_spawns_interactive_with_project_and_model(self, mocker):
-        mock_spawn = mocker.patch(
-            "helpers.claude_cli.spawn_claude_cli_interactive",
-            return_value=(True, ""))
-        mock_warn = mocker.patch(
-            "controllers.git_tab.messagebox.showwarning")
+        mock_spawn = mocker.patch("helpers.agent_cli.spawn_interactive",
+                                  return_value=(True, ""))
+        mock_warn = mocker.patch("controllers.git_tab.messagebox.showwarning")
         GitTabController.cmd_open_claude_cli(self._stub())
-        mock_spawn.assert_called_once_with(
-            "/usr/bin/claude", "/repo", model="claude-haiku")
+        spec, exe, path = mock_spawn.call_args[0]
+        assert spec.id == "claude"
+        assert exe == "/usr/bin/claude"
+        assert path == "/repo"
+        assert mock_spawn.call_args[1] == {"model": "claude-haiku"}
         mock_warn.assert_not_called()
 
     def test_spawn_failure_shows_warning(self, mocker):
-        mocker.patch(
-            "helpers.claude_cli.spawn_claude_cli_interactive",
-            return_value=(False, "boom"))
-        mock_warn = mocker.patch(
-            "controllers.git_tab.messagebox.showwarning")
+        mocker.patch("helpers.agent_cli.spawn_interactive",
+                     return_value=(False, "boom"))
+        mock_warn = mocker.patch("controllers.git_tab.messagebox.showwarning")
         GitTabController.cmd_open_claude_cli(self._stub())
         mock_warn.assert_called_once()
         assert "boom" in mock_warn.call_args[0]
+
+    # ── The button follows the selector, not the vendor it was named after ──
+
+    def test_selecting_cursor_launches_cursor(self, mocker):
+        """The whole point of the registry: one button, whichever agent is set."""
+        mock_spawn = mocker.patch("helpers.agent_cli.spawn_interactive",
+                                  return_value=(True, ""))
+        GitTabController.cmd_open_claude_cli(
+            self._stub(agent="cursor", cursor_exe="/usr/bin/cursor-agent"))
+        spec, exe, _path = mock_spawn.call_args[0]
+        assert spec.id == "cursor"
+        assert exe == "/usr/bin/cursor-agent"
+
+    def test_cursor_selected_but_missing_does_not_fall_back_to_claude(self, mocker):
+        """Silently running Claude here would be worse than refusing."""
+        self._no_binaries_anywhere(mocker)
+        mock_spawn = mocker.patch("helpers.agent_cli.spawn_interactive")
+        mock_info = mocker.patch("controllers.git_tab.messagebox.showinfo")
+        GitTabController.cmd_open_claude_cli(
+            self._stub(agent="cursor", cli_exe="/usr/bin/claude", cursor_exe=""))
+        mock_spawn.assert_not_called()
+        assert "Cursor" in mock_info.call_args[0][1]
+
+    def test_unknown_agent_reports_config_error_not_a_missing_install(self, mocker):
+        mock_spawn = mocker.patch("helpers.agent_cli.spawn_interactive")
+        mock_info = mocker.patch("controllers.git_tab.messagebox.showinfo")
+        GitTabController.cmd_open_claude_cli(self._stub(agent="cursor_old"))
+        mock_spawn.assert_not_called()
+        message = mock_info.call_args[0][1]
+        assert "cursor_old" in message
+        assert "Known agents" in message
 
 
 class TestMergeBodyFromChangelog:

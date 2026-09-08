@@ -76,6 +76,28 @@ These are the rules whose violation causes silent breakage. Every controller and
 - **Controllers import dialogs directly**; cross-dialog deps (e.g. `SettingsDialog` opening `MCPConfigDialog`) use **lazy in-handler imports** to avoid module-load cycles.
 - **`helpers/` never imports from `controllers/` or `dialogs/`** (no upward imports). Acyclic import graph is a verified invariant.
 
+### D2. Agent CLIs: a new agent is a table row, never a new literal
+
+`helpers/agent_cli.py` holds one capability table. Adding Codex, Gemini CLI or
+anything else means **adding a row**, not adding an `if agent == ...` branch or a
+sibling config key at a dozen call sites. That is the rule the whole extraction
+exists to preserve, and it is easy to break by accident.
+
+- Spec fields describe **capabilities**, not vendors: `system_prompt_mode`,
+  `prompt_transport`, `print_args`. A field named `is_cursor` re-creates the
+  cascade the table replaced.
+- The persisted backend values still spell the CLI option `"claude_cli"`. It now
+  resolves through `cfg.agent_cli`. **Do not rewrite user config to "fix" this** —
+  the compatibility guarantee is locked by `tests/test_backend_compat.py`.
+- `resolve_agent_cli()` returns three states (`ok` / `unavailable` /
+  `unknown_agent`). Never collapse the last two: one means "install it", the
+  other means "you have a typo", and an unknown id must never silently run the
+  default agent.
+- An `argv`-transport agent's prompt is size-checked against the runner's budget
+  before spawning. Never truncate to fit.
+- Claude Skills (`controllers/snippets.py`) stay pinned to Claude. That is a
+  capability difference, not an oversight.
+
 ### E. When in doubt, surface, don't decide
 
 - Adding a new top-level dependency? Ask first — the project deliberately avoids LangChain/LlamaIndex per `docs/ROADMAP.md` rule 2.
@@ -309,6 +331,10 @@ Must be updated when the project moves to a new location or machine.
 | `builtin_snippet_overrides` | Dict `{title: text}`. Per-prompt overrides for the built-in Claude prompt snippets defined in `src/prompts.py`. Defaults are ROM; this dict is the RAM overlay. Default `{}`. |
 | `codegraph_exe` | Optional absolute path to the codegraph CLI. Blank = auto-detect (`.cmd`-first via `shutil.which`, then `%APPDATA%\npm\codegraph.cmd`). Configurable via Settings → CodeGraph section. Empty string when not installed — never the bare command name. |
 | `claude_cli_exe` | Optional absolute path to the Claude Code CLI (`claude.cmd` from `npm install -g @anthropic-ai/claude-code`). Blank = auto-detect (`.cmd`-first via `shutil.which`, then `%APPDATA%\npm\claude.cmd`). Used by the Git tab's Draft PR button CLI execution path — spawns a detached terminal (`CREATE_NEW_CONSOLE + cmd.exe /k`) rather than capturing stdout. |
+| `agent_cli` | Which coding-agent CLI the manager shells out to: `"claude"` (default) or `"cursor"`. Validated, never coerced — an unrecognised value is a configuration error surfaced to the user, not a silent fallback to the default. Absent means Claude, which is what every pre-Cursor config implicitly said. |
+| `cursor_cli_exe` | Optional absolute path to the Cursor Agent CLI. Blank = auto-detect (`cursor-agent` on PATH, then `~/.local/bin`, where the Windows installer writes it — NOT `~/.cursor/bin`). Empty string when not installed. |
+| `cursor_cli_model` | Model passed to manager-spawned Cursor calls. Default `""` (let Cursor choose). Deliberately NOT mirrored from `claude_cli_model`: Anthropic model ids are not valid Cursor model ids. |
+| `gitignore_cursor_mcp` | Boolean, default `true`. Adds `.cursor/mcp.json` to a project's .gitignore after binding. Names the FILE, never the `.cursor/` directory — `.cursor/rules/` is shared project config and must stay committed. |
 | `doctor_skip_monolith_paths` | Optional list of project-relative paths Doctor's monolith audit should skip (e.g. `["src/tokensave-wrapper.py"]` for intentionally single-file modules). Default `[]`. |
 
 ---

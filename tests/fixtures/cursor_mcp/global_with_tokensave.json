@@ -1,0 +1,14 @@
+{
+  "mcpServers": {
+    "tokensave": {
+      "type": "stdio",
+      "command": "tokensave",
+      "args": ["serve"]
+    },
+    "some-other-server": {
+      "command": "npx",
+      "args": ["-y", "@example/mcp"],
+      "env": {"EXAMPLE_TOKEN": "x"}
+    }
+  }
+}

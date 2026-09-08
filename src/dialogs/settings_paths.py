@@ -23,7 +23,8 @@ from tkinter import ttk, filedialog, messagebox
 from typing import TYPE_CHECKING
 
 from constants import CREATE_NEW_CONSOLE, C, CREATE_NO_WINDOW
-from helpers.detection import _detect_git, _detect_gh, _detect_claude_cli
+from helpers.detection import (_detect_git, _detect_gh, _detect_claude_cli,
+                               _detect_cursor_cli)
 
 if TYPE_CHECKING:
     from state import ManagerConfig
@@ -60,6 +61,7 @@ class PathsSection:
         raw["git_exe"]          = self._git_exe_var.get().strip()
         raw["claude_cli_exe"]   = self._claude_cli_var.get().strip()
         raw["claude_cli_model"] = self._var_claude_cli_model.get().strip()
+        raw["cursor_cli_exe"]   = self._cursor_cli_var.get().strip()
         return True
 
     # ── Section builders (original visual order) ─────────────────────────
@@ -169,7 +171,58 @@ class PathsSection:
         self._dlg.after(100, lambda: self._verify_git(raw.get("git_exe") or self._cfg.git_exe))
 
         self._build_claude_cli_row(body, raw)
+        self._build_cursor_cli_row(body, raw)
         self._build_github_cli_row(body)
+
+
+    def _build_cursor_cli_row(self, body, raw):
+        """Cursor Agent CLI path sub-section.
+
+        Deliberately has no Install button, unlike the Claude row: Cursor's
+        installer is a piped PowerShell script (`irm ... | iex`) rather than an
+        npm package, and running a remote script the user has not read is not
+        something this dialog should do on their behalf. The hint text names
+        the command so they can run it themselves.
+        """
+        ttk.Separator(body, orient="horizontal").pack(fill=tk.X, padx=20, pady=(12, 8))
+        tk.Label(body,
+                 text="Cursor Agent CLI  ——  path to cursor-agent (installed to ~/.local/bin)",
+                 bg=C["base"], fg=C["subtext"],
+                 font=("Segoe UI", 9)).pack(anchor=tk.W, padx=20)
+        row = tk.Frame(body, bg=C["base"])
+        row.pack(fill=tk.X, padx=20, pady=(4, 0))
+        self._cursor_cli_var = tk.StringVar(value=raw.get("cursor_cli_exe", ""))
+        ttk.Entry(row, textvariable=self._cursor_cli_var, width=44).pack(
+            side=tk.LEFT, padx=(0, 6))
+
+        def _browse_cursor():
+            p = filedialog.askopenfilename(
+                title="Select cursor-agent",
+                filetypes=[("All files", "*.*")],
+                initialdir=os.path.expandvars(r"%USERPROFILE%\.local\bin"),
+                parent=self._dlg)
+            if p:
+                self._cursor_cli_var.set(p)
+
+        def _autodetect_cursor():
+            found = _detect_cursor_cli()
+            if found:
+                self._cursor_cli_var.set(found)
+                self._cursor_cli_status.configure(text=f"Found: {found}", fg=C["green"])
+            else:
+                self._cursor_cli_status.configure(
+                    text="Not found. Install with:  irm 'https://cursor.com/install?win32=true' | iex",
+                    fg=C["peach"])
+
+        ttk.Button(row, text="Browse\u2026",   command=_browse_cursor).pack(side=tk.LEFT, padx=(0, 6))
+        ttk.Button(row, text="Auto-detect", command=_autodetect_cursor).pack(side=tk.LEFT, padx=(0, 6))
+        self._cursor_cli_status = tk.Label(row, text="", bg=C["base"],
+                                           font=("Segoe UI", 8), fg=C["overlay0"])
+        self._cursor_cli_status.pack(side=tk.LEFT, padx=(6, 0))
+        tk.Label(body,
+                 text="  The Windows installer writes both `cursor-agent` and `agent` into ~/.local/bin.",
+                 font=("Segoe UI", 8), bg=C["base"], fg=C["overlay0"]).pack(
+                 anchor=tk.W, padx=20, pady=(2, 0))
 
     def _build_claude_cli_row(self, body, raw):
         """Claude Code CLI path + Install button sub-section."""

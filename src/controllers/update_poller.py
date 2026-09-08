@@ -327,7 +327,9 @@ class UpdatePollerController:
         btn_row.pack(fill=tk.X, padx=10, pady=(0, 10))
 
         # Determine which backends are available
-        has_cli = bool(self._cfg.claude_cli_exe)
+        from helpers.agent_cli import resolve_from
+        agent = resolve_from(self._cfg)
+        has_cli = agent.ok
         raw = self._cfg.raw or {}
         llm_cfg = raw.get("ask_tab_llm") or raw.get("commit_message_llm") or {}
         has_llm = bool(llm_cfg.get("enabled") and llm_cfg.get("provider"))
@@ -338,7 +340,7 @@ class UpdatePollerController:
         audit_menu = tk.Menu(audit_btn, tearoff=False, bg=C["base"], fg=C["text"])
         audit_btn["menu"] = audit_menu
         audit_menu.add_command(
-            label="🤖  Via Claude CLI",
+            label="🤖  Via " + agent.label,
             state=tk.NORMAL if has_cli else tk.DISABLED,
             command=lambda: self._run_audit_backend("claude_cli", dlg, audit_btn),
         )
@@ -549,9 +551,16 @@ class UpdatePollerController:
 
         # Import on main thread — prevents import-lock deadlock in worker
         if mode == "claude_cli":
-            from helpers.claude_cli import call_claude_cli_print as _call_fn
-            exe   = self._cfg.claude_cli_exe
-            model = self._cfg.claude_cli_model
+            from helpers.agent_cli import (call_print, model_from,
+                                           resolve_from)
+            _agent = resolve_from(self._cfg)
+            # Adapter: the LLM branch's _call_fn takes the exe first,
+            # the registry runner takes (spec, exe). Keeping one call
+            # shape below is worth this one-line shim.
+            _call_fn = (lambda _e, *a, **k:
+                        call_print(_agent.spec, _agent.exe, *a, **k))
+            exe   = _agent.exe
+            model = model_from(self._cfg, _agent.spec)
             llm_cfg_local = None
         else:  # local_llm
             from helpers.doc_drafter import dispatch_llm as _call_fn
@@ -593,8 +602,9 @@ class UpdatePollerController:
                     )
                     if result is None:
                         err = (
-                            "Claude CLI returned no output.\n"
-                            "Check claude_cli_exe in Settings → Claude Code CLI."
+                            f"{_agent.label} returned no output.\n"
+                            f"Check its path in Settings → Paths, and "
+                            f"the selected agent in Settings → AI."
                         )
                 else:
                     # enable_tokensave_tools routes to _dispatch_agentic (LocalAgent

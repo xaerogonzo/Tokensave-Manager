@@ -75,7 +75,7 @@ Token Save Manager Source/
 │   │                              report/wait/quit. `report what=geometry` runs the visual
 │   │                              oracle. Committed scripts live in scripts/drive/.
 │   │
-│   ├── helpers/                   92 modules of pure / IO helpers — no UI deps.
+│   ├── helpers/                   96 modules of pure / IO helpers — no UI deps.
 │   │   ├── config.py              _load_config, _save_config, _migrate_config
 │   │   ├── detection.py           _detect_git/_gh/_npm/_codegraph/_claude_cli,
 │   │   │                          _root_path/_label, _version_lt
@@ -134,7 +134,20 @@ Token Save Manager Source/
 │   │   │                          → (new_text, ok, msg) — Phase 2.1 mirror-contract helper;
 │   │   │                          read_section_bullets. All atomic via .tmp + os.replace.
 │   │   │                          Wired into ReleaseWizard P2 + DocDrafterDialog.
-│   │   ├── claude_cli.py          spawn_claude_cli — detached cmd.exe via CREATE_NEW_CONSOLE
+│   │   ├── agent_cli.py           Agent-CLI registry — one capability table (Claude Code,
+│   │   │                          Cursor Agent), three runners, and the Windows
+│   │   │                          command-line budgets for argv-transport agents.
+│   │   │                          New agent = one table row, never a new literal.
+│   │   ├── claude_cli.py          Thin compatibility shim over agent_cli — unchanged
+│   │   │                          signatures for ~12 existing call sites
+│   │   ├── agent_rules.py         AGENTS.md + .cursor/rules/*.mdc writers. Marked-block
+│   │   │                          managed; Cursor cannot follow CLAUDE.md's @include,
+│   │   │                          so the baseline is INLINED from one source
+│   │   ├── mcp_cursor.py          .cursor/mcp.json (project + global). Five binding
+│   │   │                          states; malformed never collapses into absent. No
+│   │   │                          trust gate — Cursor has no equivalent
+│   │   ├── cursor_tasks.py        Cursor CLI chat sessions for the Tasks tab. Reads
+│   │   │                          meta.json only, never store.db; bounded + symlink-safe
 │   │   │                          with ""outer"" multi-quote fix + \r\n strip (TTY safety).
 │   │   │                          call_claude_cli_print(model="", cwd=None) — non-interactive
 │   │   │                          --print path; model="" omits --model flag; cwd=~ isolates
@@ -406,7 +419,7 @@ Token Save Manager Source/
 │   │   ├── io_utils.py            Shared IO helpers for the patcher modules.
 │   │   └── ui.py                  UI helpers shared across controllers and dialogs.
 │   │
-│   ├── dialogs/                   46 dialog / panel modules — a tk.Toplevel per file,
+│   ├── dialogs/                   47 dialog / panel modules — a tk.Toplevel per file,
 │   │                          plus the panels the bigger dialogs are built from.
 │   │   ├── settings.py            SettingsDialog (+ _probe_loaded_model helper)
 │   │   ├── release_wizard.py      ReleaseWizardDialog + _ReleaseCtx (paired)
@@ -512,6 +525,10 @@ Token Save Manager Source/
 │   │   │                          States that the migration would make *worse*
 │   │   │                          are counted separately from bound ones.
 │   │   ├── mcp_desktop_panel.py   The Claude Desktop retirement UI.
+│   │   ├── mcp_cursor_panel.py    CursorBindingMixin — the Cursor section of the
+│   │   │                          MCP dialog. A separate panel because Cursor has no
+│   │   │                          trust gate and does not rewrite its own config; a
+│   │   │                          malformed file gets no Bind button, only Open.
 │   │   ├── tokensave_mcp_picker.py TokensaveMCPPickerDialog — wire tokensave into AI
 │   │   │                          agents from the Manager.
 │   │   ├── tokensave_daemon_manager.py TokensaveDaemonManagerDialog — list + stop running
@@ -980,7 +997,7 @@ file location changed.
 
 ## `src/app.py` — Main Application (legacy text)
 
-**No longer a single file, and this section is kept only for the class hierarchy below.** `src/app.py` is **1,320 lines**; the application is **178 files / ~72,400 lines** across `helpers/`, `controllers/` and `dialogs/`. The line this replaced claimed ~12,500 lines in one file, which was true before the Round-5 controller extraction and has been wrong by an order of magnitude since. Entry point is unchanged: `if __name__ == "__main__": App().mainloop()`.
+**No longer a single file, and this section is kept only for the class hierarchy below.** `src/app.py` is **1,320 lines**; the application is **183 files / ~74,200 lines** across `helpers/`, `controllers/` and `dialogs/`. The line this replaced claimed ~12,500 lines in one file, which was true before the Round-5 controller extraction and has been wrong by an order of magnitude since. Entry point is unchanged: `if __name__ == "__main__": App().mainloop()`.
 
 ### Class hierarchy
 

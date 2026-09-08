@@ -93,6 +93,32 @@ class ManagerConfig:
         return val if val is not None else "claude-haiku-4-5-20251001"
 
     @property
+    def cursor_cli_model(self) -> str:
+        """Model passed to manager-spawned Cursor Agent calls via --model.
+
+        Defaults to empty — let Cursor choose. Deliberately NOT mirrored from
+        `claude_cli_model`: Anthropic model ids are not valid Cursor model ids,
+        so copying that default would send every Cursor call a name it rejects.
+        """
+        val = self.raw.get("cursor_cli_model")
+        return val if val is not None else ""
+
+    @property
+    def agent_cli(self) -> str:
+        """Which agent CLI the manager shells out to: "claude" | "cursor".
+
+        Returned RAW, exactly as persisted, including values this build does
+        not recognise. Validation belongs to `resolve_agent_cli`, which can
+        report an unknown id as a configuration error; coercing it to the
+        default here would silently run Claude while the settings file said
+        otherwise. An absent key returns the default, which is what every
+        pre-Cursor configuration implicitly had.
+        """
+        from helpers.agent_cli import DEFAULT_AGENT_ID
+        val = self.raw.get("agent_cli")
+        return DEFAULT_AGENT_ID if val is None else str(val)
+
+    @property
     def enable_llm_grounding(self) -> bool:
         """Master switch for tokensave/codegraph grounding across LLM features.
 
@@ -188,6 +214,40 @@ class ManagerConfig:
         """Absolute path to the Claude Code CLI (empty string if not installed)."""
         return self._cached_claude_cli_exe
 
+    @property
+    def cursor_cli_exe(self) -> str:
+        """Absolute path to the Cursor Agent CLI (empty string if not installed)."""
+        return self._cached_cursor_cli_exe
+
+    # ── Agent-CLI resolution ──────────────────────────────────────────────
+
+    def resolve_agent_cli(self) -> "object":
+        """Resolve the selected agent CLI to (spec, exe, state).
+
+        The single entry point for every feature that shells out to a coding
+        agent. Returns an `AgentResolution` (see helpers/agent_cli) whose three
+        states callers must keep distinct: runnable, right-agent-but-missing,
+        and unknown-agent-in-config. Collapsing the last two into one message
+        told users to install something when the real fault was a typo.
+
+        Read at execution time, never snapshotted — a Settings save rebinds
+        both the selector and the paths (Rule 3).
+        """
+        from helpers.agent_cli import resolve
+        return resolve(self.agent_cli, lambda spec: self._agent_exe_for(spec))
+
+    def _agent_exe_for(self, spec) -> str:
+        """Configured-or-detected path for one agent spec."""
+        return {
+            "claude_cli_exe": self.claude_cli_exe,
+            "cursor_cli_exe": self.cursor_cli_exe,
+        }.get(spec.config_key_exe, "")
+
+    def agent_model_for(self, spec) -> str:
+        """Pinned model for one agent spec, falling back to its own default."""
+        val = self.raw.get(spec.config_key_model)
+        return spec.default_model if val is None else str(val)
+
     # ── Lifecycle ─────────────────────────────────────────────────────────
 
     def __post_init__(self):
@@ -202,10 +262,14 @@ class ManagerConfig:
         mutates `self.raw` (most notably `App._on_settings_saved`).
         """
         # Lazy import — keeps state.py at the bottom of the import graph.
-        from helpers.detection import _detect_git, _detect_codegraph, _detect_claude_cli
+        from helpers.detection import (_detect_git, _detect_codegraph,
+                                        _detect_claude_cli, _detect_cursor_cli)
+        # An explicitly configured path always wins over detection — otherwise
+        # a Settings save would be silently reverted by whatever is on PATH.
         self._cached_git_exe        = self.raw.get("git_exe")        or _detect_git()
         self._cached_codegraph_exe  = self.raw.get("codegraph_exe")  or _detect_codegraph()
         self._cached_claude_cli_exe = self.raw.get("claude_cli_exe") or _detect_claude_cli()
+        self._cached_cursor_cli_exe = self.raw.get("cursor_cli_exe") or _detect_cursor_cli()
 
     # ── Disk I/O ──────────────────────────────────────────────────────────
 

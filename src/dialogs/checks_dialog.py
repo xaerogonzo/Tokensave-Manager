@@ -112,18 +112,20 @@ def _check_claude_review(diff: str, cfg: "ManagerConfig", cancelled: threading.E
     if cancelled.is_set():
         return True, "cancelled"
     try:
-        from helpers.claude_cli import call_claude_cli_print
+        from helpers.agent_cli import call_print, model_from, resolve_from
         prompt = (
             "You are a code reviewer. Review the following git diff for the PR. "
             "Flag bugs, regressions, security issues, and significant style violations. "
             "Be concise. Summarise findings in 3–5 bullet points.\n\n"
             f"```diff\n{diff[:30_000]}\n```"
         )
-        model = (cfg.raw or {}).get("claude_cli_model") or "claude-haiku-4-5-20251001"
-        output = call_claude_cli_print(
-            claude_exe=cfg.claude_cli_exe or "claude",
+        agent = resolve_from(cfg)
+        if not agent.ok:
+            return True, "no agent CLI configured"
+        output = call_print(
+            agent.spec, agent.exe,
             prompt=prompt,
-            model=model,
+            model=model_from(cfg, agent.spec) or agent.spec.default_model,
             timeout=60,
         )
         if not output or not output.strip():

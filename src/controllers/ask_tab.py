@@ -358,9 +358,10 @@ class AskTabController:
         cfg = ((raw.get("ask_tab_llm") or raw.get("commit_message_llm") or {})
                if isinstance(raw, dict) else {})
         if cfg.get("provider") == "claude_cli":
+            _res = self._cfg.resolve_agent_cli()
             intro = (
-                "Ready (Claude CLI mode). Ask anything — responses come from "
-                "claude --print.\n"
+                f"Ready ({_res.label} mode). Ask anything — responses come "
+                f"from the agent CLI in print mode.\n"
                 "⚠  No tool access: read_file / tokensave_search are unavailable. "
                 "Great for general questions, explanations, and code advice.\n\n"
             )
@@ -464,14 +465,16 @@ class AskTabController:
         isn't needed. The full conversation history is serialised as plain text
         context, with the current user message sent cleanly as the final turn.
         """
-        from helpers.claude_cli import call_claude_cli_print
+        from helpers.agent_cli import call_print
 
-        claude_exe = self._cfg.claude_cli_exe or ""
-        if not claude_exe:
-            self._ask_append(
-                "Claude CLI is not configured. Set the path in "
-                "Settings → Claude Code CLI.\n\n", "error")
+        res = self._cfg.resolve_agent_cli()
+        if not res.ok:
+            # error_message() distinguishes "not installed" from "unknown
+            # agent in config" — two faults with two different fixes.
+            self._ask_append(res.error_message() + "\n\n", "error")
             return
+        agent_spec = res.spec
+        claude_exe = res.exe
 
         text = self._ask_entry.get().strip()
         self._ask_prepare_ui(text)
@@ -549,8 +552,8 @@ class AskTabController:
             else:
                 prompt = grounding_section + current_query
 
-            result = call_claude_cli_print(
-                claude_exe, prompt,
+            result = call_print(
+                agent_spec, claude_exe, prompt,
                 system_prompt=self._ASK_SYSTEM_PROMPT,
                 timeout=self._CLAUDE_CLI_TIMEOUT,
                 model=model,

@@ -62,6 +62,7 @@ class AISection:
 
     def save_into(self, raw: dict) -> bool:
         """Write this section's fields into raw. Always succeeds."""
+        raw["agent_cli"]               = self._var_agent_cli.get()
         raw["draft_pr_backend"]        = self._var_draft_pr_backend.get()
         raw["commit_message_backend"]  = self._var_commit_msg_backend.get()
         raw["enable_llm_grounding"]    = bool(self._var_enable_llm_grounding.get())
@@ -114,6 +115,30 @@ class AISection:
         tk.Label(lf, text="Draft PR",
                  font=("Segoe UI", 9, "bold"),
                  bg=C["base"], fg=C["text"]).pack(anchor=tk.W, padx=12, pady=(6, 2))
+        # Agent CLI selector. This sits ABOVE the per-feature backend
+        # radios because it changes what "Claude CLI" MEANS in every
+        # one of them: those settings keep the persisted value
+        # "claude_cli" and now resolve through this selector.
+        from helpers.agent_cli import AGENT_CLIS, DEFAULT_AGENT_ID
+        tk.Label(lf, text="Agent CLI  —  which coding agent the manager shells out to",
+                 bg=C["base"], fg=C["subtext"],
+                 font=("Segoe UI", 9)).pack(anchor=tk.W, padx=12, pady=(6, 2))
+        self._var_agent_cli = tk.StringVar(
+            value=raw.get("agent_cli") or DEFAULT_AGENT_ID)
+        agent_row = tk.Frame(lf, bg=C["base"])
+        agent_row.pack(anchor=tk.W, padx=12, pady=(0, 2))
+        for _aid, _spec in AGENT_CLIS.items():
+            ttk.Radiobutton(agent_row, text=_spec.label, value=_aid,
+                            variable=self._var_agent_cli).pack(
+                                side=tk.LEFT, padx=(0, 14))
+        tk.Label(lf,
+            text="  Applies to Draft PR, commit messages, the Ask tab, pre-commit\n"
+                 "  review and test generation. Set that agent's path in Paths above.\n"
+                 "  Claude Skills stay on Claude — they are a Claude Code feature.",
+            font=("Segoe UI", 8), bg=C["base"], fg=C["overlay0"],
+            justify=tk.LEFT).pack(anchor=tk.W, padx=24, pady=(0, 6))
+        ttk.Separator(lf, orient="horizontal").pack(fill=tk.X, padx=8, pady=(0, 6))
+
         self._var_draft_pr_backend = tk.StringVar(
             value=raw.get("draft_pr_backend") or "auto")
         pr_row = tk.Frame(lf, bg=C["base"])

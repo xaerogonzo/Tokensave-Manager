@@ -1146,8 +1146,9 @@ def _dispatch(effective_backend: str, cfg, system_prompt: str,
 
 def _resolve_backend(backend: str, cfg) -> "str | None":
     """Return the concrete backend to use, or None if nothing is configured."""
+    from helpers.agent_cli import resolve_from
     if backend == "auto":
-        if getattr(cfg, "claude_cli_exe", ""):
+        if resolve_from(cfg).ok:
             return "claude_cli"
         # Fall back to LLM if any provider is configured
         llm_cfg = cfg.raw.get("commit_message_llm", {})
@@ -1155,7 +1156,9 @@ def _resolve_backend(backend: str, cfg) -> "str | None":
             return "llm"
         return None
     if backend == "claude_cli":
-        return "claude_cli" if getattr(cfg, "claude_cli_exe", "") else None
+        # The persisted value still says "claude_cli"; what it resolves to is
+        # whichever agent CLI the user selected.
+        return "claude_cli" if resolve_from(cfg).ok else None
     if backend == "llm":
         llm_cfg = cfg.raw.get("commit_message_llm", {})
         if llm_cfg.get("provider") or llm_cfg.get("api_key"):
@@ -1184,20 +1187,25 @@ def _dispatch_claude_cli(cfg, system_prompt: str, user_prompt: str,
     + example) blows ("The command line is too long"). stdin has no such limit, and
     for a one-shot generate the leading-preamble placement is equivalent.
     """
-    from helpers.claude_cli import call_claude_cli_print, get_last_cli_error
+    from helpers.agent_cli import (call_print, get_last_cli_error,
+                                   model_from, resolve_from)
+    res = resolve_from(cfg)
+    if not res.ok:
+        return None, res.error_message()
     combined = f"{system_prompt}\n\n{user_prompt}" if system_prompt else user_prompt
-    content = call_claude_cli_print(
-        claude_exe=cfg.claude_cli_exe,
+    content = call_print(
+        res.spec,
+        res.exe,
         prompt=combined,
-        system_prompt="",                  # via stdin — keeps the command line tiny
+        system_prompt="",                  # folded in above — see docstring
         timeout=_CLI_GEN_TIMEOUT,          # large controllers need >90s one-shot
-        model=getattr(cfg, "claude_cli_model", "") or "",
+        model=model_from(cfg, res.spec),
         cwd=os.path.expanduser("~"),
     )
     if content is None:
         cause = get_last_cli_error()
         if cause:
-            return None, f"Claude CLI failed: {cause}"
+            return None, f"{res.label} failed: {cause}"
         return None, ("Claude CLI returned no output — verify the CLI path and "
                       "that you're logged in")
     return content, None
