@@ -13,10 +13,28 @@ inherits them — ``circular``, ``file_dependents``, ``impact``, ``callers``,
 ``dead_code``, the ``acyclicity`` health dimension, and through it the
 ``quality_signal`` aggregate.
 
+**Two kinds, two defects, reported separately.** The same bare-name binding
+happens on ``calls`` and on ``uses`` edges, and they do not move together.
+tokensave 7.11.1 (upstream #508) taught the *call* fallback to demand
+evidence before binding a lone candidate, and on this repository that took
+``calls`` from 455 impossible edges to 29 — a 94% clearance. The *reference*
+fallback was untouched: ``uses`` stayed at exactly 351, the same names
+(``exe``, ``cfg_path``, ``python_exe``, ``proj``) at the same counts before
+and after a full re-index.
+
+So a single total is not reportable. Summed, that upgrade reads 806 → 380,
+which looks like a fix that half-worked on one defect rather than what it
+was: one defect essentially fixed and a second one, in a different resolver
+path, entirely untouched. ``by_kind`` carries the split, and every consumer
+that says anything about #503 should speak about ``kind("calls")`` rather
+than about the total.
+
 This module counts them, so a consumer can say how much of the graph it is
-willing to believe. It does not repair anything: the defect is upstream
-(``docs/upstream-issues/tokensave-python-bare-name-fallback.md``) and the
-local job is to stop reporting a number whose basis is known to be wrong.
+willing to believe. It does not repair anything: the defects are upstream
+(``docs/upstream-issues/tokensave-python-bare-name-fallback.md`` for the
+call path, ``tokensave-python-uses-bare-name.md`` for the reference path)
+and the local job is to stop reporting a number whose basis is known to be
+wrong.
 
 **It reports the population it examined, not only its findings.** "No
 impossible edges across 15388" and "no impossible edges across 0" are the
@@ -61,6 +79,23 @@ MAX_COLLISIONS = 20
 
 
 @dataclass(frozen=True)
+class KindTally:
+    """The impossible/examined split for one edge kind.
+
+    Kept separate because the two kinds here answer to different upstream
+    defects and move independently. Reporting only the sum let a 94%
+    improvement in one render as "barely changed" -- see the module
+    docstring.
+    """
+    kind: str
+    impossible: int
+    examined: int
+
+    def __str__(self) -> str:
+        return f"{self.kind} {self.impossible}/{self.examined}"
+
+
+@dataclass(frozen=True)
 class Collision:
     """One name that production code binds to inside the test tree."""
     target_name: str
@@ -84,6 +119,7 @@ class GraphTrust:
     impossible_edges: int = 0
     source_files_affected: int = 0
     collisions: tuple = field(default_factory=tuple)
+    by_kind: tuple = field(default_factory=tuple)
     db_path: str = ""
 
     @property
@@ -95,6 +131,18 @@ class GraphTrust:
     def is_tainted(self) -> bool:
         return self.state == STATE_TAINTED
 
+    def kind(self, name: str) -> "KindTally | None":
+        """The tally for one edge kind, or None if that kind was not seen.
+
+        None means the kind is absent from this index, which is not the same
+        as a kind present with zero impossible edges -- the same distinction
+        the four states exist to keep.
+        """
+        for t in self.by_kind:
+            if t.kind == name:
+                return t
+        return None
+
     def summary(self) -> str:
         """One line, always naming the population it measured."""
         if self.state == STATE_UNKNOWN:
@@ -104,9 +152,12 @@ class GraphTrust:
         if self.state == STATE_TRUSTWORTHY:
             return (f"graph looks sound — no impossible edges "
                     f"across {self.edges_examined} examined")
+        split = ", ".join(f"{t.kind} {t.impossible}/{t.examined}"
+                          for t in self.by_kind if t.impossible)
+        detail = f" [{split}]" if split else ""
         return (f"graph is contaminated — {self.impossible_edges} impossible "
                 f"edge(s) from {self.source_files_affected} source file(s), "
-                f"across {self.edges_examined} examined")
+                f"across {self.edges_examined} examined{detail}")
 
 
 # ── Locating the index ───────────────────────────────────────────────────
@@ -369,7 +420,7 @@ def inspect_graph(project_root: str, *,
             node_count = conn.execute(
                 "SELECT COUNT(*) FROM nodes").fetchone()[0]
             rows = conn.execute(
-                "SELECT s.file_path, t.file_path, t.name "
+                "SELECT s.file_path, t.file_path, t.name, e.kind "
                 "FROM edges e "
                 "JOIN nodes s ON s.id = e.source "
                 "JOIN nodes t ON t.id = e.target "
@@ -394,20 +445,35 @@ def inspect_graph(project_root: str, *,
 
         tally: dict = {}
         sources: set = set()
+        seen_by_kind: dict = {}
+        bad_by_kind: dict = {}
         impossible = 0
-        for src_file, dst_file, dst_name in rows:
+        for src_file, dst_file, dst_name, edge_kind in rows:
+            kind = edge_kind or ""
+            seen_by_kind[kind] = seen_by_kind.get(kind, 0) + 1
             if not is_test_path(dst_file or ""):
                 continue
             if is_test_path(src_file or ""):
                 continue
             impossible += 1
+            bad_by_kind[kind] = bad_by_kind.get(kind, 0) + 1
             sources.add(src_file)
             key = (dst_name or "", dst_file or "")
             tally[key] = tally.get(key, 0) + 1
 
+        # Every kind that was examined, including the clean ones: a kind
+        # reporting 0/10656 is a result, and dropping it would leave a reader
+        # unable to tell "this kind is clean" from "this kind was not looked
+        # at". Ordered by impossible count so the worst reads first.
+        by_kind = tuple(
+            KindTally(k, bad_by_kind.get(k, 0), seen_by_kind[k])
+            for k in sorted(seen_by_kind,
+                            key=lambda k: (-bad_by_kind.get(k, 0), k))
+        )
+
         if not impossible:
             return GraphTrust(STATE_TRUSTWORTHY, edges_examined=examined,
-                              db_path=db)
+                              by_kind=by_kind, db_path=db)
 
         top = sorted(tally.items(), key=lambda kv: (-kv[1], kv[0]))
         collisions = tuple(
@@ -419,6 +485,7 @@ def inspect_graph(project_root: str, *,
                           impossible_edges=impossible,
                           source_files_affected=len(sources),
                           collisions=collisions,
+                          by_kind=by_kind,
                           db_path=db)
     finally:
         if conn is not None:

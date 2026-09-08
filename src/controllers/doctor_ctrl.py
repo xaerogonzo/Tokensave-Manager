@@ -66,6 +66,7 @@ from helpers import doctor_service
 from helpers.doctor_rules import (                      # noqa: E402
     _audit_project_tree,
     audit_graph_trust,
+    audit_index_extractor_version,
     audit_pyscope_cache,
     audit_mcp_auto_approve,
     audit_shadow_links,
@@ -758,6 +759,7 @@ class DoctorController:
 
         self._log_audit_results(violations, exempt_notes, files_scanned)
         self._log_shadow_health(project_path)
+        self._log_index_extractor(project_path)
         self._log_graph_trust(project_path)
         self._log_pyscope_cache(project_path)
         self._log_mcp_posture()
@@ -774,6 +776,26 @@ class DoctorController:
         if not notes:
             return
         self._on_log("═══ Shadow links ═══", C["mauve"])
+        for note in notes:
+            self._on_log(note, C["peach"])
+
+    def _log_index_extractor(self, project_path: str) -> None:
+        """Warn-only. Whether the graph was built by the tokensave installed.
+
+        Deliberately runs BEFORE the graph-trust check, because it is the
+        thing that decides how to read one: a contamination count measured
+        on an index an older extractor built is a report about a binary you
+        no longer run, and the remedy is a re-index rather than a bug
+        report. Getting those the wrong way round cost 20 days once.
+
+        Not a violation and not counted as one -- a stale index is a fact
+        about the working tree, not a defect in the source.
+        """
+        notes = audit_index_extractor_version(
+            project_path, self._cfg.tokensave_exe)
+        if not notes:
+            return
+        self._on_log("=== Index freshness ===", C["mauve"])
         for note in notes:
             self._on_log(note, C["peach"])
 

@@ -1,6 +1,28 @@
 <!--
-STATUS: FILED 2026-09-08 as issue #513 — awaiting maintainer response.
+STATUS: CLOSED — verified via GitHub API 2026-09-08
   https://github.com/aovestdipaperino/tokensave/issues/513
+
+RESOLVED: fixed upstream in PR #519, merged 2026-09-08. Closed COMPLETED.
+  NOT IN A RELEASE as of v7.11.1 (published 2026-09-06), so the misleading
+  message is still what this machine's binary prints. Archived because the
+  report is settled, not because the fix is installable — those are
+  different facts and only one of them is about the code.
+
+  The maintainer confirmed the diagnosis including which layer was lying:
+  `fetch_latest_stable_version` returned `Option<String>`, so a transport
+  failure, a parse failure, and "GitHub answered fine but this release has
+  no asset for your platform" all collapsed into one `None` that `upgrade`
+  spelled as a network fault. `VersionCheckError` now separates the three,
+  and the `config error` prefix is gone too — nothing about a missing
+  release asset implicates the user's configuration.
+
+  Manager impact: none required, and one thing NOT to do. The Manager's own
+  Upgrade-badge bug (fixed this cycle) was this same shape one layer out —
+  state written from intention instead of measurement. `reprobe()` reads
+  the installed binary after the run, so it is already correct against both
+  the old message and the new one, and must not be taught to parse either.
+
+PRIOR: FILED 2026-09-08 as issue #513 — awaiting maintainer response.
 
   SCOPE NARROWED BEFORE FILING. The draft originally reported two defects:
   the missing Windows assets AND the misleading error. The duplicate search

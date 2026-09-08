@@ -1,8 +1,9 @@
 <!--
-STATUS: FIXED in tokensave v7.11.1 (issue #474, closed upstream 2026-09-06).
+STATUS: CLOSED — verified via GitHub API 2026-09-08
   https://github.com/aovestdipaperino/tokensave/issues/474
   (addressable_input_tokens is implausibly small)
 
+RESOLVED: fixed in tokensave 7.11.1 (issue #474, closed upstream 2026-09-06).
   The diagnosis in this file was accepted and the cause was the one it
   argued: the analyzer summed `turns.input_tokens`, which under prompt
   caching holds only the uncached remainder of a turn's prompt. Upstream
@@ -11,17 +12,35 @@ STATUS: FIXED in tokensave v7.11.1 (issue #474, closed upstream 2026-09-06).
   column. Measured over 3,155 turns, the 15 replaceable navigation turns
   go from 1.93 tokens each to 793.
 
-  NOT YET VERIFIED LOCALLY. v7.11.1 was published with no Windows asset
-  (upstream #512; see tokensave-upgrade-asset-vs-network-error.md), so this machine cannot
-  install the fix. Re-run `tokensave discover --json` and confirm
-  `total_recoverable_input_tokens != replaceable_turns` once it can.
+VERIFIED LOCALLY 2026-09-08 against 7.11.1 — and it found a second thing.
+  The check this file asked for passes: `total_recoverable_input_tokens`
+  (0) != `replaceable_turns` (912), so the degenerate ~2.000-per-turn
+  artifact is gone. But every token figure now reads 0 across 912
+  replaceable turns, which is upstream's documented limit: turns ingested
+  before the upgrade carry 0, because the sizes come from transcript lines
+  the database does not keep.
 
-  Manager impact: none required. helpers/savings.py `_token_evidence`
-  suppresses the token figures on measured evidence rather than on a
-  version check, so it stops firing on its own once the payload changes.
-  One new caveat to carry if tokens are ever put on the typed surface —
-  upstream states turns ingested BEFORE the upgrade carry 0, so any range
-  spanning the upgrade under-reports.
+  The prediction below — "no Manager impact, `_token_evidence` stops firing
+  on its own once the payload changes" — was half right, and the wrong half
+  mattered. It did stop firing, into a FALSE GREEN. Both of its identity
+  checks (`recoverable == replaceable`, and the same inside every bucket)
+  are shaped against the OLD artifact, and an honest 0 trips neither. So
+  the upgrade moved `tokens_trustworthy` from False to True for figures
+  upstream itself calls unknown. A check that stops complaining is not the
+  same as a check that is satisfied.
+
+  Fixed by a third measured check in `_token_evidence`: every token figure
+  zero while `replaceable_turns > 0` is the unmeasured case and never a
+  real reading — a turn is only counted replaceable because it ran a
+  navigation tool, and a tool result that injected nothing could not be
+  replaced by a graph query. Impossible by construction, not merely
+  unlikely.
+
+  The asymmetry that produced the false green is worth its own report, and
+  is drafted as tokensave-discover-json-unknown-vs-zero.md: `discover`'s
+  HUMAN output says "their addressable total is unknown rather than zero",
+  and `--json` ships a bare 0 with no flag — so the only consumer that
+  could act on the distinction is the one that cannot read the sentence.
 
 Filed against tokensave 7.10.0. Searched for duplicates first (gh search
 over all issues): none. #457 is the same CLASS of bug — a count whose name

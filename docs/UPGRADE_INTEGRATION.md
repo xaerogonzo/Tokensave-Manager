@@ -28,13 +28,43 @@ false-clean report because the local files won't reflect the new version yet.
 ```
 1.  tokensave upgrade          ← update the binary
 2.  git pull                   ← update this repo's CHANGELOG.md, docs/, src/
-3.  🔍 Check integration       ← free deterministic checks (see below)
-4.  🔄 Integration audit       ← LLM prompt for new-tool discovery (see below)
+3.  tokensave sync --force     ← REBUILD THE GRAPH under the new extractor
+4.  🔍 Check integration       ← free deterministic checks (see below)
+5.  🔄 Integration audit       ← LLM prompt for new-tool discovery (see below)
 ```
+
+### Step 3 is not optional, and it is the step people skip
+
+Upgrading the binary does not rebuild the graph, and an **incremental sync does
+not revisit call sites it has already resolved**. So an extractor correctness
+fix lands on disk and changes nothing anyone queries until a full index runs.
+
+This is not hypothetical. tokensave 7.11.1 shipped #508 — the bare-name call
+fallback now demands evidence before binding a lone candidate — and on this
+repository the fix sat installed and inert for as long as nobody ran a full
+sync. `sync --force` then removed **426 impossible call edges in 19 seconds**
+(455 → 29), and the last full index before that was **20 days** old.
+
+Steps 4 and 5 cannot catch this. The check script reads local *files*, and the
+graph is not one of them; the LLM audit reads release notes and source. Neither
+one ever asks whether the index is current, which is why the Doctor now does —
+see below.
+
+### The safety net: Doctor's "Index freshness" line
+
+`.tokensave/config.json` records `last_indexed_version`, and it means *the
+version that last performed a FULL index*. Measured, not assumed: a plain
+`tokensave sync` over a changed file leaves the field alone, so it cannot read
+current while the graph still holds an older extractor's edges.
+
+Doctor compares that field against the installed binary and says so when they
+differ. It runs **before** the graph-trust check on purpose — a contamination
+count measured on an index an older extractor built is a report about a binary
+you no longer run, and the remedy is a re-index, not a bug report.
 
 ---
 
-## Step 3 — Free deterministic check
+## Step 4 — Free deterministic check
 
 ### From the manager UI (recommended)
 
@@ -61,11 +91,19 @@ Exit code is always 0 — this is an advisory report, not a blocking check.
 
 - **New tools without snippets** — detecting this reliably requires reading tokensave's
   own changelog (the manager's CHANGELOG records manager changes, not tokensave tool
-  additions).  This gap is covered by the LLM audit in Step 4.
+  additions).  This gap is covered by the LLM audit in Step 5.
+- **Whether the index is current** — the script reads local files and the graph
+  is not one of them, so it reports clean against a graph an older extractor
+  built. Covered by Step 3 and by Doctor's "Index freshness" line.
+- **Whether a claim in a doc is still true** — a `STATUS: FIXED` line asserting
+  a fix that was never verified locally still reads ✓. Verify the claim when
+  the binary finally makes it checkable; #474's doc carried "NOT YET VERIFIED
+  LOCALLY" for two releases, and when it was finally checked the verification
+  found a false green the fix had introduced downstream.
 
 ---
 
-## Step 4 — LLM integration audit
+## Step 5 — LLM integration audit
 
 Open the **Reference tab → copy "🔄  Integration audit (after upgrade)"** and paste
 it into a **Claude Code CLI session** (`claude`) opened in this project's directory.
@@ -119,7 +157,7 @@ For each issue in `docs/upstream-issues/` that the new release resolves:
 1. Change the `STATUS:` line to `STATUS: FIXED vX.Y.Z` (or `SHIPPED` / `MOOT`)
 2. Add a one-line note under the status: `Resolved in tokensave vX.Y.Z — <release tag>.`
 
-The check script (Step 3) will then show ✓ for that file on future runs.
+The check script (Step 4) will then show ✓ for that file on future runs.
 
 ---
 

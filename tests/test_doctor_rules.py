@@ -292,3 +292,160 @@ def test_every_violation_from_a_tree_walk_is_placed(tmp_path):
         assert violation.file, "every violation carries its path"
         assert violation.line >= 1
         assert str(violation).startswith("  " + violation.file + ": ")
+
+
+# ── Index freshness: was this graph built by the tokensave installed? ────
+#
+# The gap this closes ran 20 days on this repository. tokensave 7.11.1
+# shipped a resolver fix; upgrading does not rebuild the graph, and an
+# incremental sync does not revisit call sites it has already resolved, so
+# the fix sat installed and inert. One `sync --force` then removed 426
+# impossible call edges. Nothing compared the installed binary against the
+# one that built the index, and the integration check structurally cannot:
+# it reads local files and the graph is not one of them.
+
+import json as _json
+
+
+def _ts_project(tmp_path, *, config="missing", version="7.11.0"):
+    """A project directory with a .tokensave/config.json in a given state."""
+    ts = tmp_path / ".tokensave"
+    ts.mkdir()
+    if config == "versioned":
+        (ts / "config.json").write_text(
+            _json.dumps({"root_dir": "x", "last_indexed_version": version}),
+            encoding="utf-8")
+    elif config == "no_version_key":
+        (ts / "config.json").write_text(_json.dumps({"root_dir": "x"}),
+                                        encoding="utf-8")
+    elif config == "malformed":
+        (ts / "config.json").write_text("{not json", encoding="utf-8")
+    return str(tmp_path)
+
+
+def _fake_version(monkeypatch, value):
+    """Stub the installed-version probe rather than the subprocess.
+
+    Patched via `monkeypatch.setattr` on a DIRECT module reference, not a
+    string path -- the sys.modules footgun documented for this suite.
+    """
+    from helpers import doctor_rules
+    monkeypatch.setattr(doctor_rules, "_installed_extractor_version",
+                        lambda exe: value)
+
+
+def test_index_freshness_silent_when_versions_agree(tmp_path, monkeypatch):
+    """A healthy project must not gain a permanent line."""
+    from helpers.doctor_rules import audit_index_extractor_version
+    _fake_version(monkeypatch, ("7.11.1", ""))
+    proj = _ts_project(tmp_path, config="versioned", version="7.11.1")
+    assert audit_index_extractor_version(proj, "tokensave.exe") == []
+
+
+def test_index_freshness_silent_on_equivalent_version_spellings(
+        tmp_path, monkeypatch):
+    """7.11 and 7.11.0 are the same version, and _version_lt pads to say so."""
+    from helpers.doctor_rules import audit_index_extractor_version
+    _fake_version(monkeypatch, ("7.11", ""))
+    proj = _ts_project(tmp_path, config="versioned", version="7.11.0")
+    assert audit_index_extractor_version(proj, "tokensave.exe") == []
+
+
+def test_index_freshness_fires_on_a_stale_index(tmp_path, monkeypatch):
+    from helpers.doctor_rules import audit_index_extractor_version
+    _fake_version(monkeypatch, ("7.11.1", ""))
+    proj = _ts_project(tmp_path, config="versioned", version="7.11.0")
+    joined = " ".join(audit_index_extractor_version(proj, "tokensave.exe"))
+    assert "7.11.0" in joined and "7.11.1" in joined
+    # the remedy, and the reason the obvious cheaper one will not work
+    assert "sync --force" in joined
+    assert "incremental sync does not revisit" in joined
+
+
+def test_index_freshness_does_not_recommend_sync_on_a_downgrade(
+        tmp_path, monkeypatch):
+    """`sync --force` here would rebuild with the OLDER extractor.
+
+    Same mismatch, opposite remedy. Giving the stale-index advice for a
+    downgrade would discard whatever the newer extractor had fixed, so this
+    is the one case where the rule must actively tell the user NOT to run
+    the command the other case recommends.
+    """
+    from helpers.doctor_rules import audit_index_extractor_version
+    _fake_version(monkeypatch, ("7.11.1", ""))
+    proj = _ts_project(tmp_path, config="versioned", version="7.12.0")
+    joined = " ".join(audit_index_extractor_version(proj, "tokensave.exe"))
+    assert "NEWER" in joined
+    assert "Do NOT run `sync --force`" in joined
+    assert "Upgrade tokensave" in joined
+
+
+def test_index_freshness_silent_when_not_a_tokensave_project(
+        tmp_path, monkeypatch):
+    from helpers.doctor_rules import audit_index_extractor_version
+    _fake_version(monkeypatch, ("7.11.1", ""))
+    assert audit_index_extractor_version(str(tmp_path), "tokensave.exe") == []
+
+
+def test_index_freshness_silent_when_tokensave_not_configured(tmp_path):
+    """Not configured is not our business; unrunnable is (see below)."""
+    from helpers.doctor_rules import audit_index_extractor_version
+    proj = _ts_project(tmp_path, config="versioned", version="7.11.0")
+    assert audit_index_extractor_version(proj, "") == []
+
+
+@pytest.mark.parametrize("config,fragment", [
+    ("no_version_key", "no last_indexed_version"),
+    ("malformed",      "cannot read .tokensave/config.json"),
+])
+def test_index_freshness_speaks_when_it_could_not_read_the_index(
+        tmp_path, monkeypatch, config, fragment):
+    """"Could not ask" must never share the quiet path with "they agree".
+
+    That is how an unasked question starts reading as a clean answer, which
+    is the whole reason graph_trust has four states instead of a boolean.
+    """
+    from helpers.doctor_rules import audit_index_extractor_version
+    _fake_version(monkeypatch, ("7.11.1", ""))
+    proj = _ts_project(tmp_path, config=config)
+    joined = " ".join(audit_index_extractor_version(proj, "tokensave.exe"))
+    assert fragment in joined
+    assert "unverified rather than confirmed" in joined
+
+
+def test_index_freshness_speaks_when_the_binary_would_not_run(
+        tmp_path, monkeypatch):
+    """Knowing one of the two versions is not knowing whether they agree."""
+    from helpers.doctor_rules import audit_index_extractor_version
+    _fake_version(monkeypatch, ("", "could not run `tokensave --version` (x)"))
+    proj = _ts_project(tmp_path, config="versioned", version="7.11.0")
+    joined = " ".join(audit_index_extractor_version(proj, "tokensave.exe"))
+    assert "which tokensave is installed" in joined
+    assert "unverified rather than confirmed" in joined
+    # and it must not guess at a comparison it could not make
+    assert "sync --force" not in joined
+
+
+def test_index_freshness_reports_both_sides_when_both_are_unknown(
+        tmp_path, monkeypatch):
+    """Two different facts with two different remedies, so two lines."""
+    from helpers.doctor_rules import audit_index_extractor_version
+    _fake_version(monkeypatch, ("", "could not run `tokensave --version` (x)"))
+    proj = _ts_project(tmp_path, config="malformed")
+    notes = audit_index_extractor_version(proj, "tokensave.exe")
+    joined = " ".join(notes)
+    assert "which tokensave built this index" in joined
+    assert "which tokensave is installed" in joined
+
+
+def test_installed_version_probe_parses_the_real_binary_output():
+    """The parse is a real contract with a real tool, not an assumed shape."""
+    import os
+    import shutil
+    from helpers.doctor_rules import _installed_extractor_version
+    exe = shutil.which("tokensave") or ""
+    if not exe or not os.path.isfile(exe):
+        pytest.skip("tokensave not on PATH")
+    version, problem = _installed_extractor_version(exe)
+    assert problem == ""
+    assert version.count(".") >= 1

@@ -466,6 +466,47 @@ _ISSUE_DOC_RE = re.compile(
     r"(?:ISSUE:\s*#|issue\s+#?|/issues/)(\d+)", re.IGNORECASE)
 
 
+def _issue_numbers(text: str) -> "set[int]":
+    """Every issue number *text* names, in any of the three marker forms."""
+    return {int(m.group(1)) for m in _ISSUE_DOC_RE.finditer(text)}
+
+
+def _doc_header(text: str) -> str:
+    """The doc's ownership declaration — its STATUS stanza, nothing more.
+
+    A doc declares its subject on the STATUS line and the indented lines
+    directly under it (the issue URL, a one-line restatement), terminated by
+    the first blank line. An auto-generated stub declares it on an
+    `ISSUE: #NNN` line instead.
+
+    Scoping to the stanza rather than to the whole leading comment is the
+    part that actually works, and it was arrived at by being wrong once:
+    these drafts keep their DUPLICATE SEARCH inside the SAME html comment as
+    STATUS, so "the leading comment block" still swept up every issue the
+    search had ruled out. The live example is the #513 report, whose stanza
+    names #513 twice and whose duplicate search names #512 and #136 —
+    citations of other people's issues, which `--fix` would otherwise have
+    treated as ownership and archived the file under the wrong number.
+    """
+    stub = re.search(r"^[ \t]*ISSUE:[ \t]*#?\d+", text, re.MULTILINE)
+    if stub:
+        return stub.group(0)
+    m = re.search(r"^[ \t]*>?[ \t]*\*{0,2}STATUS:", text,
+                  re.MULTILINE | re.IGNORECASE)
+    if not m:
+        # No STATUS and no ISSUE line: the doc declares no subject at all.
+        # Returning its opening lines would let a doc that merely DISCUSSES
+        # two issues claim the first one, which is the ambiguity the second
+        # pass exists to refuse. Declare nothing and let it decide.
+        return ""
+    stanza = []
+    for line in text[m.start():].splitlines():
+        if stanza and not line.strip():
+            break
+        stanza.append(line)
+    return chr(10).join(stanza)
+
+
 def _find_issue_doc(number: int) -> "Path | None":
     """Return the Path of the active .md doc tracking *number*, or None.
 
@@ -473,18 +514,35 @@ def _find_issue_doc(number: int) -> "Path | None":
       • A dedicated "ISSUE: #NNN" frontmatter line       (auto-generated stubs)
       • An inline "issue #NNN" or "issue NNN" substring  (hand-written prose)
       • A ".../issues/NNN" GitHub URL                    (STATUS lines, links)
+
+    Two passes, because ownership and citation look identical to the regex and
+    only their POSITION separates them:
+
+      1. The leading STATUS block, which is where a doc declares its subject.
+      2. Failing that, the whole body — but only when the body names exactly
+         ONE issue, so a citation can never be mistaken for a subject. A doc
+         naming several and declaring none is ambiguous, and returns None
+         rather than a guess, on the same reasoning that makes `insufficient`
+         a state of its own in helpers/graph_trust.py.
     """
     active_dir = _ISSUES
     if not active_dir.is_dir():
         return None
-    for md in active_dir.glob("*.md"):
+    docs = []
+    for md in sorted(active_dir.glob("*.md")):
         try:
-            text = md.read_text(encoding="utf-8", errors="replace")
+            docs.append((md, md.read_text(encoding="utf-8", errors="replace")))
         except Exception:
             continue
-        for m in _ISSUE_DOC_RE.finditer(text):
-            if int(m.group(1)) == number:
-                return md
+
+    for md, text in docs:
+        if number in _issue_numbers(_doc_header(text)):
+            return md
+
+    for md, text in docs:
+        nums = _issue_numbers(text)
+        if len(nums) == 1 and number in nums:
+            return md
     return None
 
 
@@ -535,12 +593,36 @@ def _auto_archive_resolved(number: int, title: str) -> "str | None":
 
     # Rewrite STATUS line — MULTILINE-anchored to avoid matching STATUS mentions
     # inside code blocks or prose paragraphs. Preserves leading blockquote prefix.
+    #
+    # PRESERVES the existing STATUS text rather than overwriting it. The script
+    # knows two things: that GitHub reports the issue closed, and when it
+    # looked. It does NOT know what resolved it — and that is the half with the
+    # information. This repo's convention records what resolved each closure
+    # beside it rather than inferring it from the closure, and a flat
+    # "CLOSED — verified via GitHub API" is strictly less than the line it
+    # replaces. The case that forced this: #513 was closed COMPLETED, fixed in
+    # upstream PR #519, and that fix is in no release yet — a reader who is
+    # told only "CLOSED" will reasonably assume they can install it.
+    #
+    # A stub's placeholder STATUS carries nothing, so there it is still a
+    # replacement rather than an append.
     text = md.read_text(encoding="utf-8", errors="replace")
     today = _date.today()
     new_status = f"STATUS: CLOSED — verified via GitHub API {today}"
+    placeholder = re.compile(
+        r"STATUS:\s*(OPEN|UNKNOWN|TBD|PENDING|AUTO_GENERATED|TODO)?\s*$",
+        re.IGNORECASE)
+
+    def _rewrite(m: "re.Match") -> str:
+        prefix, old_line = m.group(1), m.group(2)
+        if placeholder.match(old_line.strip()):
+            return prefix + new_status
+        kept = old_line.strip()[len("STATUS:"):].strip()
+        return f"{prefix}{new_status}\n  PRIOR: {kept}"
+
     text = re.sub(
         r"^([ \t]*>?\s*\*{0,2})(STATUS:\s*[^\n]+)",
-        lambda m: m.group(1) + new_status,
+        _rewrite,
         text,
         count=1,
         flags=re.MULTILINE | re.IGNORECASE,

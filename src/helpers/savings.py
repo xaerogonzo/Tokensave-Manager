@@ -513,6 +513,36 @@ def _token_evidence(data: dict) -> str:
     if buckets and len(per_bucket) == len(buckets):
         return (f"every bucket ({len(buckets)}) reports "
                 f"recoverable_input_tokens == turns")
+
+    # Third: every token figure is zero while there are turns to measure.
+    # 7.11.1 (#474) replaced the degenerate estimate with a real one, and
+    # states that turns ingested BEFORE that upgrade carry 0, because the
+    # sizes come from transcript lines the database does not keep. The
+    # human-readable `discover` says exactly that -- "unknown rather than
+    # zero" -- but the JSON ships a bare 0 with no flag, so a machine reader
+    # cannot tell the two apart. Without this check the upgrade turns a
+    # caught error into an uncaught one: the old artifact tripped the two
+    # identities above, an honest 0 trips neither, and the figures would go
+    # from quarantined to "trustworthy" without ever being measured.
+    #
+    # A genuine zero is impossible by construction rather than merely
+    # unlikely: a turn is only counted replaceable because it ran a
+    # navigation tool, and a tool result that injected nothing would not be
+    # replaceable by a graph query. So all-zero with turns > 0 is always the
+    # unmeasured case.
+    if replaceable is not None and replaceable > 0:
+        figures = [_num(data.get(k), None) for k in
+                   ("total_addressable_input_tokens",
+                    "total_recoverable_input_tokens")]
+        figures += [_num(b.get(k), None) for b in buckets for k in
+                    ("addressable_input_tokens", "recoverable_input_tokens")]
+        present = [f for f in figures if f is not None]
+        if present and not any(present):
+            return (f"every token figure is 0 across {int(replaceable)} "
+                    f"replaceable turn(s) -- unmeasured, not zero; tokensave "
+                    f"7.11.1+ reports 0 for turns ingested before tool-result "
+                    f"sizes were recorded, and says so only in its "
+                    f"human-readable output")
     return ""
 
 
