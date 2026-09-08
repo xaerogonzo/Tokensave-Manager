@@ -503,3 +503,102 @@ class TestLaunchGui:
                 imported.add(node.module.split(".")[0])
         assert "subprocess" not in imported
         assert "os" in imported, "sanity: the scan can still see real imports"
+
+
+# ── The Ask-tab tools ────────────────────────────────────────────────────────
+
+class TestAgentTools:
+    """PyScope's tools are additive and gated, and they stay honest when cut.
+
+    They are not a second way to find a symbol — tokensave already does that.
+    They carry the three axes, which is the fact a language model otherwise
+    invents, so the properties worth guarding are that the honesty fields
+    survive slimming and that truncation announces itself.
+    """
+
+    def test_the_tools_appear_only_when_pyscope_is_configured(self):
+        """A tool whose every call answers "not configured" spends context on a
+        dead end and invites the model to keep retrying it."""
+        from agent_tools import build_tools
+        without = build_tools("/proj", "ts.exe")
+        assert "pyscope_confidence" not in without
+        assert "pyscope_graph" not in without
+
+        with_ps = build_tools("/proj", "ts.exe", pyscope_exe="ps.exe")
+        assert "pyscope_confidence" in with_ps
+        assert "pyscope_graph" in with_ps
+
+    def test_adding_them_does_not_disturb_the_existing_registry(self):
+        from agent_tools import build_tools
+        before = set(build_tools("/proj", "ts.exe"))
+        after = set(build_tools("/proj", "ts.exe", pyscope_exe="ps.exe"))
+        assert before < after
+        assert after - before == {"pyscope_confidence", "pyscope_graph"}
+
+    def test_the_confidence_slim_keeps_the_axes_and_drops_the_noise(self):
+        from agent_tools import _slim_pyscope_stats
+        slim = _slim_pyscope_stats({
+            "symbols": 10, "edges": 20, "files_indexed": 3, "concepts": 4,
+            "parse_failures": 1,
+            "confidence": {"certain": 5, "unknown": 15},
+            "dispatch": {"static": 5, "dynamic": 15},
+            "timings_seconds": {"total": 9.9}, "snapshot": "abc", "cache": {},
+        })
+        assert "confidence" in slim and "dispatch" in slim
+        assert "timings_seconds" not in slim
+        assert "snapshot" not in slim
+
+    def test_a_truncated_graph_says_so(self):
+        """A silently shortened graph reads as a complete one.
+
+        That is the exact failure PyScope's own `completeness` field exists to
+        prevent, and slimming for a context budget must not reintroduce it.
+        """
+        from agent_tools import _slim_pyscope_graph, _PYSCOPE_MAX_EDGES
+        many = [{"source": f"a{i}", "target": "b"} for i in range(_PYSCOPE_MAX_EDGES + 25)]
+        out = _slim_pyscope_graph({"title": "t", "completeness": "partial",
+                                   "reason": "why", "nodes": [], "edges": many})
+        assert len(out["edges"]) == _PYSCOPE_MAX_EDGES
+        assert out["edge_count"] == _PYSCOPE_MAX_EDGES + 25
+        assert "truncated" in out
+        assert out["completeness"] == "partial"
+        assert out["reason"] == "why"
+
+    def test_an_untruncated_graph_makes_no_truncation_claim(self):
+        from agent_tools import _slim_pyscope_graph
+        out = _slim_pyscope_graph({"title": "t", "completeness": "exhaustive",
+                                   "reason": "", "nodes": [1], "edges": [{"a": 1}]})
+        assert "truncated" not in out
+
+    def test_no_executable_is_a_tool_error_not_a_crash(self):
+        from agent_tools import build_tools
+        tools = build_tools("/proj", "ts.exe", pyscope_exe="ps.exe")
+        # Rebuild the handler with an empty exe the way build_tools would not,
+        # to exercise the guard the handler carries for a config cleared mid-run.
+        from agent_tools import _make_pyscope_runner
+        out = _make_pyscope_runner("/proj", "", "confidence")({})
+        assert out.startswith("[tool error]")
+        assert "pyscope_graph" in tools
+
+    @pytest.mark.parametrize("args,fragment", [
+        ({"view": "nonsense"}, "unknown view"),
+        ({"view": "around"}, "needs a symbol id"),
+    ])
+    def test_bad_arguments_come_back_as_tool_errors(self, args, fragment):
+        """Handlers must not raise; the agent contract is an error string."""
+        from agent_tools import _make_pyscope_runner
+        out = _make_pyscope_runner("/proj", "ps.exe", "graph")(args)
+        assert out.startswith("[tool error]")
+        assert fragment in out
+
+    def test_the_tools_go_through_the_cli_not_the_pyscope_cache(self):
+        """Invariant 5, at the Ask tab.
+
+        Reading `.pyscope/` directly would make the manager depend on PyScope's
+        private storage format, which is exactly what the CLI boundary exists
+        to prevent.
+        """
+        src = open("src/agent_tools.py", encoding="utf-8").read()
+        block = src[src.index("# PyScope tools"):src.index("def _validate_write_args")]
+        assert "index.db" not in block
+        assert "sqlite" not in block.lower()

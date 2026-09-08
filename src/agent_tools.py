@@ -748,6 +748,145 @@ _WRITE_FILE_PARAMETERS = {
 }
 
 
+# ───────────────────────────────────────────────────────────────────────
+# PyScope tools (step 1.7)
+# ───────────────────────────────────────────────────────────────────────
+#
+# These do not duplicate the tokensave tools. Tokensave tells the agent
+# WHERE things are; PyScope tells it HOW MUCH of that is established --
+# the three orthogonal axes (confidence / dispatch / completeness) plus a
+# closed vocabulary for why a call site could not be resolved. That is
+# precisely the fact a language model otherwise invents, so handing it the
+# real numbers is worth more than another way to find a symbol.
+#
+# Both go through documented `pyscope` CLI surfaces. Nothing here reads
+# `.pyscope/` internals: if an answer is not available through the CLI, the
+# fix belongs in PyScope's CLI rather than in a shortcut from here.
+#
+# NOT shipped, deliberately: a per-symbol lookup by NAME. `pyscope graph
+# --view around` needs a symbol id (`py://src/a.py#Cls.m`) and no CLI
+# command resolves a plain name into one -- only `explain` does, and that
+# path requires an AI provider. A tool that asked the model to invent an id
+# would fail on almost every call. The fix is a `pyscope symbol` CLI
+# command, which belongs in PyScope's own repository.
+
+
+def _make_pyscope_runner(project_path: str, pyscope_exe: str, mode: str):
+    """Handler factory for the PyScope tools. Never raises."""
+    def _run(args: dict) -> str:
+        if not pyscope_exe:
+            return "[tool error] PyScope is not configured for this manager."
+        from helpers.pyscope import analyze, status, TIMEOUT_ANALYZE, _run as run_cli
+        import json as _json
+
+        if mode == "confidence":
+            stats = analyze(pyscope_exe, project_path)
+            if stats is None:
+                return "[tool error] pyscope analyze failed: " + status(pyscope_exe).detail
+            return _json.dumps(_slim_pyscope_stats(stats), indent=1)
+
+        view = str(args.get("view", "modules")).strip() or "modules"
+        if view not in ("modules", "inheritance", "calls", "around"):
+            return f"[tool error] unknown view {view!r}"
+        argv = ["graph", project_path, "--view", view, "--json"]
+        symbol = str(args.get("symbol", "")).strip()
+        if view == "around":
+            if not symbol:
+                return "[tool error] --view around needs a symbol id"
+            argv += ["--symbol", symbol]
+        result = run_cli(pyscope_exe, argv, TIMEOUT_ANALYZE)
+        if not result.ok:
+            return "[tool error] pyscope graph failed"
+        try:
+            data = _json.loads(result.stdout)
+        except (ValueError, TypeError):
+            return "[tool error] pyscope graph returned unreadable output"
+        return _json.dumps(_slim_pyscope_graph(data), indent=1)
+    return _run
+
+
+def _slim_pyscope_stats(stats: dict) -> dict:
+    """Keep the parts that answer "how much is established".
+
+    Timings, cache counters and the snapshot id are real but are not what an
+    agent reasoning about the code needs, and every field spent on them is
+    context taken from the confidence breakdown.
+    """
+    keep = ("files_indexed", "symbols", "edges", "concepts",
+            "parse_failures", "confidence", "dispatch")
+    return {k: stats[k] for k in keep if k in stats}
+
+
+#: Edge cap for the graph tool. A call view on a real project is thousands of
+#: edges; handing that to a local model buys nothing and costs the whole
+#: context window. The reply says when it truncated, because a silently
+#: shortened graph reads as a complete one -- which is the exact failure
+#: PyScope's own `completeness` field exists to prevent.
+_PYSCOPE_MAX_EDGES = 60
+
+
+def _slim_pyscope_graph(data: dict) -> dict:
+    """Bound the graph and keep its honesty fields."""
+    edges = data.get("edges")
+    edges = edges if isinstance(edges, list) else []
+    out = {
+        "title": data.get("title", ""),
+        "completeness": data.get("completeness", ""),
+        "reason": data.get("reason", ""),
+        "node_count": len(data.get("nodes") or []),
+        "edge_count": len(edges),
+        "edges": edges[:_PYSCOPE_MAX_EDGES],
+    }
+    if len(edges) > _PYSCOPE_MAX_EDGES:
+        out["truncated"] = (
+            f"showing {_PYSCOPE_MAX_EDGES} of {len(edges)} edges")
+    return out
+
+
+def _tool_pyscope_confidence(project_path: str, pyscope_exe: str) -> ToolSpec:
+    return ToolSpec(
+        name="pyscope_confidence",
+        description=(
+            "How much of this project's structure is actually ESTABLISHED, "
+            "from PyScope's deterministic analysis. Returns symbol/edge counts "
+            "plus a breakdown by confidence (certain / inferred / likely / "
+            "unknown) and by call dispatch (static / possibly_rebound / "
+            "dynamic). Use this before asserting that one thing calls another: "
+            "a large 'unknown' share means the call graph is mostly unproven, "
+            "and claims built on it should be hedged."
+        ),
+        parameters={"type": "object", "properties": {},
+                    "additionalProperties": False},
+        handler=_make_pyscope_runner(project_path, pyscope_exe, "confidence"),
+    )
+
+
+def _tool_pyscope_graph(project_path: str, pyscope_exe: str) -> ToolSpec:
+    return ToolSpec(
+        name="pyscope_graph",
+        description=(
+            "A dependency graph from PyScope, with every edge carrying its own "
+            "confidence and dispatch, and the view carrying its completeness. "
+            "views: 'modules' (default, architecture level), 'inheritance', "
+            "'calls', or 'around' (needs a symbol id like "
+            "py://src/a.py#Cls.method). Prefer 'modules' first: a call view on "
+            "a real project is thousands of edges and is truncated."
+        ),
+        parameters={
+            "type": "object",
+            "properties": {
+                "view": {"type": "string",
+                         "enum": ["modules", "inheritance", "calls", "around"],
+                         "description": "Which view to build."},
+                "symbol": {"type": "string",
+                           "description": "Symbol id, for view='around' only."},
+            },
+            "additionalProperties": False,
+        },
+        handler=_make_pyscope_runner(project_path, pyscope_exe, "graph"),
+    )
+
+
 def _validate_write_args(args: dict) -> tuple[str, str, str] | str:
     """Return (path, content, rationale) or an `[tool error]` string."""
     path = (args.get("path") or "").strip()
@@ -943,12 +1082,18 @@ def _tool_write_file(project_path: str) -> ToolSpec:
 # ───────────────────────────────────────────────────────────────────────
 
 def build_tools(project_path: str, tokensave_exe: str = "",
-                with_write: bool = False) -> dict[str, ToolSpec]:
+                with_write: bool = False,
+                pyscope_exe: str = "") -> dict[str, ToolSpec]:
     """Construct the tool registry for a given project.
 
     `with_write=True` includes the gated `write_file` tool (Stage 3).
     Default is read-only for backwards compatibility — call sites that
     want the write tool must opt in explicitly.
+
+    `pyscope_exe` is optional and additive: the PyScope tools appear only
+    when it is set. Offering a tool whose every call would answer "PyScope
+    is not configured" spends context on a dead end and invites the model to
+    keep retrying it.
     """
     tools = {
         "read_file":         _tool_read_file(project_path),
@@ -958,6 +1103,10 @@ def build_tools(project_path: str, tokensave_exe: str = "",
         "tokensave_search":  _tool_tokensave_search(project_path, tokensave_exe),
         "tokensave_context": _tool_tokensave_context(project_path, tokensave_exe),
     }
+    if pyscope_exe:
+        tools["pyscope_confidence"] = _tool_pyscope_confidence(
+            project_path, pyscope_exe)
+        tools["pyscope_graph"] = _tool_pyscope_graph(project_path, pyscope_exe)
     if with_write:
         tools["write_file"] = _tool_write_file(project_path)
     return tools
@@ -984,6 +1133,16 @@ def make_tokensave_search_tool(project_path: str, tokensave_exe: str) -> ToolSpe
     one-shot ``LocalAgent`` run during doc generation.
     """
     return _tool_tokensave_search(project_path, tokensave_exe)
+
+
+def make_pyscope_confidence_tool(project_path: str, pyscope_exe: str) -> ToolSpec:
+    """Public factory for the pyscope_confidence ToolSpec.
+
+    Same rationale as the tokensave factories below: callers holding the
+    project path and exe separately (the doc-drafter agentic path) should not
+    depend on build_tools' combined signature.
+    """
+    return _tool_pyscope_confidence(project_path, pyscope_exe)
 
 
 def make_tokensave_context_tool(project_path: str, tokensave_exe: str) -> ToolSpec:
