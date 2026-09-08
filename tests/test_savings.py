@@ -487,3 +487,60 @@ def test_unavailable_carries_no_value():
     result = Result.unavailable("because")
     assert result.value is None
     assert result.reason == "because"
+
+
+# ── discover: an unmeasured total is not a zero one (7.11.1 / #474) ──────
+#
+# 7.11.1 replaced the degenerate estimate with a real one, and turns
+# ingested BEFORE that upgrade carry 0 because the sizes come from
+# transcript lines the database does not keep. `discover`'s human output
+# says "unknown rather than zero"; its JSON ships a bare 0.
+#
+# Both original checks compare against the OLD artifact's shape, so an
+# honest 0 trips neither -- the upgrade moved these figures from
+# quarantined to trusted without anything having been measured. A check
+# that stops complaining is not the same as a check that is satisfied.
+
+def _discover_payload(**over):
+    import json
+    data = {"since": "30d", "total_turns": 47209, "replaceable_turns": 912,
+            "total_addressable_input_tokens": 0,
+            "total_recoverable_input_tokens": 0,
+            "buckets": [{"bucket": "read", "tool": "Read", "suggestion": "x",
+                         "turns": 855, "addressable_input_tokens": 0,
+                         "recoverable_input_tokens": 0}]}
+    data.update(over)
+    return json.dumps(data)
+
+
+def test_discover_all_zero_tokens_are_quarantined_not_trusted():
+    d = parse_discover(_discover_payload()).value
+    assert d.tokens_trustworthy is False
+    assert "unmeasured, not zero" in d.token_evidence
+    assert "912" in d.token_evidence
+
+
+def test_discover_turn_counts_survive_the_token_quarantine():
+    """Turns are authoritative regardless; only the token columns are held."""
+    d = parse_discover(_discover_payload()).value
+    assert d.replaceable_turns == 912
+    assert d.total_turns == 47209
+    assert d.buckets[0].turns == 855
+
+
+def test_discover_a_measured_payload_is_still_trusted():
+    """The check must be able to say yes, or it is not a check."""
+    payload = _discover_payload(
+        total_addressable_input_tokens=11895,
+        total_recoverable_input_tokens=5947,
+        buckets=[{"bucket": "read", "tool": "Read", "suggestion": "x",
+                  "turns": 855, "addressable_input_tokens": 11895,
+                  "recoverable_input_tokens": 5947}])
+    assert parse_discover(payload).value.tokens_trustworthy is True
+
+
+def test_discover_zero_tokens_with_zero_turns_is_not_flagged():
+    """Nothing to measure is not the same as something measured badly."""
+    payload = _discover_payload(replaceable_turns=0, total_turns=0,
+                                buckets=[])
+    assert parse_discover(payload).value.tokens_trustworthy is True

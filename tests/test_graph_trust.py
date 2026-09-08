@@ -48,9 +48,12 @@ from helpers.graph_trust import (
 def _make_index(root, edges, *, node_rows=None, schema="full"):
     """Write a minimal tokensave-shaped index under ``root/.tokensave``.
 
-    ``edges`` is a list of ``(src_file, dst_file, dst_name)``; each entry
-    creates two nodes and one edge between them. Node ids are unique per
-    edge so ``source <> target`` holds unless a test asks otherwise.
+    ``edges`` is a list of ``(src_file, dst_file, dst_name)`` or
+    ``(src_file, dst_file, dst_name, edge_kind)``; each entry creates two
+    nodes and one edge between them. Node ids are unique per edge so
+    ``source <> target`` holds unless a test asks otherwise. The kind
+    defaults to ``calls`` -- the 3-tuple form predates the per-kind split
+    and every test written against it still means calls.
     """
     ts = os.path.join(str(root), ".tokensave")
     os.makedirs(ts, exist_ok=True)
@@ -82,11 +85,13 @@ def _make_index(root, edges, *, node_rows=None, schema="full"):
             seen[key] = True
         return key
 
-    for i, (src_file, dst_file, dst_name) in enumerate(edges):
+    for i, entry in enumerate(edges):
+        src_file, dst_file, dst_name = entry[:3]
+        edge_kind = entry[3] if len(entry) > 3 else "calls"
         sid = node(src_file, f"caller_{i}")
         did = node(dst_file, dst_name)
         conn.execute("INSERT INTO edges (source, target, kind, line) "
-                     "VALUES (?,?,?,?)", (sid, did, "calls", i + 1))
+                     "VALUES (?,?,?,?)", (sid, did, edge_kind, i + 1))
     for row in (node_rows or []):
         node(*row)
     conn.commit()
@@ -333,9 +338,13 @@ def test_doctor_reports_population_alongside_findings(tmp_path):
     notes = audit_graph_trust(str(tmp_path))
     assert notes
     joined = " ".join(notes)
-    assert "1 call edge" in joined
+    assert "1 edge(s) run from production code" in joined
     # the population is not optional garnish: 50 padding edges + the 1 bad one
     assert f"Examined {MIN_MEANINGFUL_EDGES + 1} edge(s)" in joined
+    # and it is attributed to a KIND, not left as an undifferentiated total:
+    # calls and uses answer to different upstream defects.
+    assert "calls 1/" in joined
+    assert "1 of those are CALL edges" in joined
     assert "quality_signal" in joined
 
 
@@ -703,3 +712,83 @@ def test_index_state_reads_the_branch_it_is_standing_on(tmp_path):
     state = index_state(str(tmp_path))
     assert state.state == INDEX_PRESENT
     assert state.db_path.endswith("feature_experiment.db")
+
+
+# ── Per-kind split (7.11.1 / #508) ───────────────────────────────────────
+#
+# 7.11.1 fixed the CALL fallback and left the reference fallback alone. On
+# this repository that took calls 455 -> 29 while uses stayed at exactly
+# 351, so a single total rendered a 94% clearance as a half-fix. These
+# guard the property that made the difference visible.
+
+def test_by_kind_separates_calls_from_uses(tmp_path):
+    edges = _padding(MIN_MEANINGFUL_EDGES) + [
+        ("src/a.py", "tests/t.py", "after", "calls"),
+        ("src/b.py", "tests/t.py", "exe", "uses"),
+        ("src/c.py", "tests/t.py", "exe", "uses"),
+    ]
+    _make_index(tmp_path, edges)
+    report = inspect_graph(str(tmp_path))
+    assert report.state == STATE_TAINTED
+    assert report.impossible_edges == 3
+    assert report.kind("calls").impossible == 1
+    assert report.kind("uses").impossible == 2
+
+
+def test_by_kind_names_clean_kinds_too(tmp_path):
+    """A kind measured clean is a result, not an absence.
+
+    Omitting it would leave a reader unable to tell "no impossible annotates
+    edges" from "annotates was never examined" -- the same distinction the
+    four states exist to keep.
+    """
+    edges = _padding(MIN_MEANINGFUL_EDGES) + [
+        ("src/a.py", "tests/t.py", "after", "calls"),
+        ("src/b.py", "src/c.py", "ok", "annotates"),
+    ]
+    _make_index(tmp_path, edges)
+    report = inspect_graph(str(tmp_path))
+    clean = report.kind("annotates")
+    assert clean is not None
+    assert clean.impossible == 0
+    assert clean.examined == 1
+
+
+def test_kind_returns_none_for_an_absent_kind(tmp_path):
+    """None means "not in this index", never "present and clean"."""
+    _make_index(tmp_path, _padding(MIN_MEANINGFUL_EDGES))
+    report = inspect_graph(str(tmp_path))
+    assert report.kind("uses") is None
+
+
+def test_a_clean_graph_still_reports_its_kinds(tmp_path):
+    """Trustworthy is not a reason to drop the population it was measured on."""
+    _make_index(tmp_path, _padding(MIN_MEANINGFUL_EDGES))
+    report = inspect_graph(str(tmp_path))
+    assert report.state == STATE_TRUSTWORTHY
+    assert report.by_kind
+    assert all(t.impossible == 0 for t in report.by_kind)
+
+
+def test_summary_carries_the_split(tmp_path):
+    edges = _padding(MIN_MEANINGFUL_EDGES) + [
+        ("src/a.py", "tests/t.py", "after", "calls"),
+        ("src/b.py", "tests/t.py", "exe", "uses"),
+    ]
+    _make_index(tmp_path, edges)
+    line = inspect_graph(str(tmp_path)).summary()
+    assert "uses 1/" in line and "calls 1/" in line
+
+
+def test_doctor_names_the_uses_defect_separately(tmp_path):
+    """The uses residue must not be reported under the calls issue number."""
+    from helpers.doctor_rules import audit_graph_trust
+    edges = _padding(MIN_MEANINGFUL_EDGES) + [
+        ("src/b.py", "tests/t.py", "exe", "uses"),
+    ]
+    _make_index(tmp_path, edges)
+    joined = " ".join(audit_graph_trust(str(tmp_path)))
+    assert "1 are USES edges" in joined
+    assert "tokensave-python-uses-bare-name.md" in joined
+    # and it must NOT claim a call-path finding it did not measure
+    assert "of those are CALL edges" not in joined

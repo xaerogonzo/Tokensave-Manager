@@ -517,25 +517,205 @@ def audit_graph_trust(project_path: str) -> list:
         return []
 
     notes = [
-        "  %d call edge(s) run from production code INTO the test tree, "
-        "across %d source file(s) -- impossible by construction, since "
-        "tests import production code and never the reverse. tokensave "
-        "binds an unqualified call on an untracked receiver to the only "
-        "symbol of that name in the project, and test doubles are named "
-        "after what they stand in for."
+        "  %d edge(s) run from production code INTO the test tree, across "
+        "%d source file(s) -- impossible by construction, since tests import "
+        "production code and never the reverse. tokensave binds an "
+        "unqualified name on an untracked receiver to the only symbol of "
+        "that name in the project, and test doubles are named after what "
+        "they stand in for."
         % (report.impossible_edges, report.source_files_affected),
         "  Examined %d edge(s) to find them."
         % report.edges_examined,
-        "  Treat acyclicity -- and quality_signal, which is the geometric "
-        "mean over it -- as unusable for trend comparison until upstream "
-        "fixes this. See docs/upstream-issues/"
-        "tokensave-python-bare-name-fallback.md.",
     ]
+
+    # Per kind, never only the sum. The two contaminated kinds answer to
+    # different upstream defects and move independently: 7.11.1 (#508) fixed
+    # the call fallback and left the reference fallback alone, so a single
+    # total renders a 94% clearance in one as a half-fix of the whole.
+    # Clean kinds are named too -- "0 of 531 examined" is a result, and
+    # omitting it leaves a reader unable to tell clean from unexamined.
+    if report.by_kind:
+        dirty = ", ".join("%s %d/%d" % (t.kind, t.impossible, t.examined)
+                          for t in report.by_kind if t.impossible)
+        clean = ", ".join("%s 0/%d" % (t.kind, t.examined)
+                          for t in report.by_kind if not t.impossible)
+        if dirty:
+            notes.append("  By edge kind (impossible/examined): %s." % dirty)
+        if clean:
+            notes.append("  Clean kinds, measured not assumed: %s." % clean)
+
+    calls = report.kind("calls")
+    if calls is not None and calls.impossible:
+        notes.append(
+            "  %d of those are CALL edges -- upstream #503/#508. Treat "
+            "acyclicity, and quality_signal which is the geometric mean "
+            "over it, as unusable for trend comparison. See docs/"
+            "upstream-issues/tokensave-python-bare-name-fallback.md."
+            % calls.impossible)
+    uses = report.kind("uses")
+    if uses is not None and uses.impossible:
+        notes.append(
+            "  %d are USES edges -- the same bare-name binding in the "
+            "reference resolver, which #508 did not reach. See docs/"
+            "upstream-issues/tokensave-python-uses-bare-name.md."
+            % uses.impossible)
     if report.collisions:
         top = ", ".join("%s x%d" % (c.target_name, c.count)
                         for c in report.collisions[:5])
         notes.append("  Most-bound test-double names: %s." % top)
     return notes
+
+
+def _indexed_extractor_version(project_path: str) -> "tuple[str, str]":
+    """What built this index, as ``(version, problem)`` -- exactly one set.
+
+    ``.tokensave/config.json`` carries ``last_indexed_version``, and it means
+    *the version that last performed a FULL index*. Measured, not assumed: a
+    plain ``tokensave sync`` over a changed file leaves the field alone, so
+    it cannot go green while the graph still holds an older extractor's
+    edges. That is the whole reason this rule can be one string comparison
+    rather than a comparison plus a timestamp.
+    """
+    import json
+
+    cfg = os.path.join(project_path, ".tokensave", "config.json")
+    if not os.path.isfile(cfg):
+        return ("", "")           # not a tokensave project; nothing to say
+    try:
+        with open(cfg, encoding="utf-8-sig") as fh:
+            data = json.load(fh)
+    except (OSError, ValueError) as exc:
+        return ("", "cannot read .tokensave/config.json (%s)" % exc)
+    if not isinstance(data, dict):
+        return ("", ".tokensave/config.json is not a JSON object")
+    version = str(data.get("last_indexed_version") or "").strip()
+    if not version:
+        return ("", "no last_indexed_version in .tokensave/config.json")
+    return (version, "")
+
+
+def _installed_extractor_version(tokensave_exe: str) -> "tuple[str, str]":
+    """What is installed now, as ``(version, problem)`` -- exactly one set.
+
+    ``tokensave --version`` prints ``tokensave X.Y.Z``. Subprocess and the
+    Windows console-suppression flag are imported lazily, so this module's
+    module-level import surface stays exactly ``ast``, ``os`` and ``re`` for
+    the CI one-liner in ``helpers/ci_workflow.py``.
+    """
+    import subprocess
+
+    from constants import CREATE_NO_WINDOW
+
+    if not tokensave_exe or not os.path.isfile(tokensave_exe):
+        return ("", "")           # not configured; the caller says nothing
+    try:
+        out = subprocess.run(
+            [tokensave_exe, "--version"], capture_output=True, text=True,
+            timeout=15, creationflags=CREATE_NO_WINDOW,
+        )
+    except (OSError, subprocess.SubprocessError) as exc:
+        return ("", "could not run `tokensave --version` (%s)" % exc)
+    text = ((out.stdout or "") + " " + (out.stderr or "")).strip()
+    m = re.search(r"(\d+\.\d+(?:\.\d+)*)", text)
+    if not m:
+        return ("", "`tokensave --version` printed no version (%r)"
+                % text[:60])
+    return (m.group(1), "")
+
+
+def audit_index_extractor_version(project_path: str,
+                                  tokensave_exe: str = "") -> list:
+    """Whether this project's graph was built by the tokensave now installed.
+
+    The gap this exists to close: upgrading tokensave does not rebuild the
+    graph, and an incremental sync does not revisit call sites it has already
+    resolved. So a correctness fix in a new extractor -- 7.11.1's #508 is the
+    worked example -- lands on disk and changes nothing anyone queries, for
+    as long as nobody happens to run a full sync. On this repository that gap
+    ran 20 days and hid 426 impossible edges that one `sync --force` removed.
+
+    Nothing else in the Manager compares the binary that IS installed against
+    the binary that BUILT the graph, and the integration check cannot: it
+    reads local files and the graph is not one of them.
+
+    Warn-only, and never a violation -- a stale index is a fact about the
+    working tree, not a defect in the source, and counting it would move the
+    number other things are measured against.
+
+    Silent when the two agree. NOT silent when it could not ask: an
+    unreadable config or an unrunnable binary is a different fact from a
+    match, and letting them share the quiet path is how an unasked question
+    starts reading as a clean answer.
+
+    Imported lazily to keep this module's import surface exactly ``ast``,
+    ``os`` and ``re`` for the CI one-liner in ``helpers/ci_workflow.py``.
+    """
+    if not project_path:
+        return []
+
+    indexed, indexed_problem = _indexed_extractor_version(project_path)
+    if not indexed and not indexed_problem:
+        return []                 # not a tokensave project
+    installed, installed_problem = _installed_extractor_version(tokensave_exe)
+    if not installed and not installed_problem:
+        return []                 # tokensave not configured; not our business
+
+    older = newer = False
+    if indexed and installed:
+        from helpers.detection import _version_lt
+        older = _version_lt(indexed, installed)
+        newer = _version_lt(installed, indexed)
+
+    # "Could not ask" first, and never folded into the quiet path. An
+    # unreadable config and an unrunnable binary are different facts from a
+    # match, and they are reported as two lines rather than one because they
+    # have different remedies -- a broken index directory is not a missing
+    # tokensave. Reported even when the OTHER half answered: knowing one of
+    # the two versions is not knowing whether they agree.
+    unknown = []
+    if indexed_problem:
+        unknown.append("  Could not tell which tokensave built this index: "
+                       "%s." % indexed_problem)
+    if installed_problem:
+        unknown.append("  Could not tell which tokensave is installed: %s."
+                       % installed_problem)
+    if unknown:
+        unknown.append(
+            "  Index freshness is unverified rather than confirmed -- a "
+            "graph built by an older extractor looks exactly like this one.")
+        return unknown
+
+    if not older and not newer:
+        return []                 # agreed; a healthy project gains no line
+
+    if older:
+        return [
+            "  This project's graph was built by tokensave %s, and %s is "
+            "installed. A correctness fix in a newer extractor only reaches "
+            "edges that get re-resolved, and an incremental sync does not "
+            "revisit call sites it has already resolved -- so a newer binary "
+            "can sit installed and change nothing anyone queries."
+            % (indexed, installed),
+            "  Run `tokensave sync --force` to rebuild the graph under the "
+            "installed extractor. Until then, treat every graph-derived "
+            "answer here -- callers, impact, dead_code, the health "
+            "dimensions -- as describing a tokensave you no longer run.",
+        ]
+
+    # A downgrade, and deliberately NOT the same advice. `sync --force` would
+    # rebuild the graph with the OLDER extractor, reintroducing whatever the
+    # newer one had fixed -- so recommending it here would be actively
+    # harmful. The mismatch is real and worth a line; the remedy is the
+    # binary, not the index.
+    return [
+        "  This project's graph was built by tokensave %s, which is NEWER "
+        "than the installed %s. The index may hold edges this binary would "
+        "not produce." % (indexed, installed),
+        "  Do NOT run `sync --force` to reconcile it: that would rebuild "
+        "the graph with the older extractor and discard whatever the newer "
+        "one fixed. Upgrade tokensave instead, or point tokensave_exe at "
+        "the newer install.",
+    ]
 
 
 def audit_pyscope_cache(project_path: str, pyscope_exe: str = "") -> list:

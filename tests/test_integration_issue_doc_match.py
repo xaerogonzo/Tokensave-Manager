@@ -202,3 +202,89 @@ def test_archived_issue_is_not_returned_by_lookup():
     """
     mod = _load_script_module()
     assert mod._find_issue_doc(389) is None
+
+
+# ── Ownership vs citation ────────────────────────────────────────────────
+#
+# The regex cannot tell a doc's SUBJECT from an issue it merely cites, and
+# these drafts cite freely: a duplicate search names the issues it ruled
+# out, a "same class as #457" aside names a third. Only POSITION separates
+# them, so ownership is read from the STATUS stanza and nothing else.
+#
+# The case that forced this: the #513 report keeps its duplicate search
+# inside the SAME html comment as STATUS and cites #512 and #136 there. A
+# whole-file scan resolved #512 to it, so `--fix` would have archived our
+# report under someone else's packaging issue and then found nothing for
+# #513, because the file had already moved.
+
+_CITING_DOC = """<!--
+STATUS: FILED 2026-09-08 as issue #513 — awaiting maintainer response.
+  https://github.com/o/r/issues/513
+
+DUPLICATE SEARCH:
+  #512 Windows asset missing from the release — OPEN, filed by someone else.
+       https://github.com/o/r/issues/512
+  #136 the same packaging failure, previous occurrence — CLOSED.
+-->
+
+# The report body, which also mentions issue #512 in passing.
+"""
+
+
+def test_status_stanza_declares_ownership(checker):
+    mod, issues = checker
+    (issues / "report.md").write_text(_CITING_DOC, encoding="utf-8")
+    assert mod._find_issue_doc(513).name == "report.md"
+
+
+@pytest.mark.parametrize("cited", [512, 136])
+def test_a_cited_issue_does_not_claim_the_doc(checker, cited):
+    mod, issues = checker
+    (issues / "report.md").write_text(_CITING_DOC, encoding="utf-8")
+    assert mod._find_issue_doc(cited) is None
+
+
+def test_a_doc_with_no_status_still_resolves_when_unambiguous(checker):
+    """Hand-written docs predating the STATUS convention must still match."""
+    mod, issues = checker
+    (issues / "old.md").write_text(
+        "Some analysis of issue #419 and nothing else.\n", encoding="utf-8")
+    assert mod._find_issue_doc(419).name == "old.md"
+
+
+def test_a_statusless_doc_naming_several_issues_is_ambiguous(checker):
+    """None rather than a guess, on graph_trust's `insufficient` reasoning."""
+    mod, issues = checker
+    (issues / "old.md").write_text(
+        "Compares issue #419 with issue #421 at length.\n", encoding="utf-8")
+    assert mod._find_issue_doc(419) is None
+    assert mod._find_issue_doc(421) is None
+
+
+# ── Archiving preserves what resolved the issue ──────────────────────────
+
+def test_archive_keeps_the_hand_written_status(checker):
+    """The script knows it is closed and when it looked. It does NOT know
+    what fixed it, and that is the half a reader needs."""
+    mod, issues = checker
+    (issues / "report.md").write_text(
+        "<!--\nSTATUS: FIXED upstream in PR #519 (merged) — unreleased.\n"
+        "  https://github.com/o/r/issues/513\n-->\n", encoding="utf-8")
+    line = mod._auto_archive_resolved(513, "some title")
+    assert line
+    moved = issues / "archived" / "report.md"
+    text = moved.read_text(encoding="utf-8")
+    assert "STATUS: CLOSED" in text
+    assert "PRIOR: FIXED upstream in PR #519 (merged) — unreleased." in text
+
+
+def test_archive_replaces_a_placeholder_status_outright(checker):
+    """A stub's STATUS carries nothing, so there is nothing to preserve."""
+    mod, issues = checker
+    (issues / "issue-999.md").write_text(
+        "AUTO_GENERATED: true\nISSUE: #999\nSTATUS: OPEN\n",
+        encoding="utf-8")
+    mod._auto_archive_resolved(999, "some title")
+    text = (issues / "archived" / "issue-999.md").read_text(encoding="utf-8")
+    assert "STATUS: CLOSED" in text
+    assert "PRIOR:" not in text

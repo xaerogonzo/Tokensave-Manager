@@ -15,12 +15,40 @@ STATUS: FIXED in tokensave v7.11.1 — issue #503 is still OPEN upstream.
   `execute` 172, i.e. `list.append`, `logger.debug` and `cursor.execute`,
   every one a call on a receiver the index never typed.
 
-  NOT YET VERIFIED LOCALLY. v7.11.1 was published with no Windows asset
-  (upstream #512; see tokensave-upgrade-asset-vs-network-error.md), so this machine cannot
-  install the fix. This repository is the natural regression case — the
-  8106 -> 7164 quality_signal movement recorded in Roadmap-16 was this bug
-  binding unqualified calls to same-named test doubles. Re-measure once the
-  fix is installable.
+  VERIFIED LOCALLY 2026-09-08 against 7.11.1. The Windows asset landed, the
+  binary was installed, and this repository — 489 files, 14,422 nodes — was
+  fully re-indexed with `sync --force`. It had to be a FULL index: the graph
+  was last fully built 20 days earlier under 7.11.0, and an incremental sync
+  does not revisit call sites it has already resolved, which is this issue's
+  own still-open secondary finding. So the fix sat installed and inert until
+  the re-index.
+
+  Impossible edges — production code binding INTO the test tree — before and
+  after, counted over the identical tree:
+
+      calls       455  ->   29     (-94%,  10,656 examined)
+      uses        351  ->  351     (unchanged, 7,277 examined)
+      annotates     0  ->    0     (531 examined)
+      extends       0  ->    0     (45 examined)
+
+  So the primary report is fixed, convincingly, and the per-name counts say
+  so independently: every collision that is a METHOD name moved (`after`
+  168 -> 20, `askyesno` 77 -> 0, `delete` 55 -> 0, `grid` 24 -> 6) and every
+  collision that is a VARIABLE or FIXTURE name did not move at all (`exe`
+  109, `node` 55, `lines` 46, `cfg_path` 40, `python_exe` 11, `npm_exe` 9 —
+  identical before and after).
+
+  That residue is the same defect in the reference resolver, which #508 did
+  not reach. It is a separate report: tokensave-python-uses-bare-name.md.
+
+  DO NOT report the total. Summed across kinds this reads 806 -> 380, which
+  renders a 94% clearance as a half-fix. helpers/graph_trust.py now carries
+  the per-kind split for exactly this reason, and anything speaking about
+  #503 should read `kind("calls")` rather than `impossible_edges`.
+
+  The Roadmap-16 quality_signal movement is therefore only PARTLY explained
+  by this fix: `acyclicity` reads call edges, and 94% of the contamination
+  there is gone, but the aggregate stays quarantined while `uses` is dirty.
 
   Re-read from GitHub after filing: the published body is byte-identical
   to what was sent, and carries no path, project name or username. The
