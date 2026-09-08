@@ -700,7 +700,7 @@ class DocDrafterDialog(UiPumpMixin, tk.Toplevel):
         # Theme B1: tokensave + codegraph grounding injection.
         from helpers.doc_grounding import (
             build_grounding_block, build_codegraph_block,
-            build_combined_grounding,
+            build_pyscope_block, build_combined_grounding,
         )
         tokensave_block = ""
         if dt.tokensave_recipe:
@@ -725,7 +725,14 @@ class DocDrafterDialog(UiPumpMixin, tk.Toplevel):
                 changed_files=changed_files,
                 codegraph_exe=_cg_exe,
             )
-        grounding = build_combined_grounding(tokensave_block, codegraph_block)
+        # Step 1.8: a third source, and a different KIND of one. The two
+        # above say what exists; this says how much of it PyScope actually
+        # proved, which is the caveat a model writing about a call graph most
+        # needs and the one neither of the others can supply. Absent when
+        # PyScope is not configured, like every other grounding source.
+        pyscope_block = build_pyscope_block(project, self._cfg.pyscope_exe)
+        grounding = build_combined_grounding(
+            tokensave_block, codegraph_block, pyscope_block)
 
         # v4: build_prompt returns PromptBuildResult — named-field access.
         # backend_hint=True triggers smaller candidate-body budget for local

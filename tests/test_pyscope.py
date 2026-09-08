@@ -602,3 +602,82 @@ class TestAgentTools:
         block = src[src.index("# PyScope tools"):src.index("def _validate_write_args")]
         assert "index.db" not in block
         assert "sqlite" not in block.lower()
+
+
+# ── Grounding ────────────────────────────────────────────────────────────────
+
+class TestGroundingBlock:
+    """PyScope contributes a caveat, not more content.
+
+    tokensave and codegraph both answer "what is there". Neither says how much
+    of it their resolver proved, so a model reading either has no way to tell a
+    certain call edge from a name that happened to match.
+    """
+
+    def test_it_states_the_unresolved_share_as_a_caution(self, monkeypatch):
+        import helpers.doc_grounding as dg
+        monkeypatch.setattr(ps, "analyze", lambda e, p: {
+            "symbols": 100, "edges": 200,
+            "confidence": {"certain": 100, "unknown": 100},
+            "dispatch": {"static": 100, "dynamic": 100},
+        })
+        block = dg.build_pyscope_block("/proj", "ps.exe")
+        assert "50% of relationships are unresolved" in block
+        assert "do not claim a complete list" in block
+
+    def test_no_breakdown_means_no_block(self, monkeypatch):
+        """Bare counts duplicate what the other two sources already said."""
+        import helpers.doc_grounding as dg
+        monkeypatch.setattr(ps, "analyze", lambda e, p: {"symbols": 5, "edges": 9})
+        assert dg.build_pyscope_block("/proj", "ps.exe") == ""
+
+    def test_every_failure_is_silent(self, monkeypatch):
+        """Grounding is additive; no caller's flow may depend on it."""
+        import helpers.doc_grounding as dg
+        assert dg.build_pyscope_block("/proj", "") == ""
+        assert dg.build_pyscope_block("", "ps.exe") == ""
+        monkeypatch.setattr(ps, "analyze", lambda e, p: None)
+        assert dg.build_pyscope_block("/proj", "ps.exe") == ""
+
+    def test_a_raising_analyze_is_still_silent(self, monkeypatch):
+        import helpers.doc_grounding as dg
+
+        def boom(exe, project):
+            raise RuntimeError("nope")
+        monkeypatch.setattr(ps, "analyze", boom)
+        assert dg.build_pyscope_block("/proj", "ps.exe") == ""
+
+
+class TestCombinedGroundingIsVariadic:
+
+    def test_two_sources_behave_exactly_as_before(self):
+        """Six existing call sites pass two blocks positionally."""
+        from helpers.doc_grounding import build_combined_grounding
+        assert build_combined_grounding("a\nb", "b\nc") == "a\nb\nc"
+
+    def test_a_third_source_needs_no_new_parameter(self):
+        from helpers.doc_grounding import build_combined_grounding
+        assert build_combined_grounding("a", "b", "c") == "a\nb\nc"
+
+    def test_the_budget_does_not_grow_with_the_source_count(self):
+        """The cap is a prompt-size budget, not a per-source allowance.
+
+        Letting it scale would silently inflate every prompt the moment a
+        third source was added. Compared against the two-source output rather
+        than an absolute number, because `_truncate_at_line` cuts at a line
+        boundary and appends a marker, so the exact length is not the cap.
+        """
+        from helpers.doc_grounding import build_combined_grounding
+        def lines(tag):
+            return "\n".join(f"{tag}{i}" for i in range(400))
+        two = build_combined_grounding(lines("x"), lines("y"), per_source_cap=100)
+        three = build_combined_grounding(lines("x"), lines("y"), lines("z"),
+                                         per_source_cap=100)
+        assert len(three) == len(two), (
+            "a third source changed the output size, so the cap scaled with "
+            "the source count instead of staying a fixed prompt budget")
+        assert "truncated at output cap" in three
+
+    def test_all_empty_is_empty(self):
+        from helpers.doc_grounding import build_combined_grounding
+        assert build_combined_grounding("", "", "") == ""
