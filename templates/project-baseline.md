@@ -29,6 +29,7 @@ codebase, this rule wins.
 | Find callers of a function | `tokensave_callers` | `Grep` |
 | Get context for a task or bug | `tokensave_context` | Read the specific file |
 | Understand what a file/module exports | `tokensave_module_api` | `Read` |
+| Read a file you already located | `tokensave_read` | `Read` |
 | Explore file structure | `tokensave_files` | `Glob` |
 | Find TODOs / FIXMEs | `tokensave_todos` | `Grep` |
 | Find biggest or most-connected classes | `tokensave_hotspots`, `tokensave_god_class` | — |
@@ -38,9 +39,9 @@ codebase, this rule wins.
 index last synced. A stale graph is not a broken tool, but it is a wrong answer,
 and the honest move is to say so rather than quietly work from it.
 
-Fall back to `Read` when you need the exact implementation body.
-`tokensave_context` with `include_code: true` pulls those snippets without the
-whole file.
+**The body read is a tokensave call too.** `tokensave_read` slices with
+`mode: "lines"`, maps symbols with `mode: "map"`, and is cached across
+sessions. `Read` is the fallback, not the default.
 
 ---
 

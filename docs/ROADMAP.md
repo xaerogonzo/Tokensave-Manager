@@ -114,6 +114,54 @@ linked — including in the three projects carrying the most session time.
   NOT included, leaving a heading index. Per project, never bulk, and the
   proposal must show the COMPLETE transformation before a byte is written.
   Measured and reported today; not yet offered as an action.
+- ✅ **Phase 1 remainder: the oversized-chain split offer.** Shipped as
+  `helpers/instructions_split.py`. LexForge applied: 283,874 -> 20,186 B of
+  resolved chain (-93%), 118 of 119 sections moved to `docs/LESSONS.md`,
+  reachability unchanged. OpenChem (960 KB -> 31,702 B) and Fortuna
+  (363 KB -> 21,187 B) are computed and HELD while their sessions are live.
+  The boundary is proposed from a byte budget and moved by a person: no
+  mechanical discriminator survives the fleet, and on LexForge the budget
+  landed mid-log.
+
+  **The module's "the tail is the log" premise was falsified by two of the
+  three projects it was written for** — Fortuna's log is section [2] of 5 and
+  OpenChem's LAST section is a 64 KB operational standard — so the model takes
+  an explicit `move_indices` set and renders the index where the moved run was.
+  All three applied: fleet always-loaded **1,924,101 -> 469,572 B (-75.6%)**,
+  reachability unchanged.
+
+  Shipped since: `dialogs/instructions_split.py` puts the offer on the row it
+  applies to. Per project, never bulk — every section is listed with its byte
+  cost and a tick, and nothing is ticked on open, because the budget's tail
+  guess was wrong on three of the four real files it met. Three guards are
+  mutation-tested: building the proposal writes nothing, applying writes
+  exactly the two files it represented, and re-introducing the pre-tick fails.
+
+  Shipped since: **`##` is no longer the unit.** Sections are a two-level tree
+  and a `###` moves on its own, which takes OpenChem's kept "Verification
+  standard" from 64,030 B to 567 B of actual convention — the file goes
+  83,323 -> 19,865 B, a further -76%. A second split now MERGES into the index
+  the first one wrote instead of writing a rival block beside it, appends to
+  the existing target under its own digest guard, and files an orphaned `###`
+  under a `## From:` heading rather than whatever unrelated section precedes it.
+
+  Fortuna is the honest exception and stays as it is: its whole 339 KB log is
+  ONE `##` with no headings at all. Its entries ARE reliably marked — 547
+  paragraph-initial bold lead-ins against 34 wrap artifacts, and the same ratio
+  holds on the other two projects — but listing them costs **32,840 B**, more
+  than Fortuna now keeps loaded in total. So the index records the count and
+  how to grep for them. Giving that log real `###` headings is an editorial
+  job for its owner, not something this tool should guess at.
+
+  Remaining:
+  - **OpenChem's residual.** Its kept "Verification standard" is 64,030 B: about
+    a dozen lines of convention followed by **20 `###` lesson subsections**.
+    Splitting inside a section needs `###` granularity, which this does not
+    have. A second, smaller split opportunity — not a defect in the first.
+  - **`docs/LESSONS.md` is untracked in each target repo.** The split writes it;
+    committing it is the project owner's call, and until then the index points
+    at a file that is not in the history.
+
 - ✅ **Phase 1b: shrink the baseline, harvest the big three.** Done as a
   separate commit series so Phase 1's wiring measurement stayed clean. The
   Nuitka and Tkinter sections moved into `templates/gotchas/`; the tokensave
