@@ -255,6 +255,14 @@ class _Driver:
             # scan to land — the rows are empty until it does.
             from dialogs.instructions_overview import InstructionsDialog
             self._dialog = InstructionsDialog(self._app, self._app._cfg)
+        elif name in ("split", "instructionssplit", "splitproposal"):
+            # Reads and computes the whole file in a worker, so a `shot` or
+            # `report` needs an `after_ms` long enough for the sections to
+            # land -- the list is empty until they do.
+            from dialogs.instructions_split import SplitProposalDialog
+            path = self._project(step)
+            self._dialog = SplitProposalDialog(
+                self._app, path, os.path.basename(path.rstrip("/\\")))
         elif name in ("savings", "cost", "savingsdialog"):
             # Reads `tokensave gain`/`cost`/`discover` in worker threads, so a
             # `report` step needs an `after_ms` long enough for them to land.

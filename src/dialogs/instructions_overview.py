@@ -272,6 +272,18 @@ class InstructionsDialog(UiPumpMixin, tk.Toplevel):
                        command=lambda p=project: self._wire_one(p)).pack(
                 side=tk.RIGHT)
 
+        # Offered per project and never in a bulk action: moving a lesson log
+        # is a large editorial change to a file a person wrote, and no
+        # mechanical rule decides where the log starts.
+        if project.weight_bytes > _INSTRUCTIONS_REVIEW_BYTES:
+            split = ttk.Button(row, text="Split…",
+                               command=lambda p=project: self._split_one(p))
+            split.pack(side=tk.RIGHT, padx=(0, 6))
+            _Tooltip(split,
+                     "Move the append-only sections into a file that is NOT "
+                     "@included, leaving an index of their titles. Shows the "
+                     "complete transformation before writing anything.")
+
         # Both facts on screen. `carriage` is what the files declare; the badge
         # above is what the chain resolves to, and the gap between them is the
         # entire point of this dialog.
@@ -370,6 +382,18 @@ class InstructionsDialog(UiPumpMixin, tk.Toplevel):
                         (" (%s)" % ", ".join(changed)) if changed else ""),
                      C["green"] if outcome == "wired" else C["peach"])
         self._scan()
+
+    def _split_one(self, project) -> None:
+        """The oversized-chain offer, for one project.
+
+        Lazy dialog-to-dialog import, so it stays out of module load order.
+        """
+        from dialogs.instructions_split import SplitProposalDialog
+
+        dialog = SplitProposalDialog(self, project.display_root, project.name,
+                                     on_log=self._on_log,
+                                     on_applied=self._scan)
+        dialog.transient(self)
 
     def _wire_all(self) -> None:
         if self._busy or not self._fleet:

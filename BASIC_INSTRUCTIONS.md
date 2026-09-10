@@ -406,6 +406,9 @@ Token Save Manager Source/
 │   │   │                          No install action: the Manager does not install PyScope.
 │   │   ├── release_wizard.py      ReleaseWizardDialog + _ReleaseCtx (paired)
 │   │   ├── instructions_overview.py InstructionsDialog — fleet instruction-chain view
+│   ├── instructions_split.py    SplitProposalDialog — the oversized-chain offer.
+│   │                            Per project, never bulk; shows the complete
+│   │                            transformation before a byte is written.
 │   │   ├── mcp_config.py          MCPConfigDialog — mutates cfg.raw["mcp_skip_warnings"]
 │   │   ├── ai_code_review.py      AICodeReviewDialog — takes both llm_cfg dict + cfg
 │   │   ├── git_commit.py          GitCommitDialog

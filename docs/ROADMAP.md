@@ -130,9 +130,19 @@ linked — including in the three projects carrying the most session time.
   All three applied: fleet always-loaded **1,924,101 -> 469,572 B (-75.6%)**,
   reachability unchanged.
 
+  Shipped since: `dialogs/instructions_split.py` puts the offer on the row it
+  applies to. Per project, never bulk — every section is listed with its byte
+  cost and a tick, the byte budget only pre-ticks a suggestion, and the two
+  load-bearing guards are mutation-tested: building the proposal writes
+  nothing, and applying writes exactly the two files it represented.
+
   Remaining:
-  - Wire the proposal into the Instructions dialog so it is reachable without
-    a script.
+  - **Sub-section granularity — the unit of a lesson is not `##`.** Two of the
+    three projects prove it. Fortuna's whole 339 KB log is ONE `##` section
+    with 110 bold lead-ins, so its index is a single line pointing at a 346 KB
+    file: the bytes moved, but nothing is findable. OpenChem's kept
+    "Verification standard" is 64,030 B holding 20 `###` subsections. Both
+    need a finer unit than the module currently has.
   - **OpenChem's residual.** Its kept "Verification standard" is 64,030 B: about
     a dozen lines of convention followed by **20 `###` lesson subsections**.
     Splitting inside a section needs `###` granularity, which this does not
