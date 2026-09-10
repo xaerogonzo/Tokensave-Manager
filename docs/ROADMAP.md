@@ -132,9 +132,10 @@ linked — including in the three projects carrying the most session time.
 
   Shipped since: `dialogs/instructions_split.py` puts the offer on the row it
   applies to. Per project, never bulk — every section is listed with its byte
-  cost and a tick, the byte budget only pre-ticks a suggestion, and the two
-  load-bearing guards are mutation-tested: building the proposal writes
-  nothing, and applying writes exactly the two files it represented.
+  cost and a tick, and nothing is ticked on open, because the budget's tail
+  guess was wrong on three of the four real files it met. Three guards are
+  mutation-tested: building the proposal writes nothing, applying writes
+  exactly the two files it represented, and re-introducing the pre-tick fails.
 
   Remaining:
   - **Sub-section granularity — the unit of a lesson is not `##`.** Two of the

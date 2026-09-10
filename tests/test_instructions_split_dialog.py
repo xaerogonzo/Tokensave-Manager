@@ -56,6 +56,13 @@ def _tree(root):
     return out
 
 
+def _tick(dialog, *indices):
+    """Tick sections by index. Nothing is ticked on open, by design."""
+    for index, var in dialog._vars.items():
+        var.set(index in indices)
+    dialog._recompute()
+
+
 def _open(tk_root, root, wait_for, name="Demo"):
     dialog = SplitProposalDialog(tk_root, root, name)
     wait_for(lambda: bool(dialog._sections), timeout_s=3.0)
@@ -94,7 +101,7 @@ def test_building_the_proposal_writes_nothing(tk_root, loggy, wait_for):
     for var in dialog._vars.values():
         var.set(False)
     dialog._recompute()
-    dialog._reset()
+    dialog._suggest()
     dialog._preview()
 
     assert _tree(root) == before, "interacting with the proposal wrote to disk"
@@ -106,6 +113,7 @@ def test_applying_writes_exactly_the_files_the_proposal_showed(
     """No extra files, and the bytes are the ones that were on screen."""
     root, _text = loggy
     dialog = _open(tk_root, root, wait_for)
+    _tick(dialog, 2, 3)
     mocker.patch.object(split_dialog.messagebox, "askyesno", return_value=True)
     mocker.patch.object(split_dialog.messagebox, "showinfo")
 
@@ -138,24 +146,31 @@ def test_a_ticked_chain_section_disables_apply_and_says_why(
                                     ("Log", "z" * 60_000)]))
     dialog = _open(tk_root, root, wait_for)
 
-    for index, var in dialog._vars.items():
-        var.set(index >= 1)
-    dialog._recompute()
+    _tick(dialog, 1, 2)
 
     assert str(dialog._apply_btn["state"]) == "disabled"
     assert "@include" in dialog._reason["text"]
 
 
-def test_selecting_nothing_refuses_rather_than_pretending(
-        tk_root, loggy, wait_for):
+def test_nothing_is_ticked_on_open(tk_root, loggy, wait_for):
+    """The decision this dialog exists to put in front of a person.
+
+    The byte budget guesses a TAIL, and that guess was wrong on three of the
+    four real files it met -- once selecting an operational section at the end
+    of the document. A pre-ticked box reads as a recommendation, so there is
+    none; `Suggest from budget` offers the guess to anyone who asks for it.
+    """
     root, _text = loggy
     dialog = _open(tk_root, root, wait_for)
-    for var in dialog._vars.values():
-        var.set(False)
-    dialog._recompute()
 
+    assert not dialog._selected(), "the dialog pre-selected sections"
     assert str(dialog._apply_btn["state"]) == "disabled"
-    assert dialog._reason["text"].strip()
+    # Guidance, not a refusal: an empty list on open is the starting state.
+    assert "Tick the sections" in dialog._reason["text"]
+    assert "Cannot apply" not in dialog._reason["text"]
+
+    dialog._suggest()
+    assert dialog._selected(), "the budget offered nothing when asked"
 
 
 def test_an_existing_target_is_refused_before_the_click(
@@ -178,6 +193,7 @@ def test_a_source_that_changed_after_the_preview_writes_nothing(
     """The guard that matters: a live session appended while this was open."""
     root, text = loggy
     dialog = _open(tk_root, root, wait_for)
+    _tick(dialog, 2, 3)
     mocker.patch.object(split_dialog.messagebox, "askyesno", return_value=True)
     warned = mocker.patch.object(split_dialog.messagebox, "showwarning")
 

@@ -80,10 +80,10 @@ class SplitProposalDialog(UiPumpMixin, tk.Toplevel):
                  font=("Segoe UI", 9), bg=C["base"],
                  fg=C["overlay0"]).pack(anchor=tk.W, padx=18, pady=(0, 2))
         tk.Label(self,
-                 text="The budget suggests a TAIL, and on three of four real "
-                      "files that was wrong — check the last ticked row: "
-                      "one project's final section was a 64 KB operational "
-                      "standard, not a lesson.",
+                 text="Nothing is ticked to begin with. The byte budget "
+                      "guesses a tail, and that guess has been wrong on three "
+                      "of the four real files it has met — so the choice "
+                      "is yours.",
                  font=("Segoe UI", 8, "italic"), bg=C["base"],
                  fg=C["overlay0"]).pack(anchor=tk.W, padx=18, pady=(0, 8))
 
@@ -135,10 +135,14 @@ class SplitProposalDialog(UiPumpMixin, tk.Toplevel):
         self._preview_btn.pack(side=tk.LEFT, padx=(8, 0))
         _Tooltip(self._preview_btn,
                  "The new CLAUDE.md in full, plus every heading that moves.")
-        self._suggest_btn = ttk.Button(btn_row, text="↻ Reset to suggestion",
-                                       command=self._reset,
+        self._suggest_btn = ttk.Button(btn_row, text="Suggest from budget",
+                                       command=self._suggest,
                                        state=tk.DISABLED)
         self._suggest_btn.pack(side=tk.LEFT, padx=(8, 0))
+        _Tooltip(self._suggest_btn,
+                 "Ticks the tail the byte budget would move. A starting "
+                 "point, not a recommendation: it has selected operational "
+                 "sections before, because a tail is not a log.")
         ttk.Button(btn_row, text="Close",
                    command=self.destroy).pack(side=tk.RIGHT)
 
@@ -173,10 +177,13 @@ class SplitProposalDialog(UiPumpMixin, tk.Toplevel):
             self._fail(plan.blocked or "no top-level sections to move.")
             return
 
-        suggested = {s.index for s in plan.moved}
+        # Deliberately unticked. The budget's tail has been wrong on three of
+        # the four real files this has met -- once selecting an operational
+        # section at the end of the document -- and a pre-ticked box reads as a
+        # recommendation. The guess is one button away for anyone who wants it.
         self._vars = {}
         for section in self._sections:
-            self._section_row(section, section.index in suggested)
+            self._section_row(section, False)
         for button in (self._preview_btn, self._suggest_btn):
             button.configure(state=tk.NORMAL)
         self._recompute()
@@ -228,8 +235,8 @@ class SplitProposalDialog(UiPumpMixin, tk.Toplevel):
     def _selected(self) -> set:
         return {i for i, var in self._vars.items() if var.get()}
 
-    def _reset(self) -> None:
-        """Back to what the byte budget suggests."""
+    def _suggest(self) -> None:
+        """Tick what the byte budget would move. Asked for, never assumed."""
         plan = compute_split(self._text)
         suggested = {s.index for s in plan.moved}
         for index, var in self._vars.items():
@@ -247,17 +254,28 @@ class SplitProposalDialog(UiPumpMixin, tk.Toplevel):
                  % (f"{plan.kept_bytes:,}", f"{plan.kept_bytes // 4:,}",
                     f"{plan.moved_bytes:,}", plan.target_rel))
 
-        if plan.blocked:
-            self._refuse(plan.blocked)
-        elif target_exists:
+        if target_exists:
             self._refuse("%s already exists; it will not be overwritten."
                          % DEFAULT_TARGET)
+        elif not self._selected():
+            # Not a refusal. On open this is simply the starting state, and
+            # colouring it like a fault would teach people to ignore the line
+            # that also carries the real ones.
+            self._prompt("Tick the sections that are a log. Nothing is "
+                         "written until you do.")
+        elif plan.blocked:
+            self._refuse(plan.blocked)
         else:
             self._reason.configure(text="")
             self._apply_btn.configure(state=tk.NORMAL)
 
+    def _prompt(self, message: str) -> None:
+        """Guidance. Same line as a refusal, deliberately not the same colour."""
+        self._reason.configure(text=message, fg=C["overlay0"])
+        self._apply_btn.configure(state=tk.DISABLED)
+
     def _refuse(self, reason: str) -> None:
-        self._reason.configure(text="Cannot apply: " + reason)
+        self._reason.configure(text="Cannot apply: " + reason, fg=C["peach"])
         self._apply_btn.configure(state=tk.DISABLED)
 
     # ── preview ──────────────────────────────────────────────────────────
