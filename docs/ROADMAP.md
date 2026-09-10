@@ -114,6 +114,33 @@ linked — including in the three projects carrying the most session time.
   NOT included, leaving a heading index. Per project, never bulk, and the
   proposal must show the COMPLETE transformation before a byte is written.
   Measured and reported today; not yet offered as an action.
+- ✅ **Phase 1 remainder: the oversized-chain split offer.** Shipped as
+  `helpers/instructions_split.py`. LexForge applied: 283,874 -> 20,186 B of
+  resolved chain (-93%), 118 of 119 sections moved to `docs/LESSONS.md`,
+  reachability unchanged. OpenChem (960 KB -> 31,702 B) and Fortuna
+  (363 KB -> 21,187 B) are computed and HELD while their sessions are live.
+  The boundary is proposed from a byte budget and moved by a person: no
+  mechanical discriminator survives the fleet, and on LexForge the budget
+  landed mid-log.
+
+  **The module's "the tail is the log" premise was falsified by two of the
+  three projects it was written for** — Fortuna's log is section [2] of 5 and
+  OpenChem's LAST section is a 64 KB operational standard — so the model takes
+  an explicit `move_indices` set and renders the index where the moved run was.
+  All three applied: fleet always-loaded **1,924,101 -> 469,572 B (-75.6%)**,
+  reachability unchanged.
+
+  Remaining:
+  - Wire the proposal into the Instructions dialog so it is reachable without
+    a script.
+  - **OpenChem's residual.** Its kept "Verification standard" is 64,030 B: about
+    a dozen lines of convention followed by **20 `###` lesson subsections**.
+    Splitting inside a section needs `###` granularity, which this does not
+    have. A second, smaller split opportunity — not a defect in the first.
+  - **`docs/LESSONS.md` is untracked in each target repo.** The split writes it;
+    committing it is the project owner's call, and until then the index points
+    at a file that is not in the history.
+
 - ✅ **Phase 1b: shrink the baseline, harvest the big three.** Done as a
   separate commit series so Phase 1's wiring measurement stayed clean. The
   Nuitka and Tkinter sections moved into `templates/gotchas/`; the tokensave
