@@ -187,19 +187,35 @@ class TestPyScopeRow:
         # padx=18 on the row wrapper plus padx=12 inside it, both sides.
         usable = dialog.minsize()[0] - 2 * (18 + 12)
         seen = set()
+
+        def check(owner, row):
+            if row in seen:
+                return
+            seen.add(row)
+            assert row.winfo_reqwidth() <= usable, (
+                f"the {owner} row needs {row.winfo_reqwidth()}px for "
+                f"its buttons but has {usable}px; Tk will squeeze the "
+                f"last one to a sliver rather than wrap it")
+
         for tool_id, widgets in dialog._tool_widgets.items():
             for key, widget in widgets.items():
-                if not key.endswith("_btn"):
-                    continue
-                row = widget.master
-                if row in seen:
-                    continue
-                seen.add(row)
-                assert row.winfo_reqwidth() <= usable, (
-                    f"the {tool_id} row needs {row.winfo_reqwidth()}px for "
-                    f"its buttons but has {usable}px; Tk will squeeze the "
-                    f"last one to a sliver rather than wrap it")
-        assert seen, "sanity: the scan found no button rows to measure"
+                if key.endswith("_btn"):
+                    check(tool_id, widget.master)
+
+        # The analyzer rows too. They live in their own dict, so the loop above
+        # cannot see them — and they are the ones most likely to overflow: a
+        # status label showing a full executable path already took one row to
+        # 785px inside a 720px dialog on the machine that wrote it. Font
+        # metrics differ per platform, so the bound has to be checked wherever
+        # the suite runs rather than where it was designed.
+        for key, widgets in dialog._analyzer_widgets.items():
+            check(key, widgets["primary"].master)
+
+        assert len(seen) >= 4, (
+            f"the scan measured only {len(seen)} rows; it should cover the "
+            "tool rows AND every analyzer row, and a guard that examined "
+            "almost nothing reports the same green as one that examined "
+            "everything")
 
     def test_cancelling_locate_changes_nothing(
             self, tk_root, mock_config, mocker):

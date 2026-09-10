@@ -162,10 +162,11 @@ class ToolManagerDialog(UiPumpMixin, tk.Toplevel):
         # children never mapped, which is also why the geometry oracle
         # could not see it (it skips unmapped widgets, since a widget
         # can be legitimately hidden).
-        # Raised with the analyzers section: content requires ~872, and a
-        # minsize below that lets the user shrink the last row back out of
-        # view -- the same failure the 540 note above records.
-        self.minsize(640, 880)
+        # A provisional floor only. The real one is set in _centre_on_parent
+        # from the content's own requested height, because that number differs
+        # per platform -- 872 on Windows, 912 on the Linux CI runner -- and any
+        # constant written here is measured on whichever machine wrote it.
+        self.minsize(640, 640)
         self.grab_set()
 
         # Per-tool widget bookkeeping (populated by _build_tool_row).
@@ -423,12 +424,26 @@ class ToolManagerDialog(UiPumpMixin, tk.Toplevel):
                 command=lambda k=spec.key: self._on_analyzer_primary(k))
             primary_btn.pack(side=tk.RIGHT, padx=(4, 0))
 
-            # `width` in characters, so the label's REQUESTED width is bounded
-            # regardless of how long a path turns out to be. Without it the row
-            # asks for more than the dialog has and the last button is clipped.
+            # `width` in characters bounds what the label REQUESTS; `expand`
+            # below is what it actually gets. Deliberately small, and the
+            # number was measured rather than chosen:
+            #
+            #   everything else in the row   337px
+            #   budget at the dialog minimum 580px   (minsize 640 less padding)
+            #   width=50 -> label 306px -> row 643px   over by 63
+            #   width=24 -> label 150px -> row 487px   93px of slack
+            #
+            # An unbounded label requests its full natural width, and one long
+            # path took this row to 785px inside a 720px dialog. But bounding
+            # it at what merely fits the OPENING width is not enough either:
+            # the guard in tests measures against `minsize`, because that is
+            # the smallest the user can drag the dialog to, and a row that only
+            # fits when the window is large clips the last button when it is
+            # not. The slack is deliberate headroom for platforms whose fonts
+            # are wider than this one's.
             status_lbl = tk.Label(
                 row, text="(checking…)", anchor=tk.W, justify=tk.LEFT,
-                width=50, bg=C["base"], fg=C["overlay0"],
+                width=24, bg=C["base"], fg=C["overlay0"],
                 font=("Consolas", 8))
             status_lbl.pack(side=tk.LEFT, fill=tk.X, expand=True)
             # The elided text loses the middle of a path; the tooltip is where
@@ -568,11 +583,23 @@ class ToolManagerDialog(UiPumpMixin, tk.Toplevel):
 
     def _centre_on_parent(self, parent) -> None:
         self.update_idletasks()
-        # 900, not 830: measured at 746 required before the analyzers section
-        # and ~840 after it, and the alternative to growing is clipping the
-        # bottom row. Still well inside a 1080-tall screen once the taskbar is
-        # taken off.
-        w, h = 720, 900
+        # Both the floor and the opening height come from what the content
+        # actually asks for, rather than a pixel constant.
+        #
+        # Every hard-coded number here has been wrong at least once: 540
+        # clipped the third row into an empty titled box, 830 was too short
+        # once the analyzers section arrived, and 880 — measured on Windows,
+        # where the content requests 872 — clipped the last row on the Linux CI
+        # runner, which requests **912** for the same widgets. Font metrics
+        # differ per platform, so a constant measured on one developer's
+        # machine is a guess everywhere else.
+        #
+        # Asking the widget removes the guess. `tests/test_dialog_tool_manager`
+        # asserts `minsize >= reqheight` as an invariant, and this is what
+        # keeps that true on a platform nobody has run it on yet.
+        required = self.winfo_reqheight()
+        self.minsize(640, required)
+        w, h = 720, max(830, required)
         try:
             px = parent.winfo_x() + (parent.winfo_width()  - w) // 2
             py = parent.winfo_y() + (parent.winfo_height() - h) // 2
