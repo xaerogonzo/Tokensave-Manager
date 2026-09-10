@@ -1,0 +1,76 @@
+{
+    "generalDiagnostics": [
+        {
+            "file": "<PROJECT>\\types.py",
+            "message": "Type \"str\" is not assignable to return type \"int\"\n\u00a0\u00a0\"str\" is not assignable to \"int\"",
+            "range": {
+                "end": {
+                    "character": 22,
+                    "line": 6
+                },
+                "start": {
+                    "character": 11,
+                    "line": 6
+                }
+            },
+            "rule": "reportReturnType",
+            "severity": "error"
+        },
+        {
+            "file": "<PROJECT>\\types.py",
+            "message": "\"upper\" is not a known attribute of \"None\"",
+            "range": {
+                "end": {
+                    "character": 20,
+                    "line": 6
+                },
+                "start": {
+                    "character": 15,
+                    "line": 6
+                }
+            },
+            "rule": "reportOptionalMemberAccess",
+            "severity": "error"
+        },
+        {
+            "file": "<PROJECT>\\types.py",
+            "message": "Type \"str | None\" is not assignable to return type \"int\"\n\u00a0\u00a0Type \"str | None\" is not assignable to type \"int\"\n\u00a0\u00a0\u00a0\u00a0\"str\" is not assignable to \"int\"",
+            "range": {
+                "end": {
+                    "character": 20,
+                    "line": 10
+                },
+                "start": {
+                    "character": 11,
+                    "line": 10
+                }
+            },
+            "rule": "reportReturnType",
+            "severity": "error"
+        },
+        {
+            "file": "<PROJECT>\\types.py",
+            "message": "Argument of type \"Literal[123]\" cannot be assigned to parameter \"name\" of type \"str\" in function \"find\"\n\u00a0\u00a0\"Literal[123]\" is not assignable to \"str\"",
+            "range": {
+                "end": {
+                    "character": 19,
+                    "line": 10
+                },
+                "start": {
+                    "character": 16,
+                    "line": 10
+                }
+            },
+            "rule": "reportArgumentType",
+            "severity": "error"
+        }
+    ],
+    "summary": {
+        "errorCount": 4,
+        "filesAnalyzed": 1,
+        "informationCount": 0,
+        "timeInSec": 0.191,
+        "warningCount": 0
+    },
+    "version": "1.1.414"
+}

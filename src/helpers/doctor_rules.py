@@ -782,6 +782,197 @@ def audit_pyscope_cache(project_path: str, pyscope_exe: str = "") -> list:
     ]
 
 
+#: Review heuristics, NOT correctness verdicts (BASIC_INSTRUCTIONS rule H).
+#: A project may intentionally carry a large always-loaded instruction file;
+#: these name a cost so a human can weigh it. Evaluated on BYTES — the token
+#: figure beside them is a byte/4 estimate and must never gate anything.
+_INSTRUCTIONS_REVIEW_BYTES = 50_000
+_INSTRUCTIONS_SPLIT_BYTES = 200_000
+
+
+def audit_instructions(project_path: str, baseline_include_line: str = "",
+                       template_dir: str = "",
+                       review_bytes: int = _INSTRUCTIONS_REVIEW_BYTES,
+                       split_bytes: int = _INSTRUCTIONS_SPLIT_BYTES) -> list:
+    """Warn-only notes about whether this project's Claude instructions load.
+
+    Consumes `instructions_posture` rather than re-deciding anything: one
+    classifier, and a second opinion here is how the two drift apart.
+
+    The distinction this rule exists to preserve is between a chain that does
+    not resolve and a chain we could not follow. `UNKNOWN` is reported as
+    "could not determine" and never as "missing" — phrasing an unread state as
+    an absence is the false certainty the whole feature was written against.
+
+    Imported lazily so this module's import surface stays ``ast``/``os``/``re``
+    for the CI one-liner in ``helpers/ci_workflow.py``.
+    """
+    try:
+        from helpers.instructions_posture import (
+            ADVISORY_CONTRADICTS, ADVISORY_DOUBLE_LOAD,
+            ADVISORY_DUPLICATE_CONTENT, ADVISORY_PLACEHOLDER,
+            REACH_ABSENT, REACH_ORPHANED, REACH_RESOLVED, REACH_STALE,
+            REACH_UNKNOWN, parse_baseline_target, read_project,
+        )
+    except ImportError:
+        return []
+
+    baseline = parse_baseline_target(baseline_include_line)
+    if baseline is None:
+        return ["  The configured baseline include line is not a valid "
+                "include directive, so nothing here could be checked. "
+                "Settings -> Template directory."]
+
+    # The texts are what make the content advisories possible at all: without
+    # them `read_project` cannot tell an inlined restatement of the baseline
+    # from ordinary prose, nor an untouched template from a filled-in one, and
+    # this rule silently lost both checks. Read failures degrade to "" — a
+    # missing template means we cannot judge "untouched", not that it is fine.
+    def _slurp(path):
+        try:
+            with open(path, encoding="utf-8-sig") as handle:
+                return handle.read()
+        except (OSError, UnicodeDecodeError):
+            return ""
+
+    baseline_text = _slurp(baseline)
+    placeholder_text = _slurp(os.path.join(template_dir, "claude-md-template.md"))         if template_dir else ""
+
+    posture = read_project(project_path, os.path.basename(project_path),
+                           template_dir, baseline, baseline_text,
+                           placeholder_text)
+
+    notes = []
+    if posture.reach == REACH_ORPHANED:
+        notes.append(
+            "  BASIC_INSTRUCTIONS.md carries the baseline include, but nothing "
+            "links it from CLAUDE.md -- Claude Code reads CLAUDE.md, so none of "
+            "it loads. Right-click the project -> Instructions... to wire it.")
+    elif posture.reach == REACH_ABSENT:
+        notes.append(
+            "  No baseline include anywhere, so this project gets none of the "
+            "shared rules. Right-click the project -> Instructions...")
+    elif posture.reach == REACH_STALE:
+        notes.append(
+            "  The baseline include at %s points at %s, not the configured "
+            "template. Right-click the project -> Instructions... to repoint it."
+            % (posture.stale_at or "CLAUDE.md", posture.reached_baseline))
+    elif posture.reach == REACH_UNKNOWN:
+        # Deliberately not phrased as an absence.
+        notes.append(
+            "  Could not determine whether the instruction chain resolves: %s. "
+            "Nothing was changed." % (posture.detail or "reason unrecorded"))
+
+    if posture.reach == REACH_RESOLVED and posture.weight_bytes > split_bytes:
+        notes.append(
+            "  The instruction chain is %s bytes (~%s tokens, estimated) and "
+            "loads on every message. Large enough to strongly consider "
+            "splitting the append-only sections into a file that is not "
+            "included." % (f"{posture.weight_bytes:,}",
+                           f"{posture.estimated_tokens:,}"))
+    elif posture.reach == REACH_RESOLVED and posture.weight_bytes > review_bytes:
+        notes.append(
+            "  The instruction chain is %s bytes (~%s tokens, estimated) and "
+            "loads on every message. Large enough to be worth a look."
+            % (f"{posture.weight_bytes:,}", f"{posture.estimated_tokens:,}"))
+
+    if ADVISORY_DOUBLE_LOAD in posture.advisories:
+        notes.append(
+            "  The baseline is reachable by more than one path, so it loads "
+            "twice. Nothing was removed -- deleting a line you may have "
+            "written is not a repair.")
+    if ADVISORY_DUPLICATE_CONTENT in posture.advisories:
+        notes.append(
+            "  This project restates baseline sections inline as well as "
+            "including them, so you are paying for both copies.")
+    if ADVISORY_CONTRADICTS in posture.advisories:
+        notes.append(
+            "  The instructions tell the agent to reach for Grep/Glob or a "
+            "search subagent first, which contradicts the shared "
+            "tokensave-first rule. Left alone: which one wins is your call.")
+    if ADVISORY_PLACEHOLDER in posture.advisories:
+        # Whether it LOADS is a separate question from whether it is filled
+        # in, and asserting the first was wrong: two projects carried an
+        # untouched template that no chain reached, and this line told the
+        # user it was loading. Say only what is known, and say which case.
+        basic = os.path.join(project_path, "BASIC_INSTRUCTIONS.md")
+        on_chain = any(os.path.normcase(os.path.normpath(basic))
+                       == c for c in posture.chain)
+        notes.append(
+            "  BASIC_INSTRUCTIONS.md is still the untouched template, so it "
+            "says nothing about this project yet. %s"
+            % ("It is on the include chain, so it loads as-is."
+               if on_chain else
+               "Nothing on the chain reaches it, so it is not read at all "
+               "-- if the project's own instructions live in CLAUDE.md, this "
+               "file is leftover scaffolding."))
+    return notes
+
+
+def audit_observations(project_path: str) -> list:
+    """Report the editor's Problems snapshot as a population, never as a total.
+
+    Consumes `helpers/observations.py` rather than re-deciding anything: one
+    reader, and a second opinion here is how the two drift apart.
+
+    Three rules this rule exists to keep:
+
+    **Absent is silent.** Nobody having captured a snapshot is the normal
+    state, not a fault, and a Doctor note about it would fire in every project
+    forever.
+
+    **Unknown says "could not determine".** A snapshot that would not parse is
+    never phrased as an absence — that is the false certainty the whole feature
+    is written against.
+
+    **The two sources are never added together.** This rule reports what the
+    editor covered and says plainly what it cannot know; the headless half
+    states its own population elsewhere. A single number over both would be
+    arithmetic on incomparable populations.
+
+    Imported lazily so this module's import surface stays ``ast``/``os``/``re``
+    for the CI one-liner in ``helpers/ci_workflow.py``.
+    """
+    try:
+        from helpers.observations import (
+            READ_ABSENT, READ_OK, READ_UNKNOWN, read_snapshot)
+    except ImportError:
+        return []
+
+    report = read_snapshot(project_path)
+
+    if report.read_status == READ_ABSENT:
+        return []
+    if report.read_status == READ_UNKNOWN:
+        return ["  Could not determine what the editor's Problems panel "
+                "holds: %s. Nothing was changed."
+                % (report.detail or "reason unrecorded")]
+    if report.read_status != READ_OK:                   # pragma: no cover
+        return ["  The editor snapshot is in an unrecognised state (%s)."
+                % report.read_status]
+
+    coverage = report.coverage
+    notes = [
+        "  Editor snapshot: %d observation(s) across %d file(s), %s."
+        % (coverage.diagnostic_entries, coverage.files_with_diagnostics,
+           coverage.analyzed_files_text),
+    ]
+    # Population, spelled out. "0 findings over 47 analyzed files" and "0
+    # findings because nothing was analyzed" are different claims, and only the
+    # second is one the editor can make.
+    notes.append(
+        "  These are verdicts other extensions rendered, not Manager findings. "
+        "The editor cannot report how many files were analysed, so that number "
+        "is unknown rather than zero.")
+    if coverage.diagnostic_mode:
+        notes.append(
+            "  python.analysis.diagnosticMode is %r. That is the configured "
+            "analysis POLICY, not evidence that anything in the declared "
+            "population was analysed at capture time."
+            % coverage.diagnostic_mode)
+    return notes
+
+
 def audit_mcp_auto_approve() -> list:
     """Report blanket MCP auto-approval as posture, never as brokenness.
 

@@ -173,3 +173,76 @@ scene = REGISTRY.scene
 ```
 
 A test that two registries do not share entries costs three lines.
+
+---
+
+## 7. Splitting a class: a bare name resolves against the *defining* module
+
+**Symptom:** A monolithic UI class is split into mixins. Everything imports,
+the app starts, the tests pass — and a callback deep in one mixin raises
+`NameError` on a helper that is obviously in scope.
+
+**Cause:** A bare name inside a method resolves against the globals of the
+module where that method is **defined** — not against the class's MRO, and not
+against the module where the class is finally assembled. Moving a method moves
+which globals it can see.
+
+This is the sibling of §1. There, a re-export split one module object in two;
+here, a class body spans several module objects and each method reads only its
+own.
+
+**Fix:** every extracted mixin imports its own dependencies. That is not
+duplication — it is the only thing that makes the name resolve.
+
+**And do not let the mixins reach back.** Importing the original monolith
+rebuilds exactly the coupling the split removed, and invites an import cycle.
+Assert it with an AST check over the extracted modules.
+
+**The reason this needs a linter and not just tests:** the missing names hide in
+callback bodies that no test runs, so the suite stays green. `ruff`'s `F821`
+(undefined name) finds them statically, which is the only way they surface
+before a user clicks the button.
+
+---
+
+## 8. A derived fact gets exactly one owner
+
+**Symptom:** A build works in development and breaks only once installed.
+
+**Cause:** A predicate that answers a question about the environment —
+*"am I running from a frozen build?"* — computed in two places, which agree
+until they do not. One project's rule names the specific trap:
+
+```python
+polybedrock.paths.is_frozen()     # the one owner
+sys.frozen                        # WRONG: Nuitka does not set it
+```
+
+Every packager answers this differently, so the second copy is not a duplicate
+of the first — it is a different question wearing the same name.
+
+**Fix:** one function, imported everywhere, and a test that no other module
+computes the same thing. The same discipline §1 applies to seams and §6 applies
+to registries: **a shared fact has an owner**.
+
+---
+
+## 9. Resource and data are different lifetimes
+
+**Symptom:** Something the app wrote is gone after a restart, or a packaged
+asset is missing at runtime.
+
+**Cause:** One "app root". There are two, and only one of them survives:
+
+| Root | Lifetime |
+|---|---|
+| `resource_root()` | ships with the build; **may be a temp directory deleted on exit** |
+| `app_root()` | must survive a restart |
+
+Resolve anything durable from the first and it is gone. Resolve a packaged
+asset from the second and it was never there.
+
+**The layout differs between the two, too.** A build has no `src/` level, so the
+resolver adjusts — which means the development tree cannot prove the resolver
+correct. Keep a probe that runs **from a real build** and checks both roots; it
+is the only thing that can.

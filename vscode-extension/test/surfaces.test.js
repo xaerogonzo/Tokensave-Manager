@@ -364,7 +364,9 @@ test("only the commands that support --paths claim to", () => {
   // The per-file editor actions consult this before scoping, so it must match
   // what the CLI accepts.
   const scoped = COMMANDS.filter((c) => c.acceptsPaths).map((c) => c.action);
-  assert.deepStrictEqual(scoped.sort(), ["checks", "test-gaps"]);
+  // `analyze` joined them with the external analyzers: it takes --paths and
+  // filters its findings by it, exactly as the other two do.
+  assert.deepStrictEqual(scoped.sort(), ["analyze", "checks", "test-gaps"]);
 });
 
 test("cost and doctor are not advertised as pure reads", () => {

@@ -184,6 +184,36 @@ def _detect_pyscope() -> str:
     return ""
 
 
+def _detect_uv() -> str:
+    """Return the path to the uv CLI, else empty string.
+
+    A *package manager*, which is why it lives here beside `_detect_npm` rather
+    than in `helpers/headless_analyzers.ANALYZERS` — that table describes tools
+    the Manager RUNS for their output, and uv is how one of them is obtained.
+
+    `.exe`-first for the same Windows reason `_detect_pyscope` uses it: uv is a
+    native binary, not an npm `.cmd` shim, and `CreateProcess` appends only
+    `.exe`. Then `~/.local/bin`, where uv installs its own shims and where
+    PyScope already lives.
+
+    Returns "" (not the bare command name) so callers can test `if exe:` without
+    accidentally shelling a bare command — see `gotchas/windows-subprocess.md`.
+    """
+    for name in ("uv.exe", "uv"):
+        found = shutil.which(name)
+        if found:
+            return found
+    # expanduser inside the function, never at import: tests fix HOME, and an
+    # import-time resolve would bake in whatever the environment said first.
+    for candidate in (
+        os.path.join(os.path.expanduser("~"), ".local", "bin", "uv.exe"),
+        os.path.join(os.path.expanduser("~"), ".local", "bin", "uv"),
+    ):
+        if os.path.isfile(candidate):
+            return candidate
+    return ""
+
+
 def _is_codegraph_project(path: str) -> bool:
     """True iff `path` has been initialised by CodeGraph (the .codegraph/
     SQLite database exists)."""

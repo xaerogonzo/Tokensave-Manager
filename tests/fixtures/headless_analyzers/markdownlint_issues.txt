@@ -1,0 +1,5 @@
+bad.md:3 error MD001/heading-increment Heading levels should only increment by one level at a time [Expected: h2; Actual: h3]
+bad.md:5 error MD025/single-title/single-h1 Multiple top-level headings in the same document [Context: "Duplicate Title"]
+bad.md:7:10 error MD009/no-trailing-spaces Trailing spaces [Expected: 0 or 2; Actual: 1]
+bad.md:7:10 error MD010/no-hard-tabs Hard tabs [Column: 10]
+bad.md:9 error MD040/fenced-code-language Fenced code blocks should have a language specified [Context: "```"]

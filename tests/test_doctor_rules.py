@@ -17,15 +17,18 @@ defaults rather than taking the audit down.
 """
 from __future__ import annotations
 
+import json
 import os
 
 import pytest
 
+from helpers import doctor_rules
 from helpers.doctor_rules import (
     DEFAULT_CAPS,
     Caps,
     _audit_project_tree,
     _audit_python_file,
+    audit_instructions,
     resolve_caps,
 )
 
@@ -449,3 +452,195 @@ def test_installed_version_probe_parses_the_real_binary_output():
     version, problem = _installed_extractor_version(exe)
     assert problem == ""
     assert version.count(".") >= 1
+
+
+# ── audit_instructions ──────────────────────────────────────────────────────
+
+class TestAuditInstructions:
+    """The Doctor's view of whether a project's Claude instructions load.
+
+    The property worth pinning is the one the whole feature was written
+    against: an unread state must never be reported as an absence.
+    """
+
+    @staticmethod
+    def _templates(tmp_path):
+        d = tmp_path / "templates"
+        d.mkdir()
+        (d / "project-baseline.md").write_text("# Baseline\n", encoding="utf-8")
+        return d, "@" + str(d / "project-baseline.md")
+
+    def test_resolved_and_small_produces_no_note(self, tmp_path):
+        templates, inc = self._templates(tmp_path)
+        root = tmp_path / "proj"
+        root.mkdir()
+        (root / "CLAUDE.md").write_text(inc + "\n", encoding="utf-8")
+        assert audit_instructions(str(root), inc, str(templates)) == []
+
+    def test_orphan_is_reported_with_the_reason_it_does_not_load(self, tmp_path):
+        templates, inc = self._templates(tmp_path)
+        root = tmp_path / "proj"
+        root.mkdir()
+        (root / "BASIC_INSTRUCTIONS.md").write_text(inc + "\n", encoding="utf-8")
+        notes = audit_instructions(str(root), inc, str(templates))
+        assert len(notes) == 1
+        assert "nothing links it from CLAUDE.md" in notes[0]
+
+    def test_unknown_is_never_phrased_as_missing(self, tmp_path):
+        """An unread state and an absent one are different findings.
+
+        Calling the first "missing" is the false certainty this rule exists to
+        avoid, so the wording is asserted rather than left to drift.
+        """
+        templates, inc = self._templates(tmp_path)
+        root = tmp_path / "proj"
+        root.mkdir()
+        (root / "CLAUDE.md").write_bytes(b"\xff\xfe\x00\xc3\x28")
+        notes = audit_instructions(str(root), inc, str(templates))
+        assert notes
+        joined = " ".join(notes).lower()
+        assert "could not determine" in joined
+        assert "no baseline include anywhere" not in joined
+        assert "missing" not in joined
+
+    def test_malformed_configured_baseline_says_so(self, tmp_path):
+        root = tmp_path / "proj"
+        root.mkdir()
+        notes = audit_instructions(str(root), "not-an-include", "")
+        assert notes and "not a valid include directive" in notes[0]
+
+    def test_oversize_is_phrased_as_cost_not_fault(self, tmp_path):
+        templates, inc = self._templates(tmp_path)
+        root = tmp_path / "proj"
+        root.mkdir()
+        (root / "CLAUDE.md").write_text(inc + "\n" + ("x" * 60_000) + "\n",
+                                        encoding="utf-8")
+        notes = audit_instructions(str(root), inc, str(templates))
+        joined = " ".join(notes)
+        assert "loads on every message" in joined
+        assert "estimated" in joined
+        for blaming in ("too large", "violation", "must"):
+            assert blaming not in joined.lower()
+
+    def test_thresholds_are_evaluated_on_bytes(self, tmp_path):
+        """The token figure is an estimate and must never gate anything."""
+        templates, inc = self._templates(tmp_path)
+        root = tmp_path / "proj"
+        root.mkdir()
+        (root / "CLAUDE.md").write_text(inc + "\n" + ("x" * 400) + "\n",
+                                        encoding="utf-8")
+        assert audit_instructions(str(root), inc, str(templates),
+                                  review_bytes=100) != []
+        assert audit_instructions(str(root), inc, str(templates),
+                                  review_bytes=10_000) == []
+
+    def test_placeholder_note_does_not_claim_it_loads_when_it_does_not(self, tmp_path):
+        """Filled-in and loaded are separate questions.
+
+        Two real projects carried an untouched template that no chain reached
+        while this note told the user it was loading. The note may only assert
+        what it knows.
+        """
+        templates, inc = self._templates(tmp_path)
+        placeholder = inc + "\n\n# [PROJECT NAME]\n"
+        (templates / "claude-md-template.md").write_text(placeholder,
+                                                         encoding="utf-8")
+        root = tmp_path / "proj"
+        root.mkdir()
+        # CLAUDE.md reaches the baseline directly; BASIC_INSTRUCTIONS.md is
+        # present, untouched, and on no chain.
+        (root / "CLAUDE.md").write_text(inc + "\n", encoding="utf-8")
+        (root / "BASIC_INSTRUCTIONS.md").write_text(placeholder, encoding="utf-8")
+
+        notes = audit_instructions(str(root), inc, str(templates))
+        joined = " ".join(notes)
+        assert "untouched template" in joined
+        assert "not read at all" in joined
+        assert "so it loads as-is" not in joined
+
+
+class TestAuditObservations:
+    """The editor snapshot as a population, never as a total.
+
+    Same three rules `TestAuditInstructions` pins, applied to the other
+    source: absent is silent, unknown says "could not determine", and nothing
+    is ever added to anything.
+    """
+
+    def _write(self, root, doc):
+        from helpers.observations import snapshot_path
+        path = snapshot_path(str(root))
+        os.makedirs(os.path.dirname(path), exist_ok=True)
+        with open(path, "w", encoding="utf-8") as handle:
+            json.dump(doc, handle)
+
+    def _envelope(self, rows, **coverage):
+        return {
+            "observations_schema_version": 1,
+            "captured_at": 1789000000,
+            "coverage": coverage,
+            "observations": rows,
+        }
+
+    def _row(self, file="src/a.py", line=7):
+        return {"file": file, "line": line, "column": 3, "end_line": line,
+                "end_column": 9, "severity": "error", "message": "m",
+                "rule": "reportOptionalMemberAccess", "producer": "Pylance"}
+
+    def test_no_snapshot_is_silent(self, tmp_path):
+        """Nobody having captured one is normal, not a fault.
+
+        A note here would fire in every project, forever, and teach the reader
+        to skip the section.
+        """
+        assert doctor_rules.audit_observations(str(tmp_path)) == []
+
+    def test_an_unreadable_snapshot_says_could_not_determine(self, tmp_path):
+        from helpers.observations import snapshot_path
+        path = snapshot_path(str(tmp_path))
+        os.makedirs(os.path.dirname(path), exist_ok=True)
+        with open(path, "w", encoding="utf-8") as handle:
+            handle.write("{broken")
+        notes = doctor_rules.audit_observations(str(tmp_path))
+        assert notes
+        assert "Could not determine" in notes[0]
+
+    def test_unknown_is_never_phrased_as_an_absence(self, tmp_path):
+        """The distinction the whole feature is written against.
+
+        "We could not read it" must never render as "there is nothing there".
+        """
+        self._write(tmp_path, {"observations_schema_version": 99,
+                               "observations": []})
+        notes = doctor_rules.audit_observations(str(tmp_path))
+        joined = " ".join(notes).lower()
+        assert "could not determine" in joined
+        for absence in ("no observations", "none", "nothing to report",
+                        "missing", "empty"):
+            assert absence not in joined, (
+                "an unread snapshot is described as an absence: %r" % absence)
+
+    def test_a_read_snapshot_reports_its_population(self, tmp_path):
+        self._write(tmp_path, self._envelope(
+            [self._row(), self._row(file="src/b.py")]))
+        joined = " ".join(doctor_rules.audit_observations(str(tmp_path)))
+        assert "2 observation(s)" in joined
+        assert "2 file(s)" in joined
+
+    def test_analyzed_files_is_reported_as_unknown_not_omitted(self, tmp_path):
+        """An absent field reads as zero to whoever scans the output later."""
+        self._write(tmp_path, self._envelope([self._row()]))
+        joined = " ".join(doctor_rules.audit_observations(str(tmp_path)))
+        assert "analyzed files: unknown" in joined
+
+    def test_diagnostic_mode_is_called_a_policy(self, tmp_path):
+        self._write(tmp_path,
+                    self._envelope([self._row()], diagnostic_mode="workspace"))
+        joined = " ".join(doctor_rules.audit_observations(str(tmp_path)))
+        assert "workspace" in joined
+        assert "POLICY" in joined or "policy" in joined
+
+    def test_the_note_never_claims_these_are_manager_findings(self, tmp_path):
+        self._write(tmp_path, self._envelope([self._row()]))
+        joined = " ".join(doctor_rules.audit_observations(str(tmp_path)))
+        assert "other extensions rendered" in joined

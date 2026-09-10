@@ -1,0 +1,871 @@
+[
+  {
+    "cell": null,
+    "code": "UP037",
+    "end_location": {
+      "column": 53,
+      "row": 175
+    },
+    "filename": "D:\\Claude Co worker\\Token Save Manager Source\\src\\helpers\\agent_cli.py",
+    "fix": {
+      "applicability": "safe",
+      "edits": [
+        {
+          "content": "AgentCLISpec | None",
+          "end_location": {
+            "column": 53,
+            "row": 175
+          },
+          "location": {
+            "column": 32,
+            "row": 175
+          }
+        }
+      ],
+      "message": "Remove quotes"
+    },
+    "location": {
+      "column": 32,
+      "row": 175
+    },
+    "message": "Remove quotes from type annotation",
+    "name": "quoted-annotation",
+    "noqa_row": 175,
+    "severity": "error",
+    "url": "https://docs.astral.sh/ruff/rules/quoted-annotation"
+  },
+  {
+    "cell": null,
+    "code": "PLW1510",
+    "end_location": {
+      "column": 30,
+      "row": 395
+    },
+    "filename": "D:\\Claude Co worker\\Token Save Manager Source\\src\\helpers\\agent_cli.py",
+    "fix": {
+      "applicability": "displayonly",
+      "edits": [
+        {
+          "content": "check=False, ",
+          "end_location": {
+            "column": 13,
+            "row": 397
+          },
+          "location": {
+            "column": 13,
+            "row": 397
+          }
+        }
+      ],
+      "message": "Add explicit `check=False`"
+    },
+    "location": {
+      "column": 16,
+      "row": 395
+    },
+    "message": "`subprocess.run` without explicit `check` argument",
+    "name": "subprocess-run-without-check",
+    "noqa_row": 395,
+    "severity": "error",
+    "url": "https://docs.astral.sh/ruff/rules/subprocess-run-without-check"
+  },
+  {
+    "cell": null,
+    "code": "BLE001",
+    "end_location": {
+      "column": 21,
+      "row": 440
+    },
+    "filename": "D:\\Claude Co worker\\Token Save Manager Source\\src\\helpers\\agent_cli.py",
+    "fix": null,
+    "location": {
+      "column": 12,
+      "row": 440
+    },
+    "message": "Do not catch blind exception: `Exception`",
+    "name": "blind-except",
+    "noqa_row": 440,
+    "severity": "error",
+    "url": "https://docs.astral.sh/ruff/rules/blind-except"
+  },
+  {
+    "cell": null,
+    "code": "FURB188",
+    "end_location": {
+      "column": 24,
+      "row": 97
+    },
+    "filename": "D:\\Claude Co worker\\Token Save Manager Source\\src\\helpers\\agent_rules.py",
+    "fix": {
+      "applicability": "safe",
+      "edits": [
+        {
+          "content": "tail = tail.removeprefix(\"\\n\")",
+          "end_location": {
+            "column": 24,
+            "row": 97
+          },
+          "location": {
+            "column": 5,
+            "row": 96
+          }
+        }
+      ],
+      "message": "Use removeprefix instead of assignment conditional upon startswith."
+    },
+    "location": {
+      "column": 5,
+      "row": 96
+    },
+    "message": "Prefer `str.removeprefix()` over conditionally replacing with slice.",
+    "name": "slice-to-remove-prefix-or-suffix",
+    "noqa_row": 96,
+    "severity": "error",
+    "url": "https://docs.astral.sh/ruff/rules/slice-to-remove-prefix-or-suffix"
+  },
+  {
+    "cell": null,
+    "code": "I001",
+    "end_location": {
+      "column": 10,
+      "row": 22
+    },
+    "filename": "D:\\Claude Co worker\\Token Save Manager Source\\src\\helpers\\architecture_patch.py",
+    "fix": {
+      "applicability": "safe",
+      "edits": [
+        {
+          "content": "from __future__ import annotations\r\n\r\nimport os\r\nimport re\r\n\r\n",
+          "end_location": {
+            "column": 1,
+            "row": 25
+          },
+          "location": {
+            "column": 1,
+            "row": 19
+          }
+        }
+      ],
+      "message": "Organize imports"
+    },
+    "location": {
+      "column": 1,
+      "row": 19
+    },
+    "message": "Import block is un-sorted or un-formatted",
+    "name": "unsorted-imports",
+    "noqa_row": 19,
+    "severity": "error",
+    "url": "https://docs.astral.sh/ruff/rules/unsorted-imports"
+  },
+  {
+    "cell": null,
+    "code": "RUF059",
+    "end_location": {
+      "column": 21,
+      "row": 72
+    },
+    "filename": "D:\\Claude Co worker\\Token Save Manager Source\\src\\helpers\\architecture_patch.py",
+    "fix": {
+      "applicability": "unsafe",
+      "edits": [
+        {
+          "content": "_header_start",
+          "end_location": {
+            "column": 21,
+            "row": 72
+          },
+          "location": {
+            "column": 9,
+            "row": 72
+          }
+        }
+      ],
+      "message": "Prefix it with an underscore or any other dummy variable pattern"
+    },
+    "location": {
+      "column": 9,
+      "row": 72
+    },
+    "message": "Unpacked variable `header_start` is never used",
+    "name": "unused-unpacked-variable",
+    "noqa_row": 72,
+    "severity": "error",
+    "url": "https://docs.astral.sh/ruff/rules/unused-unpacked-variable"
+  },
+  {
+    "cell": null,
+    "code": "PIE810",
+    "end_location": {
+      "column": 70,
+      "row": 257
+    },
+    "filename": "D:\\Claude Co worker\\Token Save Manager Source\\src\\helpers\\changelog_patch.py",
+    "fix": {
+      "applicability": "unsafe",
+      "edits": [
+        {
+          "content": "stripped.startswith((\"- \", \"* \"))",
+          "end_location": {
+            "column": 70,
+            "row": 257
+          },
+          "location": {
+            "column": 16,
+            "row": 257
+          }
+        }
+      ],
+      "message": "Merge into a single `startswith` call"
+    },
+    "location": {
+      "column": 16,
+      "row": 257
+    },
+    "message": "Call `startswith` once with a `tuple`",
+    "name": "multiple-starts-ends-with",
+    "noqa_row": 257,
+    "severity": "error",
+    "url": "https://docs.astral.sh/ruff/rules/multiple-starts-ends-with"
+  },
+  {
+    "cell": null,
+    "code": "RUF022",
+    "end_location": {
+      "column": 2,
+      "row": 26
+    },
+    "filename": "D:\\Claude Co worker\\Token Save Manager Source\\src\\helpers\\claude_cli.py",
+    "fix": {
+      "applicability": "safe",
+      "edits": [
+        {
+          "content": "[\r\n    \"call_claude_cli_print\",\r\n    \"get_last_cli_error\",\r\n    \"spawn_claude_cli\",\r\n    \"spawn_claude_cli_interactive\",\r\n]",
+          "end_location": {
+            "column": 2,
+            "row": 26
+          },
+          "location": {
+            "column": 11,
+            "row": 21
+          }
+        }
+      ],
+      "message": "Apply an isort-style sorting to `__all__`"
+    },
+    "location": {
+      "column": 11,
+      "row": 21
+    },
+    "message": "`__all__` is not sorted",
+    "name": "unsorted-dunder-all",
+    "noqa_row": 21,
+    "severity": "error",
+    "url": "https://docs.astral.sh/ruff/rules/unsorted-dunder-all"
+  },
+  {
+    "cell": null,
+    "code": "UP035",
+    "end_location": {
+      "column": 25,
+      "row": 36
+    },
+    "filename": "D:\\Claude Co worker\\Token Save Manager Source\\src\\helpers\\codegraph_daemon.py",
+    "fix": null,
+    "location": {
+      "column": 1,
+      "row": 36
+    },
+    "message": "`typing.Tuple` is deprecated, use `tuple` instead",
+    "name": "deprecated-import",
+    "noqa_row": 36,
+    "severity": "error",
+    "url": "https://docs.astral.sh/ruff/rules/deprecated-import"
+  },
+  {
+    "cell": null,
+    "code": "UP006",
+    "end_location": {
+      "column": 37,
+      "row": 98
+    },
+    "filename": "D:\\Claude Co worker\\Token Save Manager Source\\src\\helpers\\codegraph_daemon.py",
+    "fix": {
+      "applicability": "safe",
+      "edits": [
+        {
+          "content": "tuple",
+          "end_location": {
+            "column": 37,
+            "row": 98
+          },
+          "location": {
+            "column": 32,
+            "row": 98
+          }
+        }
+      ],
+      "message": "Replace with `tuple`"
+    },
+    "location": {
+      "column": 32,
+      "row": 98
+    },
+    "message": "Use `tuple` instead of `Tuple` for type annotation",
+    "name": "non-pep585-annotation",
+    "noqa_row": 98,
+    "severity": "error",
+    "url": "https://docs.astral.sh/ruff/rules/non-pep585-annotation"
+  },
+  {
+    "cell": null,
+    "code": "S110",
+    "end_location": {
+      "column": 21,
+      "row": 192
+    },
+    "filename": "D:\\Claude Co worker\\Token Save Manager Source\\src\\helpers\\codegraph_freshness.py",
+    "fix": null,
+    "location": {
+      "column": 13,
+      "row": 191
+    },
+    "message": "`try`-`except`-`pass` detected, consider logging the exception",
+    "name": "try-except-pass",
+    "noqa_row": 191,
+    "severity": "error",
+    "url": "https://docs.astral.sh/ruff/rules/try-except-pass"
+  },
+  {
+    "cell": null,
+    "code": "SIM115",
+    "end_location": {
+      "column": 27,
+      "row": 536
+    },
+    "filename": "D:\\Claude Co worker\\Token Save Manager Source\\src\\helpers\\commit_messages.py",
+    "fix": null,
+    "location": {
+      "column": 23,
+      "row": 536
+    },
+    "message": "Use a context manager for opening files",
+    "name": "open-file-with-context-handler",
+    "noqa_row": 536,
+    "severity": "error",
+    "url": "https://docs.astral.sh/ruff/rules/open-file-with-context-handler"
+  },
+  {
+    "cell": null,
+    "code": "S112",
+    "end_location": {
+      "column": 21,
+      "row": 1186
+    },
+    "filename": "D:\\Claude Co worker\\Token Save Manager Source\\src\\helpers\\commit_messages.py",
+    "fix": null,
+    "location": {
+      "column": 9,
+      "row": 1185
+    },
+    "message": "`try`-`except`-`continue` detected, consider logging the exception",
+    "name": "try-except-continue",
+    "noqa_row": 1185,
+    "severity": "error",
+    "url": "https://docs.astral.sh/ruff/rules/try-except-continue"
+  },
+  {
+    "cell": null,
+    "code": "SIM103",
+    "end_location": {
+      "column": 20,
+      "row": 78
+    },
+    "filename": "D:\\Claude Co worker\\Token Save Manager Source\\src\\helpers\\coverage_scan.py",
+    "fix": {
+      "applicability": "unsafe",
+      "edits": [
+        {
+          "content": "return not (self.commit_sha and commit_sha and self.commit_sha != commit_sha)",
+          "end_location": {
+            "column": 20,
+            "row": 78
+          },
+          "location": {
+            "column": 9,
+            "row": 76
+          }
+        }
+      ],
+      "message": "Inline condition"
+    },
+    "location": {
+      "column": 9,
+      "row": 76
+    },
+    "message": "Return the negated condition directly",
+    "name": "needless-bool",
+    "noqa_row": 76,
+    "severity": "error",
+    "url": "https://docs.astral.sh/ruff/rules/needless-bool"
+  },
+  {
+    "cell": null,
+    "code": "RUF100",
+    "end_location": {
+      "column": 60,
+      "row": 180
+    },
+    "filename": "D:\\Claude Co worker\\Token Save Manager Source\\src\\helpers\\doc_drafter_apply.py",
+    "fix": {
+      "applicability": "safe",
+      "edits": [
+        {
+          "content": "",
+          "end_location": {
+            "column": 60,
+            "row": 180
+          },
+          "location": {
+            "column": 46,
+            "row": 180
+          }
+        }
+      ],
+      "message": "Remove unused `noqa` directive"
+    },
+    "location": {
+      "column": 48,
+      "row": 180
+    },
+    "message": "Unused `noqa` directive (non-enabled: `E731`)",
+    "name": "unused-noqa",
+    "noqa_row": 180,
+    "severity": "error",
+    "url": "https://docs.astral.sh/ruff/rules/unused-noqa"
+  },
+  {
+    "cell": null,
+    "code": "ISC004",
+    "end_location": {
+      "column": 40,
+      "row": 195
+    },
+    "filename": "D:\\Claude Co worker\\Token Save Manager Source\\src\\helpers\\doc_drafter_apply.py",
+    "fix": {
+      "applicability": "unsafe",
+      "edits": [
+        {
+          "content": "(",
+          "end_location": {
+            "column": 17,
+            "row": 194
+          },
+          "location": {
+            "column": 17,
+            "row": 194
+          }
+        },
+        {
+          "content": ")",
+          "end_location": {
+            "column": 40,
+            "row": 195
+          },
+          "location": {
+            "column": 40,
+            "row": 195
+          }
+        }
+      ],
+      "message": "Did you forget a comma?"
+    },
+    "location": {
+      "column": 17,
+      "row": 194
+    },
+    "message": "Unparenthesized implicit string concatenation in collection",
+    "name": "implicit-string-concatenation-in-collection-literal",
+    "noqa_row": 194,
+    "severity": "error",
+    "url": "https://docs.astral.sh/ruff/rules/implicit-string-concatenation-in-collection-literal"
+  },
+  {
+    "cell": null,
+    "code": "C408",
+    "end_location": {
+      "column": 10,
+      "row": 70
+    },
+    "filename": "D:\\Claude Co worker\\Token Save Manager Source\\src\\helpers\\doc_drafter_dispatch.py",
+    "fix": {
+      "applicability": "unsafe",
+      "edits": [
+        {
+          "content": "{\r\n            \"messages\": messages,\r\n            \"on_done\": _on_done,\r\n            \"on_error\": _on_error,\r\n            \"stop_event\": stop_event,\r\n        }",
+          "end_location": {
+            "column": 10,
+            "row": 70
+          },
+          "location": {
+            "column": 16,
+            "row": 65
+          }
+        }
+      ],
+      "message": "Rewrite as a literal"
+    },
+    "location": {
+      "column": 16,
+      "row": 65
+    },
+    "message": "Unnecessary `dict()` call (rewrite as a literal)",
+    "name": "unnecessary-collection-call",
+    "noqa_row": 65,
+    "severity": "error",
+    "url": "https://docs.astral.sh/ruff/rules/unnecessary-collection-call"
+  },
+  {
+    "cell": null,
+    "code": "PLR1730",
+    "end_location": {
+      "column": 36,
+      "row": 642
+    },
+    "filename": "D:\\Claude Co worker\\Token Save Manager Source\\src\\helpers\\doc_grounding.py",
+    "fix": {
+      "applicability": "safe",
+      "edits": [
+        {
+          "content": "newest = max(newest, mt)",
+          "end_location": {
+            "column": 36,
+            "row": 642
+          },
+          "location": {
+            "column": 21,
+            "row": 641
+          }
+        }
+      ],
+      "message": "Replace with `newest = max(newest, mt)`"
+    },
+    "location": {
+      "column": 21,
+      "row": 641
+    },
+    "message": "Replace `if` statement with `newest = max(newest, mt)`",
+    "name": "if-stmt-min-max",
+    "noqa_row": 641,
+    "severity": "error",
+    "url": "https://docs.astral.sh/ruff/rules/if-stmt-min-max"
+  },
+  {
+    "cell": null,
+    "code": "SIM102",
+    "end_location": {
+      "column": 59,
+      "row": 116
+    },
+    "filename": "D:\\Claude Co worker\\Token Save Manager Source\\src\\helpers\\doctor_rules.py",
+    "fix": null,
+    "location": {
+      "column": 9,
+      "row": 115
+    },
+    "message": "Use a single `if` statement instead of nested `if` statements",
+    "name": "collapsible-if",
+    "noqa_row": 115,
+    "severity": "error",
+    "url": "https://docs.astral.sh/ruff/rules/collapsible-if"
+  },
+  {
+    "cell": null,
+    "code": "UP031",
+    "end_location": {
+      "column": 67,
+      "row": 461
+    },
+    "filename": "D:\\Claude Co worker\\Token Save Manager Source\\src\\helpers\\doctor_rules.py",
+    "fix": null,
+    "location": {
+      "column": 13,
+      "row": 459
+    },
+    "message": "Use format specifiers instead of percent format",
+    "name": "printf-string-formatting",
+    "noqa_row": 459,
+    "severity": "error",
+    "url": "https://docs.astral.sh/ruff/rules/printf-string-formatting"
+  },
+  {
+    "cell": null,
+    "code": "UP045",
+    "end_location": {
+      "column": 79,
+      "row": 43
+    },
+    "filename": "D:\\Claude Co worker\\Token Save Manager Source\\src\\helpers\\install_codegraph.py",
+    "fix": {
+      "applicability": "safe",
+      "edits": [
+        {
+          "content": "Callable[[str], None] | None",
+          "end_location": {
+            "column": 79,
+            "row": 43
+          },
+          "location": {
+            "column": 48,
+            "row": 43
+          }
+        }
+      ],
+      "message": "Convert to `X | None`"
+    },
+    "location": {
+      "column": 48,
+      "row": 43
+    },
+    "message": "Use `X | None` for type annotations",
+    "name": "non-pep604-annotation-optional",
+    "noqa_row": 43,
+    "severity": "error",
+    "url": "https://docs.astral.sh/ruff/rules/non-pep604-annotation-optional"
+  },
+  {
+    "cell": null,
+    "code": "FURB167",
+    "end_location": {
+      "column": 62,
+      "row": 112
+    },
+    "filename": "D:\\Claude Co worker\\Token Save Manager Source\\src\\helpers\\instructions_posture.py",
+    "fix": {
+      "applicability": "safe",
+      "edits": [
+        {
+          "content": "import re",
+          "end_location": {
+            "column": 10,
+            "row": 58
+          },
+          "location": {
+            "column": 1,
+            "row": 58
+          }
+        },
+        {
+          "content": "re.IGNORECASE",
+          "end_location": {
+            "column": 62,
+            "row": 112
+          },
+          "location": {
+            "column": 58,
+            "row": 112
+          }
+        }
+      ],
+      "message": "Replace with `re.IGNORECASE`"
+    },
+    "location": {
+      "column": 58,
+      "row": 112
+    },
+    "message": "Use of regular expression alias `re.I`",
+    "name": "regex-flag-alias",
+    "noqa_row": 112,
+    "severity": "error",
+    "url": "https://docs.astral.sh/ruff/rules/regex-flag-alias"
+  },
+  {
+    "cell": null,
+    "code": "DTZ005",
+    "end_location": {
+      "column": 26,
+      "row": 159
+    },
+    "filename": "D:\\Claude Co worker\\Token Save Manager Source\\src\\helpers\\project_discovery.py",
+    "fix": null,
+    "location": {
+      "column": 12,
+      "row": 159
+    },
+    "message": "`datetime.datetime.now()` called without a `tz` argument",
+    "name": "call-datetime-now-without-tzinfo",
+    "noqa_row": 159,
+    "severity": "error",
+    "url": "https://docs.astral.sh/ruff/rules/call-datetime-now-without-tzinfo"
+  },
+  {
+    "cell": null,
+    "code": "DTZ006",
+    "end_location": {
+      "column": 41,
+      "row": 164
+    },
+    "filename": "D:\\Claude Co worker\\Token Save Manager Source\\src\\helpers\\project_discovery.py",
+    "fix": null,
+    "location": {
+      "column": 12,
+      "row": 164
+    },
+    "message": "`datetime.datetime.fromtimestamp()` called without a `tz` argument",
+    "name": "call-datetime-fromtimestamp",
+    "noqa_row": 164,
+    "severity": "error",
+    "url": "https://docs.astral.sh/ruff/rules/call-datetime-fromtimestamp"
+  },
+  {
+    "cell": null,
+    "code": "SIM201",
+    "end_location": {
+      "column": 76,
+      "row": 340
+    },
+    "filename": "D:\\Claude Co worker\\Token Save Manager Source\\src\\helpers\\readme_patch.py",
+    "fix": {
+      "applicability": "unsafe",
+      "edits": [
+        {
+          "content": "block_text[sub_end - 1:sub_end] != \"\\n\"",
+          "end_location": {
+            "column": 76,
+            "row": 340
+          },
+          "location": {
+            "column": 33,
+            "row": 340
+          }
+        }
+      ],
+      "message": "Replace with `!=` operator"
+    },
+    "location": {
+      "column": 33,
+      "row": 340
+    },
+    "message": "Use `block_text[sub_end - 1:sub_end] != \"\\n\"` instead of `not block_text[sub_end - 1:sub_end] == \"\\n\"`",
+    "name": "negate-equal-op",
+    "noqa_row": 340,
+    "severity": "error",
+    "url": "https://docs.astral.sh/ruff/rules/negate-equal-op"
+  },
+  {
+    "cell": null,
+    "code": "UP012",
+    "end_location": {
+      "column": 52,
+      "row": 90
+    },
+    "filename": "D:\\Claude Co worker\\Token Save Manager Source\\src\\helpers\\refactor_scout.py",
+    "fix": {
+      "applicability": "safe",
+      "edits": [
+        {
+          "content": "()",
+          "end_location": {
+            "column": 52,
+            "row": 90
+          },
+          "location": {
+            "column": 43,
+            "row": 90
+          }
+        }
+      ],
+      "message": "Remove unnecessary `encoding` argument"
+    },
+    "location": {
+      "column": 11,
+      "row": 90
+    },
+    "message": "Unnecessary UTF-8 `encoding` argument to `encode`",
+    "name": "unnecessary-encode-utf8",
+    "noqa_row": 90,
+    "severity": "error",
+    "url": "https://docs.astral.sh/ruff/rules/unnecessary-encode-utf8"
+  },
+  {
+    "cell": null,
+    "code": "UP032",
+    "end_location": {
+      "column": 32,
+      "row": 47
+    },
+    "filename": "D:\\Claude Co worker\\Token Save Manager Source\\src\\helpers\\smoke_runner.py",
+    "fix": {
+      "applicability": "safe",
+      "edits": [
+        {
+          "content": "f\"\"\"\\\r\n#!/bin/sh\r\n{_HOOK_MARKER} \u2014 managed by Token Save Manager\r\n# To disable: Settings \u2192 Behaviour \u2192 uncheck \"Run smoke tests before commits\"\r\nREPO_ROOT=\"$(git rev-parse --show-toplevel)\"\r\ncd \"$REPO_ROOT\"\r\npython -m pytest tests/ -m \"not tk\" -q\r\nexit $?\r\n\"\"\"",
+          "end_location": {
+            "column": 32,
+            "row": 47
+          },
+          "location": {
+            "column": 16,
+            "row": 39
+          }
+        }
+      ],
+      "message": "Convert to f-string"
+    },
+    "location": {
+      "column": 16,
+      "row": 39
+    },
+    "message": "Use f-string instead of `format` call",
+    "name": "f-string",
+    "noqa_row": 47,
+    "severity": "error",
+    "url": "https://docs.astral.sh/ruff/rules/f-string"
+  },
+  {
+    "cell": null,
+    "code": "C401",
+    "end_location": {
+      "column": 54,
+      "row": 689
+    },
+    "filename": "D:\\Claude Co worker\\Token Save Manager Source\\src\\helpers\\test_discovery.py",
+    "fix": {
+      "applicability": "unsafe",
+      "edits": [
+        {
+          "content": "{",
+          "end_location": {
+            "column": 24,
+            "row": 689
+          },
+          "location": {
+            "column": 20,
+            "row": 689
+          }
+        },
+        {
+          "content": "}",
+          "end_location": {
+            "column": 54,
+            "row": 689
+          },
+          "location": {
+            "column": 53,
+            "row": 689
+          }
+        }
+      ],
+      "message": "Rewrite as a set comprehension"
+    },
+    "location": {
+      "column": 20,
+      "row": 689
+    },
+    "message": "Unnecessary generator (rewrite as a set comprehension)",
+    "name": "unnecessary-generator-set",
+    "noqa_row": 689,
+    "severity": "error",
+    "url": "https://docs.astral.sh/ruff/rules/unnecessary-generator-set"
+  }
+]

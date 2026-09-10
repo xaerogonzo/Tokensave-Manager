@@ -104,6 +104,129 @@ Corollary for aggregates: canonicalise and deduplicate project roots
 population properties, so one directory reached through two search roots is
 a wrong denominator, not a cosmetic duplicate.
 
+### D1c. Instructions: reach is derived, and it is never called "loaded"
+
+Three rules, each paid for by a measured defect across eighteen projects.
+They govern `helpers/instructions_posture.py`, `helpers/instructions_wiring.py`,
+`dialogs/instructions_overview.py` and `doctor_rules.audit_instructions`.
+
+- **Carriage is not reach.** `carriage` is what a project's files DECLARE; `reach`
+  is what the chain from `CLAUDE.md` actually resolves to. Claude Code reads
+  `CLAUDE.md` and nothing else automatically, so a correct `@project-baseline.md`
+  inside an unlinked `BASIC_INSTRUCTIONS.md` loads in no session at all. Eleven of
+  eighteen projects were in exactly that state. A badge rendered from `carriage`
+  puts a green tick on every one of them.
+- **The claim is "the chain resolves", never "the baseline loaded".** The Manager
+  reads files; it has no session to observe. The positive constant is
+  `REACH_RESOLVED`, deliberately not `REACH_LOADED` — a UI-string convention
+  drifts, a constant name travels to every call site. This is the Roadmap-11
+  mistake (a file-content verdict rendered as effective scope) in a new place.
+- **Stale is identity, not filename.** Compare canonical resolved paths, so the
+  same file spelled differently is one baseline and a matching basename elsewhere
+  is another. The substring test this replaced could not see a pointer at a moved
+  `template_dir`, and matched the filename in ordinary prose.
+
+**Parser scope is wider than repair scope, on purpose.** The classifier resolves a
+bounded general include graph; the writer repairs exactly one topology
+(`CLAUDE.md → @BASIC_INSTRUCTIONS.md → @project-baseline.md`). Resolving broadly
+is what stops the panel offering a "fix" to a project that already works through
+its own valid chain — a fix that would add a SECOND path to the same baseline.
+Do not collapse the two.
+
+**The writer never deletes and never rewrites authored prose.** An obsolete direct
+include is reported (`ADVISORY_DOUBLE_LOAD`), not removed. A project whose
+`CLAUDE.md` tells the agent to reach for Grep first keeps saying so after wiring;
+which rule wins is an editorial decision. Duplicate directives are refused rather
+than half-repaired.
+
+**Canonical thresholds (rule H).** Review heuristics, NOT correctness verdicts — a
+project may intentionally carry a large always-loaded file, and these name a cost:
+
+| Threshold | Meaning |
+|---|---|
+| **50,000 B** resolved chain | large enough to review |
+| **200,000 B** | large enough to strongly consider splitting |
+
+Evaluated on **bytes**. The token figure beside them is a byte/4 estimate and must
+never gate anything. Defined once in `helpers/doctor_rules.py`.
+
+### D1d. Diagnostics: what we RUN is a finding; what we RECEIVE is an observation
+
+The line that governs `helpers/headless_analyzers.py`, `helpers/observations.py`,
+`vscode-extension/src/observations.ts` and `doctor_rules.audit_observations`.
+
+> **A producer the Manager RUNS and PARSES emits `findings`. A verdict the
+> Manager RECEIVES already-rendered is an `observation`.**
+
+Not "our rules versus their rules" — the Manager does not own pyflakes' rules
+either. It owns the **mapping**: it decides pyflakes-on-stderr means `error`, and
+that compileall's caret column is unusable so the column is 1. ruff, pyright and
+markdownlint are the same deal and are ordinary `findings` producers needing no
+new plumbing. The editor's Problems panel is not: Pylance chose the rule, the
+position and the severity, and `vscode-extension/src/diagnostics.ts` protects one
+law — *"Python owns rules, positions and severity"* — that routing it through
+`findings` would break with the feature that reuses it.
+
+**Severity policy belongs to the analyzer row, not to the module.** Measured, and
+the two rows disagree for good reasons: ruff's `severity` field said `"error"`
+for **1,812 rows out of 1,812** on `src/` — including `S110` and `BLE001`, which
+this codebase does deliberately — so it carries no information and the Manager
+assigns from the rule code. pyright's varies with `typeCheckingMode` and per-rule
+configuration, so it is forwarded. A single global policy would have to be wrong
+about one of them.
+
+**Never sum two sources.** No public API in `helpers/observations.py` returns a
+combined population or count. `merge_rows` returns rows carrying `sources`, never
+a number, and each `SourceReport` keeps its own coverage untouched.
+
+**`analyzed_files` is three-valued and `None` for the editor, permanently.**
+`vscode.languages.getDiagnostics()` returns resources that *have* diagnostics; it
+does not enumerate what was analysed, so a clean file Pylance examined and one it
+never opened are indistinguishable. It is never defaulted from
+`files_with_diagnostics`. And `diagnosticMode` is the configured **policy**, not
+evidence of coverage.
+
+**The data flows one way, and `observations` is absent from
+`DIAGNOSTIC_COMMANDS` to keep it that way:**
+
+```
+findings ──> DiagnosticCollection ──> observations.json      (no return arrow)
+```
+
+`getDiagnostics()` includes the extension's own collection, so a capture
+**multiset-subtracts** what `DiagnosticStore` owns. A `Set` difference is wrong
+(two identical diagnostics are two diagnostics) and a filter on `source` is wrong
+(a real third-party pyflakes extension sets `source: "pyflakes"` too). Both wrong
+implementations were planted and confirmed to go red, and they are caught by
+*different* tests.
+
+**A tool that is absent, or that ran and failed, is never a pass.** Availability
+is four states — `UNCONFIGURED` / `MISSING` / `READY` / `FAILED` — because
+`configured != executable != healthy`, and `FAILED` is the one that would
+otherwise render as clean.
+
+**Adding an analyzer is a row plus a captured fixture.** Never a parser written
+from a remembered format: three facts in
+`tests/fixtures/headless_analyzers/README.md` would have been wrong that way —
+pyright's coordinates are 0-based, its payload is not an array, and markdownlint
+writes its findings to **stderr** while stdout carries only a banner.
+
+**Obtaining an analyzer is a table row too, and it is a SEPARATE module.**
+`helpers/install_analyzers.py` describes package managers by their verbs
+(`npm install -g {pkg}`, `uv tool install {pkg}`), so a row declares
+`installer` + `package` and nothing branches on a vendor name. **ruff is not on
+npm** — the package published under that name is an unrelated ES6 coroutine
+library, and installing it would put the wrong thing on the machine while every
+log line said success. It comes from PyPI via uv, the route PyScope already
+uses. A missing package manager **refuses before spawning** and returns the
+command to run, because a `WinError 2` names our command line rather than their
+missing tool. And a disabled button states its reason — a greyed control with
+no explanation is the same defect as a red row with none.
+
+**`analyze` is PURE_READ because of one flag.** Measured: `ruff check .` writes
+`.ruff_cache/` into the project; `--no-cache` does not, and pyright and
+markdownlint write nothing. Drop the flag and the classification silently becomes
+wrong.
 ### D2. Agent CLIs: a new agent is a table row, never a new literal
 
 `helpers/agent_cli.py` holds one capability table. Adding Codex, Gemini CLI or
@@ -255,6 +378,20 @@ Token Save Manager Source/
 │   │   │                          boundary; read-only surface plus the single mutating
 │   │   │                          register(). Configured / executable / healthy are
 │   │   │                          three separate answers, never inferred from each other.
+│   │   ├── instructions_posture.py Does a project's Claude instruction chain RESOLVE?
+│   │   │                          carriage (what the files declare) vs reach (what the
+│   │   │                          chain from CLAUDE.md arrives at). Bounded include walk.
+│   │   ├── instructions_wiring.py  The ONE writer. Repairs one topology; never deletes.
+│   │   ├── headless_analyzers.py One capability table for ruff / pyright /
+│   │   │                        markdownlint. Rows, not branches: probe order,
+│   │   │                        argv, stream and severity policy all differ.
+│   │   │                        Four availability states; FAILED is never a pass.
+│   │   ├── install_analyzers.py  How an analyzer is OBTAINED (npm / uv), kept
+│   │   │                        apart from how it is run. A missing package
+│   │   │                        manager is a state, not an error.
+│   │   ├── observations.py      Diagnostics the Manager RECEIVES already
+│   │   │                        rendered. Populations never summed;
+│   │   │                        analyzed_files stays unknown.
 │   │   ├── claude_cli.py          spawn_claude_cli (detached terminal via CREATE_NEW_CONSOLE)
 │   │   └── precommit_hook.py      install/remove/detect git pre-commit hook + review
 │   │                              runner (P5b). 3-value backend dispatch
@@ -268,6 +405,7 @@ Token Save Manager Source/
 │   │   ├── settings_pyscope.py    PyScopeSection — path row + three-state status.
 │   │   │                          No install action: the Manager does not install PyScope.
 │   │   ├── release_wizard.py      ReleaseWizardDialog + _ReleaseCtx (paired)
+│   │   ├── instructions_overview.py InstructionsDialog — fleet instruction-chain view
 │   │   ├── mcp_config.py          MCPConfigDialog — mutates cfg.raw["mcp_skip_warnings"]
 │   │   ├── ai_code_review.py      AICodeReviewDialog — takes both llm_cfg dict + cfg
 │   │   ├── git_commit.py          GitCommitDialog
@@ -377,6 +515,10 @@ Must be updated when the project moves to a new location or machine.
 | `cursor_cli_model` | Model passed to manager-spawned Cursor calls. Default `""` (let Cursor choose). Deliberately NOT mirrored from `claude_cli_model`: Anthropic model ids are not valid Cursor model ids. |
 | `gitignore_cursor_mcp` | Boolean, default `true`. Adds `.cursor/mcp.json` to a project's .gitignore after binding. Names the FILE, never the `.cursor/` directory — `.cursor/rules/` is shared project config and must stay committed. |
 | `pyscope_exe` | Optional absolute path to the PyScope CLI. Blank = auto-detect (`pyscope.exe` then `pyscope` on PATH, then `~/.local/bin`, where `uv tool install` writes its shims). Empty string when not installed — never the bare command name. Non-empty means *configured*, which is not the same as *executable* or *healthy* — see `helpers/pyscope.status`. **Not** a row in `helpers/agent_cli.py`: PyScope is an analysis tool, not a coding-agent CLI. |
+| `instructions_skip_paths` | Optional list of absolute project roots the instruction-chain wiring must never write to (upstream clones, vendored checkouts). They are still discovered, classified and **counted** — excluding them from the population would move the denominator silently — but are never offered a fix and are refused by `plan_wiring` itself, not merely by the button. Honoured by an explicit Retrofit too. Default `[]`. |
+| `ruff_exe` | Optional absolute path to the ruff binary. Blank = auto-detect (`.exe`-first: it is a native binary, not an npm shim). Empty string when not installed. Read by `helpers/headless_analyzers.ANALYZERS`, which owns probe order per row — there is deliberately no `_detect_ruff` in `helpers/detection.py`, because that would be a second place that knows how to find it. |
+| `pyright_exe` | Optional absolute path to pyright. Blank = auto-detect, **`.cmd`-first** (npm shim; the bare name raises WinError 2 from Python). Same table, same rules. |
+| `markdownlint_exe` | Optional absolute path to markdownlint. Blank = auto-detect, `.cmd`-first, probing both `markdownlint-cli2` and the older `markdownlint`. |
 | `doctor_skip_monolith_paths` | Optional list of project-relative paths Doctor's monolith audit should skip (e.g. `["src/tokensave-wrapper.py"]` for intentionally single-file modules). Default `[]`. |
 
 ---

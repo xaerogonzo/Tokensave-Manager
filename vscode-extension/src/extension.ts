@@ -3,12 +3,22 @@
  *
  * Two invariants are enforced here rather than merely intended.
  *
- * **Propose-only.** This extension may create or update
- * `.tokensave-manager/commit_request.json` through the CLI, and that is the
- * whole of its write authority over your repository. It never runs `git
- * commit`, never applies a proposal, and never drives the Manager's GUI to
- * approve anything. Approval happens in the Manager's Git tab, in front of a
- * person. There is deliberately no command here that could bypass that.
+ * **Propose-only.** This extension writes exactly two files, both inside the
+ * **gitignored** `.tokensave-manager/` namespace:
+ *
+ *   - `commit_request.json` — a proposal, written through the CLI
+ *   - `observations.json`   — a display cache of the Problems panel
+ *
+ * That is the whole of its write authority. It never runs `git commit`, never
+ * applies a proposal, never drives the Manager's GUI to approve anything, and
+ * **never writes a tracked file**. Approval happens in the Manager's Git tab,
+ * in front of a person. There is deliberately no command here that could
+ * bypass that.
+ *
+ * (The second file is new, and the wording above is deliberately stronger than
+ * the sentence it replaces rather than merely wider: "never writes a tracked
+ * file" is checkable, where "the whole of its write authority" was a claim
+ * about a single filename that a second file would have quietly falsified.)
  *
  * **The project is always explicit.** Every command resolves a concrete
  * workspace folder before it runs, and passes it to the CLI. Nothing falls
@@ -24,6 +34,7 @@ import { DiagnosticStore } from "./diagnostics";
 import { DiscoveryCache } from "./discovery";
 import { registerCodeLens } from "./lens";
 import { registerManagerBridge } from "./manager";
+import { registerObservations } from "./observations";
 import { registerChecksOnSave } from "./onsave";
 import { refreshReadyContext, registerSetup } from "./setup";
 import { SavingsViewProvider } from "./savings";
@@ -176,6 +187,9 @@ export function activate(context: vscode.ExtensionContext): TestApi {
     apply: (folder, relative, result) => diagnostics.replace(
       folder, "checks", result.envelope?.findings ?? [], [relative]),
   });
+  // Reads the collection and the store; writes only the snapshot. The one-way
+  // arrow is the point — see observations.ts.
+  registerObservations(context, diagnostics, pickFolder);
   registerCommitComposer(context);
   registerFileScopedActions(context);
   registerRefreshTriggers(context, provider);

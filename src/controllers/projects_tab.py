@@ -714,6 +714,9 @@ class ProjectsTabController:
                             command=self._cmd_bar.cmd_shadow_links)
         index_m.add_command(label="🔄  Integration check",
                             command=self.cmd_integration_check)
+        index_m.add_separator()
+        index_m.add_command(label="📄  Instructions…",
+                            command=self.cmd_instructions)
         m.add_cascade(label="🗂  Index", menu=index_m)
 
         # ── CodeGraph ──────────────────────────────────────────────────────
@@ -857,6 +860,17 @@ class ProjectsTabController:
             return
         from dialogs.mcp_config import MCPConfigDialog
         MCPConfigDialog(self._root, self._cfg, focus_project=path)
+
+    def cmd_instructions(self) -> None:
+        """Open the fleet view of instruction-chain reachability.
+
+        Fleet-wide rather than scoped to the selected row: whether the shared
+        rules reach a project is a question about the population, and the
+        defect this surfaces was invisible precisely because it was only ever
+        looked at one project at a time.
+        """
+        from dialogs.instructions_overview import InstructionsDialog
+        InstructionsDialog(self._root, self._cfg, on_log=self._on_log)
 
     def _sync_bind_label(self, path: str) -> None:
         """Point the entry at whichever direction this project can go.

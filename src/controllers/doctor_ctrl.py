@@ -68,6 +68,8 @@ from helpers.doctor_rules import (                      # noqa: E402
     audit_graph_trust,
     audit_index_extractor_version,
     audit_pyscope_cache,
+    audit_instructions,
+    audit_observations,
     audit_mcp_auto_approve,
     audit_shadow_links,
 )
@@ -758,11 +760,46 @@ class DoctorController:
             project_path, skip)
 
         self._log_audit_results(violations, exempt_notes, files_scanned)
+        self._log_instructions(project_path)
+        self._log_observations(project_path)
         self._log_shadow_health(project_path)
         self._log_index_extractor(project_path)
         self._log_graph_trust(project_path)
         self._log_pyscope_cache(project_path)
         self._log_mcp_posture()
+
+    def _log_instructions(self, project_path: str) -> None:
+        """Warn-only. Whether this project's Claude instructions actually load.
+
+        Silent for a project whose chain resolves and is not oversized, so
+        most projects gain no line at all.
+
+        Not a violation and not counted as one: an unwired instruction file is
+        a fact about the working tree, not a defect in the source.
+        """
+        notes = audit_instructions(project_path,
+                                   self._cfg.baseline_include_line,
+                                   self._cfg.template_dir)
+        if not notes:
+            return
+        self._on_log("═══ Instructions ═══", C["mauve"])
+        for note in notes:
+            self._on_log(note, C["peach"])
+
+    def _log_observations(self, project_path: str) -> None:
+        """Informational. What the editor's Problems panel held when captured.
+
+        Silent unless a snapshot exists, so a project nobody has captured one
+        for gains no line. Never counted as a violation: these are verdicts
+        other extensions rendered, and the Manager reports them rather than
+        owning them.
+        """
+        notes = audit_observations(project_path)
+        if not notes:
+            return
+        self._on_log("═══ Editor observations ═══", C["mauve"])
+        for note in notes:
+            self._on_log(note, C["subtext"])
 
     def _log_shadow_health(self, project_path: str) -> None:
         """Warn-only, and silent for projects that do not use shadow links.

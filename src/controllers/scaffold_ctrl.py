@@ -28,6 +28,11 @@ import tkinter as tk
 
 from constants import C, CREATE_NO_WINDOW, _ANSI
 from helpers.graph_trust import INDEX_PRESENT, index_state
+from helpers.instructions_posture import (excluded_roots,
+                                          parse_baseline_target,
+                                          read_project)
+from helpers.instructions_posture import canonical as canonical_path
+from helpers.instructions_wiring import apply_wiring, plan_wiring
 from helpers.project_discovery import load_basic_instructions_template
 from helpers.runtime import log
 from helpers.scaffold import _scaffold_git_hook
@@ -325,27 +330,72 @@ class ScaffoldRetrofitController:
             "Retrofit failed", str(e), parent=self._root))
 
     def _retrofit_add_tokensave(self, path: str, name: str) -> list[str]:
-        """Prepend the @include line to CLAUDE.md (or create it). Returns actions taken."""
-        claude_md = os.path.join(path, "CLAUDE.md")
-        include_line = self._cfg.baseline_include_line
-        if os.path.isfile(claude_md):
-            content = open(claude_md, encoding="utf-8", errors="ignore").read()
-            if "project-baseline.md" in content:
-                log.info("  CLAUDE.md already has @include — skipped")
-                self._on_log("  Tokensave already integrated in CLAUDE.md — skipped", C["overlay0"])
-                return []
-            with open(claude_md, "r+", encoding="utf-8") as f:
-                existing = f.read()
-                f.seek(0)
-                f.write(include_line + "\n\n" + existing)
-            log.info("  prepended @include to CLAUDE.md")
-            self._on_log("  Added tokensave @include to CLAUDE.md", C["green"])
-            return ["Added tokensave rules to CLAUDE.md"]
-        with open(claude_md, "w", encoding="utf-8") as f:
-            f.write(f"# {name} — Claude Instructions\n\n{include_line}\n")
-        log.info("  created CLAUDE.md with @include")
-        self._on_log("  Created CLAUDE.md with tokensave @include", C["green"])
-        return ["Created CLAUDE.md with tokensave rules"]
+        """Make the baseline chain resolve from CLAUDE.md. Returns actions taken.
+
+        The decision belongs to `instructions_posture`, not to this method —
+        one classifier, consulted by every caller that writes.
+
+        What this replaces was ``if "project-baseline.md" in content: skip``.
+        A substring test cannot tell a live include from a pointer at a MOVED
+        template directory, so a project orphaned by relocating `template_dir`
+        read as "already integrated" and was skipped forever; nor can it tell
+        an include from the filename merely being mentioned in prose. It was
+        also blind to the defect that turned out to matter most: a perfectly
+        correct include sitting in a BASIC_INSTRUCTIONS.md that nothing links,
+        which is a file no session ever reads. Eleven of seventeen projects
+        were in exactly that state while every check the Manager had said they
+        were fine.
+        """
+        cfg = self._cfg
+        baseline = parse_baseline_target(cfg.baseline_include_line)
+        posture = read_project(path, name, cfg.template_dir, baseline)
+        if canonical_path(path) in excluded_roots(cfg):
+            # Honoured even for an explicit Retrofit. Saying so is better than
+            # quietly wiring a project the user listed as hands-off; if they
+            # meant it, the remedy is to remove it from the list.
+            log.info("  instructions: excluded by config — skipped")
+            self._on_log("  Instructions: excluded in manager-config.json "
+                         "(instructions_skip_paths) — skipped", C["overlay0"])
+            return []
+        template_file = getattr(cfg, "basic_instructions_template", "") or ""
+        has_template = bool(template_file) and os.path.isfile(template_file)
+        plan = plan_wiring(posture, has_template=has_template)
+
+        if plan.blocked:
+            # Refusing is a result, not a failure: every blocked state is one
+            # where a write would be a guess.
+            log.warning(f"  instructions wiring blocked: {plan.blocked}")
+            self._on_log(f"  Instructions: {plan.blocked}", C["yellow"])
+            return []
+        if plan.is_noop:
+            log.info("  baseline chain already resolves — skipped")
+            self._on_log("  Baseline chain already resolves — skipped",
+                         C["overlay0"])
+            return []
+
+        template_text = ""
+        if has_template:
+            template_text = load_basic_instructions_template(
+                template_file, cfg.baseline_include_line)
+
+        result = apply_wiring(path, plan, cfg.baseline_include_line, name,
+                              template_text, baseline or "")
+        if not result.ok:
+            detail = result.error or result.skipped
+            log.warning(f"  instructions wiring failed: {detail}")
+            self._on_log(f"  Instructions: {detail}", C["red"])
+            return []
+        if not result.changed_files:
+            log.info("  nothing to wire")
+            self._on_log("  Baseline chain already resolves — skipped",
+                         C["overlay0"])
+            return []
+
+        for changed in result.changed_files:
+            self._on_log(f"  Wired {changed}", C["green"])
+        log.info(f"  wired instructions: {result.changed_files}")
+        return ["Wired the baseline chain in %s"
+                % ", ".join(result.changed_files)]
 
     def _retrofit_add_agent_rules(self, path: str, name: str,
                                   want_agents: bool,

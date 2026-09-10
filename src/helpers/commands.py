@@ -110,6 +110,26 @@ COMMANDS: tuple = (
         detail="Syntax + pyflakes, reported into the Problems panel.",
         side_effect=PURE_READ, accepts_paths=True, task=True),
     Command(
+        action="analyze", cli="analyze", vscode="tokensaveManager.analyze",
+        label="Analyze",
+        detail="ruff, pyright and markdownlint, when they are installed.",
+        # A separate command from `checks`, not more rows inside it. `checks`
+        # shells `sys.executable -m`, which under the frozen build is the
+        # extracted binary rather than an interpreter, so it refuses there.
+        # These are standalone executables and work fine in a packaged build;
+        # folding them in would make the whole command refuse for a reason that
+        # does not apply to them.
+        side_effect=PURE_READ, accepts_paths=True, task=True),
+    Command(
+        action="observations", cli="observations", vscode="",
+        label="Observations",
+        detail="Read the editor's Problems snapshot. Never creates one.",
+        # Deliberately no `vscode` id. The extension is what WRITES the
+        # snapshot; asking it to read one back through a subprocess would be
+        # the editor querying the Manager about the editor's own diagnostics.
+        # This command is for the Manager, the Doctor rule and scripts.
+        side_effect=PURE_READ),
+    Command(
         action="doctor", cli="doctor", vscode="tokensaveManager.doctor",
         label="Doctor",
         detail="Scan for stale tokensave entries. Read-only — never fixes.",

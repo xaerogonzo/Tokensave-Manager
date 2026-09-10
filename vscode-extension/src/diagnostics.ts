@@ -209,6 +209,34 @@ export class DiagnosticStore {
     }
   }
 
+  /**
+   * Every diagnostic this store currently owns for one file, across partitions.
+   *
+   * Exists for exactly one caller: the Problems capture in `observations.ts`,
+   * which must subtract our own rows from what the editor reports. Without it
+   * a capture reads back the Manager's own findings and files them as a
+   * *second source agreeing with the first* — the Manager observing itself.
+   *
+   * Returns a flat array **with duplicates preserved**, because the caller does
+   * multiset subtraction: two genuinely identical diagnostics at one position
+   * are two diagnostics, and collapsing them here would make the subtraction
+   * remove one too many.
+   *
+   * Read-only by contract. Nothing outside this class mutates a partition.
+   */
+  ownedFor(fsPath: string): vscode.Diagnostic[] {
+    const owned: vscode.Diagnostic[] = [];
+    for (const commands of this.partitions.values()) {
+      for (const files of commands.values()) {
+        const list = files.get(fsPath);
+        if (list) {
+          owned.push(...list);
+        }
+      }
+    }
+    return owned;
+  }
+
   /** Drop everything for one folder, e.g. when it leaves the workspace. */
   forgetFolder(folder: vscode.WorkspaceFolder): void {
     const folderKey = folder.uri.toString();
