@@ -335,6 +335,16 @@ Token Save Manager Source/
 │   │   │                          how to repair it.
 │   │   ├── mcp_approval.py        Whether a project's .mcp.json has actually been
 │   │   │                          approved — distinct from whether it exists.
+│   │   ├── mcp_posture.py         What all the wiring adds up to. `tier` is what a
+│   │   │                          project's OWN config declares; `service` is how it
+│   │   │                          is actually served, derived from tier + whether a
+│   │   │                          machine-wide fallback exists. `independent` and
+│   │   │                          `covered` are orthogonal verdicts, three-valued.
+│   │   │                          `classify_posture` is PURE and consumes
+│   │   │                          already-classified facts — never a config dict.
+│   │   ├── mcp_setup.py           Turns a Posture into SetupSteps. Writes nothing;
+│   │   │                          every step routes to the writer that owns it.
+│   │   │                          Steps sharing a `group` are ALTERNATIVES.
 │   │   ├── mcp_scope.py           Which scope wins, and whether Claude Code is live
 │   │   │                          to care. Trust is granted, never assumed: a folder
 │   │   │                          with no record is one it will ask about.
@@ -531,6 +541,11 @@ Token Save Manager Source/
 │   │   ├── mcp_blocks_panel.py    One block per MCP config file: header, badge,
 │   │   │                          diff, actions.
 │   │   ├── mcp_duplicates_panel.py The duplicate ~/.claude.json project-key panel.
+│   │   ├── mcp_overview_panel.py  The MCP dialog's front door: headline (can anything
+│   │   │                          serve the wrong project?), per-project table (how is
+│   │   │                          THIS one served?), and the Show-details toggle that
+│   │   │                          reveals the five original panels. Badges come from
+│   │   │                          `service`, never from `tier`.
 │   │   ├── mcp_migration_panel.py Drives the user-scope tokensave retirement,
 │   │   │                          including the background verification pass.
 │   │   │                          States that the migration would make *worse*

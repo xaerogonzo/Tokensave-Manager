@@ -76,6 +76,34 @@ These are the rules whose violation causes silent breakage. Every controller and
 - **Controllers import dialogs directly**; cross-dialog deps (e.g. `SettingsDialog` opening `MCPConfigDialog`) use **lazy in-handler imports** to avoid module-load cycles.
 - **`helpers/` never imports from `controllers/` or `dialogs/`** (no upward imports). Acyclic import graph is a verified invariant.
 
+### D1b. MCP posture: derived, never stored — and unknown is never false
+
+Three rules, each paid for by a shipped defect. They govern anything that
+summarises MCP state (`helpers/mcp_posture.py`, the overview panel, Doctor
+rules, any future badge).
+
+- **Posture is derived at render time, never stored.** No config key
+  records "this machine is independent". A retirement flag records an
+  *intent*; the file records a *fact*; `lifecycle_state(fact, intent)` is
+  the only place they combine, and `RETURNED` — retired, yet back — is a
+  real state that a stored summary would have erased. It happened here:
+  `mcp_user_scope_retired: true` with the entry present again.
+- **Serviceability is machine-wide; tier is not.** A project's own config
+  can never say whether that project is served, because a fallback
+  elsewhere decides it. `tier` describes the project; `service_of(tier,
+  fallback)` decides the badge. Rendering a badge from `tier` puts a green
+  checkmark on a project served by nothing.
+- **Unknown is never false.** Verdicts are three-valued and each source
+  carries a read status. A green summary requires every input to have been
+  read successfully — the dialog has already shipped
+  "13 bound · 13 approved · 0 still to bind" on a machine where three
+  were never trusted.
+
+Corollary for aggregates: canonicalise and deduplicate project roots
+(`normalize_project_key`) BEFORE counting. `independent` and `covered` are
+population properties, so one directory reached through two search roots is
+a wrong denominator, not a cosmetic duplicate.
+
 ### D2. Agent CLIs: a new agent is a table row, never a new literal
 
 `helpers/agent_cli.py` holds one capability table. Adding Codex, Gemini CLI or

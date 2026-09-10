@@ -59,6 +59,35 @@ if TYPE_CHECKING:
 _STRICT_TREE_ON_LABEL = "🛡  Enable strict_tree…"
 _STRICT_TREE_OFF_LABEL = "🛡  Disable strict_tree…"
 
+#: The pin commands, which exist only while something reads the pin.
+#:
+#: `~/.tokensave/desktop-project.txt` has exactly one reader —
+#: `src/tokensave-wrapper.py`, installed only as Claude Desktop's MCP command.
+#: Turn Claude Desktop chat off and nothing reads it.
+#:
+#: These were briefly RELABELLED in that state rather than removed, on the
+#: grounds that the pin still chose the manager's own default project. Shown
+#: to a user, that reasoning did not survive contact: a ★ command sitting at
+#: the top of the menu reads as the thing that decides what tokensave serves,
+#: whatever its label says, and explaining that it now means something smaller
+#: is exactly the esoterica this whole change exists to delete. So they are
+#: omitted, and they come back the moment Claude Desktop chat is turned on.
+_PIN_LABEL = "★  Set as Active"
+_AUTO_LABEL = "Auto-detect"
+
+#: The two faces of the binding entry. A project either has its own
+#: `.mcp.json` or is served automatically from each session's folder, and
+#: both are fine — so this is a toggle, not a repair. It had only the "on"
+#: direction for as long as it existed, which meant a project could be bound
+#: and never released except by deleting the file by hand.
+#:
+#: "Bind", never "pin": ★ Set as Active PINS one project for Claude Desktop
+#: chat, and that is an unrelated setting. Using one word for both is what
+#: sent a user looking for an unpin command in this menu after reading
+#: "Pin down" in the MCP dialog.
+_BIND_ON_LABEL = "🔌  Bind to this project…"
+_BIND_OFF_LABEL = "🔌  Unbind — serve automatically…"
+
 
 class ProjectsTabController:
 
@@ -66,6 +95,14 @@ class ProjectsTabController:
     #: _build_context_menu. None until the menu exists -- callers that
     #: run before it (or against a stubbed menu) have nothing to relabel.
     _strict_tree_entry = None
+    #: Whether the menu currently in existence was built WITH the pin
+    #: commands. None until one is built. The menu is constructed once and
+    #: reused for every row, so this is what tells `_on_right_click` that the
+    #: Desktop-chat mode changed underneath it and the menu has to be rebuilt.
+    _menu_has_pin = None
+    #: (submenu, entry index) for the bind toggle, set by
+    #: _build_context_menu -- same shape as `_strict_tree_entry`.
+    _bind_entry = None
     """Owns the Projects tab UI and all per-project commands.
 
     No back-reference to App — all cross-App dependencies flow through the
@@ -649,7 +686,10 @@ class ProjectsTabController:
                     relief=tk.FLAT, bd=0, font=("Segoe UI", 10))
 
         # ── Everyday actions, kept one click away ──────────────────────────
-        m.add_command(label="★  Set as Active", command=self._cmd_bar.cmd_set_active)
+        self._menu_has_pin = self._wrapper_reads_the_pin()
+        if self._menu_has_pin:
+            m.add_command(label=_PIN_LABEL,
+                          command=self._cmd_bar.cmd_set_active)
         m.add_command(label="↺  Sync",          command=self._cmd_bar.cmd_sync)
         m.add_command(label="📊  Status",        command=self._cmd_bar.cmd_status)
         m.add_separator()
@@ -666,8 +706,9 @@ class ProjectsTabController:
         # The label depends on the selected project, and the menu is built
         # once — so keep a handle on the entry and restate it at popup time.
         self._strict_tree_entry = (index_m, index_m.index("end"))
-        index_m.add_command(label="🔌  Bind to this project…",
+        index_m.add_command(label=_BIND_ON_LABEL,
                             command=self._bind_project_selected)
+        self._bind_entry = (index_m, index_m.index("end"))
         index_m.add_separator()
         index_m.add_command(label="🔗  Shadow Links…",
                             command=self._cmd_bar.cmd_shadow_links)
@@ -754,7 +795,9 @@ class ProjectsTabController:
                             command=self._cmd_bar.cmd_retrofit_selected)
         maint_m.add_command(label="📁  Assign Category…",
                             command=self.cmd_assign_category)
-        maint_m.add_command(label="Auto-detect", command=self._cmd_bar.cmd_auto)
+        if self._menu_has_pin:
+            maint_m.add_command(label=_AUTO_LABEL,
+                                command=self._cmd_bar.cmd_auto)
         maint_m.add_separator()
         maint_m.add_command(label="🗑  Remove Index…",
                             command=self._cmd_bar.cmd_remove)
@@ -780,7 +823,9 @@ class ProjectsTabController:
             # and having it act on exactly one of them, silently.
             self._show_batch_menu(event, paths)
             return
+        self._rebuild_menu_if_mode_changed()
         self._sync_strict_tree_label(paths[0] if paths else "")
+        self._sync_bind_label(paths[0] if paths else "")
         self._ctx_menu.tk_popup(event.x_root, event.y_root)
 
     def _open_cross_project_search(self, paths: list) -> None:
@@ -802,12 +847,80 @@ class ProjectsTabController:
         configs -- it owns the diff, the timestamped backup and the
         per-row Apply -- and a second write path here would duplicate all
         three while quietly making that claim false.
+
+        That holds for BOTH directions of the toggle: unbinding lands on the
+        same focused row, which carries the Unbind button and the
+        consequence-for-this-machine wording that goes with it.
         """
         path = self._selected_path()
         if not path:
             return
         from dialogs.mcp_config import MCPConfigDialog
         MCPConfigDialog(self._root, self._cfg, focus_project=path)
+
+    def _sync_bind_label(self, path: str) -> None:
+        """Point the entry at whichever direction this project can go.
+
+        Read at popup time for the same reason `_sync_strict_tree_label` is:
+        the menu is built once and reused for every row, so a value captured
+        at build time would be right for one project and wrong for the rest.
+        One small file check per right-click.
+
+        A project we cannot read offers Bind, matching the strict_tree
+        toggle's rule -- offering Unbind for a state we could not determine
+        would be asserting a fact we do not have, and the dialog it opens
+        will show what is actually there.
+        """
+        if not self._bind_entry:
+            return
+        menu, index = self._bind_entry
+        label = _BIND_ON_LABEL
+        if path:
+            try:
+                import os
+                label = (_BIND_OFF_LABEL
+                         if os.path.isfile(os.path.join(path, ".mcp.json"))
+                         else _BIND_ON_LABEL)
+            except Exception:                              # noqa: BLE001
+                pass          # a mislabelled entry must not eat the menu
+        try:
+            menu.entryconfigure(index, label=label)
+        except tk.TclError:
+            pass
+
+    def _wrapper_reads_the_pin(self) -> bool:
+        """Does Claude Desktop define the wrapper entry that reads the pin?
+
+        The same helper `App._pin_tag` and `SyncStatusController` use, so the
+        badge, the menu and the log line cannot disagree about which meaning
+        is live. Errs toward True when it cannot tell: showing a command that
+        turns out to do nothing is a smaller harm than hiding one the user is
+        looking for.
+        """
+        try:
+            from helpers import mcp_desktop
+            return mcp_desktop.desktop_entry_present()
+        except Exception:                                  # noqa: BLE001
+            return True
+
+    def _rebuild_menu_if_mode_changed(self) -> None:
+        """Rebuild the context menu when Claude Desktop chat is toggled.
+
+        Deleting and re-inserting two entries by index would be cheaper, and
+        it is how this started — but the indices of everything after them
+        shift, `_strict_tree_entry` stores one, and the bookkeeping is exactly
+        the kind that is right until someone adds a menu item. A full rebuild
+        re-derives every index from scratch and happens at most once per mode
+        change, which is roughly never.
+        """
+        if self._menu_has_pin is None:
+            # No menu was built through `_build_context_menu`, so there is
+            # nothing whose shape could have gone stale. Rebuilding here would
+            # construct one against collaborators the caller never supplied.
+            return
+        if self._menu_has_pin == self._wrapper_reads_the_pin():
+            return
+        self._build_context_menu()
 
     def _sync_strict_tree_label(self, path: str) -> None:
         """Point the entry at whichever direction is actually available.

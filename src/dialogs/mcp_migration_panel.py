@@ -17,6 +17,10 @@ from tkinter import messagebox
 from constants import C
 from helpers.mcp import (
     ADVISORY_STATES,
+    LIFECYCLE_ABSENT,
+    LIFECYCLE_RETIRED,
+    LIFECYCLE_RETURNED,
+    lifecycle_state,
     MIGRATION_BLOCKED_STATES,
     USER_SCOPE_RETIRED_KEY,
     _apply_mcp_fix,
@@ -103,22 +107,51 @@ the background verification pass.
         project with no binding has no tokensave at all. That is the deliberate
         trade — determinism instead of a fallback that is usually right — and
         it is not something to discover afterwards.
+
+        Driven by ``lifecycle_state`` rather than by a bare "is the entry
+        there". This panel used to compute ``still_there`` and nothing else,
+        which gave one rendering to two different situations: a user who never
+        migrated, and a user whose migration was silently undone. Measured on
+        the author's machine 2026-09-09 — ``mcp_user_scope_retired: true``
+        with ``tokensave.exe serve`` back in ``~/.claude.json``, almost
+        certainly re-added by a ``tokensave install`` or ``doctor`` run. The
+        Desktop side has had a lifecycle since its own migration shipped; this
+        side never got one, and the two need the same four answers.
         """
         st = self._migration_status(rows)
         code_cfg = _mcp_code_cfg_path()
         info = _classify_mcp_entry(code_cfg, self._cfg.raw)
-        still_there = info.get("current") is not None
+        raw = self._cfg.raw if isinstance(self._cfg.raw, dict) else {}
+        state = lifecycle_state(info.get("current") is not None,
+                                bool(raw.get(USER_SCOPE_RETIRED_KEY)))
 
         box = tk.Frame(self._body, bg=C["surface0"])
         box.pack(fill=tk.X, padx=4, pady=(12, 4), ipady=6)
 
-        if not still_there:
+        if state == LIFECYCLE_RETIRED:
             tk.Label(box,
                      text="  ✓  Migration complete — no user-scoped tokensave "
                           "entry remains. Each project serves its own graph.",
                      font=("Segoe UI", 9, "bold"),
                      bg=C["surface0"], fg=C["green"], anchor=tk.W,
                      justify=tk.LEFT, wraplength=740).pack(fill=tk.X, padx=8)
+            return
+
+        if state == LIFECYCLE_ABSENT:
+            # Never had one. The old wording congratulated this user on a
+            # migration they did not perform, and hid the half that matters
+            # to them: with no fallback, an unbound project gets nothing.
+            tk.Label(box,
+                     text="  •  No user-scoped tokensave entry on this machine. "
+                          "Nothing shadows a project binding — and a project "
+                          "without one gets no tokensave either.",
+                     font=("Segoe UI", 9),
+                     bg=C["surface0"], fg=C["subtext"], anchor=tk.W,
+                     justify=tk.LEFT, wraplength=740).pack(fill=tk.X, padx=8)
+            return
+
+        if state == LIFECYCLE_RETURNED:
+            self._render_userscope_drift(box, code_cfg, info)
             return
 
         tk.Label(box, text="  ⚠  User-scoped fallback is still active",
@@ -214,6 +247,51 @@ the background verification pass.
                      font=("Segoe UI", 9), bg=C["surface0"], fg=C["overlay0"],
                      justify=tk.LEFT, wraplength=740, anchor=tk.W).pack(
                 fill=tk.X, padx=8, pady=(0, 4))
+
+    def _render_userscope_drift(self, box, code_cfg: str, info: dict):
+        """States the fact. The DECISION lives on the Overview switch.
+
+        This used to be the decision: a warning headed "This machine recorded
+        retiring the user-scoped entry — but it is back", with buttons for
+        "Retire it again" and "Keep it — clear the retirement flag". Every
+        noun in that was internal bookkeeping, and it described a disagreement
+        between a config key and a file rather than anything the user wanted
+        done. It also never said what the entry DOES.
+
+        The Overview now carries an "Automatic serving" switch that says
+        exactly that and offers both directions, so two surfaces offering the
+        same decision in different words is one too many. This one keeps what
+        the details panel is for — the file, the command, and the reason it is
+        probably back — and points at the switch.
+        """
+        tk.Label(box, text="  •  The shared `tokensave` entry is present, "
+                           "and was previously turned off",
+                 font=("Segoe UI", 10, "bold"),
+                 bg=C["surface0"], fg=C["subtext"], anchor=tk.W).pack(
+            fill=tk.X, padx=8, pady=(4, 2))
+        tk.Label(box,
+                 text=("  %s defines it again. `tokensave install --agent "
+                       "claude` and `tokensave doctor` both write this entry "
+                       "by design, so a run of either will have restored it."
+                       % code_cfg),
+                 font=("Segoe UI", 9), bg=C["surface0"], fg=C["text"],
+                 justify=tk.LEFT, wraplength=740, anchor=tk.W).pack(
+            fill=tk.X, padx=8, pady=(0, 2))
+        tk.Label(box, text=("  Current entry:  %s"
+                            % json.dumps(info.get("current"))),
+                 font=("Consolas", 8), bg=C["surface0"], fg=C["overlay0"],
+                 justify=tk.LEFT, wraplength=740, anchor=tk.W).pack(
+            fill=tk.X, padx=8)
+        tk.Label(box,
+                 text=("  Nothing is broken by it: the entry is a bare "
+                       "`serve`, started in each session's own folder, so it "
+                       "resolves to that session's project. To turn it off, "
+                       "use the Automatic serving switch at the top of this "
+                       "page — it names the projects that would be left with "
+                       "no tokensave first."),
+                 font=("Segoe UI", 9), bg=C["surface0"], fg=C["overlay0"],
+                 justify=tk.LEFT, wraplength=740, anchor=tk.W).pack(
+            fill=tk.X, padx=8, pady=(4, 4))
 
     def _remove_user_scoped(self):
         """Its own reviewed operation: diff, backup, apply, then VERIFY.

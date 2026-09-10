@@ -35,15 +35,21 @@ import pytest
 
 from helpers import mcp_desktop
 from helpers.mcp_desktop import (
+    change_set,
+    discover_desktop_configs,
+    restore,
+    retire,
+)
+# The lifecycle moved to the family leaf beside both retirement keys: it takes
+# two booleans and the user-scope migration needs the identical truth table.
+# `mcp_desktop` deliberately does not re-export it -- see
+# tests/test_mcp_lifecycle_truth_table.py.
+from helpers.mcp_paths import (
     LIFECYCLE_ABSENT,
     LIFECYCLE_PRESENT,
     LIFECYCLE_RETIRED,
     LIFECYCLE_RETURNED,
-    change_set,
-    discover_desktop_configs,
     lifecycle_state,
-    restore,
-    retire,
 )
 from helpers.mcp_shadow import (
     SHADOW_ACTIVE,
@@ -503,6 +509,18 @@ def test_is_retired_reads_intent_not_absence():
 
 # ── the hard gate ──────────────────────────────────────────────────────────
 
+class _Named:
+    def __init__(self, name):
+        self.name = name
+
+
+class _Posture:
+    """Only the field the gate reads."""
+
+    def __init__(self, unserved):
+        self.unserved = tuple(_Named(n) for n in unserved)
+
+
 class _GateHost:
     """The mixin with just the collaborators ``_desktop_gate`` reads.
 
@@ -510,11 +528,12 @@ class _GateHost:
     without a Tk root: this is a pure decision about two facts.
     """
 
-    def __init__(self, ready=True, cached=None):
+    def __init__(self, ready=True, cached=None, unserved=()):
         from dialogs.mcp_desktop_panel import DesktopMigrationMixin
         self._gate = DesktopMigrationMixin._desktop_gate.__get__(self)
         self._ready = ready
         self._desktop_running = cached
+        self._posture = _Posture(unserved)
 
     def _migration_status(self, rows):
         return {"ready": self._ready, "bound": [("p", "r")]}
@@ -549,11 +568,41 @@ def test_gate_blocks_when_it_cannot_tell(mocker):
     assert "Could not determine" in reason
 
 
-def test_gate_blocks_until_projects_are_bound_or_skipped(mocker):
+def test_gate_blocks_only_when_something_would_be_served_by_nothing(mocker):
+    """The rule this gate SHOULD have had, and now does.
+
+    It borrowed the user-scoped migration's readiness rule — bind or skip
+    every project first — and the two migrations remove different things. The
+    user-scoped entry is a FALLBACK, so removing it strands every unbound
+    project. Desktop's entry is a SHADOW: removing it leaves each project
+    served by its own binding or by that same fallback.
+
+    Borrowing the stricter rule made this a one-way door. On a machine with
+    four projects legitimately served automatically, `ready` is False forever,
+    so once Desktop's entry was restored the retire button could never be
+    offered again — which is precisely the "no way to change it back"
+    complaint, in the other direction.
+    """
     _desktop_running(mocker, False)
+
+    # Four unbound-but-served projects: nothing is stranded, so nothing blocks.
     allowed, reason = _GateHost(ready=False)()
+    assert allowed, reason
+
+    # A project nothing else serves is the real blocker, and it is named.
+    allowed, reason = _GateHost(unserved=["CleanForge"])()
     assert not allowed
-    assert "Bind or skip" in reason
+    assert "CleanForge" in reason
+    assert "no tokensave at all" in reason
+
+
+def test_gate_still_refuses_while_desktop_is_running(mocker):
+    """Unchanged, and the hard half: Desktop rewrites its config from memory,
+    so a write performed now is guaranteed to be reverted."""
+    _desktop_running(mocker, True)
+    allowed, reason = _GateHost()()
+    assert not allowed
+    assert "Quit Claude Desktop" in reason
 
 
 def test_gate_allows_when_desktop_is_closed_and_projects_are_ready(mocker):

@@ -16,6 +16,15 @@ tells the user the restart is only about the DEFAULT graph, and names
 `graph_root` as the way to read another project without one. A message that
 says only "restart Claude" is technically true and still leaves the user
 believing the restart is unavoidable.
+
+**Every test here describes the wrapper-present posture**, and `_sync_ctrl`
+pins `desktop_entry_present` to True to say so. That was implicit when these
+were written — the pin was assumed to be live — and making it explicit is the
+third direction this log has been wrong in: `~/.tokensave/desktop-project.txt`
+has exactly one reader, `src/tokensave-wrapper.py`, installed only as Claude
+Desktop's MCP command. Retire that entry and every sentence below becomes a
+claim about a server that does not exist. The mirror cases live in
+`test_sync_ctrl_pin.py`.
 """
 from __future__ import annotations
 
@@ -30,7 +39,16 @@ class _Cfg:
 
 
 def _sync_ctrl(logs, mocker, states=("ok",)):
-    """A controller whose MCP-wiring probe returns the given states."""
+    """A controller whose MCP-wiring probe returns the given states.
+
+    Claude Desktop is pinned as DEFINING the wrapper entry, because that is
+    the precondition for everything asserted in this file. Left to the real
+    machine it would be False on any install that ran the Desktop migration,
+    and these tests would be asserting Desktop wording against a branch that
+    deliberately no longer produces it.
+    """
+    mocker.patch("helpers.mcp_desktop.desktop_entry_present",
+                 return_value=True)
     mocker.patch("controllers.sync_ctrl.set_pinned")
     mocker.patch("controllers.sync_ctrl._mcp_configs",
                  return_value=[("Claude Desktop", "cfg%d.json" % i)

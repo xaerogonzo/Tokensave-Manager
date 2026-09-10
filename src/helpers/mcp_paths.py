@@ -169,6 +169,42 @@ USER_SCOPE_RETIRED_KEY = "mcp_user_scope_retired"
 DESKTOP_SCOPE_RETIRED_KEY = "mcp_desktop_scope_retired"
 
 
+#: Where a retirement migration sits, from intent plus fact. Four states, and
+#: the interesting one is RETURNED: the entry is back although the user retired
+#: it, which a Desktop update, a ``tokensave install`` or a hand edit can do.
+#:
+#: Lives HERE rather than in :mod:`helpers.mcp_desktop`, where it started,
+#: because it was never Desktop-specific -- it takes two booleans -- and BOTH
+#: retirement keys above are defined in this module. The user-scoped migration
+#: needs the identical answer, and duplicating a four-cell truth table is how
+#: the two sides drift apart. ``mcp_desktop`` re-exports these names so its own
+#: callers and tests are unchanged.
+LIFECYCLE_ABSENT = "absent"
+LIFECYCLE_PRESENT = "present"
+LIFECYCLE_RETIRED = "retired"
+LIFECYCLE_RETURNED = "returned"
+
+
+def lifecycle_state(entry_present: bool, retired_flag: bool) -> str:
+    """Where this machine sits in a retirement migration.
+
+    Reporting RETURNED is the difference between a durable migration and a
+    cleanup that silently undoes itself. Measured on this machine 2026-09-09:
+    ``mcp_user_scope_retired`` was ``true`` while ``~/.claude.json`` again held
+    a ``tokensave`` entry, and the user-scope panel -- which had no lifecycle
+    of its own -- rendered that identically to "you never migrated".
+
+    Intent and fact are kept apart on purpose. ``retired_flag`` is what the
+    user decided; ``entry_present`` is what is on disk now. Callers asking
+    "does a server actually exist" must read the FACT (PRESENT or RETURNED),
+    never the flag.
+    """
+    if entry_present:
+        return LIFECYCLE_RETURNED if retired_flag else LIFECYCLE_PRESENT
+    return LIFECYCLE_RETIRED if retired_flag else LIFECYCLE_ABSENT
+
+
+
 
 def _project_mcp_path(project_root: str) -> str:
     """Where Claude Code looks for a project's own MCP config."""

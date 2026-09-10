@@ -71,33 +71,153 @@ class SyncStatusController:
     # ── Commands ──────────────────────────────────────────────────────────────
 
     def cmd_set_active(self, path: str) -> None:
+        """Pin *path*, then say what pinning it actually did.
+
+        The branch is on **whether anything still reads the pin**, which is
+        not the same question as "are the MCP configs healthy" — and asking
+        the second one is the bug this replaces.
+
+        The pin file has exactly one reader: ``src/tokensave-wrapper.py``,
+        installed only as Claude Desktop's MCP command. Retire that entry and
+        the pin decides nothing about MCP at all; it stays the manager's own
+        default project, which is a real and useful thing, just a much smaller
+        one than the old wording claimed.
+
+        The previous guard read ``_classify_mcp_entry(...)["state"] == "ok"``
+        across both configs and warned only when nothing was "ok". A RETIRED
+        Desktop config classifies as ``ok`` — deliberately, because a chosen
+        absence is not a defect and four surfaces depend on that reading — so
+        on a machine that had completed the migration the warning could never
+        fire, and the reassuring Desktop text printed instead. Measured
+        2026-09-09: Desktop's ``mcpServers`` was empty, the pin still named a
+        project, and the log said the pin set the default for Desktop's chats.
+
+        The classifier is right and was left alone. Only the caller changed.
+        """
         set_pinned(path)
         self._on_log(f"Pinned → {path}", C["green"])
+        if self._wrapper_reads_the_pin():
+            # The effect note is withheld when NOTHING is wired: the user's
+            # problem is a step earlier, and a cross-project tip is noise to
+            # someone whose tools do not run at all.
+            if self._warn_about_broken_configs():
+                self._log_pin_effect()
+        else:
+            self._log_manager_default_only()
+        self._on_refresh()
+
+    def _wrapper_reads_the_pin(self) -> bool:
+        """Is there a Claude Desktop entry pointing at the wrapper?
+
+        The same helper ``App._pin_tag`` already uses, so the badge and the log
+        line cannot disagree. Errs toward the louder answer for the same
+        reason it does: if we cannot tell, the message that says the pin MIGHT
+        matter is the safer one to print.
+        """
+        try:
+            from helpers import mcp_desktop
+            return mcp_desktop.desktop_entry_present()
+        except Exception:                                    # noqa: BLE001
+            return True
+
+    def _warn_about_broken_configs(self) -> bool:
+        """Warn about half-wired configs. Returns whether the pin reaches any.
+
+        Only meaningful while the pin is live, so only reached then. The
+        return value preserves a distinction the original three-branch guard
+        made and which is worth keeping: *some* wiring broken is a note beside
+        the effect, while *all* of it broken means the effect has not happened
+        at all and describing it would be describing nothing.
+
+        Errs toward reporting the effect when it cannot probe: an unreadable
+        config is a fact about this tool, and swallowing the explanation over
+        it would be the worse half of the error.
+        """
         try:
             configs = _mcp_configs()
-            states = [_classify_mcp_entry(p, self._cfg.raw)["state"] for _, p in configs]
-        except Exception:
-            configs, states = [], []
-        if "ok" in states and not all(s == "ok" for s in states):
-            bad = [lbl for (lbl, p), s in zip(configs, states) if s != "ok"]
-            self._on_log(
-                f"  Note: {', '.join(bad)} still needs its MCP wiring fixed "
-                f"(Settings → 🔌 Manage MCP wiring) — the pin cannot "
-                f"reach it.",
-                C["peach"])
-            self._log_pin_effect()
-        elif "ok" not in states:
+            states = [_classify_mcp_entry(p, self._cfg.raw)["state"]
+                      for _, p in configs]
+        except Exception:                                    # noqa: BLE001
+            return True
+        if not states:
+            return True
+        if "ok" not in states:
             self._on_log(
                 "  No MCP config currently routes through the wrapper — "
                 "this pin won't take effect until you fix the MCP wiring "
                 "AND restart Claude.  Settings → 🔌 Manage MCP wiring.",
                 C["peach"])
-        else:
-            self._log_pin_effect()
-        self._on_refresh()
+            return False
+        bad = [lbl for (lbl, _p), s in zip(configs, states) if s != "ok"]
+        if bad:
+            self._on_log(
+                f"  Note: {', '.join(bad)} still needs its MCP wiring fixed "
+                f"(Settings → 🔌 Manage MCP wiring) — the pin cannot "
+                f"reach it.",
+                C["peach"])
+        return True
+
+    def _log_manager_default_only(self) -> None:
+        """What the pin means once nothing routes through the wrapper.
+
+        Said plainly rather than softened. A user who has retired Desktop's
+        entry is running the recommended posture, and the honest report is
+        that this command is now a bookmark — it decides which project the
+        manager's own tabs open against, and nothing else.
+
+        The unserved list is computed only in the strictest case, where no
+        wrapper AND no user-scoped fallback exist. That is the one posture in
+        which "this project has no tokensave" is a live possibility, and it is
+        rare enough to afford a scan on a menu click.
+        """
+        self._on_log(
+            "  This is the manager's own default project — the ★ row, and the "
+            "project the Git tab opens when nothing else is selected.",
+            C["overlay0"])
+        self._on_log(
+            "  It decides NOTHING about MCP. Claude Desktop has no tokensave "
+            "entry, so nothing reads this pin; every Claude Code session "
+            "serves its own project either from that project's .mcp.json or "
+            "from the user-scoped entry resolving in the session's folder.",
+            C["overlay0"])
+        self._on_log(
+            "  Reading another project needs no restart anywhere: pass "
+            "graph_root=<project path> on any tokensave call.  "
+            "Reference tab → “🌐  Query another project”.",
+            C["overlay0"])
+        self._warn_if_nothing_serves_unbound_projects()
+
+    def _warn_if_nothing_serves_unbound_projects(self) -> None:
+        """Name the projects that no longer have any tokensave at all.
+
+        Reached only when both global entries are gone, which is the posture
+        where an unbound project is genuinely unserved rather than
+        automatically served. Naming them beats a count: "two projects" sends
+        the user to look, a name tells them whether they care.
+        """
+        try:
+            from helpers.mcp_posture import read_posture
+            posture = read_posture(self._cfg)
+        except Exception:                                    # noqa: BLE001
+            return
+        if posture.automatic_fallback or not posture.unserved:
+            return
+        names = ", ".join(p.name for p in posture.unserved[:6])
+        if len(posture.unserved) > 6:
+            names += ", …"
+        self._on_log(
+            f"  ⚠ Both global tokensave entries are retired, so these have no "
+            f"tokensave at all: {names}.  Bind them from Settings → "
+            f"🔌 Manage MCP wiring, or skip them there.",
+            C["peach"])
 
     def _log_pin_effect(self) -> None:
         """Say what the pin does -- and, more usefully, what it is not for.
+
+        Reached only when Claude Desktop actually defines the wrapper entry;
+        every sentence here is about Desktop, and printing it on a machine
+        with no such entry is what made this text a lie. See
+        :meth:`cmd_set_active`.
 
         This briefly claimed the change could be applied to a running Claude
         Desktop. It cannot: the pin watcher that promised it was removed after
@@ -137,13 +257,28 @@ class SyncStatusController:
             C["overlay0"])
 
     def cmd_auto(self) -> None:
+        """Clear the pin. What that means depends on who was reading it.
+
+        The old text described the wrapper's behaviour unconditionally, which
+        is wrong in the same way :meth:`cmd_set_active` was: with no Desktop
+        entry there is no wrapper to pick anything, and nothing to restart.
+        """
         clear_pinned()
-        self._on_log(
-            "Auto-detect enabled — wrapper picks the most-recently-synced project at next launch.",
-            C["sky"])
-        self._on_log(
-            "  Restart Claude Desktop / Claude Code to trigger a fresh auto-detect.",
-            C["overlay0"])
+        if self._wrapper_reads_the_pin():
+            self._on_log(
+                "Auto-detect enabled — wrapper picks the most-recently-synced "
+                "project at next launch.", C["sky"])
+            self._on_log(
+                "  Restart Claude Desktop to trigger a fresh auto-detect.",
+                C["overlay0"])
+        else:
+            self._on_log(
+                "Pin cleared — the manager falls back to the first project in "
+                "the list as its own default.", C["sky"])
+            self._on_log(
+                "  Nothing reads this pin for MCP: Claude Desktop has no "
+                "tokensave entry, and Claude Code sessions never read it.",
+                C["overlay0"])
         self._on_refresh()
 
     def cmd_sync(self, path: str) -> None:

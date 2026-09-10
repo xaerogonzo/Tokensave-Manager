@@ -493,50 +493,65 @@ class App(UiPumpMixin, tk.Tk):
     # ❓ Help tab    — handled by HelpTabController
     # ═══════════════════════════════════════════════════════════════════
 
-    def _pin_tag(self, pinned: bool) -> str:
-        """What the pin actually decides, which is not always the same thing.
+    def _pin_is_live(self) -> bool:
+        """Does anything read `~/.tokensave/desktop-project.txt`?
 
-        "pinned" alone reads as "this is the project tokensave serves", and
-        that is true only while Claude Desktop still defines its own
-        `tokensave`: the wrapper resolves the pin, and every Desktop-hosted
-        Claude Code session inherits that one server whatever repo it is in.
-        Retire that entry and the pin keeps working for the manager's own
-        project discovery while deciding nothing at all about MCP.
+        Exactly one thing ever does: `src/tokensave-wrapper.py`, installed
+        only as Claude Desktop's MCP command. Turn Claude Desktop chat off and
+        the pin decides nothing.
 
-        Both states get their own word rather than one label that is
-        half-wrong in each. Cached briefly because `refresh()` is a hot path
-        and this answer changes about once per migration.
+        This gates the ★ column and the header badge, and that is the whole
+        point of it. An earlier pass removed the two commands that SET the pin
+        in that state but left both indicators drawn, which produced the worst
+        possible result: a green ★ against one project, a header reading
+        "manager default", and no way whatsoever to change either. An
+        indicator for a setting the user cannot reach is worse than no
+        indicator, because it invites a hunt for the control.
+
+        Cached briefly because `refresh()` is a hot path and this answer
+        changes about once per Desktop-chat toggle. Errs toward True when it
+        cannot tell, matching every other reader of this fact.
         """
-        if not pinned:
-            return "auto"
         import time as _time
         now = _time.time()
-        cached = getattr(self, "_pin_tag_cache", None)
+        cached = getattr(self, "_pin_live_cache", None)
         if cached and now - cached[0] < 10:
             return cached[1]
         try:
             from helpers import mcp_desktop
-            serves_mcp = mcp_desktop.desktop_entry_present()
+            live = mcp_desktop.desktop_entry_present()
         except Exception:                                    # noqa: BLE001
-            serves_mcp = True        # the louder label is the safer default
-        tag = "pinned · serves MCP" if serves_mcp else "manager default"
-        self._pin_tag_cache = (now, tag)
-        return tag
+            live = True
+        self._pin_live_cache = (now, live)
+        return live
+
+    @staticmethod
+    def _pin_tag(pinned: bool) -> str:
+        """The header badge's parenthetical. Only reached while the pin is live.
+
+        It briefly had a third state, "manager default", for a retired Desktop
+        entry. That state no longer renders at all: with nothing reading the
+        pin the badge is hidden rather than relabelled, because the label was
+        describing a setting with no control.
+        """
+        return "pinned · serves MCP" if pinned else "auto"
 
     def refresh(self):
         self.projects = find_projects(self._cfg.search_roots)
+        # The pin is read either way: `active_path` is what the Git tab opens
+        # when nothing is selected, and that convenience is unrelated to MCP.
+        # What IS gated is every visible claim about it.
+        pin_live = self._pin_is_live()
         pinned = get_pinned()
         self.active_path = pinned or (self.projects[0]["path"] if self.projects else None)
 
-        # Delegate tree population to the controller
-        self._projects.rebuild_tree(self.projects, self.active_path, pinned)
+        # Delegate tree population to the controller. Passing None for the
+        # starred row is what removes the ★ column entirely when nothing reads
+        # the pin -- there is no setting for it to be showing.
+        self._projects.rebuild_tree(
+            self.projects, self.active_path if pin_live else None, pinned)
 
-        if self.active_path:
-            name = os.path.basename(self.active_path)
-            self.active_badge.config(
-                text=f"  ★ {name}  ({self._pin_tag(bool(pinned))})  ")
-        else:
-            self.active_badge.config(text="  No project  ")
+        self._update_active_badge(pin_live)
 
         # Keep Git tab in sync when it's visible and a project is tracked
         if self._git.is_visible() and self._git.has_path():
@@ -544,6 +559,25 @@ class App(UiPumpMixin, tk.Tk):
 
         # Kick off background refresh of the Git status column via controller
         self._projects.refresh_git_status_column(self.projects)
+
+    def _update_active_badge(self, pin_live: bool) -> None:
+        """Show the pinned project, or nothing at all.
+
+        Hidden rather than emptied: the badge carries its own background and
+        padding, so blanking the text leaves a small coloured rectangle in the
+        header that reads as a rendering fault.
+        """
+        if not pin_live:
+            self.active_badge.pack_forget()
+            return
+        if not self.active_badge.winfo_manager():
+            self.active_badge.pack(side=tk.RIGHT)
+        if self.active_path:
+            name = os.path.basename(self.active_path)
+            self.active_badge.config(
+                text=f"  ★ {name}  ({self._pin_tag(bool(get_pinned()))})  ")
+        else:
+            self.active_badge.config(text="  No project  ")
 
     def _check_config(self):
         problems = []

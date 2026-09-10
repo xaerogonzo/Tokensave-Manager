@@ -8,7 +8,7 @@ tried → what went wrong → the lesson**.
 
 ---
 
-## TL;DR — four things to know before touching this code
+## TL;DR — six things to know before touching this code
 
 0. **Claude Desktop's `tokensave` entry shadows every project's own binding, machine-wide.** Desktop spawns the wrapper app-level, the wrapper picks one project from the pin, and Claude Code dedupes MCP servers by NAME — so a Desktop-hosted session in *any* repo is answered from that one project. Symptom: the index looks stale and a re-sync does not help. See [The scope collision](#the-scope-collision-desktops-tokensave-outranks-every-project-binding) below, and prove it with the two-command recipe there before re-indexing anything.
 
@@ -18,6 +18,10 @@ tried → what went wrong → the lesson**.
 2. **`subprocess.Popen(args, creationflags=CREATE_NO_WINDOW)` with default `stdin/stdout/stderr=None` doesn't reliably proxy stdio under pythonw.exe.** Tokensave (a console child) never sees the MCP messages Claude Desktop is piping in. Pass `stdin=sys.stdin, stdout=sys.stdout, stderr=sys.stderr` explicitly.
 
 3. **Don't add `import threading` or daemon threads to the wrapper script.** It interacts badly with Windows stdio handling under pythonw.exe in subtle ways. Any live-reload feature must be implemented as an **out-of-process** mechanism, not inside the wrapper.
+
+4. **A retired config classifies as `ok`, and any guard written as `state == "ok"` is therefore blind to it.** `_retired_absence` returns `ok` for a deliberately empty `mcpServers` on purpose — four surfaces depend on a chosen absence not being reported as a defect. But it means "is the wiring healthy" and "does anything actually route through the wrapper" are different questions, and `cmd_set_active` asked the first while needing the second. The warning branch became unreachable and a false sentence printed in its place for every user who completed the Desktop migration. **Ask `mcp_desktop.desktop_entry_present()`.** Do not "fix" this by changing what the classifier returns.
+
+5. **`★ Set as Active` means two things, and only one is usually live.** `~/.tokensave/desktop-project.txt` has exactly ONE reader: `src/tokensave-wrapper.py`, installed only as Claude Desktop's MCP command. Retire that entry and nothing reads the pin — it is then the manager's own default project (the ★ row, and the project the Git tab opens when nothing is selected) and decides nothing about MCP. Claude Code sessions never read it either way. Any new text about the pin must branch on which meaning is live.
 
 ---
 

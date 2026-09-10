@@ -75,11 +75,14 @@ from helpers.mcp_paths import DESKTOP_SCOPE_RETIRED_KEY
 #: restore exactly what was there instead of a reconstructed canonical entry.
 DESKTOP_RETIRED_RECORD_KEY = "mcp_desktop_retired_record"
 
-#: Lifecycle states -- see :func:`lifecycle_state`.
-LIFECYCLE_ABSENT = "absent"
-LIFECYCLE_PRESENT = "present"
-LIFECYCLE_RETIRED = "retired"
-LIFECYCLE_RETURNED = "returned"
+#: Lifecycle states and their classifier live in :mod:`helpers.mcp_paths`,
+#: beside both retirement keys. They were defined here originally and were
+#: never Desktop-specific — the function takes two booleans, and the
+#: user-scoped migration needs the identical four-cell truth table. They are
+#: NOT re-exported through this module: a second name for one object is how
+#: two callers end up disagreeing about which is canonical, and nothing here
+#: uses them. Import them from `helpers.mcp_paths` (or the `helpers.mcp`
+#: facade, which lists them in `__all__`).
 
 #: A ``claude.exe`` under this path fragment is Claude Code, not Desktop.
 _CODE_PATH_MARKER = "claude-code"
@@ -476,19 +479,6 @@ def is_retired(raw: "dict | None") -> bool:
     by whichever surface asks next.
     """
     return bool((raw or {}).get(DESKTOP_SCOPE_RETIRED_KEY))
-
-
-def lifecycle_state(entry_present: bool, retired_flag: bool) -> str:
-    """Where this machine sits in the migration, from intent plus fact.
-
-    The interesting cell is RETURNED: the entry is back although the user
-    retired it, which a Desktop update or a hand edit can do. Reporting that
-    is the difference between a durable migration and a cleanup that silently
-    undoes itself.
-    """
-    if entry_present:
-        return LIFECYCLE_RETURNED if retired_flag else LIFECYCLE_PRESENT
-    return LIFECYCLE_RETIRED if retired_flag else LIFECYCLE_ABSENT
 
 
 def desktop_entry_present(server: str = "tokensave",

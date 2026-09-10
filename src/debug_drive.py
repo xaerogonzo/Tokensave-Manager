@@ -31,6 +31,7 @@ The script is a JSON list of steps, run in order:
                                                 //  testgaps, prdraft
       {"do": "click",  "text": "show"},
       {"do": "report", "what": "mcp", "after_ms": 3000},
+      {"do": "report", "what": "posture"},      // MCP state, not rendered text
       {"do": "report", "what": "geometry"},     // laid-out geometry defects
       {"do": "shot",   "path": "C:/tmp/mcp.png", "target": "dialog"},
       {"do": "quit"}
@@ -366,6 +367,9 @@ class _Driver:
         if what == "mcp":
             self._report_mcp(target)
             return
+        if what == "posture":
+            self._report_posture()
+            return
         if what == "geometry":
             self._report_geometry(target, step)
             return
@@ -405,6 +409,58 @@ class _Driver:
             result = scan_window(target)
         for line in format_result(result).splitlines():
             _say("drive: " + line)
+
+    def _report_posture(self) -> None:
+        """The MCP posture as STATE, not as the string a row happens to show.
+
+        `report what=mcp` prints what each row claims, which is the right
+        tool for "is this label saying something it cannot know". This is the
+        other half: a rendered badge can be produced by the wrong underlying
+        state — that is exactly how ten rows read "bound to this project"
+        while every session was answered by the user-scoped entry — so a live
+        check that asserts only on the visible string can still pass against a
+        wrong classification.
+
+        So this prints the inputs the badge is derived FROM: both lifecycles,
+        both read statuses, the fallback, and per project its tier alongside
+        its service. Tier and service are printed together on purpose; they
+        are the pair whose separation the whole model rests on, and seeing
+        `explicit_inert / automatic` on one line is what makes it obvious that
+        the second column is not a restatement of the first.
+
+        Everything goes through `_say`: every badge here is a `✓`/`⚠`/`✗`, and
+        a cp1252 console raises `UnicodeEncodeError` inside the step handler,
+        which stops the timer chain and looks exactly like the app hanging.
+        """
+        try:
+            from helpers.mcp_posture import read_posture
+            posture = read_posture(self._app._cfg)
+        except Exception as exc:                       # pragma: no cover
+            _say("drive: report: posture unavailable (%s)" % exc)
+            return
+
+        _say("drive: posture")
+        _say("    desktop      %s  (read: %s)"
+             % (posture.desktop_state, posture.desktop_read))
+        _say("    userscope    %s  (read: %s)"
+             % (posture.userscope_state, posture.userscope_read))
+        _say("    fallback     %s" % posture.automatic_fallback)
+        _say("    independent  %s" % posture.independent)
+        _say("    covered      %s" % posture.covered)
+        _say("    headline_ok  %s   reads_ok %s"
+             % (posture.headline_ok, posture.reads_ok))
+        # The population, always. A table that silently emptied would make
+        # every per-project assertion below vacuous, and "0 problems" would
+        # be indistinguishable from "0 projects looked at".
+        _say("    projects     %d" % len(posture.projects))
+        for project in posture.projects:
+            _say("    %-30s %-16s %-10s %s"
+                 % (project.name[:30], project.tier,
+                    posture.service(project), project.display_root))
+        _say("    unserved     %s"
+             % (", ".join(p.name for p in posture.unserved) or "(none)"))
+        _say("    misbound     %s"
+             % (", ".join(p.name for p in posture.misbound) or "(none)"))
 
     def _report_mcp(self, dialog) -> None:
         """The MCP dialog's per-row verdicts, as state + badge + path."""
