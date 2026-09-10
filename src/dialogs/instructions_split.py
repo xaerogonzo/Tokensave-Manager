@@ -30,7 +30,6 @@ digest-guarded, and it refuses if the file changed after this dialog read it.
 
 from __future__ import annotations
 
-import os
 import threading
 import tkinter as tk
 from tkinter import messagebox, ttk
