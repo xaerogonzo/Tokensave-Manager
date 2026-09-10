@@ -448,8 +448,8 @@ def test_excluded_project_stays_in_the_population_but_is_not_repairable(
     assert by_name["mine"].excluded is False
 
 
-def test_exclusion_matches_on_canonical_path(tmp_path, templates, monkeypatch):
-    """Separator and case spellings name the same directory."""
+def _excluded_when_skip_is(spelling, tmp_path, templates, monkeypatch):
+    """Does `instructions_skip_paths` spelled *spelling* exclude the project?"""
     clone = make_project(tmp_path, name="vendor", claude="# upstream\n")
     entries = [{"path": str(clone), "name": "vendor"}]
     monkeypatch.setattr(ip, "find_projects", lambda roots: entries)
@@ -461,6 +461,44 @@ def test_exclusion_matches_on_canonical_path(tmp_path, templates, monkeypatch):
     cfg.baseline_include_line = inc_line(templates)
     cfg.template_dir = str(templates)
     cfg.basic_instructions_template = ""
-    cfg.raw = {"instructions_skip_paths": [str(clone).replace(os.sep, "/").upper()]}
+    cfg.raw = {"instructions_skip_paths": [spelling(str(clone))]}
 
-    assert ip.read_posture(["x"], cfg).projects[0].excluded is True
+    return ip.read_posture(["x"], cfg).projects[0].excluded
+
+
+def test_exclusion_matches_on_separator_spelling(tmp_path, templates,
+                                                 monkeypatch):
+    """Forward and backward slashes name one directory, on every platform.
+
+    The half of canonicalisation that is universally true, and the half that
+    actually matters here — a user pasting a path from anywhere gets `/`.
+    """
+    assert _excluded_when_skip_is(
+        lambda p: p.replace(os.sep, "/"), tmp_path, templates, monkeypatch
+    ) is True
+
+
+@pytest.mark.skipif(os.name != "nt", reason="case folding is Windows-only")
+def test_exclusion_folds_case_on_windows(tmp_path, templates, monkeypatch):
+    """`C:/VENDOR` and `c:\\vendor` are one directory here, so both exclude."""
+    assert _excluded_when_skip_is(
+        lambda p: p.upper(), tmp_path, templates, monkeypatch) is True
+
+
+@pytest.mark.skipif(os.name == "nt", reason="POSIX paths are case-sensitive")
+def test_exclusion_does_not_fold_case_on_posix(tmp_path, templates,
+                                               monkeypatch):
+    """And it must NOT match here — this is the assertion that has teeth.
+
+    `os.path.normcase` is a **no-op on POSIX**, so `canonical()` compares
+    case-sensitively there. That is correct rather than a gap: `/TMP/vendor`
+    genuinely is a different directory from `/tmp/vendor`, and folding case
+    would exclude a project the user never named — silently skipping a repo
+    they expected the Manager to wire.
+
+    This test replaced one that asserted the Windows answer on both platforms
+    and therefore failed the first time CI ran it on Linux. The code was right;
+    the test had baked in the developer's filesystem.
+    """
+    assert _excluded_when_skip_is(
+        lambda p: p.upper(), tmp_path, templates, monkeypatch) is False

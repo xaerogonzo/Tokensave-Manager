@@ -186,10 +186,22 @@ def scan_text(text: str) -> "tuple[tuple, tuple, bool]":
 def canonical(path: str) -> str:
     """The comparison form for a filesystem path.
 
-    `normcase` folds case and separators on Windows, which is where every path
-    in this project lives. Deliberately no `realpath`: the configured baseline
-    is not realpath'd either, and canonicalising one side differently from the
-    other is how two spellings of one file become two files.
+    `normcase` folds case and separators **on Windows**, and is a **no-op on
+    POSIX** — so this comparison is case-insensitive on one platform and
+    case-sensitive on the other. That is correct rather than a gap:
+    `/TMP/vendor` genuinely is a different directory from `/tmp/vendor`, and
+    folding case there would match paths the user never named.
+
+    The sentence this replaces said Windows "is where every path in this
+    project lives", and that assumption licensed a test which asserted the
+    Windows answer on both platforms. It passed for months and failed the first
+    time CI ran it on Linux. Correctness here must not depend on case-folding;
+    it is applied for Windows' benefit only. `manager_ipc.canonical_project`
+    carries the same warning, from the same lesson.
+
+    Deliberately no `realpath`: the configured baseline is not realpath'd
+    either, and canonicalising one side differently from the other is how two
+    spellings of one file become two files.
     """
     return os.path.normcase(os.path.normpath(os.path.abspath(path)))
 
