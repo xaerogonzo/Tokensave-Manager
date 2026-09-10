@@ -1,0 +1,4 @@
+markdownlint-cli2 v0.23.2 (markdownlint v0.41.1)
+Finding: *.md
+Linting: 2 files
+Summary: 5 issues in 1 file

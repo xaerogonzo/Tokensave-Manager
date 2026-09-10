@@ -56,7 +56,7 @@ from helpers.install_tokensave import (
     releases_human_url,
 )
 from helpers.mcp import _claude_code_mcp_has_codegraph
-from theme import UiPumpMixin
+from theme import UiPumpMixin, _Tooltip
 
 if TYPE_CHECKING:
     from state import ManagerConfig
@@ -73,6 +73,33 @@ _BTN_KEYS: tuple = (
     "install_btn", "update_btn", "uninstall_btn", "wire_btn", "refresh_btn",
     "servers_btn", "daemons_btn", "locate_btn",
 )
+
+def _elide(text: str, limit: int = 48) -> str:
+    """Middle-elide so both ends survive. Paths are unreadable head-truncated.
+
+    Bounding this is not cosmetic. A Tk label with no width and no wraplength
+    requests its full natural width, and one long path took the whole row's
+    requested width to 785 inside a 720-wide dialog — which clips the
+    right-most button, the exact failure this file already records once.
+    """
+    text = " ".join(str(text).split())
+    if len(text) <= limit:
+        return text
+    keep = (limit - 1) // 2
+    return text[:keep] + "…" + text[-keep:]
+
+
+def _analyzer_state(spec, cfg) -> tuple:
+    """`(availability, exe)` for one analyzer row, honouring its config key.
+
+    A thin seam over `headless_analyzers.resolve` so the dialog never decides
+    for itself where a tool lives — the table owns probe order, and a second
+    opinion here is how the two drift apart.
+    """
+    from helpers.headless_analyzers import resolve
+    raw = cfg.raw if isinstance(cfg.raw, dict) else {}
+    return resolve(spec, raw.get(spec.config_key, ""))
+
 
 _BTN_DEFAULT_TEXT: dict = {
     "install_btn":   "Install",
@@ -135,7 +162,10 @@ class ToolManagerDialog(UiPumpMixin, tk.Toplevel):
         # children never mapped, which is also why the geometry oracle
         # could not see it (it skips unmapped widgets, since a widget
         # can be legitimately hidden).
-        self.minsize(640, 790)
+        # Raised with the analyzers section: content requires ~872, and a
+        # minsize below that lets the user shrink the last row back out of
+        # view -- the same failure the 540 note above records.
+        self.minsize(640, 880)
         self.grab_set()
 
         # Per-tool widget bookkeeping (populated by _build_tool_row).
@@ -143,6 +173,10 @@ class ToolManagerDialog(UiPumpMixin, tk.Toplevel):
         # G-G concurrency: True while a worker is running for this tool.
         self._row_busy: dict = {"tokensave": False, "codegraph": False,
                                 "pyscope": False}
+        # Analyzers keep their own bookkeeping. See _build_analyzers_section on
+        # why they are not folded into _tool_widgets / _row_busy.
+        self._analyzer_widgets: dict = {}
+        self._analyzer_busy: dict = {}
 
         self._build_header()
         self._build_action_bar()       # bottom, packed first
@@ -163,6 +197,9 @@ class ToolManagerDialog(UiPumpMixin, tk.Toplevel):
         self._build_tool_row("pyscope", "PyScope",
                              "Code comprehension — how much is established",
                              actions=False)
+        ttk.Separator(self, orient="horizontal").pack(
+            fill=tk.X, padx=18, pady=(8, 8))
+        self._build_analyzers_section()
 
         # Workers post to _ui_queue; nothing runs it until this starts.
         self._start_ui_pump()
@@ -337,9 +374,206 @@ class ToolManagerDialog(UiPumpMixin, tk.Toplevel):
             daemons_btn.pack(side=tk.LEFT, padx=(0, 6))
             self._tool_widgets[tool_id]["daemons_btn"] = daemons_btn
 
+    # ── Analyzers ─────────────────────────────────────────────────────────────
+    #
+    # A COMPACT section rather than three more `_build_tool_row` calls, and the
+    # reason was measured rather than guessed: the dialog declares 720x830 and
+    # already requires 746, so there were 84 pixels of slack. Three LabelFrame
+    # rows at ~130 each would have overflowed it — which is exactly the failure
+    # this file already documents once, where "Manage servers…" sat in the
+    # widget tree at one pixel wide and invisible for its entire life.
+    #
+    # It is also deliberately NOT wired into `_tool_widgets` / `_row_busy` /
+    # `_apply_row_state`. Those are keyed to the three tools that have a binary
+    # and an MCP presence; an analyzer has neither, and bending them would give
+    # every analyzer a meaningless second status line and push a three-tool
+    # invariant out to six.
+
+    def _build_analyzers_section(self) -> None:
+        """One row per analyzer: name, state, and the actions it actually has."""
+        from helpers.headless_analyzers import ANALYZERS
+
+        wrap = tk.LabelFrame(
+            self,
+            text="Analyzers  —  optional; used by Run checks and `analyze`",
+            fg=C["subtext"], bg=C["base"], font=("Segoe UI", 9, "bold"))
+        wrap.pack(fill=tk.X, padx=18, pady=(8, 0))
+
+        for spec in ANALYZERS:
+            row = tk.Frame(wrap, bg=C["base"])
+            row.pack(fill=tk.X, padx=12, pady=1)
+
+            tk.Label(row, text=spec.label, width=13, anchor=tk.W,
+                     bg=C["base"], fg=C["text"], font=("Consolas", 9)
+                     ).pack(side=tk.LEFT)
+
+            # Buttons first, packed right, so the status label takes whatever
+            # is left instead of pushing the last button off the edge.
+            locate_btn = ttk.Button(
+                row, text="Locate…",
+                command=lambda k=spec.key: self._on_analyzer_locate(k))
+            locate_btn.pack(side=tk.RIGHT, padx=(4, 0))
+            remove_btn = ttk.Button(
+                row, text="Remove",
+                command=lambda k=spec.key: self._on_analyzer_action(
+                    k, "uninstall"))
+            remove_btn.pack(side=tk.RIGHT, padx=(4, 0))
+            primary_btn = ttk.Button(
+                row, text="Install",
+                command=lambda k=spec.key: self._on_analyzer_primary(k))
+            primary_btn.pack(side=tk.RIGHT, padx=(4, 0))
+
+            # `width` in characters, so the label's REQUESTED width is bounded
+            # regardless of how long a path turns out to be. Without it the row
+            # asks for more than the dialog has and the last button is clipped.
+            status_lbl = tk.Label(
+                row, text="(checking…)", anchor=tk.W, justify=tk.LEFT,
+                width=50, bg=C["base"], fg=C["overlay0"],
+                font=("Consolas", 8))
+            status_lbl.pack(side=tk.LEFT, fill=tk.X, expand=True)
+            # The elided text loses the middle of a path; the tooltip is where
+            # the whole thing stays available.
+            tip = _Tooltip(status_lbl, "")
+
+            self._analyzer_widgets[spec.key] = {
+                "status": status_lbl, "primary": primary_btn,
+                "remove": remove_btn, "locate": locate_btn, "tip": tip,
+            }
+            self._analyzer_busy[spec.key] = False
+
+    def _refresh_analyzers(self) -> None:
+        """Re-read every analyzer row. Cheap: `which` plus an `isfile`."""
+        from helpers import install_analyzers as installers
+        from helpers.headless_analyzers import (
+            BY_KEY, MISSING, READY, UNCONFIGURED)
+
+        for key, widgets in self._analyzer_widgets.items():
+            spec = BY_KEY[key]
+            state, exe = _analyzer_state(spec, self._cfg)
+            can_install, detail = installers.availability(spec)
+            busy = self._analyzer_busy[key]
+
+            if state == READY:
+                text, colour = "ready · %s" % exe, C["green"]
+                if can_install != "ok":
+                    # Update and Remove are about to be greyed out. A disabled
+                    # button with no stated reason is the "red row with no
+                    # explanation" failure one dialog over, so say why here
+                    # rather than leaving the user to guess.
+                    manager = installers.manager_for(spec)
+                    text += ("  ·  update/remove need %s"
+                             % (manager.label if manager else "an install route"))
+            elif state == MISSING:
+                # A configured path that is not there. Distinct from absence,
+                # and the one state here that is genuinely an error.
+                text, colour = ("configured, executable missing · %s" % exe,
+                                C["red"])
+            elif can_install == "ok":
+                text, colour = ("not installed · %s"
+                                % installers.command_hint(spec), C["overlay0"])
+            else:
+                # Cannot be installed from here. Say what to do instead of
+                # offering a button that can only fail — the posture
+                # `settings_pyscope` takes for the same reason.
+                text, colour = "not installed · %s" % detail, C["peach"]
+
+            widgets["status"].configure(text=_elide(text), fg=colour)
+            # The full, un-elided text lives here so nothing is actually lost.
+            # `_text` is the attribute _Tooltip._show actually reads. Setting a
+            # `text` attribute instead succeeds silently and leaves every
+            # tooltip blank — which is why this is not wrapped in a try/except
+            # that would hide exactly that.
+            widgets["tip"]._text = text
+            widgets["primary"].configure(
+                text="Update" if state == READY else "Install",
+                state=(tk.NORMAL if can_install == "ok" and not busy
+                       else tk.DISABLED))
+            widgets["remove"].configure(
+                state=(tk.NORMAL if state == READY and can_install == "ok"
+                       and not busy else tk.DISABLED))
+            # Always live: pointing at a binary is how a row reporting "not
+            # installed" gets corrected, so gating it on `installed` would
+            # disable it exactly when it is needed. Same rule as `locate_btn`
+            # on the PyScope row.
+            widgets["locate"].configure(
+                state=tk.DISABLED if busy else tk.NORMAL)
+
+    def _on_analyzer_primary(self, key: str) -> None:
+        """Install when absent, update when present. One button, two verbs."""
+        from helpers.headless_analyzers import BY_KEY, READY
+        state, _exe = _analyzer_state(BY_KEY[key], self._cfg)
+        self._on_analyzer_action(key, "update" if state == READY else "install")
+
+    def _on_analyzer_action(self, key: str, verb: str) -> None:
+        """Run one package-manager verb on a worker thread.
+
+        Busy is set **synchronously before** the thread starts, the same G-G
+        discipline `_set_row_busy` follows: otherwise a double-click spawns two
+        installs of the same package.
+        """
+        from helpers import install_analyzers as installers
+        from helpers.headless_analyzers import BY_KEY
+
+        if self._analyzer_busy.get(key):
+            return
+        spec = BY_KEY[key]
+        self._analyzer_busy[key] = True
+        self._refresh_analyzers()
+        self._log("%s: %s…" % (spec.label, verb))
+
+        def worker() -> None:
+            try:
+                ok, log = getattr(installers, verb)(
+                    spec, on_log=self._log_threadsafe)
+                self._post(self._log, "%s: %s %s" % (
+                    spec.label, verb, "succeeded" if ok else "FAILED"))
+                if not ok:
+                    # The tail carries the reason; the full log is above.
+                    self._post(self._log, log.strip().splitlines()[-1]
+                               if log.strip() else "(no output)")
+            except Exception as exc:                     # noqa: BLE001
+                message = str(exc)
+                self._post(self._log, "%s: %s errored: %s"
+                           % (spec.label, verb, message))
+            finally:
+                # Always, on success or failure: a row stuck busy is a row
+                # whose buttons never come back.
+                self._post(self._finish_analyzer, key)
+
+        threading.Thread(target=worker, daemon=True,
+                         name="analyzer-%s" % key).start()
+
+    def _finish_analyzer(self, key: str) -> None:
+        self._analyzer_busy[key] = False
+        self._refresh_analyzers()
+
+    def _on_analyzer_locate(self, key: str) -> None:
+        """Point a row at a binary and persist it to that analyzer's config key.
+
+        The keys (`ruff_exe` and friends) are read by
+        `helpers/headless_analyzers`, and without this they would be reachable
+        only by hand-editing JSON — a config key with no UI is a dead key.
+        """
+        from helpers.headless_analyzers import BY_KEY
+        spec = BY_KEY[key]
+        path = filedialog.askopenfilename(
+            title="Select the %s executable" % spec.label,
+            filetypes=[("Executable", "*.exe;*.cmd;*.bat"), ("All", "*.*")],
+            parent=self)
+        if not path:
+            return
+        self._cfg.raw[spec.config_key] = path
+        self._cfg.save()
+        self._log("%s: located at %s" % (spec.label, path))
+        self._refresh_analyzers()
+
     def _centre_on_parent(self, parent) -> None:
         self.update_idletasks()
-        w, h = 720, 830
+        # 900, not 830: measured at 746 required before the analyzers section
+        # and ~840 after it, and the alternative to growing is clipping the
+        # bottom row. Still well inside a 1080-tall screen once the taskbar is
+        # taken off.
+        w, h = 720, 900
         try:
             px = parent.winfo_x() + (parent.winfo_width()  - w) // 2
             py = parent.winfo_y() + (parent.winfo_height() - h) // 2
@@ -352,6 +586,10 @@ class ToolManagerDialog(UiPumpMixin, tk.Toplevel):
     def _refresh_state(self) -> None:
         """Single source of truth: read current binary + MCP state, update
         each row's labels + button enablement."""
+        # Analyzers first and unconditionally: they share nothing with the
+        # three rows below, so a failure there must not leave them at
+        # "(checking…)" forever.
+        self._refresh_analyzers()
         # ── tokensave ─────────────────────────────────────────────────────
         ts_exe = self._cfg.tokensave_exe
         ts_installed = bool(ts_exe and os.path.isfile(ts_exe))

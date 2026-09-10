@@ -1,10 +1,19 @@
 """ChecksDialog — run pre-merge quality checks with live per-check results.
 
-Four checks (toggleable, persisted to cfg.raw["checks_enabled"]):
-  syntax   — python -m compileall src/ -q
-  pyflakes — python -m pyflakes src/
-  doctor   — _audit_project_tree (pure function, called directly)
-  claude   — git diff <base>...HEAD reviewed by Claude CLI (opt-in, uses tokens)
+Seven checks (toggleable, persisted to cfg.raw["checks_enabled"]):
+  syntax       — python -m compileall src/ -q
+  pyflakes     — python -m pyflakes src/
+  doctor       — _audit_project_tree (pure function, called directly)
+  ruff         — external analyzer, off by default
+  pyright      — external analyzer, off by default
+  markdownlint — external analyzer, off by default
+  claude       — git diff <base>...HEAD reviewed by Claude CLI (opt-in, uses tokens)
+
+The three analyzer rows answer a **row state** rather than a boolean, because
+"not installed" and "ran and crashed" are neither a pass nor a fail — see
+_check_analyzer. They are off by default: each needs a tool this app does not
+install, and three "not configured" rows on first open teach a user to ignore
+rows.
 
 All enabled checks run concurrently via ThreadPoolExecutor so the fast
 deterministic checks don't queue behind the potentially slow Claude review.
@@ -41,6 +50,13 @@ _DEFAULT_CHECKS: dict[str, bool] = {
     "syntax":   True,
     "pyflakes": True,
     "doctor":   True,
+    # External analyzers: off by default because each needs a tool this app
+    # does not install, and a first-open that shows three "not configured"
+    # rows teaches the user to ignore rows. Ticking one is how you say you
+    # have it. See `helpers/headless_analyzers.py`.
+    "ruff":         False,
+    "pyright":      False,
+    "markdownlint": False,
     "claude":   False,
 }
 
@@ -55,6 +71,9 @@ _LABELS = {
     "syntax":   "Python syntax",
     "pyflakes": "pyflakes",
     "doctor":   "Doctor audit",
+    "ruff":         "ruff",
+    "pyright":      "pyright",
+    "markdownlint": "markdownlint",
     "claude":   "Claude Code review",
 }
 
@@ -71,6 +90,48 @@ def _check_syntax(path: str) -> tuple[bool, str]:
 def _check_pyflakes(path: str) -> tuple[bool, str]:
     """Thin alias — delegates to the Tk-free helper."""
     return run_pyflakes_check(path)
+
+
+def _check_analyzer(key: str, path: str,
+                    cfg: "ManagerConfig") -> tuple[str, str]:
+    """One external analyzer. Returns a **row state**, not a boolean.
+
+    The load-bearing difference from every other row here. A boolean has two
+    answers and this has four, so returning `(True, "passed")` for a tool that
+    is not installed — or one that ran and crashed — puts a green tick beside a
+    check that never happened. `_on_check_done` understands a string first
+    element for exactly this reason.
+
+        not configured / executable missing / failed to run  ->  skip or fail
+        ran, found nothing                                   ->  pass
+        ran, found things                                    ->  fail
+
+    Never `pass` unless the tool actually ran to completion.
+    """
+    try:
+        from helpers.headless_analyzers import (
+            AVAILABILITY_TEXT, BY_KEY, FAILED, MISSING, READY, UNCONFIGURED,
+            run)
+    except ImportError as exc:                          # pragma: no cover
+        return "fail", "could not load the analyzer table: %s" % exc
+
+    spec = BY_KEY.get(key)
+    if spec is None:                                    # pragma: no cover
+        return "fail", "no analyzer named %r" % key
+
+    raw = cfg.raw if isinstance(cfg.raw, dict) else {}
+    result = run(spec, path, raw.get(spec.config_key, ""))
+
+    if result.availability == UNCONFIGURED:
+        # Not an error: the tool is optional. But it is not a pass either.
+        return "skip", AVAILABILITY_TEXT[UNCONFIGURED]
+    if result.availability == MISSING:
+        return "fail", "%s (%s)" % (AVAILABILITY_TEXT[MISSING], result.detail)
+    if result.availability == FAILED:
+        return "fail", "%s (%s)" % (AVAILABILITY_TEXT[FAILED], result.detail)
+    if result.availability == READY and result.rows == 0:
+        return "pass", result.summary
+    return "fail", result.summary
 
 
 def _check_doctor(path: str, cfg: "ManagerConfig") -> tuple[bool, str]:
@@ -378,7 +439,7 @@ class ChecksDialog(UiPumpMixin, tk.Toplevel):
 
         # ── Launch executor ───────────────────────────────────────────────────
         self._executor = concurrent.futures.ThreadPoolExecutor(
-            max_workers=4, thread_name_prefix="checks"
+            max_workers=8, thread_name_prefix="checks"
         )
 
         futures: dict[str, concurrent.futures.Future] = {}
@@ -391,6 +452,11 @@ class ChecksDialog(UiPumpMixin, tk.Toplevel):
             futures["doctor"] = self._executor.submit(
                 _check_doctor, self._path, self._cfg
             )
+        for key in ("ruff", "pyright", "markdownlint"):
+            if enabled.get(key):
+                futures[key] = self._executor.submit(
+                    _check_analyzer, key, self._path, self._cfg
+                )
         if enabled.get("claude") and diff is not None:
             futures["claude"] = self._executor.submit(
                 _check_claude_review, diff, self._cfg, self._cancelled
@@ -409,8 +475,13 @@ class ChecksDialog(UiPumpMixin, tk.Toplevel):
     ) -> None:
         """Called by the future's done-callback (may be on any thread)."""
         try:
-            passed, summary = future.result()
-            state = "pass" if passed else "fail"
+            verdict, summary = future.result()
+            # Most checks answer a boolean, which has two states. The analyzer
+            # rows answer a row state directly, because "not installed" and
+            # "ran and crashed" are neither a pass nor a fail and collapsing
+            # them into one puts a tick or a cross on a check that never ran.
+            state = verdict if isinstance(verdict, str) else (
+                "pass" if verdict else "fail")
         except concurrent.futures.CancelledError:
             state, summary = "skip", "cancelled"
         except Exception as e:

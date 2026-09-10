@@ -18,6 +18,7 @@ import pytest
 # Skip the whole module if Tk is not available (e.g. SSH without DISPLAY).
 tk = pytest.importorskip("tkinter")
 
+from dialogs import checks_dialog
 from dialogs.checks_dialog import ChecksDialog
 
 pytestmark = pytest.mark.tk
@@ -48,7 +49,12 @@ def _make_dialog(tk_root, mock_config, project_path, mocker):
 def test_dialog_constructs_without_error(tk_root, mock_config, tmp_path, mocker):
     dialog = _make_dialog(tk_root, mock_config, tmp_path, mocker)
     assert dialog.title() == "Run checks"
-    assert dialog._result_rows.keys() == {"syntax", "pyflakes", "doctor", "claude"}
+    # Adding a row is a visible act, so it moves this set deliberately. The
+    # three analyzer rows arrived with `helpers/headless_analyzers.py` and are
+    # unticked by default — each needs a tool the Manager does not install.
+    assert dialog._result_rows.keys() == {
+        "syntax", "pyflakes", "doctor", "claude",
+        "ruff", "pyright", "markdownlint"}
 
 
 def test_dialog_seeds_enabled_from_cfg(tk_root, mock_config, tmp_path, mocker):
@@ -298,3 +304,78 @@ def test_the_ci_controls_explain_their_consequences():
     assert "--no-verify" in src
     # And be honest that Doctor is not part of the gate.
     assert "advisory" in src.lower()
+
+
+# ── Analyzer rows: four states, and none of them is a green tick ─────────────
+#
+# The single most important property of these rows. Every other check here
+# answers a boolean, and a boolean forced onto four states puts a ✓ or a ✗ on a
+# check that never ran. `_check_analyzer` answers a row state instead.
+
+def test_an_unconfigured_analyzer_is_skipped_not_passed(mock_config, tmp_path,
+                                                        monkeypatch):
+    monkeypatch.setattr("helpers.headless_analyzers.shutil.which",
+                        lambda name: None)
+    state, summary = checks_dialog._check_analyzer(
+        "ruff", str(tmp_path), mock_config)
+    assert state == "skip"
+    assert "pass" not in summary.lower()
+
+
+def test_a_missing_analyzer_binary_is_a_failure(mock_config, tmp_path):
+    """A configured path that is not there is a fixable error, not absence."""
+    mock_config.raw["ruff_exe"] = str(tmp_path / "nowhere" / "ruff.exe")
+    state, summary = checks_dialog._check_analyzer(
+        "ruff", str(tmp_path), mock_config)
+    assert state == "fail"
+    assert "pass" not in summary.lower()
+
+
+def test_an_analyzer_that_crashes_is_a_failure_not_a_pass(mock_config,
+                                                          tmp_path,
+                                                          monkeypatch):
+    """The dangerous one: it ran, it broke, and there are zero findings.
+
+    Reporting that as a pass is a clean bill of health the tool never gave.
+    """
+    import helpers.headless_analyzers as analyzers
+
+    def failed(spec, path, configured="", targets=None, timeout=120):
+        return analyzers.AnalyzerResult(
+            key=spec.key, availability=analyzers.FAILED,
+            summary=analyzers.AVAILABILITY_TEXT[analyzers.FAILED],
+            detail="exit 2: bad config")
+
+    monkeypatch.setattr(analyzers, "run", failed)
+    state, summary = checks_dialog._check_analyzer(
+        "ruff", str(tmp_path), mock_config)
+    assert state == "fail"
+    assert "bad config" in summary
+
+
+def test_a_clean_analyzer_run_is_a_pass(mock_config, tmp_path, monkeypatch):
+    import helpers.headless_analyzers as analyzers
+
+    def clean(spec, path, configured="", targets=None, timeout=120):
+        return analyzers.AnalyzerResult(
+            key=spec.key, availability=analyzers.READY, rows=0,
+            summary="passed (0 findings)")
+
+    monkeypatch.setattr(analyzers, "run", clean)
+    assert checks_dialog._check_analyzer(
+        "ruff", str(tmp_path), mock_config)[0] == "pass"
+
+
+def test_findings_make_the_row_fail(mock_config, tmp_path, monkeypatch):
+    import helpers.headless_analyzers as analyzers
+    from helpers.findings import Finding
+
+    def found(spec, path, configured="", targets=None, timeout=120):
+        return analyzers.AnalyzerResult(
+            key=spec.key, availability=analyzers.READY, rows=1,
+            findings=[Finding(file="a.py", line=1)],
+            summary="a.py:1 something")
+
+    monkeypatch.setattr(analyzers, "run", found)
+    assert checks_dialog._check_analyzer(
+        "ruff", str(tmp_path), mock_config)[0] == "fail"

@@ -1,0 +1,56 @@
+[
+  {
+    "cell": null,
+    "code": "invalid-syntax",
+    "end_location": {
+      "column": 1,
+      "row": 2
+    },
+    "filename": "<PROJECT>/src\\syntaxerr.py",
+    "fix": null,
+    "location": {
+      "column": 1,
+      "row": 2
+    },
+    "message": "unexpected EOF while parsing",
+    "name": "invalid-syntax",
+    "noqa_row": null,
+    "severity": "error",
+    "url": null
+  },
+  {
+    "cell": null,
+    "code": "F401",
+    "end_location": {
+      "column": 10,
+      "row": 1
+    },
+    "filename": "<PROJECT>/src\\unused.py",
+    "fix": {
+      "applicability": "safe",
+      "edits": [
+        {
+          "content": "",
+          "end_location": {
+            "column": 1,
+            "row": 2
+          },
+          "location": {
+            "column": 1,
+            "row": 1
+          }
+        }
+      ],
+      "message": "Remove unused import: `os`"
+    },
+    "location": {
+      "column": 8,
+      "row": 1
+    },
+    "message": "`os` imported but unused",
+    "name": "unused-import",
+    "noqa_row": 1,
+    "severity": "error",
+    "url": "https://docs.astral.sh/ruff/rules/unused-import"
+  }
+]

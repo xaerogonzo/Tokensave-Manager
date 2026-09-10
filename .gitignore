@@ -19,6 +19,21 @@ manager-config.json
 .codegraph/codegraph.db
 .codegraph/codegraph.db-*
 
+# -- PyScope per-project analysis cache --
+# Functional, not tidiness: PyScope writes <project>/.pyscope/ ONLY when git
+# ignores it, and otherwise keeps the analysis in per-user app data. This
+# repo writes the pattern into every OTHER project it scaffolds and had
+# omitted it from its own -- which is why an index.db turned up here.
+.pyscope/
+
+# -- ruff cache --
+# The Manager passes --no-cache, so this only appears when someone runs ruff
+# by hand. Still machine-local either way.
+.ruff_cache/
+
+# -- gh CLI machine state (contains a device id) --
+.local/
+
 # ── Release artifacts (uploaded as GitHub Release assets, not in git) ──
 TokenSave-Manager-v*-windows.zip
 

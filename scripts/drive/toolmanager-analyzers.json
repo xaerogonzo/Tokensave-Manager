@@ -1,0 +1,6 @@
+[
+  {"do": "wait",   "after_ms": 2500},
+  {"do": "dialog", "name": "toolmanager", "after_ms": 2000},
+  {"do": "report", "what": "geometry",    "after_ms": 600},
+  {"do": "quit"}
+]

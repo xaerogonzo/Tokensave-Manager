@@ -1240,6 +1240,15 @@ Contents of the zip are 1:1 whatever `dist/` holds after the build, which is con
 
 | Symbol | Purpose |
 |--------|---------|
+| `instructions_posture.read_posture(roots, cfg)` / `read_project(...)` | Whether each project's Claude instruction chain resolves. Splits `carriage` (what the files declare) from `reach` (what the chain from `CLAUDE.md` arrives at) — the pair whose conflation hid eleven orphaned `BASIC_INSTRUCTIONS.md` files. Bounded include walk (depth 8 / 32 files / 2 MB, ancestry-based cycle detection); the permitted target boundary is the project subtree **or the configured `template_dir`**, because the shared baseline lives outside every project by design. Pure apart from `read_posture`. |
+| `instructions_posture.parse_baseline_target(line)` | Runs the directive parser over `cfg.baseline_include_line` itself, so a malformed configured baseline is `UNKNOWN` rather than making every project look stale. |
+| `instructions_wiring.plan_wiring(posture)` / `apply_wiring(...)` | The one writer. Repairs exactly ONE topology even though the classifier resolves a general graph — resolving broadly is what stops the panel "fixing" a project that already works through its own valid chain. Never deletes, never rewrites authored prose, refuses on duplicate directives. Reads with `newline=""` so a one-line insert cannot silently convert a CRLF file. |
+| `headless_analyzers.run_all(root, cfg)` / `run(spec, ...)` | ruff / pyright / markdownlint as **one capability table**, rows not branches (project rule D2). Probe order, argv, output stream and severity policy all differ per row, which is what the table earns its keep on: markdownlint writes findings to **stderr** while stdout carries a banner, and pyright is 0-based where ruff is 1-based. Availability is four states — a tool that is absent, or that ran and failed, is never a pass. `--no-cache` on ruff is what keeps `analyze` PURE_READ. |
+| `headless_analyzers.ruff_severity(code)` | The Manager’s severity policy for ruff, tested apart from the parser. ruff’s own `severity` field said `"error"` for 1,812 rows out of 1,812 on `src/`, so it carries no information; pyright’s does vary with configuration and IS forwarded. That contrast is why severity belongs to the row. |
+| `observations.read_snapshot(root)` / `merge_rows(reports)` | Diagnostics the Manager **receives already rendered** (the editor’s Problems panel), in their own envelope with their own schema version. Each source carries population + as-of + read status; `analyzed_files` is three-valued and stays `None` for the editor because `getDiagnostics()` cannot enumerate what was analysed. No public API returns a combined count. |
+| `observations.compute_report(doc)` / `schema_problem(doc)` | Validation on read: an **absent** schema version is refused as "not an envelope" (the `undefined > 1` trap `cli.ts` already paid for), a newer one is refused outright and never partially parsed, and a 0 coordinate is rejected because the envelope is 1-based everywhere. |
+| `install_analyzers.install/update/uninstall(spec)` | How an analyzer is OBTAINED, kept apart from how it is run. One table of package managers described by their verbs (`npm install -g {pkg}`, `uv tool install {pkg}`), so a row declares `installer` + `package` and nothing branches on a vendor. **ruff is not on npm** — the package of that name there is an unrelated coroutine library — so it comes from PyPI via uv, the route PyScope already uses. A missing package manager refuses before spawning and returns the command to run. |
+| `doctor_rules.audit_instructions(project_path, ...)` | Warn-only Doctor notes. `UNKNOWN` is reported as "could not determine", never as an absence; size notes name a cost, not a fault. Thresholds evaluated on bytes. |
 | `_call_llm(cfg, system_prompt, user_prompt, max_tokens=1500, timeout=None, on_token=None)` | Generalised from the commit-message-specific helper. Returns `str \| None`. New `on_token` parameter enables streaming: when provided, sends `"stream": true` to the provider and calls `on_token(delta)` for each text chunk. Anthropic + OpenAI-compatible streaming both supported via byte-aligned `_iter_sse_events` SSE parser. The streaming path still returns the accumulated full text at end-of-stream for callers that use the return value. Used by `AICodeReviewDialog._start_review` (streaming) and `_call_llm_for_commit_message` (non-streaming). |
 | `_iter_sse_events(response)` | Module-level generator. Accumulates raw bytes from an `HTTPResponse` in a `bytearray`, splits on `\n` (CRLF tolerant), yields each `data: ...` payload. Handles mid-line network fragmentation correctly — `readline()` doesn't work reliably here because the SSE stream isn't always newline-terminated at network-buffer boundaries. |
 | `_iter_json_lines(response)` | Same idea as `_iter_sse_events` but for Ollama's `/api/pull` newline-delimited JSON output (no `data:` prefix). |
@@ -1261,6 +1270,8 @@ Contents of the zip are 1:1 whatever `dist/` holds after the build, which is con
 
 | Class | Purpose | Opened from |
 |---|---|---|
+| `InstructionsDialog` (`dialogs/instructions_overview.py`) | Fleet view of instruction-chain reachability. Badge read from `reach`, `carriage` shown beside it, and the whole state distribution rather than a single count. Two bulk actions kept apart by blast radius; the executor re-reads each project immediately before and after writing and reports per-project outcomes with `changed_files`. Carries an on-screen line stating the Manager verifies files, not a live Claude session. | Projects tab right-click → 📄 Instructions… |
+| Run Checks analyzer rows (`dialogs/checks_dialog.py`) | ruff / pyright / markdownlint, unticked by default. These rows answer a **row state** rather than a boolean, because "not installed" and "ran and crashed" are neither a pass nor a fail — `_check_analyzer`. | Projects tab right-click → ✓ Run checks… |
 | `AICodeReviewDialog` | Stage 1 AI Code Review — diff + streaming severity-coloured review | Right-click → 🔍 AI Code Review… |
 | `OllamaModelManagerDialog` | Browse / pull / delete Ollama models via native REST API | Settings → 🦙 Manage Ollama Models… |
 | `MCPConfigDialog` | Classify + edit tokensave MCP entries in both Claude configs | Settings → 🔌 Manage MCP wiring… (or auto-launched at startup if drift detected) |
@@ -1377,7 +1388,11 @@ All CLI calls are non-blocking. The GUI stays responsive during indexing.
   → RetrofitDialog (modal: checkboxes for tokensave rules + BASIC_INSTRUCTIONS + Nuitka + shadow links)
       → Apply: _do_retrofit(path, add_tokensave, add_basic_instructions, add_nuitka, add_shadow_links, shadow_ext_map)
           → worker thread:
-              → if add_tokensave: prepend BASELINE_INCLUDE_LINE to CLAUDE.md
+              → if add_tokensave: instructions_posture.read_project()
+                                 → instructions_wiring.plan_wiring()   (pure)
+                                 → apply_wiring() — wires CLAUDE.md → @BASIC_INSTRUCTIONS.md
+                                   → @project-baseline.md, or repoints a stale
+                                   include. Refuses rather than guesses; never deletes.
               → if add_bi: write BASIC_INSTRUCTIONS.md
               → if add_nuitka: _scaffold_nuitka_build(path)
               → if add_shadow_links: generate_shadow_links(path, shadow_ext_map) + update_gitignore_for_shadows

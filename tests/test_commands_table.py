@@ -124,7 +124,20 @@ def test_pure_read_members_touch_nothing():
     """
     assert {c.action for c in commands.by_side_effect(PURE_READ)} == {
         "status", "checks", "scout", "tests", "test-gaps", "mcp-status",
-        "commands", "focus", "graph-trust"}
+        "commands", "focus", "graph-trust", "analyze", "observations"}
+
+
+def test_analyze_stays_pure_by_passing_no_cache():
+    """`analyze` earns PURE_READ, and one flag is what earns it.
+
+    Measured on a clean tree: `ruff check .` writes a `.ruff_cache/` directory
+    into the project. `--no-cache` does not, and pyright and markdownlint write
+    nothing either way. Drop the flag and this command starts leaving a cache
+    in every project it is pointed at, which is a side effect nobody asked a
+    read-only report for — and the classification above silently becomes wrong.
+    """
+    from helpers.headless_analyzers import BY_KEY
+    assert "--no-cache" in BY_KEY["ruff"].argv
 
 
 # ── Consumers derive rather than restate ──────────────────────────────────
@@ -163,7 +176,7 @@ def test_only_project_scoped_commands_become_tasks():
 
 def test_accepts_paths_is_only_claimed_by_commands_that_will_support_it():
     assert {c.action for c in COMMANDS if c.accepts_paths} == {
-        "checks", "test-gaps"}
+        "checks", "test-gaps", "analyze"}
 
 
 # ── as_json: the wire form four surfaces read ─────────────────────────────

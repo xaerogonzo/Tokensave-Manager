@@ -32,6 +32,7 @@ The script is a JSON list of steps, run in order:
       {"do": "click",  "text": "show"},
       {"do": "report", "what": "mcp", "after_ms": 3000},
       {"do": "report", "what": "posture"},      // MCP state, not rendered text
+      {"do": "report", "what": "instructions"}, // carriage vs reach, per project
       {"do": "report", "what": "geometry"},     // laid-out geometry defects
       {"do": "shot",   "path": "C:/tmp/mcp.png", "target": "dialog"},
       {"do": "quit"}
@@ -247,6 +248,13 @@ class _Driver:
             self._dialog = SettingsDialog(
                 self._app, self._app._cfg,
                 lambda: None, lambda: None)
+        elif name in ("instructions", "instructionsoverview",
+                      "instructionsdialog"):
+            # Scans every project in a worker thread, so a `report` step
+            # against this dialog needs an `after_ms` long enough for the
+            # scan to land — the rows are empty until it does.
+            from dialogs.instructions_overview import InstructionsDialog
+            self._dialog = InstructionsDialog(self._app, self._app._cfg)
         elif name in ("savings", "cost", "savingsdialog"):
             # Reads `tokensave gain`/`cost`/`discover` in worker threads, so a
             # `report` step needs an `after_ms` long enough for them to land.
@@ -370,6 +378,12 @@ class _Driver:
         if what == "posture":
             self._report_posture()
             return
+        if what == "observations":
+            self._report_observations(step)
+            return
+        if what == "instructions":
+            self._report_instructions()
+            return
         if what == "geometry":
             self._report_geometry(target, step)
             return
@@ -409,6 +423,105 @@ class _Driver:
             result = scan_window(target)
         for line in format_result(result).splitlines():
             _say("drive: " + line)
+
+    def _report_instructions(self) -> None:
+        """Instruction-chain state, with carriage and reach kept apart.
+
+        Printing one `status:` per project would defeat the purpose. The whole
+        model rests on the gap between what a project's files DECLARE and what
+        the chain from CLAUDE.md actually resolves to, and eleven projects sat
+        in exactly that gap — `carriage: current` beside `reach: orphaned` —
+        while every check the Manager had reported them fine. Two columns is
+        what makes that visible, and assertable.
+
+        The distribution is printed whole for the same reason the dialog shows
+        it whole: a resolved count that rose while a new `unknown` appeared is
+        not the same result, and one number cannot say so.
+
+        Everything goes through `_say` — the badges here are the same `✓`/`⚠`
+        glyphs a cp1252 console cannot encode.
+        """
+        try:
+            from helpers.instructions_posture import read_posture
+            fleet = read_posture(
+                list(self._app._cfg.raw.get("search_roots") or []),
+                self._app._cfg)
+        except Exception as exc:                       # pragma: no cover
+            _say("drive: report: instructions unavailable (%s)" % exc)
+            return
+
+        _say("drive: instructions  baseline=%s ok=%s"
+             % (fleet.baseline or "(unusable)", fleet.baseline_ok))
+        counts = fleet.counts()
+        _say("    distribution: " + "  ".join(
+            "%s=%d" % (state, counts[state]) for state in sorted(counts)))
+        for project in sorted(fleet.projects, key=lambda p: p.name.lower()):
+            _say("    %-28s carriage: %-8s reach: %-9s %s B ~%s tok  %s"
+                 % (project.name[:28], project.carriage, project.reach,
+                    f"{project.weight_bytes:,}",
+                    f"{project.estimated_tokens:,}",
+                    ",".join(project.advisories) or "-"))
+            if project.detail:
+                _say("        %s" % project.detail)
+
+    def _report_observations(self, step: "dict[str, Any]") -> None:
+        """Both diagnostic sources, side by side, each with its own population.
+
+        Printed as **two rows that never combine**. The whole design rests on
+        the two being incomparable: the headless half can state a real
+        population (the project tree, or the `--paths` scope), while the editor
+        half structurally cannot — `getDiagnostics()` enumerates resources that
+        HAVE diagnostics, not what was analysed. A single line with one count
+        would erase exactly that difference, which is the `verification_oracle`
+        population failure in a new place.
+
+        So `analyzed files: unknown` is printed rather than omitted: an absent
+        field reads as zero to whoever scans the output later.
+
+        Everything goes through `_say` — a cp1252 console cannot encode the
+        glyphs, and the exception escapes the timer chain and looks like a hang.
+        """
+        path = self._project(step)
+        try:
+            from helpers.headless_analyzers import run_all
+            from helpers.observations import (
+                findings_to_report, merge_rows, read_snapshot)
+        except Exception as exc:                        # pragma: no cover
+            _say("drive: report: observations unavailable (%s)" % exc)
+            return
+
+        editor = read_snapshot(path)
+        results = run_all(path, self._app._cfg.raw)
+        findings = [f for r in results for f in r.findings]
+        headless = findings_to_report(findings, scope="whole project")
+
+        _say("drive: observations  project=%s" % os.path.basename(path))
+        for report in (headless, editor):
+            cov = report.coverage
+            _say("    %-8s status=%-8s entries=%-5d files=%-4d %s  as-of=%s"
+                 % (report.key, report.read_status, cov.diagnostic_entries,
+                    cov.files_with_diagnostics, cov.analyzed_files_text,
+                    report.as_of or "-"))
+            if report.detail:
+                _say("        %s" % report.detail)
+        for result in results:
+            _say("    analyzer %-13s %-12s rows=%d"
+                 % (result.key, result.availability, result.rows))
+        merged = merge_rows([headless, editor])
+        # `shared` is "more than one SOURCE saw it", never "more than one row".
+        # A single analyzer legitimately reports one position several times —
+        # two deprecations on an import line, one per union member at an
+        # attribute access — and an earlier version of this line counted those
+        # as corroboration, reporting 321 rows "seen by both" on a project with
+        # no editor snapshot at all.
+        both = [m for m in merged if m.shared]
+        _say("    merged rows=%d  seen by >1 source=%d  (NOT a total of the two)"
+             % (len(merged), len(both)))
+        for shared in both[:5]:
+            _say("        %s:%d [%s] %s"
+                 % (shared.file, shared.line, shared.rule,
+                    " vs ".join("%s=%s" % (k, group[0].severity)
+                                for k, group in shared.sources)))
 
     def _report_posture(self) -> None:
         """The MCP posture as STATE, not as the string a row happens to show.

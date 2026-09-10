@@ -300,6 +300,29 @@ Needs a checkout (`tokensaveManager.managerPath`): `checks` shells out to a
 real interpreter, which the bundled CLI does not carry. With a bundled runner
 it says so once rather than failing on every save.
 
+### `tokensaveManager.captureProblemsOnSave`
+
+Off by default. Writes the Problems panel to
+`.tokensave-manager/observations.json` when you save, so the Manager can read
+what your editor is reporting — including Pylance, which is proprietary and has
+no headless CLI, so those diagnostics exist nowhere else.
+
+The file is **gitignored**, and it is never read back as diagnostics. The data
+flows one way:
+
+```
+findings ──> Problems panel ──> observations.json
+```
+
+A capture subtracts the extension’s own rows first, or the Manager would read
+its own findings back as an independent second opinion. It also cannot report
+how many files were *analysed* — VS Code exposes only the files that HAVE
+diagnostics — so the Manager records that number as unknown rather than
+guessing it.
+
+Off by default for the same reason as `checksOnSave`: a capture per save is
+useful to some people and noise to others.
+
 ## Developing
 
 ```bash

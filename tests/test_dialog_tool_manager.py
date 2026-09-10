@@ -667,3 +667,125 @@ def test_manage_daemons_opens_dialog_when_binary_present(tk_root,
         "dialogs.codegraph_daemon_manager.CodegraphDaemonManagerDialog")
     dialog._on_manage_codegraph_daemons()
     opened.assert_called_once_with(dialog, dialog._cfg)
+
+
+# ── Analyzers section (Phase 2c) ─────────────────────────────────────────
+#
+# Kept apart from the three tool rows on purpose: an analyzer has no binary
+# version and no MCP presence, so it has its own widgets and its own busy
+# bookkeeping. These tests assert that separation holds.
+
+def _analyzer_dialog(tk_root, mock_config, mocker):
+    mocker.patch("dialogs.tool_manager._detect_codegraph", return_value="")
+    mocker.patch("dialogs.tool_manager._detect_npm", return_value="")
+    mocker.patch("dialogs.tool_manager._claude_code_mcp_has_codegraph",
+                 return_value=(False, ""))
+    mocker.patch.object(ToolManagerDialog, "_tokensave_mcp_wired",
+                        return_value=False)
+    return ToolManagerDialog(tk_root, mock_config)
+
+
+def test_the_analyzer_section_renders_one_row_per_table_entry(
+        tk_root, mock_config, mocker):
+    from helpers.headless_analyzers import ANALYZERS
+    dialog = _analyzer_dialog(tk_root, mock_config, mocker)
+    assert set(dialog._analyzer_widgets) == {a.key for a in ANALYZERS}
+
+
+def test_the_analyzer_rows_are_not_folded_into_the_tool_row_bookkeeping(
+        tk_root, mock_config, mocker):
+    """`_row_busy` and `_tool_widgets` stay a three-tool invariant.
+
+    Widening them to six would give every analyzer a meaningless MCP status
+    line and put an analyzer into `_apply_row_state`, which knows nothing
+    about package managers.
+    """
+    dialog = _analyzer_dialog(tk_root, mock_config, mocker)
+    assert set(dialog._row_busy) == {"tokensave", "codegraph", "pyscope"}
+    assert "ruff" not in dialog._tool_widgets
+
+
+def test_a_missing_package_manager_disables_install_but_not_locate(
+        tk_root, mock_config, mocker):
+    """The state that matters. A button that can only fail is worse than none.
+
+    Locate stays live because pointing at a binary is exactly how a row
+    reporting "not installed" gets corrected — the same rule the PyScope row
+    already follows.
+    """
+    from helpers import install_analyzers
+    mocker.patch.object(install_analyzers, "availability",
+                        return_value=(install_analyzers.MANAGER_MISSING,
+                                      "Install uv: https://docs.astral.sh/uv/"))
+    dialog = _analyzer_dialog(tk_root, mock_config, mocker)
+    row = dialog._analyzer_widgets["ruff"]
+    assert str(row["primary"].cget("state")) == "disabled"
+    assert str(row["locate"].cget("state")) == "normal"
+    assert "uv" in row["tip"]._text
+
+
+def test_a_busy_row_disables_its_buttons(tk_root, mock_config, mocker):
+    """G-G: set synchronously, so a double-click cannot spawn two installs."""
+    dialog = _analyzer_dialog(tk_root, mock_config, mocker)
+    dialog._analyzer_busy["ruff"] = True
+    dialog._refresh_analyzers()
+    row = dialog._analyzer_widgets["ruff"]
+    assert str(row["primary"].cget("state")) == "disabled"
+    assert str(row["locate"].cget("state")) == "disabled"
+    dialog._finish_analyzer("ruff")
+    assert dialog._analyzer_busy["ruff"] is False
+
+
+def test_locate_writes_the_analyzers_own_config_key(tk_root, mock_config,
+                                                    mocker, tmp_path):
+    """Without this the key is reachable only by hand-editing JSON."""
+    target = tmp_path / "ruff.exe"
+    target.write_text("", encoding="utf-8")
+    mocker.patch("dialogs.tool_manager.filedialog.askopenfilename",
+                 return_value=str(target))
+    dialog = _analyzer_dialog(tk_root, mock_config, mocker)
+    dialog._on_analyzer_locate("ruff")
+    assert mock_config.raw["ruff_exe"] == str(target)
+    assert mock_config._saved is True
+
+
+def test_locate_cancelled_changes_nothing(tk_root, mock_config, mocker):
+    mocker.patch("dialogs.tool_manager.filedialog.askopenfilename",
+                 return_value="")
+    dialog = _analyzer_dialog(tk_root, mock_config, mocker)
+    dialog._on_analyzer_locate("ruff")
+    assert "ruff_exe" not in mock_config.raw
+
+
+def test_the_tooltip_carries_the_unelided_text(tk_root, mock_config, mocker,
+                                               tmp_path):
+    """Pins a bug that was live and silent.
+
+    `_Tooltip` reads `self._text`; assigning `.text` instead succeeds and
+    leaves every tooltip blank — a rendering that looks fine and says
+    nothing. The elided label loses the middle of a path, so this is where
+    the whole value has to survive.
+    """
+    long_path = tmp_path / ("d" * 60) / "ruff.exe"
+    long_path.parent.mkdir(parents=True)
+    long_path.write_text("", encoding="utf-8")
+    mock_config.raw["ruff_exe"] = str(long_path)
+    dialog = _analyzer_dialog(tk_root, mock_config, mocker)
+    row = dialog._analyzer_widgets["ruff"]
+    shown = row["status"].cget("text")
+    assert "…" in shown, "the fixture path was not long enough to elide"
+    assert str(long_path) in row["tip"]._text
+    assert str(long_path) not in shown
+
+
+def test_elide_keeps_both_ends():
+    from dialogs.tool_manager import _elide
+    out = _elide("C:/a/very/long/path/that/keeps/going/onwards/ruff.exe", 20)
+    assert len(out) <= 20
+    assert out.startswith("C:/a")
+    assert out.endswith("ruff.exe")
+
+
+def test_elide_leaves_short_text_alone():
+    from dialogs.tool_manager import _elide
+    assert _elide("ready · ruff.exe") == "ready · ruff.exe"

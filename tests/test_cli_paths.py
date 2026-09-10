@@ -219,12 +219,18 @@ def test_test_gaps_refuses_an_out_of_project_path(capsys, project, gaps,
 
 # ── The table agrees ──────────────────────────────────────────────────────
 
-def test_the_command_table_marks_exactly_these_two(capsys):
+def test_the_command_table_marks_exactly_the_scopable_commands(capsys):
     """So the extension can tell which entries may be scoped per-file, rather
-    than discovering it from a usage error."""
+    than discovering it from a usage error.
+
+    `analyze` joined `checks` and `test-gaps` when the external analyzers
+    arrived: all three take `--paths` and all three filter their findings by
+    it. Named by the property rather than by the count, because the count is
+    the part that changes.
+    """
     from helpers.commands import COMMANDS
-    assert {c.cli for c in COMMANDS if c.accepts_paths} == {"checks",
-                                                            "test-gaps"}
+    assert {c.cli for c in COMMANDS if c.accepts_paths} == {
+        "checks", "test-gaps", "analyze"}
 
 
 # ── test-run's failure taxonomy (D3) ──────────────────────────────────────

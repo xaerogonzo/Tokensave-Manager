@@ -1,0 +1,6 @@
+[
+  {"do": "wait",   "after_ms": 2500},
+  {"do": "report", "what": "observations", "after_ms": 400},
+  {"do": "report", "what": "instructions", "after_ms": 400},
+  {"do": "quit"}
+]

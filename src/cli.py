@@ -272,6 +272,123 @@ def _cmd_checks(args) -> Result:
                         f"({len(findings)} finding(s))")
 
 
+def _cmd_analyze(args) -> Result:
+    """ruff / pyright / markdownlint, when installed. Read-only.
+
+    Separate from `checks` on purpose: `checks` needs a Python interpreter to
+    shell `-m`, which the frozen build does not have, while these are
+    standalone executables that work there. Folding them in would make the
+    whole command refuse in a packaged build for a reason that applies to
+    neither of them.
+
+    **Availability travels with every row.** A tool that is absent, or that ran
+    and failed, is reported as such and never as zero findings — the one way
+    this feature could confidently lie.
+    """
+    from helpers.headless_analyzers import AVAILABILITY_TEXT, READY, run_all
+    project = _resolve_project(args.project)
+    cfg = _load_manager_config(args.config)
+    requested, matched = _resolve_paths(project, args.paths)
+
+    results = run_all(project, cfg,
+                      targets=list(requested) if requested else None)
+
+    findings: list = []
+    analyzers = {}
+    for result in results:
+        analyzers[result.key] = {
+            "availability": result.availability,
+            "availability_text": AVAILABILITY_TEXT.get(result.availability,
+                                                       result.availability),
+            "ok": result.ok,
+            "ran": result.ran,
+            # The row count BEFORE any `--paths` filter. A reader needs it to
+            # know whether a small finding list means a clean file or a narrow
+            # scope, and it is not recoverable from the list itself.
+            "rows": result.rows,
+            "output": result.summary,
+            "detail": result.detail,
+            "exe": result.exe,
+        }
+        findings.extend(result.findings)
+
+    if requested:
+        findings = _filter_findings(findings, requested)
+        analyzers_note = {"requested_paths": requested,
+                          "matched_paths": matched}
+    else:
+        analyzers_note = {}
+
+    data = {"analyzers": analyzers, **analyzers_note}
+
+    ran = [r for r in results if r.ran]
+    broken = [r for r in results if r.availability not in (READY,)
+              and r.ran]
+    if not ran:
+        # Nothing to say, and saying "passed" would be the lie this guards.
+        return Result(EXIT_OK, data,
+                      human="no analyzer is installed; nothing was run")
+    if broken:
+        return Result(EXIT_FAILED, data, findings=findings,
+                      human="%d analyzer(s) failed to run: %s"
+                            % (len(broken), ", ".join(r.key for r in broken)))
+    if not findings:
+        return Result(EXIT_OK, data,
+                      human="analyze passed (%d analyzer(s))" % len(ran))
+    return Result(EXIT_FAILED, data, findings=findings,
+                  human="%d finding(s) from %d analyzer(s)"
+                        % (len(findings), len(ran)))
+
+
+def _cmd_observations(args) -> Result:
+    """Read the editor's Problems snapshot. Never creates one.
+
+    Emits **no `findings`**, deliberately. These are verdicts somebody else
+    rendered; pushing them back into the extension's own `DiagnosticCollection`
+    is the echo loop — the Manager reporting its own diagnostics back to itself
+    as an independent second opinion, doubling on every capture.
+    """
+    from helpers.observations import READ_OK, read_snapshot
+    project = _resolve_project(args.project)
+    report = read_snapshot(project)
+
+    data = {
+        "source": report.key,
+        "label": report.label,
+        "read_status": report.read_status,
+        "as_of": report.as_of,
+        "detail": report.detail,
+        "coverage": {
+            "diagnostic_entries": report.coverage.diagnostic_entries,
+            "files_with_diagnostics": report.coverage.files_with_diagnostics,
+            # Three-valued, and `null` is the honest answer for an editor:
+            # `getDiagnostics()` enumerates resources that HAVE diagnostics,
+            # not what was analysed.
+            "analyzed_files": report.coverage.analyzed_files,
+            "diagnostic_mode": report.coverage.diagnostic_mode,
+            "scope": report.coverage.scope,
+        },
+        "observations": [
+            {"file": o.file, "line": o.line, "column": o.column,
+             "end_line": o.end_line, "end_column": o.end_column,
+             "severity": o.severity, "message": o.message, "rule": o.rule,
+             "producer": o.producer}
+            for o in report.rows
+        ],
+    }
+    if report.read_status != READ_OK:
+        # Not an error exit: "nobody captured one" is a normal state. But it is
+        # never reported as an empty successful read either.
+        return Result(EXIT_OK, data,
+                      human="editor snapshot: %s%s"
+                            % (report.read_status,
+                               " (%s)" % report.detail if report.detail else ""))
+    return Result(EXIT_OK, data,
+                  human="editor snapshot: %d observation(s) across %d file(s)"
+                        % (report.coverage.diagnostic_entries,
+                           report.coverage.files_with_diagnostics))
+
+
 def _audit_findings(project: str, raw: dict) -> "tuple[list, dict]":
     """The anti-monolith cap audit, as findings plus a summary block.
 
@@ -1333,6 +1450,8 @@ def _cmd_graph_trust(args) -> Result:
 
 _COMMANDS = {
     "checks": _cmd_checks,
+    "analyze": _cmd_analyze,
+    "observations": _cmd_observations,
     "doctor": _cmd_doctor,
     "scout": _cmd_scout,
     "status": _cmd_status,
@@ -1419,6 +1538,10 @@ def _build_parser() -> argparse.ArgumentParser:
                              "absolute, but inside the project)")
 
     add_paths(add("checks", "run syntax + pyflakes checks (read-only)"))
+    add_paths(add("analyze", "run ruff / pyright / markdownlint, when "
+                             "installed (read-only)"))
+    add("observations", "read the editor's Problems snapshot (read-only, "
+                        "never captures one)")
 
     d = add("doctor", "scan for stale tokensave entries (read-only, never fixes)")
     d.add_argument("--timeout", type=float, default=120.0)

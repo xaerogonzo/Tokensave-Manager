@@ -88,6 +88,95 @@ Cursor documents it.
 
 ---
 
+## Instruction delivery — Phase 1 shipped
+
+The Savings panel's Opportunity number (858 `Read` + 54 `Grep` turns that a
+tokensave query could have served) had a cause nothing could see: the shared
+baseline was reaching **5 of 18 projects**. Claude Code reads `CLAUDE.md`, and
+Retrofit had been writing the rules into a `BASIC_INSTRUCTIONS.md` that nothing
+linked — including in the three projects carrying the most session time.
+
+- ✅ `helpers/instructions_posture.py` — carriage vs reach, three-valued,
+  derived at render time, bounded include walk with ancestry-based cycle
+  detection. Identity comparison, not filename matching.
+- ✅ `helpers/instructions_wiring.py` — the one writer. Repairs a single
+  topology, never deletes, preserves line endings and authored prose.
+- ✅ Retrofit consumes the classifier instead of its own substring test.
+- ✅ `InstructionsDialog` — fleet view, per-row and bulk wiring (plan →
+  confirm → re-read → write → re-read), agent-rule generation kept separate.
+- ✅ Doctor rule that keeps `UNKNOWN` unknown.
+
+### Follow-ups
+
+- 🔮 **Phase 1 remainder: the oversized-chain split offer.** Rows over the
+  200 KB review threshold (OpenChem ~893 KB, Fortuna ~358 KB, LexForge ~273 KB)
+  should offer to move the append-only lesson log into a `docs/` file that is
+  NOT included, leaving a heading index. Per project, never bulk, and the
+  proposal must show the COMPLETE transformation before a byte is written.
+  Measured and reported today; not yet offered as an action.
+- ✅ **Phase 1b: shrink the baseline, harvest the big three.** Done as a
+  separate commit series so Phase 1's wiring measurement stayed clean. The
+  Nuitka and Tkinter sections moved into `templates/gotchas/`; the tokensave
+  section became a rule with a trigger. **8,192 B -> 6,260 B (-24%)**, which
+  across the 15 projects that resolve it is ~28,980 B no longer loaded per
+  pass. Reachability re-measured afterwards and **unchanged** — content moved,
+  plumbing did not. Harvest: 633 headings triaged, 92 clustered, 3 new gotcha
+  files plus 4 entries on `agent-scripting.md`. (Byte figures corrected in
+  Phase 3: the pair first reported here, 8,273 -> 6,348, reproduces under no
+  line-ending convention and came from an intermediate state.)
+
+- ✅ **Phase 3: full-fleet gotcha harvest.** Run BEFORE Phase 2 — content-only,
+  no new contract, so it does not belong inside an architecture commit series
+  (rule F). **The ~1.6 MB estimate recorded here was ten times too high**: that
+  figure was the big three, already harvested in 1b. Re-measured, the remaining
+  corpus was **162,572 B / 125 headings / 11 projects**. Mined heading-first,
+  then lead-lines-only from the opaque containers, and only then were approved
+  section bodies read. Four new files — `powershell-silent-failures.md`,
+  `empty-is-not-unknown.md`, `windows-subprocess.md`,
+  `elevation-and-privilege.md` — plus three sections on
+  `shared-python-packages.md`. Library **48,676 -> 77,141 B, 13 files**, still
+  never `@include`d; baseline **6,260 -> 6,623 B** for four index rows, against
+  a 7,000 B ratchet. Reachability re-measured and unchanged again.
+  Two clusters were **rejected on the ≥2-repository gate** — a CustomTkinter
+  `after`/`configure` trap and a body of ZScript modding rules — and the second
+  disproves the plan's own prediction that game-mod pipelines were the missing
+  domain.
+
+- ✅ **Phase 3, second pass: harvest what Phase 2 cost.** The fleet pass mined
+  other projects; this one mines the work just done, against the same bar. New
+  `wiring-in-an-external-analyzer.md` (four unrelated upstreams: which stream
+  carries findings, whose coordinate base, a severity field with no information
+  in it, a cache written into the analysed project, and an npm package that is
+  not the tool), plus three extensions that cost no index row. **Library
+  77,141 -> 93,119 B, 14 files**; baseline 6,623 -> 6,724 B, 276 B under the
+  ratchet. Reachability unchanged. The file records its own adapted admission
+  criterion — ≥2 unrelated UPSTREAMS — because the ≥2-repositories test does
+  not fit a fact about somebody else’s tool.
+
+- ✅ **Phase 2: ingest editor diagnostics.** Shipped. The plan framed the split
+  as "our rules vs their rules"; the real line is that a producer the Manager
+  RUNS and PARSES emits `findings` while a verdict it RECEIVES already-rendered
+  is an `observation` — which made the headless half (ruff / pyright /
+  markdownlint, one capability table) need no new plumbing at all. New:
+  `helpers/headless_analyzers.py`, `helpers/observations.py`,
+  `vscode-extension/src/observations.ts`, `analyze` + `observations` CLI rows,
+  three Run Checks rows, a Doctor rule and `report what=observations`.
+  Measured along the way: ruff’s severity field says "error" for 1,812 rows out
+  of 1,812; pyright is 0-based; markdownlint writes findings to stderr;
+  `ruff check` writes `.ruff_cache/` unless `--no-cache` is passed, which is
+  what keeps `analyze` PURE_READ. The editor half reports `analyzed_files` as
+  UNKNOWN permanently, because `getDiagnostics()` cannot enumerate it.
+
+- ✅ **Phase 2c: the analyzers are obtainable from the GUI.** Shipped.
+  `helpers/install_analyzers.py` + a compact Analyzers section in the Tool
+  Manager. Two package managers described by their verbs rather than a new
+  download stack: npm for pyright and markdownlint, **uv for ruff** — because
+  ruff is NOT on npm (the package of that name is an unrelated coroutine
+  library) and a second GitHub-release downloader would have duplicated
+  `install_tokensave`. A missing package manager is a state, not an error: the
+  row shows the exact command and the button is disabled rather than doomed.
+  The section is compact because the dialog had 84 measured pixels of slack.
+
 ## Roadmap 6
 
 ### ✅ Tasks tab — Claude Code session + worktree visibility. Shipped Roadmap-5 (2026-05-25). Details in CHANGELOG.md.
