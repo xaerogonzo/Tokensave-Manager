@@ -222,6 +222,37 @@ def test_the_split_button_appears_only_on_oversized_rows(tk_root, mocker,
     assert labels.count("Split\u2026") == 1, labels
 
 
+def test_the_button_actually_opens_the_proposal(tk_root, mocker, mock_config,
+                                                loggy, wait_for):
+    """The command runs only on click, so a bad argument there would ship.
+
+    Not a spy on the constructor: the wiring passes `display_root` and two
+    keywords, and a wrong name in any of them raises at click time and nowhere
+    earlier. This drives the real path into a real dialog.
+    """
+    from dialogs import instructions_overview
+    from helpers.instructions_posture import (
+        FleetInstructions, ProjectInstructions, REACH_RESOLVED,
+    )
+
+    root, _text = loggy
+    big = ProjectInstructions(root=root.lower(), display_root=root,
+                              name="Loggy", reach=REACH_RESOLVED,
+                              weight_bytes=300_000)
+    mocker.patch.object(instructions_overview, "read_posture",
+                        return_value=FleetInstructions(projects=(big,)))
+
+    fleet = instructions_overview.InstructionsDialog(tk_root, mock_config)
+    wait_for(lambda: fleet._fleet is not None, timeout_s=3.0)
+    fleet._split_one(big)
+
+    opened = [w for w in fleet.winfo_children()
+              if isinstance(w, SplitProposalDialog)]
+    assert len(opened) == 1, "the row button did not open the proposal"
+    wait_for(lambda: bool(opened[0]._sections), timeout_s=3.0)
+    assert opened[0]._plan is not None
+
+
 def _labels(widget):
     """Every button label under a widget, depth-first."""
     out = []
