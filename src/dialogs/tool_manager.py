@@ -444,8 +444,7 @@ class ToolManagerDialog(UiPumpMixin, tk.Toplevel):
     def _refresh_analyzers(self) -> None:
         """Re-read every analyzer row. Cheap: `which` plus an `isfile`."""
         from helpers import install_analyzers as installers
-        from helpers.headless_analyzers import (
-            BY_KEY, MISSING, READY, UNCONFIGURED)
+        from helpers.headless_analyzers import BY_KEY, MISSING, READY
 
         for key, widgets in self._analyzer_widgets.items():
             spec = BY_KEY[key]
