@@ -137,13 +137,23 @@ linked — including in the three projects carrying the most session time.
   mutation-tested: building the proposal writes nothing, applying writes
   exactly the two files it represented, and re-introducing the pre-tick fails.
 
+  Shipped since: **`##` is no longer the unit.** Sections are a two-level tree
+  and a `###` moves on its own, which takes OpenChem's kept "Verification
+  standard" from 64,030 B to 567 B of actual convention — the file goes
+  83,323 -> 19,865 B, a further -76%. A second split now MERGES into the index
+  the first one wrote instead of writing a rival block beside it, appends to
+  the existing target under its own digest guard, and files an orphaned `###`
+  under a `## From:` heading rather than whatever unrelated section precedes it.
+
+  Fortuna is the honest exception and stays as it is: its whole 339 KB log is
+  ONE `##` with no headings at all. Its entries ARE reliably marked — 547
+  paragraph-initial bold lead-ins against 34 wrap artifacts, and the same ratio
+  holds on the other two projects — but listing them costs **32,840 B**, more
+  than Fortuna now keeps loaded in total. So the index records the count and
+  how to grep for them. Giving that log real `###` headings is an editorial
+  job for its owner, not something this tool should guess at.
+
   Remaining:
-  - **Sub-section granularity — the unit of a lesson is not `##`.** Two of the
-    three projects prove it. Fortuna's whole 339 KB log is ONE `##` section
-    with 110 bold lead-ins, so its index is a single line pointing at a 346 KB
-    file: the bytes moved, but nothing is findable. OpenChem's kept
-    "Verification standard" is 64,030 B holding 20 `###` subsections. Both
-    need a finer unit than the module currently has.
   - **OpenChem's residual.** Its kept "Verification standard" is 64,030 B: about
     a dozen lines of convention followed by **20 `###` lesson subsections**.
     Splitting inside a section needs `###` granularity, which this does not

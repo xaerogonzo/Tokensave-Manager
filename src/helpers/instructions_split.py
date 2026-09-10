@@ -44,7 +44,42 @@ import re
 
 #: A heading that opens a top-level section. Level 1 is the document title and
 #: is never a section boundary — moving it would decapitate the file.
-_HEADING = re.compile(r"^(#{2})\s+(.*?)\s*#*$")
+_HEADING = re.compile(r"^(#{2,3})\s+(.*?)\s*#*$")
+#: A paragraph that opens with a bold sentence. Measured across all three
+#: projects, this is a RELIABLE entry marker rather than a local ritual --
+#: 547 vs 34 wrap artifacts on one, 180 vs 16 and 814 vs 57 on the others.
+#: It is used only to COUNT entries for a navigation note, never to split:
+#: indexing them individually costs 32,840 B on the project that needs it
+#: most, which is more than that project currently keeps loaded at all.
+_BOLD_LEAD = re.compile(r"^\*\*(.+?)\*\*")
+#: Below this many, a section is small enough to read and the note is noise.
+_ENTRY_NOTE_MIN = 8
+#: The heading the index is written under. Detection and rendering share it,
+#: because a SECOND split of an already-split file must merge into the index
+#: that is there rather than write a rival one beside it -- which is exactly
+#: what granularity makes possible, and what it did on the first attempt.
+_INDEX_TITLE = "Lessons (moved out of this file)"
+#: How a target this module wrote identifies itself. Appending is only ever
+#: offered for our own file: adding to somebody's hand-written notes because
+#: they happened to choose the same path is a smaller surprise than
+#: overwriting them, but it is still a surprise.
+_TARGET_MARKER = "so they are not loaded on every"
+
+
+def is_index_section(section) -> bool:
+    """Is this row the index a previous split wrote?
+
+    It must not be offered as movable. Ticking it sends the index itself into
+    the target, which both loses it from the loaded file and stops the merge
+    from finding it -- so the next split writes a second index beside nothing.
+    """
+    return section.level == 2 and section.title == _INDEX_TITLE
+
+
+def is_our_target(target_text: str) -> bool:
+    """Did a previous split write this file?"""
+    head = target_text.replace(chr(13), "").lstrip().split(chr(10))
+    return bool(head) and head[0].strip() == "# Lessons" and         _TARGET_MARKER in target_text[:600]
 _FENCE = re.compile(r"^[ \t]*(`{3,}|~{3,})")
 #: Directive detection is delegated to `instructions_posture.scan_text`, which
 #: already knows that a `@` inside a fenced block is a code sample and not an
@@ -68,8 +103,18 @@ class Section:
     title: str
     start: int                 # line index of the heading itself
     end: int                   # exclusive
-    size: int                  # bytes, heading included
+    size: int                  # bytes of THIS section's own body, heading
+                               # included and children excluded
     has_directive: bool = False
+    level: int = 2
+    #: Index of the enclosing level-2 section, or None at the top.
+    parent: "int | None" = None
+    #: Own bytes plus every descendant's. What a reader actually pays.
+    total_size: int = 0
+    #: Paragraph-initial bold lead-ins in the own body. A cheap navigation
+    #: note for a log that carries no headings at all -- which is the shape
+    #: of the largest one here.
+    entry_count: int = 0
 
     @property
     def anchor(self) -> str:
@@ -95,6 +140,12 @@ class SplitPlan:
     #: file no longer matches.
     digest: str
     blocked: str = ""
+    #: True when this adds to a target a previous split already wrote. The
+    #: refusal to overwrite still stands for a target we did not write.
+    appending: bool = False
+    #: sha256 of the existing target, when appending. Guarded exactly like the
+    #: source: two files are being rewritten, so two digests are checked.
+    target_digest: str = ""
 
     @property
     def ok(self) -> bool:
@@ -124,26 +175,35 @@ def digest_of(text: str) -> str:
 
 
 def _compute_sections(text: str) -> "tuple[int, list]":
-    """`(preamble_line_count, sections)`.
+    """`(preamble_line_count, sections)` as a two-level tree.
 
     Fenced blocks are skipped, for the same reason `instructions_posture` skips
     them: a `##` inside a code sample is not a section, and treating it as one
     would split a file in the middle of an example.
+
+    **A section is `##` OR `###`, because `##` is not the unit of a lesson.**
+    Measured on the projects this exists for: one keeps a 64,030 B operational
+    section holding twenty `###` lessons, which a `##`-only model can only move
+    whole or not at all. A section's own `size` therefore EXCLUDES its
+    children, and `total_size` is what a reader actually pays.
     """
     lines = text.splitlines()
     fence = None
+    fenced = []
     marks: list = []
     for i, line in enumerate(lines):
         hit = _FENCE.match(line)
         if hit:
             token = hit.group(1)
             fence = None if (fence and token[0] == fence) else (fence or token[0])
+            fenced.append(True)
             continue
+        fenced.append(fence is not None)
         if fence is not None:
             continue
         head = _HEADING.match(line)
         if head:
-            marks.append((i, head.group(2)))
+            marks.append((i, len(head.group(1)), head.group(2)))
 
     # Which lines are REAL directives is `instructions_posture`'s question, not
     # this module's. Asking it rather than re-matching `^@` is what stops a
@@ -157,23 +217,68 @@ def _compute_sections(text: str) -> "tuple[int, list]":
 
     preamble = marks[0][0] if marks else len(lines)
     sections = []
-    for n, (start, title) in enumerate(marks):
+    last_top = None
+    for n, (start, level, title) in enumerate(marks):
         end = marks[n + 1][0] if n + 1 < len(marks) else len(lines)
         size = sum(len(l) + 1 for l in lines[start:end])
+        entries = sum(1 for j in range(start, end)
+                      if not fenced[j] and _BOLD_LEAD.match(lines[j])
+                      and j > 0 and not lines[j - 1].strip())
+        if level == 2:
+            last_top = n
+            parent = None
+        else:
+            parent = last_top
         sections.append(Section(
             index=n, title=title, start=start, end=end, size=size,
-            has_directive=any(start <= d < end for d in directive_lines)))
+            has_directive=any(start <= d < end for d in directive_lines),
+            level=level, parent=parent, total_size=size, entry_count=entries))
+
+    # Second pass: a parent's total includes its children. Done here rather
+    # than in the loop because a parent is built before its children exist.
+    totals = {s.index: s.size for s in sections}
+    for section in sections:
+        if section.parent is not None:
+            totals[section.parent] += section.size
+    sections = [dataclasses.replace(s, total_size=totals[s.index])
+                for s in sections]
     return preamble, sections
 
 
-def _render_index(moved, target_rel: str) -> str:
-    """What stays behind: one line per moved section, and where it went.
+def children_of(sections, index: int) -> list:
+    """Every level-3 section under `index`, in document order."""
+    return [s for s in sections if s.parent == index]
+
+
+def with_descendants(sections, chosen: set) -> set:
+    """Ticking a parent moves what is inside it.
+
+    One pass is enough: there are two levels, and a parent always precedes its
+    children in index order.
+    """
+    out = set(chosen)
+    for section in sections:
+        if section.parent is not None and section.parent in out:
+            out.add(section.index)
+    return out
+
+
+def _render_index(moved, target_rel: str, carried=()) -> str:
+    """What stays behind: the moved titles, nested, and where they went.
 
     The index is the whole justification for the move — a section nobody can
     find is a section that has been deleted with extra steps.
+
+    **A log with no headings gets a count, not 547 index entries.** One project
+    here keeps its entire 339 KB log under a single `##`, its entries marked by
+    bold opening sentences. Indexing those individually is reliable — they are
+    paragraph-initial in 547 cases against 34 wrap artifacts — and costs
+    32,840 B, which is MORE than that project now keeps loaded in total. So the
+    index says how many there are and how they are marked, and the reader greps.
+    That is the trade this module exists to make, applied to itself.
     """
     out = [
-        "## Lessons (moved out of this file)",
+        "## " + _INDEX_TITLE,
         "",
         "These were appended here after individual investigations. They live",
         "in [`%s`](%s) and are **not** loaded on every" % (target_rel,
@@ -189,17 +294,62 @@ def _render_index(moved, target_rel: str) -> str:
     # from ~8.5 KB to ~17 KB, which is most of what the split leaves behind, in
     # exchange for a click. The heading is verbatim in the target, so a search
     # finds it either way.
+    # Entries a previous split already listed. They are carried verbatim: the
+    # sections they name are in the target file, not in this one, so there is
+    # nothing here to re-derive them from.
+    out.extend(carried)
+    moved_indices = {s.index for s in moved}
     for section in moved:
-        out.append("- %s" % section.title)
+        if section.parent is not None and section.parent in moved_indices:
+            out.append("  - %s" % section.title)
+            continue
+        line = "- %s" % section.title
+        has_children = any(s.parent == section.index for s in moved)
+        if not has_children and section.entry_count >= _ENTRY_NOTE_MIN:
+            line += (" — %d entries, each opening with a bold sentence"
+                     % section.entry_count)
+        out.append(line)
     out.append("")
     return "\n".join(out)
+
+
+def _existing_entries(lines, section) -> list:
+    """The `- ` lines of an index a previous split wrote.
+
+    Read rather than regenerated, because the sections they name have already
+    moved: this file no longer contains anything to re-derive them from.
+    """
+    out = []
+    for line in lines[section.start:section.end]:
+        stripped = line.strip()
+        if stripped.startswith("- "):
+            out.append(line.rstrip())
+    return out
+
+
+def _index_position(sections, moved, chosen: set) -> int:
+    """The line the index goes on: where the moved run was.
+
+    With a NESTED move the obvious answer is wrong in a way that is quiet. If
+    the first moved thing is a `###` inside a KEPT `##`, putting a level-2
+    index heading at its line would terminate the parent section, and every
+    remaining line of that parent would silently read as part of the index. So
+    the index goes after the parent's subtree instead, which is still where the
+    reader was looking.
+    """
+    first = moved[0]
+    if first.parent is not None and first.parent not in chosen:
+        kin = [s for s in sections
+               if s.index == first.parent or s.parent == first.parent]
+        return max(s.end for s in kin)
+    return first.start
 
 
 def compute_split(text: str, source_rel: str = "CLAUDE.md",
                   target_rel: str = DEFAULT_TARGET,
                   keep_bytes: int = DEFAULT_KEEP_BYTES,
                   keep_sections: "int | None" = None,
-                  move_indices=None) -> SplitPlan:
+                  move_indices=None, target_text: str = "") -> SplitPlan:
     """The complete transformation. Pure — reads nothing, writes nothing.
 
     Three ways to say what moves, in increasing specificity:
@@ -249,6 +399,10 @@ def compute_split(text: str, source_rel: str = "CLAUDE.md",
     else:
         chosen = {int(i) for i in move_indices}
 
+    # A `##` carries its `###` children with it. Leaving them behind would
+    # orphan them under whatever heading happened to follow.
+    chosen = with_descendants(sections, chosen)
+
     kept = tuple(s for s in sections if s.index not in chosen)
     moved = tuple(s for s in sections if s.index in chosen)
 
@@ -283,32 +437,78 @@ def compute_split(text: str, source_rel: str = "CLAUDE.md",
     # With a middle split that is the difference between a document that still
     # reads in order and one whose sections have quietly been reshuffled around
     # the reader.
-    index_lines = _render_index(moved, target_rel).split("\n")
+    # A SECOND split merges into the index the first one wrote, rather than
+    # writing a rival block beside it. Granularity is what makes a second split
+    # worth doing -- one project keeps a 64 KB operational section holding
+    # twenty `###` lessons -- and the first attempt produced two identical
+    # `## Lessons` headings in the same file.
+    prior = next((s for s in sections
+                  if s.level == 2 and s.title == _INDEX_TITLE
+                  and s.index not in chosen), None)
+    carried = _existing_entries(lines, prior) if prior is not None else []
+    replaced = {prior.index} if prior is not None else set()
+
+    index_lines = _render_index(moved, target_rel, carried).split("\n")
+    # Back where the previous index was, when there is one: that is where the
+    # reader already knows to look.
+    insert_at = (prior.start if prior is not None
+                 else _index_position(sections, moved, chosen))
     out = list(lines[:preamble])
     placed = False
     for section in sections:
-        if section.index in chosen:
-            if not placed:
-                out.extend(index_lines)
-                placed = True
+        if not placed and section.start >= insert_at:
+            out.extend(index_lines)
+            placed = True
+        if section.index in chosen or section.index in replaced:
             continue
         out.extend(lines[section.start:section.end])
+    if not placed:
+        out.extend(index_lines)
     new_source = nl.join(out).rstrip(nl) + nl
 
-    body = ["# Lessons",
-            "",
-            "Moved out of [`%s`](../%s) so they are not loaded on every"
-            % (source_rel, source_rel),
-            "message. Nothing here was edited; the sections are verbatim and in"
-            " their",
-            "original order.",
-            ""]
+    appending = bool(target_text.strip())
+    if appending and not is_our_target(target_text):
+        return SplitPlan(
+            source_rel, target_rel, preamble, kept, moved, text, "",
+            digest_of(text),
+            blocked=("%s exists and was not written by this tool, so there is "
+                     "nothing safe to add it to" % target_rel))
+    if appending:
+        # Everything already there, verbatim, plus what is arriving. Rewriting
+        # the existing target would put this module in the business of editing
+        # a file a person may since have edited themselves.
+        body = target_text.replace("\r\n", "\n").rstrip("\n").split("\n") + [""]
+    else:
+        body = ["# Lessons",
+                "",
+                "Moved out of [`%s`](../%s) so they are not loaded on every"
+                % (source_rel, source_rel),
+                "message. Section CONTENT is verbatim and in its original",
+                "order. The only lines this file adds are `## From:` headings,",
+                "which say where a subsection came from when its parent stayed",
+                "behind.",
+                ""]
+    # A `###` whose parent stayed behind would otherwise be filed under
+    # whatever unrelated `##` happens to precede it here. Measured: moving
+    # twenty subsections out of one project's operational section landed them
+    # all under a Gasteiger lesson. The heading is ADDED context, never an edit
+    # to what moved.
+    context = None
     for section in moved:
+        if section.parent is not None and section.parent not in chosen:
+            if context != section.parent:
+                context = section.parent
+                body.append("## From: %s" % sections[context].title)
+                body.append("")
+        else:
+            context = None
         body.extend(lines[section.start:section.end])
     new_target = nl.join(body).rstrip(nl) + nl
 
     return SplitPlan(source_rel, target_rel, preamble, kept, moved,
-                     new_source, new_target, digest_of(text))
+                     new_source, new_target, digest_of(text),
+                     appending=appending,
+                     target_digest=digest_of(target_text) if appending else "")
 
 
 # ── IO ───────────────────────────────────────────────────────────────────────
@@ -347,9 +547,20 @@ def apply_split(project_root: str, plan: SplitPlan) -> "tuple[bool, str]":
                        "written. Re-run the proposal." % plan.source_rel)
 
     target = os.path.join(project_root, plan.target_rel)
-    if os.path.exists(target):
+    exists = os.path.exists(target)
+    if exists and not plan.appending:
         return False, ("%s already exists; refusing to overwrite it"
                        % plan.target_rel)
+    if plan.appending:
+        # Two files are being rewritten, so two digests are checked. Appending
+        # to a target that moved would interleave this content with whatever
+        # arrived in between.
+        if not exists:
+            return False, ("%s was there when the plan was computed and is "
+                           "not now" % plan.target_rel)
+        if digest_of(read_source(project_root, plan.target_rel)) !=                 plan.target_digest:
+            return False, ("%s changed since the plan was computed -- nothing "
+                           "was written." % plan.target_rel)
 
     try:
         os.makedirs(os.path.dirname(target), exist_ok=True)

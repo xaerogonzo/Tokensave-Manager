@@ -279,3 +279,191 @@ def _labels(widget):
             pass
         out.extend(_labels(child))
     return out
+
+
+# ── the section tree on screen ───────────────────────────────────────────────
+
+def _doc3(spec, preamble="@BASIC_INSTRUCTIONS.md"):
+    """`spec` is [(level, title, body), ...]."""
+    out = ["# Demo — notes", "", preamble, ""]
+    for level, title, body in spec:
+        out += ["%s %s" % ("#" * level, title), "", body, ""]
+    return "\n".join(out)
+
+
+@pytest.fixture
+def nested(tmp_path):
+    """One project's real shape: an operational section holding lessons."""
+    text = _doc3([(2, "Commands", "x" * 200),
+                  (2, "Verification standard", "y" * 400),
+                  (3, "Lesson A", "a" * 9_000),
+                  (3, "Lesson B", "b" * 9_000),
+                  (2, "Packaging traps", "z" * 200)])
+    return _project(tmp_path, text), text
+
+
+def test_a_subsection_gets_its_own_row(tk_root, nested, wait_for):
+    """`##` is not the unit of a lesson, and the list has to show that."""
+    root, _text = nested
+    dialog = _open(tk_root, root, wait_for)
+
+    titles = [s.title for s in dialog._sections]
+    assert "Lesson A" in titles and "Lesson B" in titles
+    levels = {s.title: s.level for s in dialog._sections}
+    assert levels["Verification standard"] == 2
+    assert levels["Lesson A"] == 3
+
+
+def test_ticking_a_parent_ticks_and_locks_its_children(tk_root, nested,
+                                                       wait_for):
+    """The screen must not disagree with what is about to be written.
+
+    `compute_split` expands a ticked parent to its descendants. If the rows did
+    not mirror that, the preview would under-report what moves.
+    """
+    root, _text = nested
+    dialog = _open(tk_root, root, wait_for)
+    parent = next(s for s in dialog._sections
+                  if s.title == "Verification standard")
+    kids = [s for s in dialog._sections if s.parent == parent.index]
+    assert len(kids) == 2
+
+    dialog._vars[parent.index].set(True)
+    dialog._on_tick(parent.index)
+
+    for kid in kids:
+        assert dialog._vars[kid.index].get() is True
+        assert str(dialog._boxes[kid.index]["state"]) == "disabled"
+    assert {s.title for s in dialog._plan.moved} == {
+        "Verification standard", "Lesson A", "Lesson B"}
+
+    # ...and unticking releases them again.
+    dialog._vars[parent.index].set(False)
+    dialog._on_tick(parent.index)
+    for kid in kids:
+        assert str(dialog._boxes[kid.index]["state"]) == "normal"
+
+
+def _row_texts(dialog, title):
+    """Every label in the rendered row whose title matches."""
+    for row in dialog._body.winfo_children():
+        texts = []
+        for child in row.winfo_children():
+            try:
+                texts.append(str(child["text"]))
+            except tk.TclError:
+                pass
+        if any(x.startswith(title) for x in texts):
+            return texts
+    return []
+
+
+def test_a_parent_row_shows_what_a_reader_actually_pays(tk_root, nested,
+                                                        wait_for):
+    """Read off the ROW, not the model.
+
+    A parent's own body is 400 B; the section costs 18 KB because of its two
+    subsections. Showing `size` there would put "400 B" beside a section whose
+    real price is forty times that, and asserting on the dataclass instead of
+    the widget would not notice.
+    """
+    root, _text = nested
+    dialog = _open(tk_root, root, wait_for)
+    parent = next(s for s in dialog._sections
+                  if s.title == "Verification standard")
+    assert parent.size < 1_000 < parent.total_size
+
+    texts = _row_texts(dialog, "Verification standard")
+    assert texts, "the row was not rendered"
+    sizes = [x for x in texts if x.endswith(" B")]
+    assert sizes == ["%s B" % f"{parent.total_size:,}"], sizes
+
+
+def test_a_second_split_adds_to_the_target_instead_of_refusing(
+        tk_root, nested, wait_for, mocker):
+    """Granularity is what makes a second split worth doing at all."""
+    root, _text = nested
+    first = _open(tk_root, root, wait_for)
+    parent = next(s for s in first._sections
+                  if s.title == "Verification standard")
+    _tick(first, parent.index)
+    mocker.patch.object(split_dialog.messagebox, "askyesno", return_value=True)
+    mocker.patch.object(split_dialog.messagebox, "showinfo")
+    first._apply()
+    wait_for(lambda: os.path.exists(os.path.join(root, DEFAULT_TARGET)),
+             timeout_s=3.0)
+
+    # Re-open on the file the first split produced.
+    second = _open(tk_root, root, wait_for)
+    commands = next(s for s in second._sections if s.title == "Commands")
+    _tick(second, commands.index)
+
+    assert second._plan.appending is True
+    assert "adds to" in second._totals["text"]
+    assert str(second._apply_btn["state"]) == "normal"
+    assert "Cannot apply" not in second._reason["text"]
+
+
+def test_a_target_someone_else_wrote_is_refused_on_open(tk_root, tmp_path,
+                                                        wait_for):
+    """Appending to a person's own notes is still a surprise."""
+    root = _project(tmp_path, _doc3([(2, "Head", "x" * 200),
+                                     (2, "Log", "z" * 60_000)]))
+    os.makedirs(os.path.join(root, "docs"))
+    with open(os.path.join(root, DEFAULT_TARGET), "w", encoding="utf-8") as fh:
+        fh.write("# My own notes\n\nnothing to do with the split\n")
+
+    dialog = _open(tk_root, root, wait_for)
+
+    assert str(dialog._apply_btn["state"]) == "disabled"
+    assert "not written by this tool" in dialog._reason["text"]
+
+
+# ── two defects the driven check found, and the unit tests had not ───────────
+
+def _split_once(tk_root, root, wait_for, mocker, title):
+    """Apply one split, so the next dialog opens on an already-split file."""
+    dialog = _open(tk_root, root, wait_for)
+    section = next(s for s in dialog._sections if s.title == title)
+    _tick(dialog, section.index)
+    mocker.patch.object(split_dialog.messagebox, "askyesno", return_value=True)
+    mocker.patch.object(split_dialog.messagebox, "showinfo")
+    dialog._apply()
+    wait_for(lambda: os.path.exists(os.path.join(root, DEFAULT_TARGET)),
+             timeout_s=3.0)
+
+
+def test_the_footer_says_adds_to_before_anything_is_ticked(
+        tk_root, nested, wait_for, mocker):
+    """`plan.appending` is False whenever nothing is ticked.
+
+    The plan short-circuits before computing it, so reading the verb off the
+    plan printed "creates docs/LESSONS.md" next to a file that plainly existed.
+    The verb is a fact about the project, not about the selection -- which is
+    why this asserts on the OPENING state.
+    """
+    root, _text = nested
+    _split_once(tk_root, root, wait_for, mocker, "Verification standard")
+
+    second = _open(tk_root, root, wait_for)
+
+    assert not second._selected(), "nothing should be ticked on open"
+    assert "adds to" in second._totals["text"], second._totals["text"]
+    assert "creates" not in second._totals["text"]
+
+
+def test_the_previous_index_cannot_be_moved(tk_root, nested, wait_for, mocker):
+    """Ticking it would lose the index AND break the next merge.
+
+    The index is rewritten in place on every split. Sending it to the target
+    removes it from the file that loads it, and leaves the next split with
+    nothing to merge into -- so that one writes a second index beside it.
+    """
+    root, _text = nested
+    _split_once(tk_root, root, wait_for, mocker, "Verification standard")
+
+    second = _open(tk_root, root, wait_for)
+    index_row = next(s for s in second._sections
+                     if s.title == "Lessons (moved out of this file)")
+
+    assert str(second._boxes[index_row.index]["state"]) == "disabled"

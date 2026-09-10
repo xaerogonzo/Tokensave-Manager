@@ -37,7 +37,8 @@ from tkinter import messagebox, ttk
 
 from constants import C
 from helpers.instructions_split import (
-    DEFAULT_TARGET, apply_split, compute_split, read_source,
+    DEFAULT_TARGET, apply_split, children_of, compute_split, is_index_section,
+    is_our_target, read_source,
 )
 from theme import UiPumpMixin, _Tooltip, bind_mousewheel
 
@@ -58,8 +59,12 @@ class SplitProposalDialog(UiPumpMixin, tk.Toplevel):
         #: the weight it is showing is now wrong by most of the file.
         self._on_applied = on_applied or (lambda: None)
         self._text = ""
+        #: An existing target a previous split wrote. Passed to every
+        #: recompute, because a second split ADDS to it rather than refusing.
+        self._target_text = ""
         self._sections = ()
         self._vars = {}
+        self._boxes = {}
         self._plan = None
         self._busy = False
 
@@ -156,12 +161,13 @@ class SplitProposalDialog(UiPumpMixin, tk.Toplevel):
 
         def worker():
             text = read_source(path)
-            plan = compute_split(text) if text else None
-            self._post(lambda: self._render(text, plan))
+            target = read_source(path, DEFAULT_TARGET)
+            plan = compute_split(text, target_text=target) if text else None
+            self._post(lambda: self._render(text, target, plan))
 
         threading.Thread(target=worker, daemon=True).start()
 
-    def _render(self, text: str, plan) -> None:
+    def _render(self, text: str, target_text: str, plan) -> None:
         for child in self._body.winfo_children():
             child.destroy()
         if not text:
@@ -169,6 +175,7 @@ class SplitProposalDialog(UiPumpMixin, tk.Toplevel):
             return
 
         self._text = text
+        self._target_text = target_text
         # Every section, in document order. `compute_split` returns them split
         # into kept and moved; the union IS the file's section list.
         self._sections = tuple(sorted(plan.kept + plan.moved,
@@ -182,6 +189,7 @@ class SplitProposalDialog(UiPumpMixin, tk.Toplevel):
         # section at the end of the document -- and a pre-ticked box reads as a
         # recommendation. The guess is one button away for anyone who wants it.
         self._vars = {}
+        self._boxes = {}
         for section in self._sections:
             self._section_row(section, False)
         for button in (self._preview_btn, self._suggest_btn):
@@ -192,22 +200,54 @@ class SplitProposalDialog(UiPumpMixin, tk.Toplevel):
         var = tk.BooleanVar(value=ticked)
         self._vars[section.index] = var
         row = tk.Frame(self._body, bg=C["base"])
-        row.pack(fill=tk.X, padx=8, pady=0)
+        # Indented by level, because `##` is not the unit of a lesson: one
+        # project keeps a 64 KB operational section holding twenty `###`
+        # lessons, and a flat list cannot show that they belong to it.
+        row.pack(fill=tk.X, padx=(8 + (section.level - 2) * 26, 8), pady=0)
 
-        box = tk.Checkbutton(row, variable=var, command=self._recompute,
-                             bg=C["base"], fg=C["text"], selectcolor=C["base"],
+        box = tk.Checkbutton(row, variable=var, bg=C["base"], fg=C["text"],
+                             command=lambda i=section.index: self._on_tick(i),
+                             selectcolor=C["base"],
                              activebackground=C["base"],
                              highlightthickness=0, bd=0)
         box.pack(side=tk.LEFT)
+        self._boxes[section.index] = box
+        if is_index_section(section):
+            # Moving the index into the target loses it from the loaded file
+            # AND stops the next split finding it to merge into.
+            box.configure(state=tk.DISABLED)
+            _Tooltip(box, "This is the index a previous split left behind. It "
+                          "is rewritten in place, so it cannot be moved.")
         tk.Label(row, text="%3d" % section.index, font=("Consolas", 8),
                  bg=C["base"], fg=C["overlay0"], width=4).pack(side=tk.LEFT)
-        tk.Label(row, text="%s B" % f"{section.size:,}", font=("Consolas", 8),
-                 bg=C["base"], fg=self._size_colour(section.size), width=11,
-                 anchor=tk.E).pack(side=tk.LEFT, padx=(0, 8))
-        tk.Label(row, text=section.title[:88], font=("Segoe UI", 9),
+        # A parent shows its TOTAL: own bytes plus everything under it, which
+        # is what a reader actually pays for keeping it.
+        shown = section.total_size if section.level == 2 else section.size
+        size = tk.Label(row, text="%s B" % f"{shown:,}", font=("Consolas", 8),
+                        bg=C["base"], fg=self._size_colour(shown), width=11,
+                        anchor=tk.E)
+        size.pack(side=tk.LEFT, padx=(0, 8))
+        kids = children_of(self._sections, section.index)
+        if kids:
+            _Tooltip(size, "%s B of its own, %s B including its %d "
+                           "subsections. Ticking this moves all of them."
+                           % (f"{section.size:,}", f"{section.total_size:,}",
+                              len(kids)))
+        tk.Label(row, text=section.title[:86], font=("Segoe UI", 9),
                  bg=C["base"],
-                 fg=C["peach"] if section.has_directive else C["text"],
+                 fg=C["peach"] if section.has_directive else (
+                     C["text"] if section.level == 2 else C["subtext"]),
                  anchor=tk.W).pack(side=tk.LEFT, fill=tk.X, expand=True)
+        if section.entry_count >= 8 and not kids:
+            note = tk.Label(row, text="%d entries" % section.entry_count,
+                            font=("Segoe UI", 8), bg=C["base"],
+                            fg=C["overlay0"])
+            note.pack(side=tk.RIGHT, padx=(6, 0))
+            _Tooltip(note,
+                     "This section carries no headings, so the index can only "
+                     "name the section. It records the count instead, and the "
+                     "entries are found by grepping for the bold line that "
+                     "opens each one.")
         if section.has_directive:
             chain = tk.Label(row, text="@include", font=("Segoe UI", 8, "bold"),
                              bg=C["base"], fg=C["peach"])
@@ -215,6 +255,22 @@ class SplitProposalDialog(UiPumpMixin, tk.Toplevel):
             _Tooltip(chain, "This section carries the include chain. Moving it "
                             "would break what the file exists to do, so the "
                             "split is refused while it is ticked.")
+
+    def _on_tick(self, index: int) -> None:
+        """A parent carries its children, and the rows have to say so.
+
+        `compute_split` already expands a ticked parent to its descendants.
+        Without mirroring it here the screen would disagree with what is about
+        to be written, which is the one thing a preview may not do.
+        """
+        section = self._sections[index]
+        if section.level == 2:
+            on = self._vars[index].get()
+            for kid in children_of(self._sections, index):
+                self._vars[kid.index].set(on)
+                self._boxes[kid.index].configure(
+                    state=tk.DISABLED if on else tk.NORMAL)
+        self._recompute()
 
     @staticmethod
     def _size_colour(size: int) -> str:
@@ -245,17 +301,25 @@ class SplitProposalDialog(UiPumpMixin, tk.Toplevel):
 
     def _recompute(self) -> None:
         """Recompute the whole plan. Measured at 18 ms on the 954 KB file."""
-        self._plan = compute_split(self._text, move_indices=self._selected())
+        self._plan = compute_split(self._text, move_indices=self._selected(),
+                                   target_text=self._target_text)
         plan = self._plan
-        target_exists = os.path.exists(os.path.join(self._path,
-                                                    DEFAULT_TARGET))
+        # Not `plan.appending`: that is False whenever nothing is ticked,
+        # because the plan short-circuits before reaching it, and the footer
+        # then said "creates" beside a file that plainly exists. The verb is a
+        # fact about the project, not about the current selection.
+        verb = "adds to" if is_our_target(self._target_text) else "creates"
         self._totals.configure(
-            text="stays loaded: %s B (~%s tok)     ·     moves: %s B  →  %s"
+            text="stays loaded: %s B (~%s tok)     ·     moves: %s B  →  %s %s"
                  % (f"{plan.kept_bytes:,}", f"{plan.kept_bytes // 4:,}",
-                    f"{plan.moved_bytes:,}", plan.target_rel))
+                    f"{plan.moved_bytes:,}", verb, plan.target_rel))
 
-        if target_exists:
-            self._refuse("%s already exists; it will not be overwritten."
+        # Stated on open. `compute_split` refuses this too, but only once a
+        # section is ticked -- and a person should not choose a hundred rows
+        # before being told the destination is unusable.
+        if self._target_text.strip() and not is_our_target(self._target_text):
+            self._refuse("%s already exists and was not written by this tool, "
+                         "so there is nothing safe to add to."
                          % DEFAULT_TARGET)
         elif not self._selected():
             # Not a refusal. On open this is simply the starting state, and
