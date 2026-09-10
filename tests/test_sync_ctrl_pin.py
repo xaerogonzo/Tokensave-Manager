@@ -49,8 +49,27 @@ class _Cfg:
         self.tokensave_exe = "tokensave.exe"
 
 
-def _ctl(mocker, *, wrapper_present, cfg=None):
-    """A controller with the pin write and every callback stubbed."""
+def _ctl(mocker, *, wrapper_present, wiring="ok", cfg=None):
+    """A controller with the pin write and every collaborator stubbed.
+
+    **Every fact about the machine is set here, including the two that look
+    incidental.** `_mcp_configs` returns paths built from `%LOCALAPPDATA%`,
+    `%APPDATA%` and `%USERPROFILE%`, and `_classify_mcp_entry` then reads
+    them — so a test that leaves them alone is asserting against whatever
+    Claude configs the developer happens to have.
+
+    Caught by CI rather than by review: these tests passed on Windows, where
+    the author's real configs classify `ok`, and failed on ubuntu-latest,
+    where those environment variables are empty, every path resolves to a
+    file that does not exist, and `cmd_set_active` correctly took the
+    "nothing routes through the wrapper" branch instead of the Desktop one.
+    The same shape as the vacuous-pass trap recorded in
+    `test_mcp_trust_gate.py`.
+
+    `read_posture` is stubbed for the same reason — it walks the real search
+    roots. Tests that care about the posture re-patch it; the default is a
+    healthy machine so it can never be the thing under test by accident.
+    """
     ctl = object.__new__(SyncStatusController)
     ctl._cfg = cfg or _Cfg()
     ctl.logged = []
@@ -60,7 +79,30 @@ def _ctl(mocker, *, wrapper_present, cfg=None):
     mocker.patch("controllers.sync_ctrl.clear_pinned")
     mocker.patch("helpers.mcp_desktop.desktop_entry_present",
                  return_value=wrapper_present)
+    mocker.patch("controllers.sync_ctrl._mcp_configs",
+                 return_value=[("Claude Desktop", "desktop.json"),
+                               ("Claude Code", "code.json")])
+    mocker.patch("controllers.sync_ctrl._classify_mcp_entry",
+                 return_value={"state": wiring})
+    mocker.patch("helpers.mcp_posture.read_posture",
+                 return_value=_HEALTHY)
     return ctl
+
+
+class _Named:
+    def __init__(self, name):
+        self.name = name
+
+
+class _Posture:
+    def __init__(self, fallback=True, unserved=()):
+        self.automatic_fallback = fallback
+        self.unserved = tuple(_Named(n) for n in unserved)
+
+
+#: The default posture: a fallback exists and nothing is stranded, so the
+#: unserved warning never fires unless a test asks for it.
+_HEALTHY = _Posture()
 
 
 def _log(ctl) -> str:
@@ -136,16 +178,10 @@ def test_with_both_globals_retired_it_names_the_unserved_projects(mocker):
     A count would send the user looking; a name tells them whether they care.
     """
     ctl = _ctl(mocker, wrapper_present=False)
-
-    class _T:
-        def __init__(self, name):
-            self.name = name
-
-    class _P:
-        automatic_fallback = False
-        unserved = (_T("CleanForge"), _T("Doom RPG MOD"))
-
-    mocker.patch("helpers.mcp_posture.read_posture", return_value=_P())
+    mocker.patch("helpers.mcp_posture.read_posture",
+                 return_value=_Posture(
+                     fallback=False,
+                     unserved=["CleanForge", "Doom RPG MOD"]))
 
     ctl.cmd_set_active(r"D:\p")
 
@@ -158,12 +194,6 @@ def test_with_a_fallback_present_it_does_not_cry_wolf(mocker):
     """An unbound project served by the user-scoped entry is fine. Warning
     about it is what made the MCP dialog render working projects as broken."""
     ctl = _ctl(mocker, wrapper_present=False)
-
-    class _P:
-        automatic_fallback = True
-        unserved = ()
-
-    mocker.patch("helpers.mcp_posture.read_posture", return_value=_P())
 
     ctl.cmd_set_active(r"D:\p")
 
@@ -210,3 +240,34 @@ def test_auto_detect_keeps_its_promise_when_a_wrapper_exists(mocker):
     ctl.cmd_auto()
 
     assert "wrapper picks" in _log(ctl)
+
+
+def test_a_live_wrapper_with_nothing_wired_withholds_the_effect_note(mocker):
+    """The branch CI exposed by accident, now asserted on purpose.
+
+    With a wrapper entry but no config classifying `ok`, the pin has not taken
+    effect at all — so describing what it decides would be describing nothing.
+    The user's problem is one step earlier and the message says so.
+    """
+    ctl = _ctl(mocker, wrapper_present=True, wiring="no_file")
+
+    ctl.cmd_set_active(r"D:\p")
+
+    text = _log(ctl)
+    assert "No MCP config currently routes through the wrapper" in text
+    assert "Claude Desktop's own chats" not in text
+
+
+def test_half_wired_still_reports_the_effect_alongside_the_warning(mocker):
+    """One config broken is a note beside the explanation; all of them broken
+    means there is no explanation to give. Two different branches, and the
+    distinction predates this change."""
+    ctl = _ctl(mocker, wrapper_present=True)
+    mocker.patch("controllers.sync_ctrl._classify_mcp_entry",
+                 side_effect=[{"state": "ok"}, {"state": "missing"}])
+
+    ctl.cmd_set_active(r"D:\p")
+
+    text = _log(ctl)
+    assert "MCP wiring" in text
+    assert "Claude Desktop's own chats" in text

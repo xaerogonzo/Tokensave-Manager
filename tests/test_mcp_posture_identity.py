@@ -40,10 +40,22 @@ def _indexed(tmp_path, name):
 
 
 def _no_globals(mocker):
-    """Pin the machine-wide facts so only the project list varies."""
+    """Pin the machine-wide facts so only the project list varies.
+
+    The user-scope classification is pinned too, and that is not belt and
+    braces: `_mcp_code_cfg_path` builds its path from `%USERPROFILE%`, so left
+    alone these tests read the developer's real `~/.claude.json` on Windows
+    and a nonexistent `.claude.json` on Linux CI — two different fallback
+    states, and therefore two different `service` values for the same project.
+    A sibling test file shipped exactly that dependency and CI caught it.
+    """
     mocker.patch("helpers.mcp_desktop.desktop_entry_present",
                  return_value=False)
     mocker.patch("helpers.mcp_projects.read_claude_projects", return_value={})
+    mocker.patch("helpers.mcp_classify._classify_mcp_entry",
+                 side_effect=lambda path, raw: {
+                     "state": "no_file", "label": "", "issue": "",
+                     "current": None, "proposed": {}, "cfg_path": path})
 
 
 def test_two_spellings_of_one_directory_yield_one_project(tmp_path, mocker):
