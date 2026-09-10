@@ -531,13 +531,13 @@ Right-click any project row in the Projects tab to get the full per-project acti
 
 | Menu Item | What it does |
 |-----------|-------------|
-| ★ Set as Active | Pin the **default** project for Claude Desktop's own chats (Claude Code sessions are unaffected — see Per-Project Bindings) |
+| ★ Set as Active | **Only present while Claude Desktop chat is ON** (Settings → 🔌 Manage MCP wiring). It pins the one project Desktop's chat window answers about. With Desktop chat off nothing reads the pin, so the command is not in the menu at all. Claude Code sessions never read it either way |
 | ↺ Sync | Run `tokensave sync` |
 | 📊 Status | Show `tokensave status` output |
 | ⟳ Force Re-sync | Run `tokensave sync --force` |
 | 🔍 Doctor | Run `tokensave doctor` |
 | 🔌 Bind to this project… | Give this project its own Claude Code MCP server (writes `.mcp.json`) |
-| 🛡 Enable/Disable strict_tree | Toggle tokensave's wrong-tree refusal for this project |
+| 🛡 Enable/Disable strict_tree | Toggle tokensave's wrong-tree refusal for this project. Hardening, **not** what makes projects independent — it turns an answer from the wrong tree into a refusal, inside a server |
 | 📜 Git Log | Switch to Git tab and refresh |
 | 📝 Git Commit… | Open commit dialog for this project |
 | 🔧 Git Init | Initialise a git repo + write baseline `.gitignore` + optional initial commit |

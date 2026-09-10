@@ -278,11 +278,67 @@ def test_switching_tells_claude_code_users_to_bind_the_project():
     ctl = _make_ctl()
     htb.switching(ctl)
 
+    # Matched on the section's subject rather than one phrasing of its title.
+    # The heading was "Claude Code: bind the project instead" and is now
+    # "Claude Code: already independent, and how to pin it down" — because
+    # binding turned out to be an upgrade rather than the fix, and pinning a
+    # title here would have made the correction fail a test that agreed with it.
     headings = [c[1] for c in ctl._calls if c[0] == "h2"]
-    assert any("bind the project" in h.lower() for h in headings), headings
+    assert any("claude code" in h.lower() for h in headings), headings
 
     body = " ".join(c[1] for c in ctl._calls if len(c) > 1)
     assert ".mcp.json" in body
     assert "Bind to this project" in body
     # And it must not drop the caveats that make the advice usable.
     assert "new" in body and "approval" in body
+
+
+def test_switching_does_not_present_binding_as_a_prerequisite():
+    """Measured 2026-09-09: four servers running, one per project, and one of
+    them serving a project with no `.mcp.json` at all.
+
+    A user-scoped bare `serve` is spawned per session with that session's own
+    cwd, so it resolves to that session's project. The topic must say which
+    single thing actually decides — Claude Desktop's app-level entry — or it
+    sends a user who is already isolated through a binding ceremony for every
+    project they own.
+    """
+    ctl = _make_ctl()
+    htb.switching(ctl)
+    body = " ".join(c[1] for c in ctl._calls if len(c) > 1)
+
+    assert "upgrade, not a requirement" in body
+    assert "only thing that can serve the WRONG project" in body
+    # The trust gate is what makes a binding inert, and it is invisible
+    # otherwise: the session silently falls back and every tool call succeeds.
+    assert "TRUSTED" in body
+
+
+def test_switching_does_not_sell_strict_tree_as_the_mechanism():
+    """It was `true` in both projects during the desktop-collision incident
+    and changed nothing. It guards what happens inside a server; it cannot
+    decide which server a session talks to."""
+    ctl = _make_ctl()
+    htb.switching(ctl)
+    body = " ".join(c[1] for c in ctl._calls if len(c) > 1)
+
+    assert "hardening, not the mechanism" in body
+
+
+def test_switching_scopes_the_pin_section_to_a_live_wrapper():
+    """The pin has exactly one reader, and most machines have retired it.
+
+    The topic must say the command is ABSENT in that state, not renamed. A
+    relabelled `★` entry was tried first and did not survive being looked at:
+    at the top of a menu it reads as the thing that decides what tokensave
+    serves, whatever its label says.
+    """
+    ctl = _make_ctl()
+    htb.switching(ctl)
+    body = " ".join(c[1] for c in ctl._calls if len(c) > 1)
+
+    assert "nothing reads the pin" in body
+    assert "not in the menu at all" in body
+    # And it must point at the switch, since a section that says "turn this on"
+    # without saying where is the esoterica this page exists to remove.
+    assert "Manage MCP wiring" in body

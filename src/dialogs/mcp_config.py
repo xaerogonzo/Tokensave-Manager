@@ -36,6 +36,11 @@ from helpers.mcp import (
     _is_claude_running, _project_mcp_path, ADVISORY_STATES,
     annotate_project_binding, read_claude_projects,
 )
+from helpers.mcp_posture import (
+    SERVICE_AUTOMATIC, SERVICE_SELF, SERVICE_UNKNOWN, SERVICE_UNSERVED,
+    SERVICE_WRONG, read_posture,
+)
+from dialogs.mcp_overview_panel import OverviewMixin
 from dialogs.mcp_desktop_panel import DesktopMigrationMixin
 from dialogs.mcp_duplicates_panel import DuplicateKeysMixin
 from dialogs.mcp_migration_panel import UserScopeMigrationMixin
@@ -46,8 +51,9 @@ if TYPE_CHECKING:
     from state import ManagerConfig
 
 
-class MCPConfigDialog(DesktopMigrationMixin, DuplicateKeysMixin, UserScopeMigrationMixin, EntryBlocksMixin, CursorBindingMixin,
-                     UiPumpMixin, tk.Toplevel):
+class MCPConfigDialog(OverviewMixin, DesktopMigrationMixin, DuplicateKeysMixin,
+                     UserScopeMigrationMixin, EntryBlocksMixin,
+                     CursorBindingMixin, UiPumpMixin, tk.Toplevel):
     """Manage tokensave entries in Claude Desktop's and Claude Code's MCP
     config files.
 
@@ -78,6 +84,11 @@ class MCPConfigDialog(DesktopMigrationMixin, DuplicateKeysMixin, UserScopeMigrat
         # Bound projects collapse by default. With seventeen of them the
         # useful axis is "what needs attention", not "show everything".
         self._show_bound = bool(focus_project)
+        # The five original panels are a diagnosis, not a dashboard. Opening
+        # the dialog on them is what made a healthy machine look broken — so
+        # they start collapsed, EXCEPT when the user came here from a specific
+        # project row, which is a request to see that project's wiring.
+        self._show_details = bool(focus_project)
         # Cursor's bound projects collapse independently of Claude's: the two
         # sections answer different questions and a user checking one should
         # not have the other unfold underneath them.
@@ -178,10 +189,21 @@ class MCPConfigDialog(DesktopMigrationMixin, DuplicateKeysMixin, UserScopeMigrat
         # Any verification still running belongs to the widgets just destroyed.
         self._verify_gen += 1
         self._claude_projects = read_claude_projects()
+        # Read here and nowhere else, so it cannot go stale: every write path
+        # in this dialog ends in `_render()`, and a DERIVED model that is
+        # cached across renders is as untrustworthy as a stored one.
+        self._posture = read_posture(self._cfg)
 
         # Warning banner — running Claude apps
         self._running = _is_claude_running()
         self._warn_lbl.configure(text=self._running_warning(self._running))
+
+        # The overview always renders: it is the answer to the question the
+        # user opened this dialog with, and the five panels below are how to
+        # act on it.
+        self._render_overview()
+        if not self._show_details:
+            return
 
         for label, path in _mcp_configs():
             self._render_block(label, path)
@@ -262,15 +284,37 @@ class MCPConfigDialog(DesktopMigrationMixin, DuplicateKeysMixin, UserScopeMigrat
         if not rows:
             return
 
-        # Three buckets, not two. An advisory row has a CORRECT file and an
-        # external blocker, so it needs attention like a broken one but must
-        # not offer Apply — rewriting a correct file changes nothing and would
-        # report success for it.
-        needs = [r for r in rows
-                 if r[2]["state"] != "ok"
+        # Bucketed by how each project is actually SERVED, not by what its
+        # file says. Those are different questions, and answering the second
+        # while claiming the first is the defect this replaces: every project
+        # without a `.mcp.json` was filed under "needs binding" with a loud
+        # Apply button, including the ones a user-scoped `tokensave serve` was
+        # already serving correctly from the session's own folder.
+        #
+        # Measured 2026-09-09: four servers running, one per project, and one
+        # of them serving a project with no `.mcp.json` at all. "Needs
+        # binding" is true only once the fallback is gone — which is exactly
+        # what `SERVICE_UNSERVED` means and `SERVICE_AUTOMATIC` does not.
+        service = self._service_by_root(rows)
+
+        def _is(row, *want):
+            return service.get(row[1]) in want
+
+        # Loud: nothing serves these, or something serves them WRONGLY.
+        needs = [r for r in rows if _is(r, SERVICE_UNSERVED)
                  and r[2]["state"] not in ADVISORY_STATES]
-        advisory = [r for r in rows if r[2]["state"] in ADVISORY_STATES]
-        bound = [r for r in rows if r[2]["state"] == "ok"]
+        misbound = [r for r in rows if _is(r, SERVICE_WRONG)]
+        # Quiet: served by the machine-wide fallback rather than by their own
+        # binding. Correct today; an upgrade away from being deterministic.
+        automatic = [r for r in rows if _is(r, SERVICE_AUTOMATIC)]
+        # An advisory row has a CORRECT file and an external blocker, so it
+        # must not offer Apply — rewriting a correct file changes nothing and
+        # would report success for it. Kept separate from `automatic` only
+        # when nothing serves it; otherwise its blocker is not costing the
+        # user anything today and it belongs in the quiet group.
+        advisory = [r for r in rows if r[2]["state"] in ADVISORY_STATES
+                    and _is(r, SERVICE_UNSERVED, SERVICE_UNKNOWN)]
+        bound = [r for r in rows if _is(r, SERVICE_SELF)]
 
         # Skip is an ANSWER, and this view never honoured it. A skipped
         # project kept rendering under "needs binding" with a loud Apply
@@ -281,6 +325,8 @@ class MCPConfigDialog(DesktopMigrationMixin, DuplicateKeysMixin, UserScopeMigrat
         skips = raw_cfg.get("mcp_skip_warnings") or []
         skipped = [r for r in needs if _project_mcp_path(r[1]) in skips]
         needs = [r for r in needs if _project_mcp_path(r[1]) not in skips]
+        automatic = [r for r in automatic
+                     if _project_mcp_path(r[1]) not in skips]
 
         # A project entry says `"command": "tokensave"` so the file stays
         # portable, which makes PATH resolution a prerequisite rather than
@@ -309,6 +355,11 @@ class MCPConfigDialog(DesktopMigrationMixin, DuplicateKeysMixin, UserScopeMigrat
 
         self._render_path_prerequisite(path_state)
 
+        for name, root, info in misbound:
+            self._render_block("%s  —  bound to a DIFFERENT project" % name,
+                               _project_mcp_path(root),
+                               blocked_reason=blocked, project_root=root)
+
         for name, root, info in needs:
             self._render_block("%s  —  needs binding" % name,
                                _project_mcp_path(root),
@@ -319,6 +370,7 @@ class MCPConfigDialog(DesktopMigrationMixin, DuplicateKeysMixin, UserScopeMigrat
                                _project_mcp_path(root),
                                blocked_reason=blocked, project_root=root)
 
+        self._render_automatic(automatic, blocked)
         self._render_skipped(skipped)
 
         if not bound:
@@ -344,6 +396,94 @@ class MCPConfigDialog(DesktopMigrationMixin, DuplicateKeysMixin, UserScopeMigrat
         ttk.Button(strip, text="show",
                    command=self._toggle_bound).pack(side=tk.LEFT, padx=(10, 0))
         self._start_verification(rows)
+
+    def _service_by_root(self, rows) -> dict:
+        """`{project root: service}` for the rows about to be rendered.
+
+        Looked up from the posture read once in `_render`, keyed the way that
+        module keys projects — one directory reachable through two search
+        roots is one project there, and matching raw strings here would miss
+        the row and silently file it under `SERVICE_UNKNOWN`.
+
+        A root the posture does not know about falls back to UNKNOWN, which
+        renders in the quiet advisory group rather than the loud one. That is
+        the right direction to fail: an unrecognised project is not evidence
+        that it is broken.
+        """
+        from helpers.mcp_projects import normalize_project_key
+
+        posture = getattr(self, "_posture", None)
+        if posture is None:
+            return {}
+        by_key = {p.root: posture.service(p) for p in posture.projects}
+        out = {}
+        for _name, root, _info in rows:
+            out[root] = by_key.get(normalize_project_key(root),
+                                   SERVICE_UNKNOWN)
+        return out
+
+    def _render_automatic(self, automatic, blocked: str):
+        """Projects served by the machine-wide fallback rather than by a file.
+
+        Deliberately quiet, and deliberately not called "unbound". These are
+        working: a user-scoped bare `serve` is spawned per session with that
+        session's own cwd, so it resolves to that session's project. Binding
+        them is a determinism upgrade — worth it for a worktree, a nested
+        repo, or a session that starts in a subdirectory — not a repair.
+
+        Rendering them as a loud "needs binding" pile is what made this
+        dialog feel like fifteen mandatory steps, and it is why a user who had
+        already achieved multi-project isolation could not tell that they had.
+        """
+        if not automatic:
+            return
+        strip = tk.Frame(self._body, bg=C["base"])
+        strip.pack(fill=tk.X, padx=4, pady=(10, 2))
+        tk.Label(strip,
+                 text="✓  %d project%s served automatically — no binding of "
+                      "their own, resolved from each session's folder"
+                      % (len(automatic), "" if len(automatic) == 1 else "s"),
+                 font=("Segoe UI", 9), bg=C["base"], fg=C["green"],
+                 anchor=tk.W).pack(fill=tk.X)
+        tk.Label(self._body,
+                 text="     Binding one pins it explicitly, which matters for "
+                      "a git worktree, a nested repo, or a session started in "
+                      "a subdirectory. Otherwise there is nothing to fix here.",
+                 font=("Segoe UI", 8), bg=C["base"], fg=C["overlay0"],
+                 justify=tk.LEFT, wraplength=720, anchor=tk.W).pack(
+            fill=tk.X, padx=4, pady=(0, 2))
+        for name, root, _info in automatic:
+            row = tk.Frame(self._body, bg=C["base"])
+            row.pack(fill=tk.X, padx=16, pady=(2, 0))
+            tk.Label(row, text=name, font=("Segoe UI", 9),
+                     bg=C["base"], fg=C["subtext"]).pack(side=tk.LEFT)
+            tk.Label(row, text="  " + root, font=("Consolas", 8),
+                     bg=C["base"], fg=C["overlay0"]).pack(side=tk.LEFT)
+            if blocked:
+                continue
+            ttk.Button(row, text="Bind…",
+                       command=lambda r=root: self._bind_one(r)).pack(
+                side=tk.RIGHT)
+
+    def _bind_one(self, project_root: str):
+        """Give an automatically-served project an explicit binding.
+
+        Routed through `_apply`, which owns the timestamped backup, the
+        gitignore follow-up and the running-Claude guard. It reads its
+        proposal out of `_config_state`, and an automatic row never went
+        through `_render_block` — that is what populates it — so the entry is
+        classified here first.
+
+        Not a second write path: the classification and the write are both the
+        existing ones. The only thing new is that the row offering it no
+        longer pretends the project is broken.
+        """
+        path = _project_mcp_path(project_root)
+        info = _classify_mcp_entry(path, self._cfg.raw)
+        info = annotate_project_binding(info, project_root,
+                                        projects=self._claude_projects)
+        self._config_state[path] = info
+        self._apply(path, "Claude Code")
 
     def _render_skipped(self, skipped):
         """Unbound projects the user has explicitly answered "not this one" to.

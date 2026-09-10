@@ -23,6 +23,41 @@ Status legend:
 
 ---
 
+## MCP posture — shipped
+
+### ✅ One rule, one screen, two honest tiers. Details in CHANGELOG.md.
+
+The MCP surface had five panels each correct about its own question and
+nothing that composed them, so a machine with working multi-project
+isolation read as fifteen mandatory steps. `helpers/mcp_posture.py` splits
+`tier` (what a project's own config declares) from `service` (how it is
+actually served), and the overview panel answers the question a user
+actually has.
+
+The measurement that drove it: four tokensave servers running, one per
+project, and one of them serving a project with **no `.mcp.json` at all**.
+Per-project binding is a determinism upgrade, not a prerequisite.
+
+### 🔮 Doctor reports posture
+
+`read_posture` is a pure aggregate over readers Doctor already calls, so a
+Doctor rule is a few lines. Deliberately not shipped with the dialog: the
+Doctor has been fixed once for nagging, and a rule that fires on every
+`AUTOMATIC` project would repeat that. The rule worth having is narrower —
+`SERVICE_UNSERVED` and `SERVICE_WRONG` only, which are the two states that
+are actually wrong.
+
+### 🧊 A wizard that applies the whole plan in one click
+
+`plan_independence` could drive one. It deliberately does not. Every step
+routes to a writer that owns its own confirmation, backup and gate — and
+the Desktop retirement's gate re-asks whether Desktop is running
+*immediately* before writing, because a gate answered a minute ago is not a
+gate. Collapsing those into a single button would trade the reviewability
+this whole change exists to restore for one fewer click.
+
+---
+
 ## Multi-agent support (Cursor) — shipped
 
 ### ✅ Cursor as a peer of Claude Code. Details in CHANGELOG.md.

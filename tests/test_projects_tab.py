@@ -562,13 +562,69 @@ class TestContextMenuGrouping:
         assert len(cmds) == 41, f"expected 41 commands, found {len(cmds)}"
 
     def test_the_everyday_actions_stay_one_click_away(self):
-        """Burying Sync in a submenu would make the common case worse."""
+        """Burying Sync in a submenu would make the common case worse.
+
+        The pin is matched by its CONSTANT rather than by a literal, and it is
+        conditional: it is built only while Claude Desktop defines the wrapper
+        entry that reads the pin.
+        """
         src = open("src/controllers/projects_tab.py", encoding="utf-8").read()
         body = src[src.index("def _build_context_menu"):
                    src.index("def _on_right_click")]
         top = body[:body.index("add_cascade")]
-        for label in ("Set as Active", "Sync", "Status"):
+        for label in ("_PIN_LABEL", "Sync", "Status"):
             assert label in top, f"{label!r} was pushed into a submenu"
+
+    def test_the_pin_commands_are_built_only_when_something_reads_the_pin(self):
+        """Not relabelled — absent.
+
+        `~/.tokensave/desktop-project.txt` has exactly one reader, and turning
+        Claude Desktop chat off leaves nothing reading it. A relabelled `★`
+        command was tried first and did not survive being looked at: a ★ entry
+        at the top of the menu reads as the thing that decides what tokensave
+        serves, whatever its label says.
+
+        Asserted structurally — each of the two commands must sit inside an
+        `if self._menu_has_pin` — because that is the property. Matching on
+        the label text would pass just as well for a command built
+        unconditionally and merely renamed, which is the state this replaced.
+        """
+        import ast
+
+        src = open("src/controllers/projects_tab.py", encoding="utf-8").read()
+        fn = next(n for n in ast.walk(ast.parse(src))
+                  if isinstance(n, ast.FunctionDef)
+                  and n.name == "_build_context_menu")
+
+        guarded = set()
+        for node in ast.walk(fn):
+            if not isinstance(node, ast.If):
+                continue
+            if "_menu_has_pin" not in ast.unparse(node.test):
+                continue
+            for inner in ast.walk(node):
+                if isinstance(inner, ast.Name):
+                    guarded.add(inner.id)
+
+        assert "_PIN_LABEL" in guarded, "the pin command is built unconditionally"
+        assert "_AUTO_LABEL" in guarded, "Auto-detect is built unconditionally"
+
+    def test_the_menu_is_rebuilt_when_the_mode_flips(self):
+        """The menu is constructed once and reused for every row, so the
+        answer it was built against can go stale under it — that is the whole
+        reason this is a rebuild rather than a build-time decision."""
+        import ast
+
+        src = open("src/controllers/projects_tab.py", encoding="utf-8").read()
+        fn = next(n for n in ast.walk(ast.parse(src))
+                  if isinstance(n, ast.FunctionDef)
+                  and n.name == "_rebuild_menu_if_mode_changed")
+        body = ast.unparse(fn)
+
+        assert "_build_context_menu" in body
+        # Never against a controller that has no menu yet: rebuilding there
+        # would construct one from collaborators the caller never supplied.
+        assert "is None" in body
 
     def test_destructive_entries_live_under_maintenance(self):
         """Remove Index sitting beside Status is how it gets misclicked."""
@@ -806,3 +862,79 @@ def test_binding_is_reachable_from_the_index_cascade(controller):
     """Guards the wiring: the dialog can be perfectly correct and unreachable."""
     labels = _menu_labels(controller._ctx_menu)
     assert any("Bind to this project" in lbl for lbl in labels), labels
+
+
+class TestBindToggle:
+    """The binding entry goes both ways, and never says "pin".
+
+    Two defects, found by a user looking at the running app.
+
+    It had only the "on" direction, so a project could be bound and never
+    released except by deleting `.mcp.json` by hand — the same asymmetry the
+    Desktop migration had one scope up.
+
+    And the MCP dialog called the action "Pin down", which collided with
+    `★ Set as Active` — an unrelated setting that pins ONE project for Claude
+    Desktop chat. Reading "Pin down" there, the user came to this menu looking
+    for an unpin command. One word for two concepts, in the surface whose job
+    is telling them apart.
+    """
+
+    def test_both_directions_exist_and_neither_says_pin(self):
+        from controllers.projects_tab import (_BIND_OFF_LABEL, _BIND_ON_LABEL,
+                                              _PIN_LABEL)
+
+        assert "Bind to this project" in _BIND_ON_LABEL
+        assert "Unbind" in _BIND_OFF_LABEL
+        assert _BIND_ON_LABEL != _BIND_OFF_LABEL
+        # The ★ command keeps the word; these must not borrow it.
+        assert "Active" in _PIN_LABEL
+        for label in (_BIND_ON_LABEL, _BIND_OFF_LABEL):
+            assert "pin" not in label.lower(), label
+
+    def test_the_label_is_resolved_at_popup_time(self):
+        """The menu is built once and reused for every row, so a value read at
+        build time is right for one project and wrong for the rest — the same
+        reason `_sync_strict_tree_label` exists."""
+        import ast
+
+        src = open("src/controllers/projects_tab.py", encoding="utf-8").read()
+        popup = next(n for n in ast.walk(ast.parse(src))
+                     if isinstance(n, ast.FunctionDef)
+                     and n.name == "_on_right_click")
+        assert "_sync_bind_label" in ast.unparse(popup)
+
+    def test_an_unreadable_project_is_offered_bind_never_unbind(self):
+        """Offering Unbind for a state we could not determine would assert a
+        fact we do not have — the rule the strict_tree toggle already follows."""
+        from controllers.projects_tab import (ProjectsTabController,
+                                              _BIND_ON_LABEL)
+
+        seen = {}
+
+        class _Menu:
+            def entryconfigure(self, index, label=None):
+                seen["label"] = label
+
+        ctrl = object.__new__(ProjectsTabController)
+        ctrl._bind_entry = (_Menu(), 3)
+        ctrl._sync_bind_label("")
+
+        assert seen["label"] == _BIND_ON_LABEL
+
+    def test_a_project_with_a_binding_is_offered_unbind(self, tmp_path):
+        from controllers.projects_tab import (ProjectsTabController,
+                                              _BIND_OFF_LABEL)
+
+        (tmp_path / ".mcp.json").write_text("{}", encoding="utf-8")
+        seen = {}
+
+        class _Menu:
+            def entryconfigure(self, index, label=None):
+                seen["label"] = label
+
+        ctrl = object.__new__(ProjectsTabController)
+        ctrl._bind_entry = (_Menu(), 3)
+        ctrl._sync_bind_label(str(tmp_path))
+
+        assert seen["label"] == _BIND_OFF_LABEL

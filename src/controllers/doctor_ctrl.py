@@ -24,7 +24,7 @@ import tkinter as tk
 from tkinter import messagebox
 
 from constants import CREATE_NEW_CONSOLE, C, CREATE_NO_WINDOW, _ANSI
-from helpers import housekeeping
+from helpers import housekeeping, mcp_paths
 from helpers.runtime import log
 from helpers.tokensave_config import (
     read_strict_tree,
@@ -325,8 +325,8 @@ class DoctorController:
         except Exception:                                    # noqa: BLE001
             return
 
-        if mcp_desktop.lifecycle_state(present, retired) == \
-                mcp_desktop.LIFECYCLE_RETURNED:
+        if mcp_paths.lifecycle_state(present, retired) == \
+                mcp_paths.LIFECYCLE_RETURNED:
             self._on_log(
                 "  ⚠ Claude Desktop's tokensave entry has come back after "
                 "you retired it — an app update or a hand edit can do that. "

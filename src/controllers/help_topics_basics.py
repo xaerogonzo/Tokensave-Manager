@@ -40,25 +40,52 @@ def switching(ctl):
           "session, the pin is not what decides your project.")
         br()
 
-        h2("Claude Code: bind the project instead")
-        p("Without a binding a session resolves its project by searching "
-          "upward from wherever it started \u2014 usually right, and silently "
-          "wrong when it is not. Giving the project its own .mcp.json fixes "
-          "that at the source, so several projects can be open at once "
-          "without any of them answering about another:")
+        h2("Claude Code: already independent, and how to pin it down")
+        p("There is one rule underneath all of this. Claude Desktop's own "
+          "`tokensave` entry is the only thing that can serve the WRONG "
+          "project: Desktop spawns that server app-level, so its working "
+          "folder is the app rather than your session, and every "
+          "Desktop-hosted session inherits the one server whatever repo it is "
+          "in. Retire that entry and no project can be answered from another "
+          "codebase.")
+        br()
+        p("After that, every session serves its own project \u2014 by one of "
+          "two routes, and both are fine:")
+        ins("  \u2022  It has its own .mcp.json", "body")
+        ins(" \u2014 bound explicitly to itself.\n", "dim")
+        ins("  \u2022  It has none", "body")
+        ins(" \u2014 the user-scoped `tokensave serve` entry is started in "
+            "THAT\n     session's folder, so it resolves to that session's "
+            "project.\n", "dim")
+        br()
+        ok("So per-project binding is an upgrade, not a requirement. Settings "
+           "\u2192 \U0001f50c Manage MCP wiring opens on a page that says which "
+           "route each project is on.")
+        br()
+        p("Bind a project when the automatic route can guess wrong: a git "
+          "worktree with no index of its own, a repo nested inside another "
+          "one, or sessions you start from a subdirectory. Binding searches "
+          "nothing \u2014 it names the project:")
         ins("  Right-click the project \u2192 \U0001f5c2 Index \u2192 "
             "\u201c\U0001f50c Bind to this project\u2026\u201d\n", "body")
         ins("  (or Settings \u2192 \U0001f50c Manage MCP wiring to see them "
             "all)\n", "dim")
         br()
-        p("Then graph_root is only needed for reaching ACROSS projects, "
-          "which is what it is actually for. Two things to expect: only new "
-          "sessions pick up a binding, and each project asks for approval "
-          "once.")
+        warn("A binding only loads in a folder Claude Code has been TRUSTED "
+             "in \u2014 the \u201cDo you trust the files in this folder?\u201d "
+             "prompt. Until you answer it, the .mcp.json is not read at all "
+             "and the session quietly falls back to the automatic route. "
+             "That is harmless while the fallback exists, and it is why "
+             "removing the fallback is a separate, deliberate step.")
         br()
-        p("Reading a different project does not. Every tokensave tool takes a "
-          "graph_root argument, which opens any indexed project on demand — "
-          "including one in a completely unrelated folder tree:")
+        p("Two more things to expect: only new sessions pick up a binding, "
+          "and each project asks for approval once. graph_root is then only "
+          "needed for reaching ACROSS projects, which is what it is for.")
+        br()
+        h2("Reading across projects needs no restart at all")
+        p("Every tokensave tool takes a graph_root argument, which opens any "
+          "indexed project on demand — including one in a completely "
+          "unrelated folder tree:")
         ins('  tokensave_context(task="…", graph_root="D:\\Projects\\Other")\n',
             "dim")
         br()
@@ -80,8 +107,22 @@ def switching(ctl):
              "entry reads Disable once it is on, so you can turn it back off "
              "if it ever refuses something legitimate.")
         br()
+        dim("strict_tree is hardening, not the mechanism. It guards what "
+            "happens INSIDE a server — turning an answer about the wrong "
+            "checkout into a refusal that names both roots. It cannot decide "
+            "which server a session talks to, and during the incident that "
+            "produced this page it was on in both projects and changed "
+            "nothing. Retiring Claude Desktop's entry is the part that "
+            "decides.")
+        br()
 
         h2("When you do want to move the default")
+        p("This section applies only while Claude Desktop chat is ON. "
+          "Turn it off and nothing reads the pin, so ★ Set as Active is not "
+          "in the menu at all — there would be nothing for it to decide. The "
+          "switch is one button: Settings → 🔌 Manage MCP wiring, top of the "
+          "page, and it goes both ways.")
+        br()
         ins("  1. Select the new project in the list\n", "body")
         ins("  2. Click ★ Set as Active\n", "body")
         ins("  3. Fully quit Claude Desktop (File → Quit, not just close the window)\n", "body")

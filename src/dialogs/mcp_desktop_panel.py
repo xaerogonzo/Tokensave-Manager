@@ -24,7 +24,7 @@ import tkinter as tk
 from tkinter import ttk, messagebox
 
 from constants import C
-from helpers import mcp_desktop
+from helpers import mcp_desktop, mcp_paths
 from helpers.mcp_shadow import SHADOW_ACTIVE, classify_shadow, structural_note
 
 
@@ -96,15 +96,15 @@ class DesktopMigrationMixin:
             return
         raw = self._cfg.raw if isinstance(self._cfg.raw, dict) else {}
         retired = bool(raw.get(mcp_desktop.DESKTOP_SCOPE_RETIRED_KEY))
-        state = mcp_desktop.lifecycle_state(present, retired)
+        state = mcp_paths.lifecycle_state(present, retired)
 
-        if state == mcp_desktop.LIFECYCLE_ABSENT:
+        if state == mcp_paths.LIFECYCLE_ABSENT:
             return
 
         box = tk.Frame(self._body, bg=C["surface0"])
         box.pack(fill=tk.X, padx=4, pady=(8, 4), ipady=6)
 
-        if state == mcp_desktop.LIFECYCLE_RETIRED:
+        if state == mcp_paths.LIFECYCLE_RETIRED:
             tk.Label(box,
                      text="  ✓  Claude Desktop's tokensave entry is retired — "
                           "each project's own binding is authoritative.",
@@ -116,7 +116,7 @@ class DesktopMigrationMixin:
                 anchor=tk.W, padx=8, pady=(4, 2))
             return
 
-        if state == mcp_desktop.LIFECYCLE_RETURNED:
+        if state == mcp_paths.LIFECYCLE_RETURNED:
             tk.Label(box,
                      text="  ⚠  Claude Desktop's tokensave entry has come "
                           "BACK after you retired it",
@@ -219,10 +219,25 @@ class DesktopMigrationMixin:
         a render must never block on one — but the WRITE re-asks, because a
         gate answered a minute ago is not a gate.
         """
-        st = self._migration_status(rows)
-        if not st["ready"]:
-            return False, ("Bind or skip every project first — the same "
-                           "readiness rule as the user-scoped migration.")
+        # NOT the user-scoped migration's readiness rule, which this borrowed
+        # and which is wrong here. The two migrations remove different things:
+        # the user-scoped entry is a FALLBACK, so removing it strands every
+        # unbound project; Desktop's entry is a SHADOW, so removing it leaves
+        # each project served by its own binding or by that same fallback.
+        # Demanding every project be bound first made this a one-way door —
+        # with four projects legitimately served automatically, the button
+        # could never be offered again once Desktop's entry was restored.
+        #
+        # What actually matters is whether anything would end up served by
+        # nothing, and the posture already answers exactly that: `unserved` is
+        # computed without reference to Desktop's entry.
+        posture = getattr(self, "_posture", None)
+        stranded = list(getattr(posture, "unserved", ()) or ())
+        if stranded:
+            names = ", ".join(p.name for p in stranded[:4])
+            return False, ("%s would be left with no tokensave at all: "
+                           "nothing else serves them. Bind them, or restore "
+                           "the machine-wide fallback, first." % names)
         if live:
             running, detail = mcp_desktop.desktop_app_running()
         elif self._desktop_running is None:
@@ -344,11 +359,13 @@ class DesktopMigrationMixin:
         record = raw.get(mcp_desktop.DESKTOP_RETIRED_RECORD_KEY) or {}
         entry = record.get("entry")
         if not entry:
-            messagebox.showinfo(
-                "Nothing recorded",
-                "No retired Claude Desktop entry was recorded, so there is "
-                "nothing to restore automatically. Add it back through "
-                "Claude Desktop's own settings.", parent=self)
+            # No record — the entry was removed by something other than this
+            # migration, or on another machine. Refusing here made turning
+            # Claude Desktop chat back on impossible through the UI, which is
+            # the whole reason this is a toggle rather than a migration. The
+            # canonical wrapper entry is what the manager would install
+            # anyway, so offer that instead of a dead end.
+            self._readd_canonical_desktop_entry()
             return
 
         running, detail = mcp_desktop.desktop_app_running()
@@ -380,6 +397,61 @@ class DesktopMigrationMixin:
         self._cfg.save()
         self._log_to_app("MCP: restored Claude Desktop's tokensave entry.",
                          C["green"])
+        self._servers = None
+        self._render()
+
+    def _readd_canonical_desktop_entry(self):
+        """Write the manager's own wrapper entry into Claude Desktop's config.
+
+        The path taken when nothing was recorded to restore. It is a different
+        act from :meth:`_unretire_desktop`'s main branch and says so: that one
+        restores the user's own entry verbatim, on the grounds that quietly
+        substituting our idea of it would be a different change wearing the
+        word "undo". This one has nothing to restore, so it writes the
+        canonical entry and tells the user that is what it is doing.
+        """
+        from helpers.mcp import _apply_mcp_fix, _canonical_mcp_entry
+
+        raw = self._cfg.raw if isinstance(self._cfg.raw, dict) else {}
+        entry = _canonical_mcp_entry(raw)
+        cfg_path = mcp_desktop.config_path()
+
+        running, detail = mcp_desktop.desktop_app_running()
+        if running is not False:
+            messagebox.showwarning(
+                "Quit Claude Desktop first",
+                "Claude Desktop rewrites its config from memory, so this "
+                "change would revert on its own. (%s)" % detail, parent=self)
+            return
+
+        if not messagebox.askyesno(
+                "Turn Claude Desktop chat back on",
+                "No previously-removed entry was recorded, so this writes the "
+                "manager's standard wrapper entry into:\n\n%s\n\n%s\n\n"
+                "Claude Desktop's own chat window gets tokensave back. The "
+                "cost is the trade this migration exists for: Desktop runs "
+                "ONE server for the whole machine, so every Claude Code "
+                "session hosted inside the Desktop window is answered from "
+                "the pinned project rather than its own.\n\nProceed?"
+                % (cfg_path, json.dumps(entry, indent=2)), parent=self):
+            return
+
+        ok, msg = _apply_mcp_fix(cfg_path, entry)
+        if not ok:
+            messagebox.showerror("Not written", msg, parent=self)
+            self._log_to_app("Desktop MCP re-add FAILED: %s" % msg, C["red"])
+            return
+        raw[mcp_desktop.DESKTOP_SCOPE_RETIRED_KEY] = False
+        self._cfg.save()
+        self._log_to_app(
+            "MCP: wrote the canonical wrapper entry to Claude Desktop's "
+            "config. %s" % msg, C["green"])
+        messagebox.showinfo(
+            "Claude Desktop chat is on",
+            msg + "\n\nStart Claude Desktop to pick it up. \u2605 Set as "
+                  "Active is back on the project right-click menu, and it "
+                  "chooses which project Desktop's chat answers about.",
+            parent=self)
         self._servers = None
         self._render()
 
