@@ -22,6 +22,7 @@ import json
 import pytest
 
 import cli
+import cli_test_commands
 from cli import EXIT_FAILED, EXIT_OK, EXIT_PREREQUISITE, main
 from helpers import quality_checks
 from helpers.findings import Finding
@@ -251,11 +252,11 @@ def test_a_failed_run_is_classified_by_what_it_printed(output, expected):
     three. An unrecognised message falls through to `unreadable` rather than
     being assigned a plausible cause it has not earned.
     """
-    assert cli._classify_run(output) == expected
+    assert cli_test_commands._classify_run(output) == expected
 
 
 def test_the_classifier_never_reports_completed():
     """It is only consulted when no summary could be read, so claiming the run
     completed would be the one answer it must never give."""
     for text in ("", "anything at all", "5 passed"):
-        assert cli._classify_run(text) != "completed"
+        assert cli_test_commands._classify_run(text) != "completed"
