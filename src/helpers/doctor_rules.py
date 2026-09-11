@@ -38,7 +38,14 @@ from dataclasses import dataclass, replace
 # compute_split this reads 28 where tokensave reads 21. So this scale runs
 # ~30% hot for idiomatic Python, and 18 here is about 13 on the usual one.
 # Per-directory overrides live in resolve_caps() for anything finer.
-_CAP_FILE_LINES         = 1500  # Doctor warning threshold (BASIC_INSTRUCTIONS aspires to 800)
+# The aspiration beside this cap moved 800 -> 1000 on 2026-09-11. Measured:
+# 202 files, median 340, p75 547, **p90 873**. An aspiration below your own
+# p90 marks ordinary-large files as exceptional rather than marking the
+# outliers; 1000 sits at ~p92. Of the 26 files then over 800, 14 were
+# dialogs/controllers where the UI carve-out already applies, so only 12 of
+# 202 were non-UI and genuinely over -- this is the weakest-evidence of the
+# three 2026-09-11 recalibrations, and 800 was not costing much.
+_CAP_FILE_LINES         = 1500  # Doctor warning threshold (BASIC_INSTRUCTIONS aspires to 1000)
 _CAP_METHOD_LINES       = 150
 _CAP_CLASS_METHODS      = 40
 _CAP_COMPLEXITY         = 18
