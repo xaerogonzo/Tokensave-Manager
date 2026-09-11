@@ -349,6 +349,93 @@ def _index_position(sections, moved, chosen: set) -> int:
     return first.start
 
 
+def _render_new_source(lines, preamble, sections, moved, chosen,
+                       target_rel: str, nl: str) -> str:
+    """The source with the moved run replaced by an index, in place.
+
+    Extracted from `compute_split` (2026-09-11), which was complexity 28
+    against a cap of 18. Not an arbitrary slice taken to move a number: the
+    docstring already described this as choose-then-render-two-files, and
+    this is one of the two renders. Pure, like everything else here.
+    """
+    # The index goes exactly where the moved run was, not appended at the end.
+    # With a middle split that is the difference between a document that still
+    # reads in order and one whose sections have quietly been reshuffled around
+    # the reader.
+    # A SECOND split merges into the index the first one wrote, rather than
+    # writing a rival block beside it. Granularity is what makes a second split
+    # worth doing -- one project keeps a 64 KB operational section holding
+    # twenty `###` lessons -- and the first attempt produced two identical
+    # `## Lessons` headings in the same file.
+    prior = next((s for s in sections
+                  if s.level == 2 and s.title == _INDEX_TITLE
+                  and s.index not in chosen), None)
+    carried = _existing_entries(lines, prior) if prior is not None else []
+    replaced = {prior.index} if prior is not None else set()
+
+    index_lines = _render_index(moved, target_rel, carried).split("\n")
+    # Back where the previous index was, when there is one: that is where the
+    # reader already knows to look.
+    insert_at = (prior.start if prior is not None
+                 else _index_position(sections, moved, chosen))
+    out = list(lines[:preamble])
+    placed = False
+    for section in sections:
+        if not placed and section.start >= insert_at:
+            out.extend(index_lines)
+            placed = True
+        if section.index in chosen or section.index in replaced:
+            continue
+        out.extend(lines[section.start:section.end])
+    if not placed:
+        out.extend(index_lines)
+    new_source = nl.join(out).rstrip(nl) + nl
+    return new_source
+
+
+def _render_new_target(lines, sections, moved, chosen, source_rel: str,
+                       target_text: str, appending: bool, nl: str) -> str:
+    """The target: whatever is already there, verbatim, plus what arrives.
+
+    The other half of the render. The refusal for a target this tool did not
+    write stays in `compute_split`, because it returns a blocked PLAN rather
+    than a string -- a helper that can only answer one question is easier to
+    be sure about than one that sometimes answers a different one.
+    """
+    if appending:
+        # Everything already there, verbatim, plus what is arriving. Rewriting
+        # the existing target would put this module in the business of editing
+        # a file a person may since have edited themselves.
+        body = target_text.replace("\r\n", "\n").rstrip("\n").split("\n") + [""]
+    else:
+        body = ["# Lessons",
+                "",
+                "Moved out of [`%s`](../%s) so they are not loaded on every"
+                % (source_rel, source_rel),
+                "message. Section CONTENT is verbatim and in its original",
+                "order. The only lines this file adds are `## From:` headings,",
+                "which say where a subsection came from when its parent stayed",
+                "behind.",
+                ""]
+    # A `###` whose parent stayed behind would otherwise be filed under
+    # whatever unrelated `##` happens to precede it here. Measured: moving
+    # twenty subsections out of one project's operational section landed them
+    # all under a Gasteiger lesson. The heading is ADDED context, never an edit
+    # to what moved.
+    context = None
+    for section in moved:
+        if section.parent is not None and section.parent not in chosen:
+            if context != section.parent:
+                context = section.parent
+                body.append("## From: %s" % sections[context].title)
+                body.append("")
+        else:
+            context = None
+        body.extend(lines[section.start:section.end])
+    new_target = nl.join(body).rstrip(nl) + nl
+    return new_target
+
+
 def compute_split(text: str, source_rel: str = "CLAUDE.md",
                   target_rel: str = DEFAULT_TARGET,
                   keep_bytes: int = DEFAULT_KEEP_BYTES,
@@ -437,38 +524,8 @@ def compute_split(text: str, source_rel: str = "CLAUDE.md",
     from helpers.instructions_wiring import dominant_newline
     nl = dominant_newline(text)
 
-    # The index goes exactly where the moved run was, not appended at the end.
-    # With a middle split that is the difference between a document that still
-    # reads in order and one whose sections have quietly been reshuffled around
-    # the reader.
-    # A SECOND split merges into the index the first one wrote, rather than
-    # writing a rival block beside it. Granularity is what makes a second split
-    # worth doing -- one project keeps a 64 KB operational section holding
-    # twenty `###` lessons -- and the first attempt produced two identical
-    # `## Lessons` headings in the same file.
-    prior = next((s for s in sections
-                  if s.level == 2 and s.title == _INDEX_TITLE
-                  and s.index not in chosen), None)
-    carried = _existing_entries(lines, prior) if prior is not None else []
-    replaced = {prior.index} if prior is not None else set()
-
-    index_lines = _render_index(moved, target_rel, carried).split("\n")
-    # Back where the previous index was, when there is one: that is where the
-    # reader already knows to look.
-    insert_at = (prior.start if prior is not None
-                 else _index_position(sections, moved, chosen))
-    out = list(lines[:preamble])
-    placed = False
-    for section in sections:
-        if not placed and section.start >= insert_at:
-            out.extend(index_lines)
-            placed = True
-        if section.index in chosen or section.index in replaced:
-            continue
-        out.extend(lines[section.start:section.end])
-    if not placed:
-        out.extend(index_lines)
-    new_source = nl.join(out).rstrip(nl) + nl
+    new_source = _render_new_source(lines, preamble, sections, moved,
+                                    chosen, target_rel, nl)
 
     appending = bool(target_text.strip())
     if appending and not is_our_target(target_text):
@@ -477,37 +534,8 @@ def compute_split(text: str, source_rel: str = "CLAUDE.md",
             digest_of(text),
             blocked=("%s exists and was not written by this tool, so there is "
                      "nothing safe to add it to" % target_rel))
-    if appending:
-        # Everything already there, verbatim, plus what is arriving. Rewriting
-        # the existing target would put this module in the business of editing
-        # a file a person may since have edited themselves.
-        body = target_text.replace("\r\n", "\n").rstrip("\n").split("\n") + [""]
-    else:
-        body = ["# Lessons",
-                "",
-                "Moved out of [`%s`](../%s) so they are not loaded on every"
-                % (source_rel, source_rel),
-                "message. Section CONTENT is verbatim and in its original",
-                "order. The only lines this file adds are `## From:` headings,",
-                "which say where a subsection came from when its parent stayed",
-                "behind.",
-                ""]
-    # A `###` whose parent stayed behind would otherwise be filed under
-    # whatever unrelated `##` happens to precede it here. Measured: moving
-    # twenty subsections out of one project's operational section landed them
-    # all under a Gasteiger lesson. The heading is ADDED context, never an edit
-    # to what moved.
-    context = None
-    for section in moved:
-        if section.parent is not None and section.parent not in chosen:
-            if context != section.parent:
-                context = section.parent
-                body.append("## From: %s" % sections[context].title)
-                body.append("")
-        else:
-            context = None
-        body.extend(lines[section.start:section.end])
-    new_target = nl.join(body).rstrip(nl) + nl
+    new_target = _render_new_target(lines, sections, moved, chosen,
+                                    source_rel, target_text, appending, nl)
 
     return SplitPlan(source_rel, target_rel, preamble, kept, moved,
                      new_source, new_target, digest_of(text),

@@ -23,6 +23,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import dataclasses
 import os
 import re
 from dataclasses import dataclass
@@ -798,6 +799,48 @@ def _message_from_changelog(bullets: list, files: list) -> tuple:
 
 # ── Diff-content + filename strategies ───────────────────────────────────────
 
+_DOC_EXTS = {".md", ".rst", ".txt", ".adoc"}
+
+_CONFIG_FILES = {"requirements.txt", "pyproject.toml", "package.json",
+                 "package-lock.json", "Pipfile", "Pipfile.lock",
+                 "poetry.lock", "setup.py", "setup.cfg"}
+
+
+@dataclasses.dataclass(frozen=True)
+class _ChangedKinds:
+    """What kinds of file a change touched. No opinion about wording."""
+
+    basenames: list
+    paths: list
+    exts: set
+    test_paths: list
+    config_paths: list
+    ci_paths: list
+
+
+def _classify_changed_files(files: list) -> _ChangedKinds:
+    """Sort a status list into the buckets the wording rules ask about.
+
+    Split out of `_suggest_from_diff_content` (2026-09-11), which was
+    complexity 21 against a cap of 18. The two halves were always distinct:
+    WHAT kinds of file changed, and WHAT MESSAGE those kinds imply. Only the
+    second half is about commit wording, and it is the one worth reading when
+    a suggestion comes out wrong.
+    """
+    basenames = [os.path.basename(f) for _xy, f in files]
+    paths = [f.replace("\\", "/") for _xy, f in files]
+    return _ChangedKinds(
+        basenames=basenames,
+        paths=paths,
+        exts={os.path.splitext(b)[1].lower() for b in basenames},
+        test_paths=[p for p in paths if re.search(r"(?:^|/)tests?/", p)
+                    or os.path.basename(p).startswith("test_")
+                    or os.path.basename(p).endswith("_test.py")],
+        config_paths=[p for p in paths
+                      if os.path.basename(p) in _CONFIG_FILES],
+        ci_paths=[p for p in paths if "/.github/workflows/" in "/" + p],
+    )
+
 def _suggest_from_diff_content(repo_path: str, files: list, git_exe: str) -> tuple:
     """Strategy 2 — infer message from file kinds + added Python symbols.
 
@@ -806,20 +849,12 @@ def _suggest_from_diff_content(repo_path: str, files: list, git_exe: str) -> tup
     if not files:
         return "", ""
 
-    basenames = [os.path.basename(f) for _xy, f in files]
-    exts = {os.path.splitext(b)[1].lower() for b in basenames}
-    paths = [f.replace("\\", "/") for _xy, f in files]
-
-    doc_exts    = {".md", ".rst", ".txt", ".adoc"}
-    test_paths  = [p for p in paths if re.search(r"(?:^|/)tests?/", p)
-                   or os.path.basename(p).startswith("test_")
-                   or os.path.basename(p).endswith("_test.py")]
-    config_files = {"requirements.txt", "pyproject.toml", "package.json",
-                    "package-lock.json", "Pipfile", "Pipfile.lock",
-                    "poetry.lock", "setup.py", "setup.cfg"}
-    config_paths = [p for p in paths if os.path.basename(p) in config_files]
-    ci_paths     = [p for p in paths if "/.github/workflows/" in "/" + p]
-    scope        = _dominant_directory(files)
+    kinds = _classify_changed_files(files)
+    basenames, paths = kinds.basenames, kinds.paths
+    exts, doc_exts = kinds.exts, _DOC_EXTS
+    test_paths, config_paths, ci_paths = (kinds.test_paths, kinds.config_paths,
+                                          kinds.ci_paths)
+    scope = _dominant_directory(files)
 
     # Docs only
     if exts and exts <= doc_exts:
@@ -866,6 +901,29 @@ def _suggest_from_diff_content(repo_path: str, files: list, git_exe: str) -> tup
     return "", ""
 
 
+def _parse_status_lines(status_text: str) -> list:
+    """`git status --short` text -> [(xy, filename)], renames resolved.
+
+    Split out of `_suggest_from_filenames` (2026-09-11), which was complexity
+    19 against a cap of 18. Parsing the porcelain is a different job from
+    deciding what to call the commit, and the trap below belongs with the
+    parser rather than with the wording rules.
+
+    **Never `strip()` the whole text before `splitlines()`.** It eats the
+    leading space of the first line, shifting the columns, and silently drops
+    the first character of the filename when the first entry is a
+    working-tree modification -- which has a single leading space.
+    """
+    files = []
+    for line in status_text.splitlines():
+        if len(line) < 4:
+            continue
+        fname = line[3:]
+        if " -> " in fname:
+            fname = fname.split(" -> ")[-1]
+        files.append((line[:2].strip(), fname))
+    return files
+
 def _suggest_from_filenames(status_text: str) -> str:
     """Legacy file-pattern strategy. Last-resort fallback.
 
@@ -873,22 +931,7 @@ def _suggest_from_filenames(status_text: str) -> str:
     output ONLY (no diff content, no CHANGELOG). The strategies above this
     in the chain are preferred when they have signal.
     """
-    # NOTE: never strip() the full status_text before splitlines() — strip
-    # eats the leading space from the first line, shifting columns and
-    # silently dropping the first character of the filename when the first
-    # entry is a working-tree modification (single leading space).
-    lines = [l for l in status_text.splitlines() if len(l) >= 4]
-    if not lines:
-        return ""
-
-    files = []
-    for line in lines:
-        xy   = line[:2].strip()
-        fname = line[3:]
-        if " -> " in fname:
-            fname = fname.split(" -> ")[-1]
-        files.append((xy, fname))
-
+    files = _parse_status_lines(status_text)
     if not files:
         return ""
 
@@ -1098,25 +1141,27 @@ class CommitSuggestion:
     strategy: str  # "llm" | "changelog" | "diff" | "filenames" | "backstop" | "none"
 
 
-def _suggest_commit_message(repo_path: str = "", status_text: str = "",
-                            cfg: dict | None = None,
-                            git_exe: str = "",
-                            mc=None) -> CommitSuggestion:
-    """Generate a conventional-commit-style message for the staged changes.
+@dataclasses.dataclass(frozen=True)
+class _StrategyInputs:
+    """Everything the strategy chain needs, worked out once."""
 
-    Multi-strategy orchestrator — tries the highest-quality strategy first
-    and falls through to weaker ones on empty results. Returns a
-    CommitSuggestion with message="" only if every strategy yields nothing
-    AND there are no staged files at all.
+    backend: str
+    agent_spec: object
+    agent_exe: str
+    agent_model: str
+    ts_exe: str
+    grounding: str
 
-    `repo_path` is optional for backwards compatibility — if empty, only
-    the file-name strategy runs (it doesn't need shell access). `cfg` is
-    the full manager config dict (used to read AI settings). `git_exe` is
-    the git executable path; if empty, git-touching strategies skip.
+
+def _resolve_strategy_inputs(cfg: dict, mc, repo_path: str,
+                             git_exe: str) -> _StrategyInputs:
+    """Which agent, which exe, which model, and whether to ground.
+
+    Split out of `_suggest_commit_message` (2026-09-11), which was complexity
+    20 against a cap of 18. The orchestrator was doing two jobs: working out
+    what the strategies need, and running them in order. Only the second is
+    what anyone opens this function to read.
     """
-    files, has_source = _parse_commit_status(status_text)
-    cfg = cfg or {}
-
     backend          = (cfg.get("commit_message_backend") or "auto").lower()
     # Which agent CLI to shell out to. The persisted backend value is still
     # spelled "claude_cli"; what it NAMES is now whichever agent the user
@@ -1164,6 +1209,34 @@ def _suggest_commit_message(repo_path: str = "", status_text: str = "",
                 getattr(mc, "codegraph_exe", "") or "",
                 diff_for_grounding,
             )
+    return _StrategyInputs(backend=backend, agent_spec=agent_spec,
+                           agent_exe=agent_exe, agent_model=agent_model,
+                           ts_exe=ts_exe, grounding=grounding)
+
+
+def _suggest_commit_message(repo_path: str = "", status_text: str = "",
+                            cfg: dict | None = None,
+                            git_exe: str = "",
+                            mc=None) -> CommitSuggestion:
+    """Generate a conventional-commit-style message for the staged changes.
+
+    Multi-strategy orchestrator — tries the highest-quality strategy first
+    and falls through to weaker ones on empty results. Returns a
+    CommitSuggestion with message="" only if every strategy yields nothing
+    AND there are no staged files at all.
+
+    `repo_path` is optional for backwards compatibility — if empty, only
+    the file-name strategy runs (it doesn't need shell access). `cfg` is
+    the full manager config dict (used to read AI settings). `git_exe` is
+    the git executable path; if empty, git-touching strategies skip.
+    """
+    files, has_source = _parse_commit_status(status_text)
+    cfg = cfg or {}
+
+    _inputs = _resolve_strategy_inputs(cfg, mc, repo_path, git_exe)
+    backend, agent_spec = _inputs.backend, _inputs.agent_spec
+    agent_exe, agent_model = _inputs.agent_exe, _inputs.agent_model
+    ts_exe, grounding = _inputs.ts_exe, _inputs.grounding
 
     # Build strategy chain from backend setting — no if/elif cascade.
     _cli   = ("claude_cli", lambda: _strat_agent_cli(repo_path, git_exe, agent_exe, agent_model, grounding=grounding, tokensave_exe=ts_exe, spec=agent_spec) if git_exe else None)

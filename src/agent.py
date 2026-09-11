@@ -75,6 +75,94 @@ DEFAULT_HTTP_TIMEOUT = 300
 _MAX_RESCUE_CANDIDATES = 16
 
 
+def _compose_anthropic_prompts(messages: list) -> tuple:
+    """Flatten a chat message list into (system_prompt, user_prompt).
+
+    Split out of `_run_anthropic_oneshot` (2026-09-11), which was complexity
+    20 against a cap of 18, and which the comment there already described as
+    its own step. The Messages API takes ONE system string and one user
+    turn, so prior assistant turns are squashed into the user content marked
+    as context rather than dropped -- losing them would make a follow-up
+    question read as the first thing asked.
+    """
+    sys_parts, user_parts = [], []
+    for m in messages:
+        role = m.get("role")
+        text = m.get("content") or ""
+        if role == "system":
+            sys_parts.append(text)
+        elif role == "user":
+            user_parts.append(text)
+        elif role == "assistant":
+            user_parts.append("[previous assistant turn]" + chr(10) + text)
+    join = (chr(10) + chr(10)).join
+    return (join(p for p in sys_parts if p),
+            join(p for p in user_parts if p))
+
+def _merge_tool_call_deltas(acc: dict, deltas) -> None:
+    """Merge one SSE chunk's partial `tool_calls` into the accumulator.
+
+    Split out of `_execute_chat_stream` (2026-09-11), which was complexity 23
+    against a cap of 18. Its docstring already described this as a distinct
+    behaviour: each chunk may carry a partial `id`, `name` or `arguments`
+    FRAGMENT, and they are merged by index into complete tool-call dicts.
+
+    Mutates `acc` in place, keyed by the delta's `index` (absent means 0 --
+    a single tool call is commonly sent without one). Every field is merged
+    only when non-empty, because a later chunk carrying `"name": ""` must not
+    erase a name an earlier one established.
+    """
+    for tc in (deltas or []):
+        idx = tc.get("index") or 0
+        if idx not in acc:
+            acc[idx] = {"id": "", "name": "", "args": []}
+        fn = tc.get("function") or {}
+        if tc.get("id"):
+            acc[idx]["id"] = tc["id"]
+        if fn.get("name"):
+            acc[idx]["name"] = fn["name"]
+        if fn.get("arguments"):
+            acc[idx]["args"].append(fn["arguments"])
+
+def _tool_call_entry(obj) -> "dict | None":
+    """One parsed JSON object -> a `tool_calls[]` entry, or None.
+
+    Split out of `_rescue_tool_call_from_content` (2026-09-11), which was
+    complexity 19 against a cap of 18. Its own docstring already named the two
+    phases -- collect candidate JSON strings, then check each against four
+    object shapes -- and this is the second. Finding candidates in prose and
+    deciding whether an object IS a tool call are different questions, and
+    only this one has to know the four shapes local models actually emit:
+
+        {"name": ..., "arguments": {...}}      {"tool": ..., "arguments": {...}}
+        {"name": ..., "parameters": {...}}     {"function": {"name": ..., ...}}
+
+    `arguments` comes back as a STRING, per the OpenAI spec -- downstream
+    code calls `json.loads()` on it.
+    """
+    import json as _json
+    import uuid as _uuid
+    if not isinstance(obj, dict):
+        return None
+    if "function" in obj and isinstance(obj["function"], dict):
+        obj = obj["function"]
+    name = obj.get("name") or obj.get("tool")
+    if not isinstance(name, str) or not name:
+        return None
+    args = obj.get("arguments")
+    if args is None:
+        args = obj.get("parameters")
+    if args is None:
+        args = {}
+    if not isinstance(args, dict):
+        return None
+    return {
+        "id": f"rescued-{_uuid.uuid4().hex[:8]}",
+        "type": "function",
+        "function": {"name": name, "arguments": _json.dumps(args)},
+    }
+
+
 def _extract_balanced_json_substrings(text: str) -> list[str]:
     """Return all syntactically valid JSON object substrings (top-level
     `{...}` blocks) found anywhere in `text`, ordered by length descending.
@@ -511,7 +599,6 @@ class LocalAgent:
         no candidate parses or none has a valid tool-call shape.
         """
         import json as _json
-        import uuid as _uuid
         import re as _re
         if not content or not isinstance(content, str):
             return None
@@ -547,32 +634,9 @@ class LocalAgent:
                 obj = _json.loads(cand)
             except _json.JSONDecodeError:
                 continue
-            if not isinstance(obj, dict):
-                continue
-            # Unwrap the {"function": {...}} variant.
-            if "function" in obj and isinstance(obj["function"], dict):
-                obj = obj["function"]
-            # Find the tool name.
-            name = obj.get("name") or obj.get("tool")
-            if not isinstance(name, str) or not name:
-                continue
-            # Find the args.
-            args = obj.get("arguments")
-            if args is None:
-                args = obj.get("parameters")
-            if args is None:
-                args = {}
-            if not isinstance(args, dict):
-                continue
-            return {
-                "id": f"rescued-{_uuid.uuid4().hex[:8]}",
-                "type": "function",
-                "function": {
-                    "name": name,
-                    # OpenAI spec requires arguments as a JSON STRING.
-                    "arguments": _json.dumps(args),
-                },
-            }
+            entry = _tool_call_entry(obj)
+            if entry is not None:
+                return entry
         return None
 
     def _dispatch_tool(self, name: str, args: dict) -> str:
@@ -768,18 +832,8 @@ class LocalAgent:
                         content_parts.append(text)
                         if on_delta:
                             on_delta(text)
-                    for tc in (delta.get("tool_calls") or []):
-                        idx = tc.get("index") or 0
-                        if idx not in tool_calls_acc:
-                            tool_calls_acc[idx] = {
-                                "id": "", "name": "", "args": []}
-                        fn = tc.get("function") or {}
-                        if tc.get("id"):
-                            tool_calls_acc[idx]["id"] = tc["id"]
-                        if fn.get("name"):
-                            tool_calls_acc[idx]["name"] = fn["name"]
-                        if fn.get("arguments"):
-                            tool_calls_acc[idx]["args"].append(fn["arguments"])
+                    _merge_tool_call_deltas(tool_calls_acc,
+                                            delta.get("tool_calls"))
         except urllib.error.HTTPError as e:
             try:
                 body = e.read().decode("utf-8", errors="replace")[:600]
@@ -946,23 +1000,7 @@ class LocalAgent:
                                 on_done, on_error):
         """Anthropic provider doesn't support tool calling in v1 of the
         agent. Run a single Messages API call and return the answer."""
-        # Compose system + user from the messages list. We treat the first
-        # 'system' message (if any) as the system prompt; the rest become
-        # the user content.
-        sys_parts = []
-        user_parts = []
-        for m in messages:
-            role = m.get("role")
-            text = m.get("content") or ""
-            if role == "system":
-                sys_parts.append(text)
-            elif role == "user":
-                user_parts.append(text)
-            elif role == "assistant":
-                # Squash prior assistant turns into the conversation context.
-                user_parts.append(f"[previous assistant turn]\n{text}")
-        system_prompt = "\n\n".join(p for p in sys_parts if p)
-        user_prompt = "\n\n".join(p for p in user_parts if p)
+        system_prompt, user_prompt = _compose_anthropic_prompts(messages)
 
         api_key_env = self.cfg.get("api_key_env") or "ANTHROPIC_API_KEY"
         api_key = os.environ.get(api_key_env, "")
