@@ -189,6 +189,30 @@ class ProjectsTabController:
         self._tab = tk.Frame(notebook, bg=C["base"])
         notebook.add(self._tab, text="  Projects  ")
 
+        self._build_sub_controllers(
+            cfg, on_log, on_shell, on_refresh, on_set_running,
+            on_settings, on_seed_ask, get_projects, on_run,
+            on_run_capture, on_commit, on_project_select, notebook)
+
+        self._build_projects_tab()
+        self._build_context_menu()
+
+    def _build_sub_controllers(self, cfg, on_log, on_shell, on_refresh,
+                               on_set_running, on_settings, on_seed_ask,
+                               get_projects, on_run, on_run_capture,
+                               on_commit, on_project_select, notebook) -> None:
+        """Construct every sub-controller this tab owns.
+
+        Split out of `__init__` (2026-09-11), which was 162 lines against a
+        cap of 150. Its cyclomatic complexity was **1** -- it is declarative
+        construction start to finish -- but the layout carve-out needs a
+        matching NAME as well as complexity <= 3, and `__init__` is not one.
+        Naming it for what it does earns the exemption honestly rather than
+        by widening the rule.
+
+        Every one of these needs `self._tab` to exist, which is why the call
+        site sits after the frame is created and before the tab is built.
+        """
         self._codegraph = CodeGraphController(
             tab=self._tab,
             cfg=cfg,
@@ -299,8 +323,6 @@ class ProjectsTabController:
         # CommandBarCtrl exist, so the toolbar buttons and menu items can bind
         # to self._cmd_bar.cmd_* directly. The sub-controllers only need
         # self._tab (already created); ProjectSyncCtrl reads self._tree lazily.
-        self._build_projects_tab()
-        self._build_context_menu()
 
     # ── Convenience ───────────────────────────────────────────────────────────
 

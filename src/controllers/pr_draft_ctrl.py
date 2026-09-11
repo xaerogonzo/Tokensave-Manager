@@ -255,36 +255,25 @@ class PRDraftCtrl:
             ),
             _accept)
 
-    def _draft_pr_via_cli(self, path: str):
-        from helpers.agent_cli import spawn as spawn_agent_cli  # lazy import
-        base = self._resolve_pr_base(path)
-        if base is None:
-            messagebox.showerror(
-                "Draft PR — base branch not found",
-                "Could not detect the base branch for this PR.\n\n"
-                "Right-click the Draft PR button and choose\n"
-                "'Set PR base branch…' to specify one manually, or\n"
-                "push to a remote and set a tracking branch with:\n"
-                "  git branch --set-upstream-to=origin/<base> <branch>",
-                parent=self._root)
-            return
-        # triple-dot `git diff base...HEAD` computes diff(merge-base(base,HEAD), HEAD)
-        # — this isolates only this branch's commits, excluding upstream changes that
-        # landed on base after branching. Do not change to double-dot.
-        gh_available = bool(shutil.which("gh"))
-        gh_base = base.split("/")[-1]   # strip "origin/" prefix; gh expects bare branch name
-        gh_step = (
-            f"Then create the PR on GitHub: push the branch first with "
-            f"`git push -u origin HEAD` if it has no remote tracking, then run "
-            f"`gh pr create --title <one-line-title> --body-file PR_DRAFT.md "
-            f"--base {gh_base}` (replace <one-line-title> with a short descriptive title) "
-            f"and print the resulting PR URL. "
-            f"If the PR is created successfully, delete PR_DRAFT.md from the project root."
-            if gh_available else
-            "Note: gh CLI is not on PATH, so the PR_DRAFT.md file is your deliverable — "
-            "skip any gh commands."
-        )
+    def _build_pr_context(self, path: str, base: str) -> tuple:
+        """Assemble `.pr_context.tmp.md` and the step that points at it.
 
+        Split out of `_draft_pr_via_cli` (2026-09-11), which was 151 lines
+        against a cap of 150. Preparing what the agent READS is a different
+        job from launching it.
+
+        **Why a file at all.** The instruction is passed as one command-line
+        argument, and cmd.exe interprets `|`, `&`, `(`, `)` and `"` in
+        markdown as shell metacharacters -- the spawned process dies
+        immediately. The grounding and the checklist template therefore go to
+        a sibling file the CLI is told to read as step 1, and to delete when
+        it is done.
+
+        Returns `(context_step, context_path, grounded, gap_suggestions)`.
+        A write failure is NOT fatal: `context_step` comes back empty and the
+        draft proceeds without it, because losing the checklist is much
+        better than losing the draft.
+        """
         # v4.6: pre-build tokensave + codegraph grounding when enabled, AND
         # nudge the CLI to use its own MCP tools if they're wired. Two
         # complementary mechanisms: the grounding block gives the CLI
@@ -365,6 +354,40 @@ class PRDraftCtrl:
                 f"  Draft PR: could not write context file ({exc}); proceeding without it.",
                 C["peach"])
             context_step = ""
+        return context_step, context_path, grounded, _gap_suggestions
+
+    def _draft_pr_via_cli(self, path: str):
+        from helpers.agent_cli import spawn as spawn_agent_cli  # lazy import
+        base = self._resolve_pr_base(path)
+        if base is None:
+            messagebox.showerror(
+                "Draft PR — base branch not found",
+                "Could not detect the base branch for this PR.\n\n"
+                "Right-click the Draft PR button and choose\n"
+                "'Set PR base branch…' to specify one manually, or\n"
+                "push to a remote and set a tracking branch with:\n"
+                "  git branch --set-upstream-to=origin/<base> <branch>",
+                parent=self._root)
+            return
+        # triple-dot `git diff base...HEAD` computes diff(merge-base(base,HEAD), HEAD)
+        # — this isolates only this branch's commits, excluding upstream changes that
+        # landed on base after branching. Do not change to double-dot.
+        gh_available = bool(shutil.which("gh"))
+        gh_base = base.split("/")[-1]   # strip "origin/" prefix; gh expects bare branch name
+        gh_step = (
+            f"Then create the PR on GitHub: push the branch first with "
+            f"`git push -u origin HEAD` if it has no remote tracking, then run "
+            f"`gh pr create --title <one-line-title> --body-file PR_DRAFT.md "
+            f"--base {gh_base}` (replace <one-line-title> with a short descriptive title) "
+            f"and print the resulting PR URL. "
+            f"If the PR is created successfully, delete PR_DRAFT.md from the project root."
+            if gh_available else
+            "Note: gh CLI is not on PATH, so the PR_DRAFT.md file is your deliverable — "
+            "skip any gh commands."
+        )
+
+        (context_step, context_path, grounded,
+         _gap_suggestions) = self._build_pr_context(path, base)
 
         mcp_nudge = (
             " Note: if `mcp__tokensave__*` tools are available in this "
@@ -569,6 +592,60 @@ class PRDraftCtrl:
             "generating": "Generating draft… (streaming)",
         }.get(phase, phase)
 
+    def _build_draft_header(self, dlg) -> tuple:
+        """Status line and grounding badge. Returns (hdr, status_var, badge_var, grounded).
+
+        Split out of `_open_pr_draft_dialog` (2026-09-11), which was 156
+        lines against a cap of 150. Both halves were already marked off with
+        section comments; rule A asks for UI to be split by semantic
+        grouping, and a header is one.
+
+        The badge states whether grounding is on AND a tool is configured --
+        the switch alone would claim grounding on a machine with neither
+        tokensave nor codegraph installed.
+        """
+        # ── Header: status + grounding badge ──
+        hdr = tk.Frame(dlg, bg=C["base"])
+        status_var = tk.StringVar(value="Preparing…")
+        tk.Label(hdr, textvariable=status_var, bg=C["base"], fg=C["blue"],
+                 font=("Segoe UI", 9, "bold")).pack(side=tk.LEFT, padx=12, pady=(8, 0))
+        grounded = bool(self._cfg.enable_pr_grounding and
+                        (self._cfg.tokensave_exe or self._cfg.codegraph_exe))
+        badge_var = tk.StringVar(
+            value="✓ Grounded: tokensave + codegraph" if grounded else "not grounded")
+        tk.Label(hdr, textvariable=badge_var, bg=C["base"],
+                 fg=(C["green"] if grounded else C["overlay0"]),
+                 font=("Segoe UI", 8)).pack(side=tk.RIGHT, padx=12, pady=(8, 0))
+        return hdr, status_var, badge_var, grounded
+
+    def _build_draft_body(self, dlg) -> tuple:
+        """Text widget plus both scrollbars, gridded corner-to-corner.
+
+        The placeholder it starts with is deliberate: on local models the
+        first tokens can take 30-90s, and an empty box for a minute and a
+        half reads as a hang rather than as work in progress.
+        """
+        # ── Body: text + scrollbars in their own grid frame (corner-to-corner) ──
+        body = tk.Frame(dlg, bg=C["base"])
+        txt = tk.Text(body, wrap=tk.NONE, bg=C["mantle"], fg=C["text"],
+                      font=("Consolas", 9), relief=tk.FLAT, padx=8, pady=6)
+        vsb = ttk.Scrollbar(body, orient="vertical",   command=txt.yview)
+        hsb = ttk.Scrollbar(body, orient="horizontal", command=txt.xview)
+        txt.configure(yscrollcommand=vsb.set, xscrollcommand=hsb.set)
+        txt.grid(row=0, column=0, sticky="nsew")
+        vsb.grid(row=0, column=1, sticky="ns")
+        hsb.grid(row=1, column=0, sticky="ew")
+        body.rowconfigure(0, weight=1)
+        body.columnconfigure(0, weight=1)
+        txt.insert(
+            tk.END,
+            "⏳  Preparing your PR draft…\n\n"
+            "Reading your branch diff and grounding context. On local models the "
+            "first tokens can take 30–90s — the draft will stream in here as it "
+            "writes. Watch the status line above for progress.\n")
+        txt.configure(state=tk.DISABLED)
+        return body, txt, vsb
+
     def _open_pr_draft_dialog(self, path: str, base: str, provider: str = ""):
         """Open the standalone streaming PR-draft window; return its context dict.
 
@@ -623,38 +700,10 @@ class PRDraftCtrl:
         streamed = [False]    # first real token clears the placeholder
         gh_exe = shutil.which("gh")
 
-        # ── Header: status + grounding badge ──
-        hdr = tk.Frame(dlg, bg=C["base"])
-        status_var = tk.StringVar(value="Preparing…")
-        tk.Label(hdr, textvariable=status_var, bg=C["base"], fg=C["blue"],
-                 font=("Segoe UI", 9, "bold")).pack(side=tk.LEFT, padx=12, pady=(8, 0))
-        grounded = bool(self._cfg.enable_pr_grounding and
-                        (self._cfg.tokensave_exe or self._cfg.codegraph_exe))
-        badge_var = tk.StringVar(
-            value="✓ Grounded: tokensave + codegraph" if grounded else "not grounded")
-        tk.Label(hdr, textvariable=badge_var, bg=C["base"],
-                 fg=(C["green"] if grounded else C["overlay0"]),
-                 font=("Segoe UI", 8)).pack(side=tk.RIGHT, padx=12, pady=(8, 0))
+        (hdr, status_var, badge_var,
+         grounded) = self._build_draft_header(dlg)
 
-        # ── Body: text + scrollbars in their own grid frame (corner-to-corner) ──
-        body = tk.Frame(dlg, bg=C["base"])
-        txt = tk.Text(body, wrap=tk.NONE, bg=C["mantle"], fg=C["text"],
-                      font=("Consolas", 9), relief=tk.FLAT, padx=8, pady=6)
-        vsb = ttk.Scrollbar(body, orient="vertical",   command=txt.yview)
-        hsb = ttk.Scrollbar(body, orient="horizontal", command=txt.xview)
-        txt.configure(yscrollcommand=vsb.set, xscrollcommand=hsb.set)
-        txt.grid(row=0, column=0, sticky="nsew")
-        vsb.grid(row=0, column=1, sticky="ns")
-        hsb.grid(row=1, column=0, sticky="ew")
-        body.rowconfigure(0, weight=1)
-        body.columnconfigure(0, weight=1)
-        txt.insert(
-            tk.END,
-            "⏳  Preparing your PR draft…\n\n"
-            "Reading your branch diff and grounding context. On local models the "
-            "first tokens can take 30–90s — the draft will stream in here as it "
-            "writes. Watch the status line above for progress.\n")
-        txt.configure(state=tk.DISABLED)
+        body, txt, vsb = self._build_draft_body(dlg)
 
         # Dirty tracking — genuine user edits only (our inserts set prog[0]).
         def _on_modified(_e=None):
