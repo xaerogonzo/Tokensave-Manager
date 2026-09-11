@@ -5,7 +5,7 @@
 
 ---
 
-## Tokensave: use it before Read, Grep or Glob
+## Tokensave: use it before you locate or read
 
 **The rule, and its trigger.** Before any tool call whose purpose is *finding
 out where something is, or what it does*, use a tokensave tool. `Read` is for a
@@ -13,9 +13,9 @@ body you are about to edit or must verify line by line. It is not for locating
 one.
 
 Measured 2026-09-10 across 30 days on this machine: **912 of 49,285 turns could
-have been served by a tokensave query** — 858 `Read` and 54 `Grep`. That is
-what this rule is for, and it is why the wording is "before" rather than
-"prefer".
+have been served by a tokensave query** — 858 `Read` and 54 `Grep`, and a
+floor: it counted no shell reads. That is what this rule is for, and why
+the wording is "before" rather than "prefer".
 
 **Do not hand code research to a general-purpose or search subagent.** An agent
 that reads files re-derives what the graph already holds, and pays a second
@@ -41,7 +41,16 @@ and the honest move is to say so rather than quietly work from it.
 
 **The body read is a tokensave call too.** `tokensave_read` slices with
 `mode: "lines"`, maps symbols with `mode: "map"`, and is cached across
-sessions. `Read` is the fallback, not the default.
+sessions. It reads any path, indexed or not, including a `.md`.
+
+**The rule is the act, not the tool name.** Paging or searching through the
+shell (`sed -n`, `cat`, `grep`, `rg`, `Select-String`) is the same act and is
+covered here. A mode preferring the shell over the dedicated tools is not in
+conflict: `tokensave_read` is neither.
+
+**For a search, literal vs regex is the discriminator.** A fixed string is
+`tokensave_search literal=true`, which also names what it could not scan.
+Regex has no literal equivalent, so `Grep` is correct there.
 
 ---
 
