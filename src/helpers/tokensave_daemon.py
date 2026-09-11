@@ -463,6 +463,57 @@ def list_tokensave_servers(tokensave_exe: str = "",
                              tolerance_s=tolerance_s, registry=registry)
 
 
+def _attribute_one(srv, registry: dict, projects, claimed: dict):
+    """Attribute ONE server from the evidence that does not need guessing.
+
+    Split out of `attribute_servers` (2026-09-11), which was complexity 20
+    against a cap of 18. Its own comments already called this Pass 1, and the
+    -shm correlation Pass 2; only the first pass is per-server.
+
+    **The registry is consulted before `-p` deliberately.** It is strictly
+    better evidence: the registry records what the server itself RESOLVED,
+    whereas `-p` is what it was ASKED for -- often a relative "." that means
+    something only from the server's own working directory.
+
+    Mutates `claimed` in place: a server attributed to a KNOWN project stakes
+    a claim on it, which Pass 2 reads so a timing coincidence cannot re-
+    attribute a project that authoritative evidence already settled.
+    """
+    entry = _registry_entry_for(srv, registry)
+    listed = str((entry or {}).get("project_path") or "")
+    if listed:
+        resolved = _match_known(listed, projects) or listed
+        known = _match_known(listed, projects) is not None
+        source = entry.get("_source", SOURCE_LIVE_REGISTRY)
+        if known:
+            claimed.setdefault(resolved, []).append(srv.pid)
+        return _with(
+            srv, project=resolved, source=source,
+            attribution=_attribution_for(source),
+            db_path=str(entry.get("db_path") or "") or None,
+            version=str(entry.get("version") or ""),
+            detail=("named by the tokensave server registry"
+                    if known else
+                    "named by the tokensave server registry "
+                    "(not a known project)"))
+
+    declared = _declared_project(srv.command_line)
+    if declared and _match_known(declared, projects):
+        resolved = _match_known(declared, projects)
+        claimed.setdefault(resolved, []).append(srv.pid)
+        return _with(srv, project=resolved, source=SOURCE_DECLARED,
+                         attribution=_attribution_for(SOURCE_DECLARED),
+                         detail="declared with -p on the command line")
+    elif declared:
+        # It named a project we do not know about. Still not a guess —
+        # but not a project the manager can act on either.
+        return _with(srv, project=declared, source=SOURCE_DECLARED,
+                         attribution=_attribution_for(SOURCE_DECLARED),
+                         detail="declared with -p (not a known project)")
+    else:
+        return srv
+
+
 def attribute_servers(servers: "list[TokensaveServer]",
                       known_projects: list,
                       *, tolerance_s: float = DEFAULT_TOLERANCE_S,
@@ -497,40 +548,7 @@ def attribute_servers(servers: "list[TokensaveServer]",
     # exactly the ambiguity `project_path` resolves.
     out, claimed = [], {}
     for srv in servers:
-        entry = _registry_entry_for(srv, registry)
-        listed = str((entry or {}).get("project_path") or "")
-        if listed:
-            resolved = _match_known(listed, projects) or listed
-            known = _match_known(listed, projects) is not None
-            source = entry.get("_source", SOURCE_LIVE_REGISTRY)
-            if known:
-                claimed.setdefault(resolved, []).append(srv.pid)
-            out.append(_with(
-                srv, project=resolved, source=source,
-                attribution=_attribution_for(source),
-                db_path=str(entry.get("db_path") or "") or None,
-                version=str(entry.get("version") or ""),
-                detail=("named by the tokensave server registry"
-                        if known else
-                        "named by the tokensave server registry "
-                        "(not a known project)")))
-            continue
-
-        declared = _declared_project(srv.command_line)
-        if declared and _match_known(declared, projects):
-            resolved = _match_known(declared, projects)
-            claimed.setdefault(resolved, []).append(srv.pid)
-            out.append(_with(srv, project=resolved, source=SOURCE_DECLARED,
-                             attribution=_attribution_for(SOURCE_DECLARED),
-                             detail="declared with -p on the command line"))
-        elif declared:
-            # It named a project we do not know about. Still not a guess —
-            # but not a project the manager can act on either.
-            out.append(_with(srv, project=declared, source=SOURCE_DECLARED,
-                             attribution=_attribution_for(SOURCE_DECLARED),
-                             detail="declared with -p (not a known project)"))
-        else:
-            out.append(srv)
+        out.append(_attribute_one(srv, registry, projects, claimed))
 
     # Pass 2 — the -shm correlation for whatever is left.
     resolved = []

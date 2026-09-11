@@ -232,6 +232,57 @@ def classify_stale_entries(entries: "list[StaleEntry]",
     return out
 
 
+def _read_source_tables(con) -> tuple:
+    """(project_paths, hashes, offsets, have_history) from the global DB.
+
+    Split out of `resolve_entry_source` (2026-09-11), which was complexity 22
+    against a cap of 18. Reading three independent tables is a different job
+    from deciding what an entry IS, and it is where all the conservatism
+    lives.
+
+    **Each table is optional and each read is guarded separately.** A schema
+    that moved under us must leave the corresponding set EMPTY rather than
+    take the whole classification down -- and an empty set is later read as
+    "no positive evidence", never as "belongs to the other category".
+
+    `have_history` is true only when a history table READ SUCCEEDED. It is
+    not `bool(hashes or offsets)`: a table that exists and is legitimately
+    empty is still evidence the history structures are present, whereas one
+    that failed to read is not.
+    """
+    tables = {r[0] for r in con.execute(
+        "SELECT name FROM sqlite_master WHERE type='table'")}
+
+    project_paths = set()
+    if "projects" in tables:
+        try:
+            project_paths = {os.path.normcase(r[0])
+                             for r in con.execute("SELECT path FROM projects")
+                             if r[0]}
+        except sqlite3.Error:
+            project_paths = set()
+
+    hashes = set()
+    have_history = False
+    if "turns" in tables:
+        try:
+            hashes = {r[0] for r in con.execute(
+                "SELECT DISTINCT project_hash FROM turns") if r[0]}
+            have_history = True
+        except sqlite3.Error:
+            have_history = False
+
+    offsets: list = []
+    if "parse_offsets" in tables:
+        try:
+            offsets = [r[0] for r in con.execute(
+                "SELECT file_path FROM parse_offsets") if r[0]]
+            have_history = True
+        except sqlite3.Error:
+            pass
+    return project_paths, hashes, offsets, have_history
+
+
 def resolve_entry_source(entries: "list[StaleEntry]",
                          global_db: str) -> "list[StaleEntry]":
     """Label each entry `project_row`, `cost_history`, or `unknown`.
@@ -257,36 +308,7 @@ def resolve_entry_source(entries: "list[StaleEntry]",
     try:
         uri = pathlib.Path(os.path.abspath(global_db)).as_uri() + "?mode=ro"
         con = sqlite3.connect(uri, uri=True, timeout=2)
-        tables = {r[0] for r in con.execute(
-            "SELECT name FROM sqlite_master WHERE type='table'")}
-
-        project_paths = set()
-        if "projects" in tables:
-            try:
-                project_paths = {os.path.normcase(r[0])
-                                 for r in con.execute("SELECT path FROM projects")
-                                 if r[0]}
-            except sqlite3.Error:
-                project_paths = set()
-
-        hashes = set()
-        have_history = False
-        if "turns" in tables:
-            try:
-                hashes = {r[0] for r in con.execute(
-                    "SELECT DISTINCT project_hash FROM turns") if r[0]}
-                have_history = True
-            except sqlite3.Error:
-                have_history = False
-
-        offsets: list = []
-        if "parse_offsets" in tables:
-            try:
-                offsets = [r[0] for r in con.execute(
-                    "SELECT file_path FROM parse_offsets") if r[0]]
-                have_history = True
-            except sqlite3.Error:
-                pass
+        project_paths, hashes, offsets, have_history = _read_source_tables(con)
 
         out: list = []
         for e in entries:

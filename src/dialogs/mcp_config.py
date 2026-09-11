@@ -51,6 +51,67 @@ if TYPE_CHECKING:
     from state import ManagerConfig
 
 
+def _bucket_by_service(rows: list, service: dict, cfg_raw) -> dict:
+    """Sort project rows into the groups this view renders separately.
+
+    Split out of `_render_projects_section` (2026-09-11), which was
+    complexity 25 against a cap of 18. It matches the layout carve-out's NAME
+    pattern but not its complexity condition, and rule A is explicit that
+    naming alone never grants immunity. Pulling the buckets out also makes
+    the part worth testing testable, which a Tk render method is not.
+
+    **Bucketed by how each project is actually SERVED, not by what its file
+    says.** Those are different questions, and answering the second while
+    claiming the first is the defect this replaces: every project without a
+    `.mcp.json` was filed under "needs binding" with a loud Apply button,
+    including ones a user-scoped `tokensave serve` was already serving
+    correctly. Measured 2026-09-09: four servers running, one of them serving
+    a project with no `.mcp.json` at all. "Needs binding" is true only once
+    the fallback is gone -- which is what SERVICE_UNSERVED means and
+    SERVICE_AUTOMATIC does not.
+
+    **An advisory row has a CORRECT file and an external blocker**, so it
+    must never offer Apply: rewriting a correct file changes nothing and
+    would report success for it.
+
+    **Skip is an ANSWER.** This view did not honour it, so a skipped project
+    kept rendering under "needs binding" and clicking Skip appeared to do
+    nothing at all.
+    """
+    def _is(row, *want):
+        return service.get(row[1]) in want
+
+    # Loud: nothing serves these, or something serves them WRONGLY.
+    needs = [r for r in rows if _is(r, SERVICE_UNSERVED)
+             and r[2]["state"] not in ADVISORY_STATES]
+    misbound = [r for r in rows if _is(r, SERVICE_WRONG)]
+    # Quiet: served by the machine-wide fallback rather than by their own
+    # binding. Correct today; an upgrade away from being deterministic.
+    automatic = [r for r in rows if _is(r, SERVICE_AUTOMATIC)]
+    # An advisory row has a CORRECT file and an external blocker, so it
+    # must not offer Apply — rewriting a correct file changes nothing and
+    # would report success for it. Kept separate from `automatic` only
+    # when nothing serves it; otherwise its blocker is not costing the
+    # user anything today and it belongs in the quiet group.
+    advisory = [r for r in rows if r[2]["state"] in ADVISORY_STATES
+                and _is(r, SERVICE_UNSERVED, SERVICE_UNKNOWN)]
+    bound = [r for r in rows if _is(r, SERVICE_SELF)]
+
+    # Skip is an ANSWER, and this view never honoured it. A skipped
+    # project kept rendering under "needs binding" with a loud Apply
+    # button, so clicking Skip appeared to do nothing at all — and for a
+    # project already on the list it genuinely did nothing, because
+    # `_skip` short-circuits when the path is present.
+    raw_cfg = cfg_raw if isinstance(cfg_raw, dict) else {}
+    skips = raw_cfg.get("mcp_skip_warnings") or []
+    skipped = [r for r in needs if _project_mcp_path(r[1]) in skips]
+    needs = [r for r in needs if _project_mcp_path(r[1]) not in skips]
+    automatic = [r for r in automatic
+                 if _project_mcp_path(r[1]) not in skips]
+    return {"needs": needs, "misbound": misbound, "automatic": automatic,
+            "advisory": advisory, "bound": bound, "skipped": skipped}
+
+
 class MCPConfigDialog(OverviewMixin, DesktopMigrationMixin, DuplicateKeysMixin,
                      UserScopeMigrationMixin, EntryBlocksMixin,
                      CursorBindingMixin, UiPumpMixin, tk.Toplevel):
@@ -295,38 +356,10 @@ class MCPConfigDialog(OverviewMixin, DesktopMigrationMixin, DuplicateKeysMixin,
         # of them serving a project with no `.mcp.json` at all. "Needs
         # binding" is true only once the fallback is gone — which is exactly
         # what `SERVICE_UNSERVED` means and `SERVICE_AUTOMATIC` does not.
-        service = self._service_by_root(rows)
-
-        def _is(row, *want):
-            return service.get(row[1]) in want
-
-        # Loud: nothing serves these, or something serves them WRONGLY.
-        needs = [r for r in rows if _is(r, SERVICE_UNSERVED)
-                 and r[2]["state"] not in ADVISORY_STATES]
-        misbound = [r for r in rows if _is(r, SERVICE_WRONG)]
-        # Quiet: served by the machine-wide fallback rather than by their own
-        # binding. Correct today; an upgrade away from being deterministic.
-        automatic = [r for r in rows if _is(r, SERVICE_AUTOMATIC)]
-        # An advisory row has a CORRECT file and an external blocker, so it
-        # must not offer Apply — rewriting a correct file changes nothing and
-        # would report success for it. Kept separate from `automatic` only
-        # when nothing serves it; otherwise its blocker is not costing the
-        # user anything today and it belongs in the quiet group.
-        advisory = [r for r in rows if r[2]["state"] in ADVISORY_STATES
-                    and _is(r, SERVICE_UNSERVED, SERVICE_UNKNOWN)]
-        bound = [r for r in rows if _is(r, SERVICE_SELF)]
-
-        # Skip is an ANSWER, and this view never honoured it. A skipped
-        # project kept rendering under "needs binding" with a loud Apply
-        # button, so clicking Skip appeared to do nothing at all — and for a
-        # project already on the list it genuinely did nothing, because
-        # `_skip` short-circuits when the path is present.
-        raw_cfg = self._cfg.raw if isinstance(self._cfg.raw, dict) else {}
-        skips = raw_cfg.get("mcp_skip_warnings") or []
-        skipped = [r for r in needs if _project_mcp_path(r[1]) in skips]
-        needs = [r for r in needs if _project_mcp_path(r[1]) not in skips]
-        automatic = [r for r in automatic
-                     if _project_mcp_path(r[1]) not in skips]
+        _b = _bucket_by_service(rows, self._service_by_root(rows), self._cfg.raw)
+        needs, misbound = _b["needs"], _b["misbound"]
+        automatic, advisory = _b["automatic"], _b["advisory"]
+        bound, skipped = _b["bound"], _b["skipped"]
 
         # A project entry says `"command": "tokensave"` so the file stays
         # portable, which makes PATH resolution a prerequisite rather than

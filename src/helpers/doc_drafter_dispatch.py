@@ -83,6 +83,70 @@ def _dispatch_agentic(llm_cfg, system_prompt, user_prompt,
 
 
 
+def _dispatch_claude_cli(llm_cfg: dict, claude_cli_exe: str, system_prompt: str,
+                         user_prompt: str, timeout: int) -> tuple:
+    """The agent-CLI path. Returns (text, None) or (None, error).
+
+    Split out of `dispatch_llm` (2026-09-11), which was complexity 24 against
+    a cap of 18.
+
+    **`cwd` is $HOME on purpose.** Claude Code loads `<cwd>/CLAUDE.md` as
+    project context, which puts smaller models into "assistant mode" -- they
+    reply conversationally instead of producing the requested draft. Pointing
+    cwd at $HOME isolates the call. Everything from the project that actually
+    matters is already embedded in the prompt by the caller, so the process
+    does not need to sit in the project directory. Same pattern as
+    `helpers.commit_messages._strat_agent_cli`.
+    """
+    from helpers.claude_cli import call_claude_cli_print
+    exe = (claude_cli_exe or "").strip()
+    if not exe:
+        return None, (
+            "Claude CLI not configured — set path in "
+            "Settings → Claude Code CLI."
+        )
+    model = (llm_cfg.get("model") or "").strip()
+    # cwd=$HOME: Claude Code loads <cwd>/CLAUDE.md as project
+    # context, which puts smaller models (Haiku) into "assistant
+    # mode" — they reply conversationally to the prompt instead of
+    # producing the requested draft. Pointing cwd at $HOME isolates
+    # this call from any project CLAUDE.md. Project context that
+    # actually matters (existing section text, commit list,
+    # tokensave grounding) is already embedded in the prompt by
+    # the caller, so the CLI process does not need to be in the
+    # project directory. Same pattern used in
+    # helpers.commit_messages._strat_claude_cli.
+    result = call_claude_cli_print(
+        exe, user_prompt,
+        system_prompt=system_prompt,
+        timeout=timeout,
+        model=model,
+        cwd=os.path.expanduser("~"),
+    )
+    if not result:
+        return None, "Claude CLI returned no output (timeout or auth)."
+    return result, None
+
+
+def _max_tokens_for(system_prompt: str, user_prompt: str) -> int:
+    """Adaptive output ceiling, chosen from the size of the prompt.
+
+    After the Roadmap-7 prompt hardening (U2 swapped full existing-content
+    dumps for header summaries and scope-prefix vocab) typical prompts fell
+    below the old large branch, so the ceilings are tighter than they were.
+    The STOP marker added in U1 gives the model a positive termination
+    signal too, which is what reduced the headroom needed against ramble.
+    """
+    prompt_chars = len(system_prompt or "") + len(user_prompt or "")
+    if prompt_chars < 1500:
+        max_tokens = 1000          # tiny range → speed mode
+    elif prompt_chars < 4000:
+        max_tokens = 1500          # was 2000 — typical post-U2
+    else:
+        max_tokens = 2000          # was 2500 — large-context ceiling
+    return max_tokens
+
+
 def dispatch_llm(llm_cfg, system_prompt, user_prompt,
                  claude_cli_exe, cwd, timeout=120,
                  gen_params=None, examples=None,
@@ -133,34 +197,8 @@ def dispatch_llm(llm_cfg, system_prompt, user_prompt,
 
     try:
         if provider == "claude_cli":
-            from helpers.claude_cli import call_claude_cli_print
-            exe = (claude_cli_exe or "").strip()
-            if not exe:
-                return None, (
-                    "Claude CLI not configured — set path in "
-                    "Settings → Claude Code CLI."
-                )
-            model = (llm_cfg.get("model") or "").strip()
-            # cwd=$HOME: Claude Code loads <cwd>/CLAUDE.md as project
-            # context, which puts smaller models (Haiku) into "assistant
-            # mode" — they reply conversationally to the prompt instead of
-            # producing the requested draft. Pointing cwd at $HOME isolates
-            # this call from any project CLAUDE.md. Project context that
-            # actually matters (existing section text, commit list,
-            # tokensave grounding) is already embedded in the prompt by
-            # the caller, so the CLI process does not need to be in the
-            # project directory. Same pattern used in
-            # helpers.commit_messages._strat_claude_cli.
-            result = call_claude_cli_print(
-                exe, user_prompt,
-                system_prompt=system_prompt,
-                timeout=timeout,
-                model=model,
-                cwd=os.path.expanduser("~"),
-            )
-            if not result:
-                return None, "Claude CLI returned no output (timeout or auth)."
-            return result, None
+            return _dispatch_claude_cli(llm_cfg, claude_cli_exe,
+                                        system_prompt, user_prompt, timeout)
 
         from helpers.llm import _call_llm
         # Adaptive token cap. After Roadmap-7 prompt hardening (U2 swapped
@@ -169,13 +207,7 @@ def dispatch_llm(llm_cfg, system_prompt, user_prompt,
         # so the per-branch ceilings are tightened. The STOP marker added in
         # U1 also gives the model a positive termination signal, reducing
         # the need for headroom against ramble.
-        prompt_chars = len(system_prompt or "") + len(user_prompt or "")
-        if prompt_chars < 1500:
-            max_tokens = 1000          # tiny range → speed mode
-        elif prompt_chars < 4000:
-            max_tokens = 1500          # was 2000 — typical post-U2
-        else:
-            max_tokens = 2000          # was 2500 — large-context ceiling
+        max_tokens = _max_tokens_for(system_prompt, user_prompt)
         result = _call_llm(llm_cfg, system_prompt, user_prompt,
                            max_tokens=max_tokens)
         if not result:

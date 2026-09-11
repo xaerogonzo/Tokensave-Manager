@@ -593,36 +593,47 @@ def detect_stale_tests(
     return out
 
 
+def _target_binds(tgt, name: str) -> bool:
+    """Does one assignment target bind *name*? `a = ...` and `a, b = ...`."""
+    if isinstance(tgt, ast.Name):
+        return tgt.id == name
+    if isinstance(tgt, ast.Tuple):
+        return any(isinstance(e, ast.Name) and e.id == name for e in tgt.elts)
+    return False
+
+
+def _node_binds(node, name: str) -> bool:
+    """Does one top-level statement bind *name*?
+
+    Split out of `_module_defines` (2026-09-11), which was complexity 20
+    against a cap of 18 -- a four-way type dispatch with its own nested loops
+    inside a loop. One statement, one question, one answer.
+
+    An import binds too: `from X import Y as name` defines `name`, and a
+    plain `import a.b` binds `a`, which is why the fallback is the first
+    dotted segment rather than the whole module path.
+    """
+    if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef)):
+        return node.name == name
+    if isinstance(node, ast.Assign):
+        return any(_target_binds(t, name) for t in node.targets)
+    if isinstance(node, ast.AnnAssign):
+        return isinstance(node.target, ast.Name) and node.target.id == name
+    if isinstance(node, (ast.Import, ast.ImportFrom)):
+        return any((a.asname or a.name.split(".")[0]) == name
+                   for a in node.names)
+    return False
+
+
 def _module_defines(tree: ast.Module, name: str) -> bool:
     """True iff *tree* defines a top-level symbol called *name*.
 
-    Considers: function defs, class defs, module-level assignments,
-    and module-level imports (``from X import Y as name`` defines name).
+    Considers function defs, class defs, module-level assignments (plain and
+    annotated) and module-level imports.
     """
     if name == "*":
-        return True   # ``from X import *`` is opaque — don't false-flag
-    for node in tree.body:
-        if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef)):
-            if node.name == name:
-                return True
-        elif isinstance(node, ast.Assign):
-            for tgt in node.targets:
-                if isinstance(tgt, ast.Name) and tgt.id == name:
-                    return True
-                if isinstance(tgt, ast.Tuple):
-                    for elt in tgt.elts:
-                        if isinstance(elt, ast.Name) and elt.id == name:
-                            return True
-        elif isinstance(node, ast.AnnAssign):
-            if isinstance(node.target, ast.Name) and node.target.id == name:
-                return True
-        elif isinstance(node, (ast.Import, ast.ImportFrom)):
-            for alias in node.names:
-                bound = alias.asname or alias.name.split(".")[0]
-                if bound == name:
-                    return True
-    return False
-
+        return True   # ``from X import *`` is opaque -- do not false-flag
+    return any(_node_binds(node, name) for node in tree.body)
 
 # ── Per-project cache (last-run results, allowlists) ─────────────────────
 
