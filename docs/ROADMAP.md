@@ -170,14 +170,31 @@ linked — including in the three projects carrying the most session time.
   fleet, and shows both baselines with content hashes rather than inventing a
   version order. Runbook in `docs/RELOCATING.md` and a Help topic.
 
-  Remaining:
-  - **OpenChem's residual.** Its kept "Verification standard" is 64,030 B: about
-    a dozen lines of convention followed by **20 `###` lesson subsections**.
-    Splitting inside a section needs `###` granularity, which this does not
-    have. A second, smaller split opportunity — not a defect in the first.
-  - **`docs/LESSONS.md` is untracked in each target repo.** The split writes it;
-    committing it is the project owner's call, and until then the index points
-    at a file that is not in the history.
+  Remaining: none — both closed 2026-09-11, and both had gone stale in place.
+  - **OpenChem's residual** was resolved by the `###` granularity recorded 30
+    lines above: the kept "Verification standard" is 567 B of convention, not
+    64,030. This block still called it open, which is the hazard of recording
+    a follow-up and its resolution in two places.
+  - **`docs/LESSONS.md` is tracked.** Measured: LexForge has it committed with
+    its citations repointed (`311e7b7`) and a clean tree. Fortuna and OpenChem
+    were prompted; committing stays each owner's call.
+
+- ✅ **The tokensave rule named tools, so the shell walked past it** (PR #46).
+  A session paged its own `docs/LESSONS.md` with `sed -n`, which is not `Read`,
+  `Grep` or `Glob` and so was covered by no sentence in the rule. The rule now
+  names the **act**; `literal` vs regex is the discriminator for a search, not
+  grep vs tokensave; and the 912-turn figure is recorded as a **floor** because
+  it counted no shell reads.
+
+- ✅ **Doc sweep: the always-loaded file carried a 35%-complete copy of
+  ARCHITECTURE.** `## Project Structure` named **66 of 187** modules for
+  **16,722 B on every message**, while `docs/ARCHITECTURE.md` named 178 and is
+  read on demand. Cut to a pointer plus the shape that does not drift; the one
+  module documented only there (`dialogs/relocate.py`) and two in neither
+  (`helpers/vscode_extension.py`, `dialogs/extension_manager.py`) were added to
+  ARCHITECTURE first, and the wrapper's single-threaded **MUST** was moved into
+  the surviving key-files table rather than deleted with its tree. Chain
+  **85,303 -> 70,444 B (-17.4%)**.
 
 - ✅ **Phase 1b: shrink the baseline, harvest the big three.** Done as a
   separate commit series so Phase 1's wiring measurement stayed clean. The

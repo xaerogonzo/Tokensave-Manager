@@ -372,209 +372,31 @@ If a refactor would improve metric (4) at the cost of (2) or (3), don't do it. M
 
 ## Project Structure
 
+The complete tree -- every module in `src/helpers/`, `src/dialogs/` and
+`src/controllers/` with its role -- is **`docs/ARCHITECTURE.md`, section
+`## Repository Layout`**, which is read on demand rather than loaded on every
+message.
+
+Measured 2026-09-11: ARCHITECTURE names **178 of 187** modules. The copy that
+used to sit here named **66**, and cost **16,722 B on every message** to do it.
+A hand-kept list only grows by hand, which is the failure mode recorded in
+`templates/gotchas/moving-content-moves-its-guards.md`.
+
+The shape, which does not drift:
+
 ```
-Token Save Manager Source/
-├── manager-config.json            Machine-specific config (all hardcoded paths live here)  — gitignored
-├── manager-config.example.json    Clean template with placeholder paths — committed for new users
-├── Launch TokenSave Manager.bat   Reads python_exe from config, launches src/app.py
-├── build.ps1                      Nuitka compile pipeline — produces dist\ exes
-├── build.bat                      Double-click launcher for build.ps1
-├── BASIC_INSTRUCTIONS.md          This file
-├── CHANGELOG.md                   Feature history
-├── TOKENSAVE_GUIDE.md             Full tokensave CLI + MCP reference
-├── .gitignore                     Excludes manager-config.json, .claude/, .tokensave/, dist/, etc.
-│
-├── src/                           App + main() in app.py, everything else in
-│   │                              subpackages (helpers/, dialogs/, controllers/).
-│   ├── app.py                     Entry point — App(tk.Tk) class + main(). Owns the
-│   │                              single ManagerConfig instance and passes it down
-│   │                              to every controller/dialog.
-│   ├── state.py                   ManagerConfig dataclass (runtime-mutable settings;
-│   │                              read-only @property getters; mutated via
-│   │                              raw.update() + save() + refresh_derived()).
-│   ├── constants.py               Immutable constants: C palette, regex tables,
-│   │                              CREATE_NO_WINDOW, _ANSI, _GIT_ENV_NO_PROMPT,
-│   │                              paths (_BASE_DIR, _CONFIG_PATH, LOG_FILE).
-│   ├── theme.py                   _Tooltip widget (Tk-coupled UI primitive).
-│   ├── tokensave-wrapper.py       Claude Desktop auto-detection wrapper (MUST stay single-threaded
-│   │                              AND pass sys.stdin/stdout/stderr to Popen explicitly — see
-│   │                              docs/MCP_INTEGRATION_GOTCHAS.md before touching).
-│   ├── prompts.py                 Built-in Claude prompt snippets (ROM defaults; overrides in cfg).
-│   ├── agent.py                   LocalAgent loop for the 🤖 Ask tab — Stage 2 read-only
-│   │                              tool calling + Stage 3 write-tool dispatch via the
-│   │                              injected on_write_proposal bridge.
-│   ├── agent_tools.py             ToolSpec registry: 6 read-only tools (read_file, list_directory,
-│   │                              git_log, git_diff, tokensave_search, tokensave_context) +
-│   │                              opt-in write_file via build_tools(with_write=True).
-│   ├── precommit_review.py        Entry point for the git pre-commit AI review hook
-│   │                              (Roadmap-2 P5b). Standalone — invoked by
-│   │                              .git/hooks/pre-commit; bootstraps sys.path to src/.
-│   │
-│   ├── helpers/                   Pure / IO helpers — no UI dependencies. Each module
-│   │   │                          takes only the parameters it needs.
-│   │   ├── config.py              _load_config, _save_config, _migrate_config
-│   │   ├── detection.py           _detect_git, _detect_gh, _detect_npm, _detect_codegraph,
-│   │   │                          _detect_claude_cli, _is_codegraph_project, _root_path,
-│   │   │                          _root_label, _version_lt
-│   │   ├── runtime.py             log, _setup_logger, _acquire_instance_lock,
-│   │   │                          _bring_existing_to_front, _make_tray_icon
-│   │   ├── project_discovery.py   find_projects(roots), get_pinned, set_pinned,
-│   │   │                          clear_pinned, fmt_age, load_basic_instructions_template
-│   │   ├── git.py                 _is_git_repo, _is_local_git_repo, _parse_git_status_v2,
-│   │   │                          _format_git_status_cell, _find_tracked_but_ignored,
-│   │   │                          _fetch_tags, _git_tag, _git_push_with_tags
-│   │   ├── gitignore.py           _ensure_gitignore, _baseline_patterns, _read_gitignore_lines,
-│   │   │                          _write_gitignore_lines, _BASELINE_GITIGNORE, _GITIGNORE_TEMPLATES
-│   │   ├── shadow_links.py        generate_shadow_links, remove_shadow_links,
-│   │   │                          update_gitignore_for_shadows, DEFAULT_SHADOW_EXT_MAP
-│   │   ├── scaffold.py            _scaffold_git_hook + _AUTO_COMMIT_HELPER script body
-│   │   ├── mcp.py                 _resolve_desktop_cfg_path, _wrapper_path, _canonical_mcp_entry,
-│   │   │                          _classify_mcp_entry, _apply_mcp_fix, _is_claude_running,
-│   │   │                          _MCP_CONFIGS, _MCP_CMD_CHECKERS
-│   │   ├── llm.py                 _call_llm, _call_anthropic, _call_openai_compat,
-│   │   │                          _iter_sse_events, _iter_json_lines, _is_auth_error
-│   │   ├── commit_messages.py     _suggest_commit_message (orchestrator) + 4 _strat_*
-│   │   │                          strategy fns + sanitiser cluster + _pending_diff,
-│   │   │                          _call_llm_for_commit_message
-│   │   ├── release.py             _last_release_tag, _commits_since, _classify_commits_for_changelog,
-│   │   │                          _bump_version, _suggest_bump_kind, _render_release_notes,
-│   │   │                          _zip_dist, _release_basename, _fmt_size
-│   │   │                          (Roadmap-2 P2: _patch_changelog removed — use
-│   │   │                          helpers/changelog_patch.py)
-│   │   ├── changelog_patch.py     insert_changelog_release (idempotent atomic patcher —
-│   │   │                          replaces existing ## [version] block bounded by next
-│   │   │                          ^## \[ line; falls back to insertion under
-│   │   │                          ## [Unreleased]. Wired into ReleaseWizard.)
-│   │   ├── pr_draft.py            generate_pr_draft (LLM-based PR description drafting)
-│   │   ├── savings.py             parse/fetch gain, gain --history, cost, discover;
-│   │   │                          three-state Result — unavailable is never zero
-│   │   ├── mcp_pyscope.py         PyScope's user-scoped MCP entry. Two states (mcp,
-│   │   │                          registration) that are never collapsed; reconcile()
-│   │   │                          is best-effort, ordered register-then-write, and
-│   │   │                          verdicts come from re-reading both.
-│   │   ├── pyscope.py             PyScope integration client — one `_run` subprocess
-│   │   │                          boundary; read-only surface plus the single mutating
-│   │   │                          register(). Configured / executable / healthy are
-│   │   │                          three separate answers, never inferred from each other.
-│   │   ├── instructions_posture.py Does a project's Claude instruction chain RESOLVE?
-│   │   │                          carriage (what the files declare) vs reach (what the
-│   │   │                          chain from CLAUDE.md arrives at). Bounded include walk.
-│   │   ├── instructions_wiring.py  The ONE writer. Repairs one topology; never deletes.
-│   │   ├── install_identity.py     Where am I (FIRST_RUN/SAME/MOVED) and who owns
-│   │   │                           the fleet (HERE/ELSEWHERE/SPLIT/UNOWNED). Two
-│   │   │                           questions, never conflated.
-│   │   ├── instructions_split.py   Moves a lesson log out of the always-loaded
-│   │   │                           file. Two-level section tree; digest-guarded;
-│   │   │                           reports what else in the repo names the file.
-│   │   ├── headless_analyzers.py One capability table for ruff / pyright /
-│   │   │                        markdownlint. Rows, not branches: probe order,
-│   │   │                        argv, stream and severity policy all differ.
-│   │   │                        Four availability states; FAILED is never a pass.
-│   │   ├── install_analyzers.py  How an analyzer is OBTAINED (npm / uv), kept
-│   │   │                        apart from how it is run. A missing package
-│   │   │                        manager is a state, not an error.
-│   │   ├── observations.py      Diagnostics the Manager RECEIVES already
-│   │   │                        rendered. Populations never summed;
-│   │   │                        analyzed_files stays unknown.
-│   │   ├── claude_cli.py          spawn_claude_cli (detached terminal via CREATE_NEW_CONSOLE)
-│   │   └── precommit_hook.py      install/remove/detect git pre-commit hook + review
-│   │                              runner (P5b). 3-value backend dispatch
-│   │                              (auto/claude_cli/llm); severity parser; sentinel marker
-│   │                              for install/remove symmetry. Fail-open invariant.
-│   │
-│   ├── dialogs/                   tk.Toplevel dialog classes. Each takes cfg: ManagerConfig
-│   │   │                          via __init__ when it needs to read settings; bare-data
-│   │   │                          dialogs (NewBranch, SwitchBranch, AssignCategory, etc.) skip it.
-│   │   ├── settings.py            SettingsDialog (+_probe_loaded_model helper)
-│   │   ├── settings_pyscope.py    PyScopeSection — path row + three-state status.
-│   │   │                          No install action: the Manager does not install PyScope.
-│   │   ├── release_wizard.py      ReleaseWizardDialog + _ReleaseCtx (paired)
-│   │   ├── instructions_overview.py InstructionsDialog — fleet instruction-chain view
-│   ├── relocate.py              RelocateDialog — one action for "this install
-│   │                            moved". Writes nothing of its own; config
-│   │                            before projects, because the include line
-│   │                            is derived from template_dir.
-│   ├── instructions_split.py    SplitProposalDialog — the oversized-chain offer.
-│   │                            Per project, never bulk; shows the complete
-│   │                            transformation before a byte is written.
-│   │   ├── mcp_config.py          MCPConfigDialog — mutates cfg.raw["mcp_skip_warnings"]
-│   │   ├── ai_code_review.py      AICodeReviewDialog — takes both llm_cfg dict + cfg
-│   │   ├── git_commit.py          GitCommitDialog
-│   │   ├── ollama_model_mgr.py    OllamaModelManagerDialog
-│   │   ├── gitignore.py           GitignoreDialog (lazy-imports UntrackIgnoredDialog)
-│   │   ├── github_setup.py        GitHubSetupDialog
-│   │   ├── retrofit.py            RetrofitDialog
-│   │   ├── scaffold.py            ScaffoldDialog
-│   │   ├── snippet_edit.py        SnippetEditDialog
-│   │   ├── shadow_links.py        ShadowLinksDialog
-│   │   ├── set_remote.py          SetRemoteDialog
-│   │   ├── merge_pr.py            MergePRDialog
-│   │   ├── new_branch.py          NewBranchDialog
-│   │   ├── switch_branch.py       SwitchBranchDialog (+ static pick() helper)
-│   │   ├── assign_category.py     AssignCategoryDialog
-│   │   ├── untrack_ignored.py     UntrackIgnoredDialog
-│   │   ├── cost_viewer.py         SavingsDialog (Savings button in app footer)
-│   │   └── proposal.py            WriteProposal dataclass + ProposalDialog +
-│   │                              ProposalBridge (P1 — race-safe agent worker ↔ Tk main
-│   │                              coordinator; 5-min event.wait; first-resolution-wins;
-│   │                              automated test harness in __main__)
-│   │
-│   └── controllers/               Tab + sub-controllers.
-│       ├── projects_tab.py        ProjectsTabController — Projects tree + thin command wrappers
-│       ├── git_tab.py             GitTabController — Git tab + push/pull/release/Draft PR/
-│       │                          Open PR on GitHub. ~38 methods after P4 extracted
-│       │                          BranchManagementController.
-│       ├── branch_mgmt_ctrl.py    BranchManagementController (P4 — new/switch/merge/
-│       │                          delete-branch cluster; callback injection from GitTab)
-│       ├── ask_tab.py             AskTabController — 🤖 Ask tab + agent thread plumbing +
-│       │                          ProposalBridge registration for write-tool gating
-│       ├── snippets.py            SnippetsController — 📚 Reference tab
-│       ├── help_tab.py            HelpTabController — ❓ Help tab (16 sections)
-│       ├── update_poller.py       UpdatePollerController — tokensave version probe + GH update check
-│       ├── doctor_ctrl.py         Doctor command (tokensave doctor + purge flow +
-│       │                          P0 monolith audit: file/method/class/complexity caps via
-│       │                          AST walk + non-Python line-count check)
-│       ├── scaffold_ctrl.py       Scaffold + Retrofit commands
-│       ├── sync_ctrl.py           Sync / Status / Set-active / Force-sync
-│       ├── fileops_ctrl.py        File ops (open folder/editor, copy path, remove index)
-│       ├── shadowlinks_ctrl.py    Shadow links dialog + background generation
-│       ├── codegraph_ctrl.py      CodeGraph init / sync / status / remove
-│       ├── pyscope_ctrl.py        PyScope analyze / open / register / status.
-│                                  cmd_register is the Manager's ONLY mutation of
-│                                  PyScope state, reachable only from the menu item.
-│       ├── git_ops_ctrl.py        Git ops from Projects tab (init, log, commit, AI review,
-│       │                          gitignore, untrack, P5b pre-commit hook install/remove)
-│       └── ai_tasks_ctrl.py       Long-running AI write tasks (Stage 3 CHANGELOG drafter;
-│                                  future: refactor scout). Per-task per-project lock.
-│                                  Shutdown-safe via cancel_all_proposals() + App._quit_app.
-│
-├── templates/                     Data files used by the manager (all shipped in dist\templates\)
-│   ├── claude-md-template.md      BASIC_INSTRUCTIONS template written into scaffolded projects
-│   ├── project-baseline.md        Universal rules file @included by all retrofitted projects
-│   ├── nuitka-build.ps1.template  Generic Nuitka build script for other projects (PowerShell)
-│   ├── nuitka-build.py.template   Python-based alternative build script (no PS gotchas)
-│   ├── nuitka-build.bat.template  Bat launcher template for other projects
-│   └── NUITKA_GOTCHAS.md          Nuitka pitfalls reference (14 known issues)
-│
-├── dist/                          Build output — zip and ship this folder
-│   ├── tokensave-manager.exe
-│   ├── tokensave-wrapper.exe
-│   ├── manager-config.json
-│   ├── manager-config.example.json
-│   ├── TOKENSAVE_GUIDE.md
-│   ├── CHANGELOG.md
-│   ├── templates\
-│   └── docs\
-│
-└── docs/
-    ├── ARCHITECTURE.md             Manager architecture reference
-    ├── ARCHITECTURE_TOKENSAVE.md   tokensave tool internals reference
-    ├── AGENT_ARCHITECTURE.md       LocalAgent + tool registry + locked propose-only rules
-    ├── UPGRADE_INTEGRATION.md      Tokensave upgrade workflow (4-step: upgrade → pull → check → audit)
-    ├── ROADMAP.md                  Staged plan for local AI features
-    ├── MCP_INTEGRATION_GOTCHAS.md  Postmortem field manual — READ before changing the wrapper
-    ├── GITHUB_GUIDE.md             Beginner GitHub guide
-    └── upstream-issues/            Drafts of bugs to file against upstream tools
+src/
+  app.py         App(tk.Tk) + main(). Owns the single ManagerConfig.
+  state.py       ManagerConfig -- read-only properties; mutate via
+                 raw.update() + save() + refresh_derived().
+  constants.py   Palette, regex tables, CREATE_NO_WINDOW, _BASE_DIR, paths.
+  helpers/       Pure / IO. Never imports from controllers/ or dialogs/.
+  dialogs/       One tk.Toplevel per file.
+  controllers/   One tab or command cluster per file.
+templates/       project-baseline.md (@included by every wired project),
+                 claude-md-template.md, gotchas/, nuitka-build.*
+docs/            ARCHITECTURE.md indexes the rest.
+dist/            Build output -- see Build Pipeline below.
 ```
 
 ---
@@ -621,10 +443,10 @@ Must be updated when the project moves to a new location or machine.
 |------|------|
 | `src/app.py` | Entry point — `App(tk.Tk)` + `main()`. Constructs the single `ManagerConfig` instance and the tab controllers. |
 | `src/state.py` | `ManagerConfig` dataclass — runtime-mutable settings with read-only `@property` getters. Mutation: `cfg.raw.update(...) + cfg.save() + cfg.refresh_derived()`. |
-| `src/controllers/` | Tab + sub-controllers — see Project Structure tree. Each takes only the callbacks it needs (callback injection, never parent reference). |
-| `src/dialogs/` | One `tk.Toplevel` per file. See Project Structure tree. |
+| `src/controllers/` | Tab + sub-controllers — see `docs/ARCHITECTURE.md`. Each takes only the callbacks it needs (callback injection, never parent reference). |
+| `src/dialogs/` | One `tk.Toplevel` per file. See `docs/ARCHITECTURE.md`. |
 | `src/helpers/` | Pure / IO helpers (git, llm, mcp, commit_messages, release, etc.). No UI dependencies — safe to import from anywhere. |
-| `src/tokensave-wrapper.py` | MCP server wrapper for Claude Desktop — reads same `manager-config.json` |
+| `src/tokensave-wrapper.py` | MCP server wrapper for Claude Desktop — reads same `manager-config.json`. **MUST stay single-threaded AND pass `sys.stdin/stdout/stderr` to `Popen` explicitly** — read `docs/MCP_INTEGRATION_GOTCHAS.md` before touching. |
 | `manager-config.json` | Single source of truth for all machine-specific paths |
 | `templates/project-baseline.md` | @included by every retrofitted project's CLAUDE.md — edit here to update all |
 | `templates/claude-md-template.md` | Written as `BASIC_INSTRUCTIONS.md` when scaffolding a new project |
@@ -635,6 +457,11 @@ Must be updated when the project moves to a new location or machine.
 | `docs/UPGRADE_INTEGRATION.md` | Tokensave upgrade workflow — run after each new tokensave release |
 | `docs/GITHUB_GUIDE.md` | Beginner GitHub guide — shipped in `dist\docs\` |
 | `docs/ROADMAP.md` | Staged plan for local AI features |
+| `docs/MCP_INTEGRATION_GOTCHAS.md` | Postmortem field manual — **READ before changing the wrapper** |
+| `docs/RELOCATING.md` | What moving this installation breaks, and the one button that repairs it |
+| `docs/AGENT_ARCHITECTURE.md` | LocalAgent + tool registry + the locked propose-only rules |
+| `docs/VERIFICATION.md` | How a live UI check is made to measure something rather than look green |
+| `docs/*.md` | Further references (agent backends, PyScope, Windows findings, `upstream-issues/`). `ls docs/` — ARCHITECTURE.md documents each; this table is deliberately not a second enumeration |
 | `CHANGELOG.md` | Feature history |
 
 ---
