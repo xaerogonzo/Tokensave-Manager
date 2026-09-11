@@ -80,6 +80,15 @@ def test_the_baseline_stays_within_its_review_budget():
     # index grows ~99 B per entry. 99 B is ~25 tokens a session, so this was
     # never about bytes: the ratchet exists to force the review, and 7,500
     # still fires within a handful of additions rather than in a year.
+
+    # Corrected 2026-09-10: those are ON-DISK bytes and this file is CRLF,
+    # so they overstate what this assert sees by one byte per line (123 at
+    # the raise, 129 now). `read` is text mode, so the assert measures
+    # LF-normalised bytes: 6,924 B at the raise, 7,453 B after the
+    # shell-paging and literal-search wording, leaving 47 B -- the next
+    # addition needs a ratchet decision. Measure with the reader the
+    # assert uses -- the docstring above already records one generation of
+    # exactly this drift.
     size = len(read(BASELINE).encode("utf-8"))
     assert size <= 7500, (
         "project-baseline.md is %d B, over the 7,500 B review budget. It loads "
