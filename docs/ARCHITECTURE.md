@@ -426,6 +426,10 @@ Token Save Manager Source/
 │   │   │                          leaves a lock nobody can see.
 │   │   ├── vscode_tasks.py        The VS Code project files the Manager writes.
 │   │   ├── vscode_mcp_logs.py     What VS Code's own logs say about MCP servers.
+│   │   ├── vscode_extension.py    The extension's three versions -- source package.json,
+│   │   │                          the manifest inside the built .vsix, and what the
+│   │   │                          editor reports. They never met, so it went three
+│   │   │                          minor versions stale with nothing able to say so.
 │   │   ├── findings.py            The one shape every diagnostic producer emits.
 │   │   ├── manager_ipc.py         An inbox the running Manager drains, and a way to
 │   │   │                          raise it. Request ids are derived from a hash of the
@@ -491,6 +495,13 @@ Token Save Manager Source/
 │   │   │                          snapshotted before scrub and auto-restored if
 │   │   │                          filter-repo deletes it (three-fallback chain:
 │   │   │                          same-session URL → preflight dict → askstring).
+│   │   ├── relocate.py            RelocateDialog — one action for "this install
+│   │   │                          moved", replacing a four-surface scavenger hunt.
+│   │   │                          Writes nothing of its own; config BEFORE projects,
+│   │   │                          because the include line derives from template_dir.
+│   │   ├── extension_manager.py   ExtensionManagerDialog — the VS Code extension's
+│   │   │                          lifecycle made visible, beside the Tool Manager
+│   │   │                          button it is modelled on. Shows all three versions.
 │   │   ├── test_manager.py        v4.13 TestManagerDialog — opens from Help tab
 │   │   │                          "🧪 Test Manager…" button (replaces v4.12's "Run
 │   │   │                          Smoke Tests" button). 4-tab notebook covering the
