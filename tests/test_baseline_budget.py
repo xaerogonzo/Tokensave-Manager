@@ -64,34 +64,43 @@ def test_the_index_points_only_at_files_that_exist():
 def test_the_baseline_stays_within_its_review_budget():
     """A ratchet, so growth is a visible act rather than a drift.
 
-    6,623 B after the Phase 1b shrink and the Phase 3 index rows. (The 
-    figure recorded here after 1b said 6,348; the file was 6,260. Measure it, 
-    do not carry it forward from a report.) The ceiling is deliberately close to
-    that: this file is multiplied by every project that resolves it, so an
-    addition should have to argue for itself. Raising the number is a fine
-    thing to do on purpose — the point is that it cannot happen by accident.
-    """
-    # Raised from 7,000 on 2026-09-10, deliberately and with the arithmetic:
-    #
-    #   baseline 6,948 B + one index row 99 B = 7,047 B, a 47 B overshoot
-    #   new ceiling 7,500 B, leaving 453 B -- about four more entries
-    #
-    # The library went 9 -> 15 files while the ceiling stood still, and the
-    # index grows ~99 B per entry. 99 B is ~25 tokens a session, so this was
-    # never about bytes: the ratchet exists to force the review, and 7,500
-    # still fires within a handful of additions rather than in a year.
+    This file is multiplied by every project that resolves it and is read on
+    every message, so an addition should have to argue for itself. Raising the
+    number is a fine thing to do on purpose -- the point is that it cannot
+    happen by accident.
 
-    # Corrected 2026-09-10: those are ON-DISK bytes and this file is CRLF,
-    # so they overstate what this assert sees by one byte per line (123 at
-    # the raise, 129 now). `read` is text mode, so the assert measures
-    # LF-normalised bytes: 6,924 B at the raise, 7,453 B after the
-    # shell-paging and literal-search wording, leaving 47 B -- the next
-    # addition needs a ratchet decision. Measure with the reader the
-    # assert uses -- the docstring above already records one generation of
-    # exactly this drift.
+    Two measurement rules, each paid for here:
+
+    * **Measure with the reader this assert uses.** `read` is text mode and the
+      file is 100% CRLF, so on-disk bytes exceed the asserted size by one per
+      line (7,459 against 7,453 today). A raise once recorded the on-disk
+      figure and overstated the used budget by 123 B.
+    * **Measure; do not carry a figure forward from a report.** A note written
+      after the Phase 1b shrink said 6,348 B. The file was 6,260.
+    """
+    # Raised 7,500 -> 12,000 on 2026-09-11, deliberately, with the arithmetic:
+    #
+    #   today          7,453 B   measured, LF-normalised
+    #   new ceiling   12,000 B
+    #   headroom       4,547 B   ~45 index rows at 99 B, or ~28 rule paragraphs
+    #
+    # Roomy without being toothless. Measured history: 4,348 B at the initial
+    # commit, 8,192 B at its all-time high, harvested back to 6,724 B when that
+    # high forced a review -- the mechanism works, and it worked by firing. At
+    # the observed rate (~3,100 B over four months) 12,000 B is reached in
+    # roughly eighteen months, so it still fires within a foreseeable horizon.
+    # A ceiling that never fires again is the same as no ceiling.
+    #
+    # What keeps this file from becoming OpenChem's 971,900 B CLAUDE.md is NOT
+    # this number -- it is the three structural guards above. No gotcha file is
+    # @included, every gotcha is reachable from the index, and the index names
+    # only files that exist. The corpus is 100,612 B across 15 files and stays
+    # out of the always-loaded path by construction. That is precisely why a
+    # generous ceiling here is safe, and why these three must not be relaxed
+    # to make room -- the number is the cheapest of the four protections.
     size = len(read(BASELINE).encode("utf-8"))
-    assert size <= 7500, (
-        "project-baseline.md is %d B, over the 7,500 B review budget. It loads "
+    assert size <= 12000, (
+        "project-baseline.md is %d B, over the 12,000 B review budget. It loads "
         "in every wired project on every message. Consider moving the new "
         "material to templates/gotchas/ with one index row, which is the "
         "pattern the Nuitka and Tkinter sections already followed." % size)
