@@ -39,6 +39,7 @@ from constants import (
     CREATE_NO_WINDOW,
     LOG_FILE,
     _ANSI,
+    _BASE_DIR,
     _TOKENSAVE_UPDATE_RE,
 )
 from controllers.ask_tab import AskTabController
@@ -163,6 +164,9 @@ class App(UiPumpMixin, tk.Tk):
         # Staggered after _check_config so the two startup checks' log
         # lines don't interleave mid-write.
         self.after(1200, self._check_worktree_health)
+        # Last of the three, so a relocation dialog does not land on top of
+        # the Settings or MCP dialogs the earlier checks may have opened.
+        self.after(2500, self._check_install_identity)
         # Snapshot our own source so an edit made while the manager runs can
         # surface as a banner instead of as "my change did nothing".
         self._src_root = os.path.dirname(os.path.abspath(__file__))
@@ -657,6 +661,89 @@ class App(UiPumpMixin, tk.Tk):
             self._log(
                 f"    {o['project_name']}: '{o['branch'] or o['head']}' "
                 f"at {o['worktree_path']}", C["overlay0"])
+
+    def _check_install_identity(self):
+        """Where am I, and who owns the fleet? Two questions, one sweep.
+
+        Not "a launch check" for its own sake. The trigger is *this
+        installation's identity, or the fleet's ownership, no longer matches* —
+        and launch is simply the only moment the Manager can observe it, since
+        nothing runs while it is closed. It is re-run after a Settings save,
+        where `template_dir` can change underneath it.
+
+        Identity is a string comparison and free. Ownership needs to read every
+        project, and that is affordable **because** the instruction split took
+        the fleet's always-loaded text from 1,924,101 B to 409,375 B: the
+        largest single `CLAUDE.md` is now about 20 KB.
+
+        Modelled on `_check_worktree_health` — a worker, never blocking launch —
+        but unlike that one it offers the repair, the way MCP drift already
+        opens its configurator. A move is exactly the moment to be interrupted.
+        """
+        roots = list(self._cfg.raw.get("search_roots") or [])
+        cfg = self._cfg
+        raw = dict(cfg.raw)
+        base_dir = _BASE_DIR
+
+        def worker():
+            try:
+                from helpers.install_identity import (
+                    read_identity, read_ownership, relocation_plan,
+                )
+                from helpers.instructions_posture import read_posture
+                identity = read_identity(raw, base_dir)
+                fleet = read_posture(roots, cfg)
+                ownership = read_ownership(fleet.projects, cfg.template_dir)
+                plan = relocation_plan(identity, ownership, raw,
+                                       cfg.template_dir)
+            except Exception:       # noqa: BLE001 — never break startup
+                return
+            self._post(lambda: self._report_install_identity(plan))
+
+        threading.Thread(target=worker, daemon=True).start()
+
+    def _report_install_identity(self, plan) -> None:
+        """Log what was found; offer the repair only when one is available.
+
+        The healthy case says nothing at all. `SAME` + `OWNED_ELSEWHERE` — I
+        have not moved, another installation owns these projects — is REPORTED
+        and never turned into an offer: this cannot tell a deliberate handover
+        from a second install quietly taking them, and treating a state as an
+        instruction is how a report becomes a silent transfer of fifteen
+        repositories.
+        """
+        from helpers.install_identity import (
+            OWNED_HERE, OWNERSHIP_SPLIT, OWNERSHIP_UNOWNED,
+        )
+        ownership = plan.ownership
+        if ownership.state in (OWNED_HERE, OWNERSHIP_UNOWNED) \
+                and not plan.identity.moved:
+            return
+
+        if plan.identity.moved:
+            self._log("Instructions: this installation moved — %s -> %s"
+                      % (plan.identity.recorded_display,
+                         plan.identity.current_display), C["peach"])
+        if ownership.state == OWNERSHIP_SPLIT:
+            self._log("Instructions: the fleet points at %d different "
+                      "baselines — %s"
+                      % (len(ownership.owners), ownership.summary()), C["peach"])
+        elif ownership.state != OWNED_HERE:
+            self._log("Instructions: the fleet's baseline is %s"
+                      % ownership.summary(), C["peach"])
+        if ownership.unresolved:
+            self._log("    %d project(s) reach no baseline at all: %s"
+                      % (len(ownership.unresolved),
+                         ", ".join(ownership.unresolved[:4])), C["overlay0"])
+        if plan.blocked:
+            self._log("    no single repair: %s" % plan.blocked, C["overlay0"])
+            return
+        if not plan.offers_bulk:
+            return
+
+        from dialogs.relocate import RelocateDialog
+        self.after(800, lambda: RelocateDialog(self, self._cfg, plan,
+                                               on_log=self._log))
 
     def _auto_refresh(self):
         ctrl_idle = (not hasattr(self, "_projects") or self._projects.current_proc is None)

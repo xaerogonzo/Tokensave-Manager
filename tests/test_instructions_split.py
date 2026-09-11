@@ -11,12 +11,14 @@ The load-bearing ones, each protecting something that would be silent:
 """
 
 import os
+import pathlib
 
 import pytest
 
 from helpers.instructions_split import (
-    DEFAULT_TARGET, SplitPlan, _compute_sections, apply_split, children_of,
-    compute_split, digest_of, is_our_target, read_source,
+    DEFAULT_TARGET, ScanStats, _compute_sections, apply_split, compute_split,
+    digest_of, mention_pattern, read_repo_text, read_source, scan_mentions,
+    textual_mentions,
 )
 from helpers.instructions_posture import scan_text
 
@@ -561,3 +563,206 @@ class TestAHeadinglessLog:
         text = doc3([(2, "Head", big(40)), (2, "Log", fenced)])
         plan = compute_split(text, move_indices={1})
         assert "entries, each opening" not in plan.new_source
+
+
+# ── what else in the repository is keyed to this file ────────────────────────
+#
+# The split moves content across a file boundary and therefore across every
+# boundary anything else draws on that filename. Measured in three shapes across
+# the three projects it was applied to: a guard's hand-kept inclusion list, a
+# whole-file exemption, and prose citations in committed source. None produces
+# an error -- the file still exists; the reader is sent to the wrong place.
+#
+# These guard the report, whose entire claim is a POPULATION. Anything that
+# makes the number quietly wrong -- a substring match, an unsorted cap, a
+# silently partial scan -- destroys the only thing it is for.
+
+class TestTheTokenMatcher:
+    """A substring search makes the count noise, and noise is the whole risk.
+
+    Honest note on what this buys: measured across LexForge, Fortuna and
+    OpenChem, the token rule and a naive substring search agree EXACTLY -- 21,
+    13 and 61 files. It earns its keep on the constructed cases below, which
+    simply have not occurred in those three repositories yet. `CLAUDE.md.bak`
+    and `CLAUDE.md.example` are not exotic.
+    """
+
+    @pytest.mark.parametrize("text", [
+        "CLAUDE.md",
+        "`CLAUDE.md`",
+        '"CLAUDE.md"',
+        "../CLAUDE.md",
+        "path/CLAUDE.md",
+        "path" + chr(92) + "CLAUDE.md",
+        "see CLAUDE.md.",                 # sentence period, not an extension
+        "see CLAUDE.md, then",
+        "(CLAUDE.md)",
+        "claude.md",                      # prose casing varies
+        "Claude.MD",
+    ])
+    def test_accepts(self, text):
+        assert mention_pattern("CLAUDE.md").search(text), text
+
+    @pytest.mark.parametrize("text", [
+        "CLAUDE.md.bak",
+        "CLAUDE.md.example",
+        "MY_CLAUDE.md",
+        "my-CLAUDE.md",
+        "CLAUDE.mdx",
+        "ACLAUDE.md",
+        "CLAUDE.md2",
+    ])
+    def test_rejects(self, text):
+        assert not mention_pattern("CLAUDE.md").search(text), text
+
+
+class TestTheReport:
+    def _entries(self, pairs):
+        return list(pairs)
+
+    def test_the_source_and_target_are_excluded_from_their_own_report(self):
+        """The target's own header links back to the source.
+
+        Counting it would be the tool reporting itself, which is the echo the
+        observations feature had to be built against in another place.
+        """
+        entries = self._entries([
+            ("CLAUDE.md", "I am CLAUDE.md"),
+            ("docs/LESSONS.md", "Moved out of [`CLAUDE.md`](../CLAUDE.md)"),
+            ("src/a.py", "# see CLAUDE.md"),
+        ])
+        report = textual_mentions(entries, ScanStats())
+        assert [r[0] for r in report.files_with_mentions] == ["src/a.py"]
+
+    def test_one_file_twice_is_one_file_and_two_occurrences(self):
+        """Two questions, two named fields. Nothing here is called `count`."""
+        entries = self._entries([("src/a.py", "CLAUDE.md ... CLAUDE.md")])
+        report = textual_mentions(entries, ScanStats())
+        assert len(report.files_with_mentions) == 1
+        assert report.files_with_mentions[0][2] == 2
+        assert report.total_mentions == 2
+
+    def test_code_and_docs_are_separated_and_code_sorts_first(self):
+        """A guard list lives in code; a CHANGELOG naming the file is fine."""
+        entries = self._entries([
+            ("CHANGELOG.md", "CLAUDE.md"),
+            ("src/z.py", "CLAUDE.md"),
+            ("src/a.py", "CLAUDE.md"),
+        ])
+        report = textual_mentions(entries, ScanStats())
+        assert [r[0] for r in report.files_with_mentions] == [
+            "src/a.py", "src/z.py", "CHANGELOG.md"]
+        assert len(report.code_files) == 2
+        assert len(report.doc_files) == 1
+
+    def test_a_complete_scan_is_not_a_lower_bound(self):
+        report = textual_mentions([("src/a.py", "CLAUDE.md")], ScanStats())
+        assert report.is_lower_bound is False
+        assert report.summary().startswith("1 files")
+
+    @pytest.mark.parametrize("stats", [
+        ScanStats(truncated=True),
+        ScanStats(unreadable_files=("src/b.py",)),
+        ScanStats(oversize_files=("data/big.json",)),
+    ])
+    def test_an_incomplete_scan_renders_as_a_lower_bound(self, stats):
+        """"Unknown is never zero", landing in a sentence.
+
+        A caller cannot print "1 file mentions CLAUDE.md" while holding the
+        evidence that the scan did not finish -- the evidence is a field.
+        """
+        report = textual_mentions([("src/a.py", "CLAUDE.md")], stats)
+        assert report.is_lower_bound is True
+        assert report.summary().startswith("at least 1 files")
+
+
+class TestTheScan:
+    def _repo(self, tmp_path, files):
+        for rel, text in files.items():
+            path = tmp_path / rel
+            path.parent.mkdir(parents=True, exist_ok=True)
+            path.write_text(text, encoding="utf-8")
+        return str(tmp_path)
+
+    def test_excluded_trees_contribute_nothing(self, tmp_path):
+        """Measured: one project's `.claude/worktrees/` held a full duplicate
+        checkout, so a scan counted three of everything."""
+        root = self._repo(tmp_path, {
+            "src/a.py": "# see CLAUDE.md",
+            ".claude/worktrees/copy/src/a.py": "# see CLAUDE.md",
+            "node_modules/pkg/index.js": "// CLAUDE.md",
+            "dist/bundle.js": "// CLAUDE.md",
+        })
+        report = scan_mentions(root)
+        assert [r[0] for r in report.files_with_mentions] == ["src/a.py"]
+        assert report.stats.excluded_dirs >= 3
+
+    def test_an_unreadable_file_is_reported_not_counted_as_clean(self, tmp_path):
+        """"Could not inspect" must never render as "contains no mention"."""
+        root = self._repo(tmp_path, {"src/a.py": "# CLAUDE.md"})
+        (tmp_path / "src" / "bad.py").write_bytes(b"\xff\xfe\x00\x80bad")
+
+        report = scan_mentions(root)
+
+        assert "src/bad.py" in report.stats.unreadable_files
+        assert report.is_lower_bound is True
+
+    def test_an_oversize_file_is_skipped_and_makes_it_a_lower_bound(
+            self, tmp_path):
+        root = self._repo(tmp_path, {"src/a.py": "# CLAUDE.md",
+                                     "vendor.js": "x" * 5000})
+        report = scan_mentions(root, max_file_bytes=1000)
+        assert "vendor.js" in report.stats.oversize_files
+        assert report.is_lower_bound is True
+
+    def test_the_scan_is_reproducible_under_a_cap(self, tmp_path):
+        """The lexical sort, and it is not tidiness.
+
+        A cap applied to the walk's own ordering makes the result
+        non-reproducible: the same unchanged repository could report 22 files
+        today and 19 tomorrow because a different file consumed the cap first.
+
+        This could not be guarded through the real filesystem. Every machine
+        this runs on already hands back a small directory in name order, so
+        deleting the sort changes nothing observable -- and an earlier version
+        of this test passed against exactly the implementation it rejects. The
+        walk is therefore handed a reversed order.
+        """
+        files = {("src/f%02d.py" % n): ("# see CLAUDE.md" + chr(10) + "x" * 400)
+                 for n in range(20)}
+        root = self._repo(tmp_path, files)
+
+        def backwards(top):
+            for dirpath, dirnames, filenames in os.walk(top):
+                yield dirpath, dirnames, list(reversed(sorted(filenames)))
+
+        entries, stats = read_repo_text(root, cap_bytes=1500, _walk=backwards)
+        report = textual_mentions(entries, stats)
+        names = [r[0] for r in report.files_with_mentions]
+
+        assert stats.truncated is True
+        assert names, "the cap consumed everything"
+        # The lexically-FIRST files, not the ones the walk happened to yield.
+        assert names == sorted(names)
+        assert names[0] == "src/f00.py", names
+
+    def test_a_suffix_outside_the_allowlist_is_excluded_not_unreadable(
+            self, tmp_path):
+        root = self._repo(tmp_path, {"src/a.py": "# CLAUDE.md"})
+        (tmp_path / "image.png").write_bytes(b"\x89PNG\r\n")
+        report = scan_mentions(root)
+        assert report.stats.excluded_files >= 1
+        assert report.stats.unreadable_files == ()
+
+
+def test_the_split_module_knows_nothing_about_install_identity():
+    """An architectural rule, so it gets a guard rather than a preference.
+
+    The mention scan must stay useful for a project whose Manager lives
+    anywhere, and must not couple to a relocation mechanism that does not exist
+    yet.
+    """
+    import helpers.instructions_split as module
+    source = pathlib.Path(module.__file__).read_text(encoding="utf-8")
+    assert "install_identity" not in source
+    assert "install_dir" not in source

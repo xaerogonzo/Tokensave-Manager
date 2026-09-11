@@ -227,6 +227,84 @@ no explanation is the same defect as a red row with none.
 `.ruff_cache/` into the project; `--no-cache` does not, and pyright and
 markdownlint write nothing. Drop the flag and the classification silently becomes
 wrong.
+### D1e. Moving content moves it across every boundary keyed to its filename
+
+`helpers/instructions_split.py` empties a file, and that is a **population-moving
+operation**, not merely a document edit. Measured the day it was first applied to
+three unrelated projects — three different silent failures, none of which raised
+anything, because the file still existed afterwards:
+
+- a doc-currency guard's **hand-kept covered list** did not include the new file,
+  so 17,870 lines of citations left its reach;
+- a **whole-file exemption** on the source meant moving content out swept 21 real
+  citations for the first time — a good outcome, arrived at by accident — while
+  the source's own exemptions became holes;
+- **prose citations** in committed source (`see CLAUDE.md`) went stale without
+  breaking: 21 such files in one project, 13 in another, 61 in a third.
+
+So the split **reports the population it is about to strand and claims nothing
+more.** `textual_mentions` is a textual-occurrence detector, and its docstring
+says so, because the next caller will otherwise read it as a dependency graph:
+`see X`, `# X` and `path = "X"` are identical to it and only the last is
+load-bearing. It never blocks Apply — a mention is a fact about the repository,
+not a fault.
+
+Three rules make the number worth printing, each paid for:
+
+- **A path token, not a substring.** `CLAUDE.md.bak` and `MY_CLAUDE.md` are other
+  files. (Honest: across the three projects the token rule and a substring search
+  agreed exactly. Insurance, not a measured win.)
+- **Sort before you cap.** Filesystem order is not stable, so a byte cap over an
+  unsorted walk reports 22 files today and 19 tomorrow with no change. The sort
+  cannot be guarded through a real filesystem — small directories already come
+  back in name order — which is why `read_repo_text` takes a `_walk` seam.
+- **A partial scan is structurally partial.** Capped, unreadable and oversize are
+  three distinct facts and none of them is "no mention". They are fields, so a
+  caller cannot print a total while holding evidence it is a floor.
+
+`instructions_split` must not import `install_identity` or read `install_dir`.
+That is a guard test, not a preference: the scan stays useful for a project whose
+Manager lives anywhere.
+
+### D1f. Install identity and fleet ownership are two questions
+
+`helpers/install_identity.py`. They stop being the same question the moment a
+second installation exists, which is a **live condition** here: a source
+checkout and a `dist/` build, whose `templates/project-baseline.md` differed by
+four months. Whichever ran last owns the fleet.
+
+- **Where am I?** `FIRST_RUN` / `SAME` / `MOVED`, from the recorded
+  `install_dir` against `_BASE_DIR`. **No record is not a move** — conflating
+  them makes every first run after an upgrade announce a relocation and offer to
+  rewrite the fleet.
+- **Who owns the fleet?** `OWNED_HERE` / `OWNED_ELSEWHERE` / `SPLIT` /
+  `UNOWNED`, derived from the PROJECTS. Computed **only over projects that reach
+  a baseline** — `reached_baseline == ""` is the measured predicate for "does
+  not", and non-resolving projects are reported separately and never move the
+  verdict.
+
+**A state never encodes an action.** `SAME` + `OWNED_ELSEWHERE` means *another
+install owns these* and nothing more; this cannot tell a deliberate handover
+from a second install quietly taking them, so taking ownership stays an
+operation somebody invokes. `SPLIT` is first-class and carries per-owner
+canonical paths and counts — a bare label would be the population failure again,
+and two spellings of one directory are not a split.
+
+**Relocatable keys are an explicit allowlist**, and working it through leaves
+`("template_dir",)`. The shortness is the finding. The test is **allowlist AND
+contained-in-the-old-install**: `search_roots` is why a computed containment rule
+alone is not enough, because a search root *can* live inside the Manager's folder
+and rewriting it would silently repoint project discovery.
+
+**Bulk repair refuses a partial fleet** — `SPLIT`, `UNOWNED`, or any
+non-resolving project. Otherwise "one action" becomes "one action that silently
+fixed half of it", which is the reason `SPLIT` exists.
+
+**Baseline comparison is evidence, not versioning.** Path, size, mtime AND a
+content hash, because two different baselines must not look equivalent to
+somebody reading only a date and a byte count. No automatic version order is
+invented; the user ticks.
+
 ### D2. Agent CLIs: a new agent is a table row, never a new literal
 
 `helpers/agent_cli.py` holds one capability table. Adding Codex, Gemini CLI or
@@ -382,6 +460,12 @@ Token Save Manager Source/
 │   │   │                          carriage (what the files declare) vs reach (what the
 │   │   │                          chain from CLAUDE.md arrives at). Bounded include walk.
 │   │   ├── instructions_wiring.py  The ONE writer. Repairs one topology; never deletes.
+│   │   ├── install_identity.py     Where am I (FIRST_RUN/SAME/MOVED) and who owns
+│   │   │                           the fleet (HERE/ELSEWHERE/SPLIT/UNOWNED). Two
+│   │   │                           questions, never conflated.
+│   │   ├── instructions_split.py   Moves a lesson log out of the always-loaded
+│   │   │                           file. Two-level section tree; digest-guarded;
+│   │   │                           reports what else in the repo names the file.
 │   │   ├── headless_analyzers.py One capability table for ruff / pyright /
 │   │   │                        markdownlint. Rows, not branches: probe order,
 │   │   │                        argv, stream and severity policy all differ.
@@ -406,6 +490,10 @@ Token Save Manager Source/
 │   │   │                          No install action: the Manager does not install PyScope.
 │   │   ├── release_wizard.py      ReleaseWizardDialog + _ReleaseCtx (paired)
 │   │   ├── instructions_overview.py InstructionsDialog — fleet instruction-chain view
+│   ├── relocate.py              RelocateDialog — one action for "this install
+│   │                            moved". Writes nothing of its own; config
+│   │                            before projects, because the include line
+│   │                            is derived from template_dir.
 │   ├── instructions_split.py    SplitProposalDialog — the oversized-chain offer.
 │   │                            Per project, never bulk; shows the complete
 │   │                            transformation before a byte is written.
@@ -522,6 +610,7 @@ Must be updated when the project moves to a new location or machine.
 | `ruff_exe` | Optional absolute path to the ruff binary. Blank = auto-detect (`.exe`-first: it is a native binary, not an npm shim). Empty string when not installed. Read by `helpers/headless_analyzers.ANALYZERS`, which owns probe order per row — there is deliberately no `_detect_ruff` in `helpers/detection.py`, because that would be a second place that knows how to find it. |
 | `pyright_exe` | Optional absolute path to pyright. Blank = auto-detect, **`.cmd`-first** (npm shim; the bare name raises WinError 2 from Python). Same table, same rules. |
 | `markdownlint_exe` | Optional absolute path to markdownlint. Blank = auto-detect, `.cmd`-first, probing both `markdownlint-cli2` and the older `markdownlint`. |
+| `install_dir` | Where this installation was the last time it ran. **Seeded only when absent**, and the ordering is load-bearing: writing it unconditionally on load would erase the evidence of a move before the check could see it. Empty means no record, which is **not** evidence of a move. Compared against `constants._BASE_DIR` via `instructions_posture.canonical` — lexical, so an install reached through a junction reads as a different install. |
 | `doctor_skip_monolith_paths` | Optional list of project-relative paths Doctor's monolith audit should skip (e.g. `["src/tokensave-wrapper.py"]` for intentionally single-file modules). Default `[]`. |
 
 ---

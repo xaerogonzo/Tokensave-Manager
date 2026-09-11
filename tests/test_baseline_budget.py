@@ -71,9 +71,18 @@ def test_the_baseline_stays_within_its_review_budget():
     addition should have to argue for itself. Raising the number is a fine
     thing to do on purpose — the point is that it cannot happen by accident.
     """
+    # Raised from 7,000 on 2026-09-10, deliberately and with the arithmetic:
+    #
+    #   baseline 6,948 B + one index row 99 B = 7,047 B, a 47 B overshoot
+    #   new ceiling 7,500 B, leaving 453 B -- about four more entries
+    #
+    # The library went 9 -> 15 files while the ceiling stood still, and the
+    # index grows ~99 B per entry. 99 B is ~25 tokens a session, so this was
+    # never about bytes: the ratchet exists to force the review, and 7,500
+    # still fires within a handful of additions rather than in a year.
     size = len(read(BASELINE).encode("utf-8"))
-    assert size <= 7000, (
-        "project-baseline.md is %d B, over the 7,000 B review budget. It loads "
+    assert size <= 7500, (
+        "project-baseline.md is %d B, over the 7,500 B review budget. It loads "
         "in every wired project on every message. Consider moving the new "
         "material to templates/gotchas/ with one index row, which is the "
         "pattern the Nuitka and Tkinter sections already followed." % size)
