@@ -369,7 +369,7 @@ class RemoteSetupDialog(tk.Toplevel):
     def _do_push(self):
         self.destroy()
         self._app._git.set_active_path(self._path)
-        self._app._git.cmd_git_push()
+        self._app._git._push_pull.cmd_git_push()
 
     def _create_release(self):
         tag = self._tag_var.get().strip()

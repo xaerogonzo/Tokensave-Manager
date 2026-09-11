@@ -27,15 +27,13 @@ import tkinter as tk
 from tkinter import messagebox, ttk
 from typing import TYPE_CHECKING
 
-from constants import C, CREATE_NO_WINDOW, _ANSI, _GIT_ENV_NO_PROMPT
+from constants import C, CREATE_NO_WINDOW, _ANSI
 from theme import _Tooltip, UiPumpMixin
 from helpers.git import _is_local_git_repo
-from helpers.llm import _is_auth_error
 from dialogs.set_remote import SetRemoteDialog
 from dialogs.github_setup import GitHubSetupDialog
 from dialogs.merge_pr import MergePRDialog
 from helpers.merge_body import build_merge_body
-from helpers.multi_remote import PUSH_AUTH, list_remotes, push as mr_push
 from dialogs.release_wizard import ReleaseWizardDialog
 
 if TYPE_CHECKING:
@@ -277,6 +275,21 @@ class GitTabController(UiPumpMixin):
             on_end_op=self._git_end_op,
             is_op_in_flight=lambda: self._git_op_in_flight,
         )
+        # push / fetch / pull delegate to self._push_pull.cmd_* below.
+        from controllers.push_pull_ctrl import PushPullController
+        self._push_pull = PushPullController(
+            tab=self._tab,
+            cfg=self._cfg,
+            get_git_path=lambda: self._git_path,
+            on_shell=self._on_shell,
+            on_log=self._on_log,
+            post=self._post,
+            log_queue=self._log_queue,
+            on_begin_op=self._git_begin_op,
+            on_end_op=self._git_end_op,
+            is_op_in_flight=lambda: self._git_op_in_flight,
+            on_refresh=self._git_refresh,
+        )
         # ── Sub-controllers (Phase C) ────────────────────────────────────────
         from controllers.test_gap_ctrl import TestGapCtrl
         from controllers.pr_draft_ctrl import PRDraftCtrl
@@ -468,15 +481,15 @@ class GitTabController(UiPumpMixin):
         row2.pack(anchor=tk.W)
 
         btn_push    = ttk.Button(row1, text="⬆  Push",
-                                 command=self.cmd_git_push)
+                                 command=self._push_pull.cmd_git_push)
         # Right-click reaches the target list, mirroring how Draft PR exposes
         # its base-branch override. Left-click stays one action.
-        btn_push.bind("<Button-3>", lambda e: self.cmd_push_targets())
-        btn_push.bind("<Shift-Button-1>", lambda e: self.cmd_push_targets())
+        btn_push.bind("<Button-3>", lambda e: self._push_pull.cmd_push_targets())
+        btn_push.bind("<Shift-Button-1>", lambda e: self._push_pull.cmd_push_targets())
         btn_pull    = ttk.Button(row1, text="⬇  Pull",
-                                 command=self.cmd_git_pull)
+                                 command=self._push_pull.cmd_git_pull)
         btn_fetch   = ttk.Button(row1, text="📡  Fetch",
-                                 command=self.cmd_git_fetch)
+                                 command=self._push_pull.cmd_git_fetch)
         btn_commit  = ttk.Button(row1, text="📝  Commit…",
                                  command=lambda: self._on_commit(self._git_path)
                                          if self._git_path else None)
@@ -824,216 +837,6 @@ class GitTabController(UiPumpMixin):
         txt.configure(state=tk.DISABLED)
 
     # ── Git action commands ────────────────────────────────────────────────────
-
-    def cmd_git_push(self):
-        self._run_multi_push(force=False)
-
-    def cmd_git_force_push(self):
-        """Force-push, leasing against each remote's own current tip."""
-        path = self._git_path
-        if not path or self._git_op_in_flight:
-            return
-        targets, _upstream = self._push_targets(path)
-        if not self._confirm_force_push(targets):
-            return
-        self._run_multi_push(force=True, confirmed=True)
-
-    def cmd_push_targets(self) -> None:
-        """Open the push-target chooser for the active project."""
-        path = self._git_path
-        if not path:
-            return
-        from dialogs.remotes_manager import RemotesManagerDialog
-        RemotesManagerDialog(self._root, path, self._cfg,
-                             on_saved=self._git_refresh)
-
-    # ── multi-remote push ────────────────────────────────────────────────
-
-    def _push_targets(self, path: str) -> tuple:
-        """(selected remote names, upstream remote) for *path*.
-
-        Reconciled against `git remote` on every call, so a remote renamed or
-        deleted outside the manager drops out rather than failing at push
-        time — or worse, silently shrinking the push while still reporting
-        success for the remotes that remain.
-        """
-        from dialogs.remotes_manager import load_selection, load_upstream
-        remotes = list_remotes(self._cfg.git_exe, path)
-        return (load_selection(self._cfg, path, remotes),
-                load_upstream(self._cfg, path, remotes))
-
-    def _confirm_force_push(self, targets) -> bool:
-        where = "\n".join("    • %s" % t for t in targets) or "    (none)"
-        return messagebox.askyesno(
-            "⚠  Force Push — are you sure?",
-            "Force-pushing rewrites the remote branch history on:\n\n"
-            "%s\n\n"
-            "This is safe to use after 'Scrub from History' removed a\n"
-            "sensitive file — but anyone who has cloned this repo will need\n"
-            "to re-clone afterwards (their history will no longer match).\n\n"
-            "Each remote is checked immediately beforehand and skipped if it\n"
-            "moved since, so commits someone else pushed are not discarded.\n\n"
-            "Force-push now?" % where,
-            icon="warning", default="no", parent=self._root)
-
-    def _run_multi_push(self, *, force: bool, confirmed: bool = False):
-        path = self._git_path
-        if not path or self._git_op_in_flight:
-            return
-        targets, upstream = self._push_targets(path)
-        if not targets:
-            messagebox.showinfo(
-                "No push targets",
-                "No remotes are selected for this project.\n\n"
-                "Use \"Push targets…\" to choose which remotes a push goes to.",
-                parent=self._root)
-            return
-
-        name = os.path.basename(path)
-        verb = "Force-pushing" if force else "Pushing"
-        self._on_log("[%s] %s to %s…" % (name, verb, ", ".join(targets)),
-                     C["peach"])
-        self._git_begin_op()
-
-        git_exe = self._cfg.git_exe
-
-        def worker():
-            try:
-                outcome = mr_push(git_exe, path, targets,
-                                  upstream_remote=upstream,
-                                  force_with_lease=force)
-                for line in self._describe_outcome(outcome):
-                    self._log_queue.put(line)
-                self._post(lambda: self._after_push(outcome))
-            finally:
-                self._post(self._git_end_op)
-
-        threading.Thread(target=worker, daemon=True).start()
-
-    @staticmethod
-    def _describe_outcome(outcome) -> list:
-        """One log line per remote, plus per-destination detail when it differs.
-
-        A remote with several push URLs gets a line each: reporting the remote
-        as a single success would hide one destination having been rejected.
-        """
-        lines = []
-        for result in outcome.results:
-            glyph = "✓" if result.ok else "✗"
-            colour = C["green"] if result.ok else C["red"]
-            lines.append(("  %s %-12s %s" % (glyph, result.remote,
-                                             result.detail), colour))
-            if len(result.destinations) > 1:
-                for dest in result.destinations:
-                    lines.append(("      %s %s"
-                                  % ("✓" if dest.ok else "✗", dest.url),
-                                  C["green"] if dest.ok else C["red"]))
-        return lines
-
-    def _after_push(self, outcome) -> None:
-        """One dialog, per-remote detail preserved. Tk thread."""
-        self._git_refresh()
-        if outcome.all_ok:
-            return
-        if any(r.kind == PUSH_AUTH for r in outcome.failed_remotes):
-            self._show_auth_help(outcome)
-            return
-        detail = "\n".join(
-            "  %s %s — %s" % ("✓" if r.ok else "✗", r.remote, r.detail)
-            for r in outcome.results)
-        messagebox.showwarning(
-            "Push %s" % ("partly failed" if outcome.is_partial else "failed"),
-            "%s\n\n%s" % (outcome.summary(), detail), parent=self._root)
-
-    def _show_auth_help(self, outcome) -> None:
-        failed = [r.remote for r in outcome.failed_remotes
-                  if r.kind == PUSH_AUTH]
-        messagebox.showinfo(
-            "Authentication required",
-            "These remotes need to verify your identity:\n\n"
-            "%s\n\n"
-            "Open a terminal in this project folder and run:\n"
-            "    git push %s\n\n"
-            "Sign in when prompted; this button will work normally "
-            "afterwards." % ("\n".join("    • %s" % r for r in failed),
-                             failed[0] if failed else ""),
-            parent=self._root)
-
-    def cmd_git_fetch(self):
-        """Fetch remote refs (--prune) without merging. Updates remote-tracking branches."""
-        path = self._git_path
-        if not path or self._git_op_in_flight:
-            return
-        name = os.path.basename(path)
-        self._on_log(f"[{name}] Fetching…", C["peach"])
-        self._git_begin_op()
-
-        def worker():
-            try:
-                out, rc = self._on_shell(
-                    [self._cfg.git_exe, "-C", path, "fetch", "--prune"], path,
-                    env=_GIT_ENV_NO_PROMPT)
-                col = C["green"] if rc == 0 else C["red"]
-                lines = out.strip().splitlines()
-                if rc == 0 and not lines:
-                    self._log_queue.put((f"  [{name}] Already up to date.", col))
-                else:
-                    for line in lines[-6:]:
-                        self._log_queue.put((f"  {line}", col))
-                if rc != 0 and _is_auth_error(out):
-                    self._post(lambda: messagebox.showinfo(
-                        "GitHub Authentication Required",
-                        "GitHub needs to verify your identity.\n\n"
-                        "Open a terminal in this project folder and run:\n"
-                        "    git fetch\n\n"
-                        "A browser window will open asking you to log in to GitHub.\n"
-                        "After that, this button will work normally.",
-                        parent=self._root))
-            finally:
-                self._post(self._git_end_op)
-
-        threading.Thread(target=worker, daemon=True).start()
-
-    def cmd_git_pull(self):
-        path = self._git_path
-        if not path:
-            return
-        if self._git_op_in_flight:
-            return
-        name = os.path.basename(path)
-        self._on_log(f"[{name}] Pulling…", C["peach"])
-        self._git_begin_op()
-
-        def worker():
-            try:
-                out, rc = self._on_shell(
-                    [self._cfg.git_exe, "-C", path, "pull"], path,
-                    env=_GIT_ENV_NO_PROMPT)
-                col = C["green"] if rc == 0 else C["red"]
-                for line in out.strip().splitlines()[-6:]:
-                    self._log_queue.put((f"  {line}", col))
-                if rc != 0:
-                    if _is_auth_error(out):
-                        self._post(lambda: messagebox.showinfo(
-                            "GitHub Authentication Required",
-                            "GitHub needs to verify your identity.\n\n"
-                            "Open a terminal in this project folder and run:\n"
-                            "    git pull\n\n"
-                            "A browser window will open asking you to log in to GitHub.\n"
-                            "After that, this button will work normally.",
-                            parent=self._root))
-                    elif "conflict" in out.lower():
-                        self._post(lambda: messagebox.showwarning(
-                            "Merge Conflicts",
-                            "Pull completed but there are merge conflicts.\n\n"
-                            "Open the project in your editor and look for files\n"
-                            "marked with conflict markers (<<<<<<).\n"
-                            "Resolve them, then use 📝 Commit… to commit the result.",
-                            parent=self._root))
-            finally:
-                self._post(self._git_end_op)
-
-        threading.Thread(target=worker, daemon=True).start()
 
     def cmd_git_open_pr(self):
         """Open a pull-request comparison page on GitHub for the current branch."""
