@@ -89,6 +89,10 @@ _FENCE = re.compile(r"^[ \t]*(`{3,}|~{3,})")
 #: deliberately lives, and NOT anywhere the include chain reaches.
 DEFAULT_TARGET = "docs/LESSONS.md"
 
+#: The file Claude Code actually reads, and the one a split empties. A constant
+#: because it is the default of five separate parameters.
+DEFAULT_SOURCE = "CLAUDE.md"
+
 #: How much of the file to keep loaded, in bytes. The same review threshold
 #: `doctor_rules` uses, and for the same reason: it names a cost rather than a
 #: fault.
@@ -509,6 +513,298 @@ def compute_split(text: str, source_rel: str = "CLAUDE.md",
                      new_source, new_target, digest_of(text),
                      appending=appending,
                      target_digest=digest_of(target_text) if appending else "")
+
+
+# ── what else in the repository is keyed to this file ────────────────────────
+#
+# A split moves content across a file boundary, and therefore across every
+# boundary anything else keyed to that filename draws. Measured across the three
+# projects this module was applied to, in three distinct shapes:
+#
+#   a guard's inclusion list   17,870 lines of citations left a doc-currency
+#                              guard's reach; the covered list is a hand-kept
+#                              literal, so nothing went red
+#   a whole-file exemption     the source was exempted ENTIRELY for containing a
+#                              syntax example, so moving content out swept 21
+#                              real citations for the first time -- by accident
+#   prose citations            "see CLAUDE.md" in committed source, now pointing
+#                              at a file that no longer holds the thing cited.
+#                              LexForge: 27 mentions across 22 files.
+#                              Fortuna:  25 across 14.
+#
+# None of the three produces an error. The file still exists; the reader is just
+# sent to the wrong place. So the split reports the population it is about to
+# strand, and claims nothing beyond that.
+
+#: Directories never scanned. A deliberate omission, counted separately from a
+#: file we could not read -- those are different facts (see `ScanStats`).
+_SCAN_EXCLUDED_DIRS = frozenset({
+    ".git", ".hg", ".svn", ".venv", "venv", "env", "node_modules",
+    "__pycache__", ".tokensave", ".tokensave-manager", ".pyscope",
+    ".mypy_cache", ".pytest_cache", ".ruff_cache", ".idea", ".vs",
+    ".tox", ".nox", ".eggs", ".next", ".nuxt", ".gradle",
+    # Build output and vendored trees. A mention inside one is a COPY of an
+    # authored mention, and "fix the citation in dist/" is never the action.
+    "dist", "build", "out", "target", "site-packages", "vendor",
+    "coverage", "htmlcov",
+    # Whole duplicate checkouts. Measured on one project: `.claude/worktrees/`
+    # held a second copy of a 36 MB vendored bundle, so a scan counted three
+    # of everything and hit its cap before reaching the authored source.
+    ".claude",
+})
+
+#: Read no single file larger than this. A guard list, an exemption or a prose
+#: citation lives in an authored file; the things that blow the budget are
+#: minified vendor bundles. Measured on one project: twelve files over 2 MB held
+#: 45% of 311 MB of candidates.
+MAX_FILE_BYTES = 2_000_000
+
+#: Suffixes read at all. An allowlist rather than a binary sniff: a mention is a
+#: textual thing, and guessing at unknown formats would put decode failures into
+#: `unreadable_files` for files nobody expected to be scanned.
+_SCAN_SUFFIXES = frozenset({
+    ".py", ".pyw", ".js", ".jsx", ".ts", ".tsx", ".ps1", ".psm1", ".bat",
+    ".cmd", ".sh", ".toml", ".json", ".jsonc", ".yaml", ".yml", ".cfg",
+    ".ini", ".md", ".markdown", ".rst", ".txt", ".html", ".css",
+})
+
+#: Which half of the report a file lands in. Prose mentions in a CHANGELOG are
+#: usually fine; a guard list in a .py is where the risk concentrates.
+_DOC_SUFFIXES = frozenset({".md", ".markdown", ".rst", ".txt"})
+
+#: Total bytes read before the scan stops. Hitting it makes the result a LOWER
+#: BOUND, which is a field rather than a log line -- see `ScanStats.truncated`.
+DEFAULT_SCAN_CAP_BYTES = 40_000_000
+
+
+def mention_pattern(basename: str) -> "re.Pattern":
+    """Match `basename` as a PATH TOKEN, never as a substring.
+
+    A substring search makes the count noise immediately, and noise would
+    undercut the only claim this scan makes -- that the number is a population
+    worth a person's attention.
+
+    The rule, and both halves are load-bearing:
+
+    * the character before must not be a word character, so `MY_CLAUDE.md` and
+      `my-CLAUDE.md` are different files and do not match;
+    * the character after must not begin an extension, so `CLAUDE.md.bak` and
+      `CLAUDE.mdx` do not match -- while `see CLAUDE.md.` at the end of a
+      sentence does, because there the dot is punctuation and nothing follows it.
+
+    Case-insensitive, deliberately: this matches TEXT INSIDE FILES, where prose
+    casing varies and a mention is a mention. It is not a filesystem path
+    comparison, which is a different question with a different owner
+    (`instructions_posture.canonical`). Sharing one rule between the two gives
+    either a case-sensitive prose search or a path comparison that matches
+    things the user never named.
+    """
+    stem = re.escape(basename)
+    return re.compile(r"(?<![A-Za-z0-9_\-])" + stem +
+                      r"(?![A-Za-z0-9_\-])(?!\.[A-Za-z0-9])",
+                      re.IGNORECASE)
+
+
+@dataclasses.dataclass(frozen=True)
+class ScanStats:
+    """How much of the repository the scan actually saw.
+
+    `truncated`, or a non-empty `unreadable_files`, means every count derived
+    from this scan is a **lower bound** and must be rendered as one. That is
+    this project's "unknown is never zero" rule, and it is why these are fields:
+    a caller cannot print "22 files mention CLAUDE.md" while holding evidence
+    that the scan was incomplete, unless it chooses to ignore a field it can see.
+    """
+
+    scanned_files: int = 0
+    #: Directories pruned by `_SCAN_EXCLUDED_DIRS`, counted rather than walked:
+    #: walking an excluded tree to size it defeats the exclusion, and on one
+    #: project that tree was a duplicate checkout.
+    excluded_dirs: int = 0
+    #: Files skipped for a suffix outside the allowlist. A deliberate omission
+    #: -- NOT the same as unreadable.
+    excluded_files: int = 0
+    #: Skipped for exceeding `MAX_FILE_BYTES`. Deliberate like an exclusion, but
+    #: unlike one it is a file we might have expected to read, so it makes the
+    #: result a lower bound.
+    oversize_files: tuple = ()
+    #: Permission denied, decode failure. An absence of knowledge, and never
+    #: equivalent to "contains no mention".
+    unreadable_files: tuple = ()
+    scanned_bytes: int = 0
+    cap_bytes: int = DEFAULT_SCAN_CAP_BYTES
+    truncated: bool = False
+
+    @property
+    def complete(self) -> bool:
+        return (not self.truncated and not self.unreadable_files
+                and not self.oversize_files)
+
+
+@dataclasses.dataclass(frozen=True)
+class MentionReport:
+    """Textual mentions of the source path elsewhere in the repository.
+
+    **This reports textual mentions and nothing more. It does NOT establish
+    that a mention is live, semantic, stale, executable, or user-visible. It is
+    a population, not a dependency graph.**
+
+    That sentence is here rather than in a commit message because the next
+    caller will otherwise treat this as proof of a dependency. All four of
+
+        see CLAUDE.md        # CLAUDE.md        "CLAUDE.md"        path = "CLAUDE.md"
+
+    are the same thing to this scan, and only the last is a dependency.
+    """
+
+    #: `(rel_path, kind, occurrences)` with `kind` in {"code", "docs"}, code
+    #: first: that is where a guard list or an exemption would live.
+    files_with_mentions: tuple = ()
+    #: Deliberately a second, separately named field. One file mentioning the
+    #: source twice is ONE file and TWO occurrences, and the two answer
+    #: different questions -- nothing here is called `count`.
+    total_mentions: int = 0
+    stats: ScanStats = dataclasses.field(default_factory=ScanStats)
+
+    @property
+    def code_files(self) -> tuple:
+        return tuple(f for f in self.files_with_mentions if f[1] == "code")
+
+    @property
+    def doc_files(self) -> tuple:
+        return tuple(f for f in self.files_with_mentions if f[1] == "docs")
+
+    @property
+    def is_lower_bound(self) -> bool:
+        """Render as "at least N" rather than "N"."""
+        return not self.stats.complete
+
+    def summary(self) -> str:
+        n = len(self.files_with_mentions)
+        lead = "at least %d files" % n if self.is_lower_bound else "%d files" % n
+        return ("%s in this repository mention %s (%d code, %d docs)"
+                % (lead, self._source, len(self.code_files),
+                   len(self.doc_files)))
+
+    #: Set by `textual_mentions`; only used for rendering.
+    _source: str = "CLAUDE.md"
+
+
+def textual_mentions(entries, stats: ScanStats, source_rel: str = "CLAUDE.md",
+                     target_rel: str = DEFAULT_TARGET) -> MentionReport:
+    """Count mentions of `source_rel` across `entries`. Pure.
+
+    `entries` is an iterable of `(rel_path, text)` with forward-slash relative
+    paths, so this function never touches a filesystem and a report is
+    comparable across machines.
+
+    The source and the target are excluded from their own report: the target's
+    own header links back to the source, and counting that would be the tool
+    reporting itself.
+    """
+    pattern = mention_pattern(os.path.basename(source_rel))
+    skip = {source_rel.replace("\\", "/").lower(),
+            target_rel.replace("\\", "/").lower()}
+
+    found = []
+    total = 0
+    for rel, text in entries:
+        rel = rel.replace("\\", "/")
+        if rel.lower() in skip:
+            continue
+        hits = len(pattern.findall(text))
+        if not hits:
+            continue
+        suffix = os.path.splitext(rel)[1].lower()
+        kind = "docs" if suffix in _DOC_SUFFIXES else "code"
+        found.append((rel, kind, hits))
+        total += hits
+
+    # Code first -- a guard list or an exemption lives there, and a CHANGELOG
+    # mentioning the file by name is usually exactly right.
+    found.sort(key=lambda row: (row[1] != "code", row[0].lower()))
+    return MentionReport(files_with_mentions=tuple(found), total_mentions=total,
+                         stats=stats, _source=os.path.basename(source_rel))
+
+
+def read_repo_text(project_root: str,
+                   cap_bytes: int = DEFAULT_SCAN_CAP_BYTES,
+                   max_file_bytes: int = MAX_FILE_BYTES, _walk=os.walk):
+    """`(entries, stats)` for `textual_mentions`. The only IO here.
+
+    **Files are visited in lexical order**, and that is not tidiness. A byte cap
+    applied to `os.walk`'s own ordering makes the result non-reproducible: the
+    same unchanged repository could report 22 files today and 19 tomorrow,
+    purely because a different file consumed the cap first. Collect, sort, then
+    read.
+
+    Excluded directories are counted, never walked. Sizing an excluded tree
+    means descending into it, which is the opposite of excluding it -- and on
+    one project that tree was a full duplicate checkout.
+
+    `_walk` is a seam, and it exists because the guard cannot be written
+    without one: every filesystem this runs on already hands back a small
+    directory in name order, so deleting the sort changes nothing observable
+    and the test passes against the implementation it rejects. It did exactly
+    that. Handing the walk a different order is the only way to see the sort
+    work.
+    """
+    root = os.path.abspath(project_root)
+    candidates = []
+    excluded_dirs = 0
+    excluded_files = 0
+    oversize = []
+    for dirpath, dirnames, filenames in _walk(root):
+        pruned = [d for d in dirnames if d in _SCAN_EXCLUDED_DIRS]
+        excluded_dirs += len(pruned)
+        dirnames[:] = [d for d in dirnames if d not in _SCAN_EXCLUDED_DIRS]
+        for name in filenames:
+            if os.path.splitext(name)[1].lower() not in _SCAN_SUFFIXES:
+                excluded_files += 1
+                continue
+            full = os.path.join(dirpath, name)
+            rel = os.path.relpath(full, root).replace(os.sep, "/")
+            try:
+                size = os.path.getsize(full)
+            except OSError:
+                size = 0
+            if size > max_file_bytes:
+                oversize.append(rel)
+                continue
+            candidates.append((rel, full))
+    candidates.sort(key=lambda pair: pair[0].lower())
+
+    entries = []
+    unreadable = []
+    used = 0
+    truncated = False
+    for rel, full in candidates:
+        if used >= cap_bytes:
+            truncated = True
+            break
+        try:
+            with open(full, encoding="utf-8-sig", newline="") as handle:
+                text = handle.read()
+        except (OSError, UnicodeDecodeError, ValueError):
+            unreadable.append(rel)
+            continue
+        used += len(text.encode("utf-8", "replace"))
+        entries.append((rel, text))
+
+    return entries, ScanStats(
+        scanned_files=len(entries), excluded_dirs=excluded_dirs,
+        excluded_files=excluded_files, oversize_files=tuple(sorted(oversize)),
+        unreadable_files=tuple(unreadable), scanned_bytes=used,
+        cap_bytes=cap_bytes, truncated=truncated)
+
+
+def scan_mentions(project_root: str, source_rel: str = "CLAUDE.md",
+                  target_rel: str = DEFAULT_TARGET,
+                  cap_bytes: int = DEFAULT_SCAN_CAP_BYTES,
+                  max_file_bytes: int = MAX_FILE_BYTES) -> MentionReport:
+    """IO wrapper over `read_repo_text` + `textual_mentions`."""
+    entries, stats = read_repo_text(project_root, cap_bytes, max_file_bytes)
+    return textual_mentions(entries, stats, source_rel, target_rel)
 
 
 # ── IO ───────────────────────────────────────────────────────────────────────

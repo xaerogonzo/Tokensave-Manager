@@ -36,8 +36,8 @@ from tkinter import messagebox, ttk
 
 from constants import C
 from helpers.instructions_split import (
-    DEFAULT_TARGET, apply_split, children_of, compute_split, is_index_section,
-    is_our_target, read_source,
+    DEFAULT_SOURCE, DEFAULT_TARGET, apply_split, children_of, compute_split,
+    is_index_section, is_our_target, read_source, scan_mentions,
 )
 from theme import UiPumpMixin, _Tooltip, bind_mousewheel
 
@@ -61,6 +61,9 @@ class SplitProposalDialog(UiPumpMixin, tk.Toplevel):
         #: An existing target a previous split wrote. Passed to every
         #: recompute, because a second split ADDS to it rather than refusing.
         self._target_text = ""
+        #: What else in this repository names the file we are about to empty.
+        #: A population, never a dependency graph -- see `textual_mentions`.
+        self._mentions = None
         self._sections = ()
         self._vars = {}
         self._boxes = {}
@@ -90,6 +93,11 @@ class SplitProposalDialog(UiPumpMixin, tk.Toplevel):
                       "is yours.",
                  font=("Segoe UI", 8, "italic"), bg=C["base"],
                  fg=C["overlay0"]).pack(anchor=tk.W, padx=18, pady=(0, 8))
+
+        self._mentions_label = tk.Label(
+            self, text="", font=("Segoe UI", 8), bg=C["base"],
+            fg=C["overlay0"], anchor=tk.W, justify=tk.LEFT, wraplength=820)
+        self._mentions_label.pack(fill=tk.X, padx=18, pady=(0, 8))
 
         wrap = tk.Frame(self, bg=C["base"])
         wrap.pack(fill=tk.BOTH, expand=True, padx=14, pady=(2, 4))
@@ -162,11 +170,12 @@ class SplitProposalDialog(UiPumpMixin, tk.Toplevel):
             text = read_source(path)
             target = read_source(path, DEFAULT_TARGET)
             plan = compute_split(text, target_text=target) if text else None
-            self._post(lambda: self._render(text, target, plan))
+            mentions = scan_mentions(path) if text else None
+            self._post(lambda: self._render(text, target, plan, mentions))
 
         threading.Thread(target=worker, daemon=True).start()
 
-    def _render(self, text: str, target_text: str, plan) -> None:
+    def _render(self, text: str, target_text: str, plan, mentions=None) -> None:
         for child in self._body.winfo_children():
             child.destroy()
         if not text:
@@ -175,6 +184,8 @@ class SplitProposalDialog(UiPumpMixin, tk.Toplevel):
 
         self._text = text
         self._target_text = target_text
+        self._mentions = mentions
+        self._show_mentions()
         # Every section, in document order. `compute_split` returns them split
         # into kept and moved; the union IS the file's section list.
         self._sections = tuple(sorted(plan.kept + plan.moved,
@@ -270,6 +281,31 @@ class SplitProposalDialog(UiPumpMixin, tk.Toplevel):
                 self._boxes[kid.index].configure(
                     state=tk.DISABLED if on else tk.NORMAL)
         self._recompute()
+
+    def _show_mentions(self) -> None:
+        """State the population on open. It never blocks Apply.
+
+        A mention is a fact about the repository, not a fault. Blocking on it
+        would make the common case un-finishable, and the index the split
+        leaves behind already tells a reader following a stale pointer where
+        the content went -- a navigation cost, not a loss. So this is subtext
+        grey, the same register as the empty-selection prompt, and it disables
+        nothing.
+        """
+        report = self._mentions
+        if report is None:
+            self._mentions_label.configure(text="")
+            return
+        if not report.files_with_mentions:
+            text = ("No other file in this repository mentions %s."
+                    % DEFAULT_SOURCE)
+            if report.is_lower_bound:
+                text = ("No mentions found — but the scan did not cover "
+                        "the whole repository, so that is a floor.")
+        else:
+            text = (report.summary() + ". Moving content out of it does not "
+                    "update them.")
+        self._mentions_label.configure(text=text)
 
     @staticmethod
     def _size_colour(size: int) -> str:
@@ -373,7 +409,46 @@ class SplitProposalDialog(UiPumpMixin, tk.Toplevel):
         for section in plan.moved:
             text.insert(tk.END, "  %s   (%s B)\n"
                         % (section.title, f"{section.size:,}"))
+        self._insert_mentions(text)
         text.configure(state=tk.DISABLED)
+
+    def _insert_mentions(self, text) -> None:
+        """The population, listed, with code first.
+
+        The wording stays "mentions" throughout. Calling them "references"
+        would claim exactly the semantics `textual_mentions` disclaims: all of
+        `see CLAUDE.md`, `# CLAUDE.md` and `path = "CLAUDE.md"` are the same
+        thing to the scan, and only the last is a dependency.
+        """
+        report = self._mentions
+        if report is None or not report.files_with_mentions:
+            return
+        bar = "=" * 70
+        floor = ("  (a floor -- the scan did not cover the whole repository)"
+                 if report.is_lower_bound else "")
+        text.insert(tk.END, "\n\n%s\nFiles containing textual mentions of %s%s\n%s\n"
+                    % (bar, DEFAULT_SOURCE, floor, bar))
+        text.insert(tk.END,
+                    "A mention is not a dependency. These are files whose text\n"
+                    "names %s; whether any of them still points at something\n"
+                    "that moved is a judgement this tool does not make.\n\n"
+                    % DEFAULT_SOURCE)
+        for rel, kind, hits in report.files_with_mentions:
+            times = "  (x%d)" % hits if hits > 1 else ""
+            text.insert(tk.END, "  [%-4s] %s%s\n" % (kind, rel, times))
+        stats = report.stats
+        if stats.unreadable_files:
+            text.insert(tk.END, "\n  %d file(s) could not be read, so this list\n"
+                                "  is a floor rather than a total:\n"
+                                % len(stats.unreadable_files))
+            for rel in stats.unreadable_files[:10]:
+                text.insert(tk.END, "    %s\n" % rel)
+        if stats.oversize_files:
+            text.insert(tk.END, "\n  %d file(s) skipped for size (> %s B).\n"
+                        % (len(stats.oversize_files), f"{stats.cap_bytes:,}"))
+        if stats.truncated:
+            text.insert(tk.END, "\n  The scan stopped at its %s B budget.\n"
+                        % f"{stats.cap_bytes:,}")
 
     # ── writing ──────────────────────────────────────────────────────────
 
@@ -394,14 +469,25 @@ class SplitProposalDialog(UiPumpMixin, tk.Toplevel):
         path, name = self._path, self._name
 
         def worker():
+            # Re-scanned at the moment we act, not when the dialog opened. The
+            # report is not authorization and gates nothing, but a figure shown
+            # some minutes ago should not be recorded as what was true when the
+            # write happened.
+            fresh = scan_mentions(path)
             ok, message = apply_split(path, plan)
-            self._post(lambda: self._finish(ok, message, name))
+            self._post(lambda: self._finish(ok, message, name, fresh))
 
         threading.Thread(target=worker, daemon=True).start()
 
-    def _finish(self, ok: bool, message: str, name: str) -> None:
+    def _finish(self, ok: bool, message: str, name: str, fresh=None) -> None:
         self._busy = False
         self._on_log("[split] %s: %s" % (name, message))
+        if fresh is not None:
+            self._mentions = fresh
+            self._show_mentions()
+            if fresh.files_with_mentions:
+                self._on_log("[split] %s: %s at apply time"
+                             % (name, fresh.summary()))
         if ok:
             messagebox.showinfo("Split applied", "%s\n\n%s" % (name, message),
                                 parent=self)

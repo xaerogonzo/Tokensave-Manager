@@ -227,6 +227,45 @@ no explanation is the same defect as a red row with none.
 `.ruff_cache/` into the project; `--no-cache` does not, and pyright and
 markdownlint write nothing. Drop the flag and the classification silently becomes
 wrong.
+### D1e. Moving content moves it across every boundary keyed to its filename
+
+`helpers/instructions_split.py` empties a file, and that is a **population-moving
+operation**, not merely a document edit. Measured the day it was first applied to
+three unrelated projects — three different silent failures, none of which raised
+anything, because the file still existed afterwards:
+
+- a doc-currency guard's **hand-kept covered list** did not include the new file,
+  so 17,870 lines of citations left its reach;
+- a **whole-file exemption** on the source meant moving content out swept 21 real
+  citations for the first time — a good outcome, arrived at by accident — while
+  the source's own exemptions became holes;
+- **prose citations** in committed source (`see CLAUDE.md`) went stale without
+  breaking: 21 such files in one project, 13 in another, 61 in a third.
+
+So the split **reports the population it is about to strand and claims nothing
+more.** `textual_mentions` is a textual-occurrence detector, and its docstring
+says so, because the next caller will otherwise read it as a dependency graph:
+`see X`, `# X` and `path = "X"` are identical to it and only the last is
+load-bearing. It never blocks Apply — a mention is a fact about the repository,
+not a fault.
+
+Three rules make the number worth printing, each paid for:
+
+- **A path token, not a substring.** `CLAUDE.md.bak` and `MY_CLAUDE.md` are other
+  files. (Honest: across the three projects the token rule and a substring search
+  agreed exactly. Insurance, not a measured win.)
+- **Sort before you cap.** Filesystem order is not stable, so a byte cap over an
+  unsorted walk reports 22 files today and 19 tomorrow with no change. The sort
+  cannot be guarded through a real filesystem — small directories already come
+  back in name order — which is why `read_repo_text` takes a `_walk` seam.
+- **A partial scan is structurally partial.** Capped, unreadable and oversize are
+  three distinct facts and none of them is "no mention". They are fields, so a
+  caller cannot print a total while holding evidence it is a floor.
+
+`instructions_split` must not import `install_identity` or read `install_dir`.
+That is a guard test, not a preference: the scan stays useful for a project whose
+Manager lives anywhere.
+
 ### D2. Agent CLIs: a new agent is a table row, never a new literal
 
 `helpers/agent_cli.py` holds one capability table. Adding Codex, Gemini CLI or
@@ -382,6 +421,9 @@ Token Save Manager Source/
 │   │   │                          carriage (what the files declare) vs reach (what the
 │   │   │                          chain from CLAUDE.md arrives at). Bounded include walk.
 │   │   ├── instructions_wiring.py  The ONE writer. Repairs one topology; never deletes.
+│   │   ├── instructions_split.py   Moves a lesson log out of the always-loaded
+│   │   │                           file. Two-level section tree; digest-guarded;
+│   │   │                           reports what else in the repo names the file.
 │   │   ├── headless_analyzers.py One capability table for ruff / pyright /
 │   │   │                        markdownlint. Rows, not branches: probe order,
 │   │   │                        argv, stream and severity policy all differ.

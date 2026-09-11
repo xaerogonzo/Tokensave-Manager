@@ -14,6 +14,7 @@ with no sentence beside it is the same defect as a red row with no explanation.
 from __future__ import annotations
 
 import os
+import pathlib
 
 import pytest
 
@@ -467,3 +468,123 @@ def test_the_previous_index_cannot_be_moved(tk_root, nested, wait_for, mocker):
                      if s.title == "Lessons (moved out of this file)")
 
     assert str(second._boxes[index_row.index]["state"]) == "disabled"
+
+
+# ── what else in the repository is keyed to this file ────────────────────────
+
+@pytest.fixture
+def with_mentions(tmp_path):
+    """A project whose committed source cites the file about to be emptied.
+
+    The real shape: LexForge carries 21 such files, Fortuna 13, OpenChem 61.
+    None of them errors after a split -- the file still exists; the reader is
+    just sent to the wrong place.
+    """
+    text = _doc3([(2, "Head", "x" * 200), (2, "Log", "z" * 60_000)])
+    root = _project(tmp_path, text)
+    (tmp_path / "src").mkdir()
+    (tmp_path / "src" / "a.py").write_text(
+        "# see CLAUDE.md for why this is ordered\n", encoding="utf-8")
+    (tmp_path / "src" / "b.py").write_text(
+        "# CLAUDE.md records the table\n# and CLAUDE.md again\n",
+        encoding="utf-8")
+    (tmp_path / "CHANGELOG.md").write_text(
+        "Moved rules into CLAUDE.md\n", encoding="utf-8")
+    # Must NOT be counted: not a path token.
+    (tmp_path / "src" / "c.py").write_text(
+        "# see CLAUDE.md.bak and MY_CLAUDE.md\n", encoding="utf-8")
+    return root, text
+
+
+def test_the_mention_count_is_stated_on_open(tk_root, with_mentions, wait_for):
+    root, _text = with_mentions
+    dialog = _open(tk_root, root, wait_for)
+
+    shown = dialog._mentions_label["text"]
+    assert "3 files" in shown, shown
+    assert "2 code, 1 docs" in shown
+    assert "does not update them" in shown
+
+
+def test_the_mention_line_never_disables_apply(tk_root, with_mentions,
+                                               wait_for):
+    """A mention is a fact about the repository, not a fault.
+
+    Blocking on it would make the common case un-finishable, and the index the
+    split leaves behind already tells a reader where the content went.
+    """
+    root, _text = with_mentions
+    dialog = _open(tk_root, root, wait_for)
+    section = next(s for s in dialog._sections if s.title == "Log")
+    _tick(dialog, section.index)
+
+    assert str(dialog._apply_btn["state"]) == "normal"
+    assert "Cannot apply" not in dialog._reason["text"]
+    assert dialog._mentions_label["text"]
+
+
+def test_a_non_token_mention_is_not_counted(tk_root, with_mentions, wait_for):
+    """`CLAUDE.md.bak` and `MY_CLAUDE.md` are different files."""
+    root, _text = with_mentions
+    dialog = _open(tk_root, root, wait_for)
+    named = {row[0] for row in dialog._mentions.files_with_mentions}
+    assert "src/c.py" not in named
+    assert named == {"src/a.py", "src/b.py", "CHANGELOG.md"}
+
+
+def test_one_file_twice_counts_once_in_the_headline(tk_root, with_mentions,
+                                                    wait_for):
+    root, _text = with_mentions
+    dialog = _open(tk_root, root, wait_for)
+    report = dialog._mentions
+    assert len(report.files_with_mentions) == 3
+    assert report.total_mentions == 4        # b.py names it twice
+
+
+def test_no_mentions_says_so_rather_than_saying_nothing(tk_root, tmp_path,
+                                                        wait_for):
+    root = _project(tmp_path, _doc3([(2, "Head", "x" * 200),
+                                     (2, "Log", "z" * 60_000)]))
+    dialog = _open(tk_root, root, wait_for)
+    assert "No other file" in dialog._mentions_label["text"]
+
+
+def test_an_incomplete_scan_is_shown_as_a_floor(tk_root, with_mentions,
+                                                wait_for, mocker):
+    """"Could not inspect" must never read as "contains no mention"."""
+    from helpers import instructions_split as helper
+    root, _text = with_mentions
+    real = helper.scan_mentions
+    mocker.patch.object(
+        split_dialog, "scan_mentions",
+        lambda path, *a, **k: real(path, *a, cap_bytes=40, **k))
+
+    dialog = _open(tk_root, root, wait_for)
+
+    assert dialog._mentions.is_lower_bound is True
+    assert "at least" in dialog._mentions_label["text"] or \
+        "floor" in dialog._mentions_label["text"]
+
+
+def test_apply_rescans_and_records_the_figure(tk_root, with_mentions,
+                                              wait_for, mocker):
+    """The preview may be minutes old by the time the button is pressed."""
+    root, _text = with_mentions
+    logged = []
+    dialog = SplitProposalDialog(tk_root, root, "Demo",
+                                 on_log=lambda m: logged.append(m))
+    wait_for(lambda: bool(dialog._sections), timeout_s=3.0)
+    section = next(s for s in dialog._sections if s.title == "Log")
+    _tick(dialog, section.index)
+    mocker.patch.object(split_dialog.messagebox, "askyesno", return_value=True)
+    mocker.patch.object(split_dialog.messagebox, "showinfo")
+
+    # A file appears between opening the dialog and pressing Apply.
+    (pathlib.Path(root) / "src" / "late.py").write_text(
+        "# CLAUDE.md says so\n", encoding="utf-8")
+
+    dialog._apply()
+    wait_for(lambda: any("at apply time" in m for m in logged), timeout_s=3.0)
+
+    line = next(m for m in logged if "at apply time" in m)
+    assert "4 files" in line, line

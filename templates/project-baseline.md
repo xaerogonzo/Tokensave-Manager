@@ -68,6 +68,7 @@ This index is the cheap part; the files are the expensive part.
 | parse another tool’s output, or wire in a linter | `gotchas/wiring-in-an-external-analyzer.md` |
 | design what a result, report or cursor returns | `gotchas/empty-is-not-unknown.md` |
 | need admin rights, or split off a privileged helper | `gotchas/elevation-and-privilege.md` |
+| move content out of a file, or split a big one | `gotchas/moving-content-moves-its-guards.md` |
 
 **These describe failures that do not raise.** A wrong appearance mode renders a
 plausible-looking screenshot; a re-export shim passes its tests for the wrong

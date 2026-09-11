@@ -153,7 +153,19 @@ linked — including in the three projects carrying the most session time.
   how to grep for them. Giving that log real `###` headings is an editorial
   job for its owner, not something this tool should guess at.
 
+  Shipped since: **the split reports what it is about to strand.** Applying it
+  to three projects produced three different silent failures on one day — a
+  guard's hand-kept covered list, a whole-file exemption, and stale prose
+  citations in committed source (21 files in one project, 13 in another, 61 in
+  a third). None raised anything, because the file still existed. The dialog now
+  states the population on open and never blocks on it. Recorded as rule D1e and
+  as `gotchas/moving-content-moves-its-guards.md`; the baseline ratchet was
+  raised 7,000 -> 7,500 B deliberately to carry the index row.
+
   Remaining:
+  - **Install identity and fleet ownership** (Phase B of the current plan): the
+    Manager has no record of where it is, so a move can only be inferred; and two
+    installs can fight over which one the fleet points at.
   - **OpenChem's residual.** Its kept "Verification standard" is 64,030 B: about
     a dozen lines of convention followed by **20 `###` lesson subsections**.
     Splitting inside a section needs `###` granularity, which this does not
