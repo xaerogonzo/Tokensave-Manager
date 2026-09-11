@@ -16,11 +16,11 @@ this codebase.
 | Cap | Threshold | Notes |
 |---|---|---|
 | File length | **aim for ≤800 lines; Doctor warns at 1500** | Files between 800–1500 are an aspirational target, not an audit failure. Above 1500 → propose a split. UI/layout files exempt (see carve-out) |
-| Method length | **100 lines** | Logic methods only; declarative layout exempt if complexity ≤ 3 |
+| Method length | **150 lines** | Logic methods only; declarative layout exempt if complexity ≤ 3 |
 | Class method count | **40 direct methods** | AST count of direct `FunctionDef` / `AsyncFunctionDef` children of `ClassDef`; nested defs, decorators, lambdas don't count |
-| Cyclomatic complexity | **10** | `tokensave_complexity` is canonical (see semantics below) |
+| Cyclomatic complexity | **18** | On the semantics frozen below, which count `and`/`or` — that runs ~30% above standard cyclomatic, so 18 here is ~13 on the usual scale |
 
-**Complexity semantics** (frozen here so we don't drift if upstream `tokensave_complexity` changes its algorithm):
+**Complexity semantics** (frozen here, and implemented by `helpers/doctor_rules._cyclomatic_complexity`, which is what Doctor, the pre-push hook and CI actually run):
 - Each `if` / `elif` / `for` / `while` / `except` adds 1
 - Each `and` / `or` short-circuit adds 1
 - Each `match` arm adds 1
@@ -354,7 +354,7 @@ If a refactor would improve metric (4) at the cost of (2) or (3), don't do it. M
 ### H. Governance hygiene (meta-rule)
 
 - **New rules require evidence.** Don't add governance rules speculatively. Every rule above traces back to a real recurring failure mode. If a future Claude session goes wrong in a new way, then — and only then — propose a new rule.
-- **The caps and rules in this file are the canonical source.** If a downstream tool (Doctor audit, tokensave, an external linter) disagrees: `tokensave_complexity` wins for complexity scores; otherwise this file wins. Do not silently invent additional thresholds.
+- **The caps and rules in this file are the canonical source**, and `helpers/doctor_rules` implements them — it is what the gate runs, so it wins on a disagreement. **`tokensave_complexity` is NOT the same measurement** and must not be used to judge these caps: its headline `score` is `lines + fan_out*3 + fan_in`, and its `cyclomatic_complexity` field is `branches + 1`, which does not count the short-circuits the semantics above do. Measured on `compute_split`: 28 here, 21 there. Both are right about their own definition. Do not silently invent additional thresholds.
 
 ---
 

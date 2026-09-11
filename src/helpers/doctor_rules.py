@@ -26,10 +26,22 @@ import os
 import re
 from dataclasses import dataclass, replace
 
+# Recalibrated 2026-09-11 against this tree. A cap is useful when it
+# surfaces a reviewable list; file_lines and class_methods each surfaced 2
+# and were left alone. complexity at 10 surfaced 150 across 86 of 202 files
+# -- spread that wide, the cap is the outlier, not the code -- and
+# method_lines at 100 surfaced 38. Now 17 and 8.
+#
+# NOTE the complexity SCALE. `_cyclomatic_complexity` below implements the
+# semantics frozen in BASIC_INSTRUCTIONS rule A, which count `and`/`or`
+# short-circuits. Standard cyclomatic (branches + 1) does not: measured on
+# compute_split this reads 28 where tokensave reads 21. So this scale runs
+# ~30% hot for idiomatic Python, and 18 here is about 13 on the usual one.
+# Per-directory overrides live in resolve_caps() for anything finer.
 _CAP_FILE_LINES         = 1500  # Doctor warning threshold (BASIC_INSTRUCTIONS aspires to 800)
-_CAP_METHOD_LINES       = 100
+_CAP_METHOD_LINES       = 150
 _CAP_CLASS_METHODS      = 40
-_CAP_COMPLEXITY         = 10
+_CAP_COMPLEXITY         = 18
 _CAP_LAYOUT_COMPLEXITY  = 3
 
 
