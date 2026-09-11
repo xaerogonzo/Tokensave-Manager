@@ -37,6 +37,12 @@ Token Save Manager Source/
 │
 ├── src/                           Post-Round-4 layout: App + main() in app.py, every
 │   │                              other concern in a subpackage (no monolith).
+│   ├── cli_support.py              The contract every CLI command shares - exit
+│   │                            codes, the envelope, Result, the resolvers.
+│   │                            `_Prerequisite` lives here so there is exactly
+│   │                            ONE class object to raise and catch.
+│   ├── cli_test_commands.py        tests / test-run / test-gaps, with the RUN_*
+│   │                            constants and parsers only they use.
 │   ├── app.py                     Entry point — App(tk.Tk) + main(). Constructs the
 │   │                              single ManagerConfig instance and passes it down to
 │   │                              every controller/dialog. ~1,640 lines after v6
@@ -75,7 +81,7 @@ Token Save Manager Source/
 │   │                              report/wait/quit. `report what=geometry` runs the visual
 │   │                              oracle. Committed scripts live in scripts/drive/.
 │   │
-│   ├── helpers/                   96 modules of pure / IO helpers — no UI deps.
+│   ├── helpers/                  108 modules of pure / IO helpers — no UI deps.
 │   │   ├── config.py              _load_config, _save_config, _migrate_config
 │   │   ├── detection.py           _detect_git/_gh/_npm/_codegraph/_claude_cli,
 │   │   │                          _root_path/_label, _version_lt
@@ -335,6 +341,24 @@ Token Save Manager Source/
 │   │   │                          how to repair it.
 │   │   ├── mcp_approval.py        Whether a project's .mcp.json has actually been
 │   │   │                          approved — distinct from whether it exists.
+│   │   ├── instructions_posture.py Does a project's instruction chain RESOLVE?
+│   │   │                          carriage is what the files DECLARE, reach is what
+│   │   │                          the chain arrives at. Bounded include walk.
+│   │   ├── instructions_wiring.py The ONE writer. Repairs one topology and
+│   │   │                          never deletes authored prose.
+│   │   ├── instructions_split.py  Moves a lesson log out of the always-loaded
+│   │   │                          file. Reports the repo population keyed to the
+│   │   │                          filename it is about to empty.
+│   │   ├── install_identity.py    Where am I (FIRST_RUN/SAME/MOVED) and who owns
+│   │   │                          the fleet (HERE/ELSEWHERE/SPLIT/UNOWNED). Two
+│   │   │                          questions, never conflated.
+│   │   ├── headless_analyzers.py  One capability table for ruff / pyright /
+│   │   │                          markdownlint. Four availability states; FAILED is
+│   │   │                          never a pass.
+│   │   ├── install_analyzers.py   How an analyzer is OBTAINED (npm / uv), kept
+│   │   │                          apart from how it is run.
+│   │   ├── observations.py        Diagnostics the Manager RECEIVES already
+│   │   │                          rendered. Populations are never summed.
 │   │   ├── mcp_posture.py         What all the wiring adds up to. `tier` is what a
 │   │   │                          project's OWN config declares; `service` is how it
 │   │   │                          is actually served, derived from tier + whether a
@@ -444,7 +468,7 @@ Token Save Manager Source/
 │   │   ├── io_utils.py            Shared IO helpers for the patcher modules.
 │   │   └── ui.py                  UI helpers shared across controllers and dialogs.
 │   │
-│   ├── dialogs/                   47 dialog / panel modules — a tk.Toplevel per file,
+│   ├── dialogs/                   53 dialog / panel modules — a tk.Toplevel per file,
 │   │                          plus the panels the bigger dialogs are built from.
 │   │   ├── settings.py            SettingsDialog (+ _probe_loaded_model helper)
 │   │   ├── release_wizard.py      ReleaseWizardDialog + _ReleaseCtx (paired)
@@ -495,6 +519,9 @@ Token Save Manager Source/
 │   │   │                          snapshotted before scrub and auto-restored if
 │   │   │                          filter-repo deletes it (three-fallback chain:
 │   │   │                          same-session URL → preflight dict → askstring).
+│   │   ├── instructions_overview.py InstructionsDialog - fleet instruction-chain view.
+│   │   ├── instructions_split.py  SplitProposalDialog - the oversized-chain offer.
+│   │   │                          Per project, never bulk.
 │   │   ├── relocate.py            RelocateDialog — one action for "this install
 │   │   │                          moved", replacing a four-surface scavenger hunt.
 │   │   │                          Writes nothing of its own; config BEFORE projects,
@@ -608,6 +635,15 @@ Token Save Manager Source/
 │       │                          (--title/--body-file/--base; strips origin/ prefix;
 │       │                          deletes temp file on success; shows URL + open prompt).
 │       │                          _open_pr_via_gh — gh pr create --web (browser pre-fill).
+│   │   ├── push_pull_ctrl.py      PushPullController - every command that talks to
+│   │   │                          a REMOTE over git's own transport. Takes the
+│   │   │                          parent's _post rather than a second UI pump.
+│   │   ├── requests_ctrl.py       RequestsController - the file-based IPC inbox.
+│   │   │                          _REQUEST_HANDLERS is an allowlist: an unknown
+│   │   │                          action is REJECTED, not ignored.
+│   │   ├── startup_checks_ctrl.py StartupChecksController - the three post-launch
+│   │   │                          checks AND the stagger that keeps their dialogs
+│   │   │                          and log writes off each other.
 │       ├── branch_mgmt_ctrl.py    BranchManagementController (P4 — new/switch/merge/
 │       │                          delete-branch cluster extracted from GitTabController;
 │       │                          merge orchestration decomposed into _prepare_merge_sources
@@ -911,8 +947,8 @@ app.py
   ├── constants.py       — palette, regex, paths
   ├── theme.py           — _Tooltip
   ├── helpers/*          — pure / IO helpers (no UI)
-  ├── dialogs/*          — 22 tk.Toplevel classes
-  └── controllers/*      — 4 tab controllers
+  ├── dialogs/*          — 53 tk.Toplevel / panel modules
+  └── controllers/*      — 29 tab and sub-controllers
         └── controllers/* each import the dialogs they instantiate
             (lazy in-handler imports for any cross-dialog cycle risk —
              see Rule 6 in CHANGELOG Round 4 Phase C decisions).

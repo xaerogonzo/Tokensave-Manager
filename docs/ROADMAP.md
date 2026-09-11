@@ -186,6 +186,29 @@ linked — including in the three projects carrying the most session time.
   grep vs tokensave; and the 912-turn figure is recorded as a **floor** because
   it counted no shell reads.
 
+- ✅ **The anti-monolith caps went from 192 violations to zero** (PRs #50,
+  #52, #53, #54). Recalibrated two caps that were not gates (complexity 10
+  surfaced 150 across **86 of 202 files** -- at that spread the cap is the
+  outlier, not the code; method length 100 surfaced 38), then cleared every
+  remaining violation: both oversized modules split, both oversized classes
+  under 40, all 17 complexity and all 6 method-length violations gone.
+  `file_lines` 1500 and `class_methods` 40 were measured and left alone --
+  two violations each is what a working cap looks like.
+
+  Rule A's canonical-tool line was wrong and is fixed: it named
+  `tokensave_complexity` while freezing semantics tokensave does not
+  implement. They are different measurements (28 vs 21 on `compute_split`),
+  and the gate runs `helpers/doctor_rules`.
+
+- ✅ **Doc sweep 2: the map moved, the failure mode moved with it.** Within a
+  day of becoming canonical, `ARCHITECTURE.md`'s Repository Layout was
+  missing **14 modules** and stating three counts that were all wrong (96
+  helpers against 108, 47 dialogs against 53, and a legacy summary still
+  claiming 22 dialogs and 4 controllers). Fixed, and then guarded:
+  `tests/test_architecture_doc.py` asserts every module is named and every
+  stated count matches the filesystem. Correcting numbers by hand only
+  resets a clock.
+
 - ✅ **Doc sweep: the always-loaded file carried a 35%-complete copy of
   ARCHITECTURE.** `## Project Structure` named **66 of 187** modules for
   **16,722 B on every message**, while `docs/ARCHITECTURE.md` named 178 and is
