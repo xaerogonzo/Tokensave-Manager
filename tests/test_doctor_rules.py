@@ -25,6 +25,7 @@ import pytest
 from helpers import doctor_rules
 from helpers.doctor_rules import (
     DEFAULT_CAPS,
+    _CAP_COMPLEXITY,
     Caps,
     _audit_project_tree,
     _audit_python_file,
@@ -160,20 +161,27 @@ def test_overrides_that_are_not_a_dict_are_ignored():
 def test_a_loosened_cap_still_reports_the_extreme_case(tmp_path):
     """The argument for tiers over a blanket skip.
 
-    A script that trips the production cap at CC 14 is noise; one at CC 30 is
-    a real finding. Skipping the directory loses both.
+    A script that only just trips the production cap is noise; one far above
+    it is a real finding. Skipping the directory loses both.
+
+    Derived from `_CAP_COMPLEXITY` rather than written as literals: the first
+    version fixed mild at CC 15 against a cap of 10, so recalibrating the cap
+    to 18 made "production caps flag both" quietly false.
     """
-    _write(tmp_path, "scripts/mild.py", _complex_fn("mild", branches=14))
-    _write(tmp_path, "scripts/wild.py", _complex_fn("wild", branches=30))
+    loosened = _CAP_COMPLEXITY + 10
+    _write(tmp_path, "scripts/mild.py",
+           _complex_fn("mild", branches=_CAP_COMPLEXITY))       # just over
+    _write(tmp_path, "scripts/wild.py",
+           _complex_fn("wild", branches=loosened + 10))         # far over both
 
     strict, _, _ = _audit_project_tree(str(tmp_path), set())
     assert len(strict) == 2, "production caps flag both"
 
     loose, _, _ = _audit_project_tree(
-        str(tmp_path), set(), {"scripts": {"max_complexity": 20}})
+        str(tmp_path), set(), {"scripts": {"max_complexity": loosened}})
     assert len(loose) == 1
     assert "wild()" in str(loose[0]), "the extreme one still surfaces"
-    assert "cap 20" in str(loose[0]), "the message reports the cap applied"
+    assert "cap %d" % loosened in str(loose[0]), "the message reports the cap"
     assert loose[0].symbol == "wild", "the symbol travels with the finding"
     assert loose[0].line > 0, "and so does the line it sits on"
 
@@ -210,7 +218,7 @@ def test_caps_are_reported_in_the_message(tmp_path):
     path = _write(tmp_path, "x.py", _complex_fn("f", branches=30))
     default = _audit_python_file(path)
     loosened = _audit_python_file(path, Caps(complexity=25))
-    assert "cap 10" in str(default["violations"][0])
+    assert "cap %d" % _CAP_COMPLEXITY in str(default["violations"][0])
     assert "cap 25" in str(loosened["violations"][0])
 
 
@@ -231,7 +239,7 @@ def test_str_of_a_placed_violation_is_the_historic_two_space_form(tmp_path):
     """`  <rel path>: <message>` — the exact shape every renderer expects."""
     _write(tmp_path, "pkg/mod.py", _complex_fn("f", branches=30))
     violations, _, _ = _audit_project_tree(str(tmp_path), set())
-    assert str(violations[0]) == "  pkg/mod.py: f() complexity 31 (cap 10)"
+    assert str(violations[0]) == "  pkg/mod.py: f() complexity 31 (cap 18)"
 
 
 def test_a_file_level_violation_renders_and_points_at_line_one(tmp_path):
