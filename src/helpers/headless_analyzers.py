@@ -214,6 +214,45 @@ _PYRIGHT_SEVERITY = {
 }
 
 
+def _pyright_finding(row, project_root: str) -> "Finding | None":
+    """One `generalDiagnostics` row -> one Finding, or None to skip it.
+
+    Split out of `parse_pyright_json` (2026-09-11), which was complexity 21
+    against a cap of 18. Most of that was this row: pyright omits fields
+    rather than nulling them, so nearly every read needs a fallback.
+
+    **The `+ 1` on every coordinate is the point of this function.**
+    pyright's `range` is 0-BASED and the envelope is 1-based everywhere in
+    Python, so the conversion happens here, at the boundary where pyright's
+    convention ends. Forwarding it raw puts every squiggle one line above the
+    code it is about, which reads as an editor off-by-one rather than a
+    parser bug. Keeping it in one small function is how it stays checkable.
+    """
+    if not isinstance(row, dict):
+        return None
+    filename = row.get("file")
+    rng = row.get("range") or {}
+    start = rng.get("start") or {}
+    end = rng.get("end") or start
+    if not filename or not isinstance(start, dict):
+        return None
+    rule = row.get("rule") or ""
+    return Finding(
+        file=relative_to(str(filename), project_root),
+        # +1: pyright is 0-based, the envelope is 1-based.
+        line=int(start.get("line") or 0) + 1,
+        column=int(start.get("character") or 0) + 1,
+        end_line=int((end or {}).get("line") or start.get("line") or 0) + 1,
+        end_column=int((end or {}).get("character")
+                       or start.get("character") or 0) + 1,
+        message=str(row.get("message") or "").strip(),
+        severity=_PYRIGHT_SEVERITY.get(row.get("severity"), "warning"),
+        # A diagnostic without a rule is still a diagnostic; grouping it
+        # under the producer beats dropping it.
+        rule="pyright/%s" % rule if rule else "pyright",
+    )
+
+
 def parse_pyright_json(text: str, project_root: str) -> list:
     """Findings from `pyright --outputjson`. Raises `ValueError` on a bad payload.
 
@@ -242,29 +281,9 @@ def parse_pyright_json(text: str, project_root: str) -> list:
 
     out: list = []
     for row in rows:
-        if not isinstance(row, dict):
-            continue
-        filename = row.get("file")
-        rng = row.get("range") or {}
-        start = rng.get("start") or {}
-        end = rng.get("end") or start
-        if not filename or not isinstance(start, dict):
-            continue
-        rule = row.get("rule") or ""
-        out.append(Finding(
-            file=relative_to(str(filename), project_root),
-            # +1: pyright is 0-based, the envelope is 1-based.
-            line=int(start.get("line") or 0) + 1,
-            column=int(start.get("character") or 0) + 1,
-            end_line=int((end or {}).get("line") or start.get("line") or 0) + 1,
-            end_column=int((end or {}).get("character")
-                           or start.get("character") or 0) + 1,
-            message=str(row.get("message") or "").strip(),
-            severity=_PYRIGHT_SEVERITY.get(row.get("severity"), "warning"),
-            # A diagnostic without a rule is still a diagnostic; grouping it
-            # under the producer beats dropping it.
-            rule="pyright/%s" % rule if rule else "pyright",
-        ))
+        finding = _pyright_finding(row, project_root)
+        if finding is not None:
+            out.append(finding)
     return out
 
 

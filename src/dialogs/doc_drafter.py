@@ -63,6 +63,21 @@ _RANGE_MODES = [
     ("Custom range…",            "custom"),
 ]
 
+def _is_local_backend(llm_cfg: dict) -> bool:
+    """Is this provider running on this machine?
+
+    Drives `backend_hint`, which gives local agentic backends a smaller
+    candidate-body budget. Ollama always counts; an OpenAI-compatible
+    endpoint counts only when its base URL is localhost, because the same
+    provider value is how people reach hosted endpoints too.
+    """
+    provider = (llm_cfg.get("provider") or "").lower()
+    if provider == "ollama":
+        return True
+    return (provider == "openai_compatible"
+            and "localhost" in (llm_cfg.get("base_url") or "").lower())
+
+
 class DocDrafterDialog(UiPumpMixin, tk.Toplevel):
     """Tabbed doc-update drafter (CHANGELOG + README)."""
 
@@ -676,27 +691,19 @@ class DocDrafterDialog(UiPumpMixin, tk.Toplevel):
         self._tab_state[key]["thread"] = t
         t.start()
 
-    def _generate_worker(self, key, stop_event, commits, classified, boundary,
-                         range_spec, project, tokensave_exe, last_rejection,
-                         llm_cfg):
-        """Background worker body for _on_generate_impl.
+    def _build_grounding(self, dt, project, range_spec, changed_files,
+                         tokensave_exe):
+        """Assemble the grounding block from up to three sources.
 
-        Runs on a daemon thread — all Tk mutations go through
-        ``self._post(callback)``.  Parameters are snapshots taken on the
-        main thread before the thread was started (immutable once passed).
+        Split out of `_generate_worker` (2026-09-11), which was complexity 22
+        against a cap of 18.
+
+        The third source is a different KIND from the other two: tokensave and
+        codegraph say what EXISTS, while PyScope says how much of it was
+        actually PROVED -- the caveat a model writing about a call graph most
+        needs, and the one neither of the others can supply. Every source is
+        absent rather than fabricated when its tool is not configured.
         """
-        # Both tabs get the always-on changed-file context (Phase 1.8).
-        changed_files = dd.changed_file_paths(
-            project, range_spec, self._cfg.git_exe)
-
-        dt = REGISTRY[key]
-        target_path = self._resolve_target_path(key)
-        if not target_path:
-            self._post(lambda: self._on_generate_error(
-                key, "No target file selected — pick a file first."))
-            return
-        existing = dt.read_existing(target_path)
-
         # Theme B1: tokensave + codegraph grounding injection.
         from helpers.doc_grounding import (
             build_grounding_block, build_codegraph_block,
@@ -731,18 +738,37 @@ class DocDrafterDialog(UiPumpMixin, tk.Toplevel):
         # needs and the one neither of the others can supply. Absent when
         # PyScope is not configured, like every other grounding source.
         pyscope_block = build_pyscope_block(project, self._cfg.pyscope_exe)
-        grounding = build_combined_grounding(
+        return build_combined_grounding(
             tokensave_block, codegraph_block, pyscope_block)
+
+    def _generate_worker(self, key, stop_event, commits, classified, boundary,
+                         range_spec, project, tokensave_exe, last_rejection,
+                         llm_cfg):
+        """Background worker body for _on_generate_impl.
+
+        Runs on a daemon thread — all Tk mutations go through
+        ``self._post(callback)``.  Parameters are snapshots taken on the
+        main thread before the thread was started (immutable once passed).
+        """
+        # Both tabs get the always-on changed-file context (Phase 1.8).
+        changed_files = dd.changed_file_paths(
+            project, range_spec, self._cfg.git_exe)
+
+        dt = REGISTRY[key]
+        target_path = self._resolve_target_path(key)
+        if not target_path:
+            self._post(lambda: self._on_generate_error(
+                key, "No target file selected — pick a file first."))
+            return
+        existing = dt.read_existing(target_path)
+
+        grounding = self._build_grounding(dt, project, range_spec,
+                                          changed_files, tokensave_exe)
 
         # v4: build_prompt returns PromptBuildResult — named-field access.
         # backend_hint=True triggers smaller candidate-body budget for local
         # agentic backends (Ollama).
-        _provider = (llm_cfg.get("provider") or "").lower()
-        is_local_backend = (
-            _provider == "ollama"
-            or (_provider == "openai_compatible"
-                and "localhost" in (llm_cfg.get("base_url") or "").lower())
-        )
+        is_local_backend = _is_local_backend(llm_cfg)
         prompt_result = dt.build_prompt(
             commits, classified, existing,
             self._project_name, self._project_desc,

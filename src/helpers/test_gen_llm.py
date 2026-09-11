@@ -267,6 +267,43 @@ module docstring.
 # Public API
 # ---------------------------------------------------------------------------
 
+def _repair_non_python(err: str, code: str, run, user_prompt: str,
+                       cancel_event, source_path: str,
+                       project_root: str) -> tuple:
+    """One repair pass when the model's reply is not valid Python.
+
+    Split out of `generate_ai_test_content` (2026-09-11), which was
+    complexity 19 against a cap of 18.
+
+    Covers the case where the model emitted prose or a permission request
+    ("May I write this file?") instead of code. **Never returns unparseable
+    text**, because the caller writes what it gets to disk. If the previous
+    reply was cut off -- output past max_tokens, which shows up as an
+    unterminated string or unexpected EOF -- the model is told to produce a
+    SHORTER complete file rather than re-truncating the same one.
+    """
+    if cancel_event and cancel_event.is_set():
+        return None, "Cancelled."
+    repair_up = user_prompt + "\n\n" + _REPAIR_PROMPT_TEMPLATE.format(error=err)
+    # If the previous reply was cut off (output exceeded max_tokens), the
+    # parse error is an unterminated string / unexpected EOF — tell the model
+    # to produce a SHORTER complete file instead of re-truncating.
+    if any(s in err.lower() for s in ("unterminated", "eof", "was never closed")):
+        repair_up += "\n" + _TRUNCATION_HINT
+    raw2, _ = run(repair_up)
+    if raw2:
+        code2 = _extract_code(raw2)
+        err2 = _looks_like_python(code2)
+        if err2 is None and code2.strip():
+            return _autofix_imports(code2, source_path, project_root), None
+        err, code = (err2 or err), (code2 or code)
+    first_line = (code.strip().splitlines() or [""])[0][:80]
+    return None, (
+        f"AI did not return valid Python ({err}). "
+        f"First line was: {first_line!r}"
+    )
+
+
 def generate_ai_test_content(
     source_path: str,
     project_root: str,
@@ -334,34 +371,11 @@ def generate_ai_test_content(
         return None, "AI returned an empty response."
     err = _looks_like_python(code)
 
-    # One repair pass when the reply isn't valid Python — covers the case where
-    # the model emitted prose or a permission request ("May I write this file?")
-    # instead of code. NEVER return un-parseable text (the caller writes it to disk).
     if err is not None:
-        if cancel_event and cancel_event.is_set():
-            return None, "Cancelled."
-        repair_up = user_prompt + "\n\n" + _REPAIR_PROMPT_TEMPLATE.format(error=err)
-        # If the previous reply was cut off (output exceeded max_tokens), the
-        # parse error is an unterminated string / unexpected EOF — tell the model
-        # to produce a SHORTER complete file instead of re-truncating.
-        if any(s in err.lower() for s in ("unterminated", "eof", "was never closed")):
-            repair_up += "\n" + _TRUNCATION_HINT
-        raw2, _ = _run(repair_up)
-        if raw2:
-            code2 = _extract_code(raw2)
-            err2 = _looks_like_python(code2)
-            if err2 is None and code2.strip():
-                return _autofix_imports(code2, source_path, project_root), None
-            err, code = (err2 or err), (code2 or code)
-        first_line = (code.strip().splitlines() or [""])[0][:80]
-        return None, (
-            f"AI did not return valid Python ({err}). "
-            f"First line was: {first_line!r}"
-        )
+        return _repair_non_python(err, code, _run, user_prompt, cancel_event,
+                                  source_path, project_root)
 
     return _autofix_imports(code, source_path, project_root), None
-
-    return code, None
 
 
 @dataclass
@@ -412,6 +426,66 @@ class _VerifyCtx:
     tests_dir:           str
     max_runtime_repairs: int
     on_token:            object            # Callable[[str], None] | None
+
+
+def _gate_and_move(current: str, output: str, old_ids: set, is_update: bool,
+                   final_path: str, final_rel: str, allow_overwrite: bool,
+                   tmp_path: str) -> VerifiedResult:
+    """The test passed. May we keep it, and can it be put in place?
+
+    Split out of `_run_and_verify` (2026-09-11), which was complexity 25
+    against a cap of 18. Three gates stand between a green run and a written
+    file and they refuse for unrelated reasons: a regenerate that DROPPED
+    prior tests, a new-file collision that is not a sanctioned overwrite, and
+    a destination another process holds open.
+    """
+    # Retention gate — regenerate must not drop any prior test.
+    if is_update and old_ids:
+        missing = old_ids - _test_function_ids(current)
+        if missing:
+            return VerifiedResult(
+                current, "fail",
+                "Regenerated test DROPPED existing tests "
+                f"({', '.join(sorted(missing))}). Kept the original "
+                "to avoid losing coverage.",
+                preserved_existing=True)
+    # New-file collision (not a sanctioned overwrite) → keep existing.
+    if os.path.exists(final_path) and not allow_overwrite:
+        return VerifiedResult(
+            current, "fail",
+            f"{os.path.basename(final_path)} already exists; not overwriting.")
+    if not _safe_replace(tmp_path, final_path):
+        return VerifiedResult(
+            current, "fail",
+            f"{os.path.basename(final_path)} is locked by another "
+            "process — close it and retry.",
+            preserved_existing=is_update)
+    return VerifiedResult(current, "pass", output,
+                          written_path=final_rel,
+                          is_tk=("pytest.mark.tk" in current))
+
+
+def _repair_once(effective_backend, cfg, system_prompt: str, user_prompt: str,
+                 output: str, current: str, source_path: str,
+                 project_root: str, on_token) -> "str | None":
+    """Ask the model to fix a failing test. Returns usable Python, or None.
+
+    The other half of `_run_and_verify`'s loop. None means STOP: the model
+    returned nothing, or returned something that is not Python. Running that
+    would put garbage under pytest, so it is refused rather than tried. A
+    repair that re-drops an import is re-fixed deterministically first.
+    """
+    repair_up = user_prompt + "\n\n" + _RUNTIME_REPAIR_TEMPLATE.format(
+        report=(output or "")[-4000:], prior=current)
+    raw, _ = _dispatch(effective_backend, cfg, system_prompt, repair_up,
+                       project_root, on_token=on_token)
+    if not raw:
+        return None
+    fixed = _extract_code(raw)
+    if not fixed.strip() or _looks_like_python(fixed) is not None:
+        return None  # non-Python → don't run garbage
+    # A repair that re-dropped an import gets re-fixed deterministically.
+    return _autofix_imports(fixed, source_path, project_root)
 
 
 def _run_and_verify(
@@ -469,47 +543,21 @@ def _run_and_verify(
             passed, output = smoke_runner.run_single_test_file(project_root, tmp_rel)
             last_report = output
             if passed:
-                # Retention gate — regenerate must not drop any prior test.
-                if is_update and old_ids:
-                    missing = old_ids - _test_function_ids(current)
-                    if missing:
-                        return VerifiedResult(
-                            current, "fail",
-                            "Regenerated test DROPPED existing tests "
-                            f"({', '.join(sorted(missing))}). Kept the original "
-                            "to avoid losing coverage.",
-                            preserved_existing=True)
-                # New-file collision (not a sanctioned overwrite) → keep existing.
-                if os.path.exists(final_path) and not allow_overwrite:
-                    return VerifiedResult(
-                        current, "fail",
-                        f"{os.path.basename(final_path)} already exists; not overwriting.")
-                if not _safe_replace(tmp_path, final_path):
-                    return VerifiedResult(
-                        current, "fail",
-                        f"{os.path.basename(final_path)} is locked by another "
-                        "process — close it and retry.",
-                        preserved_existing=is_update)
-                return VerifiedResult(current, "pass", output,
-                                      written_path=final_rel,
-                                      is_tk=("pytest.mark.tk" in current))
+                return _gate_and_move(current, output, old_ids, is_update,
+                                      final_path, final_rel, allow_overwrite,
+                                      tmp_path)
 
             # Failed. Stop if out of repair budget or can't re-dispatch.
             if attempt >= attempts - 1 or effective_backend is None or not system_prompt:
                 break
             if cancel_event and cancel_event.is_set():
                 return VerifiedResult(None, "cancelled", last_report)
-            repair_up = user_prompt + "\n\n" + _RUNTIME_REPAIR_TEMPLATE.format(
-                report=(output or "")[-4000:], prior=current)
-            raw, _ = _dispatch(effective_backend, cfg, system_prompt, repair_up,
-                               project_root, on_token=on_token)
-            if not raw:
+            repaired = _repair_once(effective_backend, cfg, system_prompt,
+                                    user_prompt, output, current, source_path,
+                                    project_root, on_token)
+            if repaired is None:
                 break
-            fixed = _extract_code(raw)
-            if not fixed.strip() or _looks_like_python(fixed) is not None:
-                break  # repair produced non-Python → don't run garbage
-            # A repair that re-dropped an import gets re-fixed deterministically.
-            current = _autofix_imports(fixed, source_path, project_root)
+            current = repaired
 
         # Per-test pruning (new-file path only — regenerate's retention gate
         # forbids dropping prior tests). Salvage passing tests by removing the
