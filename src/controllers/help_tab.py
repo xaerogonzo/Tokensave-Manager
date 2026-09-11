@@ -199,6 +199,7 @@ class HelpTabController:
             ("  Run checks",          self._help_run_checks),
             ("  Integration check",   self._help_integration_check),
             ("  Settings reference",  self._help_settings_reference),
+            ("  Moving the Manager",  self._help_relocating),
             ("  File Locations",      self._help_file_locations),
             ("  About",               self._help_about),
         ]
@@ -550,6 +551,9 @@ class HelpTabController:
 
     def _help_settings_reference(self):
         help_topics_tools.settings_reference(self)
+
+    def _help_relocating(self):
+        help_topics_tools.relocating(self)
 
     def _help_file_locations(self):
         help_topics_tools.file_locations(self)

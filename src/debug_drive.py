@@ -33,6 +33,7 @@ The script is a JSON list of steps, run in order:
       {"do": "report", "what": "mcp", "after_ms": 3000},
       {"do": "report", "what": "posture"},      // MCP state, not rendered text
       {"do": "report", "what": "instructions"}, // carriage vs reach, per project
+      {"do": "report", "what": "identity"},     // install identity + fleet owner
       {"do": "report", "what": "geometry"},     // laid-out geometry defects
       {"do": "shot",   "path": "C:/tmp/mcp.png", "target": "dialog"},
       {"do": "quit"}
@@ -391,6 +392,8 @@ class _Driver:
             return
         if what == "instructions":
             self._report_instructions()
+        if what == "identity":
+            self._report_identity()
             return
         if what == "geometry":
             self._report_geometry(target, step)
@@ -431,6 +434,43 @@ class _Driver:
             result = scan_window(target)
         for line in format_result(result).splitlines():
             _say("drive: " + line)
+
+    def _report_identity(self) -> None:
+        """Where am I, and who owns the fleet — as text, not a screenshot.
+
+        Two questions printed separately on purpose. A run that silently
+        collapsed them, or that reported one owner for a split fleet, is
+        visible in a diff of this output.
+        """
+        from constants import _BASE_DIR
+        from helpers.install_identity import (
+            read_identity, read_ownership, relocation_plan,
+        )
+        from helpers.instructions_posture import read_posture
+
+        cfg = self._app._cfg
+        raw = dict(cfg.raw)
+        identity = read_identity(raw, _BASE_DIR)
+        fleet = read_posture(list(raw.get("search_roots") or []), cfg)
+        ownership = read_ownership(fleet.projects, cfg.template_dir)
+        plan = relocation_plan(identity, ownership, raw, cfg.template_dir)
+
+        _say("identity : %s" % identity.state)
+        _say("  recorded %s" % (identity.recorded_display or "(none)"))
+        _say("  current  %s" % identity.current_display)
+        _say("ownership: %s" % ownership.state)
+        for owner in ownership.owners:
+            _say("  %-3d %s" % (owner.count, owner.display_dir))
+        _say("  unresolved %d%s"
+                  % (len(ownership.unresolved),
+                     (": " + ", ".join(ownership.unresolved[:5]))
+                     if ownership.unresolved else ""))
+        _say("config updates: %d" % len(plan.config_updates))
+        for key, old, new in plan.config_updates:
+            _say("  %s: %s -> %s" % (key, old, new))
+        _say("projects to repoint: %d" % len(plan.projects))
+        _say("blocked : %s" % (plan.blocked or "(no)"))
+        _say("downgrade risk: %s" % plan.downgrades)
 
     def _report_instructions(self) -> None:
         """Instruction-chain state, with carriage and reach kept apart.

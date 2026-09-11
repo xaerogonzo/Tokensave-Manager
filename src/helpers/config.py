@@ -13,7 +13,7 @@ from __future__ import annotations
 import json
 import os
 
-from constants import _CONFIG_PATH
+from constants import _BASE_DIR, _CONFIG_PATH
 
 
 def _load_config() -> dict:
@@ -62,6 +62,19 @@ def _migrate_config(cfg: dict) -> dict:
     # told us to stop warning about.
     if "mcp_skip_warnings" not in cfg:
         cfg["mcp_skip_warnings"] = []
+        changed = True
+    # Where this installation was the last time it ran. Seeded ONLY when
+    # absent, and the ordering matters: writing it unconditionally here would
+    # erase the evidence of a move before anything could look at it, since this
+    # runs on load and the check runs afterwards.
+    #
+    # A user who upgrades to this version AND has already moved gets the new
+    # location recorded with no prior value to compare against, so that
+    # particular move is undetectable from the config. It is still visible from
+    # the projects, which point at the old templates -- which is exactly why
+    # "where am I" and "who owns the fleet" are separate questions.
+    if not cfg.get("install_dir"):
+        cfg["install_dir"] = _BASE_DIR
         changed = True
     if changed:
         _save_config(cfg)

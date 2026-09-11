@@ -162,10 +162,15 @@ linked — including in the three projects carrying the most session time.
   as `gotchas/moving-content-moves-its-guards.md`; the baseline ratchet was
   raised 7,000 -> 7,500 B deliberately to carry the index row.
 
+  Shipped since: **install identity and fleet ownership.** The Manager records
+  where it ran and asks two questions rather than one — *where am I* and *who
+  owns the fleet* — because they stop being the same question once a second
+  installation exists, which is a live condition here. One dialog, one button,
+  reusing the existing writers; it refuses bulk repair for a split or partial
+  fleet, and shows both baselines with content hashes rather than inventing a
+  version order. Runbook in `docs/RELOCATING.md` and a Help topic.
+
   Remaining:
-  - **Install identity and fleet ownership** (Phase B of the current plan): the
-    Manager has no record of where it is, so a move can only be inferred; and two
-    installs can fight over which one the fleet points at.
   - **OpenChem's residual.** Its kept "Verification standard" is 64,030 B: about
     a dozen lines of convention followed by **20 `###` lesson subsections**.
     Splitting inside a section needs `###` granularity, which this does not

@@ -65,6 +65,16 @@ class ManagerConfig:
         return self.raw.get("template_dir", "") or os.path.join(_BASE_DIR, "templates")
 
     @property
+    def install_dir(self) -> str:
+        """Where this installation was the last time it ran.
+
+        Empty means no record, which is NOT evidence of a move — see
+        `helpers/install_identity.read_identity`. Compared against
+        `constants._BASE_DIR`, never against a derived path.
+        """
+        return self.raw.get("install_dir", "") or ""
+
+    @property
     def search_roots(self) -> list:
         """List of search-root entries (each entry is str or {"path","label"})."""
         return self.raw.get("search_roots", [])

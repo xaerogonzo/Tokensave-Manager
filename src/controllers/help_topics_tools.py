@@ -605,6 +605,46 @@ def file_locations(ctl):
         ins(_CONFIG_PATH + "\n", "code")
     ctl._help_show(_fill)
 
+def relocating(ctl):
+    _doc = os.path.join(_BASE_DIR, "docs", "RELOCATING.md")
+    _ask = ("I moved TokenSave Manager to a new folder - what do I need to "
+            "check in my projects?")
+
+    def _fill():
+        h1, h2, p, warn, ok, dim, br, ins = ctl._hw()
+        h1("Moving the Manager")
+        p("Move the folder, start the Manager, and press the button it offers. "
+          "The rest of this explains why there is a button at all.")
+        br()
+        h2("Why the location matters")
+        p("Every wired project's BASIC_INSTRUCTIONS.md holds an ABSOLUTE path "
+          "to the shared baseline. That is what makes one edit to "
+          "project-baseline.md reach every project at once - and it is why "
+          "moving this folder matters to all of them.")
+        br()
+        h2("What gets repaired")
+        ins("  template_dir in manager-config.json\n", "body")
+        ins("  the baseline include in every project\n", "body")
+        ins("  MCP wrapper paths - Settings -> MCP integration\n", "body")
+        br()
+        p("Paths to software installed elsewhere - tokensave.exe, git, your "
+          "editor, the analyzers - are never rewritten by a move. Neither is "
+          "anything under search_roots, even if it lives inside this folder.")
+        br()
+        h2("When it refuses")
+        p("If your projects point at two different baselines, or some reach "
+          "none at all, there is no single thing to repoint and the Manager "
+          "says so rather than fixing half the fleet.")
+        br()
+        warn("Two installations - a source checkout and a release build - each "
+             "carry their own templates folder. Whichever ran last owns the "
+             "projects, and the other will report them all as stale. That is "
+             "correct, not a bug.")
+        br()
+        dim("Full detail: docs/RELOCATING.md")
+    ctl._help_show(_fill, doc_path=_doc, ask_text=_ask)
+
+
 def about(ctl):
     _doc = os.path.join(_BASE_DIR, "README.md")
     _ask = "Give me a high-level overview of what TokenSave Manager does and all its features"
