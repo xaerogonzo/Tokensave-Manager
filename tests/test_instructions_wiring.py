@@ -260,3 +260,102 @@ def test_planner_refuses_an_excluded_project(tmp_path, templates):
     before = sorted(os.listdir(root))
     iw.apply_wiring(str(root), plan, inc_line(templates), root.name, "x", "")
     assert sorted(os.listdir(root)) == before
+
+
+# -- applying to one project: outcomes are data, not sentences ------------
+#
+# What this replaced: the caller returned prose -- "skipped - state changed
+# since preview" versus "skipped - %s" % plan.blocked -- and the UI branched on
+# `outcome == "wired"`. So the safety case the three-stage flow exists for was
+# distinguishable from an ordinary refusal only by parsing a string the code had
+# formatted itself. It worked, and it was one rename from silently not working.
+#
+# These assert on MEMBERS. If any of them needs `in result.render()` to tell two
+# situations apart, the shape has regressed.
+
+def apply_one(root, templates, template_text=""):
+    baseline = ip.canonical(str(templates / "project-baseline.md"))
+    return iw.apply_to_project(
+        posture_of(root, templates), baseline, str(templates),
+        inc_line(templates), template_text, bool(template_text))
+
+
+class TestApplyOutcome:
+    def test_a_clean_wire_reports_wired_and_the_files_it_touched(
+            self, tmp_path, templates):
+        root = make_project(tmp_path, claude="# P\n",
+                            basic=inc_line(templates) + "\n")
+        result = apply_one(root, templates)
+        assert result.outcome == iw.OUTCOME_WIRED
+        assert result.wrote is True
+        assert "CLAUDE.md" in " ".join(result.changed_files)
+
+    def test_an_already_resolving_project_is_not_a_write(self, tmp_path,
+                                                         templates):
+        root = make_project(tmp_path, claude="@BASIC_INSTRUCTIONS.md\n",
+                            basic=inc_line(templates) + "\n")
+        result = apply_one(root, templates)
+        assert result.outcome == iw.OUTCOME_ALREADY_RESOLVED
+        assert result.wrote is False
+        assert result.changed_files == ()
+
+    def test_a_project_that_changed_since_the_preview_is_its_own_outcome(
+            self, tmp_path, templates):
+        """The safety net doing its job, and it must not look like a refusal.
+
+        The posture is captured, the project is then repaired by hand, and the
+        stale plan must be discarded unapplied.
+        """
+        root = make_project(tmp_path, claude="# P\n",
+                            basic=inc_line(templates) + "\n")
+        stale = posture_of(root, templates)          # ORPHANED at this point
+
+        # Somebody wires it by hand in between.
+        (root / "CLAUDE.md").write_bytes(
+            b"# P\n\n@BASIC_INSTRUCTIONS.md\n")
+
+        baseline = ip.canonical(str(templates / "project-baseline.md"))
+        result = iw.apply_to_project(stale, baseline, str(templates),
+                                     inc_line(templates), "", False)
+
+        assert result.outcome == iw.OUTCOME_SKIPPED_STATE_CHANGED
+        assert result.changed_files == ()
+
+    def test_a_blocked_plan_is_a_different_member_from_a_stale_one(
+            self, tmp_path, templates):
+        """The whole point of the change: two skips, two members.
+
+        Nothing here reads `render()`. If telling these apart ever needs the
+        sentence, the structure has gone.
+        """
+        root = make_project(
+            tmp_path,
+            claude="@BASIC_INSTRUCTIONS.md\n@BASIC_INSTRUCTIONS.md\n",
+            basic="nothing\n")
+        result = apply_one(root, templates)
+
+        assert result.outcome == iw.OUTCOME_SKIPPED_BLOCKED
+        assert result.outcome != iw.OUTCOME_SKIPPED_STATE_CHANGED
+        assert result.is_skip is True
+        assert result.reason
+
+    def test_both_skips_are_skips_and_neither_is_a_write(self):
+        assert iw.ApplyOutcome(iw.OUTCOME_SKIPPED_BLOCKED).is_skip
+        assert iw.ApplyOutcome(iw.OUTCOME_SKIPPED_STATE_CHANGED).is_skip
+        assert not iw.ApplyOutcome(iw.OUTCOME_SKIPPED_BLOCKED).wrote
+        assert not iw.ApplyOutcome(iw.OUTCOME_SKIPPED_STATE_CHANGED).wrote
+
+    def test_the_sentence_derives_from_the_outcome(self):
+        """One direction. The text is built from the member, never parsed."""
+        assert iw.ApplyOutcome(iw.OUTCOME_WIRED).render() == "wired"
+        assert iw.ApplyOutcome(
+            iw.OUTCOME_SKIPPED_STATE_CHANGED).render().startswith("skipped")
+        with_reason = iw.ApplyOutcome(iw.OUTCOME_FAILED, "disk full").render()
+        assert "failed" in with_reason and "disk full" in with_reason
+
+    def test_an_unverified_write_is_neither_success_nor_failure(self):
+        result = iw.ApplyOutcome(iw.OUTCOME_UNVERIFIED, "still absent",
+                                 ("CLAUDE.md",))
+        assert result.wrote is False
+        assert result.is_skip is False
+        assert result.changed_files == ("CLAUDE.md",)

@@ -52,9 +52,10 @@ from helpers.instructions_posture import (
     REACH_UNKNOWN,
     parse_baseline_target,
     read_posture,
-    read_project,
 )
-from helpers.instructions_wiring import apply_wiring, plan_wiring
+from helpers.instructions_wiring import (
+    OUTCOME_FAILED, ApplyOutcome, apply_to_project, plan_wiring,
+)
 from helpers.doctor_rules import (
     _INSTRUCTIONS_REVIEW_BYTES,
     _INSTRUCTIONS_SPLIT_BYTES,
@@ -333,38 +334,18 @@ class InstructionsDialog(UiPumpMixin, tk.Toplevel):
         template_file = getattr(self._cfg, "basic_instructions_template", "")
         return bool(template_file) and os.path.isfile(template_file)
 
-    def _apply_to(self, project) -> "tuple[str, tuple]":
-        """Re-read, re-plan, write, re-read. Returns (outcome, changed_files).
+    def _apply_to(self, project):
+        """Supply the cfg-derived values; the orchestration lives in the helper.
 
-        The plan handed to this method is deliberately NOT reused: between the
-        preview and the click the disk may have moved on, and writing a stale
-        plan is how a bulk action damages a project that had already been
-        fixed by hand.
+        `instructions_wiring.apply_to_project` owns re-read / re-plan / write /
+        verify so that this panel and any other surface share ONE implementation
+        of it. Two copies is two places for the recompute to go missing.
         """
         baseline = parse_baseline_target(self._cfg.baseline_include_line)
-        fresh = read_project(project.display_root, project.name,
-                             self._cfg.template_dir, baseline)
-        if fresh.reach != project.reach:
-            return "skipped — state changed since preview", ()
-
-        plan = plan_wiring(fresh, has_template=self._has_template())
-        if plan.blocked:
-            return "skipped — %s" % plan.blocked, ()
-        if plan.is_noop:
-            return "already resolved", ()
-
-        result = apply_wiring(project.display_root, plan,
-                              self._cfg.baseline_include_line, project.name,
-                              self._template_text(), baseline or "")
-        if not result.ok:
-            return "failed — %s" % (result.error or result.skipped), ()
-
-        after = read_project(project.display_root, project.name,
-                             self._cfg.template_dir, baseline)
-        if after.reach == REACH_RESOLVED:
-            return "wired", result.changed_files
-        return "unknown — still %s after writing" % after.reach, \
-            result.changed_files
+        return apply_to_project(
+            project, baseline or "", self._cfg.template_dir,
+            self._cfg.baseline_include_line, self._template_text(),
+            self._has_template())
 
     def _wire_one(self, project) -> None:
         plan = plan_wiring(project, has_template=self._has_template())
@@ -376,11 +357,8 @@ class InstructionsDialog(UiPumpMixin, tk.Toplevel):
                 "touched." % (project.display_root, listing or "  (nothing)"),
                 parent=self):
             return
-        outcome, changed = self._apply_to(project)
-        self._on_log("Instructions: %s — %s%s"
-                     % (project.name, outcome,
-                        (" (%s)" % ", ".join(changed)) if changed else ""),
-                     C["green"] if outcome == "wired" else C["peach"])
+        result = self._apply_to(project)
+        self._log_outcome(project.name, result)
         self._scan()
 
     def _split_one(self, project) -> None:
@@ -394,6 +372,14 @@ class InstructionsDialog(UiPumpMixin, tk.Toplevel):
                                      on_log=self._on_log,
                                      on_applied=self._scan)
         dialog.transient(self)
+
+    def _log_outcome(self, name: str, result) -> None:
+        """One place where an outcome becomes a line. Colour derives from it."""
+        changed = (" (%s)" % ", ".join(result.changed_files)
+                   if result.changed_files else "")
+        self._on_log("Instructions: %s — %s%s"
+                     % (name, result.render(), changed),
+                     C["green"] if result.wrote else C["peach"])
 
     def _wire_all(self) -> None:
         if self._busy or not self._fleet:
@@ -433,10 +419,10 @@ class InstructionsDialog(UiPumpMixin, tk.Toplevel):
             outcomes = []
             for project in projects:
                 try:
-                    outcome, changed = self._apply_to(project)
+                    result = self._apply_to(project)
                 except Exception as exc:        # noqa: BLE001 - per project
-                    outcome, changed = "failed — %s" % exc, ()
-                outcomes.append((project.name, outcome, changed))
+                    result = ApplyOutcome(OUTCOME_FAILED, str(exc))
+                outcomes.append((project.name, result))
             self._post(lambda: self._finish_bulk(outcomes))
 
         threading.Thread(target=worker, daemon=True).start()
@@ -445,23 +431,21 @@ class InstructionsDialog(UiPumpMixin, tk.Toplevel):
         """Per-project results. Mixed outcomes never collapse into "N/N"."""
         self._busy = False
         self._wire_all_btn.state(["!disabled"])
-        wired = [o for o in outcomes if o[1] == "wired"]
-        other = [o for o in outcomes if o[1] != "wired"]
+        wired = [o for o in outcomes if o[1].wrote]
+        other = [o for o in outcomes if not o[1].wrote]
 
         report = ["%d wired:" % len(wired)]
-        for name, _outcome, changed in wired:
-            report.append("    %s — %s" % (name, ", ".join(changed) or "-"))
+        for name, result in wired:
+            report.append("    %s — %s"
+                          % (name, ", ".join(result.changed_files) or "-"))
         if other:
             report.append("")
             report.append("%d not wired:" % len(other))
-            for name, outcome, _changed in other:
-                report.append("    %s — %s" % (name, outcome))
+            for name, result in other:
+                report.append("    %s — %s" % (name, result.render()))
 
-        for name, outcome, changed in outcomes:
-            self._on_log("Instructions: %s — %s%s"
-                         % (name, outcome,
-                            (" (%s)" % ", ".join(changed)) if changed else ""),
-                         C["green"] if outcome == "wired" else C["peach"])
+        for name, result in outcomes:
+            self._log_outcome(name, result)
         messagebox.showinfo("Wiring complete", "\n".join(report), parent=self)
         self._scan()
 

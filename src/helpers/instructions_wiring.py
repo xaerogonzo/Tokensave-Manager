@@ -361,3 +361,116 @@ def apply_wiring(project_root: str, plan: WiringPlan, baseline_line: str,
         changed.append(step.path)
 
     return WiringResult(ok=True, changed_files=tuple(changed))
+
+
+# ── applying to one project: a structured outcome, not a sentence ────────────
+#
+# What this replaces, and why it had to go before anything drove it over a whole
+# fleet: the caller returned prose --
+#
+#     "skipped - state changed since preview"
+#     "skipped - %s" % plan.blocked
+#     "failed - %s"
+#
+# -- and the UI branched on `outcome == "wired"`. The safety case the
+# three-stage bulk flow exists for, *this project moved since you looked, so
+# nothing was written*, was therefore distinguishable from an ordinary refusal
+# only by parsing a string the code had formatted itself. It worked, and it was
+# one rename away from silently not working.
+#
+# The rendered sentence now derives from the outcome. Never the reverse.
+
+#: Written, and re-read as resolving afterwards.
+OUTCOME_WIRED = "wired"
+#: Nothing to do; the chain already resolved.
+OUTCOME_ALREADY_RESOLVED = "already_resolved"
+#: The project changed between the preview and the click, so the plan built
+#: from the preview was discarded unapplied. A DISTINCT member: this is the
+#: safety net doing its job, not a refusal.
+OUTCOME_SKIPPED_STATE_CHANGED = "skipped_state_changed"
+#: The planner refused - a duplicate directive, an excluded project, an
+#: undetermined state. Also a skip, and a different fact.
+OUTCOME_SKIPPED_BLOCKED = "skipped_blocked"
+#: The write itself failed.
+OUTCOME_FAILED = "failed"
+#: Written, but the chain still does not resolve. Neither success nor failure,
+#: and collapsing it into either would be a lie in one direction.
+OUTCOME_UNVERIFIED = "unverified"
+
+_OUTCOME_TEXT = {
+    OUTCOME_WIRED: "wired",
+    OUTCOME_ALREADY_RESOLVED: "already resolved",
+    OUTCOME_SKIPPED_STATE_CHANGED: "skipped - state changed since preview",
+    OUTCOME_SKIPPED_BLOCKED: "skipped",
+    OUTCOME_FAILED: "failed",
+    OUTCOME_UNVERIFIED: "unverified",
+}
+
+
+@dataclass(frozen=True)
+class ApplyOutcome:
+    """What happened to ONE project, as data."""
+
+    outcome: str
+    reason: str = ""
+    changed_files: tuple = ()
+
+    @property
+    def wrote(self) -> bool:
+        return self.outcome == OUTCOME_WIRED
+
+    @property
+    def is_skip(self) -> bool:
+        return self.outcome in (OUTCOME_SKIPPED_STATE_CHANGED,
+                                OUTCOME_SKIPPED_BLOCKED)
+
+    def render(self) -> str:
+        """The sentence, DERIVED from the outcome.
+
+        One direction only. A caller that needs to know what happened reads
+        `outcome`; this exists so the two cannot drift.
+        """
+        text = _OUTCOME_TEXT.get(self.outcome, self.outcome)
+        return "%s - %s" % (text, self.reason) if self.reason else text
+
+
+def apply_to_project(posture, baseline: str, template_dir: str,
+                     baseline_include_line: str, template_text: str,
+                     has_template: bool) -> ApplyOutcome:
+    """Re-read, re-plan, write, re-read. One project.
+
+    The plan built for the preview is deliberately NOT reused: between the
+    preview and the click the disk may have moved on, and writing a stale plan
+    is how a bulk action damages a project somebody already fixed by hand.
+
+    Lives here rather than in a dialog because more than one surface drives it
+    -- the fleet panel and, once a relocation exists, that too. Two copies of
+    "re-read, re-plan, write, verify" is two places for the recompute to go
+    missing.
+    """
+    from helpers.instructions_posture import REACH_RESOLVED, read_project
+
+    fresh = read_project(posture.display_root, posture.name, template_dir,
+                         baseline)
+    if fresh.reach != posture.reach:
+        return ApplyOutcome(OUTCOME_SKIPPED_STATE_CHANGED,
+                            "was %s, now %s" % (posture.reach, fresh.reach))
+
+    plan = plan_wiring(fresh, has_template=has_template)
+    if plan.blocked:
+        return ApplyOutcome(OUTCOME_SKIPPED_BLOCKED, plan.blocked)
+    if plan.is_noop:
+        return ApplyOutcome(OUTCOME_ALREADY_RESOLVED)
+
+    result = apply_wiring(posture.display_root, plan, baseline_include_line,
+                          posture.name, template_text, baseline or "")
+    if not result.ok:
+        return ApplyOutcome(OUTCOME_FAILED, result.error or result.skipped)
+
+    after = read_project(posture.display_root, posture.name, template_dir,
+                         baseline)
+    if after.reach == REACH_RESOLVED:
+        return ApplyOutcome(OUTCOME_WIRED, changed_files=result.changed_files)
+    return ApplyOutcome(OUTCOME_UNVERIFIED,
+                        "still %s after writing" % after.reach,
+                        result.changed_files)
