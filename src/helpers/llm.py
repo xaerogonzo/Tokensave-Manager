@@ -365,6 +365,67 @@ def _call_openai_compat(url: str, api_key: str, model: str,
     return (msg.get("content") or "").strip() or None
 
 
+def _resolve_provider(cfg: dict, timeout: "int | None") -> tuple:
+    """(timeout, provider, model, base_url, api_key) from a config dict.
+
+    Split out of `_call_llm` (2026-09-11), which was complexity 20 against a
+    cap of 18. Working out WHICH provider and WHERE is a separate question
+    from making the call and handling its failures, and it is the half that
+    carries the two rules below.
+
+    **"ollama" is an alias, resolved here.** It becomes openai_compatible
+    with the default base URL filled in only when none was set, so a user
+    pointing at a remote Ollama keeps their own URL.
+
+    **A timeout under 30s is promoted to 90.** Reasoning models on consumer
+    GPUs routinely take 30-60s, and a 10s timeout reads to the user as the
+    provider being broken. An explicit 30 or 60 is left alone -- that is
+    someone choosing, not a default leaking through.
+    """
+    # Reasoning models on consumer GPUs can take 30-60+ seconds. Auto-promote
+    # any timeout below 30 to 90 (users who explicitly picked 30/60 keep their value).
+    if timeout is None:
+        raw_timeout = int(cfg.get("timeout_seconds", 90))
+        timeout = 90 if raw_timeout < 30 else raw_timeout
+
+    provider    = (cfg.get("provider") or "anthropic").lower()
+    model       = cfg.get("model") or ""
+    base_url    = (cfg.get("base_url") or "").rstrip("/")
+    api_key_env = cfg.get("api_key_env") or ""
+    api_key     = os.environ.get(api_key_env, "") if api_key_env else ""
+
+    # "ollama" is a friendly alias — falls through to OpenAI-compatible with
+    # the default Ollama base URL if none was set.
+    if provider == "ollama":
+        provider = "openai_compatible"
+        if not base_url:
+            base_url = "http://localhost:11434"
+    return timeout, provider, model, base_url, api_key
+
+
+def _sampling_params(cfg: dict) -> dict:
+    """The sampling knobs, with one rule stated once instead of four times.
+
+    Split out of `_call_llm` (2026-09-11), which was complexity 20 against a
+    cap of 18 -- four near-identical ternaries of its own.
+
+    **Absent is not zero here.** A key the user never set must reach the
+    provider as *nothing*, so the provider's own default applies; coercing a
+    missing `top_k` to 0 would silently pin sampling to a value nobody chose.
+    Only `temperature` carries a default of ours, because the callers want
+    reproducible output rather than the provider's usual 0.7-1.0.
+    """
+    def _opt(key, cast, default=None):
+        raw = cfg.get(key)
+        return cast(raw) if raw is not None else default
+
+    return {
+        "temperature": _opt("temperature", float, 0.3),
+        "top_p": _opt("top_p", float),
+        "top_k": _opt("top_k", int),
+        "num_ctx": _opt("num_ctx", int),
+    }
+
 def _call_llm(cfg: dict, system_prompt: str, user_prompt: str,
               max_tokens: int = 1500, timeout: int | None = None,
               on_token=None) -> str | None:
@@ -402,24 +463,7 @@ def _call_llm(cfg: dict, system_prompt: str, user_prompt: str,
     if not cfg.get("enabled"):
         return None
 
-    # Reasoning models on consumer GPUs can take 30-60+ seconds. Auto-promote
-    # any timeout below 30 to 90 (users who explicitly picked 30/60 keep their value).
-    if timeout is None:
-        raw_timeout = int(cfg.get("timeout_seconds", 90))
-        timeout = 90 if raw_timeout < 30 else raw_timeout
-
-    provider    = (cfg.get("provider") or "anthropic").lower()
-    model       = cfg.get("model") or ""
-    base_url    = (cfg.get("base_url") or "").rstrip("/")
-    api_key_env = cfg.get("api_key_env") or ""
-    api_key     = os.environ.get(api_key_env, "") if api_key_env else ""
-
-    # "ollama" is a friendly alias — falls through to OpenAI-compatible with
-    # the default Ollama base URL if none was set.
-    if provider == "ollama":
-        provider = "openai_compatible"
-        if not base_url:
-            base_url = "http://localhost:11434"
+    timeout, provider, model, base_url, api_key = _resolve_provider(cfg, timeout)
 
     _tls.last_error = None
     try:
@@ -435,18 +479,9 @@ def _call_llm(cfg: dict, system_prompt: str, user_prompt: str,
                 if not base_url:
                     return None
                 url = base_url + "/v1/chat/completions"
-            _temp = cfg.get("temperature")
-            temperature = float(_temp) if _temp is not None else 0.3
-            _top_p = cfg.get("top_p")
-            top_p = float(_top_p) if _top_p is not None else None
-            _top_k = cfg.get("top_k")
-            top_k = int(_top_k) if _top_k is not None else None
-            _num_ctx = cfg.get("num_ctx")
-            num_ctx = int(_num_ctx) if _num_ctx is not None else None
             return _call_openai_compat(url, api_key, model, system_prompt, user_prompt,
                                        max_tokens, timeout, on_token,
-                                       temperature=temperature, top_p=top_p,
-                                       top_k=top_k, num_ctx=num_ctx)
+                                       **_sampling_params(cfg))
     except urllib.error.HTTPError as exc:        # HTTPError is a URLError subclass — match first
         if exc.code >= 500:
             _tls.last_error = (
