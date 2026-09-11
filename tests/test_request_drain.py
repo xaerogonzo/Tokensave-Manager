@@ -1,6 +1,6 @@
 """tests/test_request_drain.py — the Manager's side of the request inbox.
 
-`App._drain_requests` / `_dispatch_request` decide what actually happens to a
+`RequestsController._drain_requests` / `_dispatch_request` decide what happens to a
 queued request, and the interesting behaviour is all in the failure paths:
 
 * a **transient** failure keeps the request, because deleting on the first
@@ -36,6 +36,7 @@ from helpers.manager_ipc import (
 )
 
 App = app_module.App
+from controllers.requests_ctrl import RequestsController as Requests
 
 
 class _Stub:
@@ -44,16 +45,17 @@ class _Stub:
     def __init__(self, projects, roots, handlers=None):
         self._paths = list(projects)
         self._roots = list(roots)
-        self._current_proc = None
-        self._projects = None
+        # Injected callables, matching RequestsController's real surface.
+        self._get_current_proc = lambda: None
+        self._get_projects = lambda: None
         self.focused = []
         self.opened = []
-        self._REQUEST_HANDLERS = (App._REQUEST_HANDLERS if handlers is None
+        self._REQUEST_HANDLERS = (Requests._REQUEST_HANDLERS if handlers is None
                                   else handlers)
 
     # Borrowed straight from App, so the tests exercise the real logic.
-    _drain_requests = App._drain_requests
-    _dispatch_request = App._dispatch_request
+    _drain_requests = Requests._drain_requests
+    _dispatch_request = Requests._dispatch_request
 
     def _known_roots(self):
         return list(self._roots)
@@ -222,7 +224,7 @@ def test_every_allowlisted_action_has_a_handler():
     `manager_ipc.ACTIONS` is what the CLI will accept; a mismatch here means
     the CLI queues something the Manager can only reject.
     """
-    assert set(App._REQUEST_HANDLERS) == set(manager_ipc.ACTIONS)
+    assert set(Requests._REQUEST_HANDLERS) == set(manager_ipc.ACTIONS)
 
 
 # ── Crash recovery ────────────────────────────────────────────────────────
@@ -329,7 +331,7 @@ def test_a_project_with_no_inbox_is_not_an_error(project, workspace):
 
 def test_the_queued_cadence_is_faster_than_the_idle_one():
     """A handoff nobody sees land stops being used."""
-    assert App._REQUEST_TICK_MS < App._REQUEST_IDLE_MS
+    assert Requests._REQUEST_TICK_MS < Requests._REQUEST_IDLE_MS
 
 
 def test_the_inbox_does_not_ride_the_project_refresh_tick():
@@ -343,4 +345,18 @@ def test_the_inbox_does_not_ride_the_project_refresh_tick():
     import inspect
     source = inspect.getsource(App._auto_refresh)
     assert "_drain_requests" not in source
-    assert App._REQUEST_TICK_MS < app_module.AUTO_REFRESH_MS
+    assert Requests._REQUEST_TICK_MS < app_module.AUTO_REFRESH_MS
+
+def test_request_projects_reads_the_injected_list():
+    """Same silent shape as the worktree check, in the inbox.
+
+    `_request_projects` read `getattr(self, "projects", [])` on `App`. Moved
+    to a controller that has no such attribute it returns `[]` forever, so the
+    inbox polls nothing and no handoff is ever seen -- and nothing raises.
+    `_Stub` defines its own `_request_projects`, so no test here covered it.
+    """
+    ctrl = Requests(root=None, cfg=None, get_projects=lambda: None,
+                    open_commit_dialog=lambda *a: None,
+                    get_current_proc=lambda: None,
+                    get_project_list=lambda: [{"path": "/x"}, {"path": "/y"}])
+    assert ctrl._request_projects() == ["/x", "/y"]
