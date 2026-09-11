@@ -13,6 +13,7 @@ with no sentence beside it is the same defect as a red row with no explanation.
 """
 from __future__ import annotations
 
+import io
 import os
 import pathlib
 
@@ -26,6 +27,33 @@ from dialogs.instructions_split import SplitProposalDialog
 from helpers.instructions_split import DEFAULT_TARGET
 
 pytestmark = pytest.mark.tk
+
+
+def _wait_applied(wait_for, root, source_rel="CLAUDE.md"):
+    """Wait for the whole apply, not just its first write.
+
+    `apply_split` writes the TARGET first and the SOURCE last, deliberately,
+    so a failure leaves the project exactly as it was. Waiting on the target
+    therefore returns while the source is still mid-rewrite: between the
+    `open(..., "w")` truncate and the write, it reads back as `''`.
+
+    Windows never showed it and `test-gate` never showed it; it went red once
+    under xvfb on a slower runner, asserting `'' == '# Demo ...'`. The source
+    is the last write, so it is the postcondition.
+    """
+    target = os.path.join(root, DEFAULT_TARGET)
+    source = os.path.join(root, source_rel)
+
+    def done():
+        if not os.path.exists(target):
+            return False
+        try:
+            with io.open(source, encoding="utf-8", newline="") as handle:
+                return DEFAULT_TARGET.replace(os.sep, "/") in handle.read()
+        except OSError:
+            return False
+
+    wait_for(done, timeout_s=5.0)
 
 
 # ── fixtures ─────────────────────────────────────────────────────────────────
@@ -122,8 +150,7 @@ def test_applying_writes_exactly_the_files_the_proposal_showed(
     before = set(_tree(root))
 
     dialog._apply()
-    wait_for(lambda: os.path.exists(os.path.join(root, DEFAULT_TARGET)),
-             timeout_s=3.0)
+    _wait_applied(wait_for, root)
 
     after = _tree(root)
     assert set(after) - before == {os.path.normpath(DEFAULT_TARGET)}, \
@@ -391,8 +418,7 @@ def test_a_second_split_adds_to_the_target_instead_of_refusing(
     mocker.patch.object(split_dialog.messagebox, "askyesno", return_value=True)
     mocker.patch.object(split_dialog.messagebox, "showinfo")
     first._apply()
-    wait_for(lambda: os.path.exists(os.path.join(root, DEFAULT_TARGET)),
-             timeout_s=3.0)
+    _wait_applied(wait_for, root)
 
     # Re-open on the file the first split produced.
     second = _open(tk_root, root, wait_for)
@@ -430,8 +456,7 @@ def _split_once(tk_root, root, wait_for, mocker, title):
     mocker.patch.object(split_dialog.messagebox, "askyesno", return_value=True)
     mocker.patch.object(split_dialog.messagebox, "showinfo")
     dialog._apply()
-    wait_for(lambda: os.path.exists(os.path.join(root, DEFAULT_TARGET)),
-             timeout_s=3.0)
+    _wait_applied(wait_for, root)
 
 
 def test_the_footer_says_adds_to_before_anything_is_ticked(
