@@ -28,6 +28,7 @@ import pathlib
 import pytest
 
 import cli
+import cli_test_commands
 from cli import (
     EXIT_FAILED,
     EXIT_OK,
@@ -1039,16 +1040,16 @@ def test_tests_counts_are_exact_but_lists_are_capped(capsys, project, mocker):
     to draw a tree. Counts stay exact; the lists are the convenience."""
     from helpers.test_discovery import TestFileInfo
     many = [TestFileInfo(path=f"t{i}.py", name=f"t{i}.py", test_count=1)
-            for i in range(cli._LIST_CAP + 25)]
+            for i in range(cli_test_commands._LIST_CAP + 25)]
     mocker.patch("helpers.test_discovery.list_test_files", return_value=many)
     mocker.patch("helpers.test_discovery.scan_coverage_gaps", return_value=[])
     mocker.patch("helpers.test_discovery.detect_stale_tests", return_value=[])
     _, env, _ = _run(capsys, ["tests", "--project", project, "--json"])
     block = env["data"]["test_files"]
-    assert block["total_count"] == cli._LIST_CAP + 25
+    assert block["total_count"] == cli_test_commands._LIST_CAP + 25
     assert block["truncated"] is True
-    assert len(block["items"]) == cli._LIST_CAP
-    assert env["data"]["test_count"] == cli._LIST_CAP + 25, "counts stay exact"
+    assert len(block["items"]) == cli_test_commands._LIST_CAP
+    assert env["data"]["test_count"] == cli_test_commands._LIST_CAP + 25, "counts stay exact"
 
 
 def test_a_short_list_is_not_marked_truncated(capsys, project, mocker):
@@ -1197,7 +1198,7 @@ def test_an_actually_unreadable_run_is_still_unverifiable(capsys, tmp_path,
     pytest.param("INTERNALERROR> boom", False, id="crash"),
 ])
 def test_only_pytest_saying_so_counts_as_zero_tests(output, expected):
-    assert cli._collected_nothing(output) is expected
+    assert cli_test_commands._collected_nothing(output) is expected
 
 
 def test_test_gaps_asks_the_repo_for_its_default_branch(capsys, project,

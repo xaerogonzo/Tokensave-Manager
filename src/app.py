@@ -39,7 +39,6 @@ from constants import (
     CREATE_NO_WINDOW,
     LOG_FILE,
     _ANSI,
-    _BASE_DIR,
     _TOKENSAVE_UPDATE_RE,
 )
 from controllers.ask_tab import AskTabController
@@ -50,19 +49,16 @@ from controllers.snippets import SnippetsController
 from controllers.tasks_tab import TasksController
 from controllers.update_poller import UpdatePollerController
 from dialogs.git_commit import GitCommitDialog
-from dialogs.mcp_config import MCPConfigDialog
 from dialogs.settings import SettingsDialog
 from dialogs.untrack_ignored import UntrackIgnoredDialog
 from helpers.commit_messages import _suggest_commit_message
 from helpers.git import _find_tracked_but_ignored, _is_git_repo, _is_local_git_repo
-from helpers.mcp import _mcp_configs, _classify_mcp_entry
 from helpers.project_discovery import find_projects, get_pinned
 from helpers.source_watch import (
     changed_files,
     describe_changes,
     snapshot_sources,
 )
-from helpers.worktree_health import find_orphaned_worktrees
 from helpers.runtime import (
     _acquire_instance_lock,
     _bring_existing_to_front,
@@ -156,17 +152,31 @@ class App(UiPumpMixin, tk.Tk):
         # Soon, not in a minute: the extension files a request and then tells
         # the user to look at the Manager, so the first check has to be close
         # to startup rather than one refresh period away.
-        self.after(1_500, self._request_tick)
+        from controllers.requests_ctrl import RequestsController
+        self._requests = RequestsController(
+            root=self,
+            cfg=self._cfg,
+            get_projects=lambda: self._projects,
+            open_commit_dialog=self._open_commit_dialog,
+            get_current_proc=lambda: self._current_proc,
+            get_project_list=lambda: getattr(self, "projects", []) or [],
+        )
+        self._requests.start()
         self._tray_mgr = TrayManager(self, self._cfg, self._on_tray_quit)
         self._tray_mgr.setup()
         self.protocol("WM_DELETE_WINDOW", self._tray_mgr.hide)
-        self.after(300, self._check_config)
-        # Staggered after _check_config so the two startup checks' log
-        # lines don't interleave mid-write.
-        self.after(1200, self._check_worktree_health)
-        # Last of the three, so a relocation dialog does not land on top of
-        # the Settings or MCP dialogs the earlier checks may have opened.
-        self.after(2500, self._check_install_identity)
+        # The three post-launch checks, and the stagger that keeps their
+        # dialogs and log writes off each other, live together in one place.
+        from controllers.startup_checks_ctrl import StartupChecksController
+        self._startup_checks = StartupChecksController(
+            root=self,
+            cfg=self._cfg,
+            on_log=self._log,
+            post=self._post,
+            on_settings_saved=self._on_settings_saved,
+            get_project_list=lambda: getattr(self, "projects", []) or [],
+        )
+        self._startup_checks.schedule()
         # Snapshot our own source so an edit made while the manager runs can
         # surface as a banner instead of as "my change did nothing".
         self._src_root = os.path.dirname(os.path.abspath(__file__))
@@ -583,168 +593,6 @@ class App(UiPumpMixin, tk.Tk):
         else:
             self.active_badge.config(text="  No project  ")
 
-    def _check_config(self):
-        problems = []
-        if not self._cfg.tokensave_exe or not os.path.isfile(self._cfg.tokensave_exe):
-            problems.append("tokensave.exe path is missing or invalid")
-        if not self._cfg.template_dir or not os.path.isdir(self._cfg.template_dir):
-            problems.append("Template directory is missing or invalid")
-
-        # MCP-config drift detection — opens the configurator instead of
-        # Settings when there are no other problems, since that's the most
-        # actionable thing the user can do.
-        skips = (self._cfg.raw.get("mcp_skip_warnings") or []) \
-                if isinstance(self._cfg.raw, dict) else []
-        mcp_drift = []
-        for label, path in _mcp_configs():
-            if path in skips:
-                continue
-            try:
-                info = _classify_mcp_entry(path, self._cfg.raw)
-            except Exception:
-                # Defensive — never crash startup just because we can't read
-                # a Claude config file. The dialog can surface details.
-                continue
-            if info["state"] != "ok":
-                mcp_drift.append((label, info))
-
-        if not problems and not mcp_drift:
-            return
-
-        if problems:
-            # Existing path: paths broken, open Settings as before.
-            note = "Please set the correct paths before using the manager."
-            self._log("Config problem: " + " | ".join(problems), C["red"])
-            SettingsDialog(
-                self, self._cfg, self._cfg.save, self._on_settings_saved,
-                startup_note=(note + "\n\n"
-                              + "\n".join(f"• {p}" for p in problems)))
-            return
-
-        # Pure MCP drift — log it, open the configurator dialog directly.
-        # Don't auto-pop in a modal way; the user just launched the manager
-        # and wants to see the project list. A log line + a non-modal dialog
-        # gives them the choice.
-        for label, info in mcp_drift:
-            self._log(
-                f"MCP: {label} {info['label']} ({info['cfg_path']}). "
-                f"Open Settings → MCP integration to fix.",
-                C["peach"] if info["state"] in
-                ("direct_serve", "wrong_wrapper") else C["red"])
-
-        # Open the configurator after a short delay so the main window has
-        # finished laying out — feels less like an interruption.
-        self.after(800, lambda: MCPConfigDialog(self, self._cfg))
-
-    def _check_worktree_health(self):
-        """Log (never dialog) any git worktree with no tokensave index of its
-        own — see helpers/worktree_health.py for why this matters: without
-        one, tokensave answers questions asked there using a SIBLING
-        checkout's index instead, confidently and about the wrong branch.
-
-        Deliberately quiet — unlike _check_config, this never opens a dialog
-        at launch. Real repair is a deliberate action via Doctor (🔍 Doctor →
-        one click repairs every orphaned worktree for that project); this
-        sweep exists so an orphaned worktree is never silently sitting there
-        unnoticed between Doctor runs.
-        """
-        orphans = find_orphaned_worktrees(
-            getattr(self, "projects", None) or [], self._cfg.git_exe)
-        if not orphans:
-            return
-        self._log(
-            f"⚠ {len(orphans)} git worktree"
-            f"{'s' if len(orphans) != 1 else ''} found with no tokensave "
-            "index of its own — run 🔍 Doctor on the parent project to "
-            "repair:", C["peach"])
-        for o in orphans:
-            self._log(
-                f"    {o['project_name']}: '{o['branch'] or o['head']}' "
-                f"at {o['worktree_path']}", C["overlay0"])
-
-    def _check_install_identity(self):
-        """Where am I, and who owns the fleet? Two questions, one sweep.
-
-        Not "a launch check" for its own sake. The trigger is *this
-        installation's identity, or the fleet's ownership, no longer matches* —
-        and launch is simply the only moment the Manager can observe it, since
-        nothing runs while it is closed. It is re-run after a Settings save,
-        where `template_dir` can change underneath it.
-
-        Identity is a string comparison and free. Ownership needs to read every
-        project, and that is affordable **because** the instruction split took
-        the fleet's always-loaded text from 1,924,101 B to 409,375 B: the
-        largest single `CLAUDE.md` is now about 20 KB.
-
-        Modelled on `_check_worktree_health` — a worker, never blocking launch —
-        but unlike that one it offers the repair, the way MCP drift already
-        opens its configurator. A move is exactly the moment to be interrupted.
-        """
-        roots = list(self._cfg.raw.get("search_roots") or [])
-        cfg = self._cfg
-        raw = dict(cfg.raw)
-        base_dir = _BASE_DIR
-
-        def worker():
-            try:
-                from helpers.install_identity import (
-                    read_identity, read_ownership, relocation_plan,
-                )
-                from helpers.instructions_posture import read_posture
-                identity = read_identity(raw, base_dir)
-                fleet = read_posture(roots, cfg)
-                ownership = read_ownership(fleet.projects, cfg.template_dir)
-                plan = relocation_plan(identity, ownership, raw,
-                                       cfg.template_dir)
-            except Exception:       # noqa: BLE001 — never break startup
-                return
-            self._post(lambda: self._report_install_identity(plan))
-
-        threading.Thread(target=worker, daemon=True).start()
-
-    def _report_install_identity(self, plan) -> None:
-        """Log what was found; offer the repair only when one is available.
-
-        The healthy case says nothing at all. `SAME` + `OWNED_ELSEWHERE` — I
-        have not moved, another installation owns these projects — is REPORTED
-        and never turned into an offer: this cannot tell a deliberate handover
-        from a second install quietly taking them, and treating a state as an
-        instruction is how a report becomes a silent transfer of fifteen
-        repositories.
-        """
-        from helpers.install_identity import (
-            OWNED_HERE, OWNERSHIP_SPLIT, OWNERSHIP_UNOWNED,
-        )
-        ownership = plan.ownership
-        if ownership.state in (OWNED_HERE, OWNERSHIP_UNOWNED) \
-                and not plan.identity.moved:
-            return
-
-        if plan.identity.moved:
-            self._log("Instructions: this installation moved — %s -> %s"
-                      % (plan.identity.recorded_display,
-                         plan.identity.current_display), C["peach"])
-        if ownership.state == OWNERSHIP_SPLIT:
-            self._log("Instructions: the fleet points at %d different "
-                      "baselines — %s"
-                      % (len(ownership.owners), ownership.summary()), C["peach"])
-        elif ownership.state != OWNED_HERE:
-            self._log("Instructions: the fleet's baseline is %s"
-                      % ownership.summary(), C["peach"])
-        if ownership.unresolved:
-            self._log("    %d project(s) reach no baseline at all: %s"
-                      % (len(ownership.unresolved),
-                         ", ".join(ownership.unresolved[:4])), C["overlay0"])
-        if plan.blocked:
-            self._log("    no single repair: %s" % plan.blocked, C["overlay0"])
-            return
-        if not plan.offers_bulk:
-            return
-
-        from dialogs.relocate import RelocateDialog
-        self.after(800, lambda: RelocateDialog(self, self._cfg, plan,
-                                               on_log=self._log))
-
     def _auto_refresh(self):
         ctrl_idle = (not hasattr(self, "_projects") or self._projects.current_proc is None)
         if self._current_proc is None and ctrl_idle:
@@ -766,197 +614,6 @@ class App(UiPumpMixin, tk.Tk):
     #
     # So they are separate: `_auto_refresh` keeps its 60s cadence for the
     # project list, and this does nothing but read a directory per project.
-
-    #: While something is queued. A handoff nobody sees land stops being used.
-    _REQUEST_TICK_MS = 2_000
-    #: While the inbox is empty. Still cheap — one `listdir` per project — but
-    #: there is no reason to spin at handoff speed when nothing is waiting.
-    _REQUEST_IDLE_MS = 6_000
-
-    def _request_tick(self) -> None:
-        """Drain the inbox, then reschedule at a cadence matching the queue."""
-        pending = 0
-        try:
-            # The same idle guard the refresh uses: a request opens a dialog,
-            # and doing that on top of a running operation would interrupt work
-            # the user started themselves. Not idle means "try again shortly",
-            # which is what a non-zero count asks for.
-            ctrl_idle = (not hasattr(self, "_projects")
-                         or self._projects.current_proc is None)
-            if self._current_proc is None and ctrl_idle:
-                pending = self._drain_requests()
-            else:
-                pending = 1
-        except Exception:                           # noqa: BLE001
-            # A drain that raises must not strand the timer — that would take
-            # the whole channel down silently until the next restart.
-            log.exception("request drain failed")
-        finally:
-            self.after(self._REQUEST_TICK_MS if pending
-                       else self._REQUEST_IDLE_MS, self._request_tick)
-
-    # ── Request inbox ─────────────────────────────────────────────────────
-    #
-    # An external tool — normally the VS Code extension — asks the running
-    # Manager to open a dialog by writing a file. Propose-only holds: every
-    # action here opens a window in front of a person, and none of them
-    # commits, applies or approves anything.
-    #
-    # The payload is untrusted: the file sits in the project directory and
-    # anything on the machine can write it. `manager_ipc.validate` is therefore
-    # run again HERE, not only where the request was written, and the project
-    # is checked against this Manager's own configured search roots. A
-    # `--project` argument is not an authorization.
-
-    def _known_roots(self) -> list:
-        from helpers.detection import _root_path
-        return [_root_path(r) for r in (self._cfg.search_roots or [])]
-
-    def _request_projects(self) -> list:
-        """Projects whose inboxes are worth reading: the ones on screen."""
-        return [p["path"] for p in getattr(self, "projects", []) or []
-                if p.get("path")]
-
-    def _drain_requests(self) -> int:
-        """Dispatch queued requests. Returns how many are still waiting."""
-        from helpers import manager_ipc
-
-        roots = self._known_roots()
-        outstanding = 0
-        for path in self._request_projects():
-            try:
-                requests, skipped = manager_ipc.load_requests(path, roots)
-            except Exception:                       # noqa: BLE001
-                continue
-            for bad in skipped:
-                # Never silent. A request that simply disappears reads to the
-                # user as "nothing happened", which is worse than an error.
-                log.warning("ignored malformed request %s: %s",
-                            bad["path"], bad["reason"])
-            for request in requests:
-                if not self._dispatch_request(manager_ipc, path, request):
-                    outstanding += 1
-            if requests:
-                manager_ipc.prune_acknowledgements(path)
-        return outstanding
-
-    def _dispatch_request(self, manager_ipc, path: str, request: dict) -> bool:
-        """Act on one request. True when it left the queue.
-
-        Four outcomes, and the distinction between the last two is the point:
-        a *transient* failure keeps the request so the next tick retries it,
-        because deleting on the first stumble silently loses what the user
-        asked for. Only the attempt limit gives up, and it says `quarantined`
-        rather than `drained`.
-        """
-        ident = request.get("id", "")
-
-        # Recovery: a crash between the acknowledgement write and the pending
-        # delete leaves a request that is queued AND already done. Finish the
-        # interrupted delete instead of acting twice.
-        already = manager_ipc.completed_outcome(path, ident)
-        if already:
-            log.info("request %s was already %s; clearing", ident, already)
-            manager_ipc.acknowledge(path, request, already,
-                                    "recovered an interrupted acknowledgement")
-            return True
-
-        handler = self._REQUEST_HANDLERS.get(request["action"])
-        if handler is None:
-            manager_ipc.acknowledge(path, request, manager_ipc.REJECTED,
-                                    f"no handler for {request['action']!r}")
-            return True
-
-        try:
-            done = handler(self, path, request)
-        except Exception as exc:                    # noqa: BLE001
-            log.exception("request %s raised", ident)
-            manager_ipc.acknowledge(path, request, manager_ipc.REJECTED,
-                                    f"{type(exc).__name__}: {exc}")
-            return True
-
-        if done:
-            log.info("drained %s (%s)", ident, request["action"])
-            manager_ipc.acknowledge(path, request, manager_ipc.DRAINED,
-                                    f"opened {request['action']}")
-            return True
-
-        attempts = manager_ipc.record_attempt(request)
-        if attempts >= manager_ipc.MAX_ATTEMPTS:
-            manager_ipc.acknowledge(
-                path, request, manager_ipc.QUARANTINED,
-                f"gave up after {attempts} attempt(s)")
-            return True
-        return False
-
-    def _focus_project(self, path: str) -> bool:
-        """Select `path` in the Projects tab. False when the row is not there.
-
-        Every handler below reaches code that reads the *selected* project, so
-        this runs first. A project the Manager has not discovered yet is a
-        transient condition, not a bad request.
-        """
-        if not hasattr(self, "_projects"):
-            return False
-        return self._projects.select_project(path)
-
-    def _req_open_project(self, path: str, request: dict) -> bool:
-        return self._focus_project(path)
-
-    def _req_commit(self, path: str, request: dict) -> bool:
-        """Seed the EXISTING commit-request handoff and open the dialog.
-
-        Routed through `commit_request.json` rather than a second seeding
-        mechanism: `GitCommitDialog` already reads that file, pre-checks only
-        those paths, and consumes it on commit. Adding a parallel path would
-        be a second way to do the same thing, with its own bugs.
-        """
-        from helpers.commit_request import write_commit_request
-        if not self._focus_project(path):
-            return False
-        payload = request.get("payload", {})
-        write_commit_request(path, payload.get("files", []),
-                             payload.get("scope", ""), payload.get("note", ""))
-        self._open_commit_dialog(path)
-        return True
-
-    def _req_doctor(self, path: str, request: dict) -> bool:
-        if not self._focus_project(path):
-            return False
-        # `cmd_doctor` lives on the command bar rather than the tab
-        # controller — the menu binds straight to it, and this follows the
-        # same route rather than adding a pass-through nobody else uses.
-        self._projects._cmd_bar.cmd_doctor()
-        return True
-
-    def _req_savings(self, path: str, request: dict) -> bool:
-        from dialogs.cost_viewer import SavingsDialog
-        self._focus_project(path)
-        SavingsDialog(self, self._cfg, path)
-        return True
-
-    def _req_test_manager(self, path: str, request: dict) -> bool:
-        from dialogs.test_manager import TestManagerDialog
-        self._focus_project(path)
-        TestManagerDialog(self, path, self._cfg)
-        return True
-
-    def _req_doc_updates(self, path: str, request: dict) -> bool:
-        if not self._focus_project(path):
-            return False
-        self._projects.cmd_doc_updates()
-        return True
-
-    #: action -> handler. An allowlist, matching `manager_ipc.ACTIONS`; a
-    #: request naming anything else is rejected rather than ignored.
-    _REQUEST_HANDLERS = {
-        "open-project": _req_open_project,
-        "commit": _req_commit,
-        "doctor": _req_doctor,
-        "savings": _req_savings,
-        "test-manager": _req_test_manager,
-        "doc-updates": _req_doc_updates,
-    }
 
     def _log(self, msg, colour=None):
         def _do():

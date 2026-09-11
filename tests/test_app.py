@@ -13,6 +13,10 @@ from types import SimpleNamespace
 from unittest import mock
 
 from app import App
+from controllers import startup_checks_ctrl
+from controllers.startup_checks_ctrl import (
+    StartupChecksController as StartupChecks,
+)
 
 
 # ── _get_git_path / _get_ask_project_path (identical resolution logic) ───────
@@ -182,26 +186,47 @@ def test_check_worktree_health_logs_each_orphan():
     cfg = mock.MagicMock()
     cfg.git_exe = "git"
     stub = SimpleNamespace(
-        projects=[{"path": "/proj", "name": "proj", "has_git": True}],
+        _get_project_list=lambda: [{"path": "/proj", "name": "proj",
+                                   "has_git": True}],
         _cfg=cfg,
         _log=lambda m, c=None: logged.append(m))
     orphans = [{"worktree_path": "/proj/wt1", "branch": "feature1",
                "head": "abc12345", "project_path": "/proj",
                "project_name": "proj"}]
-    with mock.patch("app.find_orphaned_worktrees", return_value=orphans):
-        App._check_worktree_health(stub)
+    with mock.patch("controllers.startup_checks_ctrl.find_orphaned_worktrees", return_value=orphans):
+        StartupChecks._check_worktree_health(stub)
     assert any("1 git worktree" in m for m in logged)
     assert any("feature1" in m and "/proj/wt1" in m for m in logged)
+
+
+def test_check_worktree_health_forwards_the_project_list():
+    """The argument, not just the logging.
+
+    When this moved off `App` it kept reading the list as
+    `getattr(self, "projects", [])`, which on any other object returns the
+    default forever -- the check would have scanned ZERO projects, silently.
+    Every existing test here mocks `find_orphaned_worktrees`, so a wrong
+    argument sailed straight through all of them. Assert the argument.
+    """
+    cfg = mock.MagicMock()
+    cfg.git_exe = "git"
+    projects = [{"path": "/a", "name": "a", "has_git": True}]
+    stub = SimpleNamespace(_get_project_list=lambda: projects, _cfg=cfg,
+                           _log=lambda m, c=None: None)
+    with mock.patch("controllers.startup_checks_ctrl.find_orphaned_worktrees",
+                    return_value=[]) as f:
+        StartupChecks._check_worktree_health(stub)
+    f.assert_called_once_with(projects, "git")
 
 
 def test_check_worktree_health_silent_when_clean():
     logged = []
     cfg = mock.MagicMock()
     cfg.git_exe = "git"
-    stub = SimpleNamespace(projects=[], _cfg=cfg,
+    stub = SimpleNamespace(_get_project_list=lambda: [], _cfg=cfg,
                            _log=lambda m, c=None: logged.append(m))
-    with mock.patch("app.find_orphaned_worktrees", return_value=[]):
-        App._check_worktree_health(stub)
+    with mock.patch("controllers.startup_checks_ctrl.find_orphaned_worktrees", return_value=[]):
+        StartupChecks._check_worktree_health(stub)
     assert logged == []
 
 
@@ -210,23 +235,26 @@ def test_check_worktree_health_never_opens_a_dialog():
     cfg = mock.MagicMock()
     cfg.git_exe = "git"
     stub = SimpleNamespace(
-        projects=[{"path": "/proj", "name": "proj", "has_git": True}],
+        _get_project_list=lambda: [{"path": "/proj", "name": "proj",
+                                   "has_git": True}],
         _cfg=cfg, _log=lambda m, c=None: None)
     orphans = [{"worktree_path": "/proj/wt1", "branch": "b",
                "head": "1234", "project_path": "/proj", "project_name": "proj"}]
-    with mock.patch("app.find_orphaned_worktrees", return_value=orphans), \
-         mock.patch("app.messagebox") as mb:
-        App._check_worktree_health(stub)
-    mb.askyesno.assert_not_called()
+    with mock.patch("controllers.startup_checks_ctrl.find_orphaned_worktrees", return_value=orphans):
+        StartupChecks._check_worktree_health(stub)
+    # Stronger than patching a dialog module and asserting no call: this
+    # module never imports one, so a prompt here would be a NameError.
+    assert not hasattr(startup_checks_ctrl, "messagebox")
 
 
 def test_check_worktree_health_handles_missing_projects_attr():
     """App.projects doesn't exist until the first refresh() — tolerate it."""
     cfg = mock.MagicMock()
     cfg.git_exe = "git"
-    stub = SimpleNamespace(_cfg=cfg, _log=lambda m, c=None: None)
-    with mock.patch("app.find_orphaned_worktrees", return_value=[]) as f:
-        App._check_worktree_health(stub)
+    stub = SimpleNamespace(_cfg=cfg, _log=lambda m, c=None: None,
+                           _get_project_list=lambda: [])
+    with mock.patch("controllers.startup_checks_ctrl.find_orphaned_worktrees", return_value=[]) as f:
+        StartupChecks._check_worktree_health(stub)
     f.assert_called_once_with([], "git")
 
 
