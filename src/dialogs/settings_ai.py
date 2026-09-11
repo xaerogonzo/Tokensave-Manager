@@ -102,6 +102,38 @@ class AISection:
 
     # ── Section builders (original visual order) ─────────────────────────
 
+    def _grounding_row(self, parent, raw, key, *, default, text, tooltip,
+                       caption):
+        """One grounding checkbox: label, tooltip, caption. Returns its var.
+
+        Split out of `_build_backend_selection_section` (2026-09-11), which
+        was 174 lines against a cap of 150. It was THREE copies of this exact
+        shape -- read a key defaulting when absent, make a BooleanVar, pack a
+        Checkbutton, attach a tooltip, add a caption -- differing only in the
+        five values now passed in. Every geometry value was already identical.
+
+        **Absent is not False.** `raw.get(key)` returns None for a key the
+        user has never seen, and each of these has its own default: grounding
+        and PR grounding are ON, commit grounding is OFF because small models
+        copy recent commit subjects when the prompt grows. Collapsing that to
+        `bool(raw.get(key))` would silently turn two of the three off.
+        """
+        initial = raw.get(key)
+        if initial is None:
+            initial = default
+        var = tk.BooleanVar(value=bool(initial))
+        chk = ttk.Checkbutton(parent, text=text, variable=var)
+        chk.pack(anchor=tk.W, padx=12, pady=(0, 2))
+        try:
+            from theme import _Tooltip
+            _Tooltip(chk, tooltip)
+        except Exception:
+            pass
+        tk.Label(parent, text=caption,
+                 font=("Segoe UI", 8), bg=C["base"], fg=C["overlay0"],
+                 justify=tk.LEFT).pack(anchor=tk.W, padx=24, pady=(0, 8))
+        return var
+
     def _build_backend_selection_section(self, body, raw):
         """AI backend selection LabelFrame: Draft PR, commit message, grounding."""
         ttk.Separator(body, orient="horizontal").pack(fill=tk.X, padx=20, pady=(8, 8))
@@ -183,99 +215,51 @@ class AISection:
                  font=("Segoe UI", 9, "bold"),
                  bg=C["base"], fg=C["text"]).pack(anchor=tk.W, padx=12, pady=(0, 2))
         # Default ON — matches ManagerConfig.enable_llm_grounding default.
-        _grounding_initial = raw.get("enable_llm_grounding")
-        if _grounding_initial is None:
-            _grounding_initial = True
-        self._var_enable_llm_grounding = tk.BooleanVar(value=bool(_grounding_initial))
-        # Novice gotcha #9: "grounding" is AI-research jargon — the label
-        # says what it does; the tooltip keeps the mechanics.
-        grounding_chk = ttk.Checkbutton(
-            lf, text="Attach code context to AI requests (tokensave + codegraph)",
-            variable=self._var_enable_llm_grounding,
-        )
-        grounding_chk.pack(anchor=tk.W, padx=12, pady=(0, 2))
-        try:
-            from theme import _Tooltip
-            _Tooltip(
-                grounding_chk,
+        self._var_enable_llm_grounding = self._grounding_row(
+            lf, raw, 'enable_llm_grounding', default=True,
+            text='Attach code context to AI requests (tokensave + codegraph)',
+            tooltip=(
                 "When on, the manager injects tokensave + codegraph context "
                 "into commit-message drafts, PR drafts, AI code review, the "
                 "Ask tab's Claude CLI path, and the doc drafter. Silently "
                 "skipped when neither tool is indexed for the current "
-                "project. Turn off if grounding produces noisy output.",
-            )
-        except Exception:
-            pass
-        tk.Label(lf,
-            text="  Adds structural facts (callers, callees, affected tests) to the prompt.",
-            font=("Segoe UI", 8), bg=C["base"], fg=C["overlay0"],
-            justify=tk.LEFT).pack(anchor=tk.W, padx=24, pady=(0, 8))
+                "project. Turn off if grounding produces noisy output."
+            ),
+            caption='  Adds structural facts (callers, callees, affected tests) to the prompt.')
 
         # v4.6: per-feature opt-IN for commit messages. Default OFF because
         # live testing showed grounding hurts commit-message quality on big
         # multi-file diffs (small models copy recent commit subjects verbatim).
-        _commit_grounding_initial = raw.get("enable_commit_grounding")
-        if _commit_grounding_initial is None:
-            _commit_grounding_initial = False
-        self._var_enable_commit_grounding = tk.BooleanVar(
-            value=bool(_commit_grounding_initial))
-        commit_grounding_chk = ttk.Checkbutton(
-            lf,
-            text="    └─ Also use grounding for commit messages (opt-in)",
-            variable=self._var_enable_commit_grounding,
-        )
-        commit_grounding_chk.pack(anchor=tk.W, padx=12, pady=(0, 2))
-        try:
-            from theme import _Tooltip
-            _Tooltip(
-                commit_grounding_chk,
+        self._var_enable_commit_grounding = self._grounding_row(
+            lf, raw, 'enable_commit_grounding', default=False,
+            text='    └─ Also use grounding for commit messages (opt-in)',
+            tooltip=(
                 "Off by default. Commit messages are summaries of the staged "
                 "diff — adding repository context tends to confuse small "
                 "models (qwen2.5-coder copies recent commit subjects "
                 "verbatim) and pushes the prompt past Claude CLI's output "
                 "budget. Turn ON to experiment; revert if the Suggest button "
-                "produces poor results.",
-            )
-        except Exception:
-            pass
-        tk.Label(lf,
-            text="    Recommended OFF — small models copy recent subjects when overwhelmed.",
-            font=("Segoe UI", 8), bg=C["base"], fg=C["overlay0"],
-            justify=tk.LEFT).pack(anchor=tk.W, padx=24, pady=(0, 8))
+                "produces poor results."
+            ),
+            caption='    Recommended OFF — small models copy recent subjects when overwhelmed.')
 
         # v4.6: per-feature opt-in for Draft PR grounding. Defaults to ON
         # because PRs benefit a lot from test-impact + symbol-reference
         # context, and the backends that draft them (Claude CLI, cloud
         # APIs) handle the extra prompt weight well.
-        _pr_grounding_initial = raw.get("enable_pr_grounding")
-        if _pr_grounding_initial is None:
-            _pr_grounding_initial = True
-        self._var_enable_pr_grounding = tk.BooleanVar(
-            value=bool(_pr_grounding_initial))
-        pr_grounding_chk = ttk.Checkbutton(
-            lf,
-            text="    └─ Also use grounding for Draft PR (recommended)",
-            variable=self._var_enable_pr_grounding,
-        )
-        pr_grounding_chk.pack(anchor=tk.W, padx=12, pady=(0, 2))
-        try:
-            from theme import _Tooltip
-            _Tooltip(
-                pr_grounding_chk,
+        self._var_enable_pr_grounding = self._grounding_row(
+            lf, raw, 'enable_pr_grounding', default=True,
+            text='    └─ Also use grounding for Draft PR (recommended)',
+            tooltip=(
                 "ON by default. PR descriptions benefit strongly from "
                 "test-impact mapping (codegraph affected --stdin) and "
                 "symbol-reference context. Claude CLI and cloud APIs "
                 "handle the extra prompt weight comfortably. Manager "
                 "pre-builds the grounding for the CLI path AND nudges "
                 "the CLI to use its own MCP tools if codegraph/"
-                "tokensave are wired into Claude Code's MCP config.",
-            )
-        except Exception:
-            pass
-        tk.Label(lf,
-            text="    Adds test-impact + symbol-reference context to the PR draft.",
-            font=("Segoe UI", 8), bg=C["base"], fg=C["overlay0"],
-            justify=tk.LEFT).pack(anchor=tk.W, padx=24, pady=(0, 8))
+                "tokensave are wired into Claude Code's MCP config."
+            ),
+            caption='    Adds test-impact + symbol-reference context to the PR draft.')
 
     def _build_ollama_section(self, body, raw):
         """Ollama model manager shortcut, num_ctx spinbox, and warm-up toggle."""

@@ -238,6 +238,43 @@ _TAB_LABELS = {
 }
 
 
+def _build_picker_row(dlg, frame, key):
+    """The target-file picker row: label, combobox, refresh button.
+
+    Split out of `build_tab` (2026-09-11), which was 170 lines against a cap
+    of 150 at complexity 4 -- one over the layout carve-out's limit of 3.
+    It already matched the carve-out's NAME pattern, so the honest fix was to
+    take a real widget cluster out rather than to widen the rule: rule A says
+    split UI by semantic grouping, and a row is one.
+
+    Returns the `StringVar` holding the chosen file, which is the only thing
+    the caller needs back from it.
+    """
+    # File-picker row: combobox + refresh button
+    picker_row = tk.Frame(frame, bg=C["base"])
+    picker_row.pack(fill=tk.X, pady=(0, 4))
+    tk.Label(picker_row, text="Target file:",
+             bg=C["base"], fg=C["overlay0"],
+             font=("Consolas", 8)).pack(side=tk.LEFT)
+    target_var = tk.StringVar()
+    file_list = dlg._list_picker_files(key)
+    cb = ttk.Combobox(picker_row, textvariable=target_var,
+                      values=file_list, width=40, state="normal")
+    if file_list:
+        target_var.set(file_list[0])
+    cb.pack(side=tk.LEFT, padx=(6, 0))
+
+    def _refresh_picker(k=key, c=cb, v=target_var):
+        new_list = dlg._list_picker_files(k)
+        c["values"] = new_list
+        if new_list and not v.get():
+            v.set(new_list[0])
+
+    ttk.Button(picker_row, text="↻",
+               command=_refresh_picker).pack(side=tk.LEFT, padx=(4, 0))
+    return target_var
+
+
 def build_tab(dlg, key, target_file, generate_label) -> None:
     """Construct one notebook tab for *dlg* and register its widgets.
 
@@ -252,28 +289,7 @@ def build_tab(dlg, key, target_file, generate_label) -> None:
     target_var = None
 
     if is_file_picker:
-        # File-picker row: combobox + refresh button
-        picker_row = tk.Frame(frame, bg=C["base"])
-        picker_row.pack(fill=tk.X, pady=(0, 4))
-        tk.Label(picker_row, text="Target file:",
-                 bg=C["base"], fg=C["overlay0"],
-                 font=("Consolas", 8)).pack(side=tk.LEFT)
-        target_var = tk.StringVar()
-        file_list = dlg._list_picker_files(key)
-        cb = ttk.Combobox(picker_row, textvariable=target_var,
-                          values=file_list, width=40, state="normal")
-        if file_list:
-            target_var.set(file_list[0])
-        cb.pack(side=tk.LEFT, padx=(6, 0))
-
-        def _refresh_picker(k=key, c=cb, v=target_var):
-            new_list = dlg._list_picker_files(k)
-            c["values"] = new_list
-            if new_list and not v.get():
-                v.set(new_list[0])
-
-        ttk.Button(picker_row, text="↻",
-                   command=_refresh_picker).pack(side=tk.LEFT, padx=(4, 0))
+        target_var = _build_picker_row(dlg, frame, key)
     else:
         # Static target label
         target_path = os.path.join(dlg._project_path, target_file)

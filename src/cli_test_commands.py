@@ -125,6 +125,84 @@ def _classify_run(output: str) -> str:
     return RUN_UNREADABLE
 
 
+def _report_from_run(outcomes, requested, output: str, total: int, passed: int,
+                     duration: float, nodeids, markers) -> Result:
+    """Turn one pytest run into a Result. No subprocess, no filesystem.
+
+    Split out of `_cmd_test_run` (2026-09-11), which was 153 lines against a
+    cap of 150. Running the suite and INTERPRETING what came back are
+    different jobs, and all three of the judgements below live in the second
+    one:
+
+    * **"no tests ran" is a RESULT, not a failure to read one.** A project
+      with no Python tests is not unverifiable, and reporting it as such was
+      this command stating its own contract backwards.
+    * **A missing summary is EXIT_VERIFY_FAILED with a reason.** EXIT_OK
+      would say "it passed"; the bare code says "we could not find out"
+      without saying why, and the remedies differ -- install pytest, fix a
+      collection error, raise the timeout.
+    * **Skips are not subtracted twice.** `parse_pytest_summary` already
+      leaves SKIPPED out of its total, so failures are the remainder of
+      `total` alone.
+    """
+    from helpers import pytest_report
+
+    per_test = [{"nodeid": a.outcome.nodeid, "outcome": a.outcome.outcome,
+                 "duration_seconds": a.outcome.duration,
+                 "message": a.outcome.message,
+                 # "" means "this result belongs to no requested test", and
+                 # `ambiguous` means "it belongs to more than one and picking
+                 # would be a guess". Neither may render as a result.
+                 "requested": a.requested, "ambiguous": a.ambiguous}
+                for a in pytest_report.resolve_identities(outcomes, requested)]
+    counted = pytest_report.summarise(outcomes)
+    warnings: list = []
+    from_lines = counted["passed"] + counted["failed"] + counted["error"]
+    if total != from_lines:
+        warnings.append(
+            f"pytest's footer reports {total} test(s) and its progress lines "
+            f"report {from_lines}; the counts below are the footer's")
+
+    # `_parse_pytest_summary` returns (passed, passed + failed + errored) and
+    # deliberately leaves SKIPPED out of the total, so failures are the
+    # remainder of `total` alone. Subtracting skips here as well would count
+    # them twice and under-report failures.
+    failed = max(0, total - passed)
+    skipped = _count_skipped(output)
+    data = {"passed": passed, "failed": failed, "skipped": skipped,
+            "total": total, "duration_seconds": round(duration, 2),
+            "output": output[-_OUTPUT_CAP:],
+            "selection": {"tests": list(nodeids), "markers": markers},
+            "tests": per_test}
+
+    if total == 0 and _collected_nothing(output):
+        # pytest SAID "no tests ran". That is a result, read successfully, and
+        # it is not the same as failing to read one — which is the whole reason
+        # EXIT_VERIFY_FAILED exists. Treating a project that simply has no
+        # Python tests (a PowerShell repo with a tests/ directory, say) as
+        # unverifiable was this command reporting its own contract backwards.
+        data["collected"] = 0
+        data["run_state"] = RUN_NO_TESTS
+        return Result(EXIT_OK, data, warnings,
+                      human="test-run: no tests collected")
+    if total == 0:
+        # It ran, but no summary could be read. Reporting EXIT_OK here would
+        # say "it passed"; reporting only EXIT_VERIFY_FAILED says "we could not
+        # find out" without saying why, and the remedies differ — install
+        # pytest, fix a collection error, or raise the timeout.
+        state = _classify_run(output)
+        data["run_state"] = state
+        return Result(EXIT_VERIFY_FAILED, data, warnings,
+                      error=f"could not read a pytest summary from the output "
+                            f"({state})",
+                      human=f"test-run: could not verify the result ({state})")
+    data["run_state"] = RUN_COMPLETED
+    human = (f"test-run: {passed} passed, {failed} failed, {skipped} skipped "
+             f"in {duration:.1f}s")
+    return Result(EXIT_OK if not failed else EXIT_FAILED, data, warnings,
+                  human=human)
+
+
 def _cmd_test_run(args) -> Result:
     """Run the suite once and report structured counts.
 
@@ -224,60 +302,8 @@ def _cmd_test_run(args) -> Result:
         from helpers.test_discovery import list_test_cases
         requested = [c.nodeid for c in list_test_cases(project)]
 
-    per_test = [{"nodeid": a.outcome.nodeid, "outcome": a.outcome.outcome,
-                 "duration_seconds": a.outcome.duration,
-                 "message": a.outcome.message,
-                 # "" means "this result belongs to no requested test", and
-                 # `ambiguous` means "it belongs to more than one and picking
-                 # would be a guess". Neither may render as a result.
-                 "requested": a.requested, "ambiguous": a.ambiguous}
-                for a in pytest_report.resolve_identities(outcomes, requested)]
-    counted = pytest_report.summarise(outcomes)
-    warnings: list = []
-    from_lines = counted["passed"] + counted["failed"] + counted["error"]
-    if total != from_lines:
-        warnings.append(
-            f"pytest's footer reports {total} test(s) and its progress lines "
-            f"report {from_lines}; the counts below are the footer's")
-
-    # `_parse_pytest_summary` returns (passed, passed + failed + errored) and
-    # deliberately leaves SKIPPED out of the total, so failures are the
-    # remainder of `total` alone. Subtracting skips here as well would count
-    # them twice and under-report failures.
-    failed = max(0, total - passed)
-    skipped = _count_skipped(output)
-    data = {"passed": passed, "failed": failed, "skipped": skipped,
-            "total": total, "duration_seconds": round(duration, 2),
-            "output": output[-_OUTPUT_CAP:],
-            "selection": {"tests": list(nodeids), "markers": markers},
-            "tests": per_test}
-
-    if total == 0 and _collected_nothing(output):
-        # pytest SAID "no tests ran". That is a result, read successfully, and
-        # it is not the same as failing to read one — which is the whole reason
-        # EXIT_VERIFY_FAILED exists. Treating a project that simply has no
-        # Python tests (a PowerShell repo with a tests/ directory, say) as
-        # unverifiable was this command reporting its own contract backwards.
-        data["collected"] = 0
-        data["run_state"] = RUN_NO_TESTS
-        return Result(EXIT_OK, data, warnings,
-                      human="test-run: no tests collected")
-    if total == 0:
-        # It ran, but no summary could be read. Reporting EXIT_OK here would
-        # say "it passed"; reporting only EXIT_VERIFY_FAILED says "we could not
-        # find out" without saying why, and the remedies differ — install
-        # pytest, fix a collection error, or raise the timeout.
-        state = _classify_run(output)
-        data["run_state"] = state
-        return Result(EXIT_VERIFY_FAILED, data, warnings,
-                      error=f"could not read a pytest summary from the output "
-                            f"({state})",
-                      human=f"test-run: could not verify the result ({state})")
-    data["run_state"] = RUN_COMPLETED
-    human = (f"test-run: {passed} passed, {failed} failed, {skipped} skipped "
-             f"in {duration:.1f}s")
-    return Result(EXIT_OK if not failed else EXIT_FAILED, data, warnings,
-                  human=human)
+    return _report_from_run(outcomes, requested, output, total, passed,
+                            duration, nodeids, markers)
 
 
 #: Tail of pytest output kept in the envelope. Enough to see the failures
