@@ -53,6 +53,7 @@ from dialogs.git_commit import GitCommitDialog
 from dialogs.untrack_ignored import UntrackIgnoredDialog
 from helpers.commit_messages import _suggest_commit_message
 from helpers.git import _find_tracked_but_ignored, _is_git_repo, _is_local_git_repo
+from helpers.index_provenance import begin_full_index, report_full_index
 from helpers.project_discovery import find_projects, get_pinned
 from helpers.source_watch import (
     changed_files,
@@ -683,6 +684,8 @@ class App(UiPumpMixin, tk.Tk):
             log.debug(f"     cwd={cwd}")
             t0 = time.monotonic()
             try:
+                # Before the spawn: which binary is about to build the graph.
+                pending = begin_full_index(args, cwd, self._cfg.tokensave_exe)
                 env = os.environ.copy()
                 env["NO_COLOR"] = "1"
                 env["TERM"] = "dumb"
@@ -749,6 +752,8 @@ class App(UiPumpMixin, tk.Tk):
                 if proc.returncode == 0:
                     self._log("Done.", C["green"])
                     log.info(f"DONE exit=0  [{elapsed:.1f}s]")
+                    report_full_index(
+                        pending, lambda line: self._log("  " + line, C["overlay0"]))
                     if (args and args[0] == "sync"
                             and self._cfg.raw.get("auto_commit_after_sync")
                             and _is_git_repo(cwd, self._cfg.git_exe)):

@@ -24,6 +24,7 @@ import re
 import subprocess
 
 from constants import CREATE_NO_WINDOW
+from helpers.index_provenance import begin_full_index, finish_full_index
 from helpers.shadow_links import load_shadow_config, refresh_shadows
 
 
@@ -121,6 +122,8 @@ class SyncResult:
     shadows: ShadowPrep = dataclasses.field(default_factory=ShadowPrep)
     error: str = ""
     counts: "dict | None" = None
+    #: One line from helpers.index_provenance after a full index; "" otherwise.
+    provenance: str = ""
 
     @property
     def changed(self) -> "bool | None":
@@ -153,6 +156,7 @@ def run_sync(project_root: str, tokensave_exe: str, *,
     """
     argv = sync_argv(force=force)
     shadows = prepare_shadows(project_root)
+    pending = begin_full_index(argv, project_root, tokensave_exe)
     try:
         proc = subprocess.run(
             [tokensave_exe] + argv,
@@ -176,13 +180,15 @@ def run_sync(project_root: str, tokensave_exe: str, *,
         return SyncResult(ok=False, returncode=1, output="", argv=argv,
                           shadows=shadows, error=str(exc))
     output = proc.stdout or ""
+    ok = proc.returncode == 0
     return SyncResult(
-        ok=proc.returncode == 0,
+        ok=ok,
         returncode=proc.returncode,
         output=output,
         argv=argv,
         shadows=shadows,
         counts=parse_sync_counts(output),
+        provenance=finish_full_index(pending) if (pending and ok) else "",
     )
 
 
@@ -217,6 +223,8 @@ class InitResult:
     output: str
     argv: list
     error: str = ""
+    #: One line from helpers.index_provenance on success; "" otherwise.
+    provenance: str = ""
 
 
 def run_init(project_root: str, tokensave_exe: str, *,
@@ -234,6 +242,7 @@ def run_init(project_root: str, tokensave_exe: str, *,
     be answered before this function is ever called.
     """
     argv = init_argv(git_hook=git_hook)
+    pending = begin_full_index(argv, project_root, tokensave_exe)
     try:
         proc = subprocess.run(
             [tokensave_exe] + argv,
@@ -256,10 +265,12 @@ def run_init(project_root: str, tokensave_exe: str, *,
         return InitResult(ok=False, returncode=1, output="", argv=argv,
                           error=str(exc))
     output = proc.stdout or ""
+    ok = proc.returncode == 0
     return InitResult(
-        ok=proc.returncode == 0,
+        ok=ok,
         returncode=proc.returncode,
         output=output,
         argv=argv,
-        error="" if proc.returncode == 0 else f"tokensave init exited {proc.returncode}",
+        error="" if ok else f"tokensave init exited {proc.returncode}",
+        provenance=finish_full_index(pending) if (pending and ok) else "",
     )

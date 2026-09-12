@@ -349,3 +349,49 @@ def remediation(env: HooksEnv) -> str:
             "repository's own hook directory. The Manager will not change a "
             "setting it did not make: unset it there, or point it at %s."
             % (env.hooks_dir, where, env.default_hooks_dir))
+
+
+def snapshot_hook_state(repo: str, git_exe: str = "git") -> dict:
+    """Comparable facts about hook routing, for a before/after around a command.
+
+    Exists for the tokensave agent picker. Since tokensave 7.12.0 (#506)
+    `install --git-hook yes` targets the CURRENT repository and `global` claims
+    `core.hooksPath`, so an install can change routing in two different places
+    and an exit code says nothing about which. Measuring both sides is the
+    only way to report what actually changed.
+
+    Keys are stable strings so the caller can diff two snapshots; a value that
+    could not be read is a string saying so, never an empty "nothing here".
+    """
+    snap = {}
+    value, code = _git(git_exe, repo if os.path.isdir(repo or "") else ".",
+                       ["config", "--global", "--get", "core.hooksPath"])
+    snap["global core.hooksPath"] = (value if code == 0
+                                     else "<unset>" if code == 1
+                                     else "<unreadable: %s>" % value)
+    env = read_hooks_env(repo, git_exe)
+    if not env.ok:
+        snap["repository hooks"] = "<not checked: %s>" % env.reason
+        return snap
+    snap["repository hooks dir"] = env.hooks_dir
+    try:
+        names = sorted(os.listdir(env.default_hooks_dir))
+    except OSError as exc:
+        snap["repository hooks"] = "<unreadable: %s>" % exc
+        return snap
+    for name in names:
+        path = os.path.join(env.default_hooks_dir, name)
+        try:
+            st = os.stat(path)
+            snap["repository hook " + name] = "%d:%d" % (st.st_size,
+                                                         int(st.st_mtime))
+        except OSError as exc:
+            snap["repository hook " + name] = "<unreadable: %s>" % exc
+    return snap
+
+
+def hook_state_changes(before: dict, after: dict) -> list:
+    """``[(key, before, after)]`` for every key whose value differs."""
+    return [(k, before.get(k, "<absent>"), after.get(k, "<absent>"))
+            for k in sorted(set(before) | set(after))
+            if before.get(k) != after.get(k)]

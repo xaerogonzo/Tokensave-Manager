@@ -1,5 +1,9 @@
 <!--
-STATUS: FIXED in tokensave v7.11.1 — issue #503 is still OPEN upstream.
+STATUS: CLOSED — verified via GitHub API 2026-09-12
+  PRIOR: FIXED in tokensave v7.11.1 (calls) — #503 CLOSED 2026-09-12 with
+  the 7.12.0 bare-name reachability gate (shared with #522), which also
+  covers the dotted-versus-bare split this report's secondary finding hit.
+  PREVIOUSLY: FIXED in tokensave v7.11.1 — issue #503 is still OPEN upstream.
   https://github.com/aovestdipaperino/tokensave/issues/503
 
   The fix shipped without the issue being closed, so "open" here does NOT

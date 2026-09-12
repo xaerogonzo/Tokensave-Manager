@@ -544,3 +544,56 @@ def test_discover_zero_tokens_with_zero_turns_is_not_flagged():
     payload = _discover_payload(replaceable_turns=0, total_turns=0,
                                 buckets=[])
     assert parse_discover(payload).value.tokens_trustworthy is True
+
+
+# ── discover: measured turns are read, not inferred (7.12.0 / #523) ──────
+#
+# 7.12.0 exports `turns_with_measured_sizes` top-level and per bucket. When it
+# is present the all-zero inference above no longer decides; when it is
+# absent (an older binary) or unusable, the inference still does, and the
+# qualifier says so rather than implying a measurement.
+
+def test_discover_real_712_capture_is_a_lower_bound():
+    """Captured 2026-09-12: 85 of 295 replaceable turns carry sizes."""
+    d = parse_discover(fixture("discover_712_7d.json")).value
+    assert d.measured_turns == 85
+    assert d.tokens_trustworthy is True
+    assert d.token_qualifier == ("85 of 295 replaceable turns carry measured "
+                                 "sizes, so token totals are a lower bound")
+
+
+@pytest.mark.parametrize("measured,trusted,evidence,qualifier", [
+    (0, False, "none of the 100 replaceable turn(s) carry a measured "
+               "tool-result size (turns_with_measured_sizes = 0) -- "
+               "unmeasured, not zero", ""),
+    (35, True, "", "35 of 100 replaceable turns carry measured sizes, so "
+                   "token totals are a lower bound"),
+    (100, True, "", ""),
+])
+def test_discover_measured_turns_decide(measured, trusted, evidence, qualifier):
+    payload = _discover_payload(
+        replaceable_turns=100, turns_with_measured_sizes=measured,
+        total_addressable_input_tokens=0 if measured == 0 else 5000,
+        total_recoverable_input_tokens=0 if measured == 0 else 2500,
+        buckets=[])
+    d = parse_discover(payload).value
+    assert d.tokens_trustworthy is trusted
+    assert d.token_evidence == evidence
+    assert d.token_qualifier == qualifier
+    assert d.measured_turns == measured
+
+
+def test_discover_field_absent_falls_back_and_says_so():
+    d = parse_discover(_discover_payload(replaceable_turns=100)).value
+    assert d.measured_turns is None
+    assert d.tokens_trustworthy is False           # the all-zero inference
+    assert "not reported" in d.token_qualifier
+
+
+def test_discover_field_malformed_falls_back_and_says_so():
+    d = parse_discover(_discover_payload(
+        replaceable_turns=100, turns_with_measured_sizes="x")).value
+    assert d.measured_turns is None
+    assert d.tokens_trustworthy is False
+    assert "malformed ('x')" in d.token_qualifier
+    assert "field unavailable" in d.token_qualifier

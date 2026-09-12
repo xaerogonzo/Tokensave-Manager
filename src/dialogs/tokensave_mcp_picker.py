@@ -3,7 +3,7 @@
 Opened from Tool Manager → tokensave row → "🔌 Wire into agents…", and offered
 directly from `tokensave doctor` output when it nags about missing integrations.
 
-Wraps ``tokensave install --agent <id> --git-hook no [perm flags]``.
+Wraps ``tokensave install --agent <id> --git-hook no|global [perm flags]``.
 
 Three things make this NOT a copy of ``dialogs/codegraph_mcp_picker.py``
 (verified live from ``tokensave install --help``, v7.8.1):
@@ -12,10 +12,17 @@ Three things make this NOT a copy of ``dialogs/codegraph_mcp_picker.py``
      takes exactly one agent per invocation, so ``_worker`` loops and runs one
      subprocess per selected agent.  A failure on one agent must not abort the
      rest.
-  2. ``--git-hook default`` installs a GLOBAL git ``post-commit`` hook, prompting
-     on a TTY and silently skipping otherwise.  We run non-TTY so it would skip,
-     but relying on that is fragile — ``--git-hook no`` is always passed
-     explicitly, with an opt-in checkbox for users who do want it.
+  2. ``--git-hook`` is always pinned, because ``default`` prompts on a TTY and
+     silently skips otherwise.  ``no`` unless the user opts in.
+
+     The opt-in means ``global``, and the spelling changed under us: up to
+     7.11 ``yes`` installed the GLOBAL hooks, but since 7.12.0 (#506) ``yes``
+     installs into **the current repository** -- and this dialog passes no
+     ``cwd``, so ``yes`` would have written hooks into whichever repository
+     the Manager happened to be launched from.  ``global`` is the value that
+     still means what the checkbox, its warning and the confirmation say, and
+     it does not exist before 7.12.0, so the checkbox is disabled (with the
+     reason shown) when the installed version is older or unknown.
 
      That checkbox has a consequence worth stating plainly, because it is
      invisible until something stops working: the global hooks claim
@@ -55,6 +62,8 @@ from typing import TYPE_CHECKING, Callable
 
 from constants import C, CREATE_NO_WINDOW
 from theme import UiPumpMixin, bind_mousewheel
+from helpers.doctor_rules import _installed_extractor_version
+from helpers.git_hooks_env import hook_state_changes, snapshot_hook_state
 from helpers.mcp import (
     _TOKENSAVE_AGENTS,
     _tokensave_agent_destination_path,
@@ -83,10 +92,47 @@ def build_install_argv(
     standing up Tk.  Note the singular ``--agent`` — see module docstring.
     """
     argv = [ts_exe, "install", "--agent", agent_id,
-            "--git-hook", "yes" if git_hook else "no"]
+            "--git-hook", "global" if git_hook else "no"]
     if wildcard_permissions:
         argv.append("--wildcard-permissions")
     return argv
+
+
+#: The first tokensave whose ``--git-hook`` accepts ``global`` (#506).
+GIT_HOOK_GLOBAL_MIN = "7.12.0"
+
+#: Routing changes a ticked hook checkbox promises; anything else is a surprise.
+_EXPECTED_HOOK_CHANGES = frozenset({"global core.hooksPath"})
+
+
+def git_hook_support(version: str, problem: str) -> tuple:
+    """``(supported, reason)`` for the global-hook option.
+
+    Two disabled states with two different reasons: a known-old binary is a
+    capability limit ("upgrade"), an unreadable version is a detection
+    failure ("fix the install"). Collapsing them would send a user with a
+    broken tokensave off to upgrade a binary that already supports it.
+    """
+    if problem or not version:
+        return (False, "couldn't determine the tokensave version: %s"
+                % (problem or "tokensave is not configured"))
+    from helpers.detection import _version_lt
+    if _version_lt(version, GIT_HOOK_GLOBAL_MIN):
+        return (False, "requires tokensave 7.12+ (installed: %s)" % version)
+    return (True, "")
+
+
+def describe_hook_changes(before: dict, after: dict, git_hook: bool) -> list:
+    """``[(line, unexpected)]`` for every hook-routing change a run made.
+
+    With the box unticked nothing may change; ticked, only the global
+    ``core.hooksPath`` may. The run is measured rather than trusted because
+    an install cannot be isolated from real state on Windows, and its exit
+    code does not say where hooks went.
+    """
+    allowed = _EXPECTED_HOOK_CHANGES if git_hook else frozenset()
+    return [("%s: %s -> %s" % (key, old, new), key not in allowed)
+            for key, old, new in hook_state_changes(before, after)]
 
 
 class TokensaveMCPPickerDialog(UiPumpMixin, tk.Toplevel):
@@ -123,6 +169,8 @@ class TokensaveMCPPickerDialog(UiPumpMixin, tk.Toplevel):
         self._git_hook_var = tk.BooleanVar(value=False)
         self._in_flight = False
         self._show_all = False
+        self._hook_supported, self._hook_reason = git_hook_support(
+            *_installed_extractor_version(cfg.tokensave_exe or ""))
 
         # Sticky-footer order: action bar and log pane claim the floor first,
         # then the agent list expands into whatever is left.
@@ -203,11 +251,18 @@ class TokensaveMCPPickerDialog(UiPumpMixin, tk.Toplevel):
             bg=C["base"], fg=C["overlay0"],
             font=("Segoe UI", 8), wraplength=540, justify=tk.LEFT,
         ).pack(anchor=tk.W)
-        ttk.Checkbutton(
+        self._git_hook_chk = ttk.Checkbutton(
             adv,
-            text="Also install the global git post-commit hook (--git-hook yes)",
+            text="Also install tokensave's GLOBAL git hooks (--git-hook global)",
             variable=self._git_hook_var,
-        ).pack(anchor=tk.W, padx=12, pady=(6, 0))
+            state=tk.NORMAL if self._hook_supported else tk.DISABLED,
+        )
+        self._git_hook_chk.pack(anchor=tk.W, padx=12, pady=(6, 0))
+        if not self._hook_supported:
+            # A disabled control states its reason.
+            tk.Label(adv, text="    Unavailable: " + self._hook_reason,
+                     bg=C["base"], fg=C["yellow"], font=("Segoe UI", 8),
+                     wraplength=540, justify=tk.LEFT).pack(anchor=tk.W)
         tk.Label(
             adv,
             text=("    Off by default. This hook is GLOBAL — it runs "
@@ -337,18 +392,20 @@ class TokensaveMCPPickerDialog(UiPumpMixin, tk.Toplevel):
 
     # ── Log helpers ───────────────────────────────────────────────────────────
 
-    def _log(self, line: str) -> None:
+    def _log(self, line: str, colour: "str | None" = None) -> None:
         try:
             self._log_txt.configure(state=tk.NORMAL)
-            self._log_txt.insert(tk.END, line + "\n")
+            if colour:
+                self._log_txt.tag_configure(colour, foreground=colour)
+            self._log_txt.insert(tk.END, line + "\n", (colour,) if colour else ())
             self._log_txt.see(tk.END)
             self._log_txt.configure(state=tk.DISABLED)
         except tk.TclError:
             pass
 
-    def _log_threadsafe(self, line: str) -> None:
+    def _log_threadsafe(self, line: str, colour: "str | None" = None) -> None:
         try:
-            self._post(lambda l=line: self._log(l))
+            self._post(lambda l=line, c=colour: self._log(l, c))
         except tk.TclError:
             pass
 
@@ -375,8 +432,18 @@ class TokensaveMCPPickerDialog(UiPumpMixin, tk.Toplevel):
             lines.append(f"  {os.path.expanduser('~')}"
                          f"{os.sep}.claude{os.sep}settings.json"
                          "   (hooks + permissions)")
-        if self._git_hook_var.get():
-            lines += ["", "⚠ A GLOBAL git post-commit hook will be installed."]
+        if self._git_hook_var.get() and self._hook_supported:
+            lines += ["",
+                      "⚠ GLOBAL git hooks: sets core.hooksPath machine-wide.",
+                      "  The Manager's own pre-commit and pre-push hooks stop "
+                      "running in every repository.",
+                      "  Open upstream issue #545: repository hooks are also "
+                      "skipped inside linked worktrees."]
+        if "claude" in selected:
+            lines += ["",
+                      "Note: this adds claude to tokensave's installed_agents, "
+                      "so every future minor upgrade re-runs this install and "
+                      "rewrites the user-scope MCP entry in ~/.claude.json."]
         lines += ["", "Proceed?"]
         return "\n".join(lines)
 
@@ -409,10 +476,13 @@ class TokensaveMCPPickerDialog(UiPumpMixin, tk.Toplevel):
         self._in_flight = True
         self._install_btn.configure(state=tk.DISABLED, text="🔌  Wiring…")
         wildcard = self._wildcard_var.get()
-        git_hook = self._git_hook_var.get()
+        git_hook = self._git_hook_var.get() and self._hook_supported
+        git_exe = self._cfg.git_exe or "git"
+        repo = os.getcwd()
 
         def _worker() -> None:
             ok_n, fail_n = 0, 0
+            before = snapshot_hook_state(repo, git_exe)
             for agent_id in selected:
                 argv = build_install_argv(
                     ts_exe, agent_id,
@@ -426,6 +496,15 @@ class TokensaveMCPPickerDialog(UiPumpMixin, tk.Toplevel):
                     fail_n += 1
                     # One agent failing must never abort the others.
                     self._log_threadsafe(f"  ✗ {agent_id}: {detail}")
+            changes = describe_hook_changes(
+                before, snapshot_hook_state(repo, git_exe), git_hook)
+            for line, unexpected in changes:
+                self._log_threadsafe(
+                    ("  ✗ UNEXPECTED hook change: " if unexpected
+                     else "  hook change: ") + line,
+                    C["red"] if unexpected else None)
+            if not changes:
+                self._log_threadsafe("  No git hook routing changed.")
             self._post(lambda: self._on_install_done(ok_n, fail_n))
 
         threading.Thread(target=_worker, daemon=True).start()

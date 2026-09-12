@@ -18,6 +18,8 @@ tk = pytest.importorskip("tkinter")
 from dialogs.tokensave_mcp_picker import (
     TokensaveMCPPickerDialog,
     build_install_argv,
+    describe_hook_changes,
+    git_hook_support,
 )
 
 pytestmark = pytest.mark.tk
@@ -25,6 +27,22 @@ pytestmark = pytest.mark.tk
 
 def _proc(rc=0, stdout="", stderr=""):
     return SimpleNamespace(returncode=rc, stdout=stdout, stderr=stderr)
+
+
+@pytest.fixture(autouse=True)
+def _no_real_probes(mocker):
+    """No test here may run the real tokensave or git.
+
+    The dialog probes the installed version on open and snapshots hook
+    routing around a run. Both go through `subprocess`, which several tests
+    patch wholesale to count install invocations -- so the probes are stubbed
+    at the import site, and the version reads as a supported 7.12.1 unless a
+    test says otherwise.
+    """
+    mocker.patch("dialogs.tokensave_mcp_picker._installed_extractor_version",
+                 return_value=("7.12.1", ""))
+    mocker.patch("dialogs.tokensave_mcp_picker.snapshot_hook_state",
+                 return_value={})
 
 
 @pytest.fixture
@@ -46,10 +64,15 @@ def test_argv_is_singular_agent():
                     "--git-hook", "no"]
 
 
-def test_argv_git_hook_opt_in():
+def test_argv_git_hook_opt_in_means_global():
+    """Since 7.12.0 (#506) `yes` means the CURRENT repository, not global.
+
+    The dialog passes no cwd, so `yes` would install into whichever repo the
+    Manager was launched from. `global` is what the checkbox describes.
+    """
     argv = build_install_argv("ts.exe", "claude", git_hook=True)
-    assert "--git-hook" in argv
-    assert argv[argv.index("--git-hook") + 1] == "yes"
+    assert argv[argv.index("--git-hook") + 1] == "global"
+    assert "--local" not in argv          # upstream tracks the agent
 
 
 def test_argv_wildcard_permissions_passthrough():
@@ -179,7 +202,7 @@ def test_git_hook_opt_in_reaches_subprocess(tk_root, mock_config, mocker,
     harness.drain()
 
     argv = run.call_args_list[0].args[0]
-    assert argv[argv.index("--git-hook") + 1] == "yes"
+    assert argv[argv.index("--git-hook") + 1] == "global"
 
 
 def test_one_failing_agent_does_not_abort_the_rest(tk_root, mock_config,
@@ -242,3 +265,96 @@ def test_confirm_text_warns_about_global_git_hook(tk_root, mock_config,
     dialog = TokensaveMCPPickerDialog(tk_root, mock_config)
     dialog._git_hook_var.set(True)
     assert "GLOBAL" in dialog._confirm_text(["claude"], "ts.exe")
+
+
+# ── Global-hook capability and the measured before/after (7.12 / #506) ────
+
+@pytest.mark.parametrize("version,problem,supported,fragment", [
+    ("7.12.1", "", True, ""),
+    ("7.12.0", "", True, ""),
+    ("7.11.1", "", False, "requires tokensave 7.12+ (installed: 7.11.1)"),
+    ("", "could not run `tokensave --version` (x)", False,
+     "couldn't determine the tokensave version: could not run"),
+    ("", "", False, "couldn't determine the tokensave version: tokensave is "
+                    "not configured"),
+])
+def test_git_hook_support_distinguishes_too_old_from_unknown(
+        version, problem, supported, fragment):
+    ok, reason = git_hook_support(version, problem)
+    assert ok is supported
+    assert fragment in reason
+
+
+def test_git_hook_checkbox_disabled_with_reason_when_too_old(
+        tk_root, mock_config, all_detected, mocker):
+    mocker.patch("dialogs.tokensave_mcp_picker._installed_extractor_version",
+                 return_value=("7.11.1", ""))
+    dialog = TokensaveMCPPickerDialog(tk_root, mock_config)
+    assert "disabled" in str(dialog._git_hook_chk.cget("state"))
+    assert "requires tokensave 7.12+" in dialog._hook_reason
+    # a var set programmatically still cannot reach the argv or the warning
+    dialog._git_hook_var.set(True)
+    assert "GLOBAL" not in dialog._confirm_text(["cursor"], "ts.exe")
+
+
+def test_git_hook_checkbox_disabled_with_reason_when_unknown(
+        tk_root, mock_config, all_detected, mocker):
+    mocker.patch("dialogs.tokensave_mcp_picker._installed_extractor_version",
+                 return_value=("", "could not run `tokensave --version` (x)"))
+    dialog = TokensaveMCPPickerDialog(tk_root, mock_config)
+    assert "disabled" in str(dialog._git_hook_chk.cget("state"))
+    assert "couldn't determine" in dialog._hook_reason
+
+
+def test_confirm_text_names_every_global_hook_consequence(
+        tk_root, mock_config, all_detected):
+    dialog = TokensaveMCPPickerDialog(tk_root, mock_config)
+    dialog._git_hook_var.set(True)
+    text = dialog._confirm_text(["cursor"], "ts.exe")
+    assert "core.hooksPath machine-wide" in text
+    assert "pre-commit and pre-push" in text
+    assert "#545" in text
+
+
+def test_confirm_text_states_the_installed_agents_consequence_for_claude(
+        tk_root, mock_config, all_detected):
+    dialog = TokensaveMCPPickerDialog(tk_root, mock_config)
+    assert "installed_agents" in dialog._confirm_text(["claude"], "ts.exe")
+    assert "installed_agents" not in dialog._confirm_text(["cursor"], "ts.exe")
+
+
+def test_hook_changes_unticked_means_any_change_is_unexpected():
+    before = {"global core.hooksPath": "<unset>"}
+    after = {"global core.hooksPath": "C:/ts/hooks"}
+    [(line, unexpected)] = describe_hook_changes(before, after, git_hook=False)
+    assert unexpected and "<unset> -> C:/ts/hooks" in line
+
+
+def test_hook_changes_ticked_allows_only_the_global_redirect():
+    before = {"global core.hooksPath": "<unset>",
+              "repository hook post-commit": "<absent>"}
+    after = {"global core.hooksPath": "C:/ts/hooks",
+             "repository hook post-commit": "120:1789300000"}
+    changes = dict(describe_hook_changes(before, after, git_hook=True))
+    assert changes == {
+        "global core.hooksPath: <unset> -> C:/ts/hooks": False,
+        "repository hook post-commit: <absent> -> 120:1789300000": True,
+    }
+
+
+def test_run_reports_an_unexpected_repository_hook_in_red(
+        tk_root, mock_config, mocker, patch_after, wait_for, tmp_path):
+    """The install's exit code says nothing about where hooks went."""
+    mocker.patch("dialogs.tokensave_mcp_picker.subprocess.run",
+                 return_value=_proc(0))
+    snaps = iter([{}, {"repository hook post-commit": "120:1"}])
+    mocker.patch("dialogs.tokensave_mcp_picker.snapshot_hook_state",
+                 side_effect=lambda repo, git: next(snaps))
+    dialog, harness = _install_dialog(tk_root, mock_config, mocker,
+                                      patch_after, tmp_path, ["cursor"])
+    dialog._on_install()
+    wait_for(lambda: (harness.drain() or True) and "UNEXPECTED" in
+             dialog._log_txt.get("1.0", "end"), timeout_s=5)
+    from constants import C
+    red = dialog._log_txt.tag_ranges(C["red"])
+    assert red and "UNEXPECTED" in dialog._log_txt.get(red[0], red[1])

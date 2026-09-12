@@ -1,5 +1,17 @@
 <!--
-STATUS: FILED 2026-09-08 as issue #522 — awaiting maintainer response.
+STATUS: CLOSED — verified via GitHub API 2026-09-12
+  PRIOR: FIXED in tokensave v7.12.0 (#522) — CLOSED upstream 2026-09-12.
+  Verified locally 2026-09-12 on 7.12.1, after a FULL re-index of this
+  repository (an upgrade alone changed nothing: the MCP server advanced
+  last_indexed_version to 7.12.1 without re-indexing, so the graph kept the
+  7.11 edges until `sync --force`). Measured before -> after the re-index:
+    production -> tests/ edges, per kind:  uses 827 -> 31,  calls 24 -> 23
+    `audit-edges` unreachable sole-candidate edges: 1,776 -> 797
+    total edges 22,550 -> 21,800
+  Upstream measured `uses` -40% on its project and recorded the import-rule
+  survivors as a known limit; here `uses` fell 96%. The 31 survivors are
+  that limit, not a regression.
+  PREVIOUSLY: FILED 2026-09-08 as issue #522 — awaiting maintainer response.
   https://github.com/aovestdipaperino/tokensave/issues/522
 
   Re-read from GitHub after filing: the published title and body are

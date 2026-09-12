@@ -318,8 +318,13 @@ def test_every_violation_from_a_tree_walk_is_placed(tmp_path):
 import json as _json
 
 
-def _ts_project(tmp_path, *, config="missing", version="7.11.0"):
-    """A project directory with a .tokensave/config.json in a given state."""
+def _ts_project(tmp_path, *, config="missing", version="7.11.0",
+                full_sync_at=1788905550):
+    """A project with .tokensave/config.json and an index DB in a given state.
+
+    ``full_sync_at=None`` builds a DB whose metadata table lacks the key.
+    """
+    import sqlite3
     ts = tmp_path / ".tokensave"
     ts.mkdir()
     if config == "versioned":
@@ -331,7 +336,24 @@ def _ts_project(tmp_path, *, config="missing", version="7.11.0"):
                                         encoding="utf-8")
     elif config == "malformed":
         (ts / "config.json").write_text("{not json", encoding="utf-8")
+    conn = sqlite3.connect(str(ts / "tokensave.db"))
+    conn.execute("CREATE TABLE metadata (key TEXT PRIMARY KEY, value TEXT)")
+    if full_sync_at is not None:
+        conn.execute("INSERT INTO metadata VALUES ('last_full_sync_at', ?)",
+                     (str(full_sync_at),))
+    conn.commit()
+    conn.close()
     return str(tmp_path)
+
+
+def _provenance(proj, version, full_sync_at=1788905550):
+    """Write a Manager provenance record, as a Manager-run full index would."""
+    d = os.path.join(proj, ".tokensave-manager")
+    os.makedirs(d, exist_ok=True)
+    with open(os.path.join(d, "index-provenance.json"), "w",
+              encoding="utf-8") as fh:
+        _json.dump({"version": version, "full_sync_at": full_sync_at,
+                    "db": ".tokensave/tokensave.db"}, fh)
 
 
 def _fake_version(monkeypatch, value):
@@ -345,30 +367,42 @@ def _fake_version(monkeypatch, value):
                         lambda exe: value)
 
 
-def test_index_freshness_silent_when_versions_agree(tmp_path, monkeypatch):
+def test_index_freshness_silent_when_provenance_proves_the_installed_binary(
+        tmp_path, monkeypatch):
     """A healthy project must not gain a permanent line."""
     from helpers.doctor_rules import audit_index_extractor_version
-    _fake_version(monkeypatch, ("7.11.1", ""))
-    proj = _ts_project(tmp_path, config="versioned", version="7.11.1")
+    _fake_version(monkeypatch, ("7.12.1", ""))
+    proj = _ts_project(tmp_path, config="versioned", version="7.12.1")
+    _provenance(proj, "7.12.1")
     assert audit_index_extractor_version(proj, "tokensave.exe") == []
 
 
-def test_index_freshness_silent_on_equivalent_version_spellings(
+def test_index_freshness_is_not_fooled_by_an_advanced_marker(
         tmp_path, monkeypatch):
-    """7.11 and 7.11.0 are the same version, and _version_lt pads to say so."""
-    from helpers.doctor_rules import audit_index_extractor_version
-    _fake_version(monkeypatch, ("7.11", ""))
-    proj = _ts_project(tmp_path, config="versioned", version="7.11.0")
-    assert audit_index_extractor_version(proj, "tokensave.exe") == []
+    """The F3 case: marker says 7.12.1, nothing proves 7.12.1 built the graph.
 
-
-def test_index_freshness_fires_on_a_stale_index(tmp_path, monkeypatch):
+    tokensave advances `last_indexed_version` on a minor upgrade without
+    re-indexing. The old rule compared that field and went silent here --
+    on both of the repositories it was measured on.
+    """
     from helpers.doctor_rules import audit_index_extractor_version
-    _fake_version(monkeypatch, ("7.11.1", ""))
-    proj = _ts_project(tmp_path, config="versioned", version="7.11.0")
+    _fake_version(monkeypatch, ("7.12.1", ""))
+    proj = _ts_project(tmp_path, config="versioned", version="7.12.1")
     joined = " ".join(audit_index_extractor_version(proj, "tokensave.exe"))
-    assert "7.11.0" in joined and "7.11.1" in joined
-    # the remedy, and the reason the obvious cheaper one will not work
+    assert "unknown" in joined
+    assert "EVALUATED" in joined           # why the marker is no answer
+    assert "unverified rather than confirmed" in joined
+    assert "Force Re-sync" in joined
+
+
+def test_index_freshness_fires_when_an_older_binary_built_the_graph(
+        tmp_path, monkeypatch):
+    from helpers.doctor_rules import audit_index_extractor_version
+    _fake_version(monkeypatch, ("7.12.1", ""))
+    proj = _ts_project(tmp_path, config="versioned", version="7.12.1")
+    _provenance(proj, "7.11.1")
+    joined = " ".join(audit_index_extractor_version(proj, "tokensave.exe"))
+    assert "7.11.1" in joined and "7.12.1" in joined
     assert "sync --force" in joined
     assert "incremental sync does not revisit" in joined
 
@@ -385,10 +419,24 @@ def test_index_freshness_does_not_recommend_sync_on_a_downgrade(
     from helpers.doctor_rules import audit_index_extractor_version
     _fake_version(monkeypatch, ("7.11.1", ""))
     proj = _ts_project(tmp_path, config="versioned", version="7.12.0")
+    _provenance(proj, "7.12.0")
     joined = " ".join(audit_index_extractor_version(proj, "tokensave.exe"))
     assert "NEWER" in joined
     assert "Do NOT run `sync --force`" in joined
     assert "Upgrade tokensave" in joined
+
+
+def test_index_freshness_unknown_after_a_full_index_outside_the_manager(
+        tmp_path, monkeypatch):
+    """A record that no longer describes the graph must not vouch for it."""
+    from helpers.doctor_rules import audit_index_extractor_version
+    _fake_version(monkeypatch, ("7.12.1", ""))
+    proj = _ts_project(tmp_path, config="versioned", version="7.12.1",
+                       full_sync_at=1789300000)
+    _provenance(proj, "7.12.1", full_sync_at=1788905550)
+    joined = " ".join(audit_index_extractor_version(proj, "tokensave.exe"))
+    assert "outside the Manager" in joined
+    assert "unverified rather than confirmed" in joined
 
 
 def test_index_freshness_silent_when_not_a_tokensave_project(
@@ -430,6 +478,7 @@ def test_index_freshness_speaks_when_the_binary_would_not_run(
     from helpers.doctor_rules import audit_index_extractor_version
     _fake_version(monkeypatch, ("", "could not run `tokensave --version` (x)"))
     proj = _ts_project(tmp_path, config="versioned", version="7.11.0")
+    _provenance(proj, "7.11.0")
     joined = " ".join(audit_index_extractor_version(proj, "tokensave.exe"))
     assert "which tokensave is installed" in joined
     assert "unverified rather than confirmed" in joined
@@ -437,16 +486,23 @@ def test_index_freshness_speaks_when_the_binary_would_not_run(
     assert "sync --force" not in joined
 
 
-def test_index_freshness_reports_both_sides_when_both_are_unknown(
-        tmp_path, monkeypatch):
-    """Two different facts with two different remedies, so two lines."""
+def test_index_freshness_ignores_the_binary_mtime(tmp_path, monkeypatch):
+    """Provenance unchanged + a touched executable = the same verdict.
+
+    Guards against a timestamp inference creeping back in: a binary can be
+    copied, restored or rebuilt without its semantics changing.
+    """
     from helpers.doctor_rules import audit_index_extractor_version
-    _fake_version(monkeypatch, ("", "could not run `tokensave --version` (x)"))
-    proj = _ts_project(tmp_path, config="malformed")
-    notes = audit_index_extractor_version(proj, "tokensave.exe")
-    joined = " ".join(notes)
-    assert "which tokensave built this index" in joined
-    assert "which tokensave is installed" in joined
+    exe = tmp_path / "tokensave.exe"
+    exe.write_bytes(b"x")
+    _fake_version(monkeypatch, ("7.12.1", ""))
+    proj_dir = tmp_path / "proj"
+    proj_dir.mkdir()
+    proj = _ts_project(proj_dir, config="versioned", version="7.12.1")
+    _provenance(proj, "7.12.1")
+    before = audit_index_extractor_version(proj, str(exe))
+    os.utime(exe, (4102444800, 4102444800))       # year 2100
+    assert audit_index_extractor_version(proj, str(exe)) == before == []
 
 
 def test_installed_version_probe_parses_the_real_binary_output():
