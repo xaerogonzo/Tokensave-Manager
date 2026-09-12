@@ -31,7 +31,7 @@ propagation that is the whole point.
 |---|---|---|
 | `template_dir` | `manager-config.json` | the relocation offer |
 | the baseline include in every project | each project's `BASIC_INSTRUCTIONS.md` | the relocation offer |
-| the MCP wrapper path | Claude's own config files | Settings → MCP integration |
+| the MCP wrapper path | Claude's own config files | Settings → Integrations → 🔌 Manage MCP wiring |
 
 Everything else in `manager-config.json` — `tokensave_exe`, `git_exe`,
 `python_exe`, `editor_cmd`, the analyzer paths — points at software installed

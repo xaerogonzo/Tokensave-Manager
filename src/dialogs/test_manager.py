@@ -1,7 +1,9 @@
 """TestManagerDialog — novice-friendly test lifecycle UI (v4.13).
 
-Opened from the Help tab's "🧪 Test Manager…" button (which replaced
-the v4.12 "🧪 Run Smoke Tests" button). Four tabs:
+Opened from the Git tab (beside 🧪 Test Gaps, since both act on the
+selected project's tests) and from Settings → Paths & Tools with the
+other managers. It used to live in the Help tab's left nav, which made
+the documentation surface the discovery route for an action. Four tabs:
 
   1. Run + View       — list test files with last-run status; run all,
                          run selected, stop in-flight runs (V-G), sync

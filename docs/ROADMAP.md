@@ -599,7 +599,7 @@ The manager is growing into a **propose-only AI assistant** for project maintena
 
 ### Inference engine: Ollama (recommended) or LM Studio
 
-The manager talks to local AI through an OpenAI-compatible HTTP API. Settings → "AI commit messages" lets you point at:
+The manager talks to local AI through an OpenAI-compatible HTTP API. Settings → AI lets you point at:
 
 - **Ollama** (recommended for scripted / agentic workflows) — runs as a Windows service, exposes `http://localhost:11434/v1`, has a built-in model package manager
 - **LM Studio** — friendlier GUI for interactive use, exposes `http://localhost:1234/v1`

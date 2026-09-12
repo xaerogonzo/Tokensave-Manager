@@ -286,7 +286,7 @@ Add to `claude_desktop_config.json`:
   "args": ["serve", "-p", "."]}}}
 ```
 
-It holds no machine-specific paths — Claude Code spawns a project-scoped server with the project root as its working directory, so `.` resolves correctly even when the session was launched from a subdirectory. It does require `tokensave` to be on PATH. TokenSave Manager writes this for you (Settings → 🔌 Manage MCP wiring, or right-click a project → 🗂 Index → 🔌 Bind to this project…) and checks the PATH prerequisite first.
+It holds no machine-specific paths — Claude Code spawns a project-scoped server with the project root as its working directory, so `.` resolves correctly even when the session was launched from a subdirectory. It does require `tokensave` to be on PATH. TokenSave Manager writes this for you (Settings → Integrations → 🔌 Manage MCP wiring, or right-click a project → 🗂 Index → 🔌 Bind to this project…) and checks the PATH prerequisite first.
 
 ---
 

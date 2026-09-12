@@ -74,7 +74,7 @@ Both tools below produce these results. The differences are in distribution, syn
 - **DB location**: `.codegraph/codegraph.db` inside each indexed project
 - **MCP tools**: `codegraph_search`, `codegraph_context`, `codegraph_callers`, `codegraph_callees`, `codegraph_impact`, `codegraph_node`, `codegraph_files`, `codegraph_status`
 - **Sync model**: automatic. A native OS file watcher (FSEvents / inotify / ReadDirectoryChangesW) re-indexes changed files in real time **while CodeGraph's MCP server is running inside an active Claude Code session**. Manual `🧠 CodeGraph Sync` from the manager is still useful for catching up after editing with Claude Code closed.
-- **Manager integration**: per-project lifecycle. The manager handles **Init / Sync / Status / Remove Index** through the right-click menu. The CG column shows ✓ for initialised projects. The Settings dialog can install codegraph globally via `npm install -g`.
+- **Manager integration**: per-project lifecycle. The manager handles **Init / Sync / Status / Remove Index** through the right-click menu. The CG column shows ✓ for initialised projects. Settings → Integrations can install codegraph globally via `npm install -g`.
 - **Why pick it**: zero-touch auto-sync, very fast on huge codebases (the maintainer's benchmark indexed the Swift compiler — 25,874 files, 272,898 nodes — in under 4 minutes), framework-aware routing for 13 web frameworks (Django, Flask, FastAPI, Express, Laravel, Rails, Spring, etc.), broader install reach (also configures Cursor, Codex CLI, opencode if you use them).
 
 ### Side-by-side
@@ -109,7 +109,7 @@ The manager's design philosophy: **never force a choice you don't want to make**
 
 ### Project Management
 - **Automatic project discovery** — scans configured search roots for any folder containing a tokensave index (`.tokensave/`), a CodeGraph index (`.codegraph/`), or a git repository (`.git/`). All three types appear in the list and are visually distinguished
-- **One-click project switching** — set any tokensave project as the manager's default; a pin file tells `tokensave-wrapper.exe` which project to serve Claude Desktop's own chats. **Claude Code sessions are unaffected** — each reads its own project's `.mcp.json`. If you have run the Desktop retirement migration (Settings → MCP Integration) the pin no longer decides anything about MCP at all
+- **One-click project switching** — set any tokensave project as the manager's default; a pin file tells `tokensave-wrapper.exe` which project to serve Claude Desktop's own chats. **Claude Code sessions are unaffected** — each reads its own project's `.mcp.json`. If you have run the Desktop retirement migration (Settings → Integrations → 🔌 Manage MCP wiring) the pin no longer decides anything about MCP at all
 - **Project status at a glance** — three indicator columns:
   - **Last Synced** — age of the tokensave index (`2h ago`, `3d ago`)
   - **CG** — ✓ if CodeGraph has indexed this project, — otherwise
@@ -122,8 +122,8 @@ The manager's design philosophy: **never force a choice you don't want to make**
 ### Code Intelligence — tokensave AND CodeGraph
 - **Two backends, one UI** — right-click a project to run tokensave's `↺ Sync / 📊 Status / ⟳ Force Re-sync / 🔍 Doctor` and CodeGraph's `🧠 CodeGraph Init / Sync / Status / Remove Index` from the same menu. The manager handles both lifecycles independently
 - **Sync All** — syncs every tokensave-indexed project sequentially with `[i/n]` progress logging; git-only and CodeGraph-only projects are skipped with a note
-- **Friendly install nudges** — clicking a CodeGraph action on a project without the tool installed opens a dialog explaining how to install (Settings → CodeGraph → Install via npm)
-- **CodeGraph install button** — Settings → CodeGraph has an **"Install via npm"** button that runs `npm install -g @colbymchenry/codegraph` in the background. Windows `EPERM`/`EACCES` failures (the common system-wide-Node trap) surface a specific hint about reinstalling Node per-user or running as admin
+- **Friendly install nudges** — clicking a CodeGraph action on a project without the tool installed opens a dialog explaining how to install (Settings → Integrations → CodeGraph → Install via npm)
+- **CodeGraph install button** — Settings → Integrations → CodeGraph has an **"Install via npm"** button that runs `npm install -g @colbymchenry/codegraph` in the background. Windows `EPERM`/`EACCES` failures (the common system-wide-Node trap) surface a specific hint about reinstalling Node per-user or running as admin
 - **Auto-detected paths** — both `tokensave_exe` and `codegraph_exe` auto-detect on save; `.cmd`-first Windows shim resolution handles npm-installed binaries correctly
 
 ### Project Organisation
@@ -164,30 +164,30 @@ The manager's design philosophy: **never force a choice you don't want to make**
 - **Stage 1 — 🔍 AI Code Review** — right-click any project → "🔍 AI Code Review…" opens a split-pane dialog: top pane shows `git diff HEAD` with green/red colour-coding, bottom pane streams an AI-generated structured review (⚠ High / ⚡ Medium / 💡 Low / ℹ Observations sections). Async with token-by-token streaming via byte-aligned SSE parsing — visible progress instead of a long spinner. Stop / Regenerate / Copy buttons. Pure read-only: no tools, no file writes
 - **Stage 2 — 🤖 Ask tab** — notebook tab next to Git. Chat interface where a local LLM uses six READ-ONLY tools (`read_file`, `list_directory`, `git_log`, `git_diff`, `tokensave_search`, `tokensave_context`) to answer questions about the selected project. Bounded loop (8 iterations default), cumulative context budget (~40 000 chars across tool outputs), per-tool error wrapping, path-containment validation, stop-via-event-flag cancellation. Tool calls + results appear inline in the chat log (peach for call, dim grey for result, blue for user, default for assistant). See `docs/AGENT_ARCHITECTURE.md` for the locked architectural rules
 - **Stage 3 — 📝 Doc Updates dialog** — right-click any project → "📝 Doc Updates…" opens a registry-driven dialog with one tab per doc type (CHANGELOG, README, ARCHITECTURE, ROADMAP, MEMORY, TOKENSAVE_GUIDE, generic docs). Drafts targeted updates from a commit-range against the existing file content; multi-section + hallucination protection refuses to invent section titles not present in the existing doc. Apply routes through ProposalBridge for old-vs-new diff review. Per-tab `🔍 Tokensave tools` checkbox enables Ollama-only mid-drafting tool calls. Apply-time validation surfaces a warning banner above the text widget when rejected (e.g. hallucinated section titles); the banner auto-clears the moment the user edits the draft content. The whole pipeline auto-resolves a commit range from the doc-anchor markers and shows an elapsed-time tick (`"Drafting on Ollama (12s)…"`) so long generations never look like a hang
-- **Tokensave + codegraph grounding** — every AI surface (commit messages, PR draft, code review, Ask tab non-agentic, Doc Updates) injects a slim grounding block built from `tokensave tool context/search` PLUS `codegraph context/affected` (when codegraph is indexed for the project). Both sources are dedup-merged with per-source caps so the prompt stays bounded. Master toggle in Settings → AI backend selection → "Code-graph grounding"; default ON. Grounding is silent-fail — projects without either tool indexed get a clean grounding-less prompt
+- **Tokensave + codegraph grounding** — every AI surface (commit messages, PR draft, code review, Ask tab non-agentic, Doc Updates) injects a slim grounding block built from `tokensave tool context/search` PLUS `codegraph context/affected` (when codegraph is indexed for the project). Both sources are dedup-merged with per-source caps so the prompt stays bounded. Master toggle in Settings → AI → "Code-graph grounding"; default ON. Grounding is silent-fail — projects without either tool indexed get a clean grounding-less prompt
 - **Codegraph freshness UX** — selecting a project in the Projects tab kicks a debounced background `codegraph sync` if the index is stale (200 s tolerance). The CG column shows a health glyph: `✓ indexed` / `⏳ stale` / `⚠ under-indexed` / `—`. If the index is genuinely broken (tokensave sees ≫ more files than codegraph — common after a project refactor), a one-time-per-session dialog offers a full reindex. Every grounded LLM call passes through `ensure_fresh` first, so a stale index won't silently feed bad signal to the model
-- **🦙 Ollama Model Manager** — Settings → "🦙 Manage Ollama Models…" launches a dedicated dialog that uses Ollama's native REST API to browse installed models, pull new ones with live progress, see per-model context windows, and delete unwanted ones
+- **🦙 Ollama Model Manager** — Settings → AI → "🦙 Manage Ollama Models…" launches a dedicated dialog that uses Ollama's native REST API to browse installed models, pull new ones with live progress, see per-model context windows, and delete unwanted ones
 - **🦙 Ollama Model Manager — detailed view** — the dedicated dialog uses Ollama's REST API (`GET /api/tags`, `POST /api/show`, streaming `POST /api/pull`, `DELETE /api/delete`). Cancel during a pull explicitly closes the `HTTPResponse` to unblock the worker (setting a `threading.Event` alone doesn't break out of `read()`)
 - **🔄 Upgrade tokensave from the manager** — Settings has an always-visible "🔄 Upgrade tokensave" button that runs `tokensave upgrade`. Three signals keep the button label fresh: a local `tokensave --version` probe at startup, the sync-output parser catching `Update available: vA → vB` lines, and an hourly GitHub releases poller (`api.github.com/.../releases/latest`). When a newer version is available the button promotes to a green Primary "🔄 Upgrade tokensave to vX.Y.Z". A "🔍 Check integration" button sits beside it — runs `scripts/check_tokensave_integration.py` and shows the report in a scrollable dialog. Right-click any project → **🔄 Integration check** for the same report. See [`docs/UPGRADE_INTEGRATION.md`](docs/UPGRADE_INTEGRATION.md) for the full workflow
-- **Claude Code CLI integration** — Settings → Git tools has a "Claude Code CLI" row with Browse + Auto-detect. When configured, the manager spawns `claude` (`npm install -g @anthropic-ai/claude-code`) in its own detached terminal window for tasks like Draft PR — your app stays fully unblocked while Claude works. Auto-detect probes the `.cmd` shim first (npm's Windows convention) and falls back to `%APPDATA%\npm\claude.cmd`. If auto-detect comes up empty (npm bin not on PATH in this launch context), paste the full path manually. A **Model** combobox below the path selects which Claude model the manager uses for its automated `claude --print` calls (pre-commit review, commit-message Suggest, Draft PR). Defaults to `claude-haiku-4-5-20251001` (fast, 3–5 s). Empty = defer to `~/.claude/settings.json`. Does not affect interactive `claude` sessions
+- **Claude Code CLI integration** — Settings → Paths & Tools has a "Claude Code CLI" row with Browse + Auto-detect. When configured, the manager spawns `claude` (`npm install -g @anthropic-ai/claude-code`) in its own detached terminal window for tasks like Draft PR — your app stays fully unblocked while Claude works. Auto-detect probes the `.cmd` shim first (npm's Windows convention) and falls back to `%APPDATA%\npm\claude.cmd`. If auto-detect comes up empty (npm bin not on PATH in this launch context), paste the full path manually. A **Model** combobox below the path selects which Claude model the manager uses for its automated `claude --print` calls (pre-commit review, commit-message Suggest, Draft PR). Defaults to `claude-haiku-4-5-20251001` (fast, 3–5 s). Empty = defer to `~/.claude/settings.json`. Does not affect interactive `claude` sessions
 - **✓ Run checks…** — right-click any project → "✓ Run checks…" opens a dialog that runs four pre-merge quality checks concurrently: Python syntax (`compileall`), pyflakes, Doctor audit (calls `_audit_project_tree` directly — no subprocess), and an optional Claude Code review of the PR-scope diff (`git diff <base>...HEAD`). All four are toggleable checkboxes persisted to `cfg.raw["checks_enabled"]`; Claude review is off by default (token cost). A large-diff warning fires on the main thread if the diff exceeds 10k chars before the Claude call is sent. Results update live with ✓ / ✗ / ⏳ / — icons as each future resolves. Dialog close cancels queued futures cleanly. Footer bar adds two one-click actions: **📋 Generate GitHub Actions** (writes `quality-checks.yml` from enabled checks) and **🔗 Install/Remove pre-push hook** (blocks bad pushes at the git level)
 - **GitHub Actions CI** — `.github/workflows/ci.yml` runs free deterministic checks (syntax + pyflakes) on every push and pull request. No secrets, no paid runners. The ✓ or ✗ badge appears on every PR automatically. The **Run Checks dialog** can also generate a manager-curated `quality-checks.yml` covering your currently-enabled checks
 - **Pre-push hook** — one click in the Run Checks dialog installs `.git/hooks/pre-push`, which blocks every `git push` if syntax, pyflakes, or the doctor audit fail. Claude check is always skipped (too slow for automatic gating). Fail-open on infrastructure errors; remove via the same dialog
 - **📊 Cost viewer** — `📊 Cost` button next to View Log opens a metric dashboard showing tokens saved, dollar value recouped, and total input/output token counts (parsed from `tokensave cost`). Subprocess runs in a background thread so the dialog opens instantly with `Loading…` placeholders, then updates when the data arrives
 
 ### Settings & Tools
-- **Settings dialog** — configure all paths (`tokensave_exe`, `template_dir`, `editor_cmd`, `git_exe`, `codegraph_exe`, `claude_cli_exe`, `claude_cli_model`) and search roots through a GUI; changes apply immediately. Validates and auto-detects on save. Scrollable and resizable (760×700 default, 640×500 minimum) so growing sections never push controls off-screen
-- **🔌 MCP Integration configurator** — Settings → "🔌 Manage MCP wiring…" opens a dialog that classifies the `tokensave` MCP entries in BOTH Claude Desktop's `claude_desktop_config.json` AND Claude Code's `~/.claude.json`. UWP-aware: detects Microsoft Store / packaged Claude installs and targets the per-package config under `%LOCALAPPDATA%\Packages\Claude_*\LocalCache\Roaming\Claude\` (where the legacy `%APPDATA%\Claude\` path resolves to a DIFFERENT file from inside the package's process tree — see `docs/MCP_INTEGRATION_GOTCHAS.md` for the full story). Each config row shows ✓ correct / ⚠ bypasses wrapper / ✗ missing. Recognises `tokensave install --agent claude`'s canonical direct-serve shape (`{"command": "tokensave.exe", "args": ["serve"]}`) as valid for Claude Code so the banner doesn't fight an upstream tool. Apply writes via `shutil.copy2` backup-first; refuses to write while Claude is running (the config would be silently clobbered by Desktop's preferences-save). Skip list persists so dismissed warnings don't return. Also hosts the **"Retire Desktop tokensave…"** migration: Desktop spawns its wrapper for the whole app rather than per session, so its single pin-chosen project outranked every project's own `.mcp.json` machine-wide. Retiring it is what makes multi-project work; the trade is that Claude Desktop chat loses tokensave entirely, and the confirmation says so. Gated hard on Desktop being closed (it rewrites that file from memory every 1–2 minutes), changes both physical config views on a UWP install, and Undo restores the verbatim prior entry
-- **AI commit messages** — Settings dialog has a dedicated **"AI commit messages"** section with a provider dropdown (Anthropic / OpenAI / OpenAI-compatible / Ollama), model field, API-key env-var name, and base URL for local OpenAI-compatible servers. Quick-preset buttons for **Anthropic** (Claude Haiku/Sonnet/Opus), **LM Studio** (`http://localhost:1234`), and **Ollama** (`http://localhost:11434`). Min-diff-lines threshold so trivial commits skip the LLM. All LLM failures silent-fallback to the heuristic chain — never blocks the commit dialog
-- **GitHub CLI installer** — Settings dialog includes a **"Install via winget"** button that installs the GitHub CLI (`gh`) in the background; shows a green checkmark when found on PATH
-- **CodeGraph installer** — Settings dialog includes a **"Install binary (npm)"** button that installs `@colbymchenry/codegraph` globally. Runs on a background thread so the GUI never freezes; surfaces Windows EPERM/EACCES errors with actionable hints
-- **CodeGraph MCP configuration** — three Step-2 buttons in Settings → CodeGraph: **🔌 Configure MCP (auto)** runs `codegraph install --yes` to wire codegraph into Claude Code's MCP servers (`~/.claude.json`) so the `mcp__codegraph__*` tools appear in agent sessions; **⚙ Configure MCP — pick agents…** opens a picker for choosing among the 4 supported agents (claude / cursor / codex / opencode) with destination-path detection so un-installed agents render disabled; **🧹 Uninstall MCP** reverses everything. Status row reports per-agent wiring state by parsing `~/.claude.json` directly
-- **💾 Tool Manager dialog** — single discovery surface (Settings → tokensave or CodeGraph section → 🛠️ Open Tool Manager…; OR Help tab → 💾 Tool Manager… in the left nav) for the full **install / update / uninstall** lifecycle of both code-graph tools. Tokensave install downloads the latest Windows zip from GitHub releases and extracts to `%LOCALAPPDATA%\TokenSaveManager\bin\` (no admin needed). Codegraph update runs `npm install -g @colbymchenry/codegraph@latest`. Cascading uninstall strips MCP wiring FIRST then removes the binary, with graceful fallback if MCP cleanup fails so users never get trapped with a broken-but-undeletable tool. Hardened against Windows npm-shim crashes, Zip Slip, GitHub rate-limit (403), and double-click races
-- **Per-feature grounding toggles** — Settings → AI backend selection nests two checkboxes under the master "Code-graph grounding" toggle: opt-in for commit-message Suggest (default OFF — live testing showed grounding hurts on big multi-file commits for small models) and opt-out for Draft PR (default ON — PRs genuinely benefit from test-impact + symbol context). The Git Commit dialog's strategy badge appends 🔗 grounded or ✕ ungrounded after each Suggest so you can see at a glance which mode produced any given message
+- **⚙ Settings tab** — every path (`tokensave_exe`, `template_dir`, `editor_cmd`, `git_exe`, `codegraph_exe`, `claude_cli_exe`, `claude_cli_model`, `cursor_cli_exe`), the search roots, the AI backends and the integrations, across five pages: **Paths & Tools**, **Projects**, **Git & Policy**, **AI**, **Integrations**. Each page scrolls on its own. Save is explicit and appears only when something actually differs from disk, with Revert beside it; the whole save is one transaction, so a page that refuses — a `tokensave.exe` that does not exist, say — leaves your live configuration untouched
+- **🔌 MCP Integration configurator** — Settings → Integrations → "🔌 Manage MCP wiring…" opens a dialog that classifies the `tokensave` MCP entries in BOTH Claude Desktop's `claude_desktop_config.json` AND Claude Code's `~/.claude.json`. UWP-aware: detects Microsoft Store / packaged Claude installs and targets the per-package config under `%LOCALAPPDATA%\Packages\Claude_*\LocalCache\Roaming\Claude\` (where the legacy `%APPDATA%\Claude\` path resolves to a DIFFERENT file from inside the package's process tree — see `docs/MCP_INTEGRATION_GOTCHAS.md` for the full story). Each config row shows ✓ correct / ⚠ bypasses wrapper / ✗ missing. Recognises `tokensave install --agent claude`'s canonical direct-serve shape (`{"command": "tokensave.exe", "args": ["serve"]}`) as valid for Claude Code so the banner doesn't fight an upstream tool. Apply writes via `shutil.copy2` backup-first; refuses to write while Claude is running (the config would be silently clobbered by Desktop's preferences-save). Skip list persists so dismissed warnings don't return. Also hosts the **"Retire Desktop tokensave…"** migration: Desktop spawns its wrapper for the whole app rather than per session, so its single pin-chosen project outranked every project's own `.mcp.json` machine-wide. Retiring it is what makes multi-project work; the trade is that Claude Desktop chat loses tokensave entirely, and the confirmation says so. Gated hard on Desktop being closed (it rewrites that file from memory every 1–2 minutes), changes both physical config views on a UWP install, and Undo restores the verbatim prior entry
+- **AI commit messages** — Settings → AI has a dedicated commit-message section with a provider dropdown (Anthropic / OpenAI / OpenAI-compatible / Ollama), model field, API-key env-var name, and base URL for local OpenAI-compatible servers. Quick-preset buttons for **Anthropic** (Claude Haiku/Sonnet/Opus), **LM Studio** (`http://localhost:1234`), and **Ollama** (`http://localhost:11434`). Min-diff-lines threshold so trivial commits skip the LLM. All LLM failures silent-fallback to the heuristic chain — never blocks the commit dialog
+- **GitHub CLI installer** — Settings → Paths & Tools includes a **"Install via winget"** button that installs the GitHub CLI (`gh`) in the background; shows a green checkmark when found on PATH
+- **CodeGraph installer** — Settings → Integrations includes a **"Install binary (npm)"** button that installs `@colbymchenry/codegraph` globally. Runs on a background thread so the GUI never freezes; surfaces Windows EPERM/EACCES errors with actionable hints
+- **CodeGraph MCP configuration** — three Step-2 buttons in Settings → Integrations → CodeGraph: **🔌 Configure MCP (auto)** runs `codegraph install --yes` to wire codegraph into Claude Code's MCP servers (`~/.claude.json`) so the `mcp__codegraph__*` tools appear in agent sessions; **⚙ Configure MCP — pick agents…** opens a picker for choosing among the 4 supported agents (claude / cursor / codex / opencode) with destination-path detection so un-installed agents render disabled; **🧹 Uninstall MCP** reverses everything. Status row reports per-agent wiring state by parsing `~/.claude.json` directly
+- **💾 Tool Manager dialog** — single discovery surface (Settings → Paths & Tools → Managers, or the 🛠️ Open Tool Manager… shortcut beside the tokensave path) for the full **install / update / uninstall** lifecycle of both code-graph tools. Tokensave install downloads the latest Windows zip from GitHub releases and extracts to `%LOCALAPPDATA%\TokenSaveManager\bin\` (no admin needed). Codegraph update runs `npm install -g @colbymchenry/codegraph@latest`. Cascading uninstall strips MCP wiring FIRST then removes the binary, with graceful fallback if MCP cleanup fails so users never get trapped with a broken-but-undeletable tool. Hardened against Windows npm-shim crashes, Zip Slip, GitHub rate-limit (403), and double-click races
+- **Per-feature grounding toggles** — Settings → AI nests two checkboxes under the master "Code-graph grounding" toggle: opt-in for commit-message Suggest (default OFF — live testing showed grounding hurts on big multi-file commits for small models) and opt-out for Draft PR (default ON — PRs genuinely benefit from test-impact + symbol context). The Git Commit dialog's strategy badge appends 🔗 grounded or ✕ ungrounded after each Suggest so you can see at a glance which mode produced any given message
 - **Git auto-detection** — finds `git.exe` via PATH or common Windows install locations automatically
 - **CodeGraph auto-detection** — finds `codegraph.cmd` in `%APPDATA%\npm\` or wherever npm placed it; probes `.cmd` before bare names since Windows `subprocess.run` requires the extension on shim files
 - **Reference tab** — CLI cheatsheet + 12 built-in Claude prompt snippets (codebase overview, symbol search, impact analysis, health check, etc.) with copy-to-clipboard; add your own custom snippets
-- **Help tab** — full operational guide covering every feature, including a dedicated CodeGraph section, the git workflow, GitHub setup, project categories, and more
+- **Help tab** — renders this repository's own markdown, so the documentation and the in-app guide cannot drift apart. Topics are marked with `<!-- help:key -->` anchors in README, `docs/USER_GUIDE.md` and the shipped guides; search reads section bodies rather than titles
 - **Output log** — always-visible coloured log panel at the bottom of the window; all subprocess output appears here in real time
 
 ---
@@ -198,14 +198,14 @@ The manager's design philosophy: **never force a choice you don't want to make**
 - **Windows 10 / 11** (NTFS required for shadow links; everything else works on any NTFS volume)
 - **tokensave.exe** — the tokensave binary (not bundled; [get it here](https://github.com/aovestdipaperino/tokensave))
 - **Git for Windows** — [git-scm.com/download/win](https://git-scm.com/download/win) — required for all Git tab features
-- **Node.js 18+** (optional) — only needed if you want to use [CodeGraph](https://github.com/colbymchenry/codegraph) as an alternative or complementary code-graph tool. The manager has an "Install via npm" button in Settings → CodeGraph that runs `npm install -g @colbymchenry/codegraph` for you
+- **Node.js 18+** (optional) — only needed if you want to use [CodeGraph](https://github.com/colbymchenry/codegraph) as an alternative or complementary code-graph tool. The manager has an "Install via npm" button in Settings → Integrations → CodeGraph that runs `npm install -g @colbymchenry/codegraph` for you
 
 **For running from source only:**
 - Python 3.10 or later
 - `pip install pillow pystray`
 
 **Optional:**
-- **GitHub CLI (`gh`)** — needed for releases from the GitHub Setup wizard. Install it from Settings → GitHub CLI → "Install via winget", or manually: `winget install --id GitHub.cli`
+- **GitHub CLI (`gh`)** — needed for releases from the GitHub Setup wizard. Install it from Settings → Paths & Tools → GitHub CLI → "Install via winget", or manually: `winget install --id GitHub.cli`
 
 ---
 
@@ -217,7 +217,7 @@ The manager's design philosophy: **never force a choice you don't want to make**
 1. Download the latest release zip from the [Releases](https://github.com/xaerogonzo/Tokensave-Manager/releases) page
 2. Extract anywhere — `C:\Tools\TokenSave Manager\` is a good spot
 3. Run `tokensave-manager.exe`
-4. The Settings dialog opens automatically on first run — fill in:
+4. The Settings tab opens automatically on first run — fill in:
    - **tokensave.exe path** — wherever you put `tokensave.exe`
    - **Search roots** — one or more folders to scan for tokensave projects (e.g. `D:\My Projects`)
 5. Click Save — the manager scans and populates the project list
@@ -252,7 +252,7 @@ pythonw src/app.py
 <!-- help:first-run -->
 ## First-Run Setup
 
-When you launch for the first time (or when config paths are invalid), the **Settings dialog** opens automatically with a red banner describing what's missing.
+When you launch for the first time (or when config paths are invalid), the **Settings tab** is selected automatically, with a red banner above the pages describing what's missing.
 
 **Minimum required fields:**
 
@@ -310,7 +310,7 @@ The main tab. Shows all discovered tokensave projects grouped by category.
 - **⚙ Retrofit Existing** — add tokensave + Claude instructions to a project that already exists
 - **↺↺ Sync All** — sync every project in the list one by one
 - **⟳ Refresh** — re-scan search roots now (also happens automatically every 60s)
-- **⚙ Settings** — open the Settings dialog
+- **⚙ Settings** — jump to the Settings tab
 
 The **active project badge** at the top of the window shows which project is currently pinned for Claude Desktop, and whether it was manually pinned or auto-detected.
 
@@ -457,13 +457,44 @@ Recommended starter prompts:
 <!-- help:help-tab -->
 ### Help Tab
 
-A scrollable guide covering:
-- How to switch active projects (and why Claude Code usually needs no switch)
-- Button reference for every toolbar and context menu item
-- Project categories and how to set them up
-- The full git workflow — what branches are, when to use them, step-by-step PR creation
-- GitHub Setup walkthrough
-- File locations
+**The Help tab renders this repository's own markdown.** There is no second copy of the documentation inside the application: every topic is a section of `README.md`, `docs/USER_GUIDE.md`, `docs/GITHUB_GUIDE.md`,
+`docs/RELOCATING.md`, `docs/UPGRADE_INTEGRATION.md`, `docs/PYSCOPE_INTEGRATION.md` or `TOKENSAVE_GUIDE.md`, marked with an `<!-- help:key -->` comment above its heading. Those comments render as nothing on GitHub, and editing any of these files updates what the application shows.
+
+- **The list is grouped by source document**, so it is visible that help and the repository's documents are the same thing
+- **Search reads section bodies, not just titles** — the question a reader actually has is usually about a word in the text. Results rank by title match, then by how often the term appears
+- **📄 Open docs** opens the underlying file in your default viewer; **🔍 Explain** streams a short LLM summary of the open topic; **🤖 Ask** hands the topic to the Ask tab
+- A document that cannot be read gets its own row saying so, rather than quietly shortening the list
+
+The Tool, Extension and Test Managers used to live in this tab's left nav. They are actions rather than help, and have moved to Settings → Paths & Tools (Test Manager is also on the Git tab, beside 🧪 Test Gaps).
+
+---
+
+<!-- help:settings-tab -->
+### ⚙ Settings Tab
+
+Every manager setting, in five pages. It is a tab rather than a dialog: it is the main configuration surface, and it used to be a modal behind a small button on the Projects tab.
+
+| page | what is on it |
+|---|---|
+| **Paths & Tools** | tokensave, template dir, editor, git, Claude Code CLI, Cursor Agent CLI, GitHub CLI — plus the Tool, Extension and Test Managers |
+| **Projects** | search roots: the folders scanned for projects, and the label each one contributes as a category |
+| **Git & Policy** | auto-commit after sync, whether binding adds `.mcp.json` to `.gitignore`, the pre-commit smoke-test hook, and 🎛 Agent Policy |
+| **AI** | backend selection, commit-message and Ask-tab providers, grounding toggles, the Ollama model manager |
+| **Integrations** | CodeGraph, PyScope, and the MCP wiring configurator |
+
+**Save is explicit, and appears only when something changed.** A Save / Revert bar shows up the moment a value differs from what is on disk and disappears again if you change it back. Pending edits survive switching pages and switching tabs; quitting with unsaved settings asks first.
+
+Saving is all-or-nothing: every page writes into a staging copy, and a page that refuses — a `tokensave.exe` path that does not exist, say — aborts the whole save with your live configuration untouched.
+
+---
+
+<!-- help:tasks-tab -->
+### 📋 Tasks Tab
+
+Two lists, side by side in resizable panes:
+
+- **Active git worktrees** for the selected project, with merge, delete and open actions. A worktree is a second checkout of the same repository on another branch, which is how Claude Code runs work in isolation
+- **Recent Claude Code sessions** across every indexed project — title, project and age — so you can see what has been running where
 
 ---
 
@@ -493,7 +524,7 @@ Every session in that project is then bound at startup — no cwd guessing, no
 pin involvement, and no need to remember `graph_root` for your own code.
 
 **Right-click a project → 🗂 Index → 🔌 Bind to this project…**, or see them all
-at once in Settings → 🔌 Manage MCP wiring.
+at once in Settings → Integrations → 🔌 Manage MCP wiring.
 
 ### What the Manager checks for you
 
@@ -521,7 +552,7 @@ hands everyone who clones the repo an MCP server that only starts if they have
 tokensave on PATH — opting them in silently is the ruder default. So the
 Manager adds `.mcp.json` to `.gitignore` after binding.
 
-Turn that off in **Settings → "Add .mcp.json to .gitignore when binding a
+Turn that off in **Settings → Git & Policy → "Add .mcp.json to .gitignore when binding a
 project"** if you'd rather share it. Either way git ignores nothing it is
 already tracking.
 
@@ -540,37 +571,98 @@ determinism instead of a fallback that is usually right.
 <!-- help:right-click-menu -->
 ## Right-Click Menu
 
-Right-click any project row in the Projects tab to get the full per-project action menu:
+Right-click any project row in the Projects tab. Three commands sit at the top
+level; everything else is grouped into submenus, because a flat list of thirty
+actions is not a menu.
 
-| Menu Item | What it does |
-|-----------|-------------|
-| ★ Set as Active | **Only present while Claude Desktop chat is ON** (Settings → 🔌 Manage MCP wiring). It pins the one project Desktop's chat window answers about. With Desktop chat off nothing reads the pin, so the command is not in the menu at all. Claude Code sessions never read it either way |
-| ↺ Sync | Run `tokensave sync` |
+| Top level | What it does |
+|---|---|
+| ★ Set as Active | **Only present while Claude Desktop chat is ON** (Settings → Integrations → 🔌 Manage MCP wiring). Pins the one project Desktop's chat window answers about. With Desktop chat off nothing reads the pin, so the command is not in the menu at all. Claude Code sessions never read it either way |
+| ↺ Sync | Run `tokensave sync` — an incremental re-index of changed files |
 | 📊 Status | Show `tokensave status` output |
-| ⟳ Force Re-sync | Run `tokensave sync --force` |
-| 🔍 Doctor | Run `tokensave doctor` |
-| 🔌 Bind to this project… | Give this project its own Claude Code MCP server (writes `.mcp.json`) |
-| 🛡 Enable/Disable strict_tree | Toggle tokensave's wrong-tree refusal for this project. Hardening, **not** what makes projects independent — it turns an answer from the wrong tree into a refusal, inside a server |
-| 📜 Git Log | Switch to Git tab and refresh |
-| 📝 Git Commit… | Open commit dialog for this project |
-| 🔧 Git Init | Initialise a git repo + write baseline `.gitignore` + optional initial commit |
-| 🧠 CodeGraph Init | Initialise CodeGraph + build the initial graph (`codegraph init --index`) |
-| 🧠 CodeGraph Sync | Incremental update of CodeGraph's index for the project |
-| 🧠 CodeGraph Status | Show CodeGraph stats (file count, node count, backend) |
-| 🧠 Remove CodeGraph Index | Delete `.codegraph/` — source untouched, re-initialise via Init |
-| 📋 Manage .gitignore… | Open the gitignore editor — view current entries, inject template patterns (Python / Node / Rust / IDE / OS / Nuitka / etc.), add custom entries, or remove existing ones |
-| 🧹 Untrack Ignored Files… | Find files that are tracked by git but also match a `.gitignore` rule (the "stale tracking" problem), select which to untrack via `git rm --cached`. Local files are preserved — only git's index is updated |
-| 📂 Open Folder | Open in Windows Explorer |
-| ✏ Open in Editor | Launch in configured editor |
-| ⎘ Copy Path | Copy full project path to clipboard |
-| ⚙ Retrofit… | Add tokensave rules / BASIC_INSTRUCTIONS / Nuitka / git hook |
-| 🔗 Shadow Links… | Generate NTFS hardlinks with a secondary extension |
-| 📁 Assign Category… | Move project to a different category or sub-category |
-| 🗑 Remove Index… | Delete `.tokensave/` and remove project from the list (project files untouched) |
-| Auto-detect | Switch from manual pin back to automatic project detection |
-| 📝 Draft CHANGELOG entry… | Ask the LLM to draft [Unreleased] bullets from commits since the last release tag — reviews in a proposal dialog before any file write |
-| 🔬 Refactor scout… | Surface code-health findings (complexity, god classes, dead code) via deterministic SQL against the tokensave DB — LLM only enters if you click Investigate on a card |
-| ✓ Run checks… | Run four pre-merge quality checks concurrently (Python syntax, pyflakes, Doctor audit, optional Claude Code review). All four are individually toggleable; Claude review is off by default (uses API tokens). Results appear live as each check finishes |
+
+### 🗂 Index
+
+| Item | What it does |
+|---|---|
+| ⟳ Force Re-sync | Rebuild the whole graph from scratch. Use it after a large refactor, a tokensave upgrade, or when a sync finished but a new function still cannot be found |
+| 🔍 Doctor | Run `tokensave doctor` for this project |
+| 🧹 Housekeeping… | Finish the cleanup tokensave can only report: stale registry entries it will purge only from a real terminal, and byte-identical `*.bak` files its own config rewrites left behind. It never claims an outcome it has not re-scanned to verify, and only exact duplicates can be deleted |
+| 🛡 Enable / Disable strict_tree… | Toggle tokensave's wrong-tree refusal. Hardening, **not** what makes projects independent — it turns an answer about the wrong checkout into a refusal, inside a server |
+| 🔌 Bind to this project… | Give this project its own Claude Code MCP server, by writing `.mcp.json` |
+| 🔗 Shadow Links… | Hardlink file types tokensave does not recognise under an extension it does. NTFS only |
+| 🔄 Integration check | Free deterministic audit after a tokensave upgrade: installed version, upstream issue status, new tools with no snippet coverage, snippets calling removed tools |
+| 📄 Instructions… | Does this project's Claude instruction chain actually **resolve**? It shows *carriage* — what the files declare — beside *reach*, what `CLAUDE.md` really pulls in, because a correct baseline include sitting inside a file nothing links loads in no session at all. The wording is "chain resolves", never "loaded": the Manager reads files, it does not observe a Claude session |
+
+### 🧠 CodeGraph
+
+Init, Sync, Status, Reindex (Full)… and Remove CodeGraph Index… — the same
+lifecycle as tokensave's, for the alternative code-graph tool. Removing the
+index deletes `.codegraph/` and leaves your source untouched.
+
+### 🔬 PyScope
+
+Analyze, Status, Register with PyScope, 🔌 Bind to Claude Code… and Open in
+PyScope.
+
+**Registering and binding are two different things.** PyScope's MCP server
+answers about *registered* projects and takes the project as an argument, so
+there is one server for the whole machine rather than one per project. The MCP
+entry makes the server reachable; registering makes a project answerable. An
+entry without registration replies "unknown project" to everything, which is
+why the Manager reports the two states separately and tells you when only one
+of them landed.
+
+### 🌿 Git
+
+| Item | What it does |
+|---|---|
+| 📜 Git Log | Switch to the Git tab and refresh it |
+| 📝 Commit… | Open the commit dialog with an AI-suggested message |
+| 🔧 Git Init | Initialise a repo, write the baseline `.gitignore`, offer a first commit |
+| 📋 Manage .gitignore… | View entries, inject template patterns (Python / Node / Rust / IDE / OS / Nuitka), add custom ones, remove existing ones |
+| 🧹 Untrack Ignored Files… | Find files git tracks that `.gitignore` now covers and `git rm --cached` the ones you pick. Local files are preserved — only git's index changes |
+| 🔒 Private Repo… | Mirror selected files into a **separate private local repository**, for material that must not reach a public remote. The file list is read from configuration rather than `git ls-files`, so what the dialog shows is exactly what gets synced. Add or remove tracked files, move the destination, sync on demand, or remove the link entirely |
+
+### 🤖 AI & docs
+
+| Item | What it does |
+|---|---|
+| 🔍 AI Code Review… | Stream a severity-coloured review of the staged or HEAD diff |
+| 🔍 Pre-commit AI Review hook… | Install or remove the hook that reviews every commit. Fail-open — an offline provider never blocks a commit |
+| 📝 Doc Updates… | Draft `CHANGELOG.md` and `README.md` edits from recent commits, reviewed in a proposal dialog before anything is written |
+| 📋 Roadmap… | Three tabs over `ROADMAP.md`. **Audit** cross-references entries against git history to surface stale or promotable ones; **Plan** inserts a new roadmap skeleton; **Ship** maps `[Unreleased]` changelog bullets onto active entries and promotes them in one batch. Every write goes through the proposal dialog |
+| 🔬 Refactor scout… | Deterministic code-health findings — complexity, god classes, dead code — computed against the tokensave graph using this project's own documented thresholds, so a finding **cannot be hallucinated**. The LLM only enters when you click Investigate on a card, and then only to explain a finding the scout already built |
+| ✓ Run checks… | Four pre-merge checks, concurrently: Python syntax, pyflakes, Doctor audit, and an optional Claude review of the PR-scoped diff (off by default — it spends tokens) |
+
+### 📂 Open
+
+| Item | What it does |
+|---|---|
+| 📂 Open Folder | Open the project in Windows Explorer |
+| ✏ Open in Editor | Launch the configured editor |
+| ⎘ Copy Path | Copy the full project path to the clipboard |
+| ⚙ Generate VS Code tasks… | Write `.vscode/tasks.json` entries for the manager's common operations |
+| 🗂 Generate VS Code workspace… | Assemble a `.code-workspace` from projects you pick. There is a picker because "which of these belong together" is not derivable from the registry — that registry is a *discovery* result, every repo found under your search roots, and generating across all of it produces a workspace of unrelated code. An existing descriptor is **merged, never replaced**: it carries settings, launch configuration and extension recommendations somebody wrote by hand |
+
+### 🔧 Maintenance
+
+| Item | What it does |
+|---|---|
+| ⚙ Retrofit… | Add tokensave rules, `BASIC_INSTRUCTIONS.md`, or Nuitka build files |
+| 📁 Assign Category… | Move the project to a different category or sub-category |
+| 🗑 Remove Index… | Delete `.tokensave/` and drop the project from the list. Project files untouched |
+| Auto-detect | Clear the pin and return to automatic project selection |
+
+### Selecting more than one project
+
+Ctrl-click or shift-click several rows and the menu becomes bulk actions: Sync
+all, Force Re-sync all, Status of all, Enable or Disable strict_tree on all,
+Clear selection — plus one that only makes sense for a set:
+
+- **🔍 Search across these projects…** — cross-project search: a single query run against every
+  selected project's index, merged into one ranked list. It answers "where else
+  did I write this", which no individual project's graph can
 
 ---
 
@@ -1037,7 +1129,7 @@ the test runs into three gating tiers:
 
 ### Test Manager dialog (v4.13)
 
-The Help tab's **🧪 Test Manager…** button opens a 4-tab dialog that
+The Git tab's **🧪 Test Manager…** button — also in Settings → Paths & Tools — opens a 4-tab dialog that
 covers the full test lifecycle for novice users:
 
 - **Run + View**: per-file last-run status, ▶ Run All / Run Selected /

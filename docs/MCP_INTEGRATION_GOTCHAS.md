@@ -99,7 +99,7 @@ MCP status versus direct CLI status for the same project.
 
 ### The fix
 
-Settings → MCP Integration → **Retire Desktop tokensave…**. Each project's
+Settings → Integrations → 🔌 Manage MCP wiring → **Retire Desktop tokensave…**. Each project's
 own `.mcp.json` (`tokensave serve -p .`) then wins, and every session serves
 its own tree. The accepted trade is that **Claude Desktop chat loses tokensave
 entirely** — deliberate, and stated in the confirmation.
