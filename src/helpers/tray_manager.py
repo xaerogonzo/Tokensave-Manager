@@ -8,6 +8,7 @@ Dependency contract:
   root     — the tk.Tk App window (geometry, after, withdraw, deiconify, …)
   cfg      — ManagerConfig instance (saves window_geometry on hide)
   on_quit  — called before window.destroy(); should cancel in-flight workers
+  can_quit — optional () -> bool asked FIRST; False cancels the quit
 """
 
 from __future__ import annotations
@@ -40,10 +41,12 @@ class TrayManager:
         root: "tk.Tk",
         cfg: "ManagerConfig",
         on_quit: "Callable[[], None]",
+        can_quit: "Callable[[], bool] | None" = None,
     ) -> None:
         self._root = root
         self._cfg  = cfg
         self._on_quit = on_quit
+        self._can_quit = can_quit
         self._icon: "pystray.Icon | None" = None
         self._last_geometry: str = ""
 
@@ -88,8 +91,22 @@ class TrayManager:
         self.show()
 
     def _quit(self, icon=None, item=None) -> None:
+        """pystray menu callback -- runs on the TRAY THREAD.
+
+        Everything it used to do directly now happens on the Tk main thread
+        instead. `can_quit` may put a dialog on screen (unsaved Settings),
+        and a dialog from this thread is the project's oldest Tk rule being
+        broken; `on_quit` releases worker threads and belongs beside it.
+        """
         log.info("Quit requested from tray")
+        self._root.after(0, self._finish_quit)
+
+    def _finish_quit(self) -> None:
+        """Main thread: ask, then tear down. Cancelling leaves the app up."""
+        if self._can_quit is not None and not self._can_quit():
+            log.info("Quit cancelled")
+            return
         self._on_quit()
         if self._icon:
             self._icon.stop()
-        self._root.after(0, self._root.destroy)
+        self._root.destroy()

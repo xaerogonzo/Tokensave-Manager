@@ -8,7 +8,8 @@ Dependency contract:
   • tab        — the Projects tk.Frame; used for after() scheduling and
                  winfo_toplevel() dialog parenting
   • on_log     — thread-safe log callback  (msg: str, colour: str)
-  • on_settings — () -> None, opened when PyScope is not installed
+  • on_settings — (page: str) -> None, opens Settings on that page when
+                  PyScope is not installed
 
 Two rules this controller exists to keep
 ----------------------------------------
@@ -47,7 +48,7 @@ class PyScopeController:
         tab: tk.Frame,
         cfg: "ManagerConfig",
         on_log: Callable[[str, str], None],
-        on_settings: Callable[[], None],
+        on_settings: Callable[..., None],
     ) -> None:
         self._tab = tab
         self._cfg = cfg
@@ -80,7 +81,7 @@ class PyScopeController:
                 "without it.\n\n"
                 "Open Settings to point at it?",
                 parent=self._root):
-            self._on_settings()
+            self._on_settings("integrations")
         return False
 
     # ── Commands ──────────────────────────────────────────────────────────

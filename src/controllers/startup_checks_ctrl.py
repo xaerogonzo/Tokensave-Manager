@@ -32,7 +32,6 @@ from typing import Callable, TYPE_CHECKING
 from constants import C, _BASE_DIR
 from helpers.mcp import _mcp_configs, _classify_mcp_entry
 from helpers.worktree_health import find_orphaned_worktrees
-from dialogs.settings import SettingsDialog
 from dialogs.mcp_config import MCPConfigDialog
 
 if TYPE_CHECKING:
@@ -48,14 +47,14 @@ class StartupChecksController:
         cfg: "ManagerConfig",
         on_log: Callable,
         post: Callable,
-        on_settings_saved: Callable,
+        on_open_settings: Callable,
         get_project_list: Callable,
     ) -> None:
         self._root              = root
         self._cfg               = cfg
         self._log               = on_log
         self._post              = post
-        self._on_settings_saved = on_settings_saved
+        self._open_settings     = on_open_settings
         # App's `projects` LIST (not `_projects`, the tab controller). Reached
         # through a callable because the original read it as
         # `getattr(self, "projects", [])` -- string-based, so a move to any
@@ -101,10 +100,17 @@ class StartupChecksController:
             # Existing path: paths broken, open Settings as before.
             note = "Please set the correct paths before using the manager."
             self._log("Config problem: " + " | ".join(problems), C["red"])
-            SettingsDialog(
-                self, self._cfg, self._cfg.save, self._on_settings_saved,
-                startup_note=(note + "\n\n"
-                              + "\n".join(f"• {p}" for p in problems)))
+            # Settings is a tab now, so this selects it and puts the
+            # problem above the pages instead of opening a modal. It
+            # also fixes a crash: the dialog was constructed with
+            # `self` -- this controller, which is not a widget -- so Tk
+            # raised AttributeError into the callback handler and the
+            # window never appeared at all.
+            self._open_settings(
+                "paths",
+                note + "\n\n"
+                + "\n".join("\u2022 " + str(x)
+                              for x in problems))
             return
 
         # Pure MCP drift — log it, open the configurator dialog directly.
@@ -120,7 +126,10 @@ class StartupChecksController:
 
         # Open the configurator after a short delay so the main window has
         # finished laying out — feels less like an interruption.
-        self._root.after(800, lambda: MCPConfigDialog(self, self._cfg))
+        # `self._root`, not `self`: the configurator is a Toplevel and
+        # this controller is not a widget. The same latent crash.
+        self._root.after(800,
+                         lambda: MCPConfigDialog(self._root, self._cfg))
 
     def _check_worktree_health(self):
         """Log (never dialog) any git worktree with no tokensave index of its

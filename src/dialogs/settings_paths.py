@@ -5,11 +5,17 @@ Builds, in original visual order: Paths (tokensave exe + upgrade row,
 template dir, editor command), Git executable, Claude Code CLI row
 (path + install + model dropdown), and the GitHub CLI row.
 
-House pattern: the dialog handle is used for Tk plumbing only
-(``after()``, dialog parenting, ``master`` for the host App's upgrade
-commands). Cross-section actions (Tool Manager launch) arrive as
-injected callbacks. ``save_into(raw)`` is this section's slice of the
-Save contract — it returns False (and shows a warning) when the
+House pattern: ``host`` is the application window, used for Tk plumbing
+only — ``after()``, ``parent=``, child-dialog parenting — and never
+walked upwards from. This section used to reach the App as
+``self._dlg.master`` to read the cached tokensave versions and call its
+upgrade commands. Inside a Notebook page ``.master`` is the Notebook, so
+``getattr(host, "_tokensave_current_version", None)`` would have returned
+None silently and permanently while the buttons raised AttributeError.
+Those three things are injected now (``on_upgrade_tokensave``,
+``on_integration_check``, ``get_tokensave_versions``), as the Tool
+Manager launcher already was. ``save_into(raw)`` is this section's slice
+of the Save contract — it returns False (and shows a warning) when the
 tokensave exe path doesn't exist, aborting the whole save.
 """
 
@@ -33,11 +39,17 @@ if TYPE_CHECKING:
 class PathsSection:
     """Tokensave/template/editor paths + git, Claude CLI, and gh tooling."""
 
-    def __init__(self, dialog: tk.Toplevel, body: tk.Frame,
-                 cfg: "ManagerConfig", open_tool_manager) -> None:
-        self._dlg = dialog
+    def __init__(self, host, body: tk.Frame,
+                 cfg: "ManagerConfig", open_tool_manager,
+                 on_upgrade_tokensave=None, on_integration_check=None,
+                 get_tokensave_versions=None) -> None:
+        self._host = host
         self._cfg = cfg
         self._open_tool_manager = open_tool_manager
+        self._on_upgrade_tokensave = on_upgrade_tokensave or (lambda: None)
+        self._on_integration_check = on_integration_check or (lambda: None)
+        self._get_tokensave_versions = (get_tokensave_versions
+                                        or (lambda: (None, None)))
         raw = cfg.raw
         self._build_paths_section(body, raw)
         self._build_git_tools_section(body, raw)
@@ -51,7 +63,7 @@ class PathsSection:
         exe = self._exe_var.get().strip()
         if exe and not os.path.isfile(exe):
             messagebox.showwarning("Not found",
-                f"tokensave.exe not found at:\n{exe}", parent=self._dlg)
+                f"tokensave.exe not found at:\n{exe}", parent=self._host)
             return False
         raw["tokensave_exe"] = exe
         raw["template_dir"]  = self._tmpl_var.get().strip()
@@ -63,6 +75,10 @@ class PathsSection:
         raw["claude_cli_model"] = self._var_claude_cli_model.get().strip()
         raw["cursor_cli_exe"]   = self._cursor_cli_var.get().strip()
         return True
+
+    def bind_dirty(self, callback) -> None:
+        from dialogs.settings_section import bind_vars
+        bind_vars(self, callback)
 
     # ── Section builders (original visual order) ─────────────────────────
 
@@ -80,9 +96,9 @@ class PathsSection:
                 if f:
                     p = filedialog.askopenfilename(
                         title=f"Select {label}", filetypes=[("Executable", "*.exe"), ("All", "*.*")],
-                        initialfile=v.get(), parent=self._dlg)
+                        initialfile=v.get(), parent=self._host)
                 elif d:
-                    p = filedialog.askdirectory(title=f"Select {label}", parent=self._dlg)
+                    p = filedialog.askdirectory(title=f"Select {label}", parent=self._host)
                 else:
                     return
                 if p:
@@ -101,9 +117,7 @@ class PathsSection:
         # has cached an available version from an "Update available" sync line.
         upgrade_row = tk.Frame(body, bg=C["base"])
         upgrade_row.pack(fill=tk.X, padx=20, pady=(6, 0))
-        host = self._dlg.master
-        cur_ver = getattr(host, "_tokensave_current_version", None)
-        new_ver = getattr(host, "_tokensave_available_version", None)
+        cur_ver, new_ver = self._get_tokensave_versions()
         cur_str = f"v{cur_ver}" if cur_ver else "version unknown"
         if new_ver:
             btn_label = f"🔄  Upgrade tokensave to v{new_ver}"
@@ -119,9 +133,9 @@ class PathsSection:
                     "Restart Claude after a successful upgrade.")
             hint_fg = C["overlay0"]
         ttk.Button(upgrade_row, text=btn_label, style=btn_style,
-                   command=host.cmd_upgrade_tokensave).pack(side=tk.LEFT)
+                   command=self._on_upgrade_tokensave).pack(side=tk.LEFT)
         ttk.Button(upgrade_row, text="🔍  Check integration",
-                   command=host.cmd_integration_check).pack(side=tk.LEFT, padx=(8, 0))
+                   command=self._on_integration_check).pack(side=tk.LEFT, padx=(8, 0))
         # v4.8: shortcut into the new Tool Manager dialog
         ttk.Button(upgrade_row, text="🛠️  Open Tool Manager…",
                    command=self._open_tool_manager).pack(side=tk.LEFT, padx=(8, 0))
@@ -151,7 +165,7 @@ class PathsSection:
             p = filedialog.askopenfilename(
                 title="Select git.exe",
                 filetypes=[("Executable", "*.exe"), ("All", "*.*")],
-                initialdir=r"C:\Program Files\Git\cmd", parent=self._dlg)
+                initialdir=r"C:\Program Files\Git\cmd", parent=self._host)
             if p:
                 self._git_exe_var.set(p)
                 self._verify_git(p)
@@ -168,7 +182,7 @@ class PathsSection:
                  font=("Segoe UI", 8), bg=C["base"], fg=C["overlay0"]).pack(
                  anchor=tk.W, padx=20, pady=(2, 0))
         # Verify against the saved-or-live git_exe.
-        self._dlg.after(100, lambda: self._verify_git(raw.get("git_exe") or self._cfg.git_exe))
+        self._host.after(100, lambda: self._verify_git(raw.get("git_exe") or self._cfg.git_exe))
 
         self._build_claude_cli_row(body, raw)
         self._build_cursor_cli_row(body, raw)
@@ -200,7 +214,7 @@ class PathsSection:
                 title="Select cursor-agent",
                 filetypes=[("All files", "*.*")],
                 initialdir=os.path.expandvars(r"%USERPROFILE%\.local\bin"),
-                parent=self._dlg)
+                parent=self._host)
             if p:
                 self._cursor_cli_var.set(p)
 
@@ -242,7 +256,7 @@ class PathsSection:
                 title="Select claude.cmd or claude",
                 filetypes=[("All files", "*.*")],
                 initialdir=os.path.expandvars(r"%APPDATA%\npm"),
-                parent=self._dlg)
+                parent=self._host)
             if p:
                 self._claude_cli_var.set(p)
 
@@ -347,20 +361,20 @@ class PathsSection:
                         capture_output=True, text=True, timeout=180,
                         creationflags=CREATE_NO_WINDOW)
                     if result.returncode == 0:
-                        self._dlg.after(0, lambda: self._gh_status_lbl.config(
+                        self._host.after(0, lambda: self._gh_status_lbl.config(
                             text="✓  Installed!  Restart TokenSave Manager to use gh features.",
                             fg=C["green"]))
                     else:
                         err = (result.stdout + result.stderr).strip()[-120:]
-                        self._dlg.after(0, lambda: self._gh_status_lbl.config(
+                        self._host.after(0, lambda: self._gh_status_lbl.config(
                             text=f"✗  Install failed (code {result.returncode}): {err}",
                             fg=C["red"]))
-                        self._dlg.after(0, lambda: self._gh_install_btn.configure(state=tk.NORMAL))
+                        self._host.after(0, lambda: self._gh_install_btn.configure(state=tk.NORMAL))
                 except Exception as ex:
                     err_msg = str(ex)
-                    self._dlg.after(0, lambda m=err_msg: self._gh_status_lbl.config(
+                    self._host.after(0, lambda m=err_msg: self._gh_status_lbl.config(
                         text=f"✗  Error: {m}", fg=C["red"]))
-                    self._dlg.after(0, lambda: self._gh_install_btn.configure(state=tk.NORMAL))
+                    self._host.after(0, lambda: self._gh_install_btn.configure(state=tk.NORMAL))
             threading.Thread(target=worker, daemon=True).start()
 
         self._gh_install_btn = ttk.Button(gh_row, text="Install via winget", command=_install_gh)
@@ -370,7 +384,7 @@ class PathsSection:
                  text="  Once installed, use the Git tab's '🔗 Open PR' button to create pull requests on GitHub.",
                  font=("Segoe UI", 8), bg=C["base"], fg=C["overlay0"]).pack(
                  anchor=tk.W, padx=20, pady=(2, 0))
-        self._dlg.after(150, _check_gh_status)
+        self._host.after(150, _check_gh_status)
 
     def _verify_git(self, exe_path: str):
         """Run 'git --version' with the given path and update the status label."""

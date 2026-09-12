@@ -55,9 +55,9 @@ class PyScopeSection(UiPumpMixin):
     on Windows, and on Linux it blocks silently rather than raising.
     """
 
-    def __init__(self, dialog: tk.Toplevel, body: tk.Frame,
+    def __init__(self, host, body: tk.Frame,
                  cfg: "ManagerConfig") -> None:
-        self._dlg = dialog
+        self._host = host
         self._cfg = cfg
         self._build(body, cfg.raw)
         self._start_ui_pump()
@@ -66,6 +66,10 @@ class PyScopeSection(UiPumpMixin):
         """Write this section's fields into raw. Always succeeds."""
         raw["pyscope_exe"] = self._exe_var.get().strip()
         return True
+
+    def bind_dirty(self, callback) -> None:
+        from dialogs.settings_section import bind_vars
+        bind_vars(self, callback)
 
     def focus_path_entry(self) -> None:
         """Pull the PyScope path entry into focus (see CodegraphSection)."""
@@ -141,7 +145,7 @@ class PyScopeSection(UiPumpMixin):
                  font=("Segoe UI", 8), bg=C["base"], fg=C["overlay0"],
                  justify=tk.LEFT).pack(anchor=tk.W, padx=20, pady=(4, 0))
 
-        self._dlg.after(200, self.check_status)
+        self._host.after(200, self.check_status)
 
     def _ui_host(self):
         """UiPumpMixin drives this frame: a section is not a widget itself."""
@@ -169,7 +173,7 @@ class PyScopeSection(UiPumpMixin):
         path = filedialog.askopenfilename(
             title="Select pyscope executable",
             filetypes=[("Executable", "*.exe;*.cmd;*.bat"), ("All", "*.*")],
-            initialdir=initial, parent=self._dlg)
+            initialdir=initial, parent=self._host)
         if path:
             self._exe_var.set(path)
             self.check_status()
@@ -182,8 +186,8 @@ class PyScopeSection(UiPumpMixin):
 
     def _copy_hint(self):
         try:
-            self._dlg.clipboard_clear()
-            self._dlg.clipboard_append(INSTALL_HINT)
+            self._host.clipboard_clear()
+            self._host.clipboard_append(INSTALL_HINT)
         except tk.TclError:
             pass
 

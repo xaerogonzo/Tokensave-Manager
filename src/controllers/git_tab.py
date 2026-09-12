@@ -513,13 +513,15 @@ class GitTabController(UiPumpMixin):
                                   command=self.cmd_draft_pr)
         btn_test_gaps = ttk.Button(row2, text="🧪 Test Gaps…",
                                    command=self.cmd_show_test_gaps)
+        btn_test_mgr = ttk.Button(row2, text="🧪 Test Manager…",
+                                  command=self.cmd_open_test_manager)
         btn_claude_cli = ttk.Button(row2, text="🤖 Claude CLI",
                                     command=self.cmd_open_claude_cli)
 
         for btn in (btn_push, btn_pull, btn_fetch, btn_commit, btn_undo,
                     btn_new, btn_switch, btn_merge, btn_del, btn_openpr,
                     btn_mergepr, btn_release, btn_draft_pr, btn_test_gaps,
-                    btn_claude_cli):
+                    btn_test_mgr, btn_claude_cli):
             btn.pack(side=tk.LEFT, padx=(0, 6))
 
         _Tooltip(btn_push,
@@ -614,6 +616,14 @@ class GitTabController(UiPumpMixin):
             "that are missing a tests/test_*.py counterpart.\n\n"
             "From the panel you can generate template stubs or AI-written tests\n"
             "for the flagged files in one click.")
+        _Tooltip(btn_test_mgr,
+            "Run this project's test suite, and see what it does not\nn"
+            "cover.\nn\nn"
+            "Four tabs: Run + View, Coverage Gaps, Stale Tests, and a\nn"
+            "Scaffold generator.\nn\nn"
+            "It sits beside Test Gaps because both act on the SELECTED\nn"
+            "project's tests. It is also in Settings → Paths & Tools\nn"
+            "with the other managers.")
 
         _Tooltip(btn_claude_cli,
             "Open an interactive coding-agent session in this project.\n\n"
@@ -1261,6 +1271,21 @@ class GitTabController(UiPumpMixin):
         if not ok:
             messagebox.showwarning(
                 f"Could not open {res.label}", err, parent=self._root)
+
+    def cmd_open_test_manager(self):
+        """Open the Test Manager for the project the Git tab is showing.
+
+        It moved here from the Help tab's left nav, where it was one of
+        three ACTIONS being discovered through the documentation
+        surface. Help still explains what it does; this is where you
+        reach for it.
+        """
+        from dialogs.test_manager import TestManagerDialog
+
+        path = self._git_path
+        if not path:
+            return
+        TestManagerDialog(self._root, path, self._cfg)
 
     def cmd_show_test_gaps(self):
         """Open a standalone Test Gaps dialog for the current branch.

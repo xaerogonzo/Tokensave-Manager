@@ -23,12 +23,15 @@ whatever you are working in.**
 The script is a JSON list of steps, run in order:
 
     [
-      {"do": "tab",    "name": "Projects"},
-      {"do": "dialog", "name": "mcp"},          // also: settings, savings,
-                                                //  gitignore, docdrafter,
-                                                //  testmanager, toolmanager,
+      {"do": "tab",      "name": "Projects"},
+      {"do": "settings", "page": "integrations"},  // "" keeps the current page
+      {"do": "dialog",   "name": "mcp"},        // also: savings, gitignore,
+                                                //  docdrafter, testmanager,
+                                                //  toolmanager, policy,
                                                 //  extensionmanager,
                                                 //  testgaps, prdraft
+                                                // ("settings" still works and
+                                                //  routes to the tab above)
       {"do": "click",  "text": "show"},
       {"do": "report", "what": "mcp", "after_ms": 3000},
       {"do": "report", "what": "posture"},      // MCP state, not rendered text
@@ -233,6 +236,22 @@ class _Driver:
         fresh = [w for w in tops() if id(w) not in before]
         return fresh[-1] if fresh else None
 
+    def _do_settings(self, step: "dict[str, Any]") -> None:
+        """Select the Settings tab, optionally on a named page.
+
+        `page` is a key from `controllers.settings_tab.PAGES` -- "paths",
+        "projects", "git", "ai", "integrations". Two sections fill their
+        path entry from auto-detection on a build timer, so a `report` or
+        `shot` against this wants an `after_ms` past
+        `settings_tab.DETECTION_SETTLE_MS` if it cares what they show.
+        """
+        page = str(step.get("page", "")).strip().lower()
+        opener = getattr(self._app, "open_settings", None)
+        if opener is None:
+            _say("drive: settings: the app has no open_settings")
+            return
+        opener(page)
+
     def _do_dialog(self, step: "dict[str, Any]") -> None:
         """Open a dialog and remember it as the default target."""
         name = str(step.get("name", "")).strip().lower()
@@ -242,13 +261,14 @@ class _Driver:
                 self._app, self._app._cfg,
                 focus_project=str(step.get("project", "")))
         elif name in ("settings", "settingsdialog"):
-            from dialogs.settings import SettingsDialog
-            # save_fn/callback are required. They are no-ops here on purpose:
-            # a diagnostic run must be able to open Settings and look at it
-            # without a stray Save writing manager-config.json.
-            self._dialog = SettingsDialog(
-                self._app, self._app._cfg,
-                lambda: None, lambda: None)
+            # COMPATIBILITY ALIAS, not a second surface. Settings stopped
+            # being a dialog; existing drive scripts that ask for it by that
+            # name get the tab, and `{"do": "settings"}` is the spelling to
+            # use from here. There is no `self._dialog` to remember, so a
+            # following step targets the app -- which is right, because the
+            # pages are inside the main window now.
+            self._do_settings(step)
+            self._dialog = None
         elif name in ("instructions", "instructionsoverview",
                       "instructionsdialog"):
             # Scans every project in a worker thread, so a `report` step
@@ -380,6 +400,33 @@ class _Driver:
         ok, detail = capture_window(hwnd_for(target), path)
         _say("drive: shot -> %s %s" % (path if ok else "FAILED", detail))
 
+    def _report_settings(self) -> None:
+        """What the Settings tab claims about itself.
+
+        Reported rather than screenshotted because the interesting facts here
+        are all assertions the surface makes: which page is showing, whether
+        it believes it has unsaved changes, and whether the Save bar agrees
+        with that belief. A page that opens already claiming unsaved changes
+        is the failure this exists to catch -- two sections fill their path
+        entry from auto-detection on a build timer.
+        """
+        ctl = getattr(self._app, "_settings_ctrl", None)
+        if ctl is None:
+            _say("drive: settings: the app has no settings tab")
+            return
+        selected = ""
+        for key, frame in ctl._pages.items():
+            if str(frame) == str(ctl._inner.select()):
+                selected = key
+                break
+        _say("drive: settings: pages=%s" % ",".join(ctl._pages))
+        _say("    showing   : %s" % (selected or "(none)"))
+        _say("    dirty     : %s" % ctl.is_dirty())
+        _say("    save bar  : %s" % ("shown" if ctl._bar.winfo_ismapped()
+                                     else "hidden"))
+        for index, section in enumerate(ctl._sections):
+            _say("    section %d : %s" % (index, type(section).__name__))
+
     def _do_report(self, step: "dict[str, Any]") -> None:
         """Dump what a window actually says, as text.
 
@@ -404,6 +451,9 @@ class _Driver:
             return
         if what == "geometry":
             self._report_geometry(target, step)
+            return
+        if what == "settings":
+            self._report_settings()
             return
         lines = [t for t in (_widget_text(w).strip() for w in _walk(target))
                  if t]
