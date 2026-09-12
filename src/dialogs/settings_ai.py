@@ -50,9 +50,9 @@ def _probe_loaded_model(base_url: str) -> str:
 class AISection:
     """Backend selection + Ollama + AI commit messages + Ask Tab AI."""
 
-    def __init__(self, dialog: tk.Toplevel, body: tk.Frame,
+    def __init__(self, host, body: tk.Frame,
                  cfg: "ManagerConfig") -> None:
-        self._dlg = dialog
+        self._host = host
         self._cfg = cfg
         raw = cfg.raw
         self._build_backend_selection_section(body, raw)
@@ -99,6 +99,10 @@ class AISection:
         raw["ollama_num_ctx"]   = self._var_ollama_num_ctx.get()
         raw["ollama_warmup"]    = self._var_ollama_warmup.get()
         return True
+
+    def bind_dirty(self, callback) -> None:
+        from dialogs.settings_section import bind_vars
+        bind_vars(self, callback)
 
     # ── Section builders (original visual order) ─────────────────────────
 
@@ -456,7 +460,7 @@ class AISection:
             def _probe():
                 detected = _probe_loaded_model(base)
                 def _apply():
-                    if not self._dlg.winfo_exists():
+                    if not self._host.winfo_exists():
                         return
                     if detected:
                         self._var_llm_model.set(detected)
@@ -466,7 +470,7 @@ class AISection:
                             text="⚠  LM Studio server not reachable at http://localhost:1234 — "
                                  "start the Local Server in LM Studio's '</>' panel and load a model, "
                                  "then click this preset again.", fg=C["peach"])
-                self._dlg.after(0, _apply)
+                self._host.after(0, _apply)
             threading.Thread(target=_probe, daemon=True).start()
 
         def _apply_ollama():
@@ -479,7 +483,7 @@ class AISection:
             def _probe():
                 detected = _probe_loaded_model(base)
                 def _apply():
-                    if not self._dlg.winfo_exists():
+                    if not self._host.winfo_exists():
                         return
                     if detected:
                         self._var_llm_model.set(detected)
@@ -492,7 +496,7 @@ class AISection:
                                  "make sure the Ollama service is running and run "
                                  "`ollama pull qwen2.5-coder:14b` (or any chat model), "
                                  "then click this preset again.", fg=C["peach"])
-                self._dlg.after(0, _apply)
+                self._host.after(0, _apply)
             threading.Thread(target=_probe, daemon=True).start()
 
         def _apply_anthropic():
@@ -580,4 +584,4 @@ class AISection:
                     fg=C["green"])
 
         OllamaModelManagerDialog(
-            self._dlg, base_url=base_url, on_use_for_ai=_on_use)
+            self._host, base_url=base_url, on_use_for_ai=_on_use)

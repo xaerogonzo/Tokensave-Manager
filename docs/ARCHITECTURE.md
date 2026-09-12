@@ -504,9 +504,8 @@ Token Save Manager Source/
 │   │   ├── io_utils.py            Shared IO helpers for the patcher modules.
 │   │   └── ui.py                  UI helpers shared across controllers and dialogs.
 │   │
-│   ├── dialogs/                   54 dialog / panel modules — a tk.Toplevel per file,
+│   ├── dialogs/                   57 dialog / panel modules — a tk.Toplevel per file,
 │   │                          plus the panels the bigger dialogs are built from.
-│   │   ├── settings.py            SettingsDialog (+ _probe_loaded_model helper)
 │   │   ├── release_wizard.py      ReleaseWizardDialog + _ReleaseCtx (paired)
 │   │   ├── mcp_config.py          MCPConfigDialog
 │   │   ├── ai_code_review.py      AICodeReviewDialog
@@ -658,7 +657,16 @@ Token Save Manager Source/
 │   │   ├── settings_pyscope.py    PyScopeSection — the PyScope block. Three status
 │   │   │                          rows and no install action; UiPumpMixin, because
 │   │   │                          the probe is a subprocess
-│   │   └── settings_paths.py      PathsSection — the Paths and Git-tools blocks.
+│   │   ├── settings_paths.py      PathsSection — the Paths and Git-tools blocks.
+│   │   ├── settings_projects.py   ProjectsSection — the search-root list. Owns a
+│   │   │                          snapshot() because a Treeview is not a tk var.
+│   │   ├── settings_git.py        GitPolicySection — auto-commit, .mcp.json ignore,
+│   │   │                          pre-commit hook (apply_hook, a side effect run
+│   │   │                          AFTER the save commits), Agent Policy launcher.
+│   │   ├── settings_mcp.py        McpStatusSection — read-only MCP summary + the
+│   │   │                          configurator launcher. Two pure helpers.
+│   │   └── settings_section.py    The section contract (save_into / bind_dirty /
+│   │                              optional snapshot) and bind_vars. No widgets.
 │   │
 │   └── controllers/               Tab controllers + Round-5 sub-controllers extracted
 │       │                          from the original god classes. Each takes cfg via
@@ -694,6 +702,10 @@ Token Save Manager Source/
 │       │                          switches notebook tab, populates entry, auto-sends after
 │       │                          50ms tick defer. Refuses while agent run is in flight.
 │       ├── snippets.py            SnippetsController (📚 Reference tab)
+│       ├── settings_tab.py        SettingsTabController — the ⚙ Settings tab: five
+│       │                          pages, one staged save transaction, and the dirty
+│       │                          bar. Composition only; sections keep their own
+│       │                          semantics. Replaces dialogs/settings.py.
 │       ├── help_tab.py            HelpTabController (❓ Help tab; extracted from App)
 │       ├── update_poller.py       UpdatePollerController (tokensave version probe +
 │       │                          GitHub release polling; extracted from App).
@@ -988,8 +1000,8 @@ app.py
   ├── constants.py       — palette, regex, paths
   ├── theme.py           — _Tooltip
   ├── helpers/*          — pure / IO helpers (no UI)
-  ├── dialogs/*          — 54 tk.Toplevel / panel modules
-  └── controllers/*      — 29 tab and sub-controllers
+  ├── dialogs/*          — 57 tk.Toplevel / panel modules
+  └── controllers/*      — 30 tab and sub-controllers
         └── controllers/* each import the dialogs they instantiate
             (lazy in-handler imports for any cross-dialog cycle risk —
              see Rule 6 in CHANGELOG Round 4 Phase C decisions).

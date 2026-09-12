@@ -31,9 +31,9 @@ if TYPE_CHECKING:
 class CodegraphSection:
     """CodeGraph executable path, install via npm, status check, MCP wiring."""
 
-    def __init__(self, dialog: tk.Toplevel, body: tk.Frame,
+    def __init__(self, host, body: tk.Frame,
                  cfg: "ManagerConfig", open_tool_manager) -> None:
-        self._dlg = dialog
+        self._host = host
         self._cfg = cfg
         self._open_tool_manager = open_tool_manager
         self._build(body, cfg.raw)
@@ -42,6 +42,10 @@ class CodegraphSection:
         """Write this section's fields into raw. Always succeeds."""
         raw["codegraph_exe"] = self._cg_exe_var.get().strip()
         return True
+
+    def bind_dirty(self, callback) -> None:
+        from dialogs.settings_section import bind_vars
+        bind_vars(self, callback)
 
     def focus_path_entry(self) -> None:
         """Pull the CodeGraph section into view + focus its path entry.
@@ -139,7 +143,7 @@ class CodegraphSection:
                       "  Per-project actions live in the right-click menu (🧠 CodeGraph …).",
                  font=("Segoe UI", 8), bg=C["base"], fg=C["overlay0"],
                  justify=tk.LEFT).pack(anchor=tk.W, padx=20, pady=(4, 0))
-        self._dlg.after(200, self._cg_check_status)
+        self._host.after(200, self._cg_check_status)
 
     # ── CodeGraph section helpers ────────────────────────────────────────
 
@@ -148,7 +152,7 @@ class CodegraphSection:
         p = filedialog.askopenfilename(
             title="Select codegraph executable",
             filetypes=[("Executable", "*.cmd;*.exe;*.bat"), ("All", "*.*")],
-            initialdir=os.path.expandvars(r"%APPDATA%\npm"), parent=self._dlg)
+            initialdir=os.path.expandvars(r"%APPDATA%\npm"), parent=self._host)
         if p:
             self._cg_exe_var.set(p)
             self._verify_codegraph(p)
@@ -226,7 +230,7 @@ class CodegraphSection:
             self._cg_status_lbl.config(text=msg, fg=C["red"])
             self._cg_install_btn.configure(state=tk.NORMAL)
             if "\n" in msg:
-                messagebox.showerror("CodeGraph install failed", msg, parent=self._dlg)
+                messagebox.showerror("CodeGraph install failed", msg, parent=self._host)
 
     def _cg_install(self):
         """Install codegraph via npm in a background thread."""
@@ -247,13 +251,13 @@ class CodegraphSection:
                     capture_output=True, text=True, timeout=300,
                     creationflags=CREATE_NO_WINDOW, encoding="utf-8", errors="replace")
             except subprocess.TimeoutExpired:
-                self._dlg.after(0, self._cg_on_install_done, False, "Install timed out after 5 minutes.")
+                self._host.after(0, self._cg_on_install_done, False, "Install timed out after 5 minutes.")
                 return
             except FileNotFoundError as e:
-                self._dlg.after(0, self._cg_on_install_done, False, f"npm not found: {e}")
+                self._host.after(0, self._cg_on_install_done, False, f"npm not found: {e}")
                 return
             if result.returncode == 0:
-                self._dlg.after(0, self._cg_on_install_done, True, "✓ Installed successfully.")
+                self._host.after(0, self._cg_on_install_done, True, "✓ Installed successfully.")
             else:
                 err_text = (result.stderr or result.stdout or "").strip()
                 hint = ""
@@ -264,7 +268,7 @@ class CodegraphSection:
                             "Node.js as a per-user install (the Node "
                             "installer offers this option).")
                 tail = "\n".join(err_text.splitlines()[-8:]) or "(no output)"
-                self._dlg.after(0, self._cg_on_install_done, False,
+                self._host.after(0, self._cg_on_install_done, False,
                                 f"✗  Install failed (exit {result.returncode}):\n\n{tail}{hint}")
 
         threading.Thread(target=worker, daemon=True).start()
@@ -299,7 +303,7 @@ class CodegraphSection:
                 "CodeGraph binary not found",
                 "The codegraph executable is not configured. "
                 "Install it first via 'Install binary (npm)'.",
-                parent=self._dlg)
+                parent=self._host)
             return
         self._cg_mcp_auto_btn.configure(state=tk.DISABLED)
         self._cg_mcp_picker_btn.configure(state=tk.DISABLED)
@@ -316,16 +320,16 @@ class CodegraphSection:
                     creationflags=CREATE_NO_WINDOW,
                     encoding="utf-8", errors="replace")
             except subprocess.TimeoutExpired:
-                self._dlg.after(0, self._cg_mcp_done, False,
+                self._host.after(0, self._cg_mcp_done, False,
                                 "Configure MCP timed out after 120 s.")
                 return
             except (FileNotFoundError, OSError) as e:
-                self._dlg.after(0, self._cg_mcp_done, False,
+                self._host.after(0, self._cg_mcp_done, False,
                                 f"Could not launch codegraph: {e}")
                 return
             ok = result.returncode == 0
             log = (result.stdout or "") + (result.stderr or "")
-            self._dlg.after(0, self._cg_mcp_done, ok, log)
+            self._host.after(0, self._cg_mcp_done, ok, log)
 
         threading.Thread(target=worker, daemon=True).start()
 
@@ -351,7 +355,7 @@ class CodegraphSection:
             messagebox.showerror(
                 "CodeGraph MCP — install failed",
                 f"codegraph install failed:\n\n{tail}",
-                parent=self._dlg)
+                parent=self._host)
 
     def _cg_mcp_open_picker(self) -> None:
         """⚙ Configure MCP — pick agents… — opens the picker dialog."""
@@ -361,12 +365,12 @@ class CodegraphSection:
                 "CodeGraph binary not found",
                 "The codegraph executable is not configured. "
                 "Install it first via 'Install binary (npm)'.",
-                parent=self._dlg)
+                parent=self._host)
             return
         # Lazy import — avoids any module-load cycle and keeps the
         # picker out of the main import graph until first use.
         from dialogs.codegraph_mcp_picker import CodegraphMCPPickerDialog
-        CodegraphMCPPickerDialog(self._dlg, self._cfg,
+        CodegraphMCPPickerDialog(self._host, self._cfg,
                                  on_done=self._cg_check_status)
 
     def _cg_mcp_uninstall(self) -> None:
@@ -376,7 +380,7 @@ class CodegraphSection:
             messagebox.showerror(
                 "CodeGraph binary not found",
                 "The codegraph executable is not configured.",
-                parent=self._dlg)
+                parent=self._host)
             return
         if not messagebox.askyesno(
                 "Uninstall CodeGraph from AI agents?",
@@ -386,7 +390,7 @@ class CodegraphSection:
                 "This does NOT delete the binary or any project "
                 "indexes — only the MCP registrations in Claude Code "
                 "(and any other agents that have it wired).",
-                parent=self._dlg, default="no"):
+                parent=self._host, default="no"):
             return
         self._cg_mcp_auto_btn.configure(state=tk.DISABLED)
         self._cg_mcp_picker_btn.configure(state=tk.DISABLED)
@@ -403,16 +407,16 @@ class CodegraphSection:
                     creationflags=CREATE_NO_WINDOW,
                     encoding="utf-8", errors="replace")
             except subprocess.TimeoutExpired:
-                self._dlg.after(0, self._cg_mcp_done, False,
+                self._host.after(0, self._cg_mcp_done, False,
                                 "codegraph uninstall timed out after 60 s.")
                 return
             except (FileNotFoundError, OSError) as e:
-                self._dlg.after(0, self._cg_mcp_done, False,
+                self._host.after(0, self._cg_mcp_done, False,
                                 f"Could not launch codegraph: {e}")
                 return
             ok = result.returncode == 0
             log = (result.stdout or "") + (result.stderr or "")
-            self._dlg.after(0, self._cg_mcp_done, ok, log)
+            self._host.after(0, self._cg_mcp_done, ok, log)
 
         threading.Thread(target=worker, daemon=True).start()
 

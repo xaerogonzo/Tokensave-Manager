@@ -136,10 +136,24 @@ def test_the_shipped_baseline_stays_compiled_and_current():
     If someone hand-edits a managed block, or adds a policy key without
     recompiling, this goes red — which is the whole point of the file being
     downstream of the policy.
+
+    Asserted against BOTH renderings of each key rather than against one
+    fixed policy. The earlier version pinned OFF, so the first time somebody
+    legitimately ticked "agents may commit" and applied, this went red over a
+    correctly compiled file -- it was testing which way the toggle happened to
+    be set, not the property it is named for. What must hold is that every
+    managed block is SOMETHING THE COMPILER PRODUCES; which of the two it is
+    is the user's business, and it lives in manager-config.json.
     """
     source = _baseline(_repo())
-    assert bb.block_states(source, OFF) == {
-        "agent_may_commit": bb.CURRENT, "agent_may_push": bb.CURRENT}
+    for key in ("agent_may_commit", "agent_may_push"):
+        bounds = bb.find_block(source, key)
+        assert bounds is not None, "%s block is missing entirely" % key
+        start, end = bounds
+        body = bb._lf(source[start:end])
+        assert body in (bb._lf(bb.render_block(key, OFF)),
+                        bb._lf(bb.render_block(key, ON))), (
+            "%s has been hand-edited: its text is neither rendering" % key)
     assert bb.findings(source) == ()
 
 

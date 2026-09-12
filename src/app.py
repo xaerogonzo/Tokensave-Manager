@@ -45,11 +45,11 @@ from controllers.ask_tab import AskTabController
 from controllers.git_tab import GitTabController
 from controllers.help_tab import HelpTabController
 from controllers.projects_tab import ProjectsTabController
+from controllers.settings_tab import SettingsTabController
 from controllers.snippets import SnippetsController
 from controllers.tasks_tab import TasksController
 from controllers.update_poller import UpdatePollerController
 from dialogs.git_commit import GitCommitDialog
-from dialogs.settings import SettingsDialog
 from dialogs.untrack_ignored import UntrackIgnoredDialog
 from helpers.commit_messages import _suggest_commit_message
 from helpers.git import _find_tracked_but_ignored, _is_git_repo, _is_local_git_repo
@@ -162,7 +162,8 @@ class App(UiPumpMixin, tk.Tk):
             get_project_list=lambda: getattr(self, "projects", []) or [],
         )
         self._requests.start()
-        self._tray_mgr = TrayManager(self, self._cfg, self._on_tray_quit)
+        self._tray_mgr = TrayManager(self, self._cfg, self._on_tray_quit,
+                                     can_quit=self._confirm_quit)
         self._tray_mgr.setup()
         self.protocol("WM_DELETE_WINDOW", self._tray_mgr.hide)
         # The three post-launch checks, and the stagger that keeps their
@@ -173,7 +174,7 @@ class App(UiPumpMixin, tk.Tk):
             cfg=self._cfg,
             on_log=self._log,
             post=self._post,
-            on_settings_saved=self._on_settings_saved,
+            on_open_settings=self.open_settings,
             get_project_list=lambda: getattr(self, "projects", []) or [],
         )
         self._startup_checks.schedule()
@@ -241,6 +242,15 @@ class App(UiPumpMixin, tk.Tk):
                   "".join(traceback.format_exception(exc, val, tb)))
 
     # ── Tray ───────────────────────────────────────────────────────────────────
+
+    def _confirm_quit(self) -> bool:
+        """False cancels the quit. Runs on the Tk main thread -- see
+        `helpers/tray_manager._quit`, which schedules it there precisely so
+        this can show a dialog."""
+        if not self.has_unsaved_settings():
+            return True
+        from controllers.settings_tab import confirm_discard
+        return confirm_discard(self)
 
     def _on_tray_quit(self) -> None:
         # Release any worker threads waiting on open ProposalDialogs so they
@@ -393,6 +403,20 @@ class App(UiPumpMixin, tk.Tk):
             self.nb, self._cfg,
             on_seed_ask=lambda text, path: self._ask_ctrl.seed_question(text, path),
             on_llm_cfg=lambda: self._cfg.raw.get("commit_message_llm", {}),
+        )
+        # Settings sits last: it is a destination, not part of the daily
+        # loop, and the modal dialog it replaces was reached from a button
+        # on the Projects tab that nobody could find.
+        self._settings_ctrl = SettingsTabController(
+            self.nb, self._cfg,
+            host=self,
+            save_fn=self._cfg.save,
+            on_saved=self._on_settings_saved,
+            on_upgrade_tokensave=self.cmd_upgrade_tokensave,
+            on_integration_check=self.cmd_integration_check,
+            get_tokensave_versions=lambda: (
+                self._update_poller.current_version,
+                self._update_poller.available_version),
         )
         from helpers.detection import _root_path
         self._tasks_ctrl = TasksController(
@@ -855,12 +879,12 @@ class App(UiPumpMixin, tk.Tk):
 
     @property
     def _tokensave_current_version(self) -> str | None:
-        """Backward-compat accessor for SettingsDialog."""
+        """The probed tokensave version. Read via injection, not `.master`."""
         return self._update_poller.current_version
 
     @property
     def _tokensave_available_version(self) -> str | None:
-        """Backward-compat accessor for SettingsDialog."""
+        """The newer version GitHub advertises, if the poller found one."""
         return self._update_poller.available_version
 
     def cmd_upgrade_tokensave(self):
@@ -1075,8 +1099,27 @@ class App(UiPumpMixin, tk.Tk):
             # Run the deferred sync (no commit msg — changes already committed)
             self._start_private_sync(path, "")
 
-    def cmd_settings(self):
-        SettingsDialog(self, self._cfg, self._cfg.save, self._on_settings_saved)
+    def cmd_settings(self, page: str = ""):
+        """Kept as the name every caller already uses; now navigation."""
+        self.open_settings(page)
+
+    def open_settings(self, page: str = "", note: str = "") -> None:
+        """The one way into Settings. `page` is a key from settings_tab.PAGES.
+
+        Callers name a PAGE, never a tab index or a widget: "codegraph is not
+        installed" wants the Integrations page, and a caller that had to reach
+        into the notebook to say so would be coupled to the tab order.
+        """
+        self._settings_ctrl.show_note(note)
+        self._settings_ctrl.show_tab()
+        self._settings_ctrl.select_page(page)
+
+    def has_unsaved_settings(self) -> bool:
+        """Whether the Settings tab is holding edits that were never saved."""
+        try:
+            return self._settings_ctrl.is_dirty()
+        except (AttributeError, tk.TclError):
+            return False
 
     def _on_settings_saved(self):
         # Phase E: legacy module globals are gone — only need to recompute

@@ -130,9 +130,9 @@ After any code change, update the minimum set of docs necessary — **proportion
 > **TokenSave Manager** (if installed): right-click any project in the manager → **📜 Git Log** to see the last 20 commits and working-tree status without leaving the tool. Use this to orient yourself on what changed recently before diving in.
 
 <!-- TOKENSAVE-MANAGED: agent_may_commit:begin -->
-**Do not create git commits.** The TokenSave Manager commits for this project — right-click it there and use **📝 Git Commit…**, which drafts the message with a locally-configured LLM at near-zero cost. Leave the work staged or in the working tree and say what you changed.
+**You may create a local git commit** when the work the user asked for is complete. Commit logical units, explain *why* in the message, and do not commit generated files or secrets.
 <!-- TOKENSAVE-MANAGED: agent_may_commit:end -->
 
 <!-- TOKENSAVE-MANAGED: agent_may_push:begin -->
-**Do not push to any remote.** Publishing is the user's decision; leave commits local and say that they are ready.
+**You may push the current branch to its configured upstream.** Never force-push. Never push tags and never delete a remote branch. Do not amend, rebase or reset commits that have already been pushed — forbidding force-push alone still leaves room to rewrite history and publish the result.
 <!-- TOKENSAVE-MANAGED: agent_may_push:end -->

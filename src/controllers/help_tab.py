@@ -95,32 +95,12 @@ class HelpTabController:
         left_wrap = tk.Frame(pane, bg=C["base"])
         left_wrap.pack(side=tk.LEFT, fill=tk.Y)
 
-        # v4.8: Tool Manager shortcut at the top of the left nav so it's
-        # always discoverable regardless of which help section is open.
-        ttk.Button(
-            left_wrap, text="💾  Tool Manager…",
-            command=self._open_tool_manager,
-        ).pack(side=tk.TOP, fill=tk.X, padx=(0, 0), pady=(0, 6))
-
-        # v4.13: Test Manager dialog (replaces the v4.12 "Run Smoke Tests"
-        # button). Four tabs: Run+View, Coverage Gaps, Stale Tests,
-        # Scaffold Generator. This is the only test-runner surface: the
-        # smoke-tests dialog it replaced was left unreferenced here and
-        # deleted in Roadmap-9.
-        ttk.Button(
-            left_wrap, text="🧪  Test Manager…",
-            command=self._open_test_manager,
-        ).pack(side=tk.TOP, fill=tk.X, padx=(0, 0), pady=(0, 6))
-
-        # The VS Code extension's own lifecycle. It lives here rather than in
-        # Settings because the question it answers -- "is the extension I have
-        # installed the one this Manager builds?" -- is the same kind of
-        # question the Tool Manager above answers about the CLI tools.
-        ttk.Button(
-            left_wrap, text="🧩  Extension Manager…",
-            command=self._open_extension_manager,
-        ).pack(side=tk.TOP, fill=tk.X, padx=(0, 0), pady=(0, 6))
-
+        # The Tool / Extension / Test Manager buttons that used to sit here
+        # have moved. They are ACTIONS, and Help was acting as the discovery
+        # surface for them purely because it had a spare column: Tool and
+        # Extension Manager are in Settings -> Paths & Tools beside the paths
+        # that configure them, and Test Manager is there too plus on the Git
+        # tab beside Test Gaps, which is where you are when you want it.
         list_wrap = tk.Frame(left_wrap, bg=C["mantle"])
         list_wrap.pack(side=tk.TOP, fill=tk.Y, expand=True)
 
@@ -270,64 +250,8 @@ class HelpTabController:
         else:
             self._ask_btn.pack_forget()
 
-    def _open_tool_manager(self) -> None:
-        """v4.8: open the Tool Manager dialog from the Help tab nav.
 
-        Lazy import so help_tab.py's import graph stays light. Uses
-        the manager's top-level Tk window as parent so the dialog
-        renders modally above all tabs.
-        """
-        from dialogs.tool_manager import ToolManagerDialog
-        # The help_lb's toplevel is the App window — same root as Settings uses.
-        try:
-            root = self._help_lb.winfo_toplevel()
-        except (tk.TclError, AttributeError):
-            return
-        ToolManagerDialog(root, self._cfg)
 
-    def _open_extension_manager(self) -> None:
-        """Open the Extension Manager dialog from the Help tab nav.
-
-        Lazy import for the same reason as the Tool Manager above: help_tab's
-        import graph stays light, and a dialog nobody opens costs nothing.
-        """
-        from dialogs.extension_manager import ExtensionManagerDialog
-        try:
-            root = self._help_lb.winfo_toplevel()
-        except (tk.TclError, AttributeError):
-            return
-        ExtensionManagerDialog(root, self._cfg)
-
-    def _open_test_manager(self) -> None:
-        """Open the v4.13 Test Manager dialog.
-
-        Resolves the project root from the manager's currently-active
-        project. Lazy-imports the dialog so help_tab.py stays light.
-        """
-        import os
-        from dialogs.test_manager import TestManagerDialog
-
-        try:
-            root = self._help_lb.winfo_toplevel()
-        except (tk.TclError, AttributeError):
-            return
-
-        # Resolve the active project root from cfg. Same heuristic as
-        # the old _run_smoke_tests handler.
-        project_root = ""
-        try:
-            project_root = self._cfg.raw.get("projects", [{}])[0].get("path", "") or ""
-        except Exception:
-            project_root = ""
-        if not project_root or not os.path.isdir(project_root):
-            # Fall back to the manager-source dir so the dialog has
-            # SOMETHING to scan (better than crashing on an empty
-            # project_root).
-            project_root = os.path.normpath(
-                os.path.join(os.path.dirname(__file__), "..", "..")
-            )
-
-        TestManagerDialog(root, project_root, self._cfg)
 
     def _help_explain_clicked(self) -> None:
         """Handle the Explain button click — runs on the main thread."""

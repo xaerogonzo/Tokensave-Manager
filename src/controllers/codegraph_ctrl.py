@@ -12,7 +12,8 @@ Dependency contract:
   • on_shell  — synchronous shell runner  (args, cwd) -> (out: str, rc: int)
   • on_refresh           — () -> None, requests a full tree rebuild
   • on_commit_offer      — (path, label) -> None, offered after init
-  • on_settings          — () -> None, opened when codegraph is not installed
+  • on_settings          — (page: str) -> None, opens Settings on that page
+                           when codegraph is not installed
 """
 
 from __future__ import annotations
@@ -43,7 +44,7 @@ class CodeGraphController:
         on_shell: Callable,
         on_refresh: Callable[[], None],
         on_commit_offer: Callable[[str, str], None],
-        on_settings: Callable[[], None],
+        on_settings: Callable[..., None],
     ) -> None:
         self._tab             = tab
         self._cfg             = cfg
@@ -71,7 +72,7 @@ class CodeGraphController:
                 "tokensave — both can be enabled on the same project.\n\n"
                 "Open Settings now to install it?",
                 parent=self._root):
-            self._on_settings()
+            self._on_settings("integrations")
         return False
 
     # ── Commands (path acquired by ProjectsTabController before calling) ───────
