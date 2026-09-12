@@ -232,7 +232,7 @@ if (Test-Path "$ROOT\manager-config.example.json") {
 }
 
 # -- Root-level markdown --
-foreach ($md in @("TOKENSAVE_GUIDE.md", "CHANGELOG.md")) {
+foreach ($md in @("README.md", "TOKENSAVE_GUIDE.md", "CHANGELOG.md")) {
     $src = "$ROOT\$md"
     if (Test-Path $src) {
         Copy-Item $src "$DIST\$md" -Force
@@ -254,8 +254,20 @@ Write-Host "  [dir]  templates\ ($count files)" -ForegroundColor Green
 $docsSrc  = "$ROOT\docs"
 $docsDest = "$DIST\docs"
 New-Item -ItemType Directory -Force -Path $docsDest | Out-Null
+# Every document in helpers/help_docs.HELP_DOCUMENTS must appear here or
+# in the root-markdown loop above: the Help tab READS these at runtime,
+# so one missing from a build is a help topic that silently disappears.
+# tests/test_build_ships_help_corpus.py parses this list and fails when
+# a corpus document is not covered -- the alternative was a hand-kept
+# list that only grows by hand, which is exactly how this one went stale.
+# ARCHITECTURE* are here for a different reason: shipped for readers of
+# the build, not used by Help.
 $docsInclude = @(
+    "USER_GUIDE.md",
     "GITHUB_GUIDE.md",
+    "RELOCATING.md",
+    "UPGRADE_INTEGRATION.md",
+    "PYSCOPE_INTEGRATION.md",
     "ARCHITECTURE.md",
     "ARCHITECTURE_TOKENSAVE.md"
 )

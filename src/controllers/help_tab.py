@@ -1,20 +1,36 @@
-"""HelpTabController — builds and manages the Help tab.
+"""HelpTabController — the Help tab, rendered from the repository's markdown.
 
-Extracted from App (Round 5 / App decomposition).
+WHAT CHANGED, AND WHY IT MATTERS MORE THAN THE RENDERER. This used to be 72 KB
+of hand-written Python across three `help_topics_*` modules, and editing help
+meant editing Python. Measured before the change: those 25 topics never
+mentioned **10 of 19** current features, while `README.md` already covered 12 of
+14 of the same list. The documentation was better than the help; it simply was
+not the help.
 
-Dependency contract:
-  • notebook      — ttk.Notebook to add the Help tab to
-  • cfg           — read-only ManagerConfig (.template_dir, read at execution time)
-  • on_seed_ask   — optional Callable[[str, str], None] — seeds a question into the Ask tab
-  • on_llm_cfg    — optional Callable[[], dict]         — returns the current LLM config dict
+Now it is. `helpers/help_docs.py` finds topics by `<!-- help:key -->` anchors in
+the shipped documents, `helpers/markdown_tk.py` turns a section into tagged
+spans, and this file is a list, a search box and a Text widget. A documentation
+sweep updates the application.
 
-All help content is static text.  The only cfg usage is in _help_file_locations,
-which reads .template_dir at display time (not at __init__ time) so a
-Settings save propagates without restarting.
+THREE THINGS THIS FILE OWNS, and nothing else does:
 
-Inline "🔍 Explain" streams a 3-5 sentence LLM summary via helpers/llm._call_llm.
-"🤖 Ask" pre-fills a question in the Ask tab and fires the agent.
-"📄 Open docs" opens the relevant markdown file in the system default viewer.
+  * the tag palette. `markdown_tk.TAGS` names every tag the renderer can emit,
+    and a test asserts each one is configured here -- a span carrying an
+    unconfigured tag renders as unstyled body text, silently.
+  * the placeholder values. `help_docs` owns the ALLOWLIST of names; this owns
+    what they resolve to on this machine, because it is the only side with a
+    `cfg`.
+  * corpus problems. A document that could not be read is listed as a problem
+    rather than quietly dropping its topics, so a shorter list always has a
+    reason attached.
+
+The three manager dialogs that used to sit in the left nav are gone from here.
+They were actions, discovered through the documentation surface because it had
+a spare column; they live in Settings -> Paths & Tools, and Test Manager also on
+the Git tab. Help explains them; it no longer launches them.
+
+Inline "Explain" still streams a short LLM summary, and "Ask" still pre-fills
+the Ask tab.
 """
 
 from __future__ import annotations
@@ -27,21 +43,21 @@ import tkinter as tk
 from tkinter import ttk
 from typing import TYPE_CHECKING, Callable, Optional
 
-from constants import C, _BASE_DIR
-from controllers import (
-    help_topics_basics,
-    help_topics_git,
-    help_topics_tools,
-)
+from constants import C, _BASE_DIR, _CONFIG_PATH, LOG_FILE
+from helpers import help_docs
+from helpers.markdown_tk import render
 
 if TYPE_CHECKING:
     from state import ManagerConfig
 
 
-# ── Module-level helpers ───────────────────────────────────────────────────────
+#: The row that shows corpus problems. A sentinel rather than a topic key, so
+#: it can never collide with one that came from a document.
+_PROBLEMS_KEY = "\x00problems"
+
 
 def _open_doc(path: str) -> None:
-    """Open a documentation file in the system default viewer (cross-platform)."""
+    """Open a documentation file in the system default viewer."""
     if sys.platform == "win32":
         os.startfile(path)  # type: ignore[attr-defined]
     elif sys.platform == "darwin":
@@ -56,12 +72,11 @@ def _open_doc(path: str) -> None:
             from tkinter import messagebox
             messagebox.showwarning(
                 "Cannot open file",
-                f"Could not open the document automatically.\nPath: {path}",
-            )
+                "Could not open the document automatically.\nPath: %s" % path)
 
 
 class HelpTabController:
-    """Owns the Help tab: topic list + rich-text content pane."""
+    """Topic list + search, over the markdown in `help_docs.HELP_DOCUMENTS`."""
 
     def __init__(
         self,
@@ -75,14 +90,17 @@ class HelpTabController:
         self._on_seed_ask = on_seed_ask
         self._on_llm_cfg = on_llm_cfg
 
-        # Streaming explain state — monotonic request ID prevents zombie tokens
+        # Streaming explain state -- a monotonic id discards zombie tokens from
+        # a stream whose section the user has already navigated away from.
         self._explain_req_id: int = 0
         self._explain_running: bool = False
         self._current_explain_text: Optional[str] = None
 
+        self._rows: list = []          # listbox index -> topic key
+        self._current_key: str = ""
         self._build(notebook)
 
-    # ── Construction ──────────────────────────────────────────────────────────
+    # -- Construction ----------------------------------------------------
 
     def _build(self, notebook: "ttk.Notebook") -> None:
         tab = tk.Frame(notebook, bg=C["base"])
@@ -91,232 +109,272 @@ class HelpTabController:
         pane = tk.Frame(tab, bg=C["base"])
         pane.pack(fill=tk.BOTH, expand=True, padx=14, pady=10)
 
-        # ── Left: topic list ──────────────────────────────────────────────────
         left_wrap = tk.Frame(pane, bg=C["base"])
         left_wrap.pack(side=tk.LEFT, fill=tk.Y)
 
-        # The Tool / Extension / Test Manager buttons that used to sit here
-        # have moved. They are ACTIONS, and Help was acting as the discovery
-        # surface for them purely because it had a spare column: Tool and
-        # Extension Manager are in Settings -> Paths & Tools beside the paths
-        # that configure them, and Test Manager is there too plus on the Git
-        # tab beside Test Gaps, which is where you are when you want it.
+        self._query = tk.StringVar()
+        ttk.Entry(left_wrap, textvariable=self._query,
+                  width=32).pack(side=tk.TOP, fill=tk.X, pady=(0, 4))
+        self._query.trace_add("write", lambda *_a: self._refresh_list())
+        tk.Label(left_wrap,
+                 text="Search reads the text of every topic, not just titles",
+                 font=("Segoe UI", 8), bg=C["base"], fg=C["overlay0"],
+                 wraplength=215, justify=tk.LEFT).pack(side=tk.TOP,
+                                                       anchor=tk.W,
+                                                       pady=(0, 6))
+
         list_wrap = tk.Frame(left_wrap, bg=C["mantle"])
         list_wrap.pack(side=tk.TOP, fill=tk.Y, expand=True)
-
         self._help_lb = tk.Listbox(
-            list_wrap, width=20, font=("Segoe UI", 9),
+            list_wrap, width=34, font=("Segoe UI", 9),
             bg=C["mantle"], fg=C["text"], selectbackground=C["surface1"],
             selectforeground=C["text"], activestyle="none",
             relief=tk.FLAT, borderwidth=0, highlightthickness=0,
         )
-        lb_sb = ttk.Scrollbar(list_wrap, orient="vertical", command=self._help_lb.yview)
+        lb_sb = ttk.Scrollbar(list_wrap, orient="vertical",
+                              command=self._help_lb.yview)
         self._help_lb.configure(yscrollcommand=lb_sb.set)
-        self._help_lb.pack(side=tk.LEFT, fill=tk.Y)
+        self._help_lb.pack(side=tk.LEFT, fill=tk.Y, expand=True)
         lb_sb.pack(side=tk.RIGHT, fill=tk.Y)
 
-        # ── Right: footer (pack BOTTOM first so content fills the rest) ───────
         right = tk.Frame(pane, bg=C["base"])
         right.pack(side=tk.LEFT, fill=tk.BOTH, expand=True, padx=(8, 0))
 
         self._footer = tk.Frame(right, bg=C["base"])
         self._footer.pack(side=tk.BOTTOM, fill=tk.X, pady=(6, 0))
-
-        self._doc_btn = ttk.Button(self._footer, text="📄 Open docs")
+        self._doc_btn = ttk.Button(self._footer, text="\U0001f4c4 Open docs")
         self._explain_btn = ttk.Button(
-            self._footer, text="🔍 Explain", command=self._help_explain_clicked
-        )
-        self._ask_btn = ttk.Button(self._footer, text="🤖 Ask")
-        # Buttons are shown/hidden per section by _help_show(); don't pack here
+            self._footer, text="\U0001f50d Explain",
+            command=self._help_explain_clicked)
+        self._ask_btn = ttk.Button(self._footer, text="\U0001f916 Ask")
 
-        # ── Right: content ────────────────────────────────────────────────────
         content_wrap = tk.Frame(right, bg=C["base"])
         content_wrap.pack(side=tk.TOP, fill=tk.BOTH, expand=True)
-
         hsb = ttk.Scrollbar(content_wrap, orient="vertical")
         self._help_txt = tk.Text(
             content_wrap, font=("Segoe UI", 10), bg=C["mantle"], fg=C["text"],
             relief=tk.FLAT, padx=16, pady=12, wrap=tk.WORD,
-            cursor="arrow", state=tk.DISABLED,
-            yscrollcommand=hsb.set,
+            cursor="arrow", state=tk.DISABLED, yscrollcommand=hsb.set,
         )
         hsb.configure(command=self._help_txt.yview)
         self._help_txt.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
         hsb.pack(side=tk.RIGHT, fill=tk.Y)
-
-        # ── Text tags (shared across all sections) ────────────────────────────
-        self._help_txt.tag_configure("h1",   font=("Segoe UI", 13, "bold"), foreground=C["blue"],
-                                     spacing1=14, spacing3=6)
-        self._help_txt.tag_configure("h2",   font=("Segoe UI", 10, "bold"), foreground=C["lavender"],
-                                     spacing1=10, spacing3=2)
-        self._help_txt.tag_configure("warn", font=("Segoe UI", 10, "bold"), foreground=C["yellow"])
-        self._help_txt.tag_configure("ok",   font=("Segoe UI", 10, "bold"), foreground=C["green"])
-        self._help_txt.tag_configure("dim",  foreground=C["overlay0"])
-        self._help_txt.tag_configure("code", font=("Consolas", 9), foreground=C["peach"])
-        self._help_txt.tag_configure("body", foreground=C["text"], spacing3=3)
-
-        # ── Sections ──────────────────────────────────────────────────────────
-        self._help_sections = [
-            ("  Switching Projects",  self._help_switching),
-            ("  Window & Tray",       self._help_window_tray),
-            ("  Right-click Menu",    self._help_context_menu),
-            ("  Scaffold",            self._help_scaffold),
-            ("  Retrofit Existing",   self._help_retrofit),
-            ("  Nuitka Builds",       self._help_nuitka),
-            ("  Scaffold Column",     self._help_scaffold_column),
-            ("  Auto-detect",         self._help_autodetect),
-            ("  init vs sync",        self._help_init_vs_sync),
-            ("  Project Categories",  self._help_categories),
-            ("  Git: What & Why",     self._help_git_concepts),
-            ("  Git: Daily Workflow", self._help_git_workflow),
-            ("  Git Tab Buttons",     self._help_git_tab),
-            ("  GitHub Setup",        self._help_github_setup),
-            ("  CodeGraph",           self._help_codegraph),
-            ("  PyScope",             self._help_pyscope),
-            ("  VS Code extension",   self._help_vscode_extension),
-            ("  AI Features",         self._help_ai_features),
-            ("  Pre-commit Hook",     self._help_precommit_hook),
-            ("  Run checks",          self._help_run_checks),
-            ("  Integration check",   self._help_integration_check),
-            ("  Settings reference",  self._help_settings_reference),
-            ("  Moving the Manager",  self._help_relocating),
-            ("  File Locations",      self._help_file_locations),
-            ("  About",               self._help_about),
-        ]
-        for title, _ in self._help_sections:
-            self._help_lb.insert(tk.END, title)
+        self._configure_tags()
 
         self._help_lb.bind("<<ListboxSelect>>", self._on_help_select)
+        self._refresh_list()
+        for index, key in enumerate(self._rows):
+            if key:                       # skip the document headers
+                self._help_lb.selection_set(index)
+                self._show(key)
+                break
 
-        # Show first section on open
-        self._help_lb.selection_set(0)
-        self._help_sections[0][1]()
+    def _configure_tags(self) -> None:
+        """Every tag `markdown_tk` can emit, plus the two Explain uses.
 
-    # ── Event handling ────────────────────────────────────────────────────────
+        A span whose tag was never configured renders as plain body text and
+        nothing reports it, so `tests/test_help_tab.py` checks this list
+        against `markdown_tk.TAGS` rather than trusting the two to stay in
+        step by hand.
+        """
+        t = self._help_txt
+        t.tag_configure("h1", font=("Segoe UI", 14, "bold"),
+                        foreground=C["blue"], spacing1=14, spacing3=6)
+        t.tag_configure("h2", font=("Segoe UI", 11, "bold"),
+                        foreground=C["lavender"], spacing1=12, spacing3=3)
+        t.tag_configure("h3", font=("Segoe UI", 10, "bold"),
+                        foreground=C["subtext"], spacing1=8, spacing3=2)
+        t.tag_configure("body", foreground=C["text"], spacing3=3)
+        t.tag_configure("bold", font=("Segoe UI", 10, "bold"),
+                        foreground=C["text"])
+        t.tag_configure("code", font=("Consolas", 9), foreground=C["peach"])
+        t.tag_configure("dim", foreground=C["overlay0"])
+        t.tag_configure("warn", font=("Segoe UI", 10, "bold"),
+                        foreground=C["yellow"])
+        t.tag_configure("ok", font=("Segoe UI", 10, "bold"),
+                        foreground=C["green"])
+
+    # -- The list --------------------------------------------------------
+
+    def _refresh_list(self) -> None:
+        """Rebuild the sidebar: the table of contents, or search results."""
+        query = self._query.get().strip()
+        self._help_lb.delete(0, tk.END)
+        self._rows = []
+
+        found, problems = help_docs.scan()
+        if problems:
+            self._help_lb.insert(tk.END, "  ⚠  %d corpus problem%s"
+                                 % (len(problems),
+                                    "" if len(problems) == 1 else "s"))
+            self._rows.append(_PROBLEMS_KEY)
+
+        if query:
+            hits = help_docs.search(query)
+            for hit in hits:
+                self._help_lb.insert(tk.END, "  " + hit.topic.title)
+                self._rows.append(hit.topic.key)
+            if not hits:
+                self._help_lb.insert(tk.END, "  (nothing matches)")
+                self._rows.append("")
+            return
+
+        # Grouped by document. 51 topics in one flat column reads as a heap;
+        # the grouping is also the only place a reader can see that help and
+        # the repository's documents are the same thing.
+        current = ""
+        for item in found:
+            if item.document != current:
+                current = item.document
+                self._help_lb.insert(
+                    tk.END, "  " + os.path.basename(current).replace(".md", ""))
+                self._help_lb.itemconfig(self._help_lb.size() - 1,
+                                         foreground=C["overlay0"])
+                self._rows.append("")          # a header selects nothing
+            indent = "    " + ("    " if item.level >= 3 else "")
+            self._help_lb.insert(tk.END, indent + item.title)
+            self._rows.append(item.key)
 
     def _on_help_select(self, _event=None) -> None:
-        sel = self._help_lb.curselection()
-        if not sel:
+        selection = self._help_lb.curselection()
+        if not selection:
             return
-        self._help_sections[sel[0]][1]()
+        index = selection[0]
+        key = self._rows[index] if index < len(self._rows) else ""
+        if key:
+            self._show(key)
 
-    # ── Rendering helpers ─────────────────────────────────────────────────────
+    # -- Rendering -------------------------------------------------------
 
-    def _help_show(
-        self,
-        fn: Callable,
-        *,
-        doc_path: Optional[str] = None,
-        ask_text: Optional[str] = None,
-        explain_text: Optional[str] = None,
-    ) -> None:
-        """Clear the content pane, call fn() to fill it, lock + scroll to top. Wire footer."""
-        # Invalidate any in-flight Explain stream for the previous section
-        self._explain_req_id += 1
-        self._current_explain_text = explain_text
+    def _placeholder_values(self) -> dict:
+        """What `{{name}}` resolves to on this machine.
 
-        # Fill content
+        `help_docs` owns which names are legal; this owns what they mean,
+        because it is the side that has a `cfg`. A name with no value renders
+        "unknown" rather than an empty string -- an empty one silently reads
+        as though there were nothing to say.
+        """
+        from constants import APP_VERSION
+
+        wrapper = os.path.join(_BASE_DIR, "tokensave-wrapper.exe")
+        if not os.path.isfile(wrapper):
+            wrapper = os.path.join(_BASE_DIR, "src", "tokensave-wrapper.py")
+        return {
+            "template_dir": self._cfg.template_dir,
+            "install_dir": _BASE_DIR,
+            "config_path": _CONFIG_PATH,
+            "log_file": LOG_FILE,
+            "app_version": APP_VERSION,
+            "wrapper_path": wrapper,
+        }
+
+    def _show(self, key: str) -> None:
+        self._explain_req_id += 1          # invalidate any in-flight stream
+        self._current_key = key
+
+        if key == _PROBLEMS_KEY:
+            self._render_problems()
+            return
+
+        try:
+            markdown = help_docs.topic_markdown(key)
+            item = help_docs.topic(key)
+        except help_docs.HelpUnavailable as exc:
+            self._fill([("This topic could not be loaded.\n\n", "warn"),
+                        (str(exc) + "\n", "dim")])
+            self._wire_footer(None, "")
+            return
+
+        text = help_docs.substitute(markdown, self._placeholder_values())
+        self._fill(render(text))
+        self._wire_footer(help_docs.document_path(item.document), item.title)
+
+    def _render_problems(self) -> None:
+        spans = [("Help corpus problems\n", "h1"),
+                 ("These documents are part of the help but could not be "
+                  "used. The topics they carry are missing from the list "
+                  "above -- which is why this row exists, rather than the "
+                  "list simply being shorter.\n\n", "body")]
+        for problem in help_docs.scan()[1]:
+            spans.append((problem.document + "\n", "bold"))
+            spans.append(("  " + problem.detail + "\n\n", "dim"))
+        self._fill(spans)
+        self._wire_footer(None, "")
+
+    def _fill(self, spans) -> None:
         self._help_txt.configure(state=tk.NORMAL)
         self._help_txt.delete("1.0", tk.END)
-        fn()
-        # Anchor mark so consecutive Explain runs can cleanly replace LLM output
+        for text, tag in spans:
+            self._help_txt.insert(tk.END, text, tag)
         self._help_txt.mark_set("baseline_end", "end-1c")
         self._help_txt.mark_gravity("baseline_end", tk.LEFT)
         self._help_txt.configure(state=tk.DISABLED)
         self._help_txt.yview_moveto(0)
 
-        # ── "📄 Open docs" button ──────────────────────────────────────────────
+    def _wire_footer(self, doc_path, title: str) -> None:
         if doc_path and os.path.isfile(doc_path):
             self._doc_btn.configure(command=lambda p=doc_path: _open_doc(p))
             self._doc_btn.pack(side=tk.LEFT, padx=(0, 6))
         else:
             self._doc_btn.pack_forget()
 
-        # ── "🔍 Explain" button ───────────────────────────────────────────────
-        if explain_text:
-            # Always reset to default label; DISABLED if a stream is still running
-            btn_state = tk.DISABLED if self._explain_running else tk.NORMAL
-            self._explain_btn.configure(text="🔍 Explain", state=btn_state)
+        self._current_explain_text = title
+        if title:
+            state = tk.DISABLED if self._explain_running else tk.NORMAL
+            self._explain_btn.configure(text="\U0001f50d Explain", state=state)
             self._explain_btn.pack(side=tk.LEFT, padx=(0, 6))
         else:
             self._explain_btn.pack_forget()
 
-        # ── "🤖 Ask" button ───────────────────────────────────────────────────
-        if ask_text and self._on_seed_ask:
+        if title and self._on_seed_ask:
+            question = ("Explain this TokenSave Manager topic and how to use "
+                        "it: %s" % title)
             self._ask_btn.configure(
-                command=lambda t=ask_text: self._on_seed_ask(t, _BASE_DIR)  # type: ignore[misc]
-            )
+                command=lambda q=question: self._on_seed_ask(q, _BASE_DIR))
             self._ask_btn.pack(side=tk.LEFT)
         else:
             self._ask_btn.pack_forget()
 
-
-
+    # -- Inline Explain (unchanged behaviour) ----------------------------
 
     def _help_explain_clicked(self) -> None:
-        """Handle the Explain button click — runs on the main thread."""
         explain_text = self._current_explain_text
         if not explain_text:
             return
-
         llm_cfg: dict = self._on_llm_cfg() if self._on_llm_cfg else {}
-
         if not llm_cfg.get("enabled"):
-            # No LLM configured — show dim hint in the content pane
-            self._help_txt.configure(state=tk.NORMAL)
-            try:
-                self._help_txt.delete("baseline_end", tk.END)
-            except tk.TclError:
-                pass
-            self._help_txt.insert(
-                tk.END,
-                "\n\nConfigure an LLM in Settings → AI / Commit to use inline explanations.",
-                "dim",
-            )
-            self._help_txt.configure(state=tk.DISABLED)
+            self._replace_tail(
+                "\n\nConfigure an LLM in Settings → AI to use inline "
+                "explanations.", "dim")
             return
 
-        # Increment ID to invalidate any previous stream
         self._explain_req_id += 1
         my_id = self._explain_req_id
-        # Snapshot context on the main thread (up to 800 chars of static section text)
         ctx = self._help_txt.get("1.0", "baseline_end")[:800]
-
         self._explain_running = True
         self._explain_btn.configure(state=tk.DISABLED)
+        threading.Thread(target=self._help_explain_worker,
+                         args=(my_id, ctx, explain_text, llm_cfg),
+                         daemon=True).start()
 
-        t = threading.Thread(
-            target=self._help_explain_worker,
-            args=(my_id, ctx, explain_text, llm_cfg),
-            daemon=True,
-        )
-        t.start()
+    def _help_explain_worker(self, req_id: int, ctx: str, explain_text: str,
+                             llm_cfg: dict) -> None:
+        """Background thread: stream an LLM explanation into the pane."""
+        from helpers.llm import _call_llm
 
-    def _help_explain_worker(
-        self,
-        req_id: int,
-        ctx: str,
-        explain_text: str,
-        llm_cfg: dict,
-    ) -> None:
-        """Background thread: stream an LLM explanation into the content pane."""
-        from helpers.llm import _call_llm  # lazy import — avoids circular at startup
-
-        system = (
-            "You are a concise help assistant for TokenSave Manager. "
-            "Explain this topic clearly with a practical example. 3-5 sentences."
-        )
-        user = f"Topic: {explain_text}\n\nContext:\n{ctx}"
-
+        system = ("You are a concise help assistant for TokenSave Manager. "
+                  "Explain this topic clearly with a practical example. "
+                  "3-5 sentences.")
+        user = "Topic: %s\n\nContext:\n%s" % (explain_text, ctx)
         stream_state = {"first": True}
 
         def on_token(tok: str) -> None:
             is_first = stream_state["first"]
             stream_state["first"] = False
 
-            def _put(t: str = tok, req: int = req_id, first: bool = is_first) -> None:
+            def _put(t: str = tok, req: int = req_id, first: bool = is_first):
                 if self._explain_req_id != req:
-                    return  # zombie token from abandoned stream — discard
+                    return             # zombie token from an abandoned stream
                 self._help_txt.configure(state=tk.NORMAL)
                 if first:
                     try:
@@ -331,61 +389,29 @@ class HelpTabController:
             self._help_txt.after(0, _put)
 
         try:
-            result = _call_llm(
-                llm_cfg, system, user,
-                max_tokens=300, timeout=30, on_token=on_token,
-            )
-
-            # Non-streaming fallback: provider completed without calling on_token
+            result = _call_llm(llm_cfg, system, user, max_tokens=300,
+                               timeout=30, on_token=on_token)
             if stream_state["first"]:
-                if result:
-                    def _put_result(r: str = result, req: int = req_id) -> None:
-                        if self._explain_req_id != req:
-                            return
-                        self._help_txt.configure(state=tk.NORMAL)
-                        try:
-                            self._help_txt.delete("baseline_end", tk.END)
-                        except tk.TclError:
-                            pass
-                        self._help_txt.insert(tk.END, "\n\n" + r, "dim")
-                        self._help_txt.see(tk.END)
-                        self._help_txt.configure(state=tk.DISABLED)
-                    self._help_txt.after(0, _put_result)
-                else:
-                    def _put_none(req: int = req_id) -> None:
-                        if self._explain_req_id != req:
-                            return
-                        self._help_txt.configure(state=tk.NORMAL)
-                        try:
-                            self._help_txt.delete("baseline_end", tk.END)
-                        except tk.TclError:
-                            pass
-                        self._help_txt.insert(
-                            tk.END,
-                            "\n\nLLM did not return a response. Check Settings → AI / Commit.",
-                            "dim",
-                        )
-                        self._help_txt.configure(state=tk.DISABLED)
-                    self._help_txt.after(0, _put_none)
+                tail = result or ("LLM did not return a response. Check "
+                                  "Settings → AI.")
 
-        except Exception as e:
-            err = str(e)
+                def _put_result(r: str = tail, req: int = req_id):
+                    if self._explain_req_id != req:
+                        return
+                    self._replace_tail("\n\n" + r, "dim")
 
-            def _show_err(m: str = err, req: int = req_id) -> None:
+                self._help_txt.after(0, _put_result)
+        except Exception as exc:
+            err = str(exc)
+
+            def _show_err(m: str = err, req: int = req_id):
                 if self._explain_req_id != req:
-                    return  # error from abandoned stream — discard silently
-                self._help_txt.configure(state=tk.NORMAL)
-                try:
-                    self._help_txt.delete("baseline_end", tk.END)
-                except tk.TclError:
-                    pass
-                self._help_txt.insert(tk.END, f"\n\nError: {m}", "warn")
-                self._help_txt.configure(state=tk.DISABLED)
+                    return
+                self._replace_tail("\n\nError: " + m, "warn")
 
             self._help_txt.after(0, _show_err)
-
         finally:
-            def _cleanup(req: int = req_id) -> None:
+            def _cleanup():
                 self._explain_running = False
                 try:
                     if self._explain_btn.winfo_ismapped():
@@ -395,92 +421,13 @@ class HelpTabController:
 
             self._help_txt.after(0, _cleanup)
 
-    def _hw(self):
-        """Return (h1, h2, p, warn, ok, dim, br, ins) writer helpers for _help_txt."""
-        t = self._help_txt
-        def h1(s):       t.insert(tk.END, s + "\n", "h1")
-        def h2(s):       t.insert(tk.END, s + "\n", "h2")
-        def p(s):        t.insert(tk.END, s + "\n", "body")
-        def warn(s):     t.insert(tk.END, s + "\n", "warn")
-        def ok(s):       t.insert(tk.END, s + "\n", "ok")
-        def dim(s):      t.insert(tk.END, s + "\n", "dim")
-        def br():        t.insert(tk.END, "\n")
-        def ins(s, tag): t.insert(tk.END, s, tag)
-        return h1, h2, p, warn, ok, dim, br, ins
-
-    # ── Help sections ─────────────────────────────────────────────────────────
-
-    def _help_switching(self):
-        help_topics_basics.switching(self)
-
-    def _help_window_tray(self):
-        help_topics_basics.window_tray(self)
-
-    def _help_context_menu(self):
-        help_topics_basics.context_menu(self)
-
-    def _help_scaffold(self):
-        help_topics_basics.scaffold(self)
-
-    def _help_retrofit(self):
-        help_topics_basics.retrofit(self)
-
-    def _help_nuitka(self):
-        help_topics_basics.nuitka(self)
-
-    def _help_scaffold_column(self):
-        help_topics_basics.scaffold_column(self)
-
-    def _help_autodetect(self):
-        help_topics_basics.autodetect(self)
-
-    def _help_init_vs_sync(self):
-        help_topics_basics.init_vs_sync(self)
-
-    def _help_categories(self):
-        help_topics_basics.categories(self)
-
-    def _help_git_concepts(self):
-        help_topics_git.git_concepts(self)
-
-    def _help_git_workflow(self):
-        help_topics_git.git_workflow(self)
-
-    def _help_git_tab(self):
-        help_topics_git.git_tab(self)
-
-    def _help_github_setup(self):
-        help_topics_git.github_setup(self)
-
-    def _help_codegraph(self):
-        help_topics_tools.codegraph(self)
-
-    def _help_pyscope(self):
-        help_topics_tools.pyscope(self)
-
-    def _help_vscode_extension(self):
-        help_topics_tools.vscode_extension(self)
-
-    def _help_ai_features(self):
-        help_topics_tools.ai_features(self)
-
-    def _help_precommit_hook(self):
-        help_topics_tools.precommit_hook(self)
-
-    def _help_run_checks(self):
-        help_topics_tools.run_checks(self)
-
-    def _help_integration_check(self):
-        help_topics_tools.integration_check(self)
-
-    def _help_settings_reference(self):
-        help_topics_tools.settings_reference(self)
-
-    def _help_relocating(self):
-        help_topics_tools.relocating(self)
-
-    def _help_file_locations(self):
-        help_topics_tools.file_locations(self)
-
-    def _help_about(self):
-        help_topics_tools.about(self)
+    def _replace_tail(self, text: str, tag: str) -> None:
+        """Swap whatever a previous Explain left after the rendered topic."""
+        self._help_txt.configure(state=tk.NORMAL)
+        try:
+            self._help_txt.delete("baseline_end", tk.END)
+        except tk.TclError:
+            pass
+        self._help_txt.insert(tk.END, text, tag)
+        self._help_txt.see(tk.END)
+        self._help_txt.configure(state=tk.DISABLED)

@@ -1,3 +1,4 @@
+<!-- help:pyscope -->
 # PyScope integration
 
 PyScope is an **optional peer** of tokensave and CodeGraph. This file states the
