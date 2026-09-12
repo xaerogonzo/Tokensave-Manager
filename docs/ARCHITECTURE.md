@@ -81,7 +81,7 @@ Token Save Manager Source/
 │   │                              report/wait/quit. `report what=geometry` runs the visual
 │   │                              oracle. Committed scripts live in scripts/drive/.
 │   │
-│   ├── helpers/                  113 modules of pure / IO helpers — no UI deps.
+│   ├── helpers/                  114 modules of pure / IO helpers — no UI deps.
 │   │   ├── config.py              _load_config, _save_config, _migrate_config
 │   │   ├── detection.py           _detect_git/_gh/_npm/_codegraph/_claude_cli,
 │   │   │                          _root_path/_label, _version_lt
@@ -103,6 +103,13 @@ Token Save Manager Source/
 │   │   │                          never shell activity. Bounded head+tail read
 │   │   │                          (transcripts reach 134 MB). Imports nothing
 │   │   │                          that drafts - the arrow runs one way.
+│   │   ├── session_context.py     Gathers what a person asked for in a window:
+│   │   │                          session note first, transcripts as fallback,
+│   │   │                          every fragment carrying its PROVENANCE so an
+│   │   │                          authoritative prompt never blurs into heuristic
+│   │   │                          prose. Window bounded by the last commit, with
+│   │   │                          no-commits and unreadable named as their own
+│   │   │                          states rather than defaulted to now.
 │   │   ├── shadow_links.py        generate/remove_shadow_links, update_gitignore_for_shadows,
 │   │   │                          DEFAULT_SHADOW_EXT_MAP
 │   │   ├── housekeeping.py        PURE detection for the Housekeeping surface:

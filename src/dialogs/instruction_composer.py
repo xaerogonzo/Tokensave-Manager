@@ -58,6 +58,18 @@ _OPERATIONAL = {
         "Session note on exit",
         "A Stop hook records your prompts beside each repo, so later drafts "
         "can say why a change happened."),
+    "enable_session_grounding": (
+        "Use session context in drafts",
+        "Attaches what you asked for to PR drafts. Falls back to reading "
+        "transcripts when a project has no note yet."),
+    "session_grounding_prompts": (
+        "    · include your prompts",
+        "Your own words, and the only authoritative source. ~1,200 tokens a "
+        "day measured."),
+    "session_grounding_prose": (
+        "    · include assistant prose",
+        "Richer but ~20,200 tokens a day measured — the prompt weight that "
+        "was already measured to degrade small local models. Capped hard."),
 }
 
 
@@ -71,7 +83,7 @@ class InstructionComposerDialog(UiPumpMixin, tk.Toplevel):
         # Tall enough for both toggle groups AND the preview without clipping
         # the footer: measured against a driven window, where the first size
         # cut the Apply row in half.
-        self.geometry("760x720")
+        self.geometry("760x790")
         self._cfg = cfg
         self._on_log = on_log or (lambda *a, **k: None)
         self._staged = cfg.instruction_policy
@@ -112,8 +124,8 @@ class InstructionComposerDialog(UiPumpMixin, tk.Toplevel):
                            RENDERED_KEYS, _LABELS)
         self._toggle_group(" Agent context — what this Manager does ",
                            tuple(_OPERATIONAL), _OPERATIONAL,
-                           footer="Costs no baseline bytes. Grounding toggles "
-                                  "arrive with the feature they control.")
+                           footer="These cost no baseline bytes — they change what "
+                                  "this Manager does, not what projects are told.")
 
     def _toggle_group(self, title: str, keys, labels, footer: str = "") -> None:
         from theme import themed_checkbutton
@@ -144,7 +156,7 @@ class InstructionComposerDialog(UiPumpMixin, tk.Toplevel):
         box = tk.LabelFrame(self, text=" What Apply would do ", bg=C["base"],
                             fg=C["mauve"], font=("Segoe UI", 9, "bold"))
         box.pack(fill=tk.BOTH, expand=True, padx=18, pady=(0, 8))
-        self._preview = tk.Text(box, height=12, wrap="word", bd=0,
+        self._preview = tk.Text(box, height=10, wrap="word", bd=0,
                                 bg=C["mantle"], fg=C["text"],
                                 font=("Consolas", 9), padx=10, pady=8)
         self._preview.pack(fill=tk.BOTH, expand=True, padx=6, pady=6)

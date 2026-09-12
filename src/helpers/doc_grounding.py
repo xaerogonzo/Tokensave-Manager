@@ -362,6 +362,82 @@ def build_pyscope_block(project_path: str, pyscope_exe: str) -> str:
     return _truncate_at_line("\n".join(lines), _MAX_PYSCOPE_CHARS)
 
 
+# ── Session grounding (Phase C) ──────────────────────────────────────────────
+
+#: Small on purpose. The other three sources say what the code IS; this one
+#: says what a person asked for, and one day of prompts measured ~1,200 tokens
+#: against ~20,200 of assistant prose beside them. `enable_commit_grounding`
+#: already defaults OFF because added prompt weight was measured to degrade
+#: small local models, so this block earns its place by being short.
+_MAX_SESSION_CHARS = 2500
+
+
+def build_session_block(project_path: str, *, include_prompts: bool = True,
+                        include_prose: bool = False, git_exe: str = "") -> str:
+    """What a person asked for in this window, as markdown.
+
+    Returns "" on every failure, exactly like the other three builders —
+    grounding is purely additive and no caller's flow may depend on it.
+
+    What this contributes that the others cannot: tokensave, codegraph and
+    PyScope all describe the code. None of them knows why anybody changed it.
+    That is the premise a cold diff is missing, and supplying it turns the
+    model's task from "infer intent" into "summarise this".
+
+    The heading is the claim, and it is deliberately narrow: *what the human
+    asked for*, never *why this diff exists*. Work spans sessions and some of
+    it is done by hand, so these are fragments to attribute rather than an
+    explanation to assert.
+    """
+    if not project_path or not (include_prompts or include_prose):
+        return ""
+    try:
+        from helpers.session_context import (
+            SOURCE_TRANSCRIPT_PROSE, WINDOW_SINCE_COMMIT, gather,
+        )
+        context = gather(project_path, include_prompts=include_prompts,
+                         include_prose=include_prose, git_exe=git_exe)
+    except Exception:
+        return ""
+    if not context.fragments:
+        return ""
+
+    origin = "session notes" if context.from_note else "session transcripts"
+    lines = [
+        "### What the human asked for in this window",
+        "",
+        "_Read as evidence of intent, not as an explanation of the diff. "
+        "Work can span sessions and some of it is done by hand._",
+        "",
+        "- source: %s, %s" % (origin, context.window_reason),
+    ]
+    if context.window_reason != WINDOW_SINCE_COMMIT:
+        lines.append("- the commit boundary was unavailable, so this covers a "
+                     "fixed maximum window instead")
+    if context.truncated:
+        lines.append("- **partial**: capped before the material ran out, so "
+                     "this is a floor rather than everything that was said")
+    lines.append("")
+
+    asked = [f for f in context.fragments if f.source != SOURCE_TRANSCRIPT_PROSE]
+    said = [f for f in context.fragments if f.source == SOURCE_TRANSCRIPT_PROSE]
+    if asked:
+        lines.append("**Asked for:**")
+        lines += ["- %s" % _one_line(f.text) for f in asked]
+        lines.append("")
+    if said:
+        lines.append("**Assistant notes (lower confidence — not the user's "
+                     "words):**")
+        lines += ["- %s" % _one_line(f.text) for f in said]
+        lines.append("")
+    return _truncate_at_line("\n".join(lines), _MAX_SESSION_CHARS)
+
+
+def _one_line(text: str) -> str:
+    """Flatten to a bullet. Newlines inside one would split it into several."""
+    return " ".join((text or "").split())
+
+
 def build_combined_grounding(*blocks: str, per_source_cap: int = 4000) -> str:
     """Combine grounding blocks from any number of sources into one.
 

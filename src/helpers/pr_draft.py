@@ -190,6 +190,26 @@ def _safe_grounding(fn, *args, **kwargs) -> str:
         return ""
 
 
+def _session_grounding(cfg, project_path: str) -> str:
+    """The session block, gated by policy. `""` when off or unavailable.
+
+    Three independent decisions, because they answer different questions: use
+    session context at all, include the user's prompts, include assistant
+    prose. Collapsing them into one switch would make "prompts only" —
+    the arm the measurement expects to win — unexpressible.
+    """
+    policy = cfg.instruction_policy
+    if not policy.enable_session_grounding:
+        return ""
+    from helpers.doc_grounding import build_session_block
+
+    return build_session_block(
+        project_path,
+        include_prompts=policy.session_grounding_prompts,
+        include_prose=policy.session_grounding_prose,
+        git_exe=cfg.git_exe)
+
+
 def _build_grounding_section(cfg, diff_data: str, project_path: str,
                              on_status) -> str:
     """Build the grounding markdown section (tokensave + codegraph).
@@ -200,8 +220,15 @@ def _build_grounding_section(cfg, diff_data: str, project_path: str,
     disabled, unavailable, or fails.  Fail-open: all sub-failures are caught
     by :func:`_safe_grounding` so the caller always receives a string.
     """
+    # Session context is gated by its OWN policy key, not by `enable_pr_
+    # grounding`. They answer different questions — one attaches what the code
+    # is, the other what a person asked for — and folding them together would
+    # make "session context ON" a dead toggle for anyone who turned codebase
+    # grounding off because it bloated their prompts.
+    session_block = _safe_grounding(_session_grounding, cfg, project_path)
     if not cfg.enable_pr_grounding:
-        return ""
+        return (f"## Affected tests & symbols (auto-attached)\n\n"
+                f"{session_block}\n\n" if session_block.strip() else "")
     if on_status is not None:
         try:
             on_status("grounding")
@@ -226,7 +253,12 @@ def _build_grounding_section(cfg, diff_data: str, project_path: str,
             build_codegraph_block, project_path, "roadmap_evidence",
             changed_files=changed_files,
             codegraph_exe=cfg.codegraph_exe or "")
-        combined = build_combined_grounding(ts_block, cg_block)
+        # Session block FIRST. The combined cap is fixed regardless of how
+        # many sources there are and dedup keeps first-seen order, so argument
+        # position decides what survives truncation. Intent is the highest-
+        # signal input for describing a change, so it displaces code-graph
+        # bulk rather than being displaced by it.
+        combined = build_combined_grounding(session_block, ts_block, cg_block)
         return (f"## Affected tests & symbols (auto-attached)\n\n{combined}\n\n"
                 if combined.strip() else "")
     except Exception:
