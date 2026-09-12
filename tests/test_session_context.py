@@ -70,6 +70,85 @@ def test_the_last_commit_bounds_the_window(repo):
     assert isinstance(when, datetime.datetime)
 
 
+#: An offset no CI runner sits at, so the assertions below cannot pass by
+#: coincidence of the machine's own timezone. CI runs at UTC, which is where
+#: every version of this code agrees — which is exactly why the bug survived.
+_NEPAL = datetime.timezone(datetime.timedelta(hours=5, minutes=45))
+
+
+@pytest.fixture
+def dated_repo(tmp_path):
+    """A repo whose single commit is stamped with an explicit `+05:45`.
+
+    Recent enough to sit inside `MAX_WINDOW_DAYS`, so `_floor` does not clamp
+    it away and the commit really is the window boundary under test.
+    """
+    root = tmp_path / "dated"
+    root.mkdir()
+    _git(root, "init")
+    _git(root, "config", "user.email", "t@example.com")
+    _git(root, "config", "user.name", "T")
+    (root / "a.txt").write_text("x", encoding="utf-8")
+    _git(root, "add", "-A")
+
+    anchor = (datetime.datetime.now(datetime.timezone.utc)
+              - datetime.timedelta(hours=1)).replace(microsecond=0)
+    stamp = anchor.astimezone(_NEPAL).isoformat()
+    env = dict(os.environ, GIT_COMMITTER_DATE=stamp, GIT_AUTHOR_DATE=stamp)
+    subprocess.run(["git", "-C", str(root), "commit", "-m", "dated"],
+                   capture_output=True, check=False, env=env)
+    return root, anchor.replace(tzinfo=None)
+
+
+def test_the_window_floor_is_utc_whatever_offset_the_commit_carries(dated_repo):
+    """One `since`, one clock.
+
+    `git log --format=%cI` renders the committer's offset. Parsing it and
+    then calling `.replace(tzinfo=None)` DISCARDS the offset instead of
+    converting, so the floor came back as a wall-clock reading from another
+    timezone — 5h45m adrift here — while transcript records parsed as UTC.
+    The two were compared directly, in the same function.
+    """
+    root, anchor_utc = dated_repo
+    when, reason = sc.last_commit_time(str(root))
+    assert reason == sc.WINDOW_SINCE_COMMIT
+    assert when == anchor_utc, (
+        "floor is %s, but the commit was %s UTC" % (when, anchor_utc))
+
+
+def test_a_transcript_record_is_weighed_against_the_commit_on_one_clock(
+        dated_repo, fake_home):
+    """End to end, with stamps anchored to an absolute instant.
+
+    Deriving the record stamps from `last_commit_time()` instead would make
+    this pass on the broken code — the error cancels when both sides come
+    from the same wrong function. The `Z` stamps here are absolute, so the
+    boundary is real.
+    """
+    root, anchor_utc = dated_repo
+    _transcripts(fake_home, root, [
+        {"type": "user",
+         "timestamp": (anchor_utc - datetime.timedelta(minutes=1)).isoformat() + "Z",
+         "message": {"content": "before the commit"}},
+        {"type": "user",
+         "timestamp": (anchor_utc + datetime.timedelta(minutes=1)).isoformat() + "Z",
+         "message": {"content": "after the commit"}}])
+    context = sc.gather(str(root))
+    assert [f.text for f in context.prompts] == ["after the commit"]
+
+
+def test_every_stamp_form_this_module_meets_lands_on_the_same_clock():
+    """`Z` (transcripts), an offset (the session note), and naive (local)."""
+    assert (sc._parse_stamp("2026-01-02T17:00:00Z")
+            == sc._parse_stamp("2026-01-02T12:00:00-05:00")
+            == datetime.datetime(2026, 1, 2, 17, 0, 0))
+    # `session_note._now()` writes `datetime.now().astimezone()`, so a note
+    # stamped this second must not land in the future or the past.
+    noted = sc._parse_stamp(
+        datetime.datetime.now().astimezone().isoformat(timespec="seconds"))
+    assert abs((noted - sc._utcnow()).total_seconds()) < 5
+
+
 def test_a_repository_with_no_commit_is_its_own_state(tmp_path):
     """Not defaulted to 'now', which would gather nothing exactly where there
     is most to say."""
@@ -92,6 +171,22 @@ def test_even_a_real_commit_date_is_clamped_to_the_maximum_window():
     floor, _reason = sc._floor(ancient, sc.WINDOW_SINCE_COMMIT)
     assert floor > ancient
     assert floor <= datetime.datetime.now()
+
+
+def test_the_maximum_window_is_measured_on_the_utc_clock(monkeypatch):
+    """When there is no commit, the cap IS the floor — so it faces the same
+    `Z`-stamped records and must be on their clock.
+
+    Asserts the SOURCE of the clock rather than a difference in hours: a
+    numeric assertion would pass on a UTC runner whichever function was
+    called, which is the blind spot that let every other version of this bug
+    through.
+    """
+    fixed = datetime.datetime(2026, 3, 4, 9, 0, 0)
+    monkeypatch.setattr(sc, "_utcnow", lambda: fixed)
+    cap, reason = sc._floor(None, sc.WINDOW_NO_COMMITS)
+    assert cap == fixed - datetime.timedelta(days=sc.MAX_WINDOW_DAYS)
+    assert reason == sc.WINDOW_NO_COMMITS
 
 
 # ── Source precedence and provenance ──────────────────────────────────────
@@ -121,6 +216,80 @@ def test_tool_results_are_not_something_the_user_said(repo, fake_home):
         {"type": "user", "message": {"content": "the real ask"}}])
     context = sc.gather(str(repo))
     assert [f.text for f in context.prompts] == ["the real ask"]
+
+
+def test_harness_records_are_not_something_the_user_said(repo, fake_home):
+    """A second population `_user_text` structurally cannot see.
+
+    Measured on a real window: 4 of the 9 fragments returned were plumbing —
+    a compaction summary, the caveat block, a `/compact` echo and its stdout.
+    Every one is `type: "user"` carrying an ordinary text block, so nothing
+    about the CONTENT shape separates them from a person typing.
+    """
+    _transcripts(fake_home, repo, [
+        {"type": "user", "isCompactSummary": True,
+         "message": {"content": "This session is being continued from a "
+                                "previous conversation that ran out of..."}},
+        {"type": "user", "isMeta": True,
+         "message": {"content": "<local-command-caveat>Caveat: the messages "
+                                "below...</local-command-caveat>"}},
+        {"type": "user", "message": {"content":
+            "<command-name>/compact</command-name> "
+            "<command-message>compact</command-message>"}},
+        {"type": "user", "message": {"content":
+            "<local-command-stdout>Compacted </local-command-stdout>"}},
+        {"type": "user", "message": {"content": "let's do the A/B now"}}])
+    context = sc.gather(str(repo))
+    assert [f.text for f in context.prompts] == ["let's do the A/B now"]
+
+
+def test_an_unrecognised_record_still_counts_as_the_users(repo, fake_home):
+    """The filter is NEGATIVE on purpose, and this is what that buys.
+
+    Requiring a marker such as `promptSource` to be PRESENT reads as tidier
+    and would silently empty the window on every transcript written before
+    that field existed. A shape nobody has seen yet must lose no real prompt.
+    """
+    _transcripts(fake_home, repo, [
+        {"type": "user", "someFieldNobodyHasSeenYet": True,
+         "message": {"content": "still a real ask"}}])
+    context = sc.gather(str(repo))
+    assert [f.text for f in context.prompts] == ["still a real ask"]
+
+
+def test_an_oversized_transcript_is_read_from_its_tail(repo, fake_home,
+                                                       monkeypatch):
+    """The defect that killed this feature on its own repository.
+
+    Candidates are sorted newest-first, so the transcript most likely to
+    exceed the byte budget is the live session — the one file that can hold
+    the window. Skipping it returned zero fragments, and because
+    `build_session_block` renders nothing when there are no fragments, the
+    `truncated` flag that would have said so was dropped on the floor: the
+    caller could not tell "too big to read" from "nothing was said".
+
+    Measured live on 2026-09-12 — the active transcript crossed the 8 MB cap
+    at 07:58 and every gather afterwards came back empty, silently, on
+    exactly the sessions with the most to say.
+    """
+    padding = [{"type": "user", "message": {"content": "old ask %d" % i}}
+               for i in range(200)]
+    _transcripts(fake_home, repo, padding + [
+        {"type": "user", "message": {"content": "the recent ask"}}])
+    monkeypatch.setattr(sc, "MAX_TRANSCRIPT_BYTES", 400)
+
+    context = sc.gather(str(repo))
+    assert [f.text for f in context.prompts][-1:] == ["the recent ask"]
+    assert context.truncated is True, "a tail IS partial and must say so"
+
+
+def test_a_transcript_within_budget_is_not_reported_partial(repo, fake_home):
+    """The other half: reading a tail is partial, reading a file is not."""
+    _transcripts(fake_home, repo, [
+        {"type": "user", "message": {"content": "small enough"}}])
+    context = sc.gather(str(repo))
+    assert [f.text for f in context.prompts] == ["small enough"]
+    assert context.truncated is False
 
 
 def test_prose_is_off_by_default(repo, fake_home):

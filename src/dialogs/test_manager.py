@@ -572,7 +572,7 @@ class TestManagerDialog(UiPumpMixin, tk.Toplevel):
 
     def _on_sync_pr_checklist(self) -> None:
         """Sync the open PR's testing checklist from the last-run cache."""
-        from helpers.pr_checklist import sync_pr_checklist
+        from helpers.pr_checklist import local_test_evidence, sync_pr_checklist
 
         gh_exe = (self._cfg.raw or {}).get("gh_exe") or "gh"
         cache  = load_last_run_results(self._project_root)
@@ -587,29 +587,12 @@ class TestManagerDialog(UiPumpMixin, tk.Toplevel):
             )
             return
 
-        # Prefer the whole-suite snapshot when present (written by Run All).
-        # Summing per-file rows after a Run All multiplies the suite total
-        # by the file count, since every row carries the same suite-wide
-        # numbers.
-        summary = cache.get("summary")
-        if isinstance(summary, dict):
-            passed = int(summary.get("passed", 0))
-            total  = int(summary.get("total", 0))
-            ran_at = summary.get("ran_at") or cache.get(
-                "ran_at", datetime.now().strftime("%Y-%m-%d %H:%M"))
-        else:
-            # Legacy / single-file runs: aggregate the per-file rows.
-            results = cache.get("results", {})
-            passed = sum(int(r.get("passed", 0)) for r in results.values()
-                           if isinstance(r, dict))
-            total  = sum(int(r.get("total", 0))  for r in results.values()
-                           if isinstance(r, dict))
-            ran_at = cache.get(
-                "ran_at", datetime.now().strftime("%Y-%m-%d %H:%M"))
-
+        # What the cache proves is decided in ONE place, shared with the Draft
+        # PR path. The fallback that used to live here summed the per-file
+        # rows, which every multi-file run stamps with the same run-wide
+        # totals — see helpers.pr_checklist.local_test_evidence.
         ok, msg = sync_pr_checklist(
-            gh_exe, self._project_root,
-            {"passed": passed, "total": total, "ran_at": ran_at},
+            gh_exe, self._project_root, local_test_evidence(cache),
         )
         if ok:
             messagebox.showinfo("PR checklist synced", msg, parent=self)

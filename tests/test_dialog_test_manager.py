@@ -227,11 +227,22 @@ def test_sync_pr_checklist_prefers_summary_over_sum(
     assert payload["total"] == 353
 
 
-def test_sync_pr_checklist_legacy_cache_sums_per_file_rows(
+def test_sync_pr_checklist_refuses_to_invent_a_suite_number(
     tk_root, mock_config, tmp_path, mocker
 ):
-    """Caches without a summary block (single-file runs / pre-fix caches)
-    still aggregate by summing the per-file rows."""
+    """A cache with no summary block is not evidence the suite passed.
+
+    This test used to assert the opposite — it was named
+    `..._legacy_cache_sums_per_file_rows` and pinned 5+2=7 of 5+3=8 as the
+    answer. Two problems with that. The rows are not per-file figures: every
+    multi-file run stamps each affected row with the RUN's totals, so the sum
+    multiplies. And even when the rows ARE genuine (two separate single-file
+    runs accumulating into one cache), adding them stitches two runs made at
+    different times into one claim that "the test suite passes locally".
+
+    `summary` is the only whole-suite number, and its absence is reported as
+    a partial scope rather than filled in.
+    """
     cache = {
         "ran_at": "2026-05-27",
         "results": {
@@ -250,8 +261,9 @@ def test_sync_pr_checklist_legacy_cache_sums_per_file_rows(
     dialog._on_sync_pr_checklist()
     _args, _kwargs = mock_sync.call_args
     payload = _args[2]
-    assert payload["passed"] == 7
-    assert payload["total"] == 8
+    assert payload["scope"] == "partial"
+    assert payload["files"] == 2
+    assert "passed" not in payload and "total" not in payload
 
 
 # ── Tab 1 — last-run cache summary block ─────────────────────────────────

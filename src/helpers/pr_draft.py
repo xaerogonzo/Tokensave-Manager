@@ -53,8 +53,9 @@ subsection's bullet points based on the changed files):
 ## Testing checklist
 <!-- tokensave-manager:testing-checklist v1 -->
 ### Automated (verified by `pytest -m "not tk"`)
-- [<TICK_OR_BLANK>] Test suite passes locally (<N>/<M> passed as of <TIMESTAMP>)
-- [ ] CI test-gate job passes on this PR (check GitHub Actions tab)
+<COPY BOTH BULLET LINES EXACTLY AS THEY APPEAR IN THE PRE-RENDERED BLOCK IN \
+THE USER PROMPT. Do not reword them, do not tick a box they leave unticked, \
+and do not substitute numbers of your own.>
 
 ### Manual (please verify before merge)
 - [ ] <One bullet per UI flow or smoke check implied by the changed files>
@@ -440,38 +441,24 @@ def generate_pr_draft(cfg, project_path: str, base: str = "", *,
 def _render_automated_for_pr(project_path: str) -> str:
     """Render the ``### Automated`` subsection for the PR template prompt.
 
-    Reads the manager's last-run cache (``.tokensave-manager/last_test_run.json``).
-    Falls back to a "untested" template when the cache is absent — the
-    user still gets the checklist structure; they just need to run tests
-    and click "Sync PR Checklist" later to populate the ticks.
+    Reads the manager's last-run cache (``.tokensave-manager/last_test_run.json``)
+    and renders it through the SAME pair the Sync-PR-Checklist button uses, so
+    the two can never disagree about what the cache proves. This function used
+    to carry its own copy of that judgement, and its copy summed the per-file
+    rows — see :func:`helpers.pr_checklist.local_test_evidence` for what that
+    cost.
 
-    Returned content is literal markdown — the system prompt instructs
-    the LLM to copy it verbatim into the final body. Format matches
-    :func:`helpers.pr_checklist.format_automated_section` so the
-    Sync-PR-Checklist button can later update it in place.
+    Returned content is literal markdown — the system prompt instructs the LLM
+    to copy it verbatim into the final body, which is also why the wording must
+    come from `format_automated_section` rather than being restated here.
     """
+    from helpers.pr_checklist import format_automated_section, local_test_evidence
     try:
         from helpers.test_discovery import load_last_run_results
         cache = load_last_run_results(project_path)
     except Exception:
         cache = {}
-
-    if not isinstance(cache, dict):
-        cache = {}
-    results = cache.get("results") if isinstance(cache.get("results"), dict) else {}
-    passed = sum(int(r.get("passed", 0)) for r in (results or {}).values()
-                   if isinstance(r, dict))
-    total  = sum(int(r.get("total", 0))  for r in (results or {}).values()
-                   if isinstance(r, dict))
-    ran_at = cache.get("ran_at") or "not yet run"
-    tick = "x" if (total > 0 and passed == total) else " "
-
-    return (
-        "### Automated (verified by `pytest -m \"not tk\"`)\n"
-        f"- [{tick}] Test suite passes locally "
-        f"({passed}/{total} passed as of {ran_at})\n"
-        "- [ ] CI test-gate job passes on this PR (check GitHub Actions tab)\n"
-    )
+    return format_automated_section(local_test_evidence(cache))
 
 
 def _clean_local_artifacts(text: str) -> str:

@@ -161,30 +161,81 @@ def update_pr_body(gh_exe: str, project_root: str,
 
 # ── Checklist rendering + sync ───────────────────────────────────────────
 
-def format_automated_section(test_results: dict) -> str:
+#: What the local run actually covered. Three states, because "the suite
+#: passed", "some of it passed" and "nothing has run" are three different
+#: claims and only the first may tick a box.
+SCOPE_SUITE   = "suite"
+SCOPE_PARTIAL = "partial"
+SCOPE_NONE    = "none"
+
+
+def local_test_evidence(cache: dict) -> dict:
+    """What the last-run cache actually proves, in one place.
+
+    **The `results` rows cannot be summed, and that is why this exists.**
+    `dialogs/test_manager.py` stamps every affected row with the RUN's
+    totals, so a Run All writes the suite figure onto every file and a
+    sixteen-file selection writes its own figure onto sixteen. Adding them
+    up multiplies the run by the number of files it touched.
+
+    Measured on this repository: sixteen rows of 353/353 summed to **5,648**,
+    and every PR body drafted since carried *"Test suite passes locally
+    (5648/5648 passed)"* with the box **ticked** — from a partial run that
+    never claimed to be the suite, of a suite that has 4,426 tests. Both
+    consumers had their own copy of that sum; now neither does.
+
+    `summary` is the only trustworthy whole-suite number: written by a
+    `tests/` run and deliberately dropped by anything narrower. When it is
+    absent there IS no suite figure, and none is invented — the scope is
+    reported instead. D1b in a new place: unknown must never render as passed.
+    """
+    if not isinstance(cache, dict):
+        return {"scope": SCOPE_NONE}
+    summary = cache.get("summary")
+    if isinstance(summary, dict):
+        return {
+            "scope":  SCOPE_SUITE,
+            "passed": int(summary.get("passed", 0)),
+            "total":  int(summary.get("total", 0)),
+            "ran_at": summary.get("ran_at") or cache.get("ran_at") or "",
+        }
+    rows = cache.get("results")
+    rows = rows if isinstance(rows, dict) else {}
+    files = [r for r in rows.values() if isinstance(r, dict)]
+    if not files:
+        return {"scope": SCOPE_NONE}
+    return {
+        "scope":  SCOPE_PARTIAL,
+        "files":  len(files),
+        "ran_at": cache.get("ran_at") or max(
+            (str(r.get("ran_at") or "") for r in files), default=""),
+    }
+
+
+def format_automated_section(evidence: dict) -> str:
     """Render the ``### Automated`` subsection markdown.
 
-    ``test_results`` schema mirrors ``test_discovery.save_last_run_results``::
-
-        {
-            "passed": int,
-            "total":  int,
-            "ran_at": <iso timestamp string>,
-        }
-
-    The subsection's ticked items reflect what we can verify from the
-    local pytest run. Items the manager can't verify itself (e.g. "CI
-    test-gate passes on this PR") stay unticked.
+    Takes the dict :func:`local_test_evidence` returns. The ticked items
+    reflect only what the manager can verify from a local pytest run; items
+    it cannot verify itself ("CI test-gate passes on this PR") stay unticked,
+    and so does anything short of a whole-suite pass.
     """
-    passed = int(test_results.get("passed", 0))
-    total  = int(test_results.get("total", 0))
-    ran_at = test_results.get("ran_at", "unknown time")
-    all_pass = total > 0 and passed == total
-    ts_tick = "x" if all_pass else " "
+    scope  = evidence.get("scope")
+    ran_at = evidence.get("ran_at") or "unknown time"
+    if scope == SCOPE_SUITE:
+        passed = int(evidence.get("passed", 0))
+        total  = int(evidence.get("total", 0))
+        tick   = "x" if (total > 0 and passed == total) else " "
+        first  = (f"- [{tick}] Test suite passes locally "
+                  f"({passed}/{total} passed as of {ran_at})")
+    elif scope == SCOPE_PARTIAL:
+        first = ("- [ ] Test suite not run in full locally — the last run "
+                 f"covered {evidence.get('files', 0)} file(s) as of {ran_at}")
+    else:
+        first = "- [ ] Test suite not run locally yet"
     return (
         f"{_AUTOMATED_HEADING}\n"
-        f"- [{ts_tick}] Test suite passes locally "
-        f"({passed}/{total} passed as of {ran_at})\n"
+        f"{first}\n"
         "- [ ] CI test-gate job passes on this PR (check GitHub Actions tab)\n"
     )
 

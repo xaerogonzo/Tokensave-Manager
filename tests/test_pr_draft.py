@@ -82,6 +82,31 @@ def test_clean_preserves_structural_whitespace():
 # ── _inject_automated_block ───────────────────────────────────────────────────
 
 _AUTO = "### Automated (verified by `pytest -m \"not tk\"`)\n- [x] pass\n"
+
+
+def test_the_draft_and_the_sync_button_read_the_cache_the_same_way(
+        tmp_path, mocker):
+    """One judgement, one place — asserted rather than assumed.
+
+    Both surfaces used to carry their own copy of "what does this cache
+    prove", and the copies disagreed: the Sync button preferred `summary`
+    while the Draft PR path summed the per-file rows and produced a number
+    no run ever reported. A guard on the shared call is what stops a third
+    copy appearing the next time one of them needs a tweak.
+    """
+    from helpers import pr_draft
+    from helpers.pr_checklist import format_automated_section, local_test_evidence
+
+    cache = {"ran_at": "2026-05-27 21:45",
+             "results": {"tests/test_%d.py" % i:
+                         {"passed": 353, "total": 353} for i in range(16)}}
+    mocker.patch("helpers.test_discovery.load_last_run_results",
+                 return_value=cache)
+
+    drafted = pr_draft._render_automated_for_pr(str(tmp_path))
+    assert drafted == format_automated_section(local_test_evidence(cache))
+    assert "5648" not in drafted
+    assert "[x]" not in drafted
 _MARKER = "<!-- tokensave-manager:testing-checklist v1 -->"
 
 

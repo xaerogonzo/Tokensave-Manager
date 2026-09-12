@@ -17,12 +17,22 @@ import pytest
 
 from helpers.pr_checklist import (
     _MARKER,
+    SCOPE_NONE,
+    SCOPE_PARTIAL,
+    SCOPE_SUITE,
     format_automated_section,
     get_open_pr,
+    local_test_evidence,
     sync_checklist_section,
     sync_pr_checklist,
     update_pr_body,
 )
+
+
+def _suite(passed, total, ran_at="now"):
+    """The evidence a whole-suite run produces."""
+    return {"scope": SCOPE_SUITE, "passed": passed, "total": total,
+            "ran_at": ran_at}
 
 
 def _proc(rc=0, stdout="", stderr=""):
@@ -32,8 +42,8 @@ def _proc(rc=0, stdout="", stderr=""):
 # ── format_automated_section ─────────────────────────────────────────────
 
 def test_format_automated_ticks_when_all_pass():
-    """All tests passing → first checkbox is [x]."""
-    out = format_automated_section({"passed": 12, "total": 12, "ran_at": "now"})
+    """A whole-suite run that passed → first checkbox is [x]."""
+    out = format_automated_section(_suite(12, 12))
     assert "- [x] Test suite passes locally (12/12 passed as of now)" in out
     # CI checkbox is never auto-ticked.
     assert "- [ ] CI test-gate job passes" in out
@@ -41,14 +51,64 @@ def test_format_automated_ticks_when_all_pass():
 
 def test_format_automated_unticked_when_failures():
     """Any failure → first checkbox stays [ ]."""
-    out = format_automated_section({"passed": 10, "total": 12, "ran_at": "now"})
+    out = format_automated_section(_suite(10, 12))
     assert "- [ ] Test suite passes locally (10/12 passed as of now)" in out
 
 
 def test_format_automated_unticked_when_zero_total():
     """Edge: no tests ran → can't claim "all passed", unticked."""
-    out = format_automated_section({"passed": 0, "total": 0, "ran_at": "never"})
+    out = format_automated_section(_suite(0, 0, ran_at="never"))
     assert "- [ ] Test suite passes locally (0/0 passed as of never)" in out
+
+
+# ── What the cache proves: scope, never a sum ────────────────────────────
+
+def test_the_per_file_rows_are_never_summed():
+    """The defect this pair of functions exists to kill.
+
+    `dialogs/test_manager.py` stamps every affected row with the RUN's
+    totals, so a sixteen-file selection writes 353/353 sixteen times. The
+    old code summed them into 5,648 and TICKED the box — a number no run
+    ever produced, for a suite of 4,426 tests.
+    """
+    cache = {"ran_at": "2026-05-27 21:45",
+             "results": {"tests/test_%d.py" % i:
+                         {"passed": 353, "total": 353, "status": "pass"}
+                         for i in range(16)}}
+    evidence = local_test_evidence(cache)
+    assert evidence["scope"] == SCOPE_PARTIAL
+    assert "passed" not in evidence, "a partial run has no suite figure"
+
+    out = format_automated_section(evidence)
+    assert "5648" not in out
+    assert "353" not in out
+    assert "- [ ] Test suite not run in full locally" in out
+    assert "16 file(s)" in out
+    assert "2026-05-27 21:45" in out
+
+
+def test_the_summary_is_the_only_whole_suite_number():
+    """Written by a `tests/` run, and it wins over the rows beside it."""
+    cache = {"ran_at": "2026-09-12 14:00",
+             "summary": {"passed": 4426, "total": 4426,
+                         "ran_at": "2026-09-12 14:00"},
+             "results": {"tests/test_%d.py" % i:
+                         {"passed": 4426, "total": 4426} for i in range(200)}}
+    evidence = local_test_evidence(cache)
+    assert evidence["scope"] == SCOPE_SUITE
+    assert (evidence["passed"], evidence["total"]) == (4426, 4426)
+    assert "- [x] Test suite passes locally (4426/4426" in (
+        format_automated_section(evidence))
+
+
+def test_an_empty_cache_is_not_a_pass():
+    """D1b: unknown must never render as passed."""
+    for cache in ({}, None, {"results": {}}, {"results": "nonsense"}):
+        evidence = local_test_evidence(cache)
+        assert evidence["scope"] == SCOPE_NONE, cache
+        out = format_automated_section(evidence)
+        assert "- [ ] Test suite not run locally yet" in out
+        assert "[x]" not in out
 
 
 # ── sync_checklist_section ───────────────────────────────────────────────
@@ -83,8 +143,7 @@ def test_sync_refuses_without_marker():
 def test_sync_updates_automated_subsection_only():
     """Manual subsection is byte-identical pre/post sync."""
     body = _sample_body(passed=0, total=0)
-    new, changed = sync_checklist_section(
-        body, {"passed": 290, "total": 290, "ran_at": "2026-05-27"})
+    new, changed = sync_checklist_section(body, _suite(290, 290, "2026-05-27"))
     assert changed is True
     # Automated now ticked with new counts.
     assert "290/290 passed" in new
