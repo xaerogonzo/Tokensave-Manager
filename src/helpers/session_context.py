@@ -178,6 +178,15 @@ def _from_transcripts(project_path: str, since, want_prose: bool) -> "tuple":
 
     Bounded on transcripts scanned AND bytes read, for the reason the session
     note hook is: measured p99 is 112 MB and max 134 MB.
+
+    An oversized transcript is read from its TAIL, never skipped. Skipping it
+    was measured to kill the feature outright on this repository: candidates
+    are sorted newest-first, so the file most likely to exceed the budget is
+    the live session — the one file that can hold the window. On 2026-09-12
+    the active transcript crossed the 8 MB cap at 07:58 and every gather after
+    that returned zero fragments, silently, on the sessions with the most to
+    say. Records are appended in chronological order, so the tail is exactly
+    the recent end: seeking into it reads the material the window asked for.
     """
     directory = _transcript_dir(project_path)
     if not directory or not os.path.isdir(directory):
@@ -200,30 +209,62 @@ def _from_transcripts(project_path: str, since, want_prose: bool) -> "tuple":
     prompts, prose, budget = [], [], MAX_TRANSCRIPT_BYTES
 
     for _mtime, path in candidates[:MAX_TRANSCRIPTS]:
+        if budget <= 0:
+            truncated = True
+            break
         try:
             size = os.path.getsize(path)
         except OSError:
             continue
-        if size > budget:
-            truncated = True
-            continue
-        budget -= size
-        truncated = _scan_one(path, since, want_prose, prompts, prose) or truncated
+        # Read the last `budget` bytes when the file is larger than what is
+        # left. A tail IS partial, so `truncated` stays honest — but partial
+        # and skipped are not the same fact, and this used to report the
+        # second one as if it were the first.
+        tail_from = max(0, size - budget)
+        budget -= min(size, budget)
+        truncated = _scan_one(path, since, want_prose, prompts, prose,
+                              tail_from=tail_from) or truncated or bool(tail_from)
 
     prompts = prompts[-MAX_FRAGMENTS:]
     prose = prose[-MAX_PROSE_FRAGMENTS:]
     return tuple(prompts + prose), truncated
 
 
-def _scan_one(path, since, want_prose, prompts, prose) -> bool:
+def _open_at(path, tail_from: int):
+    """Open a transcript positioned past the seam, ready to iterate.
+
+    Binary, so `tail_from` can be a byte offset: text handles accept only
+    opaque `tell()` values. The first line after an arbitrary seek is the tail
+    end of a record, so it is read and discarded.
+    """
+    handle = open(path, "rb")
+    if tail_from:
+        handle.seek(tail_from)
+        handle.readline()
+    return handle
+
+
+def _user_prompt(record, content) -> str:
+    """What the PERSON said in this record, or `""`.
+
+    Two populations reduce to empty here, for unrelated reasons: tool results
+    are not text blocks at all, and harness-authored records ARE text blocks
+    that the user did not write.
+    """
+    said = _user_text(content)
+    return said if said and _is_user_authored(record, said) else ""
+
+
+def _scan_one(path, since, want_prose, prompts, prose, tail_from: int = 0) -> bool:
     """Append fragments from one transcript. Returns whether anything was cut."""
     cut = False
     try:
-        handle = open(path, encoding="utf-8", errors="replace")
+        handle = _open_at(path, tail_from)
     except OSError:
         return False
     with handle:
-        for line in handle:
+        for raw in handle:
+            line = raw.decode("utf-8", "replace")
             if '"user"' not in line and (not want_prose or '"assistant"' not in line):
                 continue
             try:
@@ -236,7 +277,7 @@ def _scan_one(path, since, want_prose, prompts, prose) -> bool:
             kind = record.get("type")
             content = (record.get("message") or {}).get("content")
             if kind == "user":
-                said = _user_text(content)
+                said = _user_prompt(record, content)
                 if said:
                     prompts.append(Fragment(said[:MAX_FRAGMENT_CHARS],
                                             SOURCE_TRANSCRIPT_PROMPT))
@@ -248,11 +289,37 @@ def _scan_one(path, since, want_prose, prompts, prose) -> bool:
     return cut
 
 
+#: Text the harness writes in the user's role, recognised by the envelope it
+#: opens with. Measured, not imagined: `<local-command-caveat>`,
+#: `<local-command-stdout>` and a `<command-name>/compact</command-name>` echo
+#: were 3 of the 9 fragments one real window returned, with a compaction
+#: summary — caught by its own flag below — making it 4.
+_HARNESS_ENVELOPES = ("<local-command-", "<command-name>")
+
+
+def _is_user_authored(record, text: str) -> bool:
+    """Did the PERSON write this, or did the harness write it in their role?
+
+    A NEGATIVE filter on purpose. An unrecognised record counts as the user's,
+    so a transcript shape nobody has seen yet loses no real prompt. The
+    inverse — requiring a marker such as `promptSource` to be PRESENT — reads
+    as tidier and would silently empty the window on every transcript written
+    before that field existed, which is the population failure this codebase
+    keeps paying for.
+    """
+    if record.get("isMeta") or record.get("isCompactSummary"):
+        return False
+    return not text.lstrip().startswith(_HARNESS_ENVELOPES)
+
+
 def _user_text(content) -> str:
     """Only what the user actually said.
 
     Tool results arrive as user-role records — measured at 262 of 267 in one
-    real session — and are not something the user said.
+    real session — and are not something the user said. Records the HARNESS
+    authors in the user's role are a second population, filtered separately by
+    :func:`_is_user_authored`: they are ordinary text blocks, so nothing about
+    their content shape distinguishes them here.
     """
     if isinstance(content, str):
         return content.strip()

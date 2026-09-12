@@ -123,6 +123,80 @@ def test_tool_results_are_not_something_the_user_said(repo, fake_home):
     assert [f.text for f in context.prompts] == ["the real ask"]
 
 
+def test_harness_records_are_not_something_the_user_said(repo, fake_home):
+    """A second population `_user_text` structurally cannot see.
+
+    Measured on a real window: 4 of the 9 fragments returned were plumbing —
+    a compaction summary, the caveat block, a `/compact` echo and its stdout.
+    Every one is `type: "user"` carrying an ordinary text block, so nothing
+    about the CONTENT shape separates them from a person typing.
+    """
+    _transcripts(fake_home, repo, [
+        {"type": "user", "isCompactSummary": True,
+         "message": {"content": "This session is being continued from a "
+                                "previous conversation that ran out of..."}},
+        {"type": "user", "isMeta": True,
+         "message": {"content": "<local-command-caveat>Caveat: the messages "
+                                "below...</local-command-caveat>"}},
+        {"type": "user", "message": {"content":
+            "<command-name>/compact</command-name> "
+            "<command-message>compact</command-message>"}},
+        {"type": "user", "message": {"content":
+            "<local-command-stdout>Compacted </local-command-stdout>"}},
+        {"type": "user", "message": {"content": "let's do the A/B now"}}])
+    context = sc.gather(str(repo))
+    assert [f.text for f in context.prompts] == ["let's do the A/B now"]
+
+
+def test_an_unrecognised_record_still_counts_as_the_users(repo, fake_home):
+    """The filter is NEGATIVE on purpose, and this is what that buys.
+
+    Requiring a marker such as `promptSource` to be PRESENT reads as tidier
+    and would silently empty the window on every transcript written before
+    that field existed. A shape nobody has seen yet must lose no real prompt.
+    """
+    _transcripts(fake_home, repo, [
+        {"type": "user", "someFieldNobodyHasSeenYet": True,
+         "message": {"content": "still a real ask"}}])
+    context = sc.gather(str(repo))
+    assert [f.text for f in context.prompts] == ["still a real ask"]
+
+
+def test_an_oversized_transcript_is_read_from_its_tail(repo, fake_home,
+                                                       monkeypatch):
+    """The defect that killed this feature on its own repository.
+
+    Candidates are sorted newest-first, so the transcript most likely to
+    exceed the byte budget is the live session — the one file that can hold
+    the window. Skipping it returned zero fragments, and because
+    `build_session_block` renders nothing when there are no fragments, the
+    `truncated` flag that would have said so was dropped on the floor: the
+    caller could not tell "too big to read" from "nothing was said".
+
+    Measured live on 2026-09-12 — the active transcript crossed the 8 MB cap
+    at 07:58 and every gather afterwards came back empty, silently, on
+    exactly the sessions with the most to say.
+    """
+    padding = [{"type": "user", "message": {"content": "old ask %d" % i}}
+               for i in range(200)]
+    _transcripts(fake_home, repo, padding + [
+        {"type": "user", "message": {"content": "the recent ask"}}])
+    monkeypatch.setattr(sc, "MAX_TRANSCRIPT_BYTES", 400)
+
+    context = sc.gather(str(repo))
+    assert [f.text for f in context.prompts][-1:] == ["the recent ask"]
+    assert context.truncated is True, "a tail IS partial and must say so"
+
+
+def test_a_transcript_within_budget_is_not_reported_partial(repo, fake_home):
+    """The other half: reading a tail is partial, reading a file is not."""
+    _transcripts(fake_home, repo, [
+        {"type": "user", "message": {"content": "small enough"}}])
+    context = sc.gather(str(repo))
+    assert [f.text for f in context.prompts] == ["small enough"]
+    assert context.truncated is False
+
+
 def test_prose_is_off_by_default(repo, fake_home):
     _transcripts(fake_home, repo, [
         {"type": "user", "message": {"content": "ask"}},
