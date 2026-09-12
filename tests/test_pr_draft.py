@@ -350,9 +350,15 @@ def test_safe_grounding_swallows_exception():
 
 def _grounding_cfg(*, enabled=True, tokensave_exe="ts", codegraph_exe=""):
     # codegraph_exe="" keeps the ensure_fresh branch (real subprocess) skipped.
+    # Session grounding OFF: these tests are about the tokensave+codegraph
+    # pair, and a policy attribute is now read before them.
+    from helpers.instruction_policy import InstructionPolicy
+
     return SimpleNamespace(enable_pr_grounding=enabled,
                            tokensave_exe=tokensave_exe,
-                           codegraph_exe=codegraph_exe)
+                           codegraph_exe=codegraph_exe,
+                           git_exe="git",
+                           instruction_policy=InstructionPolicy())
 
 
 def _patch_doc_grounding(monkeypatch, ts="TS", cg="CG", combine=None):
@@ -362,7 +368,7 @@ def _patch_doc_grounding(monkeypatch, ts="TS", cg="CG", combine=None):
     monkeypatch.setattr("helpers.doc_grounding.build_codegraph_block",
                         lambda *a, **k: cg)
     monkeypatch.setattr("helpers.doc_grounding.build_combined_grounding",
-                        combine or (lambda a, b: f"{a}{b}"))
+                        combine or (lambda *blocks: "".join(blocks)))
 
 
 def test_grounding_section_disabled_returns_empty_and_skips_status():
@@ -383,7 +389,8 @@ def test_grounding_section_fires_status_grounding(monkeypatch):
 
 def test_grounding_section_success_wraps_combined(monkeypatch):
     _patch_doc_grounding(monkeypatch, ts="TSBLOCK", cg="CGBLOCK",
-                         combine=lambda a, b: f"{a}|{b}")
+                         combine=lambda *blocks: "|".join(
+                             b for b in blocks if b))
     out = _build_grounding_section(_grounding_cfg(), "diff", "/proj", on_status=None)
     assert out.startswith("## Affected tests & symbols (auto-attached)")
     assert "TSBLOCK|CGBLOCK" in out
@@ -391,7 +398,7 @@ def test_grounding_section_success_wraps_combined(monkeypatch):
 
 def test_grounding_section_empty_combined_returns_empty(monkeypatch):
     # Whitespace-only combined block → no section emitted.
-    _patch_doc_grounding(monkeypatch, ts="", cg="", combine=lambda a, b: "   ")
+    _patch_doc_grounding(monkeypatch, ts="", cg="", combine=lambda *blocks: "   ")
     assert _build_grounding_section(_grounding_cfg(), "diff", "/proj",
                                     on_status=None) == ""
 
