@@ -72,24 +72,18 @@ def test_on_project_selected_skips_refresh_when_git_hidden():
 
 # ── _set_running ──────────────────────────────────────────────────────────────
 
-def test_set_running_true_enables_stop_button():
-    stop_btn = mock.MagicMock()
-    label = mock.MagicMock()
-    stub = SimpleNamespace(_stop_btn=stop_btn, _running_label=label)
+def test_set_running_delegates_to_the_output_pane():
+    """The Stop button and running label live in OutputPaneController now.
+
+    Their enabled/disabled behaviour is tested there (tests/test_output_pane.py),
+    across every live header -- docked and popped out.
+    """
+    output = mock.MagicMock()
+    stub = SimpleNamespace(_output=output)
     App._set_running(stub, True, "Sync All")
-    stop_btn.configure.assert_called_once()
-    assert stop_btn.configure.call_args.kwargs.get("state") == "normal" \
-        or stop_btn.configure.call_args[1]["state"] == "normal"
-    assert "Sync All" in label.configure.call_args[1]["text"]
-
-
-def test_set_running_false_disables_stop_button():
-    stop_btn = mock.MagicMock()
-    label = mock.MagicMock()
-    stub = SimpleNamespace(_stop_btn=stop_btn, _running_label=label)
+    output.set_running.assert_called_once_with(True, "Sync All")
     App._set_running(stub, False)
-    assert stop_btn.configure.call_args[1]["state"] == "disabled"
-    assert label.configure.call_args[1]["text"] == ""
+    output.set_running.assert_called_with(False, "")
 
 
 # ── _stop_current ─────────────────────────────────────────────────────────────
@@ -135,25 +129,31 @@ def test_stop_current_no_projects_attr_is_safe():
 
 # ── _log (marshals to the Tk thread via UiPumpMixin._post) ──────────────────────────
 
-def test_log_inserts_message_via_post():
-    log_widget = mock.MagicMock()
+def test_log_appends_via_post():
+    """`_log` is the cross-thread boundary: it posts, the pane appends."""
+    output = mock.MagicMock()
     # _post(fn, *args) → run it immediately (simulates the pump draining).
-    stub = SimpleNamespace(log=log_widget,
-                           _post=lambda fn, *a: fn(*a))
+    stub = SimpleNamespace(_output=output, _post=lambda fn, *a: fn(*a))
     App._log(stub, "hello", "red")
-    # The message (with newline) was inserted with a colour tag.
-    args = log_widget.insert.call_args[0]
-    assert args[1] == "hello\n"
-    assert args[2] == "col_red"
+    output.append.assert_called_once_with("hello", "red")
 
 
-def test_log_defaults_colour_tag():
-    log_widget = mock.MagicMock()
-    stub = SimpleNamespace(log=log_widget, _post=lambda fn, *a: fn(*a))
+def test_log_defaults_colour_to_none():
+    output = mock.MagicMock()
+    stub = SimpleNamespace(_output=output, _post=lambda fn, *a: fn(*a))
     App._log(stub, "plain")
-    args = log_widget.insert.call_args[0]
-    assert args[1] == "plain\n"
-    assert args[2] == "col_None"   # colour=None → tag "col_None"
+    output.append.assert_called_once_with("plain", None)
+
+
+def test_log_never_touches_the_pane_off_the_pump():
+    """A worker calling _log must not reach the widget before the pump runs."""
+    output = mock.MagicMock()
+    posted = []
+    stub = SimpleNamespace(_output=output, _post=lambda fn, *a: posted.append(fn))
+    App._log(stub, "from a worker")
+    output.append.assert_not_called()
+    posted[0]()
+    output.append.assert_called_once()
 
 
 # ── tokensave version accessors (delegate to UpdatePollerController) ──────────
@@ -321,7 +321,7 @@ def test_banner_text_names_the_changed_files():
                                     pack=lambda **kw: None),
         _src_banner_lbl=SimpleNamespace(
             configure=lambda **kw: captured.update(kw)),
-        nb=object())
+        _paned=object())
     with mock.patch("app.describe_changes", return_value="helpers/git.py"):
         App._show_source_banner(stub, ["/proj/src/helpers/git.py"])
     assert "helpers/git.py" in captured["text"]

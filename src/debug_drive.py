@@ -489,11 +489,43 @@ class _Driver:
         if what == "help":
             self._report_help(step)
             return
+        if what == "output":
+            self._report_output()
+            return
         lines = [t for t in (_widget_text(w).strip() for w in _walk(target))
                  if t]
         _say("drive: report (%d labels)" % len(lines))
         for line in lines:
             _say("    " + line)
+
+    def _report_output(self) -> None:
+        """The OUTPUT pane as measured: where it is, how tall, and read-only how.
+
+        Measured rather than inferred: `docked` is membership in the paned
+        window's live pane list, and the proxy is checked by asking Tcl for
+        the alias, so a pane that silently lost either reports it.
+        """
+        out = getattr(self._app, "_output", None)
+        paned = getattr(self._app, "_paned", None)
+        if out is None or paned is None:
+            _say("drive: output: the app has no output pane")
+            return
+        docked = str(out.frame) in [str(p) for p in paned.panes()]
+        _say("output: docked=%s popped_out=%s"
+             % (docked, bool(getattr(out, "is_popped_out", False))))
+        _say("  pane height : %d px (preference %r)"
+             % (out.frame.winfo_height(),
+                self._app._cfg.raw.get("output_pane_height")))
+        _say("  text state  : %s" % out.text.cget("state"))
+        _say("  proxy alias : %s" % bool(
+            out.text.tk.call("interp", "alias", "", out.text._w)))
+        _say("  content end : %s" % out.text.index("end-1c"))
+        win = getattr(out, "_popout", None)
+        if win is not None and win.winfo_exists():
+            _say("  pop-out     : %s state=%s peer_end=%s"
+                 % (win.geometry(), win.state(), out._peer.index("end-1c")))
+        _say("  paned height: %d, panes=%d"
+             % (paned.winfo_height(), len(paned.panes())))
 
     def _report_geometry(self, target, step: "dict[str, Any]") -> None:
         """Assert geometric invariants on what is actually on screen.

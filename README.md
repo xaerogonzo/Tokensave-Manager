@@ -488,6 +488,17 @@ Saving is all-or-nothing: every page writes into a staging copy, and a page that
 
 ---
 
+### The OUTPUT pane
+
+The strip under the tabs shows what the last command printed. You can select
+text and copy it (Ctrl+C, or right-click → **Copy** / **Copy all**), drag the
+bar above it to make it taller, and **⧉ Pop out** it into its own window — handy
+on a second monitor. Closing that window, or pressing **⇲ Dock**, puts the pane
+back exactly where and how tall it was, including anything logged while it was
+out. **Clear view** empties the display only; it never stops a running command.
+
+---
+
 <!-- help:tasks-tab -->
 ### 📋 Tasks Tab
 
