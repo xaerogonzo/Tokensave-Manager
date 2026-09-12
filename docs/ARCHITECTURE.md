@@ -81,7 +81,7 @@ Token Save Manager Source/
 │   │                              report/wait/quit. `report what=geometry` runs the visual
 │   │                              oracle. Committed scripts live in scripts/drive/.
 │   │
-│   ├── helpers/                  111 modules of pure / IO helpers — no UI deps.
+│   ├── helpers/                  113 modules of pure / IO helpers — no UI deps.
 │   │   ├── config.py              _load_config, _save_config, _migrate_config
 │   │   ├── detection.py           _detect_git/_gh/_npm/_codegraph/_claude_cli,
 │   │   │                          _root_path/_label, _version_lt
@@ -97,6 +97,12 @@ Token Save Manager Source/
 │   │   │                          _find_tracked_but_ignored, _fetch_tags, _git_tag, _git_push_with_tags
 │   │   ├── gitignore.py           _ensure_gitignore, _read/_write_gitignore_lines,
 │   │   │                          _BASELINE_GITIGNORE, _GITIGNORE_TEMPLATES
+│   │   ├── session_note.py        Stop hook recording a session's PROMPTS beside
+│   │   │                          the repo it touched, so later drafts can say
+│   │   │                          why. Project = git root of the declared cwd,
+│   │   │                          never shell activity. Bounded head+tail read
+│   │   │                          (transcripts reach 134 MB). Imports nothing
+│   │   │                          that drafts - the arrow runs one way.
 │   │   ├── shadow_links.py        generate/remove_shadow_links, update_gitignore_for_shadows,
 │   │   │                          DEFAULT_SHADOW_EXT_MAP
 │   │   ├── housekeeping.py        PURE detection for the Housekeeping surface:
@@ -461,6 +467,11 @@ Token Save Manager Source/
 │   │   │                          baseline and detects drift. Offers NO function
 │   │   │                          returning a policy from Markdown - the artifact
 │   │   │                          must never become a second source of truth.
+│   │   ├── claude_hooks.py        One owned Claude Code hook, described by a
+│   │   │                          HookSpec row rather than written twice. Shared
+│   │   │                          by read_nudge and session_note: interpreter
+│   │   │                          resolution, structural ownership, backup +
+│   │   │                          atomic settings write, install AND uninstall.
 │   │   ├── claude_tasks.py        Pure functions for scanning Claude Code sessions and
 │   │   │                          git worktrees.
 │   │   ├── proc_kill.py           Terminate a process, with the semantics the caller

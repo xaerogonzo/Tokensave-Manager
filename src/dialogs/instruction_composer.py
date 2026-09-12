@@ -40,16 +40,24 @@ if TYPE_CHECKING:                                    # pragma: no cover
     from state import ManagerConfig
 
 
-#: Label and one-line explanation per rendered key. Only the two keys that
-#: compile into the baseline appear here: a toggle for a feature that has no
-#: consumer yet would be a control that does nothing, which is the same
-#: configuration-is-not-behaviour failure this dialog exists to avoid.
+#: Keys that COMPILE INTO the baseline — text every wired project loads.
 _LABELS = {
     "agent_may_commit": ("Allow automatic commits",
                          "Whether agents may run git commit themselves."),
     "agent_may_push":   ("Allow automatic pushes",
                          "Requires commits. Never force-push, tags or "
                          "branch deletion."),
+}
+
+#: Keys that change what this MANAGER does rather than what projects are told.
+#: They cost no baseline bytes. A toggle only appears once the feature it
+#: controls exists — a control that does nothing is the same
+#: configuration-is-not-behaviour failure this dialog exists to avoid.
+_OPERATIONAL = {
+    "enable_session_note": (
+        "Session note on exit",
+        "A Stop hook records your prompts beside each repo, so later drafts "
+        "can say why a change happened."),
 }
 
 
@@ -60,7 +68,10 @@ class InstructionComposerDialog(UiPumpMixin, tk.Toplevel):
         super().__init__(parent)
         self.title("🎛 Agent Policy")
         self.configure(bg=C["base"])
-        self.geometry("760x560")
+        # Tall enough for both toggle groups AND the preview without clipping
+        # the footer: measured against a driven window, where the first size
+        # cut the Apply row in half.
+        self.geometry("760x720")
         self._cfg = cfg
         self._on_log = on_log or (lambda *a, **k: None)
         self._staged = cfg.instruction_policy
@@ -97,13 +108,21 @@ class InstructionComposerDialog(UiPumpMixin, tk.Toplevel):
                  fg=C["overlay0"]).pack(anchor=tk.W, padx=18, pady=(0, 10))
 
     def _build_toggles(self) -> None:
+        self._toggle_group(" Agent behaviour — compiled into every project ",
+                           RENDERED_KEYS, _LABELS)
+        self._toggle_group(" Agent context — what this Manager does ",
+                           tuple(_OPERATIONAL), _OPERATIONAL,
+                           footer="Costs no baseline bytes. Grounding toggles "
+                                  "arrive with the feature they control.")
+
+    def _toggle_group(self, title: str, keys, labels, footer: str = "") -> None:
         from theme import themed_checkbutton
 
-        box = tk.LabelFrame(self, text=" Agent behaviour ", bg=C["base"],
-                            fg=C["mauve"], font=("Segoe UI", 9, "bold"))
-        box.pack(fill=tk.X, padx=18, pady=(0, 10))
-        for key in RENDERED_KEYS:
-            label, blurb = _LABELS[key]
+        box = tk.LabelFrame(self, text=title, bg=C["base"], fg=C["mauve"],
+                            font=("Segoe UI", 9, "bold"))
+        box.pack(fill=tk.X, padx=18, pady=(0, 8))
+        for key in keys:
+            label, blurb = labels[key]
             var = tk.BooleanVar(value=bool(getattr(self._staged, key)))
             self._vars[key] = var
             row = tk.Frame(box, bg=C["base"])
@@ -114,11 +133,12 @@ class InstructionComposerDialog(UiPumpMixin, tk.Toplevel):
                                command=lambda k=key: self._stage(k)).pack(
                                    anchor=tk.W)
             tk.Label(row, text=blurb, font=("Segoe UI", 8), bg=C["base"],
-                     fg=C["overlay0"]).pack(anchor=tk.W, padx=(26, 0))
-        tk.Label(box, text="Session note and grounding toggles arrive with the "
-                           "features they control.",
-                 font=("Segoe UI", 8, "italic"), bg=C["base"],
-                 fg=C["overlay0"]).pack(anchor=tk.W, padx=10, pady=(8, 8))
+                     fg=C["overlay0"], justify=tk.LEFT,
+                     wraplength=640).pack(anchor=tk.W, padx=(26, 0))
+        if footer:
+            tk.Label(box, text=footer, font=("Segoe UI", 8, "italic"),
+                     bg=C["base"], fg=C["overlay0"]).pack(anchor=tk.W, padx=10,
+                                                          pady=(6, 8))
 
     def _build_preview(self) -> None:
         box = tk.LabelFrame(self, text=" What Apply would do ", bg=C["base"],
@@ -217,12 +237,18 @@ class InstructionComposerDialog(UiPumpMixin, tk.Toplevel):
         lines = ["Policy"]
         committed = self._cfg.instruction_policy
         changed = False
-        for key in RENDERED_KEYS:
-            was, now = getattr(committed, key), getattr(self._staged, key)
-            mark = "  →  " if was != now else "     "
-            changed = changed or was != now
-            lines.append("  %-24s %s%s%s"
-                         % (_LABELS[key][0], _onoff(was), mark, _onoff(now)))
+        for key, labels in ((RENDERED_KEYS, _LABELS), (tuple(_OPERATIONAL),
+                                                       _OPERATIONAL)):
+            for name in key:
+                was, now = getattr(committed, name), getattr(self._staged, name)
+                mark = "  →  " if was != now else "     "
+                changed = changed or was != now
+                lines.append("  %-24s %s%s%s"
+                             % (labels[name][0], _onoff(was), mark, _onoff(now)))
+
+        hook_lines, hook_pending = self._hook_lines()
+        lines += hook_lines
+        changed = changed or hook_pending
 
         if refusal:
             lines += ["", refusal]
@@ -256,6 +282,30 @@ class InstructionComposerDialog(UiPumpMixin, tk.Toplevel):
             lines += ["", "Nothing to apply — the baseline already matches."]
             return "\n".join(lines), False
         return "\n".join(lines), True
+
+    def _hook_lines(self) -> "tuple[list, bool]":
+        """Policy state and ARTIFACT state, separately. `(lines, pending)`.
+
+        Two facts, not one. A toggle that says ON beside a hook that is absent
+        is the case worth seeing — and the one a single combined label would
+        hide, which is how "turning it off" quietly stops meaning anything.
+        """
+        from helpers import session_note
+
+        state, detail = session_note.installed_state()
+        wanted = bool(self._staged.enable_session_note)
+        installed = state == session_note.CURRENT
+        pending = wanted != installed
+        lines = ["", "Session note hook",
+                 "  %-24s %s" % ("policy", "ON" if wanted else "OFF"),
+                 "  %-24s %s%s" % ("hook", state,
+                                   "  (%s)" % detail if detail and
+                                   state != session_note.ABSENT else "")]
+        if pending:
+            lines.append("  %-24s %s" % (
+                "apply will",
+                "install it" if wanted else "remove our entry and script"))
+        return lines, pending
 
     def _write_preview(self, text: str) -> None:
         self._preview.configure(state=tk.NORMAL)
@@ -297,6 +347,13 @@ class InstructionComposerDialog(UiPumpMixin, tk.Toplevel):
                 messagebox.showerror("Not applied", saved, parent=self)
                 return
             _write_atomic(path, compiled)
+            hook_error = self._reconcile_hook()
+            if hook_error:
+                # The policy and baseline DID land; only the hook did not.
+                # Saying so beats a blanket "not applied" that would send the
+                # user looking for a change that is already on disk.
+                messagebox.showwarning(
+                    "Policy applied, hook not changed", hook_error, parent=self)
         except OSError as exc:
             err = "%s: %s" % (exc.__class__.__name__, exc)
             messagebox.showerror("Not applied", err, parent=self)
@@ -309,6 +366,30 @@ class InstructionComposerDialog(UiPumpMixin, tk.Toplevel):
             "Policy saved and the baseline recompiled.\n\nClaude Code reads "
             "instructions when a session starts, so sessions already running "
             "keep the previous text until they are restarted.", parent=self)
+
+
+    def _reconcile_hook(self) -> str:
+        """Make the artifact match the policy. `""`, or why it could not.
+
+        ON installs; OFF **uninstalls** — entry and script both. A toggle that
+        only stops future installs is a preference wearing a switch's clothes.
+        """
+        from helpers import session_note
+
+        wanted = bool(self._staged.enable_session_note)
+        state, _detail = session_note.installed_state()
+        if wanted and state == session_note.CURRENT:
+            return ""
+        if not wanted and state == session_note.ABSENT:
+            return ""
+        if wanted:
+            ok, error, actions = session_note.install(
+                python_exe=self._cfg.raw.get("python_exe", ""))
+        else:
+            ok, error, actions = session_note.uninstall()
+        for action in actions:
+            self._on_log("  %s" % action, C["overlay0"])
+        return "" if ok else error
 
 
 def _onoff(value: bool) -> str:
