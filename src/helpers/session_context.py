@@ -97,6 +97,34 @@ class SessionContext:
         return tuple(f for f in self.fragments if f.source == SOURCE_TRANSCRIPT_PROSE)
 
 
+def _as_utc(when: "datetime.datetime") -> "datetime.datetime":
+    """Naive UTC, from anything. A naive input is read as LOCAL time.
+
+    Every stamp this module compares arrives on a different clock, and the
+    comparison used to mix them. `git log --format=%cI` carries an offset
+    (`2026-09-12T13:25:33-04:00`); Claude Code stamps transcripts `Z`;
+    `session_note` writes `datetime.now().astimezone()`; `os.path.getmtime`
+    is epoch seconds. Parsing an offset and then calling `.replace(tzinfo=
+    None)` DISCARDS it rather than converting, so one `since` was compared
+    against naive-local mtimes and naive-UTC record stamps in the same
+    function — shifting the window by the machine's offset, wider west of
+    Greenwich and NARROWER east of it, with nothing anywhere saying so.
+
+    Reading a naive input as local is the right default because both naive
+    forms that occur are local: `datetime.now().isoformat()` and an
+    offset-less ISO string. CI runs at UTC, where every version of this
+    agrees, which is exactly why it survived.
+    """
+    if when.tzinfo is None:
+        when = when.astimezone()
+    return when.astimezone(datetime.timezone.utc).replace(tzinfo=None)
+
+
+def _utcnow() -> "datetime.datetime":
+    """`datetime.now()` on the one clock this module compares against."""
+    return datetime.datetime.now(datetime.timezone.utc).replace(tzinfo=None)
+
+
 def last_commit_time(project_path: str, git_exe: str = "") -> "tuple":
     """`(when, reason)`. The degenerate cases are named, never defaulted to now.
 
@@ -118,7 +146,7 @@ def last_commit_time(project_path: str, git_exe: str = "") -> "tuple":
         # state, and a different one from a git that would not run.
         return None, WINDOW_NO_COMMITS
     try:
-        return (datetime.datetime.fromisoformat(stamp).replace(tzinfo=None),
+        return (_as_utc(datetime.datetime.fromisoformat(stamp)),
                 WINDOW_SINCE_COMMIT)
     except ValueError:
         return None, WINDOW_UNREADABLE
@@ -126,7 +154,7 @@ def last_commit_time(project_path: str, git_exe: str = "") -> "tuple":
 
 def _floor(since, reason) -> "tuple":
     """Resolve the window, applying the maximum when there is no commit."""
-    cap = datetime.datetime.now() - datetime.timedelta(days=MAX_WINDOW_DAYS)
+    cap = _utcnow() - datetime.timedelta(days=MAX_WINDOW_DAYS)
     if since is None:
         return cap, reason
     # Even a real commit date is clamped: a repository untouched for a year
@@ -138,8 +166,8 @@ def _parse_stamp(text: str):
     if not text:
         return None
     try:
-        return datetime.datetime.fromisoformat(
-            text.replace("Z", "+00:00")).replace(tzinfo=None)
+        return _as_utc(datetime.datetime.fromisoformat(
+            text.replace("Z", "+00:00")))
     except ValueError:
         return None
 
@@ -198,7 +226,9 @@ def _from_transcripts(project_path: str, since, want_prose: bool) -> "tuple":
     candidates = []
     for path in glob.glob(os.path.join(directory, "*.jsonl")):
         try:
-            mtime = datetime.datetime.fromtimestamp(os.path.getmtime(path))
+            mtime = datetime.datetime.fromtimestamp(
+                os.path.getmtime(path), datetime.timezone.utc
+            ).replace(tzinfo=None)
         except OSError:
             continue
         if since is None or mtime >= since:
