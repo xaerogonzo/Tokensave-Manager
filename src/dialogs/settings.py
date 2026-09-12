@@ -202,6 +202,28 @@ class SettingsDialog(tk.Toplevel):
             font=("Segoe UI", 8), bg=C["base"], fg=C["overlay0"],
             justify=tk.LEFT).pack(anchor=tk.W, padx=36, pady=(0, 8))
 
+        # Its own dialog rather than another block of checkboxes here: these
+        # settings are FLEET policy that compiles into a shared file, so they
+        # need a preview and an explicit apply, not a Save button shared with
+        # twenty unrelated paths.
+        tk.Button(body, text="🎛 Agent Policy…",
+                  command=self._open_instruction_composer,
+                  bg=C["surface1"], fg=C["text"], relief=tk.FLAT,
+                  padx=12).pack(anchor=tk.W, padx=20, pady=(0, 2))
+        tk.Label(body,
+            text="  Whether agents may commit or push, as toggles. Compiles into\n"
+                 "  templates/project-baseline.md, which every wired project loads.",
+            font=("Segoe UI", 8), bg=C["base"], fg=C["overlay0"],
+            justify=tk.LEFT).pack(anchor=tk.W, padx=36, pady=(0, 8))
+
+    def _open_instruction_composer(self):
+        """Lazy in-handler import — cross-dialog dep, per the project rule."""
+        from dialogs.instruction_composer import InstructionComposerDialog
+
+        dialog = InstructionComposerDialog(self, self._cfg)
+        dialog.transient(self)
+        dialog.grab_set()
+
     def _build_mcp_section(self, body):
         """MCP integration status row and wrapper health summary."""
         ttk.Separator(body, orient="horizontal").pack(fill=tk.X, padx=20, pady=(8, 8))

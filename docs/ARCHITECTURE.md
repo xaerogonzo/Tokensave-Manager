@@ -81,7 +81,7 @@ Token Save Manager Source/
 │   │                              report/wait/quit. `report what=geometry` runs the visual
 │   │                              oracle. Committed scripts live in scripts/drive/.
 │   │
-│   ├── helpers/                  109 modules of pure / IO helpers — no UI deps.
+│   ├── helpers/                  111 modules of pure / IO helpers — no UI deps.
 │   │   ├── config.py              _load_config, _save_config, _migrate_config
 │   │   ├── detection.py           _detect_git/_gh/_npm/_codegraph/_claude_cli,
 │   │   │                          _root_path/_label, _version_lt
@@ -350,6 +350,11 @@ Token Save Manager Source/
 │   │   │                          how to repair it.
 │   │   ├── mcp_approval.py        Whether a project's .mcp.json has actually been
 │   │   │                          approved — distinct from whether it exists.
+│   │   ├── instruction_policy.py The six agent-policy toggles as one frozen,
+│   │   │                          validated model. Only agent_may_commit and
+│   │   │                          agent_may_push render into the baseline; push
+│   │   │                          requires commit. Versioned migration persists
+│   │   │                          absent keys so silence is recorded once.
 │   │   ├── instructions_posture.py Does a project's instruction chain RESOLVE?
 │   │   │                          carriage is what the files DECLARE, reach is what
 │   │   │                          the chain arrives at. Bounded include walk.
@@ -452,6 +457,10 @@ Token Save Manager Source/
 │   │   │                          Windows leaves when a directory is still held.
 │   │   ├── worktree_health.py     Detect + repair git worktrees with no tokensave
 │   │   │                          index.
+│   │   ├── baseline_blocks.py Compiles an InstructionPolicy into the fleet
+│   │   │                          baseline and detects drift. Offers NO function
+│   │   │                          returning a policy from Markdown - the artifact
+│   │   │                          must never become a second source of truth.
 │   │   ├── claude_tasks.py        Pure functions for scanning Claude Code sessions and
 │   │   │                          git worktrees.
 │   │   ├── proc_kill.py           Terminate a process, with the semantics the caller
@@ -477,7 +486,7 @@ Token Save Manager Source/
 │   │   ├── io_utils.py            Shared IO helpers for the patcher modules.
 │   │   └── ui.py                  UI helpers shared across controllers and dialogs.
 │   │
-│   ├── dialogs/                   53 dialog / panel modules — a tk.Toplevel per file,
+│   ├── dialogs/                   54 dialog / panel modules — a tk.Toplevel per file,
 │   │                          plus the panels the bigger dialogs are built from.
 │   │   ├── settings.py            SettingsDialog (+ _probe_loaded_model helper)
 │   │   ├── release_wizard.py      ReleaseWizardDialog + _ReleaseCtx (paired)
@@ -528,6 +537,11 @@ Token Save Manager Source/
 │   │   │                          snapshotted before scrub and auto-restored if
 │   │   │                          filter-repo deletes it (three-fallback chain:
 │   │   │                          same-session URL → preflight dict → askstring).
+│   │   ├── instruction_composer.py InstructionComposerDialog - agent policy as
+│   │   │                          toggles. Reads ownership FIRST and refuses a
+│   │   │                          foreign install; shows policy delta above
+│   │   │                          artifact delta, fleet exposure in fleet units,
+│   │   │                          and never recompiles on open.
 │   │   ├── instructions_overview.py InstructionsDialog - fleet instruction-chain view.
 │   │   ├── instructions_split.py  SplitProposalDialog - the oversized-chain offer.
 │   │   │                          Per project, never bulk.
@@ -956,7 +970,7 @@ app.py
   ├── constants.py       — palette, regex, paths
   ├── theme.py           — _Tooltip
   ├── helpers/*          — pure / IO helpers (no UI)
-  ├── dialogs/*          — 53 tk.Toplevel / panel modules
+  ├── dialogs/*          — 54 tk.Toplevel / panel modules
   └── controllers/*      — 29 tab and sub-controllers
         └── controllers/* each import the dialogs they instantiate
             (lazy in-handler imports for any cross-dialog cycle risk —

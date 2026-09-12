@@ -186,6 +186,49 @@ class ManagerConfig:
         return True if val is None else bool(val)
 
     @property
+    def instruction_policy(self):
+        """What this installation tells the fleet, as one validated object.
+
+        Read at execution time from `self.raw`, never snapshotted — the
+        ManagerConfig contract, and doubly so here: a Settings save rebinds
+        config, and a stale policy snapshot would render the baseline from
+        settings the user has already changed.
+
+        Returns the policy only. Migration reports which keys still need
+        persisting; `save_instruction_policy` is the one place that writes
+        them, so a read can never have a write as a side effect.
+        """
+        from helpers.instruction_policy import from_raw
+
+        return from_raw(self.raw)[0]
+
+    @property
+    def instruction_policy_unpersisted(self) -> tuple:
+        """Policy keys absent from config, so silence can be recorded as choice.
+
+        Separate from `instruction_policy` because the difference between
+        *never configured* and *chose the default* only matters to the code
+        that migrates, and every other caller wants the value.
+        """
+        from helpers.instruction_policy import from_raw
+
+        return from_raw(self.raw)[1]
+
+    def save_instruction_policy(self, policy) -> str:
+        """Persist a policy. Returns `""`, or the reason it was refused.
+
+        Refuses an invalid policy rather than storing it: the incoherent
+        combination must not exist on disk either, or the next load would have
+        to repair it and the user would see a toggle revert itself.
+        """
+        invalid = policy.validate()
+        if invalid:
+            return invalid
+        self.raw.update(policy.to_raw())
+        self.save()
+        return ""
+
+    @property
     def commit_message_backend(self) -> str:
         """Strategy order for commit-message suggestion.
 
