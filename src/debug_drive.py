@@ -278,6 +278,13 @@ class _Driver:
             from dialogs.gitignore import GitignoreDialog
             self._dialog = GitignoreDialog(
                 self._app, self._project(step), self._app._cfg)
+        elif name in ("policy", "composer", "agentpolicy", "agent_policy"):
+            # Reads fleet ownership in a worker before offering anything, so a
+            # `report` or `shot` needs an `after_ms` long enough for that scan
+            # to land -- until it does the preview says so and Apply is
+            # disabled, which is the correct state rather than an empty one.
+            from dialogs.instruction_composer import InstructionComposerDialog
+            self._dialog = InstructionComposerDialog(self._app, self._app._cfg)
         elif name in ("toolmanager", "tools", "tool_manager"):
             from dialogs.tool_manager import ToolManagerDialog
             self._dialog = ToolManagerDialog(self._app, self._app._cfg)
