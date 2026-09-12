@@ -1023,3 +1023,71 @@ def audit_mcp_auto_approve() -> list:
         "  Not a fault -- a trust setting. Remove the key to go back to "
         "approving each project's .mcp.json on its own merits.",
     ]
+
+
+def audit_read_nudge() -> list:
+    """Is the post-read advisory hook still registered, and still ours?
+
+    The reason this rule exists at all: **tokensave rewrites the hooks block of
+    ``~/.claude/settings.json`` on every ``install`` and upgrade.** Our entry is
+    dropped silently when it does, and the symptom -- reads that never get the
+    reminder -- is indistinguishable from the state before the feature existed.
+    A missing hook cannot report itself, so something else has to.
+
+    **Never installed is not a fault.** When neither the entry nor the script is
+    present the user simply does not use this, and a Doctor line telling them so
+    on every run is nagging, not diagnosis. The loud case is the script sitting
+    there with no entry pointing at it: that is a feature that *was* installed
+    and is now inert.
+
+    Reports which half is wrong, because "the nudge is stale" sends the user to
+    the wrong repair when the settings entry is perfect and the script was
+    edited by hand. UNKNOWN carries its own reason and is offered no fix --
+    ``settings.json`` is an agent-control file, and a repair written over one
+    that could not be parsed is worse than the warning it would silence.
+
+    Imported lazily so this module's import surface stays exactly ``ast``,
+    ``os`` and ``re`` for the CI one-liner in ``helpers/ci_workflow.py``.
+    """
+    try:
+        from helpers import read_nudge
+    except ImportError:
+        return []
+
+    script_path = read_nudge.default_script_path()
+    state, detail = read_nudge.installed_state()
+
+    if state == read_nudge.CURRENT:
+        return []
+    if state == read_nudge.ABSENT and not os.path.exists(script_path):
+        return []                       # never installed; not this rule's business
+
+    head = {
+        read_nudge.ABSENT: "  The read-nudge hook is installed but no longer "
+                           "registered.",
+        read_nudge.STALE: "  The read-nudge hook is registered but out of date.",
+        read_nudge.DUPLICATE: "  The read-nudge hook is registered more than "
+                              "once.",
+        read_nudge.UNKNOWN: "  The read-nudge hook could not be checked.",
+    }.get(state, "  The read-nudge hook is in an unrecognised state: %s" % state)
+
+    notes = [head]
+    if detail:
+        notes.append("  %s" % detail)
+
+    if state == read_nudge.UNKNOWN:
+        notes.append(
+            "  No repair is offered while this is unknown. ~/.claude/settings.json "
+            "controls which hooks run, and rewriting one that could not be read "
+            "risks more than the missing reminder costs.")
+        return notes
+
+    if state == read_nudge.ABSENT:
+        notes.append(
+            "  tokensave rewrites the hooks block of ~/.claude/settings.json on "
+            "every `install` and upgrade, which drops the entry without "
+            "reporting it. Reads stop getting the reminder and nothing says so.")
+    notes.append(
+        "  Re-run the read-nudge install from Doctor to restore exactly one "
+        "owned entry. Hooks that are not ours are never touched.")
+    return notes

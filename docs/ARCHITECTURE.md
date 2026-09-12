@@ -81,7 +81,7 @@ Token Save Manager Source/
 │   │                              report/wait/quit. `report what=geometry` runs the visual
 │   │                              oracle. Committed scripts live in scripts/drive/.
 │   │
-│   ├── helpers/                  108 modules of pure / IO helpers — no UI deps.
+│   ├── helpers/                  109 modules of pure / IO helpers — no UI deps.
 │   │   ├── config.py              _load_config, _save_config, _migrate_config
 │   │   ├── detection.py           _detect_git/_gh/_npm/_codegraph/_claude_cli,
 │   │   │                          _root_path/_label, _version_lt
@@ -212,6 +212,15 @@ Token Save Manager Source/
 │   │   │                          resolve_commit_range (4 modes: since_last_doc /
 │   │   │                          since_last_commit / since_last_tag / custom),
 │   │   │                          changed_file_paths. Roadmap-6 Tier B.
+│   │   ├── read_nudge.py          Post-read advisory hook. Renders + installs the
+│   │   │                          PostToolUse:Read hook that tells Claude tokensave_read
+│   │   │                          can serve an indexed file, after a whole-file Read.
+│   │   │                          Emits additionalContext ONLY -- never a permission key,
+│   │   │                          since `allow` would skip the permission prompt. Owns ONE
+│   │   │                          entry structurally (marker + body hash), so a foreign Read
+│   │   │                          hook is never claimed. installed_state() is five-valued and
+│   │   │                          names WHICH half drifted. The predicate is importable, so
+│   │   │                          scripts/measure_tokensave_adherence.py shares it verbatim.
 │   │   ├── readme_patch.py        README highlights sub-section splicer (append-only,
 │   │   │                          Roadmap-6 Phase 2.1 shape). Key exports:
 │   │   │                          read_highlights(path), read_highlights_from_text(text),

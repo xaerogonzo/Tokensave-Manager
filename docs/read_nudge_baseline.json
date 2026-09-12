@@ -1,0 +1,302 @@
+{
+  "window": {
+    "since": "2026-09-04T22:24:53.728935",
+    "until": "2026-09-11T22:24:53.728935"
+  },
+  "min_response_bytes": 2048,
+  "projects_discovered": 15,
+  "projects_with_eligible_reads": 10,
+  "projects_with_tokensave_read": 4,
+  "totals": {
+    "whole_file_reads": 468,
+    "eligible_whole_file_reads": 184,
+    "sliced_reads": 489,
+    "small_whole_file_reads": 25,
+    "excluded_extension_reads": 236,
+    "reads_outside_a_metadata_project": 23,
+    "tokensave_read_calls": 30,
+    "results_unrecoverable": 0
+  },
+  "completeness": {
+    "transcripts_scanned": 241,
+    "transcripts_failed": 0,
+    "records_unparsed": 0,
+    "results_unrecoverable": 0,
+    "complete": true
+  },
+  "projects": {
+    "D:\\Claude Co worker\\Token Save Manager Source": {
+      "verdicts": {
+        "excluded_extension": 22,
+        "eligible": 62,
+        "sliced": 27,
+        "no_metadata_project": 4
+      },
+      "tokensave_tools": {
+        "tokensave_status": 10,
+        "tokensave_context": 32,
+        "tokensave_files": 6,
+        "tokensave_search": 18,
+        "tokensave_module_api": 1,
+        "tokensave_complexity": 2,
+        "tokensave_read": 21,
+        "tokensave_callers": 1,
+        "tokensave_callers_for": 2,
+        "tokensave_health": 1,
+        "tokensave_circular": 1
+      },
+      "whole_file_reads": 88,
+      "eligible_whole_file_reads": 62,
+      "results_unrecoverable": 0
+    },
+    "D:\\Random Projects\\Pet Python": {
+      "verdicts": {
+        "no_metadata_project": 2,
+        "eligible": 5,
+        "excluded_extension": 15,
+        "sliced": 4
+      },
+      "tokensave_tools": {
+        "tokensave_context": 15,
+        "tokensave_status": 5,
+        "tokensave_todos": 2,
+        "tokensave_health": 1,
+        "tokensave_dead_code": 1,
+        "tokensave_read": 1,
+        "tokensave_callers_for": 3,
+        "tokensave_search": 3
+      },
+      "whole_file_reads": 22,
+      "eligible_whole_file_reads": 5,
+      "results_unrecoverable": 0
+    },
+    "D:\\Random Projects\\CleanForge": {
+      "verdicts": {
+        "eligible": 1,
+        "sliced": 1,
+        "excluded_extension": 1
+      },
+      "tokensave_tools": {
+        "tokensave_status": 2,
+        "tokensave_search": 1
+      },
+      "whole_file_reads": 2,
+      "eligible_whole_file_reads": 1,
+      "results_unrecoverable": 0
+    },
+    "D:\\Random Projects\\KicomAI_Project": {
+      "verdicts": {
+        "sliced": 14,
+        "small": 1,
+        "eligible": 5,
+        "excluded_extension": 4,
+        "no_metadata_project": 2
+      },
+      "tokensave_tools": {
+        "tokensave_context": 4,
+        "tokensave_status": 1,
+        "tokensave_search": 10,
+        "tokensave_callers_for": 1,
+        "tokensave_files": 1,
+        "tokensave_complexity": 2,
+        "tokensave_health": 1,
+        "tokensave_god_class": 1,
+        "tokensave_unused_imports": 1,
+        "tokensave_redundancy": 1,
+        "tokensave_imports": 1
+      },
+      "whole_file_reads": 12,
+      "eligible_whole_file_reads": 5,
+      "results_unrecoverable": 0
+    },
+    "D:\\Random Projects\\File Converter": {
+      "verdicts": {},
+      "tokensave_tools": {
+        "tokensave_health": 2,
+        "tokensave_dead_code": 1,
+        "tokensave_largest": 1,
+        "tokensave_read": 4,
+        "tokensave_circular": 1
+      },
+      "whole_file_reads": 0,
+      "eligible_whole_file_reads": 0,
+      "results_unrecoverable": 0
+    },
+    "D:\\Random Projects\\Fortuna Lab": {
+      "verdicts": {
+        "excluded_extension": 33,
+        "eligible": 24,
+        "sliced": 57
+      },
+      "tokensave_tools": {
+        "tokensave_context": 26,
+        "tokensave_search": 16,
+        "tokensave_status": 8,
+        "tokensave_body": 4,
+        "tokensave_callers_for": 2
+      },
+      "whole_file_reads": 57,
+      "eligible_whole_file_reads": 24,
+      "results_unrecoverable": 0
+    },
+    "D:\\Random Projects\\LexForge": {
+      "verdicts": {
+        "sliced": 1,
+        "eligible": 5,
+        "excluded_extension": 2
+      },
+      "tokensave_tools": {
+        "tokensave_status": 1,
+        "tokensave_search": 4,
+        "tokensave_context": 1
+      },
+      "whole_file_reads": 7,
+      "eligible_whole_file_reads": 5,
+      "results_unrecoverable": 0
+    },
+    "D:\\Random Projects\\OpenChem Studio": {
+      "verdicts": {
+        "eligible": 34,
+        "sliced": 113,
+        "no_metadata_project": 4,
+        "excluded_extension": 141,
+        "small": 1
+      },
+      "tokensave_tools": {
+        "tokensave_status": 15,
+        "tokensave_context": 31,
+        "tokensave_todos": 1,
+        "tokensave_search": 15,
+        "tokensave_health": 1,
+        "tokensave_complexity": 1,
+        "tokensave_god_class": 1,
+        "tokensave_circular": 1,
+        "tokensave_imports": 3,
+        "tokensave_coupling": 2,
+        "tokensave_redundancy": 1,
+        "tokensave_dead_code": 1,
+        "tokensave_unused_imports": 1,
+        "tokensave_recursion": 1,
+        "tokensave_unsafe_patterns": 1,
+        "tokensave_hotspots": 1,
+        "tokensave_callers_for": 2,
+        "tokensave_body": 3,
+        "tokensave_files": 11,
+        "tokensave_callers": 1
+      },
+      "whole_file_reads": 180,
+      "eligible_whole_file_reads": 34,
+      "results_unrecoverable": 0
+    },
+    "D:\\Random Projects\\PolyScour": {
+      "verdicts": {
+        "excluded_extension": 7,
+        "eligible": 8,
+        "sliced": 11
+      },
+      "tokensave_tools": {
+        "tokensave_context": 4,
+        "tokensave_search": 1,
+        "tokensave_status": 2,
+        "tokensave_todos": 1
+      },
+      "whole_file_reads": 15,
+      "eligible_whole_file_reads": 8,
+      "results_unrecoverable": 0
+    },
+    "D:\\Random Projects\\PolyBedrock": {
+      "verdicts": {
+        "sliced": 1
+      },
+      "tokensave_tools": {
+        "tokensave_search": 1,
+        "tokensave_body": 1
+      },
+      "whole_file_reads": 0,
+      "eligible_whole_file_reads": 0,
+      "results_unrecoverable": 0
+    },
+    "D:\\Random Projects\\Timed Shutdown": {
+      "verdicts": {
+        "eligible": 9,
+        "sliced": 6,
+        "small": 3
+      },
+      "tokensave_tools": {
+        "tokensave_status": 2,
+        "tokensave_context": 3,
+        "tokensave_files": 1,
+        "tokensave_read": 4,
+        "tokensave_todos": 1,
+        "tokensave_dead_code": 1
+      },
+      "whole_file_reads": 12,
+      "eligible_whole_file_reads": 9,
+      "results_unrecoverable": 0
+    },
+    "D:\\Random Projects\\Uplift Messenger": {
+      "verdicts": {
+        "eligible": 31,
+        "small": 17,
+        "sliced": 150,
+        "excluded_extension": 10,
+        "no_path": 3,
+        "no_metadata_project": 2
+      },
+      "tokensave_tools": {
+        "tokensave_status": 11,
+        "tokensave_context": 23,
+        "tokensave_files": 6,
+        "tokensave_callers_for": 5,
+        "tokensave_search": 41,
+        "tokensave_callers": 7,
+        "tokensave_module_api": 13,
+        "tokensave_largest": 2,
+        "tokensave_body": 2
+      },
+      "whole_file_reads": 60,
+      "eligible_whole_file_reads": 31,
+      "results_unrecoverable": 0
+    },
+    "D:\\Random Projects\\Uplift Messenger\\UpliftBridge_v2B": {
+      "verdicts": {
+        "sliced": 14,
+        "no_metadata_project": 1,
+        "excluded_extension": 1,
+        "small": 1
+      },
+      "tokensave_tools": {
+        "tokensave_search": 2
+      },
+      "whole_file_reads": 3,
+      "eligible_whole_file_reads": 0,
+      "results_unrecoverable": 0
+    },
+    "D:\\Random Projects\\Uplift Messenger\\Uplift Messanger": {
+      "verdicts": {
+        "sliced": 88,
+        "no_path": 2,
+        "no_metadata_project": 8,
+        "small": 1
+      },
+      "tokensave_tools": {
+        "tokensave_callers": 7,
+        "tokensave_search": 12,
+        "tokensave_callers_for": 2
+      },
+      "whole_file_reads": 9,
+      "eligible_whole_file_reads": 0,
+      "results_unrecoverable": 0
+    },
+    "D:\\Random Projects\\Uplift Messenger\\Uplift Messanger\\scripts\\drive": {
+      "verdicts": {
+        "small": 1,
+        "sliced": 2
+      },
+      "tokensave_tools": {},
+      "whole_file_reads": 1,
+      "eligible_whole_file_reads": 0,
+      "results_unrecoverable": 0
+    }
+  }
+}

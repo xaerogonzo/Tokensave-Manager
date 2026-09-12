@@ -71,6 +71,7 @@ from helpers.doctor_rules import (                      # noqa: E402
     audit_instructions,
     audit_observations,
     audit_mcp_auto_approve,
+    audit_read_nudge,
     audit_shadow_links,
 )
 
@@ -767,6 +768,7 @@ class DoctorController:
         self._log_graph_trust(project_path)
         self._log_pyscope_cache(project_path)
         self._log_mcp_posture()
+        self._log_read_nudge()
 
     def _log_instructions(self, project_path: str) -> None:
         """Warn-only. Whether this project's Claude instructions actually load.
@@ -871,6 +873,65 @@ class DoctorController:
         self._on_log("=== MCP trust posture ===", C["mauve"])
         for note in notes:
             self._on_log(note, C["peach"])
+
+    def _log_read_nudge(self) -> None:
+        """Machine-wide. Warn-only, and silent unless the hook has drifted.
+
+        Never counted as a violation: a missing reminder is a lost saving, not
+        a broken project, and it must not touch the number the caps are
+        measured against or block a push.
+        """
+        notes = audit_read_nudge()
+        if not notes:
+            return
+        self._on_log("=== Read nudge ===", C["mauve"])
+        for note in notes:
+            self._on_log(note, C["peach"])
+        self._offer_read_nudge_repair()
+
+    def _offer_read_nudge_repair(self) -> None:
+        """Offer the repair, and only for a state where a repair is honest.
+
+        UNKNOWN gets no prompt: `audit_read_nudge` already said why, and the
+        fix for an unparseable agent-control file is a person looking at it,
+        not this Manager writing over it.
+        """
+        from helpers import read_nudge
+
+        state, _detail = read_nudge.installed_state()
+        if state not in (read_nudge.ABSENT, read_nudge.STALE,
+                         read_nudge.DUPLICATE):
+            return
+        if not messagebox.askyesno(
+                "Restore the read nudge?",
+                "Re-register the post-read advisory hook in "
+                "~/.claude/settings.json?\n\n"
+                "It adds one line of context after a whole-file Read in an "
+                "indexed project, telling Claude that tokensave_read can serve "
+                "that file from the index. It never blocks, denies or "
+                "re-permissions a read.\n\n"
+                "A timestamped backup is written first, and hooks that are not "
+                "ours are left exactly as they are.",
+                parent=self._root):
+            self._on_log("  (read-nudge repair skipped)", C["overlay0"])
+            return
+
+        def worker():
+            ok, error, actions = read_nudge.install(
+                python_exe=self._cfg.raw.get("python_exe", ""))
+            for action in actions:
+                self._on_log("  %s" % action, C["overlay0"])
+            if ok:
+                self._on_log("  ✓ read nudge registered", C["green"])
+                self._on_log(
+                    "  ⚠ Hooks are read when a session starts, so any Claude "
+                    "Code session already running will not use it until it is "
+                    "restarted.", C["peach"])
+            else:
+                self._on_log("  ✗ %s" % error, C["red"])
+
+        threading.Thread(target=worker, daemon=True,
+                         name="doctor-read-nudge").start()
 
     def _log_audit_results(
         self,
