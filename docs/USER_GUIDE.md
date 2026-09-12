@@ -403,12 +403,6 @@ that uses the configured provider.
 - **Claude CLI not found** — features that require it show a warning and skip
   that step. Set the path in Settings → Paths & Tools.
 
-### Savings and spend
-
-The **Savings** button beside the output pane shows what tokensave saved and
-what the API calls cost. Those are two different ledgers and the dialog keeps
-them apart — `gain` is the saving, `cost` is the spend.
-
 ---
 
 <!-- help:precommit-hook -->
@@ -555,6 +549,185 @@ your editor by one click.
 Install and Uninstall need an editor that answers `--list-extensions`.
 `editor_cmd` is configurable and may not be VS Code at all, so the buttons are
 disabled with the reason rather than failing obscurely when it is not.
+
+---
+
+<!-- help:agent-policy -->
+## Agent Policy
+
+**What every wired project is told about committing and pushing, as toggles.**
+Settings → Git & Policy → 🎛 Agent Policy.
+
+Before this existed, the shared baseline hard-coded one behavioural instruction
+in prose, and changing it meant editing a file by hand. Now the toggles are the
+policy and the Markdown is compiled output:
+
+```
+manager-config.json  →  InstructionPolicy  →  templates/project-baseline.md
+                                                        ↓
+                                              every wired project,
+                                              on every message
+```
+
+**The direction of that arrow is the whole design.** If the compiled file
+disagrees with your configuration, the configuration is right and the file is
+stale. Nothing reads a hand-edited block back as intent — drift is reported and
+a recompile is offered, never adopted.
+
+### The toggles
+
+| toggle | what it means |
+|---|---|
+| **Allow automatic commits** | Whether agents may run `git commit` themselves |
+| **Allow automatic pushes** | Requires commits. The rendered instruction forbids force-push, tags and branch deletion *and* rewriting anything already pushed — forbidding force-push alone still leaves room to amend, rebase or reset and then publish the result |
+| **Session note on exit** | A Stop hook records your prompts beside each repo, so later drafts can say why a change happened |
+| **Use session context in drafts** | Attaches what you asked for to PR drafts; falls back to reading transcripts when a project has no note yet |
+| · include your prompts | Your own words, and the only authoritative source. Measured at ~1,200 tokens a day |
+| · include assistant prose | Richer, but ~20,200 tokens a day — prompt weight already measured to degrade small local models. Capped hard |
+
+Only the first two compile into the baseline. The rest change what *this
+Manager* does and cost no baseline bytes at all.
+
+Pushes require commits, and that is enforced on the model rather than in the
+dialog: "may push but not commit" cannot exist as a valid policy in memory or
+on disk.
+
+### Three things it refuses to do
+
+- **It will not write a template another installation owns.** Ownership is read
+  before anything else. A source checkout and a `dist/` build each carry their
+  own templates folder, and a policy artifact is the worst possible file to
+  write into the wrong one.
+- **It does not recompile when you open it.** The compiled baseline is version
+  controlled, so recompiling on open would turn a `git pull` into a silent
+  fleet-wide policy change.
+- **It will not exceed the review budget.** A compile that would push the
+  baseline past its size ceiling is refused with the arithmetic shown, rather
+  than discovered later.
+
+### What the claim actually is
+
+A rendered instruction is what projects are **told**. Whether an agent obeys it
+is not something this Manager can observe, and the dialog says so on screen.
+The preview shows the cost in fleet units — `+189 chars × 15 projects` — because
+the baseline is loaded by every wired project on every message.
+
+---
+
+<!-- help:agent-cli -->
+## Choosing a coding agent
+
+The Manager shells out to a coding-agent CLI in about a dozen places: commit
+message suggestions, Draft PR, the Ask tab, the pre-commit review hook, test
+generation, the integration audit. Which one it uses is a single setting —
+Settings → AI → Agent CLI — and the path lives in Settings → Paths & Tools.
+
+| agent | notes |
+|---|---|
+| **Claude Code** (default) | `npm install -g @anthropic-ai/claude-code`. Auto-detect probes the `.cmd` shim first, which is npm's Windows convention |
+| **Cursor Agent** | Auto-detect looks on `PATH` and then in `~/.local/bin`, where the Windows installer writes it |
+
+**Three outcomes, never two.** Resolution returns *ok*, *unavailable* — the
+right agent, nothing installed to run — or *unknown agent*, meaning the
+configured id is a typo. Those are kept apart deliberately: one means "install
+it" and the other means "fix your config", and an unrecognised id must never
+quietly run the default agent instead.
+
+The model is configured per agent rather than shared, because Anthropic model
+ids are not valid Cursor model ids. Leaving Cursor's blank lets Cursor choose.
+
+Claude Skills in the Reference tab stay pinned to Claude Code. That is a
+capability difference rather than an oversight.
+
+---
+
+<!-- help:testing-a-project -->
+## Testing a project
+
+Two surfaces, answering different questions.
+
+### 🧪 Test Gaps — what this branch changed without testing
+
+On the Git tab. It compares your branch against its base — auto-detected, or
+overridden through the Draft PR button's right-click menu — and lists the
+`src/` Python files that changed with no `tests/test_*.py` counterpart.
+
+From the panel you can generate template stubs, or AI-written tests, for the
+flagged files in one click. The same panel appears inside the Draft PR dialog,
+so you can reach it without drafting a PR first.
+
+### 🧪 Test Manager — the whole suite
+
+On the Git tab beside Test Gaps, and in Settings → Paths & Tools with the other
+managers. Four tabs:
+
+1. **Run + View** — every test file with its last-run status; run all, run the
+   selected ones, stop a run in flight, and sync the open PR's testing checklist
+2. **Coverage Gaps** — `src/` files with no matching test file. Clicking *Add
+   Tests for Selected* jumps to the Scaffold tab with them already chosen
+3. **Stale Tests** — tests importing deleted modules or symbols that no longer
+   exist. It reads top-level imports only and skips `TYPE_CHECKING` blocks; a
+   per-row *Mark as still valid* silences a false positive for good
+4. **Scaffold** — pick a source file and a template kind, preview the rendered
+   test file, then generate `tests/test_<name>.py` with placeholder tests
+
+Separately, Settings → Git & Policy can install a **pre-commit hook that runs
+the suite before every commit** for the active project.
+
+---
+
+<!-- help:savings -->
+## Savings and spend
+
+The **Savings** button beside the output pane. It reports two quantities that
+are easy to confuse and are never shown adjacent without a label saying which is
+which:
+
+- **Savings** come from `tokensave gain`, and are **per project** with an
+  explicit all-projects toggle
+- **Spend** comes from `tokensave cost`, and is **machine-global** across every
+  project and agent, because tokensave offers no project filter for it. The
+  heading says so inline
+
+That separation replaced a panel that was confidently wrong. It scraped the
+*Cost* column — money **spent**, at API list price — and rendered it in a card
+labelled "Value Recouped". On the reference machine it showed **$4,132.75**
+where the ledger that actually records savings said **$0.14**. The "Saved
+Tokens" card beside it was a lifetime, all-projects counter displayed under a
+subtitle reading "past 7 days".
+
+Both figures are list-price estimates for traffic, not an invoice. A number
+whose scope is not stated is the failure this dialog was rewritten to remove, so
+each card names its own.
+
+---
+
+<!-- help:scrub-history -->
+## Erasing a file from GitHub history
+
+Manage .gitignore… → **⚙ Advanced**. For when something that should never have
+been published — a credential, a build script, a private note — is sitting in
+your repository's history where anyone can download it.
+
+**Adding it to `.gitignore` does not help, and neither does deleting it.** Git
+keeps every commit that ever contained it, and GitHub stores whatever history
+you push. To change what GitHub has you must rewrite your **local** history and
+then force-push so GitHub adopts the rewritten version. There is no way to edit
+GitHub directly; `git filter-repo` is the standard tool for the local rewrite,
+and the dialog offers to install it with `pip` if it is missing.
+
+The order matters, and the dialog enforces it:
+
+1. If the file is still in `HEAD`, **untrack and commit that first** — the Scrub
+   button stays disabled until you have
+2. Pick the file to erase
+3. Scrub, which rewrites local history
+4. Force-push, so GitHub adopts it
+
+Two things worth knowing before you start. Anyone who already cloned the
+repository still has the old history, and a secret that was ever public should
+be **rotated** rather than merely erased. And rewriting history changes every
+commit id after the affected one, so collaborators will need to re-clone.
 
 ---
 

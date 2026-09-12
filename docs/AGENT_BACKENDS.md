@@ -25,7 +25,7 @@ and behaves exactly as it did — locked down by `tests/test_backend_compat.py`.
 | State | Meaning | What to tell the user |
 |---|---|---|
 | `ok` | agent known, binary found | — |
-| `unavailable` | right agent, nothing to run | set its path in Settings → Paths |
+| `unavailable` | right agent, nothing to run | set its path in Settings → Paths & Tools |
 | `unknown_agent` | config names something unrecognised | fix `agent_cli`; **no agent is run** |
 
 An unknown id is never quietly mapped onto the default. Doing so would run one
@@ -199,7 +199,7 @@ Stdout is captured and returned as the draft text.  The process runs with
 | `gen_params` overrides         | ❌ (CLI ignores temperature / top_p) |
 | `num_ctx`                      | ❌        |
 
-**CLI path** is set in Settings → Claude Code CLI.  An empty path returns a
+**CLI path** is set in Settings → Paths & Tools → Claude Code CLI.  An empty path returns a
 user-visible error before the subprocess call.
 
 ---
@@ -367,7 +367,7 @@ caller's UI surfaces a once-per-session "run a full reindex" dialog.
 `ManagerConfig.enable_llm_grounding` gates the entire pipeline across
 EVERY AI surface (commit messages, PR draft, AI Code Review, Ask tab
 non-agentic, doc drafter). Default ON; persisted via
-`cfg.raw["enable_llm_grounding"]`. Settings → AI backend selection →
+`cfg.raw["enable_llm_grounding"]`. Settings → AI →
 "Code-graph grounding".
 
 ---

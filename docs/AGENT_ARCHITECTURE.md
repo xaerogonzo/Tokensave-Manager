@@ -18,7 +18,7 @@ Autonomous execution (Stage 5+) will be opt-in per tool with an explicit allowli
 
 | Layer | Implementation |
 |---|---|
-| **Inference engine** | User's choice: Ollama (recommended), LM Studio, OpenAI, Anthropic. Configured in Settings → "AI commit messages". |
+| **Inference engine** | User's choice: Ollama (recommended), LM Studio, OpenAI, Anthropic. Configured in Settings → AI. |
 | **HTTP transport** | `urllib.request` from the Python stdlib. No `httpx`, no `requests`, no `openai` SDK — keeping dependencies minimal. |
 | **LLM client** | `_call_llm(cfg, system_prompt, user_prompt, max_tokens, timeout) → str \| None` in `src/helpers/llm.py`. Returns text on success, `None` on any failure. |
 | **Agent loop** | `LocalAgent` class in `src/agent.py`. Custom ~280-line stdlib implementation. NO LangChain / LlamaIndex / OpenAI-Agents-SDK. Bounded `max_iterations` (default 8), cumulative tool-output context budget (~40 000 chars), master try/except around every tool dispatch so handler errors feed back to the model rather than crashing the thread. |
@@ -29,7 +29,7 @@ Autonomous execution (Stage 5+) will be opt-in per tool with an explicit allowli
 
 - **Running Ollama and LM Studio simultaneously can break model loading.** Both inference engines load their model into RAM/VRAM independently — they don't share state and don't know about each other. If LM Studio has a 7B model loaded and you ask Ollama to load a 14B model, Ollama's memory-availability check refuses with `HTTP 500: "model requires more system memory (X GiB) than is available (Y GiB)"`. The error message points at total system memory and doesn't hint that another inference daemon is holding the difference.
   - **Workaround**: unload one model before loading the other. LM Studio: Eject button in the model dropdown. Ollama: `ollama ps` then `ollama stop <model>`.
-  - **Why the manager doesn't auto-detect this**: the manager only knows about ONE provider at a time (whichever is selected in Settings → AI commit messages). Polling both engines on every LLM call would add latency to the happy path.
+  - **Why the manager doesn't auto-detect this**: the manager only knows about ONE provider at a time (whichever is selected in Settings → AI). Polling both engines on every LLM call would add latency to the happy path.
   - **Symptom in the manager**: `_call_llm` returns `None` silently (intentional — commit-message generation must never block a commit because of an LLM error). The Ask tab agent path DOES surface the full HTTP body via `LocalAgent._last_error`, so the chat will show you the "more system memory" message verbatim.
 
 - **`num_ctx` for Ollama defaults to 32 768** in `commit_message_llm`. If you're running a model that only supports a smaller context, requests may be silently truncated. Check the model's actual context limit (`ollama show <model>`) and tune the setting if needed.
@@ -48,7 +48,7 @@ Every AI surface in the manager (commit messages, PR draft, code review, Ask tab
 - **Tokensave block** built from named recipes (`commit_range_context`, `architecture_overview`, `roadmap_evidence`, `module_deep_dive`) via `helpers/doc_grounding.py:build_grounding_block`. Shells out to `tokensave tool context/search`.
 - **Codegraph block** (v4.1) built in parallel via `build_codegraph_block`. For the `roadmap_evidence` recipe it additionally invokes `codegraph affected --stdin` with the changed-files list to surface test-impact mapping.
 - **`build_combined_grounding`** (v4.4 dedup-first-then-truncate) merges both sources with per-source cap (4000 chars default; 2000 for the Ask tab tight-budget path). Line-level dedup eliminates redundancy where both sources cite the same symbols.
-- **Master toggle** `ManagerConfig.enable_llm_grounding` (Settings → "Code-graph grounding") gates the entire pipeline; default ON.
+- **Master toggle** `ManagerConfig.enable_llm_grounding` (Settings → AI → "Code-graph grounding") gates the entire pipeline; default ON.
 - **Freshness gate** `helpers/codegraph_freshness.py:ensure_fresh` runs before every codegraph block invocation; if the index is stale (DB mtime > 200 s behind newest source), it blocks briefly to run `codegraph sync` and re-checks. If broken (under-indexed), the dialog surfaces a once-per-session "run a full reindex" prompt.
 
 ### Stage 0 — Smart commit-message generation (shipped)

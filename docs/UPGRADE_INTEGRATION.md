@@ -69,7 +69,7 @@ you no longer run, and the remedy is a re-index, not a bug report.
 
 ### From the manager UI (recommended)
 
-- **Settings → "🔍 Check integration"** button (next to the Upgrade button)
+- **Settings → Paths & Tools → "🔍 Check integration"** button (next to the Upgrade button)
 - **Right-click any project → "🔄 Integration check"**
 
 Both open a scrollable report dialog showing:
@@ -169,7 +169,7 @@ When the hourly GitHub poller detects a new tokensave release for the first time
 OUTPUT pane shows two lines:
 
 ```
-→ tokensave X.Y.Z → A.B.C ready to install.  Settings → 'Upgrade tokensave to vA.B.C'
+→ tokensave X.Y.Z → A.B.C ready to install.  Settings → Paths & Tools → 'Upgrade tokensave to vA.B.C'
   to apply, or run 'tokensave upgrade' from a shell.
 → Integration workflow: upgrade tokensave → git pull this repo →
   python scripts/check_tokensave_integration.py → '🔄 Integration audit' snippet
