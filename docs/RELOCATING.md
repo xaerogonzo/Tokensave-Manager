@@ -1,3 +1,4 @@
+<!-- help:relocating -->
 # Moving TokenSave Manager
 
 Short version: **move the folder, start the Manager, press the button it

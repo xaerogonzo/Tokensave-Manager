@@ -427,6 +427,37 @@ class _Driver:
         for index, section in enumerate(ctl._sections):
             _say("    section %d : %s" % (index, type(section).__name__))
 
+    def _report_help(self, step: "dict[str, Any]") -> None:
+        """What the Help tab is showing, and what the corpus scan found.
+
+        The corpus numbers are the assertable part: a document that failed to
+        load shows up as a problem here rather than as a list that is merely
+        shorter than you remember. `query` drives the search box first, so a
+        script can check that searching narrows the list rather than emptying
+        it.
+        """
+        from helpers import help_docs
+
+        ctl = getattr(self._app, "_help_ctrl", None)
+        if ctl is None:
+            _say("drive: help: the app has no help tab")
+            return
+        query = str(step.get("query", ""))
+        if query:
+            ctl._query.set(query)
+        topics, problems = help_docs.scan()
+        _say("drive: help: %d topics from %d documents, %d problem(s)"
+             % (len(topics), len(help_docs.HELP_DOCUMENTS), len(problems)))
+        for problem in problems:
+            _say("    PROBLEM %s: %s" % (problem.document, problem.detail))
+        _say("    query     : %r" % query)
+        _say("    listed    : %d" % ctl._help_lb.size())
+        _say("    showing   : %s" % (ctl._current_key or "(none)"))
+        body = ctl._help_txt.get("1.0", "end").strip()
+        _say("    rendered  : %d chars" % len(body))
+        for line in body.splitlines()[:int(step.get("lines", 6))]:
+            _say("    | " + line)
+
     def _do_report(self, step: "dict[str, Any]") -> None:
         """Dump what a window actually says, as text.
 
@@ -454,6 +485,9 @@ class _Driver:
             return
         if what == "settings":
             self._report_settings()
+            return
+        if what == "help":
+            self._report_help(step)
             return
         lines = [t for t in (_widget_text(w).strip() for w in _walk(target))
                  if t]

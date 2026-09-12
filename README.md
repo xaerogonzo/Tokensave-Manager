@@ -42,6 +42,7 @@ If you use Claude across several projects, this is the control panel: switch act
 
 ---
 
+<!-- help:code-intelligence -->
 ## Code Intelligence — tokensave + CodeGraph
 
 The manager treats two different code-graph tools as equal citizens. You can use either, both, or neither on any given project. This section explains what they do, how they differ, and how to pick.
@@ -103,6 +104,7 @@ The manager's design philosophy: **never force a choice you don't want to make**
 
 ---
 
+<!-- help:features -->
 ## Features
 
 ### Project Management
@@ -190,6 +192,7 @@ The manager's design philosophy: **never force a choice you don't want to make**
 
 ---
 
+<!-- help:requirements -->
 ## Requirements
 
 - **Windows 10 / 11** (NTFS required for shadow links; everything else works on any NTFS volume)
@@ -206,6 +209,7 @@ The manager's design philosophy: **never force a choice you don't want to make**
 
 ---
 
+<!-- help:installation -->
 ## Installation
 
 ### From a compiled release (recommended)
@@ -245,6 +249,7 @@ pythonw src/app.py
 
 ---
 
+<!-- help:first-run -->
 ## First-Run Setup
 
 When you launch for the first time (or when config paths are invalid), the **Settings dialog** opens automatically with a red banner describing what's missing.
@@ -276,8 +281,10 @@ You can also use **⚙ Retrofit Existing** from the toolbar to add tokensave rul
 
 ---
 
+<!-- help:interface -->
 ## The Interface
 
+<!-- help:projects-tab -->
 ### Projects Tab
 
 The main tab. Shows all discovered tokensave projects grouped by category.
@@ -307,6 +314,7 @@ The main tab. Shows all discovered tokensave projects grouped by category.
 
 The **active project badge** at the top of the window shows which project is currently pinned for Claude Desktop, and whether it was manually pinned or auto-detected.
 
+<!-- help:git-tab -->
 ### Git Tab
 
 A full git control panel for whichever project is selected in the Projects tab.
@@ -390,6 +398,7 @@ Commit message:
 - **💡 Suggest** generates a conventional-commit message based on *only the ticked files* (`feat:`, `fix:`, `docs:`, `chore:`, etc.)
 - Select All / Select None / Modified Only are quick-pick shortcuts
 
+<!-- help:ask-tab -->
 ### 🤖 Ask Tab
 
 Stage 2 of the agentic-AI roadmap (see `docs/AGENT_ARCHITECTURE.md` and `docs/ROADMAP.md`). A chat interface where a local LLM uses read-only tools to answer questions about the selected project.
@@ -438,12 +447,14 @@ Recommended starter prompts:
 - "What did I change in the last 10 commits?"
 - "Why might `_call_llm` fail silently? What are all the failure modes?"
 
+<!-- help:reference-tab -->
 ### Reference Tab
 
 - **CLI cheatsheet** — every common `tokensave` command with flags, formatted for copy-paste
 - **Prompt snippets** — 12 built-in Claude Code prompts: codebase overview, symbol search, impact analysis, dead-code scan, TODO list, changelog generation, health check, etc.
 - Copy any snippet to the clipboard with one click, or **Add** your own custom snippets that persist in `manager-config.json`
 
+<!-- help:help-tab -->
 ### Help Tab
 
 A scrollable guide covering:
@@ -456,6 +467,7 @@ A scrollable guide covering:
 
 ---
 
+<!-- help:project-bindings -->
 ## Per-Project Bindings — working on several projects at once
 
 **The problem.** Without a binding, every Claude Code session falls back to the
@@ -525,6 +537,7 @@ Worth understanding before you do it: once the fallback is gone, a project with
 no binding has **no tokensave at all**. That is the deliberate trade —
 determinism instead of a fallback that is usually right.
 
+<!-- help:right-click-menu -->
 ## Right-Click Menu
 
 Right-click any project row in the Projects tab to get the full per-project action menu:
@@ -561,6 +574,7 @@ Right-click any project row in the Projects tab to get the full per-project acti
 
 ---
 
+<!-- help:git-workflow -->
 ## Git Workflow — Step by Step
 
 If you're new to git, here's the pattern the manager is designed around:
@@ -599,6 +613,7 @@ For a project only you work on, you can skip branches entirely:
 
 ---
 
+<!-- help:configuration -->
 ## Configuration Reference
 
 All settings live in `manager-config.json` at the project root (not committed to git). Edit via the **Settings** dialog or directly in a text editor.
@@ -641,6 +656,7 @@ All settings live in `manager-config.json` at the project root (not committed to
 
 ---
 
+<!-- help:vscode -->
 ## Working from VS Code
 
 Everything below is optional. The Manager is still the full UI — this is about
@@ -724,6 +740,7 @@ in VS Code reads which config — the answer is less obvious than it looks.
 
 ---
 
+<!-- help:building -->
 ## Building from Source
 
 Prerequisites:
@@ -992,6 +1009,7 @@ See [CHANGELOG.md](CHANGELOG.md) for the full history.
 
 ---
 
+<!-- help:testing -->
 ## Testing
 
 The manager ships with a pytest test suite covering pure-logic helpers, the AI

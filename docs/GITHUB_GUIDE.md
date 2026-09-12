@@ -20,6 +20,7 @@ change you made, and a downloadable release that anyone can install.
 
 ---
 
+<!-- help:git-what-is-it -->
 ## 1. What is git? What is GitHub?
 
 **Git** is a program that runs on your computer and remembers every change you make
@@ -39,6 +40,7 @@ destination you push to.
 
 ---
 
+<!-- help:git-concepts -->
 ## 2. Key concepts in plain English
 
 | Term | What it actually means |
@@ -59,6 +61,7 @@ destination you push to.
 
 ---
 
+<!-- help:github-setup -->
 ## 3. First-time setup
 
 ### Step 1 — Install git
@@ -87,6 +90,7 @@ unlimited public and private repositories.
 
 ---
 
+<!-- help:github-first-push -->
 ## 4. Putting your project on GitHub
 
 ### Step 1 — Initialise git in your project
@@ -122,6 +126,7 @@ Your project is now on GitHub. Visit your repo URL to see it.
 
 ---
 
+<!-- help:git-daily -->
 ## 5. Your daily workflow
 
 ```
@@ -158,6 +163,7 @@ Click **⬆ Push** to send your commits to GitHub.
 
 ---
 
+<!-- help:git-branches -->
 ## 6. Working with branches
 
 Branches let you try out an idea without touching your stable code.
@@ -223,6 +229,7 @@ for you — no terminal needed, and no orphaned remote branch left behind.
 
 ---
 
+<!-- help:releases -->
 ## 7. Publishing a release (.exe)
 
 A GitHub Release lets anyone download your compiled `.exe` without needing Python
@@ -313,6 +320,7 @@ commit prefixes.
 
 ---
 
+<!-- help:git-problems -->
 ## 8. Common problems and fixes
 
 ### "Push failed — authentication"
@@ -351,6 +359,7 @@ this in a terminal.
 
 ---
 
+<!-- help:git-glossary -->
 ## 9. Glossary
 
 | Word | Plain-English definition |

@@ -22,6 +22,7 @@
 
 ---
 
+<!-- help:tokensave-install -->
 ## Installation
 
 ### Windows (Scoop)
@@ -79,6 +80,7 @@ tokensave status
 
 ---
 
+<!-- help:tokensave-daily -->
 ## Daily Workflow
 
 ```
@@ -97,6 +99,7 @@ Claude uses tokensave MCP tools automatically
 
 ---
 
+<!-- help:tokensave-cli -->
 ## CLI Reference
 
 ### Indexing
@@ -159,6 +162,7 @@ Claude uses tokensave MCP tools automatically
 
 ---
 
+<!-- help:tokensave-tools -->
 ## MCP Tools Reference
 
 These are the 48 tools Claude uses automatically when tokensave is active. You can reference them by name in prompts to guide Claude toward specific analyses.
@@ -367,6 +371,7 @@ tokensave reset-counter
 
 ---
 
+<!-- help:tokensave-troubleshooting -->
 ## Troubleshooting
 
 ### "Server disconnected" in Claude Desktop

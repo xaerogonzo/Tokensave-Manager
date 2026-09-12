@@ -305,6 +305,35 @@ content hash, because two different baselines must not look equivalent to
 somebody reading only a date and a byte count. No automatic version order is
 invented; the user ticks.
 
+### D1g. Help is the repository's markdown, and the key lives in the document
+
+`helpers/help_docs.py` + `helpers/markdown_tk.py` + `controllers/help_tab.py`.
+Paid for by a measurement: the hand-written Python help covered **9 of 19**
+features while `README.md` already covered **12 of 14** of the ones it missed.
+The documentation was better than the help and simply was not the help.
+
+- **A topic is an `<!-- help:key -->` anchor above a heading**, never a registry
+  in Python mapping a key to heading text. A registry breaks silently the first
+  time somebody rewords a heading, which is the edit a documentation sweep
+  makes. **Do not delete these anchors** — they render as nothing on GitHub
+  and each one is a page of the application.
+- **Python owns WHICH documents are help; markdown owns WHAT TOPICS exist.**
+  `HELP_DOCUMENTS` is a list of files, which has no silent-staleness mode; a
+  list of headings does. ARCHITECTURE / ROADMAP / VERIFICATION / CHANGELOG are
+  excluded on purpose — written for people working ON the Manager, and they
+  would bury the documents that answer a user's question.
+- **A missing document is a reported `Problem`, never a shorter list.** D1b in a
+  new place: a reader cannot tell "nothing to say" from "failed to load".
+- **`markdown_tk` is a SUBSET, not a markdown implementation**, and unsupported
+  syntax is asserted to render literally. Without those tests it is one "just
+  add links" away from a parser nobody trusts.
+- **The build must ship every corpus document.** Help reads them from
+  `_BASE_DIR` at run time, so one missing from `dist\` is a topic that vanishes
+  while a source checkout still passes every test. `build.ps1` keeps an explicit
+  list — a recursive `docs\` copy would ship dev notes to users — and
+  `tests/test_build_ships_help_corpus.py` parses it so the list maintains
+  itself.
+
 ### D2. Agent CLIs: a new agent is a table row, never a new literal
 
 `helpers/agent_cli.py` holds one capability table. Adding Codex, Gemini CLI or

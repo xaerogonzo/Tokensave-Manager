@@ -81,7 +81,7 @@ Token Save Manager Source/
 │   │                              report/wait/quit. `report what=geometry` runs the visual
 │   │                              oracle. Committed scripts live in scripts/drive/.
 │   │
-│   ├── helpers/                  114 modules of pure / IO helpers — no UI deps.
+│   ├── helpers/                  116 modules of pure / IO helpers — no UI deps.
 │   │   ├── config.py              _load_config, _save_config, _migrate_config
 │   │   ├── detection.py           _detect_git/_gh/_npm/_codegraph/_claude_cli,
 │   │   │                          _root_path/_label, _version_lt
@@ -263,6 +263,11 @@ Token Save Manager Source/
 │   │   │                          detection. v4 alignment-aware: refuses if the candidate
 │   │   │                          sections don't reach the alignment threshold (≥ 2
 │   │   │                          weighted points; tiered scoring per v4.1 Revision C).
+│   │   ├── help_docs.py         The help corpus: topics keyed by <!-- help:key -->
+│   │   │                        anchors in the shipped markdown. Python owns WHICH
+│   │   │                        documents; markdown owns WHAT TOPICS.
+│   │   ├── markdown_tk.py       Pure markdown subset -> (text, tag) spans for the
+│   │   │                        Help Text widget. Deliberately not a parser.
 │   │   ├── doc_grounding.py       v4 cascade Theme B1. `build_grounding_block` shells out
 │   │   │                          to `tokensave tool context/search`; `build_codegraph_block`
 │   │   │                          (v4.1) does the same for codegraph (incl. `codegraph
@@ -764,11 +769,6 @@ Token Save Manager Source/
 │       │                          files without tests to generated stubs.
 │       ├── commit_request_banner.py CommitRequestBanner — the Git tab's commit-request
 │       │                          handoff banner.
-│       ├── help_topics_basics.py  Help-tab topic renderers — projects, scaffold, tray.
-│       ├── help_topics_git.py     Help-tab topic renderers — git concepts, workflow,
-│       │                          GitHub.
-│       └── help_topics_tools.py   Help-tab topic renderers — CodeGraph, AI, checks,
-│       │                          settings, about.
 │
 ├── scripts/                       Source-only developer tools (NOT shipped in dist\)
 │   ├── check_tokensave_integration.py
@@ -1001,7 +1001,7 @@ app.py
   ├── theme.py           — _Tooltip
   ├── helpers/*          — pure / IO helpers (no UI)
   ├── dialogs/*          — 57 tk.Toplevel / panel modules
-  └── controllers/*      — 30 tab and sub-controllers
+  └── controllers/*      — 27 tab and sub-controllers
         └── controllers/* each import the dialogs they instantiate
             (lazy in-handler imports for any cross-dialog cycle risk —
              see Rule 6 in CHANGELOG Round 4 Phase C decisions).

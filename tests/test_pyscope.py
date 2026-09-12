@@ -795,17 +795,23 @@ class TestDoctorCacheRecommendation:
 
 
 class TestHelpTopic:
+    """Help moved from Python to markdown; what it must SAY did not change."""
 
-    def test_the_topic_is_registered_in_the_section_list(self):
-        src = open("src/controllers/help_tab.py", encoding="utf-8").read()
-        assert '"  PyScope"' in src
-        assert "_help_pyscope" in src
+    def test_the_topic_is_reachable_from_the_corpus(self):
+        from helpers import help_docs
+
+        keys = [t.key for t in help_docs.topics()]
+        assert "pyscope" in keys, (
+            "the PyScope help anchor is gone; add <!-- help:pyscope --> back "
+            "above its heading")
 
     def test_it_states_the_difference_from_the_other_two_tools(self):
         """The topic exists to answer "why a third tool", so that answer has
-        to survive future edits."""
-        import inspect
-        from controllers import help_topics_tools
-        src = inspect.getsource(help_topics_tools.pyscope)
-        assert "how much of that is actually established" in src
-        assert "Confidence" in src and "Dispatch" in src and "Completeness" in src
+        to survive future edits -- including the edit that moved it out of
+        Python and into docs/PYSCOPE_INTEGRATION.md."""
+        from helpers import help_docs
+
+        body = help_docs.topic_markdown("pyscope")
+        assert "actually established" in body
+        assert "Confidence" in body and "Dispatch" in body
+        assert "Completeness" in body

@@ -19,6 +19,7 @@ The integration workflow below catches both classes of problem.
 
 ---
 
+<!-- help:integration-check -->
 ## The sequence (ORDER MATTERS)
 
 The check script reads **local files only** — it does not fetch anything from the
@@ -103,6 +104,7 @@ Exit code is always 0 — this is an advisory report, not a blocking check.
 
 ---
 
+<!-- help:integration-audit -->
 ## Step 5 — LLM integration audit
 
 Open the **Reference tab → copy "🔄  Integration audit (after upgrade)"** and paste

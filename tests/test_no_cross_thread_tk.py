@@ -137,7 +137,7 @@ _KNOWN_OFFENDERS: dict = {
     "src/controllers/codegraph_ctrl.py": 4,
     "src/controllers/doctor_ctrl.py": 5,
     "src/controllers/git_ops_ctrl.py": 5,
-    "src/controllers/help_tab.py": 5,
+    "src/controllers/help_tab.py": 4,
     "src/controllers/housekeeping_ctrl.py": 4,
     "src/controllers/pr_draft_ctrl.py": 1,
     "src/controllers/project_sync_ctrl.py": 1,
