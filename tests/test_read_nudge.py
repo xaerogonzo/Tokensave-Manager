@@ -323,9 +323,15 @@ def test_a_configured_but_absent_python_falls_back(tmp_path):
 
 
 def test_no_interpreter_refuses_rather_than_writing_a_dead_hook(monkeypatch,
-                                                               tmp_path):
-    monkeypatch.setattr(rn.shutil, "which", lambda _name: None)
-    monkeypatch.setattr(rn.sys, "executable", str(tmp_path / "pythonw.exe"))
+                                                                tmp_path):
+    # Patched on `claude_hooks`, which owns interpreter resolution for every
+    # hook. It used to live in `read_nudge`; patching the module that no longer
+    # performs the behaviour is how a mock quietly stops testing anything.
+    from helpers import claude_hooks
+
+    monkeypatch.setattr(claude_hooks.shutil, "which", lambda _name: None)
+    monkeypatch.setattr(claude_hooks.sys, "executable",
+                        str(tmp_path / "pythonw.exe"))
     found, error = rn.resolve_interpreter("")
     assert found == ""
     assert "not installed" in error

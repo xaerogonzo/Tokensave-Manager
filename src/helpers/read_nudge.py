@@ -52,16 +52,11 @@ It is a string constant rather than a file read from disk for the same reason
 
 from __future__ import annotations
 
-import hashlib
 import importlib.util
-import json
 import os
-import shutil
-import sys
 import tempfile
-import time
 
-from helpers.mcp_paths import _write_json_atomic
+from helpers import claude_hooks
 
 # ── Identity ──────────────────────────────────────────────────────────────
 #: Bumping this is a deliberate migration: `installed_state` reports STALE and
@@ -72,18 +67,14 @@ HOOK_EVENT = "PostToolUse"
 HOOK_MATCHER = "Read"
 SCRIPT_BASENAME = "tokensave_read_nudge.py"
 
-# ── Install states ────────────────────────────────────────────────────────
-CURRENT = "current"
-STALE = "stale"
-DUPLICATE = "duplicate"
-ABSENT = "absent"
-UNKNOWN = "unknown"
-
-#: Which half is wrong, so the diagnostic can say so. An entry that is perfect
-#: beside a script somebody replaced by hand is not "the nudge is stale", and
-#: telling the user it is sends them to the wrong repair.
-HALF_ENTRY = "settings entry"
-HALF_SCRIPT = "hook script"
+# ── Install states: the shared vocabulary, re-exported ────────────────────
+CURRENT = claude_hooks.CURRENT
+STALE = claude_hooks.STALE
+DUPLICATE = claude_hooks.DUPLICATE
+ABSENT = claude_hooks.ABSENT
+UNKNOWN = claude_hooks.UNKNOWN
+HALF_ENTRY = claude_hooks.HALF_ENTRY
+HALF_SCRIPT = claude_hooks.HALF_SCRIPT
 
 
 _HOOK_HEADER = "# %s v%d\n" % (HOOK_MARKER, HOOK_VERSION)
@@ -358,39 +349,71 @@ if __name__ == "__main__":
     main()
 '''
 
-HOOK_SCRIPT = _HOOK_HEADER + _HOOK_BODY
+#: This hook, as a row. Everything generic — resolving an interpreter, owning
+#: exactly one entry, backing up and rewriting settings, reporting state —
+#: lives in `helpers/claude_hooks.py`, because the session note is the second
+#: hook and the second is where a literal becomes a table.
+SPEC = claude_hooks.HookSpec(
+    marker=HOOK_MARKER,
+    version=HOOK_VERSION,
+    event=HOOK_EVENT,
+    matcher=HOOK_MATCHER,
+    basename=SCRIPT_BASENAME,
+    body=_HOOK_BODY,
+)
+
+HOOK_SCRIPT = SPEC.script
 
 
 def render_hook_script() -> str:
     """The artifact's exact text. Identity is computed from this, never guessed."""
-    return HOOK_SCRIPT
+    return SPEC.script
 
 
 def script_fingerprint(text: str) -> str:
-    """Content identity, newline-insensitive.
-
-    A checkout or an editor may rewrite line endings without changing a single
-    instruction, and calling that a stale hook would send the user to a repair
-    that changes nothing.
-    """
-    normalised = (text or "").replace("\r\n", "\n").replace("\r", "\n")
-    return hashlib.sha256(normalised.encode("utf-8")).hexdigest()
+    return claude_hooks.script_fingerprint(text)
 
 
 def default_script_path() -> str:
-    """`~/.claude/hooks/` -- deliberately NOT the Manager's install directory.
-
-    Rule D1f: an absolute pointer into the install dir is one more thing a
-    relocation breaks, and `template_dir` is meant to be the only relocatable
-    key. The Manager owns this file's content; the home directory owns where it
-    lives.
-    """
-    return os.path.join(os.path.expanduser("~"), ".claude", "hooks",
-                        SCRIPT_BASENAME)
+    return claude_hooks.default_script_path(SPEC)
 
 
 def default_settings_path() -> str:
-    return os.path.join(os.path.expanduser("~"), ".claude", "settings.json")
+    return claude_hooks.default_settings_path()
+
+
+def resolve_interpreter(python_exe: str = "") -> "tuple[str, str]":
+    return claude_hooks.resolve_interpreter(python_exe)
+
+
+def hook_entry(interpreter: str, script_path: str) -> dict:
+    return claude_hooks.hook_entry(SPEC, interpreter, script_path)
+
+
+def is_owned_entry(entry: dict, script_path: str = "") -> bool:
+    return claude_hooks.is_owned_entry(
+        SPEC, entry, script_path or default_script_path())
+
+
+def owned_entries(settings: dict, script_path: str = "") -> list:
+    return claude_hooks.owned_entries(
+        SPEC, settings, script_path or default_script_path())
+
+
+def installed_state(settings_path: str = "",
+                    script_path: str = "") -> "tuple[str, str]":
+    return claude_hooks.installed_state(SPEC, settings_path, script_path)
+
+
+def install(python_exe: str = "", settings_path: str = "",
+            script_path: str = "") -> "tuple[bool, str, list]":
+    return claude_hooks.install(SPEC, python_exe, settings_path, script_path)
+
+
+def uninstall(settings_path: str = "",
+              script_path: str = "") -> "tuple[bool, str, list]":
+    """Available for symmetry; the read nudge has no OFF toggle yet."""
+    return claude_hooks.uninstall(SPEC, settings_path, script_path)
 
 
 def predicate_module():
@@ -410,217 +433,3 @@ def predicate_module():
     module = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(module)
     return module
-
-
-def resolve_interpreter(python_exe: str = "") -> "tuple[str, str]":
-    """`(interpreter, error)`. A console python, never `pythonw`, never bare.
-
-    `pythonw.exe` has no stdout to write the advisory to, and a bare `python` is
-    not reliably resolvable from a hook's environment. Returning an error rather
-    than a guess is the point: a hook that cannot run is worse than no hook,
-    because it looks installed.
-    """
-    candidates = []
-    if python_exe:
-        base = os.path.basename(python_exe)
-        if base.lower().startswith("pythonw"):
-            candidates.append(os.path.join(
-                os.path.dirname(python_exe),
-                base[:6] + base[7:]))  # pythonw.exe -> python.exe, case kept
-        else:
-            candidates.append(python_exe)
-    if (sys.executable
-            and not os.path.basename(sys.executable).lower().startswith("pythonw")):
-        candidates.append(sys.executable)
-    for name in ("python.exe", "python3", "python"):
-        found = shutil.which(name)
-        if found:
-            candidates.append(found)
-    for candidate in candidates:
-        if candidate and os.path.isfile(candidate):
-            return candidate, ""
-    return "", ("No console Python interpreter could be resolved, so the hook "
-                "was not installed. A hook that cannot run looks installed and "
-                "advises nothing.")
-
-
-def hook_entry(interpreter: str, script_path: str) -> dict:
-    """The one owned settings entry.
-
-    `command` + `args` array, the shape tokensave's own entries use and the one
-    the hook-quoting bug was fixed to -- so no shell quoting is involved at all.
-    """
-    return {
-        "matcher": HOOK_MATCHER,
-        "hooks": [{"type": "command", "command": interpreter,
-                   "args": [script_path]}],
-    }
-
-
-def is_owned_entry(entry: dict, script_path: str = "") -> bool:
-    """Ours, structurally -- never "a Read hook that looks a bit like ours".
-
-    A hand-written hook of the user's that happens to match `Read`, or that
-    happens to contain our marker string, is not ours and is never repaired or
-    replaced. D1b's "unknown is never false", applied to ownership.
-    """
-    if not isinstance(entry, dict) or entry.get("matcher") != HOOK_MATCHER:
-        return False
-    target = os.path.normcase(os.path.abspath(script_path or default_script_path()))
-    for handler in entry.get("hooks") or []:
-        if not isinstance(handler, dict) or handler.get("type") != "command":
-            continue
-        for arg in handler.get("args") or []:
-            try:
-                if os.path.normcase(os.path.abspath(str(arg))) == target:
-                    return True
-            except (OSError, ValueError):
-                continue
-    return False
-
-
-def _read_settings(settings_path: str) -> "tuple[dict, str]":
-    """`(settings, unknown_reason)`. Absent is a fact; unreadable is not.
-
-    An absent settings file is an empty one for our purposes -- there is simply
-    no owned entry in it. Unreadable and malformed are different, and both are
-    UNKNOWN with distinct reasons, because a repair written on top of a file we
-    could not parse is exactly the agent-control accident this protocol exists
-    to prevent.
-    """
-    if not os.path.exists(settings_path):
-        return {}, ""
-    try:
-        with open(settings_path, encoding="utf-8-sig") as handle:
-            raw = handle.read()
-    except OSError as exc:
-        return {}, "settings unreadable (%s)" % exc.__class__.__name__
-    try:
-        data = json.loads(raw or "{}")
-    except ValueError:
-        return {}, "settings JSON malformed"
-    if not isinstance(data, dict):
-        return {}, "settings JSON is not an object"
-    return data, ""
-
-
-def owned_entries(settings: dict, script_path: str = "") -> list:
-    """Indices of our entries within `hooks.PostToolUse`, in order."""
-    entries = ((settings.get("hooks") or {}).get(HOOK_EVENT) or [])
-    if not isinstance(entries, list):
-        return []
-    return [index for index, entry in enumerate(entries)
-            if is_owned_entry(entry, script_path)]
-
-
-def installed_state(settings_path: str = "",
-                    script_path: str = "") -> "tuple[str, str]":
-    """`(state, detail)` over BOTH identities -- the entry and the script.
-
-    They are checked independently and the detail names which half is wrong.
-    "Read nudge stale" when the entry is perfect and somebody replaced the
-    script by hand is a misleading prompt rather than a diagnosis.
-    """
-    settings_path = settings_path or default_settings_path()
-    script_path = script_path or default_script_path()
-
-    settings, unknown = _read_settings(settings_path)
-    if unknown:
-        return UNKNOWN, unknown
-
-    indices = owned_entries(settings, script_path)
-    if not indices:
-        return ABSENT, "no owned %s entry in %s" % (HOOK_EVENT, settings_path)
-    if len(indices) > 1:
-        return DUPLICATE, ("%d owned %s entries; exactly one is expected"
-                           % (len(indices), HOOK_EVENT))
-
-    if not os.path.exists(script_path):
-        return STALE, "%s present, but %s is missing" % (HALF_ENTRY, script_path)
-    try:
-        with open(script_path, encoding="utf-8") as handle:
-            on_disk = handle.read()
-    except OSError as exc:
-        return UNKNOWN, "script unreadable (%s)" % exc.__class__.__name__
-
-    if script_fingerprint(on_disk) != script_fingerprint(render_hook_script()):
-        return STALE, ("%s is current; the %s does not match the version this "
-                       "Manager generates" % (HALF_ENTRY, HALF_SCRIPT))
-    return CURRENT, ""
-
-
-def install(python_exe: str = "", settings_path: str = "",
-            script_path: str = "") -> "tuple[bool, str, list]":
-    """Write the script and register exactly one owned entry. `(ok, error, actions)`.
-
-    Refuses rather than guesses, in two places that matter:
-
-    * **No interpreter, no install.** A hook whose command cannot run looks
-      installed and advises nothing, which is strictly worse than its absence.
-    * **Unreadable or malformed settings, no install.** A lenient parser could
-      often salvage enough of a broken `settings.json` to append to, and doing
-      so would rewrite an agent-control file we admit we did not understand.
-      The warning is the better outcome.
-
-    Everything not ours survives. The file legitimately holds other event
-    groups, other matchers, several handlers per entry and hand-written
-    additions; this loads, edits one entry, and writes the whole object back
-    atomically.
-    """
-    settings_path = settings_path or default_settings_path()
-    script_path = script_path or default_script_path()
-
-    interpreter, error = resolve_interpreter(python_exe)
-    if error:
-        return False, error, []
-
-    settings, unknown = _read_settings(settings_path)
-    if unknown:
-        return False, ("Refusing to write: %s. This is an agent-control file, "
-                       "and a repair written over one that could not be parsed "
-                       "is worse than the warning it would silence." % unknown), []
-
-    hooks = settings.setdefault("hooks", {})
-    if not isinstance(hooks, dict):
-        return False, "Refusing to write: `hooks` is not an object.", []
-    entries = hooks.setdefault(HOOK_EVENT, [])
-    if not isinstance(entries, list):
-        return False, "Refusing to write: `hooks.%s` is not a list." % HOOK_EVENT, []
-
-    actions = []
-    try:
-        os.makedirs(os.path.dirname(script_path), exist_ok=True)
-        with open(script_path, "w", encoding="utf-8") as handle:
-            handle.write(render_hook_script())
-    except OSError as exc:
-        return False, "Could not write %s: %s" % (script_path, exc), []
-    actions.append("Wrote %s (v%d)" % (script_path, HOOK_VERSION))
-
-    indices = owned_entries(settings, script_path)
-    entry = hook_entry(interpreter, script_path)
-    if indices:
-        entries[indices[0]] = entry
-        for index in reversed(indices[1:]):
-            del entries[index]
-            actions.append("Removed a duplicate owned %s entry" % HOOK_EVENT)
-        actions.append("Updated the owned %s entry" % HOOK_EVENT)
-    else:
-        entries.append(entry)
-        actions.append("Added the owned %s entry (matcher %r)"
-                       % (HOOK_EVENT, HOOK_MATCHER))
-
-    # The backup happens only now -- after every refusal above, so a validation
-    # failure leaves no litter behind it.
-    if os.path.exists(settings_path):
-        backup = "%s.backup.%d" % (settings_path, int(time.time() * 1000))
-        try:
-            shutil.copy2(settings_path, backup)
-        except OSError as exc:
-            return False, "Could not back up %s: %s" % (settings_path, exc), actions
-        actions.append("Backed up to %s" % backup)
-
-    ok, write_error = _write_json_atomic(settings_path, settings)
-    if not ok:
-        return False, write_error, actions
-    actions.append("Wrote %s" % settings_path)
-    return True, "", actions
