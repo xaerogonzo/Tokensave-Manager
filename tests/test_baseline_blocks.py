@@ -84,17 +84,30 @@ def test_a_block_that_disagrees_with_policy_is_drifted_not_adopted():
         "agent_may_commit": bb.DRIFTED, "agent_may_push": bb.DRIFTED}
 
 
-def test_line_endings_alone_are_not_drift():
-    """The file is CRLF and the renderer emits LF.
+def test_line_endings_are_preserved_and_are_never_drift():
+    """Whatever the file uses, the compile keeps — and neither form is stale.
 
-    Compared raw, a freshly compiled baseline reports itself stale and offers a
-    repair that changes nothing. This failed exactly that way when first run.
+    Two defects sit behind this test. The renderer emits LF while the file may
+    be CRLF, so a raw comparison reports a freshly compiled baseline as stale
+    and offers a repair that changes nothing.
+
+    And the first version of THIS test read the checked-out template to find
+    its CRLF — which asserts the platform, not the code. Git stores this repo's
+    Markdown with LF and hands Windows a CRLF working copy, so it passed
+    locally and went red on Linux CI. Explicit fixtures, both directions.
     """
-    source = _baseline(_repo())
-    compiled, _ = bb.compile_baseline(source, OFF)
-    assert "\r\n" in compiled
-    assert bb.block_states(compiled.replace("\r\n", "\n"), OFF) == {
-        "agent_may_commit": bb.CURRENT, "agent_may_push": bb.CURRENT}
+    crlf = PRE_MIGRATION
+    lf = PRE_MIGRATION.replace("\r\n", "\n")
+    assert "\r\n" in crlf and "\r\n" not in lf
+
+    out_crlf, _ = bb.compile_baseline(crlf, OFF)
+    out_lf, _ = bb.compile_baseline(lf, OFF)
+    assert "\r\n" in out_crlf, "CRLF input lost its line endings"
+    assert "\r\n" not in out_lf, "LF input was given CRLF it never had"
+
+    for compiled in (out_crlf, out_lf):
+        assert bb.block_states(compiled, OFF) == {
+            "agent_may_commit": bb.CURRENT, "agent_may_push": bb.CURRENT}
 
 
 #: The pre-migration baseline, as a fixture rather than the live file.
