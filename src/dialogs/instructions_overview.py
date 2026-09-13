@@ -108,6 +108,12 @@ _COPY_ROWS = {
 
 def _row_of(project) -> "tuple[str, str, str]":
     """(badge, colour, meaning) for one project, from reach, delivery and copy."""
+    if project.excluded:
+        # Still counted (D1c: the denominator must not move), but a red cross
+        # on a project the user listed as hands-off reads as something Repair
+        # all failed to fix.
+        return ("–", "overlay0",
+                "excluded from wiring (instructions_skip_paths)")
     if project.reach == REACH_RESOLVED and project.delivery in _DELIVERY_ROWS:
         return _DELIVERY_ROWS[project.delivery]
     if project.reach == REACH_STALE and project.copy_state in _COPY_ROWS:
