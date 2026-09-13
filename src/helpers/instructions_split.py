@@ -462,6 +462,23 @@ def _render_new_target(lines, sections, moved, chosen, source_rel: str,
     return new_target
 
 
+def _target_refusal(target_rel: str, target_text: str) -> str:
+    """Why an existing target must not be appended to, or ""."""
+    if not is_our_target(target_text):
+        return ("%s exists and was not written by this tool, so there is "
+                "nothing safe to add it to" % target_rel)
+    if _target_holds_an_index(target_text):
+        # Written by a version without the never-move-the-index rule. Adding
+        # to it would bury the lost entries further, and the repair is a
+        # person's call: which moved sections were really lessons is exactly
+        # what went wrong.
+        return ("%s contains a moved index (\"## %s\"), so an earlier split "
+                "carried the index and probably sections that were not "
+                "lessons into it. Repair it by hand first."
+                % (target_rel, _INDEX_TITLE))
+    return ""
+
+
 def compute_split(text: str, source_rel: str = "CLAUDE.md",
                   target_rel: str = DEFAULT_TARGET,
                   keep_bytes: int = DEFAULT_KEEP_BYTES,
@@ -565,23 +582,10 @@ def compute_split(text: str, source_rel: str = "CLAUDE.md",
                                     chosen, target_rel, nl)
 
     appending = bool(target_text.strip())
-    if appending and not is_our_target(target_text):
-        return SplitPlan(
-            source_rel, target_rel, preamble, kept, moved, text, "",
-            digest_of(text),
-            blocked=("%s exists and was not written by this tool, so there is "
-                     "nothing safe to add it to" % target_rel))
-    if appending and _target_holds_an_index(target_text):
-        # Written by a version without the rule above. Adding to it would bury
-        # the lost entries further, and the repair is a person's call: which
-        # moved sections were really lessons is exactly what went wrong.
-        return SplitPlan(
-            source_rel, target_rel, preamble, kept, moved, text, "",
-            digest_of(text),
-            blocked=("%s contains a moved index (\"## %s\"), so an earlier "
-                     "split carried the index and probably sections that were "
-                     "not lessons into it. Repair it by hand first."
-                     % (target_rel, _INDEX_TITLE)))
+    refusal = _target_refusal(target_rel, target_text) if appending else ""
+    if refusal:
+        return SplitPlan(source_rel, target_rel, preamble, kept, moved, text,
+                         "", digest_of(text), blocked=refusal)
     new_target = _render_new_target(lines, sections, moved, chosen,
                                     source_rel, target_text, appending, nl)
 
