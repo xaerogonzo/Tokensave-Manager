@@ -292,6 +292,36 @@ def test_rendered_paths_use_forward_slashes_on_every_platform(tmp_path):
     assert chr(92) not in str(violations[0])
 
 
+def test_a_file_in_another_encoding_is_reported_not_raised(tmp_path):
+    """One undecodable file used to end the whole Doctor run.
+
+    The byte is the one that did it: joblib's deliberately non-UTF-8 test file,
+    inside a virtual environment the name list did not know.
+    """
+    _write(tmp_path, "src/app.py", _complex_fn("f", branches=30))
+    (tmp_path / "src" / "legacy.py").write_bytes(
+        b"# -*- coding: big5 -*-\n" + b"x = '\xa4\xa4'\n")
+
+    violations, notes, scanned = _audit_project_tree(str(tmp_path), set())
+
+    assert violations, "the readable file is still audited"
+    assert scanned == 2
+    assert any("legacy.py" in n and "not valid UTF-8" in n for n in notes)
+
+
+def test_a_virtual_environment_is_skipped_whatever_its_name(tmp_path):
+    env = tmp_path / "benchmarks" / "admet" / "tdcenv"
+    _write(tmp_path, "benchmarks/admet/tdcenv/Lib/site-packages/pkg/big.py",
+           _complex_fn("g", branches=30))
+    (env / "pyvenv.cfg").write_text("home = C:/Python313\n", encoding="utf-8")
+    _write(tmp_path, "src/app.py", "x = 1\n")
+
+    violations, _notes, scanned = _audit_project_tree(str(tmp_path), set())
+
+    assert violations == []
+    assert scanned == 1, "nothing under the environment is walked"
+
+
 def test_every_violation_from_a_tree_walk_is_placed(tmp_path):
     """An unplaced violation would render without its path — the node-level
     auditors do not know the file, so `_audit_project_tree` must fill it in."""

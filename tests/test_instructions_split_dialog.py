@@ -297,6 +297,21 @@ def test_the_button_actually_opens_the_proposal(tk_root, mocker, mock_config,
     assert opened[0]._plan is not None
 
 
+def test_an_excluded_project_reads_as_excluded_not_as_a_failure():
+    """Measured: two projects in instructions_skip_paths showed a red cross and
+    "no baseline include anywhere" after Repair all, which reads as a repair
+    that failed rather than one that was refused on purpose."""
+    import types
+    from dialogs.instructions_overview import _row_of
+    from helpers.instructions_posture import REACH_ABSENT
+
+    project = types.SimpleNamespace(excluded=True, reach=REACH_ABSENT,
+                                    delivery="", copy_state="")
+    badge, colour, meaning = _row_of(project)
+    assert badge != "✗" and colour != "red"
+    assert "instructions_skip_paths" in meaning
+
+
 def test_bulk_repair_offers_one_commit_per_changed_project_only(
         tk_root, mocker, mock_config, wait_for):
     """Through the Manager's existing offer, never a commit of its own, and

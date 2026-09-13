@@ -255,6 +255,17 @@ _AUDIT_TEXT_EXTS = frozenset({
 })
 
 
+def _is_virtualenv(path: str) -> bool:
+    """A directory holding `pyvenv.cfg` is a virtual environment, whatever
+    it is called.
+
+    The name list above caught `.venv` and `venv` and walked straight into
+    OpenChem's `benchmarks/admet/tdcenv/`, where joblib ships a test file
+    saved in a non-UTF-8 encoding on purpose -- and the audit crashed on it.
+    """
+    return os.path.isfile(os.path.join(path, "pyvenv.cfg"))
+
+
 def _audit_project_tree(
     project_path: str,
     skip_rel_paths: set[str],
@@ -275,7 +286,8 @@ def _audit_project_tree(
     files_scanned = 0
 
     for root, dirs, files in os.walk(project_path):
-        dirs[:] = [d for d in dirs if d not in _AUDIT_SKIP_DIRS]
+        dirs[:] = [d for d in dirs if d not in _AUDIT_SKIP_DIRS
+                   and not _is_virtualenv(os.path.join(root, d))]
         for fname in files:
             ext = os.path.splitext(fname)[1].lower()
             full = os.path.join(root, fname)
@@ -297,7 +309,10 @@ def _audit_project_tree(
             files_scanned += 1
             if result is None:
                 continue
-            if result["exempt"]:
+            if result.get("unreadable"):
+                exempt_notes.append(
+                    f"  (not audited: {rel} — {result['unreadable']})")
+            elif result["exempt"]:
                 exempt_notes.append(f"  (exempt: {rel} — {result['exempt_reason']})")
             else:
                 # The node-level auditors know the symbol and the line but not
@@ -390,6 +405,11 @@ def _audit_python_file(path: str, caps: Caps = DEFAULT_CAPS) -> dict | None:
             source = f.read()
     except OSError:
         return None
+    except UnicodeDecodeError:
+        # Reported, never raised: one file in a foreign encoding used to end
+        # the whole Doctor run, taking every check after it down too.
+        return {"exempt": False, "exempt_reason": None, "violations": [],
+                "unreadable": "not valid UTF-8"}
 
     reason = _parse_exempt_header(source)
     if reason:
