@@ -32,6 +32,48 @@ if TYPE_CHECKING:
     from state import ManagerConfig
 
 
+def make_report_copyable(text: tk.Text) -> None:
+    """Read-only, but selectable and copyable: the OUTPUT pane's treatment.
+
+    These reports were ``state=DISABLED``, and Tk never gives focus to a
+    disabled Text, so a highlighted line could not be copied with Ctrl+C. The
+    widget stays ``normal`` and refuses mutation at its command instead, via
+    the same proxy the OUTPUT pane uses rather than a second copy of it.
+    """
+    from controllers.output_pane import install_read_only   # lazy: Tk-only
+    text.configure(insertwidth=0, selectbackground=C["surface1"],
+                   selectforeground=C["text"],
+                   inactiveselectbackground=C["surface0"])
+    install_read_only(text)
+    menu = tk.Menu(text, tearoff=0)
+    # No "…": every item acts immediately.
+    menu.add_command(label="Copy",
+                     command=lambda: text.event_generate("<<Copy>>"))
+    menu.add_command(label="Select all",
+                     command=lambda: text.tag_add("sel", "1.0", "end-1c"))
+    menu.add_command(label="Copy all", command=lambda: _copy_all(text))
+
+    def popup(event):
+        text.focus_set()
+        try:
+            menu.tk_popup(event.x_root, event.y_root)
+        finally:
+            menu.grab_release()
+        return "break"
+
+    text.bind("<Button-3>", popup)
+
+
+def _copy_all(text: tk.Text) -> None:
+    text.clipboard_clear()
+    text.clipboard_append(text.get("1.0", "end-1c"))
+
+
+def _open_link_unless_selecting(text: tk.Text, url: str) -> None:
+    if not text.tag_ranges("sel"):
+        webbrowser.open(url)
+
+
 class UpdatePollerController:
     """Probes the installed tokensave version and polls GitHub for updates.
 
@@ -334,11 +376,14 @@ class UpdatePollerController:
             end_idx   = f"1.0 + {match.start() + len(url)} chars"
             st.tag_add(tag, start_idx, end_idx)
             st.tag_configure(tag, foreground=C.get("blue", "#89b4fa"), underline=True)
-            st.tag_bind(tag, "<Button-1>", lambda e, u=url: webbrowser.open(u))
+            # On release, and only for a plain click: the text is selectable
+            # now, and a drag that starts on a link is selecting, not opening.
+            st.tag_bind(tag, "<ButtonRelease-1>",
+                        lambda e, u=url: _open_link_unless_selecting(st, u))
             st.tag_bind(tag, "<Enter>", lambda e: st.configure(cursor="hand2"))
             st.tag_bind(tag, "<Leave>", lambda e: st.configure(cursor=""))
 
-        st.configure(state=tk.DISABLED)
+        make_report_copyable(st)
 
         # ── Button row ────────────────────────────────────────────────────────
         btn_row = tk.Frame(dlg, bg=C["base"])
@@ -675,7 +720,7 @@ class UpdatePollerController:
         )
         st.pack(fill=tk.BOTH, expand=True, padx=10, pady=(10, 4))
         st.insert(tk.END, result_text)
-        st.configure(state=tk.DISABLED)
+        make_report_copyable(st)
 
         ttk.Button(dlg, text="Close", command=dlg.destroy).pack(pady=(0, 10))
         dlg.focus_set()
