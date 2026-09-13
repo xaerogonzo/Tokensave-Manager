@@ -40,6 +40,7 @@ TOKENSAVE_FLAGS = {
 
 class _Cfg:
     tokensave_exe = "tokensave"
+    git_exe = ""                              # no git: alignment is a no-op
     template_dir = ""
     basic_instructions_template = ""
     baseline_include_line = "@D:/templates/project-baseline.md"

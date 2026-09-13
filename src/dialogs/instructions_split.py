@@ -35,6 +35,7 @@ import tkinter as tk
 from tkinter import messagebox, ttk
 
 from constants import C
+from helpers import ignore_alignment as ia
 from helpers.instructions_split import (
     DEFAULT_SOURCE, DEFAULT_TARGET, apply_split, children_of, compute_split,
     is_index_section, is_our_target, read_source, scan_mentions,
@@ -46,7 +47,8 @@ class SplitProposalDialog(UiPumpMixin, tk.Toplevel):
     """Show the whole transformation for one project, then ask."""
 
     def __init__(self, parent, project_path: str, project_name: str,
-                 on_log=None, on_applied=None):
+                 on_log=None, on_applied=None, git_exe: str = "",
+                 on_commit_offer=None):
         super().__init__(parent)
         self.title("✂ Split instructions — %s" % project_name)
         self.configure(bg=C["base"])
@@ -57,6 +59,12 @@ class SplitProposalDialog(UiPumpMixin, tk.Toplevel):
         #: Called after a successful write so the fleet panel re-measures --
         #: the weight it is showing is now wrong by most of the file.
         self._on_applied = on_applied or (lambda: None)
+        self._git_exe = git_exe
+        #: `(path, label)`: the Manager's existing commit offer, or None.
+        self._on_commit_offer = on_commit_offer
+        #: `ignore_alignment.Facts` for source and target, read off the Tk
+        #: thread. The confirmation says what they are rather than assuming.
+        self._git_facts = None
         self._text = ""
         #: An existing target a previous split wrote. Passed to every
         #: recompute, because a second split ADDS to it rather than refusing.
@@ -164,16 +172,23 @@ class SplitProposalDialog(UiPumpMixin, tk.Toplevel):
         """Read and compute off the Tk thread; the biggest file is ~1 MB."""
         tk.Label(self._body, text="  Reading…", font=("Segoe UI", 10),
                  bg=C["base"], fg=C["overlay0"]).pack(anchor=tk.W, pady=20)
-        path = self._path
+        path, git_exe = self._path, self._git_exe
 
         def worker():
             text = read_source(path)
             target = read_source(path, DEFAULT_TARGET)
             plan = compute_split(text, target_text=target) if text else None
             mentions = scan_mentions(path) if text else None
-            self._post(lambda: self._render(text, target, plan, mentions))
+            facts = ia.read_facts(path, git_exe,
+                                  [DEFAULT_SOURCE, DEFAULT_TARGET])
+            self._post(lambda: self._loaded(text, target, plan, mentions,
+                                            facts))
 
         threading.Thread(target=worker, daemon=True).start()
+
+    def _loaded(self, text, target_text, plan, mentions, facts) -> None:
+        self._git_facts = facts
+        self._render(text, target_text, plan, mentions)
 
     def _render(self, text: str, target_text: str, plan, mentions=None) -> None:
         for child in self._body.winfo_children():
@@ -458,15 +473,16 @@ class SplitProposalDialog(UiPumpMixin, tk.Toplevel):
             return
         if not messagebox.askyesno(
                 "Apply split",
-                "%s\n\nWrites %s, then rewrites CLAUDE.md.\n\nThe original "
-                "sections are moved verbatim. Both files are in git, so this "
-                "is revertible."
-                % (plan.summary(), plan.target_rel), parent=self):
+                "%s\n\nWrites %s, then rewrites %s.\n\nThe original "
+                "sections are moved verbatim. %s"
+                % (plan.summary(), plan.target_rel, plan.source_rel,
+                   ia.split_visibility_text(self._git_facts, plan.source_rel,
+                                            plan.target_rel)), parent=self):
             return
 
         self._busy = True
         self._apply_btn.configure(state=tk.DISABLED)
-        path, name = self._path, self._name
+        path, name, git_exe = self._path, self._name, self._git_exe
 
         def worker():
             # Re-scanned at the moment we act, not when the dialog opened. The
@@ -475,6 +491,12 @@ class SplitProposalDialog(UiPumpMixin, tk.Toplevel):
             # write happened.
             fresh = scan_mentions(path)
             ok, message = apply_split(path, plan)
+            if ok and git_exe:
+                aligned = ia.align(path, git_exe, [ia.CompanionPair(
+                    plan.target_rel, plan.source_rel, ia.KIND_LESSONS)])
+                if aligned.render():
+                    message = "%s\n\nGit alignment: %s" % (message,
+                                                          aligned.render())
             self._post(lambda: self._finish(ok, message, name, fresh))
 
         threading.Thread(target=worker, daemon=True).start()
@@ -492,6 +514,8 @@ class SplitProposalDialog(UiPumpMixin, tk.Toplevel):
             messagebox.showinfo("Split applied", "%s\n\n%s" % (name, message),
                                 parent=self)
             self._on_applied()
+            if self._on_commit_offer:
+                self._on_commit_offer(self._path, "the instruction split")
             self.destroy()
             return
         # A refusal is a state, not a crash: the digest guard fires when a live

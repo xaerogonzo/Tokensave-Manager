@@ -252,7 +252,7 @@ class RelocateDialog(UiPumpMixin, tk.Toplevel):
                 try:
                     result = apply_to_project(
                         project, baseline, cfg.template_dir, template_text,
-                        has_template, baseline_text)
+                        has_template, baseline_text, git_exe=cfg.git_exe)
                 except Exception as exc:    # noqa: BLE001 — per project
                     from helpers.instructions_wiring import (
                         OUTCOME_FAILED, ApplyOutcome,

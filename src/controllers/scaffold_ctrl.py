@@ -27,9 +27,10 @@ from typing import TYPE_CHECKING, Callable
 import tkinter as tk
 
 from constants import C, CREATE_NO_WINDOW, _ANSI
-from helpers.baseline_copy import read_template, write_copy
+from helpers import ignore_alignment as ia
+from helpers.baseline_copy import COPY_BASENAME, read_template, write_copy
 from helpers.graph_trust import INDEX_PRESENT, index_state
-from helpers.instructions_posture import (excluded_roots,
+from helpers.instructions_posture import (BASIC_MD, CLAUDE_MD, excluded_roots,
                                           parse_baseline_target,
                                           read_project)
 from helpers.instructions_posture import canonical as canonical_path
@@ -374,7 +375,7 @@ class ScaffoldRetrofitController:
             log.info("  baseline chain already resolves — skipped")
             self._on_log("  Baseline chain already resolves — skipped",
                          C["overlay0"])
-            return []
+            return self._align_posture(posture)
 
         template_text = ""
         if has_template:
@@ -392,13 +393,29 @@ class ScaffoldRetrofitController:
             log.info("  nothing to wire")
             self._on_log("  Baseline chain already resolves — skipped",
                          C["overlay0"])
-            return []
+            return self._align_posture(posture)
 
         for changed in result.changed_files:
             self._on_log(f"  Wired {changed}", C["green"])
         log.info(f"  wired instructions: {result.changed_files}")
-        return ["Wired the baseline chain in %s"
-                % ", ".join(result.changed_files)]
+        after = read_project(path, name, cfg.template_dir, baseline)
+        return (["Wired the baseline chain in %s"
+                 % ", ".join(result.changed_files)]
+                + self._align_posture(after))
+
+    def _align_posture(self, posture) -> list[str]:
+        """Git alignment for the companions this posture's chain reaches."""
+        return self._report_alignment(ia.align(
+            posture.display_root, self._cfg.git_exe,
+            ia.companions_of(posture)))
+
+    def _report_alignment(self, aligned) -> list[str]:
+        text = aligned.render()
+        if not text:
+            return []
+        self._on_log("  Git alignment: %s" % text,
+                     C["green"] if aligned.confirmed else C["yellow"])
+        return ["Git alignment: %s" % text]
 
     def _retrofit_add_agent_rules(self, path: str, name: str,
                                   want_agents: bool,
@@ -523,7 +540,14 @@ class ScaffoldRetrofitController:
         if not written.changed:
             return []
         self._on_log("  Wrote project-baseline.md", C["green"])
-        return ["Wrote project-baseline.md"]
+        return ["Wrote project-baseline.md"] + self._align_with_git(path)
+
+    def _align_with_git(self, path: str) -> list[str]:
+        """Keep the new instruction files as local as the CLAUDE.md using them."""
+        return self._report_alignment(ia.align(path, self._cfg.git_exe, (
+            ia.CompanionPair(BASIC_MD, CLAUDE_MD, ia.KIND_BASIC),
+            ia.CompanionPair(COPY_BASENAME, BASIC_MD,
+                             ia.KIND_BASELINE_COPY))))
 
     def _retrofit_add_shadow_links(self, path: str, ext_map: dict) -> list[str]:
         """Generate shadow extension links and update .gitignore. Returns actions taken."""

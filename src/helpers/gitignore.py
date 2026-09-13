@@ -131,7 +131,8 @@ def ensure_pattern(path: str, pattern: str,
     pattern = (pattern or "").strip()
     if not pattern:
         return False, "No pattern given."
-    if not os.path.isdir(os.path.join(path, ".git")):
+    # `exists`, not `isdir`: a linked worktree's `.git` is a file.
+    if not os.path.exists(os.path.join(path, ".git")):
         return False, "Not a git repository — nothing to ignore."
 
     lines = _read_gitignore_lines(path)
