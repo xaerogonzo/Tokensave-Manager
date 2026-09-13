@@ -4,6 +4,7 @@
 ## [Unreleased]
 
 ### Fixed
+- (instructions) **Suggest skipped tables but still proposed standing rules.** On KicomAI it still ticked `Sandbox Testing`, a prose section whose `**Do NOT:**` block keeps the setup script off the host. A section carrying a standing directive (a bold or bulleted Never / Do NOT / MUST, not the bare word) is now marked "rules" and never suggested; a person can still tick it. Measured over every level-2 section in the fleet: 9 of 141 CLAUDE.md sections carry one and 1 of 243 lessons sections.
 - (instructions) **A second split could move its own index, and Suggest proposed operational tables.** On KicomAI, Suggest after a first split ticked `Common Edit Locations` (a 76-row lookup), `Sandbox Testing` and the `## Lessons (moved out of this file)` index. The index's checkbox was disabled, but Suggest set its variable anyway, so Apply carried the index into `docs/LESSONS.md` and wrote a new index listing itself. `compute_split` now removes the index on every route; the budget's suggestion skips sections that are 75%+ table rows (measured: 17 such sections in fleet CLAUDE.md files, none in any lessons file), which a person can still tick; and appending to a target that already holds a moved index is refused until it is repaired by hand. Suggest can still propose prose operational sections such as a "Do NOT" list, as its tooltip says
 
 ### Added

@@ -66,6 +66,16 @@ _REFERENCE_TABLE_SHARE = 0.75
 #: a lesson is a figure, and a heading over three rows is not what the budget
 #: was taking.
 _REFERENCE_MIN_LINES = 5
+#: A STANDING DIRECTIVE: `**Never ...**`, `**Do NOT:**`, `**MUST ...**`, or a
+#: bullet that opens with one. Not the word "never" -- lessons are full of it.
+#: Measured over every level-2 section in the fleet (2026-09-13): 9 of 141
+#: CLAUDE.md / BASIC_INSTRUCTIONS.md sections carry one, all standing rules
+#: (KicomAI's "Sandbox Testing" among them), and 1 of 243 lessons sections --
+#: LexForge's list of rules inherited from OpenChem, itself operational.
+_STANDING_DIRECTIVE = re.compile(
+    r"\*\*(Do NOT|Never|NEVER|MUST|Don't)"
+    r"|^\s*[-*]\s*(Do NOT|Never|Don't)\b"
+    r"|Do NOT:")
 #: The heading the index is written under. Detection and rendering share it,
 #: because a SECOND split of an already-split file must merge into the index
 #: that is there rather than write a rival one beside it -- which is exactly
@@ -86,6 +96,22 @@ def is_index_section(section) -> bool:
     from finding it -- so the next split writes a second index beside nothing.
     """
     return section.level == 2 and section.title == _INDEX_TITLE
+
+
+def _lookup_marks(lines, fenced, start: int, end: int) -> "tuple[bool, bool]":
+    """(mostly a table, carries a standing directive) for one section's body.
+
+    Both are reasons the byte budget must not SUGGEST moving a section: what
+    every message needs loaded, rather than a log entry. Fenced lines are
+    skipped, so a quoted sample cannot make a lesson look like a rule.
+    """
+    body = [lines[j] for j in range(start + 1, end)
+            if lines[j].strip() and not fenced[j]]
+    table_rows = sum(1 for line in body if line.lstrip().startswith("|"))
+    reference = (len(body) >= _REFERENCE_MIN_LINES
+                 and table_rows >= _REFERENCE_TABLE_SHARE * len(body))
+    rules = any(_STANDING_DIRECTIVE.search(line) for line in body)
+    return reference, rules
 
 
 def _target_holds_an_index(target_text: str) -> bool:
@@ -140,6 +166,9 @@ class Section:
     #: Mostly a table: a lookup the reader needs loaded, not a log entry. Only
     #: the byte budget's SUGGESTION honours it; a person can still move one.
     is_reference: bool = False
+    #: Carries a standing directive (a bold or bulleted Never / Do NOT / MUST):
+    #: a rule the reader needs loaded. Suggestion-only, like `is_reference`.
+    has_rules: bool = False
 
     @property
     def anchor(self) -> str:
@@ -249,10 +278,7 @@ def _compute_sections(text: str) -> "tuple[int, list]":
         entries = sum(1 for j in range(start, end)
                       if not fenced[j] and _BOLD_LEAD.match(lines[j])
                       and j > 0 and not lines[j - 1].strip())
-        body = [l for l in lines[start + 1:end] if l.strip()]
-        table_rows = sum(1 for l in body if l.lstrip().startswith("|"))
-        reference = (len(body) >= _REFERENCE_MIN_LINES
-                     and table_rows >= _REFERENCE_TABLE_SHARE * len(body))
+        reference, rules = _lookup_marks(lines, fenced, start, end)
         if level == 2:
             last_top = n
             parent = None
@@ -262,7 +288,7 @@ def _compute_sections(text: str) -> "tuple[int, list]":
             index=n, title=title, start=start, end=end, size=size,
             has_directive=any(start <= d < end for d in directive_lines),
             level=level, parent=parent, total_size=size, entry_count=entries,
-            is_reference=reference))
+            is_reference=reference, has_rules=rules))
 
     # Second pass: a parent's total includes its children. Done here rather
     # than in the loop because a parent is built before its children exist.
@@ -546,7 +572,8 @@ def compute_split(text: str, source_rel: str = "CLAUDE.md",
     chosen -= {s.index for s in sections if is_index_section(s)}
     if move_indices is None:
         # The SUGGESTION skips lookups; an explicit tick is still honoured.
-        chosen -= {s.index for s in sections if s.is_reference}
+        chosen -= {s.index for s in sections
+                   if s.is_reference or s.has_rules}
 
     kept = tuple(s for s in sections if s.index not in chosen)
     moved = tuple(s for s in sections if s.index in chosen)

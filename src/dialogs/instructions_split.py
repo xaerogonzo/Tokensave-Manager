@@ -281,6 +281,14 @@ class SplitProposalDialog(UiPumpMixin, tk.Toplevel):
                      "Mostly a table: a lookup that is usually needed on every "
                      "message, like a file map or \"where to edit\" list. "
                      "Suggest never ticks it; you still can.")
+        if section.has_rules:
+            rules = tk.Label(row, text="rules", font=("Segoe UI", 8),
+                             bg=C["base"], fg=C["overlay0"])
+            rules.pack(side=tk.RIGHT, padx=(6, 0))
+            _Tooltip(rules,
+                     "Carries a standing rule (a bold or bulleted Never, "
+                     "Do NOT or MUST), so every message probably needs it "
+                     "loaded. Suggest never ticks it; you still can.")
         if section.has_directive:
             chain = tk.Label(row, text="@include", font=("Segoe UI", 8, "bold"),
                              bg=C["base"], fg=C["peach"])
