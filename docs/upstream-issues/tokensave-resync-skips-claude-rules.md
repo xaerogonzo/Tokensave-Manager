@@ -1,6 +1,6 @@
 <!--
-STATUS: DRAFT 2026-09-12 — not filed. Review before posting; nothing inside
-  this comment is part of the issue body.
+STATUS: FILED 2026-09-12 as issue #553 — awaiting maintainer response.
+  https://github.com/aovestdipaperino/tokensave/issues/553
 
 DUPLICATE SEARCH (gh search issues, repo-scoped, 2026-09-12):
   "resync installed_agents rules" (0), "rules file not refreshed upgrade" (0),
