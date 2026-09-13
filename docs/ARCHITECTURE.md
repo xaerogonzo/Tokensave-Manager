@@ -730,6 +730,14 @@ Token Save Manager Source/
 │       │                          background thread and shows output in a
 │       │                          scrolledtext Toplevel dialog)
 │       ├── codegraph_ctrl.py      CodeGraphController (init/sync/status/remove)
+│       ├── output_pane.py         OutputPaneController — the OUTPUT pane below the
+│       │                          notebook in a vertical tk.PanedWindow. Read-only
+│       │                          via a Tcl command proxy (never state=DISABLED,
+│       │                          never a Python proxy); pop-out is a Tk text PEER
+│       │                          in a Toplevel; `output_pane_height` is a
+│       │                          preference saved on sash release, clamped only
+│       │                          on restore. UI-thread only: App._log is the
+│       │                          cross-thread boundary.
 │       ├── pyscope_ctrl.py        PyScopeController (analyze/open/register/status).
 │       │                          cmd_register is the Manager's only mutation of
 │       │                          PyScope state and never runs automatically
@@ -1023,7 +1031,7 @@ app.py
   ├── theme.py           — _Tooltip
   ├── helpers/*          — pure / IO helpers (no UI)
   ├── dialogs/*          — 57 tk.Toplevel / panel modules
-  └── controllers/*      — 27 tab and sub-controllers
+  └── controllers/*      — 28 tab and sub-controllers
         └── controllers/* each import the dialogs they instantiate
             (lazy in-handler imports for any cross-dialog cycle risk —
              see Rule 6 in CHANGELOG Round 4 Phase C decisions).
@@ -1561,6 +1569,16 @@ _scaffold_nuitka_build(path)
 ```
 
 ---
+
+## Main window layout
+
+Header, then a vertical `tk.PanedWindow` holding the notebook (`stretch=always`,
+minsize 200) above the OUTPUT pane (`stretch=never`), then the separator and
+credit bar. The sash is coloured and carries a resize cursor because on the base
+background it was invisible. Config: `output_pane_height` (int px) is the
+user's preferred pane height — written only on a sash release while docked,
+never by a clamp and never by the pop-out, whose geometry is session-only.
+Every launch starts docked.
 
 ## Threading Model
 

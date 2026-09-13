@@ -43,6 +43,7 @@ from constants import (
 )
 from controllers.ask_tab import AskTabController
 from controllers.git_tab import GitTabController
+from controllers.output_pane import OutputPaneController
 from controllers.help_tab import HelpTabController
 from controllers.projects_tab import ProjectsTabController
 from controllers.settings_tab import SettingsTabController
@@ -217,7 +218,7 @@ class App(UiPumpMixin, tk.Tk):
             text=f"⚠  Manager source changed since startup ({what}) — "
                  f"restart to load the new code.")
         if not self._src_banner.winfo_ismapped():
-            self._src_banner.pack(fill=tk.X, side=tk.TOP, before=self.nb)
+            self._src_banner.pack(fill=tk.X, side=tk.TOP, before=self._paned)
 
     def _dismiss_source_banner(self) -> None:
         """Hide it, and stay hidden.
@@ -348,11 +349,8 @@ class App(UiPumpMixin, tk.Tk):
                  font=("Segoe UI", 7), bg=C["crust"], fg=C["overlay0"],
                  pady=2).pack(fill=tk.X, side=tk.BOTTOM)
 
-        # ── Separator + Log — packed BEFORE notebook so expand=True doesn't eat it ──
+        # ── Separator — packed BEFORE the paned area so expand=True doesn't eat it ──
         ttk.Separator(self, orient="horizontal").pack(fill=tk.X, padx=14, side=tk.BOTTOM)
-
-        log_frame = tk.Frame(self, bg=C["base"], padx=14, pady=8)
-        log_frame.pack(fill=tk.X, side=tk.BOTTOM)
 
         # ── "source changed, restart" banner ──
         # Packed before the notebook so it appears above the tabs, and stays
@@ -367,9 +365,15 @@ class App(UiPumpMixin, tk.Tk):
                   cursor="hand2",
                   command=self._dismiss_source_banner).pack(side=tk.RIGHT)
 
-        # ── Notebook ──
-        self.nb = ttk.Notebook(self)
-        self.nb.pack(fill=tk.BOTH, expand=True, padx=0, pady=0)
+        # ── Notebook above, OUTPUT below, with a draggable sash between ──
+        # The sash gets a colour and a resize cursor: on the base background
+        # it is invisible, and an invisible handle is not a discoverable one.
+        self._paned = tk.PanedWindow(self, orient=tk.VERTICAL, bg=C["surface0"],
+                                     sashwidth=6, sashrelief=tk.FLAT, bd=0,
+                                     sashcursor="sb_v_double_arrow")
+        self._paned.pack(fill=tk.BOTH, expand=True, padx=0, pady=0)
+        self.nb = ttk.Notebook(self._paned)
+        self._paned.add(self.nb, stretch="always", minsize=200)
 
         self._projects = ProjectsTabController(
             self.nb, self._cfg,
@@ -428,41 +432,13 @@ class App(UiPumpMixin, tk.Tk):
 
         self.nb.bind("<<NotebookTabChanged>>", self._on_tab_changed)
 
-        log_header = tk.Frame(log_frame, bg=C["base"])
-        log_header.pack(fill=tk.X, pady=(0, 4))
-
-        tk.Label(log_header, text="OUTPUT",
-                 font=("Segoe UI", 8, "bold"),
-                 bg=C["base"], fg=C["overlay0"]).pack(side=tk.LEFT)
-
-        ttk.Button(log_header, text="View Log",
-                   command=self._open_log).pack(side=tk.RIGHT, padx=(0, 6))
-
-        ttk.Button(log_header, text="Savings",
-                   command=self._open_cost_viewer).pack(side=tk.RIGHT, padx=(0, 6))
-
-        self._stop_btn = ttk.Button(log_header, text="■  Stop",
-                                    style="Danger.TButton",
-                                    command=self._stop_current,
-                                    state=tk.DISABLED)
-        self._stop_btn.pack(side=tk.RIGHT, padx=(0, 6))
-
-        self._running_label = tk.Label(log_header, text="",
-                                       font=("Segoe UI", 8),
-                                       bg=C["base"], fg=C["yellow"])
-        self._running_label.pack(side=tk.RIGHT, padx=(0, 8))
-
-        log_inner = tk.Frame(log_frame, bg=C["mantle"])
-        log_inner.pack(fill=tk.X)
-
-        self.log = tk.Text(log_inner, height=4,
-            font=("Consolas", 9), bg=C["mantle"], fg=C["green"],
-            insertbackground=C["green"], relief=tk.FLAT,
-            padx=10, pady=6, state=tk.DISABLED, wrap=tk.WORD)
-        lsb = ttk.Scrollbar(log_inner, orient="vertical", command=self.log.yview)
-        self.log.configure(yscrollcommand=lsb.set)
-        self.log.pack(side=tk.LEFT, fill=tk.X, expand=True)
-        lsb.pack(side=tk.RIGHT, fill=tk.Y)
+        self._output = OutputPaneController(
+            self._paned, self._cfg, host=self, above=self.nb,
+            on_stop=self._stop_current,
+            on_open_savings=self._open_cost_viewer,
+            on_open_log=self._open_log,
+            geometry_ok=lambda geom: _geometry_on_screen(self, geom),
+        )
 
     # ── Savings & spend viewer ──────────────────────────────────────────────
 
@@ -641,22 +617,11 @@ class App(UiPumpMixin, tk.Tk):
     # project list, and this does nothing but read a directory per project.
 
     def _log(self, msg, colour=None):
-        def _do():
-            self.log.configure(state=tk.NORMAL)
-            tag = f"col_{colour}"
-            self.log.tag_configure(tag, foreground=colour or C["green"])
-            self.log.insert(tk.END, msg + "\n", tag)
-            self.log.see(tk.END)
-            self.log.configure(state=tk.DISABLED)
-        self._post(_do)
+        # The cross-thread boundary: the pane itself is UI-thread only.
+        self._post(lambda: self._output.append(msg, colour))
 
     def _set_running(self, running, label=""):
-        if running:
-            self._stop_btn.configure(state=tk.NORMAL)
-            self._running_label.configure(text=f"⏳ running: {label}")
-        else:
-            self._stop_btn.configure(state=tk.DISABLED)
-            self._running_label.configure(text="")
+        self._output.set_running(running, label)
 
     def _stop_current(self):
         self._stop_requested = True
