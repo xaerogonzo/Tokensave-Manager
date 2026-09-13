@@ -235,3 +235,34 @@ def test_untrusted_is_the_only_state_that_blocks_the_migration():
         "a blocking state must also be advisory, or the row would offer an "
         "Apply button for something no file can fix"
     )
+
+
+# -- one record resolver, shared by every flag ----------------------------------
+
+def test_trust_and_external_include_approval_read_the_same_record():
+    """Two flags, one matching rule: they can never disagree about WHICH record
+    a directory is. The backslash decoy approves; the forward key does not."""
+    from helpers.mcp_projects import (external_includes_approved,
+                                      resolve_project_record)
+    projects = {
+        _BACK: {"hasTrustDialogAccepted": True,
+                "hasClaudeMdExternalIncludesApproved": True},
+        _FWD: {"hasTrustDialogAccepted": False,
+               "hasClaudeMdExternalIncludesApproved": False},
+    }
+    record = resolve_project_record(_ROOT, projects)
+    assert record.key == _FWD
+    assert project_trust_state(_ROOT, projects=projects) == TRUST_UNTRUSTED
+    assert external_includes_approved(record) is False
+
+
+def test_external_include_approval_is_three_valued(tmp_path):
+    from helpers.mcp_projects import (external_includes_approved,
+                                      resolve_project_record)
+    approved = {_FWD: {"hasClaudeMdExternalIncludesApproved": True}}
+    assert external_includes_approved(
+        resolve_project_record(_ROOT, approved)) is True
+    assert external_includes_approved(resolve_project_record(_ROOT, {})) is False
+    unreadable = resolve_project_record(
+        _ROOT, claude_json_path=str(tmp_path / "missing.json"))
+    assert external_includes_approved(unreadable) is None

@@ -126,6 +126,8 @@ They govern `helpers/instructions_posture.py`, `helpers/instructions_wiring.py`,
   is another. The substring test this replaced could not see a pointer at a moved
   `template_dir`, and matched the filename in ordinary prose.
 
+**Resolving is not loading, and the baseline is a COPY, not a pointer.** Claude Code loaded no absolute baseline include here: outside the project it needs a per-project approval the desktop app never asks for, and a backslash or unescaped space is not parsed at all (canaries, 2026-09-13). So each project commits `project-baseline.md`, a Manager copy with a sha header (`helpers/baseline_copy.py`), and `delivery` is what turns a row green. `reached_baseline` stays a PATH; `baseline_match` is the content fact. An approved external include is still localized. The writer copies, verifies, THEN repoints, and every repoint is compare-and-apply.
+
 **Parser scope is wider than repair scope, on purpose.** The classifier resolves a
 bounded general include graph; the writer repairs exactly one topology
 (`CLAUDE.md → @BASIC_INSTRUCTIONS.md → @project-baseline.md`). Resolving broadly

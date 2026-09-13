@@ -627,8 +627,11 @@ class _Driver:
         _say("    distribution: " + "  ".join(
             "%s=%d" % (state, counts[state]) for state in sorted(counts)))
         for project in sorted(fleet.projects, key=lambda p: p.name.lower()):
-            _say("    %-28s carriage: %-8s reach: %-9s %s B ~%s tok  %s"
+            _say("    %-28s carriage: %-8s reach: %-9s delivery: %-17s "
+                 "copy: %-10s healthy: %-5s %s B ~%s tok  %s"
                  % (project.name[:28], project.carriage, project.reach,
+                    project.delivery, project.copy_state or "-",
+                    project.healthy,
                     f"{project.weight_bytes:,}",
                     f"{project.estimated_tokens:,}",
                     ",".join(project.advisories) or "-"))

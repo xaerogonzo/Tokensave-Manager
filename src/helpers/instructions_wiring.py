@@ -5,7 +5,9 @@
 `instructions_posture` resolves a bounded, general include graph. **This module
 writes exactly one topology**::
 
-    CLAUDE.md  ->  @BASIC_INSTRUCTIONS.md  ->  @<template_dir>/project-baseline.md
+    CLAUDE.md  ->  @BASIC_INSTRUCTIONS.md  ->  @project-baseline.md
+                                               (a Manager copy of the template,
+                                                committed in the project)
 
 That asymmetry is deliberate and is documented in both modules because it is
 easy to erode: reading the classifier alone suggests Retrofit ought to repair
@@ -14,29 +16,43 @@ resolves through some other valid chain needs nothing, and the only repair this
 module knows how to make would add a SECOND path to a baseline that already
 arrives.
 
+## A copy, not a pointer
+
+The topology used to end in an absolute include of `<template_dir>`. Claude
+Code loaded none of those: an include outside the project needs a per-project
+approval the desktop app never asks for, and a path with a backslash or an
+unescaped space is not parsed at all (both measured, see
+`helpers/baseline_copy.py` and `instructions_posture.claude_code_parses`). So
+the writer puts a copy inside the project and points the include at it. An
+include that resolves on this machine only because someone approved it is still
+LOCALIZED: a committed machine path breaks every other checkout and worktree.
+
+## Ordering and compare-and-apply
+
+A project's copy is written and verified BEFORE any include is repointed at it.
+If the copy fails, the old include is untouched; if the repoint fails, the old
+include still works and an unused copy is left behind. The reverse order would
+leave an include naming a file that does not exist.
+
+A repoint carries the exact directive text and line it was planned from, and is
+applied only if that directive is still there. A refresh carries the sha the
+copy recorded, and is applied only if the copy still records it.
+
 ## What it will not do
 
-- **It never deletes.** An obsolete direct baseline include left behind by a
-  moved `template_dir` is reported (`ADVISORY_DOUBLE_LOAD`), not removed.
-  Deleting a line a human may have written is not a repair, and this phase's
-  rule is surgical addition and in-place repair only.
+- **It never deletes.** An obsolete direct baseline include is reported
+  (`ADVISORY_DOUBLE_LOAD`), not removed.
 - **It never rewrites authored prose.** A project whose `CLAUDE.md` tells the
-  agent to reach for Grep first keeps saying so after wiring. That contradiction
-  is surfaced for a human, because resolving it is an editorial decision.
-- **It refuses rather than guesses.** Two `@BASIC_INSTRUCTIONS.md` lines in one
-  file is not a thing to normalise silently: repairing the first and leaving the
-  second would have the writer preserving the duplication the advisories exist
-  to surface.
+  agent to reach for Grep first keeps saying so after wiring.
+- **It never overwrites a `project-baseline.md` it did not write**, or one
+  edited by hand, or one whose header is damaged.
+- **It refuses rather than guesses.** Two `@BASIC_INSTRUCTIONS.md` lines, or two
+  baseline includes, are not normalised silently.
 
 ## Bytes outside the managed line are preserved
 
-Reading a file with Python's default universal-newline translation turns every
-CRLF into LF, so a "surgical" one-line insert would silently rewrite every line
-ending in the file. Everything here reads with `newline=""` and inserts using
-the file's own dominant terminator.
-
-Pure computation split from IO, the shape `agent_rules` and `changelog_patch`
-already use: every `_compute_*` is testable without touching a disk.
+Everything here reads with `newline=""` and inserts using the file's own
+dominant terminator.
 """
 
 from __future__ import annotations
@@ -44,10 +60,14 @@ from __future__ import annotations
 import os
 from dataclasses import dataclass
 
+from helpers import baseline_copy as bc
 from helpers.instructions_posture import (
     ADVISORY_DUPLICATE_DIRECTIVE,
+    ADVISORY_NONSTANDARD_CHAIN,
     BASIC_MD,
     CLAUDE_MD,
+    DELIVERY_IN_PROJECT,
+    DELIVERY_UNKNOWN,
     REACH_ABSENT,
     REACH_ORPHANED,
     REACH_RESOLVED,
@@ -56,6 +76,7 @@ from helpers.instructions_posture import (
     canonical,
     is_baseline,
     scan_text,
+    unescape_target,
 )
 from helpers.io_utils import _atomic_write
 
@@ -67,17 +88,36 @@ ACTION_LINK_BASIC = "link_basic"
 ACTION_CREATE_CLAUDE = "create_claude"
 #: Create `BASIC_INSTRUCTIONS.md` from the template.
 ACTION_CREATE_BASIC = "create_basic"
-#: Add the baseline include to an existing `BASIC_INSTRUCTIONS.md`.
+#: Add `@project-baseline.md` to an existing file.
 ACTION_ADD_BASELINE = "add_baseline"
-#: Point an existing baseline directive at the configured baseline.
-ACTION_REPAIR_STALE = "repair_stale"
+#: Create `<root>/project-baseline.md` from the template.
+ACTION_WRITE_COPY = "write_copy"
+#: Rewrite an outdated copy.
+ACTION_REFRESH_COPY = "refresh_copy"
+#: Repoint a baseline directive at the project's copy.
+ACTION_LOCALIZE = "localize"
 
 _LABELS = {
     ACTION_LINK_BASIC: "link BASIC_INSTRUCTIONS.md from CLAUDE.md",
     ACTION_CREATE_CLAUDE: "create CLAUDE.md",
     ACTION_CREATE_BASIC: "create BASIC_INSTRUCTIONS.md",
     ACTION_ADD_BASELINE: "add the baseline include",
-    ACTION_REPAIR_STALE: "point the baseline include at the current template",
+    ACTION_WRITE_COPY: "write the project's copy of the baseline",
+    ACTION_REFRESH_COPY: "update the project's copy of the baseline",
+    ACTION_LOCALIZE: "point the baseline include at the project's copy",
+}
+
+_COPY_STEPS = (ACTION_WRITE_COPY, ACTION_REFRESH_COPY)
+
+#: Copy states a plan must not write over, with the reason shown on the row.
+_COPY_BLOCKS = {
+    bc.COPY_EDITED: "project-baseline.md was edited by hand since the Manager "
+                    "copied it - not overwritten",
+    bc.COPY_INVALID: "project-baseline.md has a damaged Manager header - not "
+                     "overwritten",
+    bc.COPY_UNMANAGED: "a project-baseline.md the Manager did not write is "
+                       "already in the project - not overwritten",
+    bc.COPY_UNREADABLE: "project-baseline.md could not be read or judged",
 }
 
 
@@ -86,6 +126,10 @@ class WiringStep:
     action: str
     path: str
     detail: str = ""
+    #: The precondition: a directive's exact raw target (LOCALIZE) or the sha a
+    #: copy records (REFRESH_COPY).
+    expect: str = ""
+    lineno: int = 0
 
     @property
     def label(self) -> str:
@@ -111,66 +155,112 @@ class WiringPlan:
 
 # ── planning (pure) ──────────────────────────────────────────────────────
 
+def _directive_target(posture, raw: str) -> str:
+    spelled = unescape_target(raw)
+    if os.path.isabs(spelled):
+        return canonical(spelled)
+    return canonical(os.path.join(posture.display_root, spelled))
+
+
+def _localize_steps(posture) -> "tuple[list, str]":
+    """Steps that leave the project on its own current copy, or a refusal."""
+    blocked = _COPY_BLOCKS.get(posture.copy_state)
+    if blocked:
+        return [], blocked
+    if not posture.baseline_directives:
+        return [], ("the baseline include is not in %s or %s, so there is no "
+                    "line the Manager knows to repoint" % (CLAUDE_MD, BASIC_MD))
+    copy_path = canonical(os.path.join(posture.display_root, bc.COPY_BASENAME))
+    foreign = [d for d in posture.baseline_directives
+               if _directive_target(posture, d[2]) != copy_path]
+    if len(posture.baseline_directives) > 1:
+        return [], ("%d baseline includes - localizing them would load the "
+                    "copy more than once" % len(posture.baseline_directives))
+
+    steps: list = []
+    if posture.copy_state == bc.COPY_OUTDATED:
+        steps.append(WiringStep(ACTION_REFRESH_COPY, bc.COPY_BASENAME,
+                                expect=posture.copy_recorded_sha))
+    elif posture.copy_state != bc.COPY_CURRENT:
+        steps.append(WiringStep(ACTION_WRITE_COPY, bc.COPY_BASENAME))
+    for name, lineno, raw in foreign:
+        steps.append(WiringStep(ACTION_LOCALIZE, name, "was @%s" % raw,
+                                expect=raw, lineno=lineno))
+    if any(d[0] == BASIC_MD for d in posture.baseline_directives) and \
+            canonical(os.path.join(posture.display_root, BASIC_MD)) \
+            not in posture.chain:
+        steps.append(WiringStep(ACTION_LINK_BASIC, CLAUDE_MD))
+    return steps, ""
+
+
+def _absent_steps(posture, has_template: bool) -> "tuple[list, str]":
+    blocked = _COPY_BLOCKS.get(posture.copy_state)
+    if blocked:
+        return [], blocked
+    steps: list = []
+    if posture.copy_state == bc.COPY_OUTDATED:
+        steps.append(WiringStep(ACTION_REFRESH_COPY, bc.COPY_BASENAME,
+                                expect=posture.copy_recorded_sha))
+    elif posture.copy_state != bc.COPY_CURRENT:
+        steps.append(WiringStep(ACTION_WRITE_COPY, bc.COPY_BASENAME))
+    if posture.has_basic:
+        steps.append(WiringStep(ACTION_ADD_BASELINE, BASIC_MD))
+    elif has_template:
+        steps.append(WiringStep(ACTION_CREATE_BASIC, BASIC_MD))
+    else:
+        # Nothing to create BASIC_INSTRUCTIONS.md from. Wire the one-hop shape
+        # rather than refusing: `CLAUDE.md` -> baseline is a documented topology
+        # too, and it needs no file the user did not ask for.
+        steps.append(WiringStep(ACTION_ADD_BASELINE, CLAUDE_MD))
+        return steps, ""
+    steps.append(WiringStep(ACTION_LINK_BASIC, CLAUDE_MD))
+    return steps, ""
+
+
+def _refusal(posture) -> str:
+    """Why nothing may be planned at all, or ""."""
+    if getattr(posture, "excluded", False):
+        # The guard belongs HERE and not only on the button: what this
+        # exclusion protects is writing Manager-authored files into somebody
+        # else's repository, which is not a mistake to leave one call site away.
+        return posture.exclude_reason or "excluded from instruction wiring"
+    if posture.reach == REACH_UNKNOWN:
+        return posture.detail or "state could not be determined"
+    if posture.delivery == DELIVERY_UNKNOWN:
+        return ("could not determine whether Claude Code loads this chain: %s"
+                % (posture.detail or "reason unrecorded"))
+    if ADVISORY_DUPLICATE_DIRECTIVE in posture.advisories:
+        return ("two %s includes in %s — repairing one and leaving the other "
+                "would preserve the duplication" % (BASIC_MD, CLAUDE_MD))
+    return ""
+
+
 def plan_wiring(posture, has_template: bool = True) -> WiringPlan:
     """Decide the writes for one project from its posture. Pure.
 
     Takes an already-classified `ProjectInstructions` rather than re-reading
-    the files, so there is exactly one classifier in the system. A second
-    opinion here is how the two halves drift apart.
+    the files, so there is exactly one classifier in the system.
     """
-    if getattr(posture, "excluded", False):
-        # The guard belongs HERE and not only on the button. `repairable`
-        # gates the UI, but any caller reaching the planner directly would
-        # have walked straight past it — and what this particular exclusion
-        # protects is writing Manager-authored files into somebody else's
-        # repository, which is not a mistake to leave one call site away.
-        return WiringPlan(blocked=posture.exclude_reason or
-                          "excluded from instruction wiring")
+    refusal = _refusal(posture)
+    if refusal:
+        return WiringPlan(blocked=refusal)
+
     if posture.reach == REACH_RESOLVED:
+        if posture.delivery == DELIVERY_IN_PROJECT:
+            return WiringPlan()
+        if ADVISORY_NONSTANDARD_CHAIN in posture.advisories:
+            return WiringPlan(blocked="resolves through its own include chain, "
+                                      "which the Manager does not rewrite")
+        steps, blocked = _localize_steps(posture)
+    elif posture.reach in (REACH_STALE, REACH_ORPHANED):
+        steps, blocked = _localize_steps(posture)
+    elif posture.reach == REACH_ABSENT:
+        steps, blocked = _absent_steps(posture, has_template)
+    else:
         return WiringPlan()
-    if posture.reach == REACH_UNKNOWN:
-        return WiringPlan(blocked=posture.detail or
-                          "state could not be determined")
-    if ADVISORY_DUPLICATE_DIRECTIVE in posture.advisories:
-        return WiringPlan(blocked="two %s includes in %s — repairing one and "
-                                  "leaving the other would preserve the "
-                                  "duplication" % (BASIC_MD, CLAUDE_MD))
-
-    steps: list = []
-
-    if posture.reach == REACH_STALE:
-        where = posture.stale_at.split(":")[0] if posture.stale_at else CLAUDE_MD
-        steps.append(WiringStep(ACTION_REPAIR_STALE, where,
-                                "reaches %s" % posture.reached_baseline))
-        # A stale directive that lives in BASIC_INSTRUCTIONS.md is only useful
-        # once something links that file, so the chain still has to be closed.
-        if os.path.basename(where).upper() == BASIC_MD.upper():
-            steps.append(WiringStep(ACTION_LINK_BASIC, CLAUDE_MD))
-        return WiringPlan(steps=tuple(steps))
-
-    if posture.reach == REACH_ORPHANED:
-        steps.append(WiringStep(ACTION_LINK_BASIC, CLAUDE_MD,
-                                "%s already carries the baseline include"
-                                % BASIC_MD))
-        return WiringPlan(steps=tuple(steps))
-
-    if posture.reach == REACH_ABSENT:
-        if posture.has_basic:
-            steps.append(WiringStep(ACTION_ADD_BASELINE, BASIC_MD))
-        elif has_template:
-            steps.append(WiringStep(ACTION_CREATE_BASIC, BASIC_MD))
-        else:
-            # Nothing to create BASIC_INSTRUCTIONS.md from. Wire the one-hop
-            # shape rather than refusing: `CLAUDE.md` -> baseline is a
-            # documented topology too, and it needs no file the user did not
-            # ask for. Refusing here would leave a project unwired purely
-            # because a template path was blank.
-            steps.append(WiringStep(ACTION_ADD_BASELINE, CLAUDE_MD))
-            return WiringPlan(steps=tuple(steps))
-        steps.append(WiringStep(ACTION_LINK_BASIC, CLAUDE_MD))
-        return WiringPlan(steps=tuple(steps))
-
-    return WiringPlan()
+    if blocked:
+        return WiringPlan(blocked=blocked)
+    return WiringPlan(steps=tuple(steps))
 
 
 # ── text computation (pure) ──────────────────────────────────────────────
@@ -192,8 +282,7 @@ def compute_created_claude(project_name: str) -> str:
     """A brand-new `CLAUDE.md`. Deterministic, and tested byte-for-byte.
 
     Minimal on purpose: a wiring action earns a wiring line, not a starter
-    document. Anything more would be this module deciding what a project's
-    instructions should say.
+    document.
     """
     return "# %s — Claude Instructions\n\n@%s\n" % (project_name, BASIC_MD)
 
@@ -202,8 +291,7 @@ def compute_link_basic(existing: str) -> "tuple[str, bool]":
     """Ensure `CLAUDE.md` includes `BASIC_INSTRUCTIONS.md`. Pure.
 
     Returns ``(text, changed)``; `changed` is False when the file already says
-    this, which is what makes a re-run a genuine no-op with a clean git status
-    rather than a rewrite that only looks idempotent.
+    this, which is what makes a re-run a genuine no-op.
     """
     if _has_directive(existing, BASIC_MD):
         return existing, False
@@ -214,10 +302,12 @@ def compute_link_basic(existing: str) -> "tuple[str, bool]":
     return line + nl + existing, True
 
 
-def compute_add_baseline(existing: str, baseline_line: str) -> "tuple[str, bool]":
-    """Ensure `BASIC_INSTRUCTIONS.md` carries the configured baseline include."""
+def compute_add_baseline(existing: str,
+                         baseline_line: str = bc.LOCAL_INCLUDE_LINE
+                         ) -> "tuple[str, bool]":
+    """Ensure a file carries the baseline include."""
     directives, _indented, _fence = scan_text(existing)
-    if any(is_baseline(raw) for _lineno, raw in directives):
+    if any(is_baseline(unescape_target(raw)) for _lineno, raw in directives):
         return existing, False
     nl = dominant_newline(existing)
     line = baseline_line.strip() + nl
@@ -226,32 +316,27 @@ def compute_add_baseline(existing: str, baseline_line: str) -> "tuple[str, bool]
     return line + nl + existing, True
 
 
-def compute_repair_stale(existing: str, baseline_line: str,
-                         containing_dir: str,
-                         current_target: str) -> "tuple[str, bool]":
-    """Repoint baseline directives that name a different baseline. Pure.
+def compute_localize(existing: str, lineno: int,
+                     expect: str) -> "tuple[str, bool, str]":
+    """Repoint the directive `@<expect>` to `@project-baseline.md`. Pure.
 
-    Only lines the parser recognises as directives naming a baseline are
-    touched, and only when they resolve somewhere other than the configured
-    baseline. Every other byte — including a prose mention of the filename,
-    which is what defeated the substring test this replaces — is untouched.
+    Compare-and-apply: the directive must still read exactly *expect*, at
+    *lineno* or, if lines moved, at exactly one other place. Anything else is
+    `(existing, False, reason)` — the file changed since the plan, and line
+    surgery on a guess is how a repair damages somebody's edit.
     """
     directives, _indented, _fence = scan_text(existing)
-    stale_lines = set()
-    for lineno, raw in directives:
-        if not is_baseline(raw):
-            continue
-        target = canonical(raw if os.path.isabs(raw)
-                           else os.path.join(containing_dir, raw))
-        if target != current_target:
-            stale_lines.add(lineno)
-    if not stale_lines:
-        return existing, False
+    hits = [n for n, raw in directives if raw == expect]
+    if lineno in hits:
+        target = lineno
+    elif len(hits) == 1:
+        target = hits[0]
+    else:
+        return existing, False, "the include changed since the plan"
 
-    replacement = baseline_line.strip()
     out = []
-    for lineno, line in enumerate(existing.splitlines(keepends=True), 1):
-        if lineno not in stale_lines:
+    for number, line in enumerate(existing.splitlines(keepends=True), 1):
+        if number != target:
             out.append(line)
             continue
         tail = ""
@@ -259,19 +344,14 @@ def compute_repair_stale(existing: str, baseline_line: str,
             if line.endswith(ending):
                 tail = ending
                 break
-        out.append(replacement + tail)
-    return "".join(out), True
+        out.append(bc.LOCAL_INCLUDE_LINE + tail)
+    return "".join(out), True, ""
 
 
 # ── IO ───────────────────────────────────────────────────────────────────
 
 def _read_preserving(path: str) -> "str | None":
-    """Text with line endings intact, or None when unreadable.
-
-    `newline=""` is the whole point: the default would translate CRLF to LF on
-    read, and writing that back would rewrite every line in the file while
-    claiming to have inserted one.
-    """
+    """Text with line endings intact, or None when unreadable."""
     try:
         with open(path, encoding="utf-8-sig", newline="") as handle:
             return handle.read()
@@ -288,58 +368,86 @@ class WiringResult:
 
 
 def _render_step(step: WiringStep, path: str, existing: str,
-                 baseline_line: str, project_name: str, template_text: str,
-                 current_target: str) -> "tuple[str, bool]":
-    """The text one step would write, and whether it differs. Pure-ish.
-
-    Only touches the filesystem to ask whether *path* exists, which decides
-    create-versus-edit. Split from `apply_wiring` so that function is a loop
-    over writes rather than a switch nested inside one.
-    """
+                 project_name: str, template_text: str) -> "tuple[str, bool, str]":
+    """The text one step would write, whether it differs, and any refusal."""
     exists = os.path.isfile(path)
 
     if step.action == ACTION_LINK_BASIC:
         if not exists:
-            return compute_created_claude(project_name), True
-        return compute_link_basic(existing)
+            return compute_created_claude(project_name), True, ""
+        return compute_link_basic(existing) + ("",)
 
     if step.action == ACTION_CREATE_CLAUDE:
-        return compute_created_claude(project_name), True
+        return compute_created_claude(project_name), True, ""
 
     if step.action == ACTION_CREATE_BASIC:
         if exists:
-            # Never overwrite a file the user may have filled in. The posture
-            # said this was absent; if it is here now the state changed under
-            # us, and stopping is the correct answer.
-            return existing, False
-        return template_text, bool(template_text)
+            # Never overwrite a file the user may have filled in.
+            return existing, False, ""
+        return template_text, bool(template_text), ""
 
     if step.action == ACTION_ADD_BASELINE:
-        return compute_add_baseline(existing, baseline_line)
+        return compute_add_baseline(existing) + ("",)
 
-    if step.action == ACTION_REPAIR_STALE:
-        target = current_target or canonical(baseline_line.lstrip("@").strip())
-        return compute_repair_stale(existing, baseline_line,
-                                    os.path.dirname(path), target)
+    if step.action == ACTION_LOCALIZE:
+        return compute_localize(existing, step.lineno, step.expect)
 
-    return existing, False
+    return existing, False, ""
 
 
-def apply_wiring(project_root: str, plan: WiringPlan, baseline_line: str,
-                 project_name: str, template_text: str = "",
-                 current_target: str = "") -> WiringResult:
-    """Execute *plan*. Returns which files actually changed.
+def _stale_localize(project_root: str, steps: tuple) -> str:
+    """Why a LOCALIZE step no longer applies, or ""."""
+    for step in steps:
+        if step.action != ACTION_LOCALIZE:
+            continue
+        existing = _read_preserving(os.path.join(project_root, step.path))
+        if existing is None:
+            return "could not read %s" % step.path
+        _text, _changed, refusal = compute_localize(existing, step.lineno,
+                                                    step.expect)
+        if refusal:
+            return "%s: %s" % (step.path, refusal)
+    return ""
 
-    Reports the files it CHANGED rather than the files it considered, so a
-    caller can show what was touched instead of what was intended.
+
+def _ordered(steps: tuple) -> list:
+    """Copy steps first, whatever order a plan arrived in. See the docstring."""
+    return ([s for s in steps if s.action in _COPY_STEPS]
+            + [s for s in steps if s.action not in _COPY_STEPS])
+
+
+def apply_wiring(project_root: str, plan: WiringPlan, project_name: str,
+                 template_text: str = "",
+                 baseline_template_text: str = "") -> WiringResult:
+    """Execute *plan*, stopping at the first failure. Returns what changed.
+
+    *template_text* is the BASIC_INSTRUCTIONS.md template; *baseline_template_text*
+    is the shared baseline a copy is rendered from. Reports the files it
+    CHANGED rather than the files it considered.
     """
     if plan.blocked:
         return WiringResult(ok=False, skipped=plan.blocked)
     if plan.is_noop:
         return WiringResult(ok=True)
 
+    # Every repoint's precondition is checked before ANY write, so a project
+    # edited since the plan gets nothing - not even the copy.
+    stale = _stale_localize(project_root, plan.steps)
+    if stale:
+        return WiringResult(ok=False, error=stale)
+
     changed: list = []
-    for step in plan.steps:
+    for step in _ordered(plan.steps):
+        if step.action in _COPY_STEPS:
+            expect = step.expect if step.action == ACTION_REFRESH_COPY else None
+            written = bc.write_copy(project_root, baseline_template_text, expect)
+            if not written.ok:
+                return WiringResult(ok=False, changed_files=tuple(changed),
+                                    error=written.error)
+            if written.changed:
+                changed.append(step.path)
+            continue
+
         path = os.path.join(project_root, step.path)
         existing = ""
         if os.path.isfile(path):
@@ -349,16 +457,19 @@ def apply_wiring(project_root: str, plan: WiringPlan, baseline_line: str,
                                     error="could not read %s" % step.path)
             existing = raw
 
-        text, changed_now = _render_step(
-            step, path, existing, baseline_line, project_name, template_text,
-            current_target)
+        text, changed_now, refusal = _render_step(step, path, existing,
+                                                  project_name, template_text)
+        if refusal:
+            return WiringResult(ok=False, changed_files=tuple(changed),
+                                error="%s: %s" % (step.path, refusal))
         if not changed_now:
             continue
         ok, msg = _atomic_write(path, text, step.path)
         if not ok:
             return WiringResult(ok=False, changed_files=tuple(changed),
                                 error=msg)
-        changed.append(step.path)
+        if step.path not in changed:
+            changed.append(step.path)
 
     return WiringResult(ok=True, changed_files=tuple(changed))
 
@@ -380,9 +491,9 @@ def apply_wiring(project_root: str, plan: WiringPlan, baseline_line: str,
 #
 # The rendered sentence now derives from the outcome. Never the reverse.
 
-#: Written, and re-read as resolving afterwards.
+#: Written, and re-read as healthy afterwards.
 OUTCOME_WIRED = "wired"
-#: Nothing to do; the chain already resolved.
+#: Nothing to do; the chain already resolves inside the project.
 OUTCOME_ALREADY_RESOLVED = "already_resolved"
 #: The project changed between the preview and the click, so the plan built
 #: from the preview was discarded unapplied. A DISTINCT member: this is the
@@ -393,8 +504,8 @@ OUTCOME_SKIPPED_STATE_CHANGED = "skipped_state_changed"
 OUTCOME_SKIPPED_BLOCKED = "skipped_blocked"
 #: The write itself failed.
 OUTCOME_FAILED = "failed"
-#: Written, but the chain still does not resolve. Neither success nor failure,
-#: and collapsing it into either would be a lie in one direction.
+#: Written, but the chain still does not resolve inside the project. Neither
+#: success nor failure, and collapsing it into either would be a lie.
 OUTCOME_UNVERIFIED = "unverified"
 
 _OUTCOME_TEXT = {
@@ -425,36 +536,46 @@ class ApplyOutcome:
                                 OUTCOME_SKIPPED_BLOCKED)
 
     def render(self) -> str:
-        """The sentence, DERIVED from the outcome.
-
-        One direction only. A caller that needs to know what happened reads
-        `outcome`; this exists so the two cannot drift.
-        """
+        """The sentence, DERIVED from the outcome."""
         text = _OUTCOME_TEXT.get(self.outcome, self.outcome)
         return "%s - %s" % (text, self.reason) if self.reason else text
 
 
+def _state_key(posture) -> tuple:
+    return (posture.reach, posture.delivery, posture.copy_state)
+
+
 def apply_to_project(posture, baseline: str, template_dir: str,
-                     baseline_include_line: str, template_text: str,
-                     has_template: bool) -> ApplyOutcome:
+                     template_text: str, has_template: bool,
+                     baseline_template_text: str = "",
+                     claude_projects=None) -> ApplyOutcome:
     """Re-read, re-plan, write, re-read. One project.
 
     The plan built for the preview is deliberately NOT reused: between the
     preview and the click the disk may have moved on, and writing a stale plan
     is how a bulk action damages a project somebody already fixed by hand.
 
-    Lives here rather than in a dialog because more than one surface drives it
-    -- the fleet panel and, once a relocation exists, that too. Two copies of
-    "re-read, re-plan, write, verify" is two places for the recompute to go
-    missing.
+    *claude_projects* is passed through to `read_project` when given (tests);
+    by default the config is read fresh, because approval can change too.
     """
-    from helpers.instructions_posture import REACH_RESOLVED, read_project
+    from helpers.instructions_posture import read_project
 
-    fresh = read_project(posture.display_root, posture.name, template_dir,
-                         baseline)
-    if fresh.reach != posture.reach:
+    def reread():
+        if claude_projects is None:
+            return read_project(posture.display_root, posture.name,
+                                template_dir, baseline, baseline_template_text)
+        return read_project(posture.display_root, posture.name, template_dir,
+                            baseline, baseline_template_text, "",
+                            claude_projects)
+
+    if baseline and not baseline_template_text:
+        baseline_template_text = bc.read_template(baseline)
+
+    fresh = reread()
+    if _state_key(fresh) != _state_key(posture):
         return ApplyOutcome(OUTCOME_SKIPPED_STATE_CHANGED,
-                            "was %s, now %s" % (posture.reach, fresh.reach))
+                            "was %s, now %s" % ("/".join(_state_key(posture)),
+                                                "/".join(_state_key(fresh))))
 
     plan = plan_wiring(fresh, has_template=has_template)
     if plan.blocked:
@@ -462,15 +583,15 @@ def apply_to_project(posture, baseline: str, template_dir: str,
     if plan.is_noop:
         return ApplyOutcome(OUTCOME_ALREADY_RESOLVED)
 
-    result = apply_wiring(posture.display_root, plan, baseline_include_line,
-                          posture.name, template_text, baseline or "")
+    result = apply_wiring(posture.display_root, plan, posture.name,
+                          template_text, baseline_template_text)
     if not result.ok:
-        return ApplyOutcome(OUTCOME_FAILED, result.error or result.skipped)
+        return ApplyOutcome(OUTCOME_FAILED, result.error or result.skipped,
+                            result.changed_files)
 
-    after = read_project(posture.display_root, posture.name, template_dir,
-                         baseline)
-    if after.reach == REACH_RESOLVED:
+    after = reread()
+    if after.healthy and after.copy_state == bc.COPY_CURRENT:
         return ApplyOutcome(OUTCOME_WIRED, changed_files=result.changed_files)
     return ApplyOutcome(OUTCOME_UNVERIFIED,
-                        "still %s after writing" % after.reach,
+                        "still %s after writing" % "/".join(_state_key(after)),
                         result.changed_files)

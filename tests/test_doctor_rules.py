@@ -534,12 +534,54 @@ class TestAuditInstructions:
         (d / "project-baseline.md").write_text("# Baseline\n", encoding="utf-8")
         return d, "@" + str(d / "project-baseline.md")
 
+    @staticmethod
+    def _localized(root, templates):
+        """A project on its own current copy - the only healthy shape."""
+        from helpers.baseline_copy import render_copy
+        text = (templates / "project-baseline.md").read_text(encoding="utf-8")
+        (root / "project-baseline.md").write_text(render_copy(text),
+                                                  encoding="utf-8")
+        return "@project-baseline.md"
+
     def test_resolved_and_small_produces_no_note(self, tmp_path):
         templates, inc = self._templates(tmp_path)
         root = tmp_path / "proj"
         root.mkdir()
-        (root / "CLAUDE.md").write_text(inc + "\n", encoding="utf-8")
+        local = self._localized(root, templates)
+        (root / "CLAUDE.md").write_text(local + "\n", encoding="utf-8")
         assert audit_instructions(str(root), inc, str(templates)) == []
+
+    def test_a_resolving_absolute_include_is_reported_as_not_loading(
+            self, tmp_path, monkeypatch):
+        """"Resolves" used to be the whole claim, and it was false.
+
+        An include of the template outside the project resolves under the
+        Manager's parser and is not loaded by Claude Code: on Windows the
+        backslashes alone stop it, elsewhere the missing approval does.
+        """
+        from helpers import instructions_posture as ip
+        monkeypatch.setattr(ip, "read_claude_projects_strict", lambda: {})
+        templates, inc = self._templates(tmp_path)
+        root = tmp_path / "proj"
+        root.mkdir()
+        (root / "CLAUDE.md").write_text(inc + "\n", encoding="utf-8")
+        notes = audit_instructions(str(root), inc, str(templates))
+        assert len(notes) == 1
+        assert "will not load it" in notes[0]
+        assert "Localize" in notes[0]
+
+    def test_doctor_delivery_keys_are_the_posture_constants(self):
+        """doctor_rules spells the states as literals to keep its import surface
+        small; this is what stops the two spellings drifting apart."""
+        from helpers import baseline_copy as bc
+        from helpers import doctor_rules as dr
+        from helpers import instructions_posture as ip
+        assert set(dr._DELIVERY_NOTES) == {
+            ip.DELIVERY_EXTERNAL_BLOCKED, ip.DELIVERY_UNPARSEABLE,
+            ip.DELIVERY_EXTERNAL_APPROVED, ip.DELIVERY_UNKNOWN}
+        assert set(dr._COPY_NOTES) == {bc.COPY_OUTDATED, bc.COPY_EDITED}
+        assert (ip.REACH_ORPHANED, ip.REACH_ABSENT, ip.REACH_STALE,
+                ip.REACH_UNKNOWN) == ("orphaned", "absent", "stale", "unknown")
 
     def test_orphan_is_reported_with_the_reason_it_does_not_load(self, tmp_path):
         templates, inc = self._templates(tmp_path)
@@ -591,7 +633,8 @@ class TestAuditInstructions:
         templates, inc = self._templates(tmp_path)
         root = tmp_path / "proj"
         root.mkdir()
-        (root / "CLAUDE.md").write_text(inc + "\n" + ("x" * 400) + "\n",
+        local = self._localized(root, templates)
+        (root / "CLAUDE.md").write_text(local + "\n" + ("x" * 400) + "\n",
                                         encoding="utf-8")
         assert audit_instructions(str(root), inc, str(templates),
                                   review_bytes=100) != []

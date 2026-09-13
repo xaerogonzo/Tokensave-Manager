@@ -22,8 +22,13 @@ from helpers import install_identity as ii
 
 
 def proj(name, reached=""):
-    """A posture stand-in. `read_ownership` is pure and reads two fields."""
-    return types.SimpleNamespace(name=name, reached_baseline=reached)
+    """A posture stand-in for a project that includes a template directly.
+
+    `read_ownership` is pure and reads `name` and `baseline_source`; for a
+    direct include the source is the reached path itself.
+    """
+    return types.SimpleNamespace(name=name, reached_baseline=reached,
+                                 baseline_source=reached)
 
 
 def base(tmp_path, name):
@@ -146,6 +151,37 @@ class TestOwnership:
         assert own.state == ii.OWNERSHIP_UNOWNED
         assert own.owners == ()
         assert own.unresolved == ("a", "b")
+
+    def test_projects_on_current_copies_are_owned_by_the_template_they_match(
+            self, tmp_path):
+        """A localized project reaches its OWN file; ownership reads the source.
+
+        Grouping by `reached_baseline` would make every localized project an
+        owner of itself, and a fleet of copies a SPLIT of N.
+        """
+        here = str(tmp_path / "t")
+        template = os.path.join(here, "project-baseline.md")
+        fleet = [types.SimpleNamespace(
+                     name=n, baseline_source=template,
+                     reached_baseline=str(tmp_path / n / "project-baseline.md"))
+                 for n in ("a", "b")]
+        own = ii.read_ownership(fleet, here)
+        assert own.state == ii.OWNED_HERE
+        assert own.owners[0].count == 2
+
+    def test_an_outdated_copy_is_unresolved_for_ownership(self, tmp_path):
+        here = str(tmp_path / "t")
+        template = os.path.join(here, "project-baseline.md")
+        fleet = [types.SimpleNamespace(name="current", baseline_source=template,
+                                       reached_baseline="x"),
+                 types.SimpleNamespace(name="outdated", baseline_source="",
+                                       reached_baseline=str(
+                                           tmp_path / "o" / "project-baseline.md"))]
+        own = ii.read_ownership(fleet, here)
+        assert own.unresolved == ("outdated",)
+        plan = ii.relocation_plan(ii.read_identity({}, str(tmp_path)), own, {},
+                                  here)
+        assert plan.blocked
 
     def test_unresolved_projects_never_move_the_verdict(self, tmp_path):
         """They are ordinary wiring work, counted separately.

@@ -136,10 +136,19 @@ def test_a_fresh_project_gets_both_the_include_and_the_index(
         tmp_path, ctrl, mocker):
     init = mocker.patch("controllers.scaffold_ctrl.run_index_init",
                         return_value=InitResult(True, 0, "", []))
-    actions = ctrl._run_retrofit_steps(_project(tmp_path, integrated=False),
+    # Wiring now writes the project's copy of the baseline, so the template it
+    # is copied from has to exist; an unreadable template refuses the wiring.
+    templates = tmp_path / "templates"
+    templates.mkdir()
+    (templates / "project-baseline.md").write_text("# Baseline\n",
+                                                   encoding="utf-8")
+    ctrl._cfg.baseline_include_line = "@" + str(templates / "project-baseline.md")
+    project = tmp_path / "proj"
+    project.mkdir()
+    actions = ctrl._run_retrofit_steps(_project(project, integrated=False),
                                        "Proj", dict(TOKENSAVE_FLAGS))
     init.assert_called_once()
-    assert any("CLAUDE.md" in a for a in actions)
+    assert any("CLAUDE.md" in a and "project-baseline.md" in a for a in actions)
     assert "Initialised tokensave index" in actions
 
 

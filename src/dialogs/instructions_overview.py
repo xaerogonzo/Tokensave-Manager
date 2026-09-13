@@ -37,7 +37,12 @@ from tkinter import messagebox, ttk
 from typing import TYPE_CHECKING
 
 from constants import C
+from helpers.baseline_copy import COPY_EDITED, COPY_OUTDATED, read_template
 from helpers.instructions_posture import (
+    DELIVERY_EXTERNAL_APPROVED,
+    DELIVERY_EXTERNAL_BLOCKED,
+    DELIVERY_UNKNOWN,
+    DELIVERY_UNPARSEABLE,
     ADVISORY_CONTRADICTS,
     ADVISORY_DOUBLE_LOAD,
     ADVISORY_DUPLICATE_CONTENT,
@@ -73,10 +78,48 @@ _ROWS = {
     REACH_ORPHANED: ("✗", "red",     "carried, but nothing links it from CLAUDE.md"),
     REACH_STALE:    ("⚠", "peach",   "resolves to a different baseline"),
     REACH_UNKNOWN:  ("?", "yellow",  "could not determine"),
-    REACH_RESOLVED: ("✓", "green",   "baseline chain resolves"),
+    REACH_RESOLVED: ("✓", "green",   "baseline chain resolves in the project"),
 }
 _ORDER = {REACH_ABSENT: 0, REACH_ORPHANED: 1, REACH_STALE: 2,
           REACH_UNKNOWN: 3, REACH_RESOLVED: 4}
+
+#: A chain that resolves is only green when Claude Code will load it. These
+#: override the RESOLVED row; each names a different fact, and none may be
+#: flattened into another (see the health ordering in ARCHITECTURE.md).
+_DELIVERY_ROWS = {
+    DELIVERY_EXTERNAL_BLOCKED: ("✗", "red",
+                                "resolves, but Claude Code won't load it"),
+    DELIVERY_UNPARSEABLE: ("✗", "red",
+                           "resolves, but the include is spelled so Claude "
+                           "Code won't load it"),
+    DELIVERY_EXTERNAL_APPROVED: ("⚠", "peach",
+                                 "loads on this machine only (outside the "
+                                 "project)"),
+    DELIVERY_UNKNOWN: ("?", "yellow", "could not determine whether it loads"),
+}
+
+#: Row text for a Manager copy that is not current.
+_COPY_ROWS = {
+    COPY_OUTDATED: ("⚠", "peach", "project-baseline.md copy is outdated"),
+    COPY_EDITED: ("⚠", "peach", "project-baseline.md was edited by hand"),
+}
+
+
+def _row_of(project) -> "tuple[str, str, str]":
+    """(badge, colour, meaning) for one project, from reach, delivery and copy."""
+    if project.reach == REACH_RESOLVED and project.delivery in _DELIVERY_ROWS:
+        return _DELIVERY_ROWS[project.delivery]
+    if project.reach == REACH_STALE and project.copy_state in _COPY_ROWS:
+        return _COPY_ROWS[project.copy_state]
+    return _ROWS.get(project.reach, _ROWS[REACH_UNKNOWN])
+
+
+def _action_label(project) -> str:
+    if project.copy_state == COPY_OUTDATED and project.reach == REACH_STALE:
+        return "Update copy…"
+    if project.reach == REACH_RESOLVED:
+        return "Localize…"
+    return "Wire…"
 
 _ADVISORY_TEXT = {
     ADVISORY_DOUBLE_LOAD: "baseline reachable twice — it loads twice",
@@ -114,9 +157,9 @@ class InstructionsDialog(UiPumpMixin, tk.Toplevel):
         # The honest limit of the claim, on screen rather than only in a
         # docstring: this dialog verifies files, not a running session.
         tk.Label(self,
-                 text="The Manager verifies that the documented include chain "
-                      "resolves from CLAUDE.md. It cannot observe a live "
-                      "Claude session.",
+                 text="The Manager verifies that the include chain resolves "
+                      "inside the project, spelled the way Claude Code parses "
+                      "it. It cannot observe a live Claude session.",
                  font=("Segoe UI", 8, "italic"), bg=C["base"],
                  fg=C["overlay0"]).pack(anchor=tk.W, padx=18, pady=(0, 8))
 
@@ -144,12 +187,14 @@ class InstructionsDialog(UiPumpMixin, tk.Toplevel):
 
         btn_row = tk.Frame(self, bg=C["base"])
         btn_row.pack(fill=tk.X, padx=18, pady=(0, 14))
-        self._wire_all_btn = ttk.Button(btn_row, text="Wire all…",
+        self._wire_all_btn = ttk.Button(btn_row, text="Repair all…",
                                         style="Primary.TButton",
                                         command=self._wire_all)
         self._wire_all_btn.pack(side=tk.LEFT)
         _Tooltip(self._wire_all_btn,
-                 "Reachability only. Shows every file it would touch first.")
+                 "Wires, localizes and updates project copies of the baseline. "
+                 "Shows every file it would touch first, and re-reads each "
+                 "project immediately before writing it.")
         self._agents_btn = ttk.Button(btn_row, text="Generate agent rules…",
                                       command=self._generate_agent_rules)
         self._agents_btn.pack(side=tk.LEFT, padx=(8, 0))
@@ -222,10 +267,11 @@ class InstructionsDialog(UiPumpMixin, tk.Toplevel):
         determine" is exactly what a single number would hide.
         """
         counts = fleet.counts()
+        healthy = sum(1 for p in fleet.projects if p.healthy)
         head = tk.Frame(self._body, bg=C["base"])
         head.pack(fill=tk.X, padx=4, pady=(6, 2))
-        tk.Label(head, text="%d of %d projects resolve the baseline"
-                            % (counts[REACH_RESOLVED], fleet.total),
+        tk.Label(head, text="%d of %d projects resolve the baseline inside the "
+                            "project" % (healthy, fleet.total),
                  font=("Segoe UI", 11, "bold"), bg=C["base"],
                  fg=C["text"]).pack(side=tk.LEFT)
 
@@ -240,12 +286,13 @@ class InstructionsDialog(UiPumpMixin, tk.Toplevel):
 
     def _render_rows(self, fleet) -> None:
         rows = sorted(fleet.projects,
-                      key=lambda p: (_ORDER.get(p.reach, 9), p.name.lower()))
+                      key=lambda p: (p.healthy, _ORDER.get(p.reach, 9),
+                                     p.name.lower()))
         for project in rows:
             self._render_row(project)
 
     def _render_row(self, project) -> None:
-        badge, colour, meaning = _ROWS.get(project.reach, _ROWS[REACH_UNKNOWN])
+        badge, colour, meaning = _row_of(project)
         row = tk.Frame(self._body, bg=C["base"])
         row.pack(fill=tk.X, padx=12, pady=1)
 
@@ -269,7 +316,7 @@ class InstructionsDialog(UiPumpMixin, tk.Toplevel):
             _Tooltip(weight, self._weight_note(project))
 
         if project.repairable:
-            ttk.Button(row, text="Wire…",
+            ttk.Button(row, text=_action_label(project),
                        command=lambda p=project: self._wire_one(p)).pack(
                 side=tk.RIGHT)
 
@@ -328,7 +375,7 @@ class InstructionsDialog(UiPumpMixin, tk.Toplevel):
         if not template_file or not os.path.isfile(template_file):
             return ""
         return load_basic_instructions_template(
-            template_file, self._cfg.baseline_include_line)
+            template_file, self._cfg.project_baseline_include_line)
 
     def _has_template(self) -> bool:
         template_file = getattr(self._cfg, "basic_instructions_template", "")
@@ -344,8 +391,8 @@ class InstructionsDialog(UiPumpMixin, tk.Toplevel):
         baseline = parse_baseline_target(self._cfg.baseline_include_line)
         return apply_to_project(
             project, baseline or "", self._cfg.template_dir,
-            self._cfg.baseline_include_line, self._template_text(),
-            self._has_template())
+            self._template_text(), self._has_template(),
+            read_template(baseline or ""))
 
     def _wire_one(self, project) -> None:
         plan = plan_wiring(project, has_template=self._has_template())

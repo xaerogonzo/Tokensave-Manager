@@ -502,3 +502,207 @@ def test_exclusion_does_not_fold_case_on_posix(tmp_path, templates,
     """
     assert _excluded_when_skip_is(
         lambda p: p.upper(), tmp_path, templates, monkeypatch) is False
+
+
+
+# -- the project's own copy: path and content are separate facts -----------
+
+from helpers import baseline_copy as bc  # noqa: E402
+
+
+def fwd(path):
+    """An include spelled the way Claude Code parses it: forward slashes."""
+    return str(path).replace("\\", "/")
+
+
+def localized(tmp_path, templates, copy_text=None, name="proj"):
+    root = make_project(tmp_path, name=name, claude="@BASIC_INSTRUCTIONS.md\n",
+                        basic="@project-baseline.md\n")
+    text = bc.render_copy(BASELINE_TEXT if copy_text is None else copy_text)
+    (root / "project-baseline.md").write_text(text, encoding="utf-8")
+    return root
+
+
+def posture_with(root, templates, claude_projects):
+    return ip.read_project(str(root), root.name, str(templates),
+                           ip.canonical(str(templates / "project-baseline.md")),
+                           BASELINE_TEXT, "", claude_projects)
+
+
+def test_a_current_copy_resolves_by_content_and_names_its_own_path(tmp_path,
+                                                                  templates):
+    root = localized(tmp_path, templates)
+    p = posture_with(root, templates, {})
+    assert p.reach == ip.REACH_RESOLVED
+    assert p.baseline_match == ip.CONTENT_MATCH
+    assert p.copy_state == bc.COPY_CURRENT
+    # The PATH is the copy, never the template: the two facts stay apart.
+    assert p.reached_baseline == ip.canonical(str(root / "project-baseline.md"))
+    assert p.baseline_source == ip.canonical(str(templates / "project-baseline.md"))
+    assert p.delivery == ip.DELIVERY_IN_PROJECT
+    assert p.healthy
+    assert ip.ADVISORY_DUPLICATE_CONTENT not in p.advisories
+
+
+def test_an_outdated_copy_is_stale_and_owns_nothing(tmp_path, templates):
+    root = localized(tmp_path, templates, copy_text="# older\n")
+    p = posture_with(root, templates, {})
+    assert p.reach == ip.REACH_STALE
+    assert p.copy_state == bc.COPY_OUTDATED
+    assert p.baseline_match == ip.CONTENT_MISMATCH
+    assert p.baseline_source == ""
+    assert not p.healthy
+
+
+def test_a_copy_with_a_damaged_header_is_unknown(tmp_path, templates):
+    root = localized(tmp_path, templates)
+    (root / "project-baseline.md").write_text(
+        "<!-- tokensave-manager:copy project-baseline.md sha256=zz -->\n"
+        + BASELINE_TEXT, encoding="utf-8")
+    p = posture_with(root, templates, {})
+    assert p.reach == ip.REACH_UNKNOWN
+    assert p.baseline_match == ip.CONTENT_UNKNOWN
+
+
+def test_a_project_baseline_md_the_manager_did_not_write_is_not_a_copy(
+        tmp_path, templates):
+    root = localized(tmp_path, templates)
+    (root / "project-baseline.md").write_text(BASELINE_TEXT, encoding="utf-8")
+    p = posture_with(root, templates, {})
+    assert p.reach == ip.REACH_STALE
+    assert p.copy_state == bc.COPY_UNMANAGED
+    assert p.baseline_source == ""
+
+
+def test_a_nested_project_baseline_md_is_never_treated_as_the_copy(tmp_path,
+                                                                  templates):
+    root = make_project(tmp_path, claude="@sub/project-baseline.md\n")
+    (root / "sub").mkdir()
+    (root / "sub" / "project-baseline.md").write_text(
+        bc.render_copy(BASELINE_TEXT), encoding="utf-8")
+    p = posture_with(root, templates, {})
+    assert p.copy_state == bc.COPY_ABSENT
+    assert p.reach == ip.REACH_STALE
+
+
+# -- delivery: will Claude Code load it? ----------------------------------
+
+@pytest.mark.parametrize("raw,parses", [
+    ("BASIC_INSTRUCTIONS.md", True),
+    ("docs/notes.md", True),
+    ("C:/Users/x/My\\ Project/project-baseline.md", True),
+    ("C:/Users/x/My Project/project-baseline.md", False),
+    ("C:\\Users\\x\\project-baseline.md", False),
+    ("D:\\Claude Co worker\\Token Save Manager Source\\templates\\project-baseline.md",
+     False),
+])
+def test_claude_code_parses_only_forward_slashes_and_escaped_spaces(raw,
+                                                                    parses):
+    """Measured with canaries on 2026-09-13; see `claude_code_parses`."""
+    assert ip.claude_code_parses(raw) is parses
+
+
+def test_an_escaped_space_is_followed_by_the_walk(tmp_path, templates):
+    root = make_project(tmp_path, claude="@notes\\ dir/extra.md\n")
+    (root / "notes dir").mkdir()
+    (root / "notes dir" / "extra.md").write_text("# extra\n", encoding="utf-8")
+    scan = ip.walk_chain(str(root), str(templates))
+    assert ip.canonical(str(root / "notes dir" / "extra.md")) in scan.paths
+
+
+def external(tmp_path, templates, spelled):
+    return make_project(tmp_path, claude="@BASIC_INSTRUCTIONS.md\n",
+                        basic="@" + spelled + "\n")
+
+
+def record(root, **flags):
+    return {fwd(os.path.abspath(str(root))): flags}
+
+
+def test_an_external_include_needs_approval(tmp_path, templates):
+    root = external(tmp_path, templates, fwd(templates / "project-baseline.md"))
+    blocked = posture_with(root, templates, {})
+    approved = posture_with(
+        root, templates,
+        record(root, hasClaudeMdExternalIncludesApproved=True))
+    denied = posture_with(
+        root, templates,
+        record(root, hasClaudeMdExternalIncludesApproved=False))
+    for p in (blocked, approved, denied):
+        assert p.reach == ip.REACH_RESOLVED and not p.healthy
+    assert blocked.delivery == ip.DELIVERY_EXTERNAL_BLOCKED
+    assert denied.delivery == ip.DELIVERY_EXTERNAL_BLOCKED
+    assert approved.delivery == ip.DELIVERY_EXTERNAL_APPROVED
+    assert approved.repairable and blocked.repairable
+
+
+def test_approval_on_a_backslash_key_is_not_approval(tmp_path, templates):
+    """Only the forward-slash record is the one Claude Code consults."""
+    root = external(tmp_path, templates, fwd(templates / "project-baseline.md"))
+    decoy = "\\".join(os.path.abspath(str(root)).replace("\\", "/").split("/"))
+    assert decoy != fwd(os.path.abspath(str(root)))
+    p = posture_with(root, templates,
+                     {decoy: {"hasClaudeMdExternalIncludesApproved": True}})
+    assert p.delivery == ip.DELIVERY_EXTERNAL_BLOCKED
+
+
+def test_an_unreadable_claude_json_is_unknown_never_blocked(tmp_path,
+                                                            templates):
+    root = external(tmp_path, templates, fwd(templates / "project-baseline.md"))
+    p = posture_with(root, templates, None)
+    assert p.delivery == ip.DELIVERY_UNKNOWN
+    assert not p.repairable
+
+
+def test_an_unresolvable_path_is_unknown_never_blocked(tmp_path, templates,
+                                                       monkeypatch):
+    root = external(tmp_path, templates, fwd(templates / "project-baseline.md"))
+
+    def boom(_path):
+        raise OSError("cannot resolve")
+    monkeypatch.setattr(ip.os.path, "realpath", boom)
+    p = posture_with(root, templates, {})
+    assert p.delivery == ip.DELIVERY_UNKNOWN
+
+
+def test_a_badly_spelled_include_does_not_load_even_when_approved(tmp_path,
+                                                                 templates):
+    spelled = str(templates / "project-baseline.md").replace("/", "\\")
+    root = external(tmp_path, templates, spelled if os.name == "nt"
+                    else fwd(templates / "with space") + "/../project-baseline.md")
+    if os.name != "nt":
+        (templates / "with space").mkdir()
+    p = posture_with(root, templates,
+                     record(root, hasClaudeMdExternalIncludesApproved=True))
+    assert p.delivery == ip.DELIVERY_UNPARSEABLE
+    assert "BASIC_INSTRUCTIONS.md:1" in p.detail
+
+
+def test_a_sibling_directory_sharing_a_prefix_is_outside(tmp_path):
+    """`Repo` does not contain `Repository`: containment is separator-bounded."""
+    repo = tmp_path / "Repo"
+    other = tmp_path / "Repository"
+    other.mkdir()
+    (other / "project-baseline.md").write_text(BASELINE_TEXT, encoding="utf-8")
+    repo.mkdir()
+    (repo / "CLAUDE.md").write_text(
+        "@" + fwd(other / "project-baseline.md") + "\n", encoding="utf-8")
+    p = ip.read_project(str(repo), "Repo", str(other),
+                        ip.canonical(str(other / "project-baseline.md")),
+                        BASELINE_TEXT, "", {})
+    assert p.reach == ip.REACH_RESOLVED
+    assert p.delivery == ip.DELIVERY_EXTERNAL_BLOCKED
+
+
+@pytest.mark.skipif(os.name != "nt", reason="directory junctions are Windows")
+def test_a_junction_to_outside_the_project_is_external(tmp_path, templates):
+    """Claude Code resolves the link before its containment test (measured)."""
+    import subprocess
+    root = make_project(tmp_path, claude="@BASIC_INSTRUCTIONS.md\n",
+                        basic="@linked/project-baseline.md\n")
+    made = subprocess.run(["cmd", "/c", "mklink", "/J", str(root / "linked"),
+                           str(templates)], capture_output=True)
+    if made.returncode != 0:
+        pytest.skip("could not create a junction here")
+    p = posture_with(root, templates, {})
+    assert p.delivery == ip.DELIVERY_EXTERNAL_BLOCKED

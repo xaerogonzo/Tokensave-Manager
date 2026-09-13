@@ -240,17 +240,19 @@ class RelocateDialog(UiPumpMixin, tk.Toplevel):
 
         def worker():
             from helpers.instructions_posture import read_posture
+            from helpers.baseline_copy import read_template
             baseline = parse_baseline_target(cfg.baseline_include_line) or ""
             template_text = _template_text(cfg)
             has_template = bool(template_text)
+            baseline_text = read_template(baseline)
             outcomes = []
             for project in read_posture(roots, cfg).projects:
                 if project.name not in names:
                     continue
                 try:
                     result = apply_to_project(
-                        project, baseline, cfg.template_dir,
-                        cfg.baseline_include_line, template_text, has_template)
+                        project, baseline, cfg.template_dir, template_text,
+                        has_template, baseline_text)
                 except Exception as exc:    # noqa: BLE001 — per project
                     from helpers.instructions_wiring import (
                         OUTCOME_FAILED, ApplyOutcome,
@@ -286,7 +288,7 @@ def _template_text(cfg) -> str:
     if not template_file or not os.path.isfile(template_file):
         return ""
     return load_basic_instructions_template(template_file,
-                                            cfg.baseline_include_line)
+                                            cfg.project_baseline_include_line)
 
 
 def _stamp(mtime: float) -> str:

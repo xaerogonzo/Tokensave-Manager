@@ -58,7 +58,13 @@ import os
 import re
 from dataclasses import dataclass, replace
 
-from helpers.mcp_projects import normalize_project_key
+from helpers import baseline_copy as bc
+from helpers.mcp_projects import (
+    external_includes_approved,
+    normalize_project_key,
+    read_claude_projects_strict,
+    resolve_project_record,
+)
 from helpers.project_discovery import find_projects
 
 # ── vocabulary ───────────────────────────────────────────────────────────
@@ -88,6 +94,29 @@ ADVISORY_NONSTANDARD_CHAIN = "nonstandard_chain"
 ADVISORY_CONTRADICTS = "contradicts"
 ADVISORY_PLACEHOLDER = "placeholder"
 ADVISORY_INDENTED_DIRECTIVE = "indented_directive"
+
+#: Is the reached baseline the configured one's CONTENT? Kept apart from the
+#: path in `reached_baseline`: a localized project reaches its own copy, a
+#: different file, and saying that path "is" the template would make a path
+#: comparison secretly become a content comparison.
+CONTENT_MATCH = "match"
+CONTENT_MISMATCH = "mismatch"
+CONTENT_UNKNOWN = "unknown"
+
+#: Will Claude Code load the chain? An OBSERVED fact about Claude Code, not a
+#: Manager invariant: files outside the project load only when the project's
+#: record approves external includes (measured 2026-09-13, see
+#: `helpers/baseline_copy.py`). Approved is still not the goal state - an
+#: absolute include is non-portable - so it is diagnostic, never a green light.
+DELIVERY_IN_PROJECT = "in_project"
+DELIVERY_EXTERNAL_APPROVED = "external_approved"
+DELIVERY_EXTERNAL_BLOCKED = "external_blocked"
+#: A directive on the chain is spelled so Claude Code does not parse it.
+DELIVERY_UNPARSEABLE = "unparseable"
+DELIVERY_UNKNOWN = "unknown"
+
+#: Sentinel: `read_project` loads `~/.claude.json` itself when not handed one.
+_LOAD = object()
 
 #: Traversal bounds. This runs fleet-wide, so a pathological include graph must
 #: terminate rather than turn the panel into a filesystem scanner.
@@ -230,6 +259,28 @@ def is_baseline(path: str) -> bool:
     return os.path.basename(path).lower() == BASELINE_BASENAME
 
 
+def unescape_target(raw: str) -> str:
+    """A directive target as a filesystem path: `\\ ` is an escaped space."""
+    return raw.replace("\\ ", " ")
+
+
+_UNESCAPED_SPACE = re.compile(r"(?<!\\)\s")
+
+
+def claude_code_parses(raw: str) -> bool:
+    """Would Claude Code load a directive spelled *raw*? Measured, not documented.
+
+    Canaries on 2026-09-13, each file inside the project: `@rel.md` and an
+    absolute forward-slash path with `\\ ` escapes loaded; the same absolute
+    path with raw spaces did NOT, and a backslash path with no spaces at all
+    (`@C:\\dir\\abs.md`) did NOT. So a space must be escaped and a backslash may
+    appear only as that escape. This parser is wider on purpose - it resolves
+    what a human meant - and this predicate says what Claude Code will do.
+    """
+    return ("\\" not in raw.replace("\\ ", "")
+            and not _UNESCAPED_SPACE.search(raw))
+
+
 # ── the walk ─────────────────────────────────────────────────────────────
 
 @dataclass(frozen=True)
@@ -302,7 +353,9 @@ def _expand_directives(path: str, as_written: str, depth: int,
     for lineno, raw in directives:
         if not raw.lower().endswith(_FOLLOWABLE_SUFFIXES):
             continue
-        raw_target = raw if os.path.isabs(raw) else os.path.join(base, raw)
+        spelled = unescape_target(raw)
+        raw_target = (spelled if os.path.isabs(spelled)
+                      else os.path.join(base, spelled))
         target = canonical(raw_target)
 
         if is_baseline(target):
@@ -457,9 +510,26 @@ class ProjectInstructions:
 
     #: Kept BEFORE the verdict collapses them, so a finding can say which
     #: baseline was reached and where the stale line lives.
+    #: The file the chain actually reaches, as a canonical PATH. For a
+    #: localized project that is its own `project-baseline.md`.
     reached_baseline: str = ""
     reached_is_current: bool = False
     stale_at: str = ""
+    #: CONTENT identity with the configured template, separately from the path.
+    baseline_match: str = ""
+    #: Which installation's baseline this project follows, for ownership: the
+    #: reached path when it is the template itself, the configured template
+    #: when a copy matches it, and "" when neither can be said.
+    baseline_source: str = ""
+    #: `baseline_copy` state of `<root>/project-baseline.md` when reached.
+    copy_state: str = ""
+    #: The sha the copy's header records, so a refresh can compare first.
+    copy_recorded_sha: str = ""
+    delivery: str = ""
+    #: (relative file, lineno, raw target) for every baseline directive in
+    #: CLAUDE.md and BASIC_INSTRUCTIONS.md, reached or not. What a localize
+    #: step repairs, captured so the writer can compare before it applies.
+    baseline_directives: tuple = ()
 
     weight_bytes: int = 0
     advisories: tuple = ()
@@ -495,41 +565,61 @@ class ProjectInstructions:
         """
         if self.excluded:
             return False
-        if self.reach == REACH_UNKNOWN:
+        if self.reach == REACH_UNKNOWN or self.delivery == DELIVERY_UNKNOWN:
             return False
         if ADVISORY_NONSTANDARD_CHAIN in self.advisories:
             return False
         if ADVISORY_DUPLICATE_DIRECTIVE in self.advisories:
             return False
+        if self.reach == REACH_RESOLVED:
+            # Resolving is not loading: a chain that leaves the project is
+            # dropped by Claude Code unless approved, and non-portable if it is.
+            return self.delivery in (DELIVERY_EXTERNAL_APPROVED,
+                                     DELIVERY_EXTERNAL_BLOCKED,
+                                     DELIVERY_UNPARSEABLE)
         return self.reach in (REACH_ORPHANED, REACH_ABSENT, REACH_STALE)
+
+    @property
+    def healthy(self) -> bool:
+        """The only state a panel may render green."""
+        return (self.reach == REACH_RESOLVED
+                and self.delivery == DELIVERY_IN_PROJECT)
 
 
 def _documented_shape(scan: ChainScan, project_root: str,
-                      baseline: str) -> bool:
+                      baselines: tuple) -> bool:
     """Is the resolution the shape Retrofit knows how to write?
 
     `CLAUDE.md` -> `BASIC_INSTRUCTIONS.md` -> baseline, or `CLAUDE.md` ->
     baseline directly. Anything else resolves fine and is left alone.
+    *baselines* is every path that counts as the configured baseline: the
+    template itself, and the project's copy when that copy is current.
     """
     root = canonical(project_root)
     claude = canonical(os.path.join(root, CLAUDE_MD))
     basic = canonical(os.path.join(root, BASIC_MD))
     for target, source, _lineno in scan.baselines:
-        if target == baseline and source in (claude, basic):
+        if target in baselines and source in (claude, basic):
             return True
     return False
 
 
+def _target_of(raw: str, base: str) -> str:
+    spelled = unescape_target(raw)
+    return canonical(spelled if os.path.isabs(spelled)
+                     else os.path.join(base, spelled))
+
+
 def _carriage_of(scan: ChainScan, standalone: "FileScan | None",
-                 current_baseline: str) -> "tuple[str, str]":
+                 matching: tuple) -> "tuple[str, str]":
     """What the project's files DECLARE, reached or not. Returns (carriage, stale_at).
 
     Deliberately separate from the reach decision. Carriage is a statement
     about the files; reach is a statement about the chain, and the whole
     module exists because those two were being answered as one.
     """
-    carried_current = any(b[0] == current_baseline for b in scan.baselines)
-    carried_other = any(b[0] != current_baseline for b in scan.baselines)
+    carried_current = any(b[0] in matching for b in scan.baselines)
+    carried_other = any(b[0] not in matching for b in scan.baselines)
     stale_at = ""
 
     if standalone is not None:
@@ -537,11 +627,10 @@ def _carriage_of(scan: ChainScan, standalone: "FileScan | None",
         for lineno, raw in standalone.directives:
             if not raw.lower().endswith(_FOLLOWABLE_SUFFIXES):
                 continue
-            target = canonical(raw if os.path.isabs(raw)
-                               else os.path.join(base, raw))
+            target = _target_of(raw, base)
             if not is_baseline(target):
                 continue
-            if target == current_baseline:
+            if target in matching:
                 carried_current = True
             else:
                 carried_other = True
@@ -577,10 +666,13 @@ def _text_advisories(scan: ChainScan, texts: dict, current_baseline: str,
     """Advisories that come from reading the prose. All heuristics."""
     found: list = []
     baseline_text = texts.get(current_baseline, "")
+    # The project's own copy restates the baseline by construction.
+    skip = (current_baseline,
+            canonical(os.path.join(project_root, BASELINE_BASENAME)))
 
     if baseline_text:
         for scanned in scan.files:
-            if scanned.path == current_baseline:
+            if scanned.path in skip:
                 continue
             body = texts.get(scanned.path, "")
             if body and _restates_baseline(body, baseline_text):
@@ -603,9 +695,55 @@ def _text_advisories(scan: ChainScan, texts: dict, current_baseline: str,
     return found
 
 
+_COPY_DETAIL = {
+    bc.COPY_OUTDATED: "project-baseline.md is an outdated copy of the template",
+    bc.COPY_EDITED: "project-baseline.md was edited by hand since it was copied",
+    bc.COPY_INVALID: "project-baseline.md has a damaged Manager header",
+    bc.COPY_UNREADABLE: "project-baseline.md could not be read",
+}
+
+
+def _copy_verdict(copy_state: str, copy_path: str, evidence: dict,
+                  carriage: str, advisories: list) -> "tuple[str, str, dict]":
+    """The verdict for a reached Manager copy that is NOT current."""
+    evidence = dict(evidence, reached_baseline=copy_path,
+                    detail=_COPY_DETAIL.get(copy_state, copy_state),
+                    advisories=tuple(advisories))
+    if copy_state in (bc.COPY_OUTDATED, bc.COPY_EDITED):
+        return REACH_STALE, carriage, dict(evidence,
+                                           baseline_match=CONTENT_MISMATCH)
+    return REACH_UNKNOWN, carriage, dict(evidence, baseline_match=CONTENT_UNKNOWN)
+
+
+def _other_baseline_verdict(scan: ChainScan, reached: tuple, project_root: str,
+                            current_baseline: str, copy_path: str,
+                            is_copy: bool, copy_state: str, evidence: dict,
+                            carriage: str,
+                            advisories: list) -> "tuple[str, str, dict]":
+    """The verdict when the chain reaches a baseline other than the configured
+    one (or a copy that does not match it)."""
+    target, source, lineno = reached
+    evidence = dict(evidence, stale_at="%s:%d" % (
+        os.path.relpath(scan.shown(source), project_root), lineno))
+    if is_copy and target == copy_path:
+        return _copy_verdict(copy_state, copy_path, evidence, carriage,
+                             advisories)
+    evidence.update(reached_baseline=target, baseline_match=CONTENT_UNKNOWN,
+                    detail="reaches %s; configured baseline is %s" % (
+                        target, current_baseline))
+    if target == copy_path:
+        # A file of the copy's name the Manager did not write: not an
+        # installation's baseline, so it owns nothing.
+        evidence["detail"] = "project-baseline.md here was not written by the Manager"
+    else:
+        evidence["baseline_source"] = target
+    return REACH_STALE, carriage, dict(evidence, advisories=tuple(advisories))
+
+
 def classify(scan: ChainScan, standalone: "FileScan | None",
              current_baseline: "str | None", project_root: str,
-             texts: "dict | None" = None) -> "tuple[str, str, dict]":
+             texts: "dict | None" = None,
+             copy_state: str = "") -> "tuple[str, str, dict]":
     """Decide `(reach, carriage, evidence)` from already-gathered facts. Pure.
 
     ### Why positive evidence outranks incompleteness
@@ -619,33 +757,49 @@ def classify(scan: ChainScan, standalone: "FileScan | None",
     So `UNKNOWN` preempts `STALE` / `ORPHANED` / `ABSENT`, and never
     `RESOLVED`. The same reasoning governs indented directives: they can only
     ever ADD a path, so they matter only when nothing was found.
+
+    ### A Manager copy is judged by content
+
+    *copy_state* is `baseline_copy`'s verdict on `<root>/project-baseline.md`.
+    A CURRENT copy counts as the configured baseline for reach, while
+    `reached_baseline` still names the copy's own path and `baseline_match`
+    says the match is by content. An unmanaged file of that name is not a copy
+    and keeps the ordinary "a different baseline" verdict.
     """
     texts = texts or {}
     evidence: dict = {"reached_baseline": "", "reached_is_current": False,
-                      "stale_at": "", "detail": ""}
+                      "stale_at": "", "detail": "", "baseline_match": "",
+                      "baseline_source": ""}
 
     if current_baseline is None:
         return REACH_UNKNOWN, CARRIAGE_UNKNOWN, dict(
             evidence, detail="configured baseline include line is not a valid "
                              "include directive", advisories=())
 
-    carriage, carried_stale_at = _carriage_of(scan, standalone,
-                                              current_baseline)
+    copy_path = canonical(os.path.join(project_root, BASELINE_BASENAME))
+    is_copy = (copy_path != current_baseline and copy_state not in
+               ("", bc.COPY_ABSENT, bc.COPY_UNMANAGED))
+    matching = (current_baseline,)
+    if is_copy and copy_state == bc.COPY_CURRENT:
+        matching = (current_baseline, copy_path)
+
+    carriage, carried_stale_at = _carriage_of(scan, standalone, matching)
     evidence["stale_at"] = carried_stale_at
 
     advisories = _text_advisories(scan, texts, current_baseline, project_root)
     if _duplicate_basic_directives(scan, project_root):
         advisories.append(ADVISORY_DUPLICATE_DIRECTIVE)
 
-    reached_current = [b for b in scan.baselines if b[0] == current_baseline]
-    reached_other = [b for b in scan.baselines if b[0] != current_baseline]
+    reached_current = [b for b in scan.baselines if b[0] in matching]
+    reached_other = [b for b in scan.baselines if b[0] not in matching]
 
     if reached_current:
-        evidence["reached_baseline"] = current_baseline
-        evidence["reached_is_current"] = True
+        evidence.update(reached_baseline=reached_current[0][0],
+                        reached_is_current=True, baseline_match=CONTENT_MATCH,
+                        baseline_source=current_baseline)
         if len(reached_current) > 1:
             advisories.append(ADVISORY_DOUBLE_LOAD)
-        if not _documented_shape(scan, project_root, current_baseline):
+        if not _documented_shape(scan, project_root, matching):
             advisories.append(ADVISORY_NONSTANDARD_CHAIN)
         return REACH_RESOLVED, carriage, dict(evidence,
                                               advisories=tuple(advisories))
@@ -659,14 +813,10 @@ def classify(scan: ChainScan, standalone: "FileScan | None",
                                              advisories=tuple(advisories))
 
     if reached_other:
-        target, source, lineno = reached_other[0]
-        evidence["reached_baseline"] = target
-        evidence["stale_at"] = "%s:%d" % (
-            os.path.relpath(scan.shown(source), project_root), lineno)
-        evidence["detail"] = "reaches %s; configured baseline is %s" % (
-            target, current_baseline)
-        return REACH_STALE, carriage, dict(evidence,
-                                           advisories=tuple(advisories))
+        return _other_baseline_verdict(scan, reached_other[0], project_root,
+                                       current_baseline, copy_path, is_copy,
+                                       copy_state, evidence, carriage,
+                                       advisories)
 
     if carriage != CARRIAGE_NONE:
         evidence["detail"] = (
@@ -762,6 +912,57 @@ def excluded_roots(cfg) -> tuple:
                  if str(entry).strip())
 
 
+def delivery_of(scan: ChainScan, project_root: str,
+                claude_projects) -> "tuple[str, str]":
+    """`(delivery, detail)`: will Claude Code load this chain? Observed facts.
+
+    Three checks, strongest first:
+
+    1. **Spelling.** A directive on the chain that Claude Code does not parse
+       (`claude_code_parses`) loads nothing, wherever it points.
+    2. **Containment,** by `realpath` - unlike `canonical`, which avoids it for
+       identity - because the junction canary showed Claude Code resolving a
+       link to its real location before deciding it is outside the project.
+    3. **Approval** of external includes, read off the project's record.
+
+    *claude_projects* is the `projects` map, or None when `~/.claude.json`
+    could not be read. An unreadable config or a path that cannot be resolved
+    is UNKNOWN, never blocked.
+    """
+    reached = set(scan.paths) | {b[0] for b in scan.baselines}
+    for scanned in scan.files:
+        base = os.path.dirname(scanned.path)
+        for lineno, raw in scanned.directives:
+            if (raw.lower().endswith(_FOLLOWABLE_SUFFIXES)
+                    and _target_of(raw, base) in reached
+                    and not claude_code_parses(raw)):
+                return DELIVERY_UNPARSEABLE, (
+                    "%s:%d is spelled in a way Claude Code does not load "
+                    "(a backslash, or an unescaped space)"
+                    % (os.path.basename(scan.shown(scanned.path)), lineno))
+    try:
+        root = canonical(os.path.realpath(project_root))
+        outside = [path for path in sorted(reached)
+                   if not _within(canonical(os.path.realpath(path)), (root,))]
+    except (OSError, ValueError):
+        return DELIVERY_UNKNOWN, "could not resolve the chain's real paths"
+    if not outside:
+        return DELIVERY_IN_PROJECT, ""
+    if claude_projects is None:
+        return DELIVERY_UNKNOWN, "~/.claude.json could not be read"
+    approved = external_includes_approved(
+        resolve_project_record(project_root, claude_projects))
+    if approved is None:
+        return DELIVERY_UNKNOWN, "~/.claude.json could not be read"
+    if approved:
+        return DELIVERY_EXTERNAL_APPROVED, (
+            "includes %s from outside the project (approved on this machine "
+            "only)" % outside[0])
+    return DELIVERY_EXTERNAL_BLOCKED, (
+        "includes %s from outside the project, which Claude Code does not load "
+        "without approval" % outside[0])
+
+
 def read_posture(roots: list, cfg) -> FleetInstructions:
     """Scan every discovered project. The only function here that does IO."""
     baseline = parse_baseline_target(getattr(cfg, "baseline_include_line", ""))
@@ -776,6 +977,7 @@ def read_posture(roots: list, cfg) -> FleetInstructions:
     if template_file:
         placeholder_text = _read(template_file) or ""
 
+    claude_projects = read_claude_projects_strict()
     skips = excluded_roots(cfg)
     seen: set = set()
     projects: list = []
@@ -787,7 +989,8 @@ def read_posture(roots: list, cfg) -> FleetInstructions:
         seen.add(key)
         project = read_project(path, entry.get("name") or
                                os.path.basename(path), template_dir,
-                               baseline, template_text, placeholder_text)
+                               baseline, template_text, placeholder_text,
+                               claude_projects)
         if canonical(path) in skips:
             project = replace(project, excluded=True,
                               exclude_reason="excluded in manager-config.json "
@@ -798,12 +1001,34 @@ def read_posture(roots: list, cfg) -> FleetInstructions:
                              baseline_ok=baseline is not None)
 
 
-def read_project(project_root: str, name: str, template_dir: str,
-                 baseline: "str | None", baseline_text: str = "",
-                 placeholder_text: str = "") -> ProjectInstructions:
-    """One project's posture. Separated so tests can drive it directly."""
-    scan = walk_chain(project_root, template_dir)
+def _baseline_directives(project_root: str, texts_by_name: dict) -> tuple:
+    """(file, lineno, raw) for every baseline directive in the two wired files."""
+    found = []
+    for name in (CLAUDE_MD, BASIC_MD):
+        text = texts_by_name.get(name)
+        if not text:
+            continue
+        directives, _soft, _fence = scan_text(text)
+        for lineno, raw in directives:
+            if is_baseline(unescape_target(raw)):
+                found.append((name, lineno, raw))
+    return tuple(found)
 
+
+def _copy_state_of(project_root: str, baseline_text: str) -> "tuple[str, str]":
+    """(copy state, recorded sha) for `<root>/project-baseline.md`."""
+    facts = bc.read_copy(os.path.join(project_root, BASELINE_BASENAME))
+    if facts.exists and facts.header == bc.HEADER_OK and not baseline_text:
+        # Current or outdated cannot be decided against a template we could not
+        # read, and guessing "outdated" would offer to overwrite it.
+        return bc.COPY_UNREADABLE, facts.recorded_sha
+    return (bc.classify_copy(facts, bc.content_sha(baseline_text)),
+            facts.recorded_sha)
+
+
+def _gather_texts(scan: ChainScan, project_root: str, baseline: "str | None",
+                  baseline_text: str) -> dict:
+    """Canonical path -> text, for the content advisories."""
     texts: dict = {}
     for scanned in scan.files:
         texts[scanned.path] = _read(scanned.path) or ""
@@ -814,22 +1039,54 @@ def read_project(project_root: str, name: str, template_dir: str,
             texts[claude] = body
     if baseline and baseline_text:
         texts[baseline] = baseline_text
+    return texts
+
+
+def _read_standalone(basic_path: str, placeholder_text: str,
+                     texts: dict) -> "FileScan | None":
+    """BASIC_INSTRUCTIONS.md scanned on its own, reached or not."""
+    basic_text = _read(basic_path)
+    if basic_text is None:
+        return None
+    if placeholder_text and basic_text.strip() == placeholder_text.strip():
+        texts["__placeholder__"] = True
+    directives, soft, fence = scan_text(basic_text)
+    return FileScan(path=basic_path, size=len(basic_text),
+                    directives=directives, indented=soft, unclosed_fence=fence)
+
+
+def read_project(project_root: str, name: str, template_dir: str,
+                 baseline: "str | None", baseline_text: str = "",
+                 placeholder_text: str = "",
+                 claude_projects=_LOAD) -> ProjectInstructions:
+    """One project's posture. Separated so tests can drive it directly.
+
+    *claude_projects* is the `~/.claude.json` projects map (None: unreadable);
+    omitted, it is read here.
+    """
+    if baseline and not baseline_text:
+        baseline_text = _read(baseline) or ""
+    if claude_projects is _LOAD:
+        claude_projects = read_claude_projects_strict()
+    scan = walk_chain(project_root, template_dir)
+    texts = _gather_texts(scan, project_root, baseline, baseline_text)
 
     basic_path = canonical(os.path.join(project_root, BASIC_MD))
     has_basic = os.path.isfile(basic_path)
-    standalone = None
-    if has_basic:
-        basic_text = _read(basic_path)
-        if basic_text is not None:
-            directives, soft, fence = scan_text(basic_text)
-            standalone = FileScan(path=basic_path, size=len(basic_text),
-                                  directives=directives, indented=soft,
-                                  unclosed_fence=fence)
-            if placeholder_text and basic_text.strip() == placeholder_text.strip():
-                texts["__placeholder__"] = True
+    standalone = _read_standalone(basic_path, placeholder_text, texts) \
+        if has_basic else None
 
+    copy_state, recorded_sha = _copy_state_of(project_root, baseline_text)
     reach, carriage, evidence = classify(scan, standalone, baseline,
-                                         project_root, texts)
+                                         project_root, texts, copy_state)
+    delivery, delivery_detail = delivery_of(scan, project_root, claude_projects)
+    detail = evidence.get("detail", "")
+    if delivery != DELIVERY_IN_PROJECT and delivery_detail:
+        detail = "; ".join(part for part in (detail, delivery_detail) if part)
+
+    by_name = {CLAUDE_MD: texts.get(canonical(os.path.join(project_root,
+                                                           CLAUDE_MD))),
+               BASIC_MD: _read(basic_path) if has_basic else None}
 
     return ProjectInstructions(
         root=normalize_project_key(project_root),
@@ -840,9 +1097,15 @@ def read_project(project_root: str, name: str, template_dir: str,
         reached_baseline=evidence.get("reached_baseline", ""),
         reached_is_current=evidence.get("reached_is_current", False),
         stale_at=evidence.get("stale_at", ""),
+        baseline_match=evidence.get("baseline_match", ""),
+        baseline_source=evidence.get("baseline_source", ""),
+        copy_state=copy_state,
+        copy_recorded_sha=recorded_sha,
+        delivery=delivery,
+        baseline_directives=_baseline_directives(project_root, by_name),
         weight_bytes=scan.total_bytes,
         advisories=evidence.get("advisories", ()),
-        detail=evidence.get("detail", ""),
+        detail=detail,
         chain=scan.paths,
         has_basic=has_basic,
         basic_carries=bool(standalone and any(

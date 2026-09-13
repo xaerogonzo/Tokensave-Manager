@@ -1,9 +1,9 @@
 """helpers/install_identity.py — where am I, and who owns the fleet?
 
-Every retrofitted project's `BASIC_INSTRUCTIONS.md` carries an **absolute** path
-to the shared baseline. That is the feature, not a defect: it is what makes one
-edit to `project-baseline.md` reach every wired project at once. But it makes
-this installation's location load-bearing for the whole fleet, and the Manager
+Projects follow ONE installation's `templates/project-baseline.md`: older ones
+through an absolute include of it, localized ones through a committed copy that
+matches it by content (`helpers/baseline_copy.py`). Either way this
+installation's template is load-bearing for the whole fleet, and the Manager
 had no record of where it was — so a move could only ever be *inferred* from
 drift, never known.
 
@@ -160,18 +160,22 @@ def read_ownership(projects, here_template_dir: str) -> FleetOwnership:
 
     Pure: takes already-classified postures and does no IO.
 
-    **Ownership is computed only over projects that reach a baseline**, and
-    `reached_baseline` being empty is the measured predicate for "does not" —
-    an ORPHANED project carries the include but reaches nothing, and reports an
-    empty string. `RESOLVED` and `STALE` both reach one; that is exactly the
-    distinction that makes `STALE` mean "owned by a different install" rather
-    than "broken".
+    **Ownership is computed only over projects that follow an installation's
+    baseline**, read from `baseline_source` and not from `reached_baseline`.
+    The two were the same until projects carried their own copy: a localized
+    project REACHES `<project>/project-baseline.md`, a path that names no
+    installation, and grouping by it would call every project its own owner.
+    `baseline_source` is the template a current copy matches by content, the
+    reached template itself, or "" when neither can be said — an ORPHANED
+    project, or a copy that is outdated, hand-edited or unreadable. `STALE`
+    pointing at another install's template still names that install, which is
+    what makes it mean "owned elsewhere" rather than "broken".
     """
     here = canonical(here_template_dir) if here_template_dir else ""
     groups: dict = {}
     unresolved = []
     for project in projects:
-        reached = getattr(project, "reached_baseline", "") or ""
+        reached = getattr(project, "baseline_source", "") or ""
         if not reached:
             unresolved.append(project.name)
             continue

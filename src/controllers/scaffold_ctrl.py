@@ -27,6 +27,7 @@ from typing import TYPE_CHECKING, Callable
 import tkinter as tk
 
 from constants import C, CREATE_NO_WINDOW, _ANSI
+from helpers.baseline_copy import read_template, write_copy
 from helpers.graph_trust import INDEX_PRESENT, index_state
 from helpers.instructions_posture import (excluded_roots,
                                           parse_baseline_target,
@@ -164,11 +165,13 @@ class ScaffoldRetrofitController:
             basic_md = os.path.join(path, "BASIC_INSTRUCTIONS.md")
             try:
                 template = load_basic_instructions_template(
-                    self._cfg.basic_instructions_template, self._cfg.baseline_include_line)
+                    self._cfg.basic_instructions_template,
+                    self._cfg.project_baseline_include_line)
                 with open(basic_md, "w", encoding="utf-8") as f:
                     f.write(template)
                 self._on_log(f"  Created BASIC_INSTRUCTIONS.md in {name}", C["green"])
                 log.info("  created BASIC_INSTRUCTIONS.md")
+                self._write_baseline_copy(path)
             except Exception as e:
                 self._on_log(f"  Error writing BASIC_INSTRUCTIONS.md: {e}", C["red"])
                 log.exception("  SCAFFOLD write failed")
@@ -376,10 +379,10 @@ class ScaffoldRetrofitController:
         template_text = ""
         if has_template:
             template_text = load_basic_instructions_template(
-                template_file, cfg.baseline_include_line)
+                template_file, cfg.project_baseline_include_line)
 
-        result = apply_wiring(path, plan, cfg.baseline_include_line, name,
-                              template_text, baseline or "")
+        result = apply_wiring(path, plan, name, template_text,
+                              read_template(baseline or ""))
         if not result.ok:
             detail = result.error or result.skipped
             log.warning(f"  instructions wiring failed: {detail}")
@@ -498,12 +501,29 @@ class ScaffoldRetrofitController:
             self._on_log("  BASIC_INSTRUCTIONS.md already exists — skipped", C["overlay0"])
             return []
         template = load_basic_instructions_template(
-            self._cfg.basic_instructions_template, self._cfg.baseline_include_line)
+            self._cfg.basic_instructions_template,
+            self._cfg.project_baseline_include_line)
         with open(basic_md, "w", encoding="utf-8") as f:
             f.write(template)
         log.info("  created BASIC_INSTRUCTIONS.md")
         self._on_log("  Created BASIC_INSTRUCTIONS.md", C["green"])
-        return ["Created BASIC_INSTRUCTIONS.md"]
+        return ["Created BASIC_INSTRUCTIONS.md"] + self._write_baseline_copy(path)
+
+    def _write_baseline_copy(self, path: str) -> list[str]:
+        """The project's copy of the baseline, which the new include names.
+
+        Without it a freshly scaffolded BASIC_INSTRUCTIONS.md would include a
+        file that is not there.
+        """
+        baseline = parse_baseline_target(self._cfg.baseline_include_line)
+        written = write_copy(path, read_template(baseline or ""))
+        if not written.ok:
+            self._on_log(f"  project-baseline.md: {written.error}", C["peach"])
+            return []
+        if not written.changed:
+            return []
+        self._on_log("  Wrote project-baseline.md", C["green"])
+        return ["Wrote project-baseline.md"]
 
     def _retrofit_add_shadow_links(self, path: str, ext_map: dict) -> list[str]:
         """Generate shadow extension links and update .gitignore. Returns actions taken."""

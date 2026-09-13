@@ -81,6 +81,7 @@ This index is the cheap part; the files are the expensive part.
 | design what a result, report or cursor returns | `gotchas/empty-is-not-unknown.md` |
 | need admin rights, or split off a privileged helper | `gotchas/elevation-and-privilege.md` |
 | move content out of a file, or split a big one | `gotchas/moving-content-moves-its-guards.md` |
+| add an `@include`, or wonder why rules are ignored | `gotchas/claude-md-external-includes.md` |
 
 **These describe failures that do not raise.** A wrong appearance mode renders a
 plausible-looking screenshot; a re-export shim passes its tests for the wrong
