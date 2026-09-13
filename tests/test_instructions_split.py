@@ -563,6 +563,62 @@ class TestReferenceSections:
         assert sections[0].is_reference is False
 
 
+class TestRuleSections:
+    """A standing directive marks a rule the reader needs loaded.
+
+    KicomAI's "Sandbox Testing" is prose, not a table, so the table mark could
+    not keep the budget off it. What separates it is a `**Do NOT:**` block --
+    not the word "never", which lessons use constantly. Measured over the
+    fleet: 9 of 141 CLAUDE.md sections and 1 of 243 lessons sections.
+    """
+
+    # KicomAI's section, verbatim in shape.
+    SANDBOX = (
+        "The sandbox setup lives **outside the main project**.\n\n"
+        "**Workflow:** double-click, then run the setup script.\n\n"
+        "**Do NOT:**\n"
+        "- Run `scripts\\sandbox\\sandbox-auto-setup.bat` on the host\n"
+        "- Map the project as `ReadOnly=false`\n")
+    # A lesson that says never, the way lessons do.
+    LESSON = (big(3000) + "\n\nWe had never measured it, and the guard would "
+              "never have caught the case. It never raised.\n")
+
+    def _doc(self):
+        return doc3([(2, "Head", big(40)),
+                     (2, "Sandbox Testing", self.SANDBOX),
+                     (2, "A lesson", self.LESSON)])
+
+    def test_a_standing_directive_marks_the_section(self):
+        _pre, sections = _compute_sections(self._doc())
+        assert {s.title: s.has_rules for s in sections} == {
+            "Head": False, "Sandbox Testing": True, "A lesson": False}
+
+    @pytest.mark.parametrize("line", [
+        "**Never `tempfile.mkdtemp()`** for shared data.",
+        "- Never store a raw `Mol` in a project file.",
+        "* Don't call `super()` between the mixins.",
+        "Callers **MUST stay single-threaded**.",
+    ])
+    def test_each_directive_form_is_recognised(self, line):
+        _pre, sections = _compute_sections(doc3([(2, "Rules", line)]))
+        assert sections[0].has_rules is True
+
+    def test_a_directive_inside_a_code_fence_is_not_a_rule(self):
+        text = doc3([(2, "Lesson", "```\n**Do NOT:** quoted output\n```")])
+        _pre, sections = _compute_sections(text)
+        assert sections[0].has_rules is False
+
+    def test_the_budget_does_not_suggest_one(self):
+        plan = compute_split(self._doc(), keep_bytes=10)
+        titles = [s.title for s in plan.moved]
+        assert "Sandbox Testing" not in titles
+        assert "A lesson" in titles
+
+    def test_a_person_can_still_move_one(self):
+        plan = compute_split(self._doc(), move_indices={1})
+        assert [s.title for s in plan.moved] == ["Sandbox Testing"]
+
+
 class TestAppendGuards:
     def _project(self, tmp_path, text, target=None):
         (tmp_path / "CLAUDE.md").write_text(text, encoding="utf-8", newline="")
