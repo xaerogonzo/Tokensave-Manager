@@ -828,6 +828,63 @@ _INSTRUCTIONS_REVIEW_BYTES = 50_000
 _INSTRUCTIONS_SPLIT_BYTES = 200_000
 
 
+#: `_reach_note` spells reach states as literals for the same reason; the test
+#: `test_doctor_delivery_keys_are_the_posture_constants` pins both spellings.
+#: One wording per delivery state. They are ordered facts, not one warning:
+#: blocked and unparseable load nothing, approved loads on this machine only,
+#: unknown could not be decided. `%s` is the posture's detail.
+_DELIVERY_NOTES = {
+    "external_blocked": (
+        "  The instruction chain resolves, but Claude Code will not load it: "
+        "%s. Right-click the project -> Instructions... -> Localize."),
+    "unparseable": (
+        "  The instruction chain resolves, but Claude Code will not load it: "
+        "%s. Right-click the project -> Instructions... -> Localize."),
+    "external_approved": (
+        "  The instruction chain loads on this machine only: %s. A committed "
+        "machine path breaks other checkouts and worktrees. Right-click the "
+        "project -> Instructions... -> Localize."),
+    "unknown": (
+        "  Could not determine whether Claude Code loads the instruction "
+        "chain: %s. Nothing was changed."),
+}
+
+_COPY_NOTES = {
+    "outdated": (
+        "  project-baseline.md is an outdated copy of the template. "
+        "Right-click the project -> Instructions... -> Update copy."),
+    "edited": (
+        "  project-baseline.md was edited by hand since the Manager copied it, "
+        "so it is not updated automatically. Edit the template instead, then "
+        "restore the copy."),
+}
+
+
+def _reach_note(posture) -> str:
+    """The one note about whether the chain resolves and loads, or ""."""
+    reach = posture.reach
+    detail = posture.detail or "reason unrecorded"
+    if reach == "orphaned":
+        return ("  BASIC_INSTRUCTIONS.md carries the baseline include, but nothing "
+                "links it from CLAUDE.md -- Claude Code reads CLAUDE.md, so none of "
+                "it loads. Right-click the project -> Instructions... to wire it.")
+    if reach == "absent":
+        return ("  No baseline include anywhere, so this project gets none of the "
+                "shared rules. Right-click the project -> Instructions...")
+    if reach == "stale" and posture.copy_state in _COPY_NOTES:
+        return _COPY_NOTES[posture.copy_state]
+    if reach == "stale":
+        return ("  The baseline include at %s points at %s, not the configured "
+                "template. Right-click the project -> Instructions... to repoint it."
+                % (posture.stale_at or "CLAUDE.md", posture.reached_baseline))
+    if reach == "unknown":
+        # Deliberately not phrased as an absence.
+        return ("  Could not determine whether the instruction chain resolves: %s. "
+                "Nothing was changed." % detail)
+    note = _DELIVERY_NOTES.get(posture.delivery)
+    return note % detail if note else ""
+
+
 def audit_instructions(project_path: str, baseline_include_line: str = "",
                        template_dir: str = "",
                        review_bytes: int = _INSTRUCTIONS_REVIEW_BYTES,
@@ -849,8 +906,7 @@ def audit_instructions(project_path: str, baseline_include_line: str = "",
         from helpers.instructions_posture import (
             ADVISORY_CONTRADICTS, ADVISORY_DOUBLE_LOAD,
             ADVISORY_DUPLICATE_CONTENT, ADVISORY_PLACEHOLDER,
-            REACH_ABSENT, REACH_ORPHANED, REACH_RESOLVED, REACH_STALE,
-            REACH_UNKNOWN, parse_baseline_target, read_project,
+            REACH_RESOLVED, parse_baseline_target, read_project,
         )
     except ImportError:
         return []
@@ -880,26 +936,7 @@ def audit_instructions(project_path: str, baseline_include_line: str = "",
                            template_dir, baseline, baseline_text,
                            placeholder_text)
 
-    notes = []
-    if posture.reach == REACH_ORPHANED:
-        notes.append(
-            "  BASIC_INSTRUCTIONS.md carries the baseline include, but nothing "
-            "links it from CLAUDE.md -- Claude Code reads CLAUDE.md, so none of "
-            "it loads. Right-click the project -> Instructions... to wire it.")
-    elif posture.reach == REACH_ABSENT:
-        notes.append(
-            "  No baseline include anywhere, so this project gets none of the "
-            "shared rules. Right-click the project -> Instructions...")
-    elif posture.reach == REACH_STALE:
-        notes.append(
-            "  The baseline include at %s points at %s, not the configured "
-            "template. Right-click the project -> Instructions... to repoint it."
-            % (posture.stale_at or "CLAUDE.md", posture.reached_baseline))
-    elif posture.reach == REACH_UNKNOWN:
-        # Deliberately not phrased as an absence.
-        notes.append(
-            "  Could not determine whether the instruction chain resolves: %s. "
-            "Nothing was changed." % (posture.detail or "reason unrecorded"))
+    notes = [note for note in (_reach_note(posture),) if note]
 
     if posture.reach == REACH_RESOLVED and posture.weight_bytes > split_bytes:
         notes.append(

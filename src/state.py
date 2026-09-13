@@ -246,9 +246,19 @@ class ManagerConfig:
 
     @property
     def baseline_include_line(self) -> str:
-        """The `@<path>\\project-baseline.md` include line written into BASIC_INSTRUCTIONS.md."""
+        """`@<template_dir>\\project-baseline.md` - how the TEMPLATE is located.
+
+        Never written into a project any more: Claude Code does not load an
+        absolute include like this one (see `helpers/baseline_copy.py`). Projects
+        carry `project_baseline_include_line` and a copy.
+        """
         path = os.path.join(self.template_dir, "project-baseline.md")
         return f"@{os.path.normpath(path)}"
+
+    @property
+    def project_baseline_include_line(self) -> str:
+        """The include line a project's BASIC_INSTRUCTIONS.md carries."""
+        return "@project-baseline.md"
 
     # ── Cached properties (cache values from refresh_derived) ─────────────
 

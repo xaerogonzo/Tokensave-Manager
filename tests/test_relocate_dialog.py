@@ -33,7 +33,8 @@ def _install(tmp_path, name, baseline_text="# baseline\n"):
 
 def _proj(name, reached=""):
     import types
-    return types.SimpleNamespace(name=name, reached_baseline=reached)
+    return types.SimpleNamespace(name=name, reached_baseline=reached,
+                                 baseline_source=reached)
 
 
 def _moved_plan(tmp_path, baseline_text="# baseline\n"):

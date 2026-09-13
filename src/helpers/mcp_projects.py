@@ -156,41 +156,97 @@ def project_trust_state(project_root: str, projects: "dict | None" = None,
     reporting "shadowed" were the three with `false` plus one with no
     forward-slash key at all.
     """
+    record = resolve_project_record(project_root, projects, claude_json_path)
+    if record.status == RECORD_UNKNOWN:
+        return TRUST_UNKNOWN
+    if record.status == RECORD_FOUND and isinstance(record.record, dict) \
+            and record.record.get("hasTrustDialogAccepted"):
+        return TRUST_TRUSTED
+    return TRUST_UNTRUSTED
+
+
+#: Which `~/.claude.json` record Claude Code consults for a directory.
+RECORD_FOUND = "found"
+RECORD_ABSENT = "absent"
+#: The config could not be read, or the root could not be spelled.
+RECORD_UNKNOWN = "unknown"
+
+
+class ProjectRecord:
+    """The one record Claude Code keys a project by, or why there is none."""
+
+    __slots__ = ("status", "key", "record")
+
+    def __init__(self, status: str, key: str = "", record=None):
+        self.status = status
+        self.key = key
+        self.record = record
+
+
+def read_claude_projects_strict(claude_json_path: str = "") -> "dict | None":
+    """The `projects` map, or None when `~/.claude.json` cannot be read.
+
+    The strict sibling of `read_claude_projects`: "no record of this project"
+    and "could not read the config" are different facts, and the second is
+    about this tool rather than the user's setup.
+    """
+    path = claude_json_path or _claude_json_path()
+    try:
+        with open(path, encoding="utf-8-sig") as fh:
+            data = json.load(fh)
+    except (OSError, ValueError):
+        return None
+    found = data.get("projects") if isinstance(data, dict) else None
+    return found if isinstance(found, dict) else {}
+
+
+def resolve_project_record(project_root: str, projects: "dict | None" = None,
+                           claude_json_path: str = "") -> ProjectRecord:
+    """The record for *project_root* under the spelling Claude Code writes.
+
+    ONE matching rule, shared by every flag read off a project record — trust,
+    external-include approval, anything later — so two readers can never
+    disagree about which record a directory is. See `project_trust_state` for
+    the measurement behind the forward-slash spelling.
+    """
     if projects is None:
-        # Read directly rather than through `read_claude_projects`, which
-        # deliberately flattens an unreadable file to `{}` for callers that
-        # only decorate a status row. Here that distinction is the whole
-        # point: "no record of this project" is untrusted, but "could not
-        # read the config" is a fact about this tool, and reporting it as
-        # untrusted would overwrite a correct row with our own failure.
-        path = claude_json_path or _claude_json_path()
-        try:
-            with open(path, encoding="utf-8-sig") as fh:
-                data = json.load(fh)
-        except (OSError, ValueError):
-            return TRUST_UNKNOWN
-        found = data.get("projects") if isinstance(data, dict) else None
-        projects = found if isinstance(found, dict) else {}
+        projects = read_claude_projects_strict(claude_json_path)
+        if projects is None:
+            return ProjectRecord(RECORD_UNKNOWN)
     try:
         forward = os.path.abspath(project_root).replace("\\", "/")
     except (OSError, ValueError):
-        return TRUST_UNKNOWN
+        return ProjectRecord(RECORD_UNKNOWN)
 
     # Compared against the forward-slash spelling and NOT normalised, which
     # is the whole mechanism: a backslash-spelled key cannot equal `wanted`,
-    # so a trust flag sitting on one of those leftovers is ignored without
-    # needing a rule of its own. Normalising `key` here would quietly undo
-    # that and let a leftover confer trust. (An explicit "skip backslash
-    # keys" guard stood here briefly and was removed as dead — a mutation
-    # proved it could be deleted with nothing failing.)
+    # so a flag sitting on one of those leftovers is ignored without needing a
+    # rule of its own. Normalising `key` here would quietly undo that and let
+    # a leftover confer trust. (An explicit "skip backslash keys" guard stood
+    # here briefly and was removed as dead — a mutation proved it could be
+    # deleted with nothing failing.)
     wanted = forward.rstrip("/").lower()
     for key, value in projects.items():
-        if key.rstrip("/").lower() != wanted:
-            continue
-        if isinstance(value, dict) and value.get("hasTrustDialogAccepted"):
-            return TRUST_TRUSTED
-        return TRUST_UNTRUSTED
-    return TRUST_UNTRUSTED
+        if key.rstrip("/").lower() == wanted:
+            return ProjectRecord(RECORD_FOUND, key, value)
+    return ProjectRecord(RECORD_ABSENT)
+
+
+def external_includes_approved(record: ProjectRecord) -> "bool | None":
+    """Has Claude Code been allowed to load CLAUDE.md includes from outside?
+
+    An OBSERVED configuration field, measured 2026-09-13 with a canary: an
+    include outside the project loaded only once
+    `hasClaudeMdExternalIncludesApproved` was true for that project. Nothing
+    promises the field keeps that meaning, which is why the Manager localizes
+    the baseline instead of depending on it. None means the config was
+    unreadable; an absent record is False, because approval is never assumed.
+    """
+    if record.status == RECORD_UNKNOWN:
+        return None
+    if record.status == RECORD_FOUND and isinstance(record.record, dict):
+        return bool(record.record.get("hasClaudeMdExternalIncludesApproved"))
+    return False
 
 
 def duplicate_project_keys(claude_json_path: str = "",

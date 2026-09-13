@@ -1,19 +1,29 @@
 """Tests for helpers/instructions_wiring.
 
-Two properties matter more than the rest and are asserted repeatedly: a re-run
-changes nothing, and every byte outside the managed line survives — including
-the line endings, which naive reading silently converts.
+Properties asserted repeatedly: a re-run changes nothing, every byte outside the
+managed line survives (line endings included), the copy is written before any
+include is pointed at it, and a file edited since the plan is never written.
+
+`posture_of` hands `read_project` an explicit empty `~/.claude.json` projects
+map, so nothing depends on the machine running the tests. With it, an include of
+the template outside the project is never a healthy chain: on Windows the
+backslashes stop Claude Code parsing it, elsewhere the missing approval does.
 """
 
+import dataclasses
 import os
+import shutil
+import subprocess
 
 import pytest
 
+from helpers import baseline_copy as bc
 from helpers import instructions_posture as ip
 from helpers import instructions_wiring as iw
 
 
 BASELINE_TEXT = "# Project Baseline Rules\n\n## Tokensave: Use It First\n"
+LOCAL = bc.LOCAL_INCLUDE_LINE
 
 
 @pytest.fixture
@@ -28,50 +38,94 @@ def inc_line(templates):
     return "@" + str(templates / "project-baseline.md")
 
 
-def make_project(tmp_path, name="proj", claude=None, basic=None):
+def baseline_of(templates):
+    return ip.canonical(str(templates / "project-baseline.md"))
+
+
+def make_project(tmp_path, name="proj", claude=None, basic=None, copy=False):
     root = tmp_path / name
     root.mkdir(parents=True, exist_ok=True)
     if claude is not None:
         (root / "CLAUDE.md").write_bytes(claude.encode("utf-8"))
     if basic is not None:
         (root / "BASIC_INSTRUCTIONS.md").write_bytes(basic.encode("utf-8"))
+    if copy:
+        (root / "project-baseline.md").write_bytes(
+            bc.render_copy(BASELINE_TEXT).encode("utf-8"))
     return root
 
 
-def posture_of(root, templates):
+def posture_of(root, templates, claude_projects=None):
     return ip.read_project(str(root), root.name, str(templates),
-                           ip.canonical(str(templates / "project-baseline.md")),
-                           BASELINE_TEXT, "")
+                           baseline_of(templates), BASELINE_TEXT, "",
+                           {} if claude_projects is None else claude_projects)
 
 
 def wire(root, templates, template_text=""):
     p = posture_of(root, templates)
     plan = iw.plan_wiring(p, has_template=bool(template_text))
-    return plan, iw.apply_wiring(
-        str(root), plan, inc_line(templates), root.name, template_text,
-        ip.canonical(str(templates / "project-baseline.md")))
+    return plan, iw.apply_wiring(str(root), plan, root.name, template_text,
+                                 BASELINE_TEXT)
+
+
+def actions(plan):
+    return [(s.action, s.path) for s in plan.steps]
 
 
 # -- planning -------------------------------------------------------------
 
-def test_resolved_project_plans_nothing(tmp_path, templates):
-    root = make_project(tmp_path, claude=inc_line(templates) + "\n")
-    plan = iw.plan_wiring(posture_of(root, templates))
-    assert plan.is_noop
-    assert plan.files == ()
+def test_a_project_on_its_own_current_copy_plans_nothing(tmp_path, templates):
+    root = make_project(tmp_path, claude=LOCAL + "\n", copy=True)
+    p = posture_of(root, templates)
+    assert p.healthy
+    assert iw.plan_wiring(p).is_noop
 
 
-def test_orphan_plans_only_the_claude_link(tmp_path, templates):
+def test_a_resolving_template_include_is_localized_copy_first(tmp_path,
+                                                             templates):
+    root = make_project(tmp_path, claude="@BASIC_INSTRUCTIONS.md\n",
+                        basic=inc_line(templates) + "\n")
+    p = posture_of(root, templates)
+    assert p.reach == ip.REACH_RESOLVED and not p.healthy
+    assert actions(iw.plan_wiring(p)) == [
+        (iw.ACTION_WRITE_COPY, "project-baseline.md"),
+        (iw.ACTION_LOCALIZE, "BASIC_INSTRUCTIONS.md")]
+
+
+def test_an_approved_external_include_is_still_localized(tmp_path, templates):
+    """Loading on this machine is not the goal state: a committed machine path
+    breaks every other checkout and every worktree."""
+    root = make_project(tmp_path, claude="@BASIC_INSTRUCTIONS.md\n",
+                        basic=inc_line(templates) + "\n")
+    p = dataclasses.replace(posture_of(root, templates),
+                            delivery=ip.DELIVERY_EXTERNAL_APPROVED)
+    assert iw.ACTION_LOCALIZE in [a for a, _ in actions(iw.plan_wiring(p))]
+
+
+def test_undetermined_delivery_is_blocked(tmp_path, templates):
+    root = make_project(tmp_path, claude="@BASIC_INSTRUCTIONS.md\n",
+                        basic=inc_line(templates) + "\n")
+    p = dataclasses.replace(posture_of(root, templates),
+                            delivery=ip.DELIVERY_UNKNOWN)
+    plan = iw.plan_wiring(p)
+    assert plan.blocked and plan.steps == ()
+
+
+def test_orphan_is_localized_and_linked(tmp_path, templates):
     root = make_project(tmp_path, basic=inc_line(templates) + "\n")
-    plan = iw.plan_wiring(posture_of(root, templates))
-    assert plan.files == ("CLAUDE.md",)
-    assert plan.steps[0].action == iw.ACTION_LINK_BASIC
+    assert actions(iw.plan_wiring(posture_of(root, templates))) == [
+        (iw.ACTION_WRITE_COPY, "project-baseline.md"),
+        (iw.ACTION_LOCALIZE, "BASIC_INSTRUCTIONS.md"),
+        (iw.ACTION_LINK_BASIC, "CLAUDE.md")]
 
 
-def test_absent_with_no_basic_plans_both_files(tmp_path, templates):
+def test_absent_with_no_basic_plans_the_copy_and_both_files(tmp_path,
+                                                            templates):
     root = make_project(tmp_path, claude="# Notes\n")
     plan = iw.plan_wiring(posture_of(root, templates), has_template=True)
-    assert set(plan.files) == {"BASIC_INSTRUCTIONS.md", "CLAUDE.md"}
+    assert plan.steps[0].action == iw.ACTION_WRITE_COPY
+    assert set(plan.files) == {"project-baseline.md", "BASIC_INSTRUCTIONS.md",
+                               "CLAUDE.md"}
 
 
 def test_unknown_is_blocked_not_planned(tmp_path, templates):
@@ -93,6 +147,62 @@ def test_duplicate_directive_is_blocked(tmp_path, templates):
     assert "duplication" in plan.blocked
 
 
+@pytest.mark.parametrize("content,reason", [
+    ("# my own baseline\n", "did not write"),
+    (bc.render_copy(BASELINE_TEXT) + "hand edit\n", "edited by hand"),
+    ("<!-- tokensave-manager:copy project-baseline.md sha256=nothex -->\n",
+     "damaged"),
+])
+def test_an_existing_root_file_the_manager_may_not_overwrite_blocks(
+        tmp_path, templates, content, reason):
+    root = make_project(tmp_path, claude="@BASIC_INSTRUCTIONS.md\n",
+                        basic=inc_line(templates) + "\n")
+    (root / "project-baseline.md").write_bytes(content.encode("utf-8"))
+    plan = iw.plan_wiring(posture_of(root, templates))
+    assert reason in plan.blocked
+    assert plan.steps == ()
+
+
+def test_an_outdated_copy_plans_only_the_refresh(tmp_path, templates):
+    root = make_project(tmp_path, claude="@BASIC_INSTRUCTIONS.md\n",
+                        basic=LOCAL + "\n")
+    (root / "project-baseline.md").write_bytes(
+        bc.render_copy("# older baseline\n").encode("utf-8"))
+    p = posture_of(root, templates)
+    assert p.reach == ip.REACH_STALE and p.copy_state == bc.COPY_OUTDATED
+    plan = iw.plan_wiring(p)
+    assert actions(plan) == [(iw.ACTION_REFRESH_COPY, "project-baseline.md")]
+    assert plan.steps[0].expect == p.copy_recorded_sha
+
+
+def test_two_baseline_includes_are_refused_not_localized_twice(tmp_path,
+                                                               templates):
+    """Double-load is reported, not silently edited away."""
+    inc = inc_line(templates)
+    root = make_project(tmp_path, claude=inc + "\n@BASIC_INSTRUCTIONS.md\n",
+                        basic=inc + "\n")
+    p = posture_of(root, templates)
+    assert ip.ADVISORY_DOUBLE_LOAD in p.advisories
+    before = (root / "CLAUDE.md").read_bytes()
+    plan, result = wire(root, templates)
+    assert plan.blocked
+    assert result.changed_files == ()
+    assert (root / "CLAUDE.md").read_bytes() == before
+    assert not (root / "project-baseline.md").exists()
+
+
+def test_planner_refuses_an_excluded_project(tmp_path, templates):
+    root = make_project(tmp_path, claude="# upstream clone\n")
+    p = dataclasses.replace(posture_of(root, templates), excluded=True,
+                            exclude_reason="vendor clone")
+    plan = iw.plan_wiring(p, has_template=True)
+    assert plan.steps == ()
+    assert plan.blocked == "vendor clone"
+    before = sorted(os.listdir(root))
+    iw.apply_wiring(str(root), plan, root.name, "x", BASELINE_TEXT)
+    assert sorted(os.listdir(root)) == before
+
+
 # -- deterministic creation ----------------------------------------------
 
 def test_created_claude_md_is_byte_for_byte_stable():
@@ -101,11 +211,96 @@ def test_created_claude_md_is_byte_for_byte_stable():
     assert iw.compute_created_claude("Widget Factory") == text
 
 
-# -- surgical edits -------------------------------------------------------
+# -- compare-and-apply line surgery ---------------------------------------
+
+def test_localize_replaces_the_planned_line_and_keeps_its_terminator():
+    text = "# T\r\n@C:\\old\\project-baseline.md\r\nprose\r\n"
+    out, changed, refusal = iw.compute_localize(
+        text, 2, "C:\\old\\project-baseline.md")
+    assert (changed, refusal) == (True, "")
+    assert out == "# T\r\n@project-baseline.md\r\nprose\r\n"
+
+
+def test_localize_follows_a_line_that_moved_when_it_is_unique():
+    text = "new first line\n# T\n@C:/old/project-baseline.md\n"
+    out, changed, _ = iw.compute_localize(text, 2, "C:/old/project-baseline.md")
+    assert changed and out.endswith("@project-baseline.md\n")
+
+
+@pytest.mark.parametrize("text", [
+    "# T\n@C:/somewhere/else/project-baseline.md\n",       # edited
+    "@C:/old/project-baseline.md\n@C:/old/project-baseline.md\n",  # ambiguous
+    "# T\n",                                                # removed
+])
+def test_localize_refuses_when_the_directive_is_not_what_was_planned(text):
+    out, changed, refusal = iw.compute_localize(text, 5,
+                                                "C:/old/project-baseline.md")
+    assert (out, changed) == (text, False)
+    assert refusal
+
+
+# -- applying -------------------------------------------------------------
+
+def test_localizing_makes_the_project_healthy_on_a_current_copy(tmp_path,
+                                                               templates):
+    prose = "We used to keep project-baseline.md elsewhere.\r\n"
+    root = make_project(tmp_path, claude="@BASIC_INSTRUCTIONS.md\r\n",
+                        basic="# B\r\n\r\n" + inc_line(templates) + "\r\n" + prose)
+    _plan, result = wire(root, templates)
+    assert result.ok, result.error
+    assert set(result.changed_files) == {"project-baseline.md",
+                                         "BASIC_INSTRUCTIONS.md"}
+    after = (root / "BASIC_INSTRUCTIONS.md").read_bytes()
+    assert after == ("# B\r\n\r\n@project-baseline.md\r\n" + prose).encode()
+    p = posture_of(root, templates)
+    assert p.healthy and p.copy_state == bc.COPY_CURRENT
+    assert p.baseline_match == ip.CONTENT_MATCH
+    assert p.reached_baseline == ip.canonical(str(root / "project-baseline.md"))
+
+
+def test_the_project_root_may_contain_spaces(tmp_path, templates):
+    root = make_project(tmp_path, name="my project dir",
+                        claude="@BASIC_INSTRUCTIONS.md\n",
+                        basic=inc_line(templates) + "\n")
+    _plan, result = wire(root, templates)
+    assert result.ok, result.error
+    assert posture_of(root, templates).healthy
+
+
+def test_a_file_edited_between_plan_and_apply_gets_nothing_written(
+        tmp_path, templates):
+    root = make_project(tmp_path, claude="@BASIC_INSTRUCTIONS.md\n",
+                        basic=inc_line(templates) + "\n")
+    plan = iw.plan_wiring(posture_of(root, templates))
+    edited = b"@C:/somebody/else/project-baseline.md\n"
+    (root / "BASIC_INSTRUCTIONS.md").write_bytes(edited)
+
+    result = iw.apply_wiring(str(root), plan, root.name, "", BASELINE_TEXT)
+
+    assert not result.ok and "changed since the plan" in result.error
+    assert (root / "BASIC_INSTRUCTIONS.md").read_bytes() == edited
+    assert not (root / "project-baseline.md").exists()
+
+
+def test_the_include_is_never_repointed_when_the_copy_cannot_be_written(
+        tmp_path, templates):
+    """Write-then-localize, whatever order the plan lists the steps in."""
+    root = make_project(tmp_path, claude="@BASIC_INSTRUCTIONS.md\n",
+                        basic=inc_line(templates) + "\n")
+    plan = iw.plan_wiring(posture_of(root, templates))
+    reversed_plan = iw.WiringPlan(steps=tuple(reversed(plan.steps)))
+    before = (root / "BASIC_INSTRUCTIONS.md").read_bytes()
+
+    result = iw.apply_wiring(str(root), reversed_plan, root.name, "",
+                             baseline_template_text="")   # copy write fails
+
+    assert not result.ok
+    assert (root / "BASIC_INSTRUCTIONS.md").read_bytes() == before
+
 
 def test_link_is_prepended_and_the_rest_is_untouched(tmp_path, templates):
     body = "# Title\n\nSome authored prose.\n\n## A section\n\nmore\n"
-    root = make_project(tmp_path, claude=body, basic=inc_line(templates) + "\n")
+    root = make_project(tmp_path, claude=body, basic=LOCAL + "\n", copy=True)
     _plan, result = wire(root, templates)
     assert result.ok
     after = (root / "CLAUDE.md").read_text(encoding="utf-8")
@@ -115,112 +310,79 @@ def test_link_is_prepended_and_the_rest_is_untouched(tmp_path, templates):
 
 def test_crlf_line_endings_survive(tmp_path, templates):
     body = "# Title\r\n\r\nAuthored prose.\r\n"
-    root = make_project(tmp_path, claude=body, basic=inc_line(templates) + "\n")
+    root = make_project(tmp_path, claude=body, basic=LOCAL + "\n", copy=True)
     wire(root, templates)
     raw = (root / "CLAUDE.md").read_bytes()
     assert b"\r\n" in raw
-    # The one inserted line uses the file's own terminator, so no line in the
-    # file is left with a bare LF.
-    assert raw.replace(b"\r\n", b"") .count(b"\n") == 0
+    assert raw.replace(b"\r\n", b"").count(b"\n") == 0
 
 
 def test_lf_file_stays_lf(tmp_path, templates):
     root = make_project(tmp_path, claude="# Title\n\nprose\n",
-                        basic=inc_line(templates) + "\n")
+                        basic=LOCAL + "\n", copy=True)
     wire(root, templates)
     assert b"\r\n" not in (root / "CLAUDE.md").read_bytes()
 
 
-def test_rerun_changes_nothing(tmp_path, templates):
+def test_rerun_after_localizing_changes_nothing(tmp_path, templates):
     root = make_project(tmp_path, claude="# Title\n\nprose\n",
                         basic=inc_line(templates) + "\n")
     _plan, first = wire(root, templates)
-    assert first.changed_files == ("CLAUDE.md",)
-    snapshot = (root / "CLAUDE.md").read_bytes()
+    assert first.ok, first.error
+    names = ("CLAUDE.md", "BASIC_INSTRUCTIONS.md", "project-baseline.md")
+    snapshot = {n: ((root / n).read_bytes(), os.stat(root / n).st_mtime_ns)
+                for n in names}
 
     plan2, second = wire(root, templates)
+
     assert plan2.is_noop
     assert second.changed_files == ()
-    assert (root / "CLAUDE.md").read_bytes() == snapshot
+    assert {n: ((root / n).read_bytes(), os.stat(root / n).st_mtime_ns)
+            for n in names} == snapshot
 
 
-def test_wiring_makes_the_chain_resolve(tmp_path, templates):
-    root = make_project(tmp_path, basic=inc_line(templates) + "\n")
-    assert posture_of(root, templates).reach == ip.REACH_ORPHANED
+@pytest.mark.skipif(not shutil.which("git"), reason="git not on PATH")
+def test_a_committed_localized_project_stays_clean_on_a_rerun(tmp_path,
+                                                             templates):
+    root = make_project(tmp_path, claude="@BASIC_INSTRUCTIONS.md\n",
+                        basic=inc_line(templates) + "\n")
+    _plan, first = wire(root, templates)
+    assert first.ok, first.error
+
+    def git(*args):
+        return subprocess.run(["git", "-C", str(root), *args], check=True,
+                              capture_output=True, text=True).stdout
+    git("init", "-q")
+    git("-c", "user.email=t@t", "-c", "user.name=t", "add", "-A")
+    git("-c", "user.email=t@t", "-c", "user.name=t", "commit", "-qm", "wire")
+
     wire(root, templates)
-    assert posture_of(root, templates).reach == ip.REACH_RESOLVED
+    assert git("status", "--porcelain") == ""
 
 
 def test_basic_instructions_is_not_touched_when_it_already_carries(tmp_path,
                                                                   templates):
-    body = inc_line(templates) + "\n\n# Real project notes\n"
-    root = make_project(tmp_path, basic=body)
+    body = LOCAL + "\n\n# Real project notes\n"
+    root = make_project(tmp_path, basic=body, copy=True)
     _plan, result = wire(root, templates)
     assert "BASIC_INSTRUCTIONS.md" not in result.changed_files
     assert (root / "BASIC_INSTRUCTIONS.md").read_text(encoding="utf-8") == body
 
 
-# -- stale repair ---------------------------------------------------------
-
-def test_repair_rewrites_the_directive_and_not_the_prose(tmp_path, templates):
-    old = tmp_path / "old"
-    old.mkdir()
-    (old / "project-baseline.md").write_text("old\n", encoding="utf-8")
-    prose = "We used to keep project-baseline.md elsewhere.\n"
-    body = "@" + str(old / "project-baseline.md") + "\n\n" + prose
-    root = make_project(tmp_path, claude=body)
-
-    assert posture_of(root, templates).reach == ip.REACH_STALE
+def test_an_outdated_copy_is_refreshed_and_nothing_else(tmp_path, templates):
+    root = make_project(tmp_path, claude="@BASIC_INSTRUCTIONS.md\n",
+                        basic=LOCAL + "\n")
+    (root / "project-baseline.md").write_bytes(
+        bc.render_copy("# older\n").encode("utf-8"))
     _plan, result = wire(root, templates)
-    assert result.ok
-    after = (root / "CLAUDE.md").read_text(encoding="utf-8")
-    assert prose in after                      # the mention survives verbatim
-    assert str(old) not in after               # the directive does not
-    assert posture_of(root, templates).reach == ip.REACH_RESOLVED
-
-
-def test_repair_leaves_a_current_directive_alone(tmp_path, templates):
-    text = inc_line(templates) + "\nkeep\n"
-    out, changed = iw.compute_repair_stale(
-        text, inc_line(templates), str(templates),
-        ip.canonical(str(templates / "project-baseline.md")))
-    assert changed is False
-    assert out == text
-
-
-def test_repair_preserves_the_line_terminator(tmp_path, templates):
-    text = "@C:/old/project-baseline.md\r\nkeep\r\n"
-    out, changed = iw.compute_repair_stale(
-        text, inc_line(templates), str(tmp_path),
-        ip.canonical(str(templates / "project-baseline.md")))
-    assert changed is True
-    assert out.splitlines(keepends=True)[0].endswith("\r\n")
-
-
-# -- the writer never deletes --------------------------------------------
-
-def test_an_obsolete_direct_include_is_never_removed(tmp_path, templates):
-    """Double-load is reported, not silently edited away.
-
-    Deleting a line a human may have written is not a repair; the advisory
-    exists so a person can decide.
-    """
-    inc = inc_line(templates)
-    root = make_project(tmp_path, claude=inc + "\n@BASIC_INSTRUCTIONS.md\n",
-                        basic=inc + "\n")
-    p = posture_of(root, templates)
-    assert ip.ADVISORY_DOUBLE_LOAD in p.advisories
-    before = (root / "CLAUDE.md").read_bytes()
-    _plan, result = wire(root, templates)
-    assert result.changed_files == ()
-    assert (root / "CLAUDE.md").read_bytes() == before
+    assert result.changed_files == ("project-baseline.md",)
+    assert posture_of(root, templates).healthy
 
 
 def test_authored_contradiction_survives_wiring(tmp_path, templates):
     """Wiring adds a line. It does not edit what the project already says."""
     prose = "## Token-Saving Tool Usage\n\nUse the Explore subagent.\n"
-    root = make_project(tmp_path, claude=prose,
-                        basic=inc_line(templates) + "\n")
+    root = make_project(tmp_path, claude=prose, basic=LOCAL + "\n", copy=True)
     wire(root, templates)
     after = (root / "CLAUDE.md").read_text(encoding="utf-8")
     assert prose in after
@@ -228,56 +390,26 @@ def test_authored_contradiction_survives_wiring(tmp_path, templates):
 
 
 def test_absent_without_a_template_wires_the_one_hop_shape(tmp_path, templates):
-    """A blank template path must not leave a project unwired.
-
-    `CLAUDE.md` -> baseline is a documented topology too, and choosing it here
-    avoids creating a BASIC_INSTRUCTIONS.md the caller did not ask for.
-    """
+    """A blank template path must not leave a project unwired."""
     root = make_project(tmp_path, claude="# Notes\n")
     plan = iw.plan_wiring(posture_of(root, templates), has_template=False)
-    assert plan.files == ("CLAUDE.md",)
-    result = iw.apply_wiring(str(root), plan, inc_line(templates), root.name, "",
-                             ip.canonical(str(templates / "project-baseline.md")))
+    assert plan.files == ("project-baseline.md", "CLAUDE.md")
+    result = iw.apply_wiring(str(root), plan, root.name, "", BASELINE_TEXT)
     assert result.ok
-    assert posture_of(root, templates).reach == ip.REACH_RESOLVED
-
-
-def test_planner_refuses_an_excluded_project(tmp_path, templates):
-    """The guard is in the planner, not only on the button.
-
-    `repairable` gates the UI; a caller reaching `plan_wiring` directly would
-    walk past it. What this exclusion protects is writing Manager-authored
-    files into somebody else's repository.
-    """
-    import dataclasses
-    root = make_project(tmp_path, claude="# upstream clone\n")
-    p = dataclasses.replace(posture_of(root, templates), excluded=True,
-                            exclude_reason="vendor clone")
-    plan = iw.plan_wiring(p, has_template=True)
-    assert plan.steps == ()
-    assert plan.blocked == "vendor clone"
-
-    before = sorted(os.listdir(root))
-    iw.apply_wiring(str(root), plan, inc_line(templates), root.name, "x", "")
-    assert sorted(os.listdir(root)) == before
+    assert (root / "CLAUDE.md").read_text(encoding="utf-8").startswith(LOCAL)
+    assert posture_of(root, templates).healthy
 
 
 # -- applying to one project: outcomes are data, not sentences ------------
 #
-# What this replaced: the caller returned prose -- "skipped - state changed
-# since preview" versus "skipped - %s" % plan.blocked -- and the UI branched on
-# `outcome == "wired"`. So the safety case the three-stage flow exists for was
-# distinguishable from an ordinary refusal only by parsing a string the code had
-# formatted itself. It worked, and it was one rename from silently not working.
-#
 # These assert on MEMBERS. If any of them needs `in result.render()` to tell two
 # situations apart, the shape has regressed.
 
-def apply_one(root, templates, template_text=""):
-    baseline = ip.canonical(str(templates / "project-baseline.md"))
+def apply_one(root, templates, template_text="", posture=None):
     return iw.apply_to_project(
-        posture_of(root, templates), baseline, str(templates),
-        inc_line(templates), template_text, bool(template_text))
+        posture or posture_of(root, templates), baseline_of(templates),
+        str(templates), template_text, bool(template_text), BASELINE_TEXT,
+        claude_projects={})
 
 
 class TestApplyOutcome:
@@ -286,14 +418,15 @@ class TestApplyOutcome:
         root = make_project(tmp_path, claude="# P\n",
                             basic=inc_line(templates) + "\n")
         result = apply_one(root, templates)
-        assert result.outcome == iw.OUTCOME_WIRED
+        assert result.outcome == iw.OUTCOME_WIRED, result.render()
         assert result.wrote is True
-        assert "CLAUDE.md" in " ".join(result.changed_files)
+        assert "CLAUDE.md" in result.changed_files
+        assert "project-baseline.md" in result.changed_files
 
-    def test_an_already_resolving_project_is_not_a_write(self, tmp_path,
-                                                         templates):
+    def test_an_already_healthy_project_is_not_a_write(self, tmp_path,
+                                                       templates):
         root = make_project(tmp_path, claude="@BASIC_INSTRUCTIONS.md\n",
-                            basic=inc_line(templates) + "\n")
+                            basic=LOCAL + "\n", copy=True)
         result = apply_one(root, templates)
         assert result.outcome == iw.OUTCOME_ALREADY_RESOLVED
         assert result.wrote is False
@@ -301,33 +434,20 @@ class TestApplyOutcome:
 
     def test_a_project_that_changed_since_the_preview_is_its_own_outcome(
             self, tmp_path, templates):
-        """The safety net doing its job, and it must not look like a refusal.
-
-        The posture is captured, the project is then repaired by hand, and the
-        stale plan must be discarded unapplied.
-        """
+        """The safety net doing its job, and it must not look like a refusal."""
         root = make_project(tmp_path, claude="# P\n",
                             basic=inc_line(templates) + "\n")
         stale = posture_of(root, templates)          # ORPHANED at this point
 
-        # Somebody wires it by hand in between.
-        (root / "CLAUDE.md").write_bytes(
-            b"# P\n\n@BASIC_INSTRUCTIONS.md\n")
+        (root / "CLAUDE.md").write_bytes(b"# P\n\n@BASIC_INSTRUCTIONS.md\n")
 
-        baseline = ip.canonical(str(templates / "project-baseline.md"))
-        result = iw.apply_to_project(stale, baseline, str(templates),
-                                     inc_line(templates), "", False)
-
+        result = apply_one(root, templates, posture=stale)
         assert result.outcome == iw.OUTCOME_SKIPPED_STATE_CHANGED
         assert result.changed_files == ()
+        assert not (root / "project-baseline.md").exists()
 
     def test_a_blocked_plan_is_a_different_member_from_a_stale_one(
             self, tmp_path, templates):
-        """The whole point of the change: two skips, two members.
-
-        Nothing here reads `render()`. If telling these apart ever needs the
-        sentence, the structure has gone.
-        """
         root = make_project(
             tmp_path,
             claude="@BASIC_INSTRUCTIONS.md\n@BASIC_INSTRUCTIONS.md\n",
@@ -346,7 +466,6 @@ class TestApplyOutcome:
         assert not iw.ApplyOutcome(iw.OUTCOME_SKIPPED_STATE_CHANGED).wrote
 
     def test_the_sentence_derives_from_the_outcome(self):
-        """One direction. The text is built from the member, never parsed."""
         assert iw.ApplyOutcome(iw.OUTCOME_WIRED).render() == "wired"
         assert iw.ApplyOutcome(
             iw.OUTCOME_SKIPPED_STATE_CHANGED).render().startswith("skipped")

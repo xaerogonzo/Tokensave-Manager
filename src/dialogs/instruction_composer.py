@@ -375,9 +375,43 @@ class InstructionComposerDialog(UiPumpMixin, tk.Toplevel):
         self._refresh()          # re-read from disk and re-report
         messagebox.showinfo(
             "Applied",
-            "Policy saved and the baseline recompiled.\n\nClaude Code reads "
-            "instructions when a session starts, so sessions already running "
-            "keep the previous text until they are restarted.", parent=self)
+            "Policy saved and the baseline template recompiled.\n\nProjects "
+            "load their own copy of the baseline, so a copy only carries this "
+            "once it is updated. Claude Code reads instructions when a session "
+            "starts, so running sessions keep the previous text until they are "
+            "restarted.", parent=self)
+        self._offer_copy_update()
+
+    def _offer_copy_update(self) -> None:
+        """Say how many project copies are now outdated, and offer the panel.
+
+        The number is informational. Nothing is written from here: the
+        Instructions panel re-reads and re-plans every project immediately
+        before it writes, so a count taken now never becomes a list acted on.
+        """
+        from helpers.baseline_copy import COPY_OUTDATED
+        from helpers.instructions_posture import read_posture
+
+        try:
+            fleet = read_posture(list(self._cfg.raw.get("search_roots") or []),
+                                 self._cfg)
+        except Exception as exc:                # noqa: BLE001 - shown, not fatal
+            self._on_log("Could not count outdated project copies: %s" % exc,
+                         C["peach"])
+            return
+        outdated = [p.name for p in fleet.projects
+                    if p.copy_state == COPY_OUTDATED]
+        if not outdated:
+            return
+        if messagebox.askyesno(
+                "Update project copies?",
+                "%d project cop%s of the baseline %s now outdated:\n\n%s\n\n"
+                "Open Instructions to review and update them?"
+                % (len(outdated), "y" if len(outdated) == 1 else "ies",
+                   "is" if len(outdated) == 1 else "are",
+                   "\n".join("  %s" % n for n in outdated[:20])), parent=self):
+            from dialogs.instructions_overview import InstructionsDialog
+            InstructionsDialog(self.master, self._cfg, on_log=self._on_log)
 
 
     def _reconcile_hook(self) -> str:
