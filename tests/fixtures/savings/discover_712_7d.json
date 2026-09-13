@@ -1,0 +1,29 @@
+{
+  "since": "7d",
+  "recoverable_fraction": 0.5,
+  "total_turns": 19252,
+  "replaceable_turns": 295,
+  "turns_with_measured_sizes": 85,
+  "total_addressable_input_tokens": 162455,
+  "total_recoverable_input_tokens": 81227,
+  "buckets": [
+    {
+      "bucket": "read",
+      "tool": "Read",
+      "suggestion": "outline / read / node",
+      "turns": 284,
+      "turns_with_measured_sizes": 75,
+      "addressable_input_tokens": 159475,
+      "recoverable_input_tokens": 79737
+    },
+    {
+      "bucket": "grep",
+      "tool": "Grep",
+      "suggestion": "search / callers / callees / impact",
+      "turns": 11,
+      "turns_with_measured_sizes": 10,
+      "addressable_input_tokens": 2980,
+      "recoverable_input_tokens": 1490
+    }
+  ]
+}

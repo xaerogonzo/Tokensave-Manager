@@ -586,14 +586,19 @@ def audit_graph_trust(project_path: str) -> list:
 
 
 def _indexed_extractor_version(project_path: str) -> "tuple[str, str]":
-    """What built this index, as ``(version, problem)`` -- exactly one set.
+    """``last_indexed_version``, as ``(version, problem)`` -- exactly one set.
 
-    ``.tokensave/config.json`` carries ``last_indexed_version``, and it means
-    *the version that last performed a FULL index*. Measured, not assumed: a
-    plain ``tokensave sync`` over a changed file leaves the field alone, so
-    it cannot go green while the graph still holds an older extractor's
-    edges. That is the whole reason this rule can be one string comparison
-    rather than a comparison plus a timestamp.
+    NOT provenance, despite the name. This docstring used to say the field
+    means "the version that last performed a FULL index", measured by showing
+    a plain CLI ``sync`` leaves it alone. The measurement was right and the
+    conclusion was not: tokensave's MCP server advances the field on every
+    patch and minor upgrade WITHOUT re-indexing (``run_version_reindex``,
+    documented in upstream ``TOKENSAVE-VERSIONING.md``). On 2026-09-12 both
+    this repository and Fortuna Lab read 7.12.1 over graphs last fully built
+    on Sep 8 and Aug 19. So it names the last version that *evaluated* the
+    project, and is used here only to detect a tokensave project and to show
+    the user why it does not answer the question. Which binary built the graph
+    comes from :mod:`helpers.index_provenance`.
     """
     import json
 
@@ -661,10 +666,12 @@ def audit_index_extractor_version(project_path: str,
     working tree, not a defect in the source, and counting it would move the
     number other things are measured against.
 
-    Silent when the two agree. NOT silent when it could not ask: an
-    unreadable config or an unrunnable binary is a different fact from a
-    match, and letting them share the quiet path is how an unasked question
-    starts reading as a clean answer.
+    Silent only when provenance PROVES the installed binary built the graph.
+    ``last_indexed_version`` cannot prove that -- tokensave advances it on
+    patch and minor upgrades without re-indexing -- so the question is
+    answered from :mod:`helpers.index_provenance`, which knows only about
+    full indexes the Manager ran. Everything else is UNKNOWN and says so:
+    an unasked question must never read as a clean answer.
 
     Imported lazily to keep this module's import surface exactly ``ast``,
     ``os`` and ``re`` for the CI one-liner in ``helpers/ci_workflow.py``.
@@ -678,47 +685,35 @@ def audit_index_extractor_version(project_path: str,
     installed, installed_problem = _installed_extractor_version(tokensave_exe)
     if not installed and not installed_problem:
         return []                 # tokensave not configured; not our business
-
-    older = newer = False
-    if indexed and installed:
-        from helpers.detection import _version_lt
-        older = _version_lt(indexed, installed)
-        newer = _version_lt(installed, indexed)
-
-    # "Could not ask" first, and never folded into the quiet path. An
-    # unreadable config and an unrunnable binary are different facts from a
-    # match, and they are reported as two lines rather than one because they
-    # have different remedies -- a broken index directory is not a missing
-    # tokensave. Reported even when the OTHER half answered: knowing one of
-    # the two versions is not knowing whether they agree.
-    unknown = []
-    if indexed_problem:
-        unknown.append("  Could not tell which tokensave built this index: "
-                       "%s." % indexed_problem)
     if installed_problem:
-        unknown.append("  Could not tell which tokensave is installed: %s."
-                       % installed_problem)
-    if unknown:
-        unknown.append(
-            "  Index freshness is unverified rather than confirmed -- a "
-            "graph built by an older extractor looks exactly like this one.")
-        return unknown
-
-    if not older and not newer:
-        return []                 # agreed; a healthy project gains no line
-
-    if older:
         return [
-            "  This project's graph was built by tokensave %s, and %s is "
-            "installed. A correctness fix in a newer extractor only reaches "
-            "edges that get re-resolved, and an incremental sync does not "
-            "revisit call sites it has already resolved -- so a newer binary "
-            "can sit installed and change nothing anyone queries."
-            % (indexed, installed),
-            "  Run `tokensave sync --force` to rebuild the graph under the "
-            "installed extractor. Until then, treat every graph-derived "
-            "answer here -- callers, impact, dead_code, the health "
-            "dimensions -- as describing a tokensave you no longer run.",
+            "  Could not tell which tokensave is installed: %s."
+            % installed_problem,
+            "  Index freshness is unverified rather than confirmed -- a "
+            "graph built by an older extractor looks exactly like this one.",
+        ]
+
+    from helpers import index_provenance as ip
+    prov = ip.verdict(project_path, installed)
+    if prov.state == ip.CURRENT:
+        return []                 # proven; a healthy project gains no line
+    if prov.state == ip.UNKNOWN:
+        return _index_provenance_unknown(prov, indexed, indexed_problem)
+
+    from helpers.detection import _version_lt
+    if _version_lt(prov.built_by, installed):
+        return [
+            "  This project's graph was fully built by tokensave %s, and %s "
+            "is installed. A correctness fix in a newer extractor only "
+            "reaches edges that get re-resolved, and an incremental sync does "
+            "not revisit call sites it has already resolved -- so a newer "
+            "binary can sit installed and change nothing anyone queries."
+            % (prov.built_by, installed),
+            "  Run a full re-index (Force Re-sync, `tokensave sync --force`) "
+            "to rebuild the graph under the installed extractor. Until then, "
+            "treat every graph-derived answer here -- callers, impact, "
+            "dead_code, the health dimensions -- as describing a tokensave "
+            "you no longer run.",
         ]
 
     # A downgrade, and deliberately NOT the same advice. `sync --force` would
@@ -727,14 +722,38 @@ def audit_index_extractor_version(project_path: str,
     # harmful. The mismatch is real and worth a line; the remedy is the
     # binary, not the index.
     return [
-        "  This project's graph was built by tokensave %s, which is NEWER "
-        "than the installed %s. The index may hold edges this binary would "
-        "not produce." % (indexed, installed),
+        "  This project's graph was fully built by tokensave %s, which is "
+        "NEWER than the installed %s. The index may hold edges this binary "
+        "would not produce." % (prov.built_by, installed),
         "  Do NOT run `sync --force` to reconcile it: that would rebuild "
         "the graph with the older extractor and discard whatever the newer "
         "one fixed. Upgrade tokensave instead, or point tokensave_exe at "
         "the newer install.",
     ]
+
+
+def _index_provenance_unknown(prov, indexed: str, indexed_problem: str) -> list:
+    """The UNKNOWN wording: the reason, and why the obvious field is no answer."""
+    import datetime
+
+    lines = ["  Which tokensave built this graph is unknown: %s." % prov.reason]
+    if prov.full_sync_at:
+        when = datetime.datetime.fromtimestamp(prov.full_sync_at)
+        lines.append("  Last full index: %s." % when.strftime("%Y-%m-%d %H:%M"))
+    if indexed:
+        lines.append(
+            "  `last_indexed_version` says %s, but that is not the answer: "
+            "tokensave advances it on patch and minor upgrades without "
+            "re-indexing, so it names the last version that EVALUATED this "
+            "project, not the one that built its graph." % indexed)
+    elif indexed_problem:
+        lines.append("  Also could not read the project's tokensave config: "
+                     "%s." % indexed_problem)
+    lines.append(
+        "  Run a full re-index from the Manager (Force Re-sync) to record "
+        "which tokensave built the graph. Until then, index freshness is "
+        "unverified rather than confirmed.")
+    return lines
 
 
 def audit_pyscope_cache(project_path: str, pyscope_exe: str = "") -> list:

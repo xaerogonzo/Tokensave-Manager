@@ -330,6 +330,11 @@ class Discover:
     buckets: tuple = ()
     tokens_trustworthy: bool = False
     token_evidence: str = ""
+    #: `turns_with_measured_sizes` as reported (7.12.0+, #523); None when this
+    #: binary did not send it or sent something that is not a count.
+    measured_turns: "int | None" = None
+    #: What a trusted figure still is not -- e.g. a lower bound. "" when none.
+    token_qualifier: str = ""
     raw: dict = field(default_factory=dict, repr=False)
 
 
@@ -514,6 +519,13 @@ def _token_evidence(data: dict) -> str:
         return (f"every bucket ({len(buckets)}) reports "
                 f"recoverable_input_tokens == turns")
 
+    # 7.12.0 (#523) says how many turns carry a measured size, so the answer
+    # is read rather than inferred. Only when the field is absent (an older
+    # binary) or unusable does the all-zero inference below still decide.
+    read = _measured_evidence(data, replaceable)
+    if read is not None:
+        return read
+
     # Third: every token figure is zero while there are turns to measure.
     # 7.11.1 (#474) replaced the degenerate estimate with a real one, and
     # states that turns ingested BEFORE that upgrade carry 0, because the
@@ -546,6 +558,53 @@ def _token_evidence(data: dict) -> str:
     return ""
 
 
+def _measured_turns(data: dict) -> "int | None":
+    """`turns_with_measured_sizes` when it is a usable count, else None."""
+    value = data.get("turns_with_measured_sizes")
+    if isinstance(value, bool) or not isinstance(value, int) or value < 0:
+        return None
+    return value
+
+
+def _measured_evidence(data: dict, replaceable) -> "str | None":
+    """The evidence verdict read from `turns_with_measured_sizes`.
+
+    None when the field cannot decide (absent, malformed, or nothing to
+    measure) so the caller falls back to inference; "" when some turns were
+    measured; the failing observation when none were.
+    """
+    measured = _measured_turns(data)
+    if measured is None or not replaceable or replaceable <= 0:
+        return None
+    if measured == 0:
+        return (f"none of the {int(replaceable)} replaceable turn(s) carry "
+                f"a measured tool-result size (turns_with_measured_sizes "
+                f"= 0) -- unmeasured, not zero")
+    return ""
+
+
+def _token_qualifier(data: dict) -> str:
+    """What the token figures are, beyond trusted/withheld. "" when fully measured.
+
+    Separate from the evidence on purpose: a range straddling the upgrade is
+    real but partial, and folding that into a boolean would round it off in
+    one direction or the other.
+    """
+    replaceable = _num(data.get("replaceable_turns"), None)
+    if "turns_with_measured_sizes" not in data:
+        return ("turns_with_measured_sizes not reported (tokensave older than "
+                "7.12); measurement inferred from the figures")
+    measured = _measured_turns(data)
+    if measured is None:
+        return (f"turns_with_measured_sizes is malformed "
+                f"({data.get('turns_with_measured_sizes')!r}); field "
+                f"unavailable, measurement inferred from the figures")
+    if replaceable is not None and 0 < measured < replaceable:
+        return (f"{measured} of {int(replaceable)} replaceable turns carry "
+                f"measured sizes, so token totals are a lower bound")
+    return ""
+
+
 def parse_discover(text: str) -> Result:
     """Parse `tokensave discover --json`.
 
@@ -574,6 +633,8 @@ def parse_discover(text: str) -> Result:
         buckets=buckets,
         tokens_trustworthy=not evidence,
         token_evidence=evidence,
+        measured_turns=_measured_turns(data),
+        token_qualifier=_token_qualifier(data),
         raw=data,
     ))
 

@@ -81,7 +81,7 @@ Token Save Manager Source/
 │   │                              report/wait/quit. `report what=geometry` runs the visual
 │   │                              oracle. Committed scripts live in scripts/drive/.
 │   │
-│   ├── helpers/                  116 modules of pure / IO helpers — no UI deps.
+│   ├── helpers/                  118 modules of pure / IO helpers — no UI deps.
 │   │   ├── config.py              _load_config, _save_config, _migrate_config
 │   │   ├── detection.py           _detect_git/_gh/_npm/_codegraph/_claude_cli,
 │   │   │                          _root_path/_label, _version_lt
@@ -412,6 +412,12 @@ Token Save Manager Source/
 │   │   │                          matching, deduplicating. Forward-slash spellings
 │   │   │                          are the ones Claude Code writes.
 │   │   ├── mcp_agents.py          Per-agent wiring tables for codegraph and tokensave.
+│   │   ├── index_provenance.py    Which tokensave BUILT this graph, when known.
+│   │   │                          `last_indexed_version` is not it (advanced on
+│   │   │                          minor upgrades without a reindex). Records
+│   │   │                          {version, full_sync_at, db} after a Manager-run
+│   │   │                          full index; CURRENT / BUILT_BY_OLDER / UNKNOWN.
+│   │   │                          Never infers from timestamps or exe mtime.
 │   │   ├── graph_trust.py         How much of tokensave's call graph can be believed,
 │   │   │                          and *where the index is*. Four trust states, because
 │   │   │                          'could not look' and 'looked and found nothing' are
@@ -427,6 +433,11 @@ Token Save Manager Source/
 │   │   │                          CLI-invoked command cannot drift; run_sync/run_init
 │   │   │                          report a missing executable as a *result*, never an
 │   │   │                          exception. No Tk: the headless CLI imports this.
+│   │   ├── tokensave_rules.py     Is ~/.claude/rules/tokensave.md what the installed
+│   │   │                          tokensave writes? Generates via an isolated
+│   │   │                          `install --local`, guards the real state it cannot
+│   │   │                          isolate, compares as upstream does, refreshes only
+│   │   │                          a previewed, recognisable file, with a backup.
 │   │   ├── tokensave_config.py    Read tokensave's per-project config — currently the
 │   │   │                          `strict_tree` switch.
 │   │   ├── tokensave_daemon.py    Find running `tokensave serve` processes, and say
@@ -997,6 +1008,17 @@ Token Save Manager Source/
 ```
 
 ---
+
+## Tokensave integration state: four separate truths
+
+The binary version, the server version per project (`tokensave servers
+--json`), the graph's provenance (`helpers/index_provenance.py`) and the
+Claude rules artifact (`helpers/tokensave_rules.py`) fail independently and
+are reported separately — never merged into one "tokensave is current" badge.
+Measured 2026-09-12, straight after 7.11.1 → 7.12.1: binary and servers were
+7.12.1, every graph had been built by an older extractor while its config said
+7.12.1, and the rules file was still the 7.11.1 text. "Server current; graph
+unknown" is a legitimate state and the report must be able to say it.
 
 ## Application architecture (post-Round 4)
 

@@ -44,6 +44,21 @@ properties under test are only visible across ranges:
 
 A single range would let a regression that re-broke the scoping pass.
 
+### tokensave 7.12.1
+
+Added for the #523 fix. `discover --json` gained `turns_with_measured_sizes`,
+top-level and per bucket -- a count, not a flag, because a range straddling
+the upgrade is partially measured.
+
+| File | Produced by |
+|---|---|
+| `discover_712_7d.json` | `tokensave discover --json --since 7d` (stdout only) |
+
+Captured 2026-09-12: 85 of 295 replaceable turns measured, which is exactly
+the partial case a boolean would have rounded off. Its stderr carried the
+upgrade resync line `Refreshed agent config for tokensave 7.12.1 (was
+7.11.1) -- 1 agent` -- one, because `installed_agents` held only copilot.
+
 ## The one edit
 
 `gain_project_30d.json`'s `project` value was replaced with

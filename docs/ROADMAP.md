@@ -23,6 +23,27 @@ Status legend:
 
 ---
 
+## tokensave 7.12 integration — shipped
+
+- ✅ Integration check reports binary / servers / graph provenance / rules
+  artifact as four facts, with its audit scope and limits.
+- ✅ Claude rules drift check + `--fix-rules=<sha>` (local artifact only).
+- ✅ Doctor index freshness from recorded provenance, not `last_indexed_version`.
+- ✅ `discover` measured-turn count (#523); picker `--git-hook global` (#506).
+
+### Follow-ups
+
+- 🔮 **Report the release notes of the version upgraded FROM.** The check's
+  "releases since installed version" is structurally empty when run after an
+  upgrade, which its own instructions require.
+- 🔮 **A surface for `tokensave audit-edges`.** Comparative by design (index two
+  commits, diff); a natural Doctor companion to graph trust.
+- 🔮 **File the two drafts** in `docs/upstream-issues/` (resync skips the Claude
+  rules file; no index provenance) once reviewed.
+- 💭 **The RETURNED user-scope entry.** `~/.claude.json` carries a tokensave
+  entry while `mcp_user_scope_retired` is true; the MCP Integration dialog is
+  where that belongs.
+
 ## MCP posture — shipped
 
 ### ✅ One rule, one screen, two honest tiers. Details in CHANGELOG.md.

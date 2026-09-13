@@ -2,11 +2,18 @@
 
 Usage:
     python scripts/check_tokensave_integration.py [--available VERSION] [--fix]
+                                                  [--fix-rules=<installed-sha>]
 
     --available VERSION  Show an upgrade nudge when VERSION is newer than installed.
     --fix                Apply pending lifecycle actions (archive resolved issues,
                          create stubs for new open issues). Without this flag the
                          script is read-only and only reports what would change.
+    --fix-rules=SHA      Replace ~/.claude/rules/tokensave.md with what the
+                         installed tokensave writes -- only if its sha256 still
+                         equals SHA (printed by the preview) and it is DRIFTED.
+                         Separate from --fix on purpose: the Manager's Fix
+                         button passes --fix, and a write to a user-global
+                         instructions file must never ride along with it.
 
 Reads local files and optionally queries GitHub via `gh` CLI. Exit code always
 0 — this is an advisory report, never a blocking check.
@@ -68,6 +75,10 @@ def _force_utf8_stdout() -> None:
             sys.stdout.buffer, encoding="utf-8", errors="replace")
 
 # ── Repo root ──────────────────────────────────────────────────────────────────
+
+# Suppresses the console flash on Windows; 0 elsewhere, where a non-zero
+# creationflags raises ValueError.
+_NO_WINDOW = getattr(subprocess, "CREATE_NO_WINDOW", 0)
 
 _SCRIPT_DIR = Path(__file__).resolve().parent
 _ROOT = _SCRIPT_DIR.parent          # Token Save Manager Source/
@@ -436,8 +447,8 @@ def _check_upstream_issues() -> list[tuple[str, str | None]]:
 # ── CLI arg parsing ────────────────────────────────────────────────────────────
 
 def _parse_args() -> dict:
-    """Parse CLI arguments. Returns dict with keys: available, fix."""
-    result: dict = {"available": None, "fix": False}
+    """Parse CLI arguments. Returns dict with keys: available, fix, fix_rules."""
+    result: dict = {"available": None, "fix": False, "fix_rules": ""}
     args = sys.argv[1:]
     i = 0
     while i < len(args):
@@ -447,9 +458,127 @@ def _parse_args() -> dict:
         elif args[i] == "--fix":
             result["fix"] = True
             i += 1
+        elif args[i].startswith("--fix-rules="):
+            result["fix_rules"] = args[i].split("=", 1)[1].strip()
+            i += 1
         else:
             i += 1
     return result
+
+
+# ── Integration state: four separate truths ────────────────────────────────
+#
+# Binary version, server version per project, graph provenance, and the Claude
+# rules artifact are different facts that fail independently. 2026-09-12 had
+# all four disagreeing at once: binary 7.12.1, servers 7.12.1, graphs built by
+# older extractors, rules file from 7.11.1. They are printed separately and
+# never summarised into one "tokensave is current" line.
+
+_AUDIT_SCOPE = (
+    "  Audited automatically: installed binary version, running servers, index\n"
+    "  provenance, the Claude rules artifact, tracked issues, releases newer\n"
+    "  than the installed binary, upstream-issue docs, stale snippet refs.\n"
+    "  NOT audited: release notes of the version you upgraded FROM (the\n"
+    "  releases list above is empty after an upgrade), subcommand --help\n"
+    "  changes, closed upstream issues not in tracked-issues.json.\n"
+    "  A clean report here is not a full integration review."
+)
+
+
+def _src_on_path() -> None:
+    src = str(_ROOT / "src")
+    if src not in sys.path:
+        sys.path.insert(0, src)
+
+
+def _servers_by_project(exe: str) -> "dict | None":
+    """``{canonical project path: version}`` from `tokensave servers --json`."""
+    if not exe or not os.path.isfile(exe):
+        return None
+    try:
+        r = subprocess.run([exe, "servers", "--json"], capture_output=True,
+                           text=True, encoding="utf-8", errors="replace",
+                           timeout=20, creationflags=_NO_WINDOW)
+        rows = json.loads(r.stdout or "[]")
+    except (OSError, subprocess.SubprocessError, ValueError):
+        return None
+    out = {}
+    for row in rows if isinstance(rows, list) else []:
+        path = row.get("project_path") or ""
+        if path:
+            out[os.path.normcase(os.path.normpath(path))] = row.get("version", "?")
+    return out
+
+
+def _print_state_section(cfg: dict, installed: "str | None") -> None:
+    _src_on_path()
+    from helpers import index_provenance as ip
+    from helpers.project_discovery import find_projects
+
+    print("\n### Tokensave state (four separate facts)")
+    print(f"  Binary:  {('v' + installed) if installed else 'unknown'}")
+    servers = _servers_by_project(cfg.get("tokensave_exe", ""))
+    projects = [p for p in find_projects(cfg.get("search_roots") or [])
+                if p.get("has_tokensave")]
+    counts: dict = {}
+    for p in sorted(projects, key=lambda p: p["path"].lower()):
+        prov = ip.verdict(p["path"], installed or "")
+        counts[prov.state] = counts.get(prov.state, 0) + 1
+        key = os.path.normcase(os.path.normpath(p["path"]))
+        server = ("servers unknown" if servers is None
+                  else f"server {servers[key]}" if key in servers
+                  else "no server running")
+        graph = {ip.CURRENT: f"graph built by {prov.built_by}",
+                 ip.BUILT_BY_OLDER: f"graph built by {prov.built_by} (older)",
+                 }.get(prov.state, "graph provenance unknown")
+        icon = "✓" if prov.state == ip.CURRENT else "⚠"
+        print(f"  {icon}  {os.path.basename(p['path']):<28} {server:<18} {graph}")
+    if projects:
+        print("  Provenance: " + ", ".join(
+            f"{n} {s}" for s, n in sorted(counts.items())))
+        print("  (unknown = no full index run from the Manager; "
+              "last_indexed_version is NOT provenance -- tokensave advances it "
+              "on minor upgrades without re-indexing)")
+
+
+def _print_rules_section(cfg: dict, fix_rules_sha: str) -> None:
+    _src_on_path()
+    from helpers import tokensave_rules as tr
+
+    print("\n### Claude rules file (~/.claude/rules/tokensave.md)")
+    exe = cfg.get("tokensave_exe", "")
+    report = tr.evaluate(exe, git_exe=cfg.get("git_exe", "") or
+                         shutil.which("git") or "")
+    v, gen = report.verdict, report.generation
+    icon = {tr.CURRENT: "✓", tr.DRIFTED: "⚠"}.get(v.state, "?")
+    print(f"  {icon}  verdict: {v.state.upper()}" + (f" -- {v.reason}" if v.reason else ""))
+    print(f"     generation: {gen.state}" + (f" ({gen.diagnostic})" if gen.diagnostic else ""))
+    print(f"     tracked by tokensave's upgrade resync: {report.tracked.value} "
+          f"({report.tracked.fact})")
+    if report.tracked.value is False:
+        print("     → tokensave will never refresh this file on upgrade; "
+              "rules-text fixes must be pulled in here.")
+    print(f"     installed sha256: {v.installed_sha or '-'}")
+    print(f"     expected  sha256: {v.expected_sha or '-'}")
+    print(f"     isolated install wrote: {', '.join(gen.written_files) or '-'}")
+    print("     real-state guard: " + ("no change" if not report.guard_changed
+                                       else "CHANGED " + ", ".join(report.guard_changed)))
+    gaps = {s: m for s, m in report.installed_missing.items() if m}
+    if gaps:
+        for sec, tools in gaps.items():
+            print(f"     installed file lacks in '{sec}': {', '.join(tools)}")
+    if v.diff:
+        print("     diff (installed → what tokensave would write):")
+        for line in v.diff.splitlines():
+            print(f"       {line}")
+    if v.state == tr.DRIFTED and not fix_rules_sha:
+        print(f"     To apply: re-run with --fix-rules={v.installed_sha}")
+        print("     (repairs the local artifact only; the upstream resync gap "
+              "remains -- docs/upstream-issues/tokensave-resync-skips-claude-rules.md)")
+    if fix_rules_sha:
+        ok, msg = tr.refresh(exe, fix_rules_sha,
+                             git_exe=cfg.get("git_exe", "") or shutil.which("git") or "")
+        print(f"  {'✓' if ok else '✗'}  --fix-rules: {msg}")
 
 
 # ── Upstream-issue lifecycle helpers ───────────────────────────────────────────
@@ -665,6 +794,9 @@ def main() -> None:
         else:
             print(f"Available:  v{avail}")
 
+    _print_state_section(cfg, installed)
+    _print_rules_section(cfg, cli["fix_rules"])
+
     # Read CHANGELOG lines once
     try:
         cl_lines = _CHANGELOG.read_text(encoding="utf-8").splitlines()
@@ -806,6 +938,9 @@ def main() -> None:
         print("  ✓  (no snippets reference tools listed in CHANGELOG ### Removed)")
 
     # ── Footer ────────────────────────────────────────────────────────────────
+
+    print("\n### Audit scope")
+    print(_AUDIT_SCOPE)
 
     print(
         "\n### Next steps\n"

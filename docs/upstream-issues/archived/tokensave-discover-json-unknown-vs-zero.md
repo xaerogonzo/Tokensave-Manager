@@ -1,5 +1,13 @@
 <!--
-STATUS: FILED 2026-09-08 as issue #523 — awaiting maintainer response.
+STATUS: CLOSED — verified via GitHub API 2026-09-12
+  PRIOR: FIXED in tokensave v7.12.0 (#523) — CLOSED upstream 2026-09-12.
+  `discover --json` now exports `turns_with_measured_sizes`, top-level and
+  per bucket, as a COUNT. Captured 2026-09-12 on 7.12.1 (7d): 85 of 295
+  replaceable turns measured -- the partial case a boolean would have lost.
+  helpers/savings.py reads the count and falls back to the all-zero
+  inference only when the field is absent or malformed
+  (tests/fixtures/savings/discover_712_7d.json).
+  PREVIOUSLY: FILED 2026-09-08 as issue #523 — awaiting maintainer response.
   https://github.com/aovestdipaperino/tokensave/issues/523
 
   Re-read from GitHub after filing: the published title and body are

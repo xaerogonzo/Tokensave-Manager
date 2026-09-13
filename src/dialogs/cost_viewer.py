@@ -578,6 +578,8 @@ class SavingsDialog(UiPumpMixin, tk.Toplevel):
         if value.tokens_trustworthy:
             note = ("Turn counts are the authoritative figure here. "
                     "tokensave's token-recovery estimates are not shown.")
+            if value.token_qualifier:
+                note += f" ({value.token_qualifier}.)"
             colour = C["overlay0"]
         else:
             note = ("Token-recovery estimates are withheld: tokensave's "
