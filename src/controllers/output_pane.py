@@ -46,6 +46,8 @@ DEFAULT_H = 110
 _NB_MIN = 200
 _SASH = 6
 _CFG_KEY = "output_pane_height"
+#: Kept free below a first pop-out: its title bar (~40 px) plus a taskbar (48).
+_BOTTOM_RESERVE = 96
 
 _PROXY_PROC = "::tsm_readonly_text"
 _PROXY_BODY = """
@@ -102,6 +104,30 @@ def clamp_height(value, window_height: int) -> int:
         return DEFAULT_H
     upper = max(MIN_H, int(window_height) - _NB_MIN - _SASH)
     return max(MIN_H, min(h, upper))
+
+
+def default_popout_geometry(host_x: int, host_y: int, host_w: int, host_h: int,
+                            docked_h: int, screen_w: int, screen_h: int) -> str:
+    """Where a first pop-out opens: roomy, centred on the main window, on screen.
+
+    Measured live: three times a 384 px pane asked for 1152 px on a 1080 px
+    screen, Windows left the window 1100 px tall against a 1032 px work area,
+    and the newest line -- where output arrives -- sat under the taskbar. So
+    the size is capped at two thirds of the screen, and the window is pulled
+    up to leave room for its title bar and the taskbar.
+
+    The clamp applies only when the main window is on the primary screen,
+    which is all `winfo_screen*` describes; a window on another monitor keeps
+    its pop-out centred there rather than being dragged back.
+    """
+    w = min(max(640, host_w // 2), screen_w * 2 // 3)
+    h = min(max(280, docked_h * 3), screen_h * 2 // 3)
+    x = host_x + (host_w - w) // 2
+    y = host_y + (host_h - h) // 2
+    if 0 <= host_x + host_w // 2 < screen_w and 0 <= host_y + host_h // 2 < screen_h:
+        x = max(0, min(x, screen_w - w))
+        y = max(0, min(y, screen_h - h - _BOTTOM_RESERVE))
+    return "%dx%d+%d+%d" % (w, h, x, y)
 
 
 def at_bottom(text: tk.Text) -> bool:
@@ -275,8 +301,11 @@ class OutputPaneController:
         if self._popout_geom and self._geometry_ok(self._popout_geom):
             win.geometry(self._popout_geom)
         else:
-            win.geometry("%dx%d" % (max(640, self._host.winfo_width() // 2),
-                                    max(280, self._docked_h * 3)))
+            host = self._host
+            win.geometry(default_popout_geometry(
+                host.winfo_x(), host.winfo_y(),
+                host.winfo_width(), host.winfo_height(), self._docked_h,
+                host.winfo_screenwidth(), host.winfo_screenheight()))
         body = tk.Frame(win, bg=C["base"], padx=14, pady=8)
         body.pack(fill=tk.BOTH, expand=True)
         self._build_header(body, docked=False)
@@ -368,6 +397,10 @@ class OutputPaneController:
         """Save the user's height -- the last committed sash position wins."""
         if event.widget is not self._paned or self._popout is not None:
             return
+        # The sash moved on <B1-Motion>, but the pane's size only updates when
+        # layout runs at idle. A release that arrives first would otherwise
+        # save the height from before the last move -- measured live.
+        self._paned.update_idletasks()
         self.save_height(self.frame.winfo_height())
 
     def save_height(self, height: int) -> None:

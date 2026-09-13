@@ -270,6 +270,41 @@ def test_save_height_ignores_a_collapsed_measurement(pane, mock_config):
     assert "output_pane_height" not in mock_config.raw
 
 
+def test_a_release_before_layout_saves_where_the_sash_ended(tk_root, mock_config):
+    """The last committed sash position wins, even when layout has not caught up.
+
+    Found in the live window: Tk's Panedwindow binding moves the sash on
+    <B1-Motion>, but the pane's size only updates when layout runs at idle. A
+    release arriving before then was saved as the height from BEFORE the last
+    move (504 saved while the pane showed 414). Events are generated back to
+    back here, with no idle between them, which is that exact order.
+    """
+    win = tk.Toplevel(tk_root)
+    win.geometry("420x520+-3000+-3000")
+    paned = tk.PanedWindow(win, orient=tk.VERTICAL, sashwidth=6)
+    paned.pack(fill=tk.BOTH, expand=True)
+    above = tk.Frame(paned, height=40)
+    paned.add(above, stretch="always")
+    mock_config.raw["output_pane_height"] = 120
+    ctrl = OutputPaneController(paned, mock_config, host=win, above=above,
+                                on_stop=lambda: None,
+                                on_open_savings=lambda: None,
+                                on_open_log=lambda: None)
+    win.update()
+    try:
+        before = ctrl.frame.winfo_height()
+        _x, y = paned.sash_coord(0)
+        paned.event_generate("<Button-1>", x=100, y=y + 2)
+        paned.event_generate("<B1-Motion>", x=100, y=y + 2 + 60)
+        paned.event_generate("<ButtonRelease-1>", x=100, y=y + 2 + 60)
+        win.update()
+        after = ctrl.frame.winfo_height()
+        assert after < before - 40, (before, after)   # the drag really moved it
+        assert mock_config.raw["output_pane_height"] == after
+    finally:
+        win.destroy()
+
+
 # ── running state, header callbacks, clear during a run ─────────────────
 
 def test_set_running_paints_the_header(pane):
@@ -482,6 +517,51 @@ def test_remembered_geometry_is_validated_before_use(pane):
     pane.pop_out()
     assert seen == [remembered]                # consulted with the memory
     pane.dock()
+
+
+def _outer_bottom(geom, title_bar=40):
+    size, x, y = geom.split("+")
+    _w, h = size.split("x")
+    return int(y) + int(h) + title_bar
+
+
+def test_first_pop_out_fits_above_the_taskbar_at_a_tall_preference():
+    """Measured live: a 384 px pane opened a 1152 px pop-out on a 1080 px screen.
+
+    Windows shrank it to 1100 px outer, still past the 1032 px work area, so
+    the newest line -- where output arrives -- sat under the taskbar.
+    """
+    geom = op.default_popout_geometry(
+        host_x=-8, host_y=24, host_w=1920, host_h=1009,
+        docked_h=384, screen_w=1920, screen_h=1080)
+    _size, _x, _y = geom.split("+")
+    assert int(_size.split("x")[1]) <= 1080 * 2 // 3
+    assert _outer_bottom(geom) <= 1032, geom
+
+
+@pytest.mark.parametrize("host,screen", [
+    ((0, 0, 760, 600), (1366, 768)),          # small laptop, default window
+    ((100, 400, 900, 650), (1920, 1080)),     # window low on the screen
+    ((0, 0, 3840, 2100), (3840, 2160)),       # 4K, maximised
+])
+def test_first_pop_out_stays_on_screen(host, screen):
+    hx, hy, hw, hh = host
+    sw, sh = screen
+    for docked_h in (60, 110, 384, 900):
+        geom = op.default_popout_geometry(hx, hy, hw, hh, docked_h, sw, sh)
+        size, x, y = geom.split("+")
+        w, h = (int(v) for v in size.split("x"))
+        assert 0 <= int(x) and int(x) + w <= sw, geom
+        assert 0 <= int(y) and _outer_bottom(geom) <= sh - 48, geom
+        assert h >= min(280, sh * 2 // 3)                 # still roomy
+
+
+def test_first_pop_out_is_centred_over_the_main_window():
+    geom = op.default_popout_geometry(200, 100, 1200, 900, 110, 1920, 1080)
+    size, x, y = geom.split("+")
+    w, h = (int(v) for v in size.split("x"))
+    assert int(x) + w // 2 == 200 + 1200 // 2
+    assert int(y) + h // 2 == 100 + 900 // 2
 
 
 def test_popping_out_never_writes_the_height_preference(pane, mock_config):
