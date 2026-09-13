@@ -470,6 +470,99 @@ class TestASecondSplit:
         assert plan.ok is False
 
 
+class TestTheIndexNeverMoves:
+    """The KicomAI damage, reproduced from the real file before it was fixed.
+
+    After one split, the byte budget's tail on KicomAI's CLAUDE.md was
+    `Common Edit Locations`, `Sandbox Testing` and the index itself. The dialog
+    DISABLES the index's checkbox, but "Suggest" sets the variables straight
+    from `plan.moved`, which a disabled box does not stop -- so Apply carried
+    the index into the target and wrote a new index listing itself. Measured:
+    `compute_split` on that file suggested exactly those three sections.
+    """
+
+    def _split_once(self):
+        text = doc3([(2, "Head", big(40)),
+                     (2, "Standard", big(40)),
+                     (2, "Old lesson", big(4000)),
+                     (2, "Tail lesson", big(4000))])
+        first = compute_split(text, move_indices={2})
+        return first
+
+    def test_the_budget_never_suggests_the_index(self):
+        first = self._split_once()
+        suggested = compute_split(first.new_source, keep_bytes=10,
+                                  target_text=first.new_target)
+        titles = [s.title for s in suggested.moved]
+        assert "Lessons (moved out of this file)" not in titles
+        assert "Tail lesson" in titles
+
+    def test_an_explicit_tick_of_the_index_is_not_honoured(self):
+        """Every way in, not only the one the dialog guards."""
+        first = self._split_once()
+        _pre, sections = _compute_sections(first.new_source)
+        every = {s.index for s in sections}
+        plan = compute_split(first.new_source, move_indices=every - {0},
+                             target_text=first.new_target)
+
+        assert plan.new_source.count("## Lessons (moved out of this file)") == 1
+        assert "- Old lesson" in plan.new_source, "the earlier entry was lost"
+        assert "- Lessons (moved out of this file)" not in plan.new_source
+        assert "## Lessons (moved out of this file)" not in plan.new_target
+
+    def test_a_target_an_older_version_damaged_is_refused(self):
+        """Appending to it would bury a second lost index under the first."""
+        first = self._split_once()
+        damaged = (first.new_target.rstrip("\n")
+                   + "\n\n## Lessons (moved out of this file)\n\n- Old lesson\n")
+        plan = compute_split(first.new_source, keep_bytes=10,
+                             target_text=damaged)
+        assert plan.blocked
+        assert "index" in plan.blocked
+
+
+class TestReferenceSections:
+    """A table is a lookup, and the budget must not propose moving one.
+
+    Measured across every CLAUDE.md and docs/LESSONS.md in the fleet: a section
+    whose non-blank body is 75% or more table rows occurred 17 times in CLAUDE.md
+    files -- file maps, doc tables, tech stacks, KicomAI's 76-row Common Edit
+    Locations -- and never in a lessons file, where the highest was 0.71 on a
+    7-line section and the next 0.43.
+    """
+
+    def _doc(self):
+        table = "\n".join(["| If you need to | Edit |", "|---|---|"]
+                          + ["| thing %d | file_%d.py |" % (i, i)
+                             for i in range(40)])
+        return doc3([(2, "Head", big(40)),
+                     (2, "Common Edit Locations", table),
+                     (2, "A lesson", big(4000))])
+
+    def test_a_table_dominated_section_is_marked(self):
+        _pre, sections = _compute_sections(self._doc())
+        marked = {s.title: s.is_reference for s in sections}
+        assert marked == {"Head": False, "Common Edit Locations": True,
+                          "A lesson": False}
+
+    def test_the_budget_does_not_suggest_one(self):
+        plan = compute_split(self._doc(), keep_bytes=10)
+        titles = [s.title for s in plan.moved]
+        assert "Common Edit Locations" not in titles
+        assert "A lesson" in titles
+
+    def test_a_person_can_still_move_one(self):
+        """Proposed, never decided: the mark changes the suggestion only."""
+        plan = compute_split(self._doc(), move_indices={1})
+        assert [s.title for s in plan.moved] == ["Common Edit Locations"]
+
+    def test_a_short_table_is_not_a_reference(self):
+        """Two rows of a table inside a lesson are a figure, not a lookup."""
+        text = doc3([(2, "Lesson", "| a | b |\n|---|---|\n| 1 | 2 |")])
+        _pre, sections = _compute_sections(text)
+        assert sections[0].is_reference is False
+
+
 class TestAppendGuards:
     def _project(self, tmp_path, text, target=None):
         (tmp_path / "CLAUDE.md").write_text(text, encoding="utf-8", newline="")

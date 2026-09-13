@@ -535,6 +535,36 @@ def test_the_previous_index_cannot_be_moved(tk_root, nested, wait_for, mocker):
     assert str(second._boxes[index_row.index]["state"]) == "disabled"
 
 
+def test_suggest_cannot_tick_the_index_the_box_disables(
+        tk_root, tmp_path, wait_for, mocker):
+    """The test above checked the box's STATE, and the box was never the route.
+
+    `_suggest` sets the variables from the budget's tail, which a disabled
+    checkbox does not stop -- and after a first split the index IS the tail.
+    That is how KicomAI's index ended up inside docs/LESSONS.md listing itself.
+    Asserted on what Apply would write, not on the widget.
+
+    NOT the `nested` fixture: after one split that file is far under budget,
+    so Suggest ticks nothing and the test passed with the fix deleted. Here
+    the kept part sits just under the budget, so the index is the tail.
+    """
+    root = _project(tmp_path, _doc3([(2, "Head", "x" * 200),
+                                     (2, "Operational", "y" * 49_900),
+                                     (2, "Old lesson", "z" * 9_000)]))
+    _split_once(tk_root, root, wait_for, mocker, "Old lesson")
+
+    second = _open(tk_root, root, wait_for)
+    second._suggest()
+
+    index_row = next(s for s in second._sections
+                     if s.title == "Lessons (moved out of this file)")
+    assert second._vars[index_row.index].get() is False
+    assert "Lessons (moved out of this file)" not in {
+        s.title for s in second._plan.moved}
+    assert second._plan.new_source.count(
+        "## Lessons (moved out of this file)") == 1
+
+
 # ── what else in the repository is keyed to this file ────────────────────────
 
 @pytest.fixture
