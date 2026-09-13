@@ -26,6 +26,7 @@ Three rules shape the module:
 from __future__ import annotations
 
 import os
+import re
 import subprocess
 from dataclasses import dataclass, field
 
@@ -130,7 +131,10 @@ class AlignResult:
 
 def safe_rel(root: str, rel: str) -> "str | None":
     """*rel* with forward slashes, or None when it escapes *root*."""
-    if not rel or os.path.isabs(rel) or os.path.splitdrive(rel)[0] \
+    # The drive test is spelled out rather than left to `splitdrive`, which
+    # only recognises `C:` on Windows: on Linux CI `C:x.md` is a plain name.
+    # No companion is ever spelled that way, so reject it everywhere.
+    if not rel or os.path.isabs(rel) or re.match(r"^[A-Za-z]:", rel) \
             or rel.startswith(("/", "\\")):
         return None
     norm = os.path.normpath(rel)
