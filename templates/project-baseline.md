@@ -8,9 +8,10 @@
 ## Tokensave: use it before you locate or read
 
 **The rule, and its trigger.** Before any tool call whose purpose is *finding
-out where something is, or what it does*, use a tokensave tool. `Read` is for a
-body you are about to edit or must verify line by line. It is not for locating
-one.
+out where something is, or what it does*, use a tokensave tool. `Read` is for
+the range you are about to Edit, in the turn you edit it. It is not for locating
+one, and that holds while implementing too: paging a file to find or understand
+something, in `Read` slices or with `sed -n`/`cat`, is locating.
 
 Measured 2026-09-10 across 30 days on this machine: **912 of 49,285 turns could
 have been served by a tokensave query** — 858 `Read` and 54 `Grep`, and a

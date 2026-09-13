@@ -227,13 +227,16 @@ Token Save Manager Source/
 │   │   │                          changed_file_paths. Roadmap-6 Tier B.
 │   │   ├── read_nudge.py          Post-read advisory hook. Renders + installs the
 │   │   │                          PostToolUse:Read hook that tells Claude tokensave_read
-│   │   │                          can serve an indexed file, after a whole-file Read.
+│   │   │                          can serve an indexed file, after a whole-file Read,
+│   │   │                          or (PAGED, v2) on the second Read slice of one file.
 │   │   │                          Emits additionalContext ONLY -- never a permission key,
 │   │   │                          since `allow` would skip the permission prompt. Owns ONE
 │   │   │                          entry structurally (marker + body hash), so a foreign Read
 │   │   │                          hook is never claimed. installed_state() is five-valued and
 │   │   │                          names WHICH half drifted. The predicate is importable, so
-│   │   │                          scripts/measure_tokensave_adherence.py shares it verbatim.
+│   │   │                          scripts/measure_tokensave_adherence.py shares it verbatim;
+│   │   │                          that script reports every read population by phase
+│   │   │                          (before/after the first project Edit), never a ratio.
 │   │   ├── readme_patch.py        README highlights sub-section splicer (append-only,
 │   │   │                          Roadmap-6 Phase 2.1 shape). Key exports:
 │   │   │                          read_highlights(path), read_highlights_from_text(text),

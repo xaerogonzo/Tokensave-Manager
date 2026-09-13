@@ -653,3 +653,193 @@ def test_the_verdicts_partition_every_whole_file_read(nudge):
     assert reachable <= whole_file_verdicts, (
         "a whole-file read can reach a verdict with no column: %s"
         % (reachable - whole_file_verdicts))
+
+
+# ── Paging: the second slice of one file ──────────────────────────────────
+#
+# Measured 2026-09-13 on an OpenChem session: once implementation began, the
+# reading moved to Read SLICES that paged one file in chunks with no Edit after
+# them -- and `classify_read` returns SLICED for every one, so the whole-file
+# advisory never fired. One slice is usually the range about to be edited, so
+# the first stays silent; the second is paging.
+
+def _slice_payload(path, cwd, session="page-s", offset=10):
+    return _payload(tool_input={"file_path": str(path), "offset": offset,
+                                "limit": 40},
+                    tool_response={"file": {"content": "x" * 300}},
+                    cwd=str(cwd), session_id=session)
+
+
+@pytest.fixture
+def isolated_state(nudge, tmp_path, monkeypatch):
+    monkeypatch.setattr(nudge, "_temp_root", lambda: str(tmp_path / "state"))
+    monkeypatch.delenv("TOKENSAVE_DISABLE_READ_NUDGE", raising=False)
+    return tmp_path
+
+
+def test_the_first_slice_is_silent_and_the_second_advises_once(
+        nudge, isolated_state):
+    root, source = _make_project(isolated_state)
+    first = nudge.decide(_slice_payload(source, root, offset=185))
+    second = nudge.decide(_slice_payload(source, root, offset=545))
+    third = nudge.decide(_slice_payload(source, root, offset=744))
+
+    assert first == (nudge.SLICED, "")
+    assert second == (nudge.PAGED, nudge.PAGED_ADVICE)
+    assert third == (nudge.ALREADY_NUDGED, "")
+
+
+def test_slices_of_different_files_are_not_paging(nudge, isolated_state):
+    root, source = _make_project(isolated_state)
+    other = source.parent / "other.py"
+    other.write_text("x\n", encoding="utf-8")
+    assert nudge.decide(_slice_payload(source, root))[0] == nudge.SLICED
+    assert nudge.decide(_slice_payload(other, root))[0] == nudge.SLICED
+
+
+def test_paging_is_per_session(nudge, isolated_state):
+    root, source = _make_project(isolated_state)
+    nudge.decide(_slice_payload(source, root, session="a"))
+    assert nudge.decide(_slice_payload(source, root, session="b"))[0] == \
+        nudge.SLICED
+
+
+def test_a_whole_file_nudge_does_not_silence_paging(nudge, isolated_state):
+    """Separate markers: one advisory must not consume the other's claim."""
+    root, source = _make_project(isolated_state)
+    whole = _payload(tool_input={"file_path": str(source)}, cwd=str(root),
+                     session_id="page-s")
+    assert nudge.decide(whole)[0] == nudge.ELIGIBLE
+    nudge.decide(_slice_payload(source, root))
+    assert nudge.decide(_slice_payload(source, root))[0] == nudge.PAGED
+
+
+@pytest.mark.parametrize("name,metadata,expected", [
+    ("shot.png", True, "excluded_extension"),
+    ("tool.exe", True, "excluded_extension"),
+    ("mod.py", False, "no_metadata_project"),
+])
+def test_paging_keeps_the_same_gates(nudge, isolated_state, name, metadata,
+                                     expected):
+    root, _source = _make_project(isolated_state, with_metadata=metadata)
+    target = root / "src" / name
+    target.write_text("x", encoding="utf-8")
+    for _ in range(3):
+        assert nudge.decide(_slice_payload(target, root)) == (expected, "")
+
+
+def test_the_paged_advice_claims_only_what_was_checked(nudge):
+    lowered = nudge.PAGED_ADVICE.lower()
+    assert "can serve indexed ranges" in lowered
+    assert "edit" in lowered, "the advice must keep Read's legitimate use"
+    for overclaim in ("will return", "should have used", "instead of read",
+                      "you should"):
+        assert overclaim not in lowered
+
+
+def test_the_script_advises_on_paging_with_only_additional_context(
+        nudge, tmp_path):
+    root, source = _make_project(tmp_path)
+    outputs = []
+    for offset in (1, 200):
+        proc = _run_script(nudge, json.dumps(_slice_payload(
+            source, root, offset=offset)), state_dir=tmp_path)
+        assert proc.returncode == 0
+        outputs.append(proc.stdout.strip())
+    assert outputs[0] == ""
+    body = json.loads(outputs[1])
+    assert set(body["hookSpecificOutput"]) == {"hookEventName",
+                                               "additionalContext"}
+    assert body["hookSpecificOutput"]["additionalContext"] == nudge.PAGED_ADVICE
+
+
+# ── Measurement: every population, split by phase, no ratio ───────────────
+
+#: The body is data. It holds a line that WOULD be a page if it were a command,
+#: which is the only way this case can catch a parser that reads the body.
+HEREDOC = ("bash <<'" + "END'\nset -e\ncat src/inner.py\nEND")
+
+
+@pytest.mark.parametrize("command,expected", [
+    ('cd "D:/r" && sed -n 761,800p src/openchem/ui/result_adapters.py',
+     "src/openchem/ui/result_adapters.py"),
+    ("cat src/a.py", "src/a.py"),
+    ("head -40 notes.md", "notes.md"),
+    ("tail -n 20 src/x.ts", "src/x.ts"),
+    ("Get-Content src/a.py -TotalCount 30", "src/a.py"),
+    ("sed -i 's/a/b/' src/a.py", ""),
+    (HEREDOC, ""),
+    ("grep -n def src/a.py | head -40", ""),
+    ("git show HEAD:src/a.py | sed -n 1,20p", ""),
+    ("cat build.log", ""),
+    ("uv run pytest -q", ""),
+    ("cd src\ncat a.py", "a.py"),
+])
+def test_shell_page_target(command, expected):
+    measure, _path = _measure_module()
+    assert measure.shell_page_target(command) == expected
+
+
+def _write_transcript(tmp_path, cwd, calls):
+    """calls: (name, input, result_content), in order."""
+    lines = []
+    for index, (name, tool_input, content) in enumerate(calls):
+        tid = "t%d" % index
+        stamp = "2026-09-13T18:00:%02dZ" % index
+        lines.append(json.dumps({
+            "timestamp": stamp, "cwd": str(cwd),
+            "message": {"role": "assistant", "content": [
+                {"type": "tool_use", "id": tid, "name": name,
+                 "input": tool_input}]}}))
+        lines.append(json.dumps({
+            "timestamp": stamp, "cwd": str(cwd),
+            "message": {"role": "user", "content": [
+                {"type": "tool_result", "tool_use_id": tid,
+                 "content": content}]}}))
+    projects = tmp_path / "projects" / "p"
+    projects.mkdir(parents=True)
+    (projects / "s.jsonl").write_text("\n".join(lines) + "\n",
+                                      encoding="utf-8")
+    return str(tmp_path / "projects")
+
+
+def test_the_measurement_splits_by_phase_and_by_purpose(tmp_path):
+    measure, _path = _measure_module()
+    root, source = _make_project(tmp_path)
+    src, plan = str(source), str(tmp_path / "plans" / "plan.md")
+    calls = [
+        ("mcp__tokensave__tokensave_read", {"file": "src/mod.py"}, "ok"),
+        ("Write", {"file_path": plan}, "ok"),        # outside cwd: no phase
+        ("Read", {"file_path": src, "offset": 1, "limit": 9}, "x" * 50),
+        ("Edit", {"file_path": src}, "ok"),          # implementation starts
+        ("Read", {"file_path": src, "offset": 100, "limit": 9}, "x" * 50),
+        ("Read", {"file_path": src, "offset": 300, "limit": 9}, "x" * 50),
+        ("Bash", {"command": "sed -n 1,40p src/mod.py"}, "x"),
+        ("mcp__tokensave__tokensave_read", {"file": "src/mod.py"}, "ok"),
+    ]
+    projects_dir = _write_transcript(tmp_path, root, calls)
+    tallies, meta = measure.scan(None, None, projects_dir)
+    tally = tallies[str(root)]
+
+    explore, implement = tally.phases["explore"], tally.phases["implement"]
+    assert explore[measure.TS_READ] == 1
+    assert explore[measure.SLICE_FOR_EDIT] == 1
+    assert explore[measure.SLICE_LOCATING] == 0
+    assert implement[measure.SLICE_LOCATING] == 2
+    assert implement[measure.SHELL_PAGE] == 1
+    assert implement[measure.TS_READ] == 1
+    assert meta["transcripts_failed"] == 0
+
+
+def test_the_report_prints_no_headline_ratio(tmp_path):
+    """A single ratio over one population is how 279 slices read as 709.7%."""
+    measure, _path = _measure_module()
+    root, source = _make_project(tmp_path)
+    projects_dir = _write_transcript(tmp_path, root, [
+        ("Read", {"file_path": str(source), "offset": 1, "limit": 9}, "x")])
+    tallies, meta = measure.scan(None, None, projects_dir)
+    text = measure.render(tallies, meta, None, None)
+    assert "%" not in text
+    assert "per eligible" not in text
+    for column in ("slice_loc", "sh_page", "ts_read", "explore", "implement"):
+        assert column in text

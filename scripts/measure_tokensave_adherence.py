@@ -1,10 +1,10 @@
 """Did the read nudge change anything? Count, do not guess.
 
 Reads the Claude Code transcripts under ``~/.claude/projects`` and reports, per
-project, how many whole-file ``Read`` calls were *eligible* for the advisory
-against how many ``tokensave_read`` calls actually happened.
+project and per PHASE, every population of read-like call beside the
+``tokensave_read`` calls that actually happened.
 
-THE DENOMINATOR IS THE POINT, so two rules shape this whole script.
+THE DENOMINATOR IS THE POINT, so three rules shape this whole script.
 
 **Eligibility is the hook's own predicate, imported.** ``helpers.read_nudge``
 renders the hook as an importable module and this imports it -- there is no
@@ -12,15 +12,23 @@ second copy of the extension allowlist, the slice test or the size gate to drift
 from the deployed one. A ratio computed by a near-copy of the predicate is the
 number most worth getting wrong quietly.
 
+**No population is left out, and none is summed into a ratio.** The first
+version printed "tokensave_read per eligible whole-file read: 709.7%" -- over
+31 eligible whole-file reads, while 279 Read SLICES and every shell page
+(`sed -n`, `cat`) sat outside the denominator. Measured 2026-09-13 on one
+OpenChem session: tokensave was used throughout exploration, and once
+implementation began the reading moved to exactly those uncounted calls. So
+each population is its own column, split by phase (before and after a session's
+first Edit/Write), and there is no headline ratio to hide behind.
+
 **Completeness is a field, never an inference.** ``transcripts_failed`` and
 ``results_unrecoverable`` are reported beside the counts, because a parse
 failure rendering as ``tokensave_read = 0`` would read exactly like the problem
-this feature was built to fix. *No data* and *no calls* are different facts and
-only one of them is bad news.
+this feature was built to fix.
 
-It is observational telemetry, not an experiment. It can support "the adoption
-ratio changed after the nudge was installed"; it cannot support "this read
-caused that ``tokensave_read``", and the output should not be read that way.
+It is observational telemetry, not an experiment. It can support "the reading
+pattern changed after the nudge was installed"; it cannot support "this read
+caused that ``tokensave_read``".
 
     python scripts/measure_tokensave_adherence.py
     python scripts/measure_tokensave_adherence.py --since 2026-09-04 --until 2026-09-11
@@ -35,6 +43,8 @@ import datetime
 import glob
 import json
 import os
+import re
+import shlex
 import sys
 
 sys.path.insert(0, os.path.join(
@@ -50,6 +60,78 @@ PROJECTS_DIR = os.path.join(os.path.expanduser("~"), ".claude", "projects")
 #: the transcript. Structurally different from every verdict the predicate can
 #: return, so it gets its own bucket rather than being folded into `small`.
 UNRECOVERABLE = "results_unrecoverable"
+
+EXPLORE = "explore"
+IMPLEMENT = "implement"
+PHASES = (EXPLORE, IMPLEMENT)
+
+#: Tools that write a file. The first one in a transcript starts IMPLEMENT.
+WRITE_TOOLS = frozenset({"Edit", "Write", "MultiEdit", "NotebookEdit"})
+
+#: A slice counts as "for an Edit" when an Edit/Write of the same file follows
+#: within this many tool calls. The Edit tool requires a Read first, so those
+#: slices are not locating -- and must not be counted as if they were.
+EDIT_LOOKAHEAD = 15
+
+#: Populations, in column order.
+WHOLE = "whole"
+ELIGIBLE_COL = "eligible"
+SLICE_FOR_EDIT = "slice_for_edit"
+SLICE_LOCATING = "slice_locating"
+SHELL_PAGE = "shell_page"
+TS_READ = "ts_read"
+COLUMNS = (WHOLE, ELIGIBLE_COL, SLICE_FOR_EDIT, SLICE_LOCATING, SHELL_PAGE,
+           TS_READ)
+
+#: A newline separates commands too: multi-line shell calls are common here.
+_SEGMENT_SPLIT = re.compile(r"&&|\|\||;|\||\n")
+_PAGERS = frozenset({"cat", "head", "tail", "get-content", "gc", "type"})
+
+
+def shell_page_target(command):
+    """The file a shell command pages through, or "". Pure.
+
+    Recognises `sed -n <range>p FILE`, `cat FILE`, `head`/`tail [...] FILE` and
+    `Get-Content FILE`, only for an extension the hook would advise on. A
+    heredoc (`cat > x <<EOF`), `sed -i`, and a pager reading a pipe (no file
+    argument) are not pages. Deliberately narrow: `grep -n PATTERN FILE` is a
+    search, which tokensave's own PreToolUse hook already polices.
+    """
+    command = command or ""
+    # A heredoc's BODY is data, often Python, and must not be read as commands.
+    if "<<" in command:
+        command = command.split("<<", 1)[0]
+    for segment in _SEGMENT_SPLIT.split(command):
+        try:
+            words = shlex.split(segment, posix=True)
+        except ValueError:
+            continue
+        target = _segment_target(words)
+        if target:
+            return target
+    return ""
+
+
+def _segment_target(words):
+    if not words:
+        return ""
+    verb = words[0].lower()
+    if any(w.startswith((">", "<")) or w in (">", ">>", "<<") for w in words):
+        return ""
+    if verb == "sed":
+        if "-n" not in words or any(w.startswith("-i") for w in words):
+            return ""
+        files = [w for w in words[1:] if not w.startswith("-")
+                 and not re.fullmatch(r"\d*,?\$?\d*p", w)]
+    elif verb in _PAGERS:
+        files = [w for w in words[1:] if not w.startswith("-")
+                 and not re.fullmatch(r"\d+", w)]
+    else:
+        return ""
+    for word in files:
+        if os.path.splitext(word)[1].lower() in NUDGE.NUDGE_EXTENSIONS:
+            return word
+    return ""
 
 
 def _parse_timestamp(text):
@@ -74,6 +156,10 @@ def _serialised_bytes(body):
     return len(text.encode("utf-8", "replace"))
 
 
+def _same_file(path):
+    return os.path.normcase(os.path.normpath(path or ""))
+
+
 class ProjectTally:
     """One project's counts. Every field is reported; none is derived."""
 
@@ -81,6 +167,7 @@ class ProjectTally:
         self.name = name
         self.verdicts = collections.Counter()
         self.tools = collections.Counter()
+        self.phases = {phase: collections.Counter() for phase in PHASES}
         self.unrecoverable = 0
 
     @property
@@ -101,6 +188,10 @@ class ProjectTally:
     @property
     def tokensave_calls(self):
         return sum(self.tools.values())
+
+    @property
+    def any_reading(self):
+        return any(sum(c.values()) for c in self.phases.values())
 
 
 def scan(since, until, projects_dir=PROJECTS_DIR):
@@ -125,8 +216,22 @@ def scan(since, until, projects_dir=PROJECTS_DIR):
     return tallies, meta
 
 
+def _in_window(record, since, until):
+    stamp = _parse_timestamp(record.get("timestamp"))
+    if stamp is None:
+        return True
+    naive = stamp.replace(tzinfo=None)
+    return not ((since and naive < since) or (until and naive >= until))
+
+
 def _scan_one(path, since, until, tallies, meta):
-    pending = {}
+    """Collect one transcript's calls in order, then classify them together.
+
+    Two facts need the whole sequence: which phase a call is in, and whether a
+    slice was followed by an Edit of the same file.
+    """
+    events = []
+    by_id = {}
     with open(path, encoding="utf-8", errors="replace") as handle:
         for line in handle:
             if '"tool_use"' not in line and '"tool_result"' not in line:
@@ -136,58 +241,84 @@ def _scan_one(path, since, until, tallies, meta):
             except ValueError:
                 meta["records_unparsed"] += 1
                 continue
-
-            stamp = _parse_timestamp(record.get("timestamp"))
-            if stamp is not None:
-                naive = stamp.replace(tzinfo=None)
-                if since and naive < since:
-                    continue
-                if until and naive >= until:
-                    continue
-
+            if not _in_window(record, since, until):
+                continue
             cwd = record.get("cwd") or ""
             project = cwd or os.path.basename(os.path.dirname(path))
             tally = tallies.setdefault(project, ProjectTally(project))
-
             for block in _blocks(record):
                 if not isinstance(block, dict):
                     continue
                 if block.get("type") == "tool_use":
-                    _note_tool_use(block, cwd, tally, pending)
+                    event = {"name": block.get("name") or "", "tally": tally,
+                             "input": block.get("input") or {}, "cwd": cwd,
+                             "size": None}
+                    events.append(event)
+                    by_id[block.get("id")] = event
                 elif block.get("type") == "tool_result":
-                    _note_tool_result(block, pending)
-
-    # A Read whose result never arrived cannot be classified. Say so.
-    for tally, _inp, _cwd in pending.values():
-        tally.unrecoverable += 1
-
-
-def _note_tool_use(block, cwd, tally, pending):
-    name = block.get("name") or ""
-    if name.startswith("mcp__tokensave__"):
-        tally.tools[name.replace("mcp__tokensave__", "")] += 1
-        return
-    if name != "Read":
-        return
-    # Held until its result arrives: the size gate needs the payload, and the
-    # payload is the thing the hook actually sees.
-    pending[block.get("id")] = (tally, block.get("input") or {}, cwd)
+                    event = by_id.get(block.get("tool_use_id"))
+                    if event is not None:
+                        event["size"] = _serialised_bytes(block.get("content"))
+    _classify(events)
 
 
-def _note_tool_result(block, pending):
-    held = pending.pop(block.get("tool_use_id"), None)
-    if held is None:
-        return
-    tally, tool_input, cwd = held
-    size = _serialised_bytes(block.get("content"))
-    if size is None:
+def _writes_the_project(event):
+    """An Edit/Write inside the session's own directory.
+
+    A plan-mode session writes its plan file under `~/.claude/plans` before a
+    line of code changes; counting that as the start of implementation moved
+    the phase boundary 17 minutes early on the session this was measured on.
+    """
+    if event["name"] not in WRITE_TOOLS:
+        return False
+    target = _same_file(event["input"].get("file_path")
+                        or event["input"].get("notebook_path") or "")
+    root = _same_file(event["cwd"])
+    return bool(root) and (target == root or target.startswith(
+        root.rstrip("\\/") + os.sep))
+
+
+def _classify(events):
+    phase = EXPLORE
+    for index, event in enumerate(events):
+        name, tally = event["name"], event["tally"]
+        if name in WRITE_TOOLS:
+            if _writes_the_project(event):
+                phase = IMPLEMENT
+            continue
+        counts = tally.phases[phase]
+        if name.startswith("mcp__tokensave__"):
+            tool = name.replace("mcp__tokensave__", "")
+            tally.tools[tool] += 1
+            if tool == "tokensave_read":
+                counts[TS_READ] += 1
+        elif name in ("Bash", "PowerShell"):
+            if shell_page_target(event["input"].get("command")):
+                counts[SHELL_PAGE] += 1
+        elif name == "Read":
+            _classify_read(events, index, event, counts)
+
+
+def _classify_read(events, index, event, counts):
+    tally, tool_input = event["tally"], event["input"]
+    if event["size"] is None:
         tally.unrecoverable += 1
         return
     path = tool_input.get("file_path") or tool_input.get("path") or ""
     verdict = NUDGE.classify_read(
-        "Read", tool_input, size,
-        NUDGE.project_with_tokensave_metadata(path, cwd))
+        "Read", tool_input, event["size"],
+        NUDGE.project_with_tokensave_metadata(path, event["cwd"]))
     tally.verdicts[verdict] += 1
+    if verdict == NUDGE.SLICED:
+        target = _same_file(path)
+        edited = any(later["name"] in WRITE_TOOLS and _same_file(
+            later["input"].get("file_path") or later["input"].get("path"))
+            == target for later in events[index + 1:index + 1 + EDIT_LOOKAHEAD])
+        counts[SLICE_FOR_EDIT if edited else SLICE_LOCATING] += 1
+    elif verdict not in (NUDGE.NOT_READ, NUDGE.NO_PATH):
+        counts[WHOLE] += 1
+        if verdict == NUDGE.ELIGIBLE:
+            counts[ELIGIBLE_COL] += 1
 
 
 def render(tallies, meta, since, until):
@@ -195,118 +326,86 @@ def render(tallies, meta, since, until):
     window = "%s .. %s" % (since.date() if since else "(all)",
                            until.date() if until else "(now)")
     lines.append("Window: %s" % window)
+    lines.append("Phase: 'implement' starts at a session's first Edit/Write. "
+                 "A slice is 'for_edit' when an Edit of that file follows "
+                 "within %d calls." % EDIT_LOOKAHEAD)
     lines.append("")
-    # Every whole-file read appears in exactly one of excl/no_proj/small/
-    # ELIGIBLE, so the row accounts for the whole population. A table that
-    # showed only the eligible count would hide a denominator moving.
-    header = ("%-30s %6s %7s %6s %8s %6s %9s %8s" %
-              ("project", "whole", "sliced", "excl", "no_proj", "small",
-               "ELIGIBLE", "ts_read"))
+    # No ratio anywhere. Each population is its own column, because a single
+    # number over one of them is how 279 uncounted slices read as 709.7%.
+    header = ("%-26s %-9s %6s %8s %9s %9s %7s %8s" %
+              ("project", "phase", "whole", "eligible", "slice_edt",
+               "slice_loc", "sh_page", "ts_read"))
     lines.append(header)
     lines.append("-" * len(header))
-
-    totals = collections.Counter()
-    projects_with_eligible = 0
-    projects_with_ts_read = 0
-    for _key, tally in sorted(tallies.items(),
-                              key=lambda kv: -kv[1].whole_file_reads):
-        if not tally.whole_file_reads and not tally.tokensave_calls:
+    totals = {phase: collections.Counter() for phase in PHASES}
+    unrecoverable = 0
+    for _key, tally in sorted(tallies.items(), key=lambda kv: kv[0].lower()):
+        unrecoverable += tally.unrecoverable
+        if not tally.any_reading:
             continue
-        if tally.eligible:
-            projects_with_eligible += 1
-        if tally.tokensave_reads:
-            projects_with_ts_read += 1
-        lines.append("%-30s %6d %7d %6d %8d %6d %9d %8d" % (
-            os.path.basename(tally.name.rstrip("\\/"))[:30],
-            tally.whole_file_reads,
-            tally.verdicts[NUDGE.SLICED],
-            tally.verdicts[NUDGE.EXCLUDED_EXTENSION],
-            tally.verdicts[NUDGE.NO_METADATA_PROJECT],
-            tally.verdicts[NUDGE.SMALL],
-            tally.eligible,
-            tally.tokensave_reads))
-        totals["whole"] += tally.whole_file_reads
-        totals["sliced"] += tally.verdicts[NUDGE.SLICED]
-        totals["excl"] += tally.verdicts[NUDGE.EXCLUDED_EXTENSION]
-        totals["no_proj"] += tally.verdicts[NUDGE.NO_METADATA_PROJECT]
-        totals["small"] += tally.verdicts[NUDGE.SMALL]
-        totals["eligible"] += tally.eligible
-        totals["ts_read"] += tally.tokensave_reads
-        totals["unrecoverable"] += tally.unrecoverable
-
+        for phase in PHASES:
+            counts = tally.phases[phase]
+            totals[phase].update(counts)
+            lines.append(_row(os.path.basename(tally.name.rstrip("\\/"))[:26],
+                              phase, counts))
     lines.append("-" * len(header))
-    lines.append("%-30s %6d %7d %6d %8d %6d %9d %8d" % (
-        "TOTAL", totals["whole"], totals["sliced"], totals["excl"],
-        totals["no_proj"], totals["small"], totals["eligible"],
-        totals["ts_read"]))
-    lines.append("")
-
-    ratio = (100.0 * totals["ts_read"] / totals["eligible"]
-             if totals["eligible"] else 0.0)
-    lines.append("tokensave_read per eligible whole-file read: %.1f%% "
-                 "(%d / %d)" % (ratio, totals["ts_read"], totals["eligible"]))
-    lines.append("projects with an eligible read: %d   with any tokensave_read: %d"
-                 % (projects_with_eligible, projects_with_ts_read))
+    for phase in PHASES:
+        lines.append(_row("TOTAL", phase, totals[phase]))
     lines.append("")
     complete = (meta["transcripts_failed"] == 0
-                and meta["records_unparsed"] == 0
-                and totals["unrecoverable"] == 0)
+                and meta["records_unparsed"] == 0 and unrecoverable == 0)
     lines.append("transcripts scanned %d, failed %d, records unparsed %d, "
                  "results unrecoverable %d"
                  % (meta["transcripts_scanned"], meta["transcripts_failed"],
-                    meta["records_unparsed"], totals["unrecoverable"]))
+                    meta["records_unparsed"], unrecoverable))
     lines.append("complete: %s%s" % (
         complete,
         "" if complete else "  <- the counts above are a FLOOR, not a total"))
     return "\n".join(lines)
 
 
+def _row(label, phase, counts):
+    return "%-26s %-9s %6d %8d %9d %9d %7d %8d" % (
+        label, phase, counts[WHOLE], counts[ELIGIBLE_COL],
+        counts[SLICE_FOR_EDIT], counts[SLICE_LOCATING], counts[SHELL_PAGE],
+        counts[TS_READ])
+
+
 def as_json(tallies, meta, since, until):
     """The full population, so a later run cannot mistake a collapsed
     denominator for an improvement."""
     projects = {}
+    totals = {phase: collections.Counter() for phase in PHASES}
+    unrecoverable = 0
     for key, tally in tallies.items():
-        if not tally.whole_file_reads and not tally.tokensave_calls:
+        unrecoverable += tally.unrecoverable
+        if not tally.any_reading and not tally.tokensave_calls:
             continue
+        for phase in PHASES:
+            totals[phase].update(tally.phases[phase])
         projects[key] = {
             "verdicts": dict(tally.verdicts),
             "tokensave_tools": dict(tally.tools),
-            "whole_file_reads": tally.whole_file_reads,
-            "eligible_whole_file_reads": tally.eligible,
+            "phases": {phase: {col: tally.phases[phase][col]
+                               for col in COLUMNS} for phase in PHASES},
             "results_unrecoverable": tally.unrecoverable,
         }
-    totals = collections.Counter()
-    for data in projects.values():
-        totals["whole_file_reads"] += data["whole_file_reads"]
-        totals["eligible_whole_file_reads"] += data["eligible_whole_file_reads"]
-        totals["sliced_reads"] += data["verdicts"].get(NUDGE.SLICED, 0)
-        totals["small_whole_file_reads"] += data["verdicts"].get(NUDGE.SMALL, 0)
-        totals["excluded_extension_reads"] += data["verdicts"].get(
-            NUDGE.EXCLUDED_EXTENSION, 0)
-        totals["reads_outside_a_metadata_project"] += data["verdicts"].get(
-            NUDGE.NO_METADATA_PROJECT, 0)
-        totals["tokensave_read_calls"] += data["tokensave_tools"].get(
-            "tokensave_read", 0)
-        totals["results_unrecoverable"] += data["results_unrecoverable"]
     return {
         "window": {"since": since.isoformat() if since else None,
                    "until": until.isoformat() if until else None},
         "min_response_bytes": NUDGE.MIN_RESPONSE_BYTES,
+        "edit_lookahead": EDIT_LOOKAHEAD,
         "projects_discovered": len(projects),
-        "projects_with_eligible_reads": sum(
-            1 for d in projects.values() if d["eligible_whole_file_reads"]),
-        "projects_with_tokensave_read": sum(
-            1 for d in projects.values()
-            if d["tokensave_tools"].get("tokensave_read")),
-        "totals": dict(totals),
+        "totals": {phase: {col: totals[phase][col] for col in COLUMNS}
+                   for phase in PHASES},
         "completeness": {
             "transcripts_scanned": meta["transcripts_scanned"],
             "transcripts_failed": meta["transcripts_failed"],
             "records_unparsed": meta["records_unparsed"],
-            "results_unrecoverable": totals["results_unrecoverable"],
+            "results_unrecoverable": unrecoverable,
             "complete": (meta["transcripts_failed"] == 0
                          and meta["records_unparsed"] == 0
-                         and totals["results_unrecoverable"] == 0),
+                         and unrecoverable == 0),
         },
         "projects": projects,
     }
