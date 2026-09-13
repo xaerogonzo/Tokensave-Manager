@@ -79,6 +79,7 @@ from helpers.instructions_posture import (
     unescape_target,
 )
 from helpers.io_utils import _atomic_write
+from helpers import ignore_alignment as ia
 
 # ── plan vocabulary ──────────────────────────────────────────────────────
 
@@ -171,11 +172,21 @@ def _localize_steps(posture) -> "tuple[list, str]":
         return [], ("the baseline include is not in %s or %s, so there is no "
                     "line the Manager knows to repoint" % (CLAUDE_MD, BASIC_MD))
     copy_path = canonical(os.path.join(posture.display_root, bc.COPY_BASENAME))
-    foreign = [d for d in posture.baseline_directives
+    # Only includes in files that LOAD can load the copy twice. Measured on
+    # four projects: CLAUDE.md included the baseline directly while an
+    # untouched placeholder BASIC_INSTRUCTIONS.md, linked from nothing, carried
+    # a second include - counting both refused a project with one live path.
+    # The unlinked file's line is left alone; when no include is on the chain
+    # at all (an orphan), the carried ones are the ones to repair.
+    live = [d for d in posture.baseline_directives
+            if canonical(os.path.join(posture.display_root, d[0]))
+            in posture.chain]
+    candidates = live or list(posture.baseline_directives)
+    foreign = [d for d in candidates
                if _directive_target(posture, d[2]) != copy_path]
-    if len(posture.baseline_directives) > 1:
-        return [], ("%d baseline includes - localizing them would load the "
-                    "copy more than once" % len(posture.baseline_directives))
+    if len(candidates) > 1:
+        return [], ("%d baseline includes load - localizing them would load "
+                    "the copy more than once" % len(candidates))
 
     steps: list = []
     if posture.copy_state == bc.COPY_OUTDATED:
@@ -186,7 +197,7 @@ def _localize_steps(posture) -> "tuple[list, str]":
     for name, lineno, raw in foreign:
         steps.append(WiringStep(ACTION_LOCALIZE, name, "was @%s" % raw,
                                 expect=raw, lineno=lineno))
-    if any(d[0] == BASIC_MD for d in posture.baseline_directives) and \
+    if any(d[0] == BASIC_MD for d in candidates) and \
             canonical(os.path.join(posture.display_root, BASIC_MD)) \
             not in posture.chain:
         steps.append(WiringStep(ACTION_LINK_BASIC, CLAUDE_MD))
@@ -524,11 +535,27 @@ class ApplyOutcome:
 
     outcome: str
     reason: str = ""
+    #: What the WIRING wrote. Git alignment's `.gitignore` is kept apart.
     changed_files: tuple = ()
+    #: `ignore_alignment.AlignResult`, when a git exe was given.
+    alignment: object = None
 
     @property
     def wrote(self) -> bool:
         return self.outcome == OUTCOME_WIRED
+
+    @property
+    def alignment_files(self) -> tuple:
+        return self.alignment.changed_files if self.alignment else ()
+
+    @property
+    def all_files(self) -> tuple:
+        return tuple(dict.fromkeys(self.changed_files + self.alignment_files))
+
+    @property
+    def mutated(self) -> bool:
+        """The Manager changed something. Not the same as "commit-worthy"."""
+        return bool(self.all_files)
 
     @property
     def is_skip(self) -> bool:
@@ -538,7 +565,20 @@ class ApplyOutcome:
     def render(self) -> str:
         """The sentence, DERIVED from the outcome."""
         text = _OUTCOME_TEXT.get(self.outcome, self.outcome)
-        return "%s - %s" % (text, self.reason) if self.reason else text
+        text = "%s - %s" % (text, self.reason) if self.reason else text
+        aligned = self.alignment.render() if self.alignment else ""
+        # Two dimensions, never one sentence: instructions can be resolved
+        # while their git alignment is what changed.
+        return "instructions: %s · git alignment: %s" % (text, aligned) \
+            if aligned else text
+
+
+def _align(posture, git_exe: str):
+    """Git alignment for a project that resolves, or None without a git exe."""
+    if not git_exe:
+        return None
+    return ia.align(posture.display_root, git_exe,
+                    ia.companions_of(posture))
 
 
 def _state_key(posture) -> tuple:
@@ -548,8 +588,12 @@ def _state_key(posture) -> tuple:
 def apply_to_project(posture, baseline: str, template_dir: str,
                      template_text: str, has_template: bool,
                      baseline_template_text: str = "",
-                     claude_projects=None) -> ApplyOutcome:
+                     claude_projects=None, git_exe: str = "") -> ApplyOutcome:
     """Re-read, re-plan, write, re-read. One project.
+
+    With *git_exe*, a project whose chain resolves then has its Manager-written
+    companions aligned with git (`ignore_alignment.align`). Without it,
+    behaviour is exactly what it was.
 
     The plan built for the preview is deliberately NOT reused: between the
     preview and the click the disk may have moved on, and writing a stale plan
@@ -581,7 +625,8 @@ def apply_to_project(posture, baseline: str, template_dir: str,
     if plan.blocked:
         return ApplyOutcome(OUTCOME_SKIPPED_BLOCKED, plan.blocked)
     if plan.is_noop:
-        return ApplyOutcome(OUTCOME_ALREADY_RESOLVED)
+        return ApplyOutcome(OUTCOME_ALREADY_RESOLVED,
+                            alignment=_align(fresh, git_exe))
 
     result = apply_wiring(posture.display_root, plan, posture.name,
                           template_text, baseline_template_text)
@@ -591,7 +636,8 @@ def apply_to_project(posture, baseline: str, template_dir: str,
 
     after = reread()
     if after.healthy and after.copy_state == bc.COPY_CURRENT:
-        return ApplyOutcome(OUTCOME_WIRED, changed_files=result.changed_files)
+        return ApplyOutcome(OUTCOME_WIRED, changed_files=result.changed_files,
+                            alignment=_align(after, git_exe))
     return ApplyOutcome(OUTCOME_UNVERIFIED,
                         "still %s after writing" % "/".join(_state_key(after)),
                         result.changed_files)

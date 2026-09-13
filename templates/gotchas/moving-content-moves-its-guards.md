@@ -78,6 +78,11 @@ There is no good automatic fix. Rewriting somebody's comments is not a
 refactoring tool's business, and deciding *per citation* whether it went stale
 means matching prose to a moved section — fuzzy, and wrong in both directions.
 
+**`.gitignore` is keyed to filenames too.** A repo that ignores `CLAUDE.md` so
+its instructions stay private will happily commit the `docs/LESSONS.md` a split
+moved them into. Measured on one project the day a split first ran there. Ask
+git (`git check-ignore`) whether the new file keeps the old one's visibility.
+
 ## 5. So report the population, and claim nothing more
 
 What a mover can honestly do is count what it is about to strand, before it acts:

@@ -1,6 +1,6 @@
 # TokenSave Manager — Basic Instructions
 
-@D:\Claude Co worker\Token Save Manager Source\templates\project-baseline.md
+@project-baseline.md
 
 ---
 
@@ -127,6 +127,8 @@ They govern `helpers/instructions_posture.py`, `helpers/instructions_wiring.py`,
   `template_dir`, and matched the filename in ordinary prose.
 
 **Resolving is not loading, and the baseline is a COPY, not a pointer.** Claude Code loaded no absolute baseline include here: outside the project it needs a per-project approval the desktop app never asks for, and a backslash or unescaped space is not parsed at all (canaries, 2026-09-13). So each project commits `project-baseline.md`, a Manager copy with a sha header (`helpers/baseline_copy.py`), and `delivery` is what turns a row green. `reached_baseline` stays a PATH; `baseline_match` is the content fact. An approved external include is still localized. The writer copies, verifies, THEN repoints, and every repoint is compare-and-apply.
+
+**A file the Manager writes follows its referrer into or out of git** (`helpers/ignore_alignment.py`). A repo that ignores `CLAUDE.md` keeps its instructions local, and KicomAI was left with a committable copy and `docs/LESSONS.md`. Git's `ls-files`/`check-ignore` decide, never our pattern reading; only `.gitignore` is written; untracking, un-ignoring and anything unknown are reported, never done.
 
 **Parser scope is wider than repair scope, on purpose.** The classifier resolves a
 bounded general include graph; the writer repairs exactly one topology

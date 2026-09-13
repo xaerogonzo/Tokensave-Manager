@@ -37,6 +37,7 @@ from tkinter import messagebox, ttk
 from typing import TYPE_CHECKING
 
 from constants import C
+from helpers import ignore_alignment as ia
 from helpers.baseline_copy import COPY_EDITED, COPY_OUTDATED, read_template
 from helpers.instructions_posture import (
     DELIVERY_EXTERNAL_APPROVED,
@@ -121,6 +122,39 @@ def _action_label(project) -> str:
         return "Localize…"
     return "Wire…"
 
+
+def _read_alignment(fleet, git_exe: str) -> dict:
+    """root -> Alignment for every project. Runs git; call off the Tk thread."""
+    out = {}
+    for project in fleet.projects:
+        if project.excluded:
+            continue
+        pairs = ia.companions_of(project)
+        if not pairs:
+            continue
+        facts = ia.read_facts(project.display_root, git_exe,
+                              [r for p in pairs
+                               for r in (p.companion_rel, p.referrer_rel)])
+        out[project.root] = ia.decide(pairs, facts)
+    return out
+
+
+def _alignment_line(alignment) -> "tuple[str, str]":
+    """(text, colour) for the git alignment line, or ("", "") for none."""
+    if alignment is None:
+        return "", ""
+    if alignment.pending:
+        return "git alignment: pending - %s" % ia.pending_text(alignment), \
+            "peach"
+    parts = list(alignment.notes)
+    if alignment.unknown:
+        parts.append("unknown - %s" % "; ".join(alignment.unknown))
+        return "git alignment: %s" % "   ·   ".join(parts), "yellow"
+    if parts:
+        return "git alignment: current   ·   %s" % "   ·   ".join(parts), \
+            "overlay0"
+    return "git alignment: current", "overlay0"
+
 _ADVISORY_TEXT = {
     ADVISORY_DOUBLE_LOAD: "baseline reachable twice — it loads twice",
     ADVISORY_DUPLICATE_DIRECTIVE: "two BASIC_INSTRUCTIONS.md includes",
@@ -135,14 +169,21 @@ _ADVISORY_TEXT = {
 class InstructionsDialog(UiPumpMixin, tk.Toplevel):
     """Fleet view of instruction-chain reachability, with the repair."""
 
-    def __init__(self, parent, cfg: "ManagerConfig", on_log=None):
+    def __init__(self, parent, cfg: "ManagerConfig", on_log=None,
+                 on_commit_offer=None):
         super().__init__(parent)
         self.title("📄 Instructions")
         self.configure(bg=C["base"])
         self.geometry("940x720")
         self._cfg = cfg
         self._on_log = on_log or (lambda *a, **k: None)
+        #: `(path, label)`: the Manager's existing commit offer. Never a second
+        #: commit pipeline - it checks porcelain and opens GitCommitDialog.
+        self._on_commit_offer = on_commit_offer
         self._fleet = None
+        #: root -> `ignore_alignment.Alignment` from the last scan. Display
+        #: only: `align` re-reads before it writes.
+        self._alignment = {}
         self._busy = False
 
         tk.Label(self, text="Do the shared rules actually reach each project?",
@@ -224,11 +265,12 @@ class InstructionsDialog(UiPumpMixin, tk.Toplevel):
         def worker():
             try:
                 fleet = read_posture(roots, cfg)
+                alignment = _read_alignment(fleet, cfg.git_exe)
             except Exception as exc:            # noqa: BLE001 - shown to user
                 message = str(exc)
                 self._post(lambda: self._render_error(message))
                 return
-            self._post(lambda: self._render(fleet))
+            self._post(lambda: self._render(fleet, alignment))
 
         threading.Thread(target=worker, daemon=True).start()
 
@@ -244,8 +286,9 @@ class InstructionsDialog(UiPumpMixin, tk.Toplevel):
 
     # ── rendering ────────────────────────────────────────────────────────
 
-    def _render(self, fleet) -> None:
+    def _render(self, fleet, alignment=None) -> None:
         self._fleet = fleet
+        self._alignment = alignment or {}
         self._clear()
 
         if not fleet.baseline_ok:
@@ -315,10 +358,19 @@ class InstructionsDialog(UiPumpMixin, tk.Toplevel):
             weight.pack(side=tk.LEFT)
             _Tooltip(weight, self._weight_note(project))
 
+        alignment = self._alignment.get(project.root)
         if project.repairable:
             ttk.Button(row, text=_action_label(project),
                        command=lambda p=project: self._wire_one(p)).pack(
                 side=tk.RIGHT)
+        elif alignment is not None and alignment.pending:
+            match = ttk.Button(row, text="Match .gitignore…",
+                               command=lambda p=project: self._wire_one(p))
+            match.pack(side=tk.RIGHT)
+            _Tooltip(match,
+                     "Adds ignore rules so the Manager-written files stay as "
+                     "local as the file that uses them. The files themselves "
+                     "are not touched.")
 
         # Offered per project and never in a bulk action: moving a lesson log
         # is a large editorial change to a file a person wrote, and no
@@ -342,6 +394,16 @@ class InstructionsDialog(UiPumpMixin, tk.Toplevel):
             sub += "   ·   %s" % _ADVISORY_TEXT.get(advisory, advisory)
         tk.Label(self._body, text="        " + sub, font=("Segoe UI", 8),
                  bg=C["base"], fg=C["overlay0"], anchor=tk.W, justify=tk.LEFT,
+                 wraplength=860).pack(fill=tk.X, padx=12, pady=(0, 3))
+        self._render_alignment(alignment)
+
+    def _render_alignment(self, alignment) -> None:
+        """Git alignment is its own line: a separate dimension from reach."""
+        text, colour = _alignment_line(alignment)
+        if not text:
+            return
+        tk.Label(self._body, text="        " + text, font=("Segoe UI", 8),
+                 bg=C["base"], fg=C[colour], anchor=tk.W, justify=tk.LEFT,
                  wraplength=860).pack(fill=tk.X, padx=12, pady=(0, 3))
 
     def _weight_colour(self, project) -> str:
@@ -392,20 +454,39 @@ class InstructionsDialog(UiPumpMixin, tk.Toplevel):
         return apply_to_project(
             project, baseline or "", self._cfg.template_dir,
             self._template_text(), self._has_template(),
-            read_template(baseline or ""))
+            read_template(baseline or ""), git_exe=self._cfg.git_exe)
+
+    def _preview_lines(self, project, plan) -> list:
+        """Every file a repair would touch, the ignore rules included."""
+        lines = ["%s — %s" % (step.path, step.label) for step in plan.steps]
+        alignment = self._alignment.get(project.root)
+        if alignment is not None and alignment.pending:
+            lines.append(".gitignore — add %s (the files themselves are "
+                         "unchanged)" % ", ".join(alignment.patterns))
+        return lines
+
+    def _offer_commit(self, results) -> None:
+        """One existing commit prompt per project the Manager changed."""
+        if not self._on_commit_offer:
+            return
+        for path, label in results:
+            self._on_commit_offer(path, label)
 
     def _wire_one(self, project) -> None:
         plan = plan_wiring(project, has_template=self._has_template())
-        listing = "\n".join("    %s — %s" % (step.path, step.label)
-                            for step in plan.steps)
+        listing = "\n".join("    " + line
+                            for line in self._preview_lines(project, plan))
         if not messagebox.askyesno(
-                "Wire %s" % project.name,
+                "Repair %s" % project.name,
                 "%s\n\nWould write:\n\n%s\n\nNothing else in these files is "
                 "touched." % (project.display_root, listing or "  (nothing)"),
                 parent=self):
             return
         result = self._apply_to(project)
         self._log_outcome(project.name, result)
+        if result.mutated:
+            self._offer_commit([(project.display_root,
+                                 ", ".join(result.all_files))])
         self._scan()
 
     def _split_one(self, project) -> None:
@@ -417,21 +498,28 @@ class InstructionsDialog(UiPumpMixin, tk.Toplevel):
 
         dialog = SplitProposalDialog(self, project.display_root, project.name,
                                      on_log=self._on_log,
-                                     on_applied=self._scan)
+                                     on_applied=self._scan,
+                                     git_exe=self._cfg.git_exe,
+                                     on_commit_offer=self._on_commit_offer)
         dialog.transient(self)
 
     def _log_outcome(self, name: str, result) -> None:
         """One place where an outcome becomes a line. Colour derives from it."""
-        changed = (" (%s)" % ", ".join(result.changed_files)
-                   if result.changed_files else "")
+        changed = (" (%s)" % ", ".join(result.all_files)
+                   if result.all_files else "")
         self._on_log("Instructions: %s — %s%s"
                      % (name, result.render(), changed),
-                     C["green"] if result.wrote else C["peach"])
+                     C["green"] if result.mutated else C["peach"])
+
+    def _alignment_pending(self, project) -> bool:
+        alignment = self._alignment.get(project.root)
+        return alignment is not None and bool(alignment.pending)
 
     def _wire_all(self) -> None:
         if self._busy or not self._fleet:
             return
-        candidates = [p for p in self._fleet.projects if p.repairable]
+        candidates = [p for p in self._fleet.projects
+                      if p.repairable or self._alignment_pending(p)]
         if not candidates:
             messagebox.showinfo("Wire all",
                                 "Nothing to wire — every project either "
@@ -444,9 +532,8 @@ class InstructionsDialog(UiPumpMixin, tk.Toplevel):
         lines = []
         for project, plan in plans:
             lines.append("  %s" % project.name)
-            for step in plan.steps:
-                lines.append("      %s: %s" % (step.action.split("_")[0],
-                                               step.path))
+            for line in self._preview_lines(project, plan):
+                lines.append("      %s" % line)
         if not messagebox.askyesno(
                 "Wire %d projects" % len(plans),
                 "These files would be written:\n\n%s\n\nEach project is "
@@ -469,7 +556,7 @@ class InstructionsDialog(UiPumpMixin, tk.Toplevel):
                     result = self._apply_to(project)
                 except Exception as exc:        # noqa: BLE001 - per project
                     result = ApplyOutcome(OUTCOME_FAILED, str(exc))
-                outcomes.append((project.name, result))
+                outcomes.append((project, result))
             self._post(lambda: self._finish_bulk(outcomes))
 
         threading.Thread(target=worker, daemon=True).start()
@@ -478,22 +565,25 @@ class InstructionsDialog(UiPumpMixin, tk.Toplevel):
         """Per-project results. Mixed outcomes never collapse into "N/N"."""
         self._busy = False
         self._wire_all_btn.state(["!disabled"])
-        wired = [o for o in outcomes if o[1].wrote]
-        other = [o for o in outcomes if not o[1].wrote]
+        changed = [o for o in outcomes if o[1].mutated]
+        other = [o for o in outcomes if not o[1].mutated]
 
-        report = ["%d wired:" % len(wired)]
-        for name, result in wired:
-            report.append("    %s — %s"
-                          % (name, ", ".join(result.changed_files) or "-"))
+        report = ["%d changed:" % len(changed)]
+        for project, result in changed:
+            report.append("    %s — %s" % (project.name, result.render()))
         if other:
             report.append("")
-            report.append("%d not wired:" % len(other))
-            for name, result in other:
-                report.append("    %s — %s" % (name, result.render()))
+            report.append("%d not changed:" % len(other))
+            for project, result in other:
+                report.append("    %s — %s" % (project.name, result.render()))
 
-        for name, result in outcomes:
-            self._log_outcome(name, result)
-        messagebox.showinfo("Wiring complete", "\n".join(report), parent=self)
+        for project, result in outcomes:
+            self._log_outcome(project.name, result)
+        messagebox.showinfo("Repair complete", "\n".join(report), parent=self)
+        # After the summary, one prompt per changed project. The commit offer
+        # itself checks porcelain, so a change git ignores prompts nothing.
+        self._offer_commit([(p.display_root, ", ".join(r.all_files))
+                            for p, r in changed])
         self._scan()
 
     # ── agent rules (separate blast radius) ──────────────────────────────

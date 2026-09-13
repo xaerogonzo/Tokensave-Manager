@@ -191,6 +191,25 @@ def test_two_baseline_includes_are_refused_not_localized_twice(tmp_path,
     assert not (root / "project-baseline.md").exists()
 
 
+def test_an_unlinked_placeholder_include_does_not_block_the_live_one(
+        tmp_path, templates):
+    """Measured on four real projects: CLAUDE.md includes the baseline directly,
+    and a placeholder BASIC_INSTRUCTIONS.md nothing links carries a second
+    include. Only one of them can load, so only that one is localized."""
+    placeholder = "# [PROJECT NAME]\n\n" + inc_line(templates) + "\n"
+    root = make_project(tmp_path, claude=inc_line(templates) + "\n\n# Notes\n",
+                        basic=placeholder)
+    plan = iw.plan_wiring(posture_of(root, templates))
+    assert not plan.blocked, plan.blocked
+    assert actions(plan) == [(iw.ACTION_WRITE_COPY, "project-baseline.md"),
+                             (iw.ACTION_LOCALIZE, "CLAUDE.md")]
+
+    result = iw.apply_wiring(str(root), plan, root.name, "", BASELINE_TEXT)
+    assert result.ok, result.error
+    assert posture_of(root, templates).healthy
+    assert (root / "BASIC_INSTRUCTIONS.md").read_text(encoding="utf-8") == placeholder
+
+
 def test_planner_refuses_an_excluded_project(tmp_path, templates):
     root = make_project(tmp_path, claude="# upstream clone\n")
     p = dataclasses.replace(posture_of(root, templates), excluded=True,
@@ -478,3 +497,65 @@ class TestApplyOutcome:
         assert result.wrote is False
         assert result.is_skip is False
         assert result.changed_files == ("CLAUDE.md",)
+
+
+# -- git alignment rides on apply_to_project, and only when asked ----------
+
+GIT = shutil.which("git") or ""
+
+
+def _local_only_repo(root):
+    """KicomAI's shape: the instruction files are ignored."""
+    (root / ".gitignore").write_text("CLAUDE.md\nBASIC_INSTRUCTIONS.md\n",
+                                     encoding="utf-8")
+    for args in (["init", "-q"], ["add", ".gitignore"],
+                 ["-c", "user.email=t@e", "-c", "user.name=t", "commit", "-q",
+                  "-m", "init"]):
+        subprocess.run([GIT, "-C", str(root)] + args, check=True,
+                       capture_output=True)
+
+
+@pytest.mark.skipif(not GIT, reason="git not installed")
+class TestGitAlignment:
+    def test_wiring_a_local_only_project_ignores_the_new_copy(
+            self, tmp_path, templates):
+        root = make_project(tmp_path, claude="# P\n",
+                            basic=inc_line(templates) + "\n")
+        _local_only_repo(root)
+        result = iw.apply_to_project(
+            posture_of(root, templates), baseline_of(templates),
+            str(templates), "", False, BASELINE_TEXT, claude_projects={},
+            git_exe=GIT)
+        assert result.outcome == iw.OUTCOME_WIRED, result.render()
+        assert "project-baseline.md" in result.changed_files
+        # Kept apart: wiring's files and alignment's are different facts.
+        assert ".gitignore" not in result.changed_files
+        assert result.alignment_files == (".gitignore",)
+        assert result.mutated
+        status = subprocess.run(
+            [GIT, "-C", str(root), "status", "--porcelain"],
+            capture_output=True, text=True, check=True).stdout
+        assert status.strip() == "M .gitignore"
+
+    def test_a_healthy_project_can_still_need_alignment(self, tmp_path,
+                                                        templates):
+        root = make_project(tmp_path, claude="@BASIC_INSTRUCTIONS.md\n",
+                            basic=LOCAL + "\n", copy=True)
+        _local_only_repo(root)
+        result = iw.apply_to_project(
+            posture_of(root, templates), baseline_of(templates),
+            str(templates), "", False, BASELINE_TEXT, claude_projects={},
+            git_exe=GIT)
+        assert result.outcome == iw.OUTCOME_ALREADY_RESOLVED
+        assert result.wrote is False and result.mutated is True
+        assert "instructions: already resolved · git alignment:" \
+            in result.render()
+
+    def test_without_a_git_exe_nothing_changes(self, tmp_path, templates):
+        root = make_project(tmp_path, claude="@BASIC_INSTRUCTIONS.md\n",
+                            basic=LOCAL + "\n", copy=True)
+        _local_only_repo(root)
+        before = (root / ".gitignore").read_bytes()
+        result = apply_one(root, templates)
+        assert result.alignment is None and result.mutated is False
+        assert (root / ".gitignore").read_bytes() == before

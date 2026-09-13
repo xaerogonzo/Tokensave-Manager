@@ -60,6 +60,7 @@ class _Cfg:
         self.saved = 0
         self.refreshed = 0
         self.basic_instructions_template = ""
+        self.git_exe = ""
 
     @property
     def template_dir(self):

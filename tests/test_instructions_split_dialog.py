@@ -297,6 +297,46 @@ def test_the_button_actually_opens_the_proposal(tk_root, mocker, mock_config,
     assert opened[0]._plan is not None
 
 
+def test_bulk_repair_offers_one_commit_per_changed_project_only(
+        tk_root, mocker, mock_config, wait_for):
+    """Through the Manager's existing offer, never a commit of its own, and
+    never for a project where nothing was written."""
+    from dialogs import instructions_overview
+    from helpers import ignore_alignment as ia
+    from helpers.instructions_posture import (
+        FleetInstructions, ProjectInstructions, REACH_RESOLVED,
+    )
+    from helpers.instructions_wiring import (
+        OUTCOME_ALREADY_RESOLVED, OUTCOME_WIRED, ApplyOutcome,
+    )
+
+    wired = ProjectInstructions(root="d:/a", display_root="D:/a", name="A",
+                                reach=REACH_RESOLVED)
+    aligned = ProjectInstructions(root="d:/b", display_root="D:/b", name="B",
+                                  reach=REACH_RESOLVED)
+    untouched = ProjectInstructions(root="d:/c", display_root="D:/c",
+                                    name="C", reach=REACH_RESOLVED)
+    mocker.patch.object(instructions_overview, "read_posture",
+                        return_value=FleetInstructions(
+                            projects=(wired, aligned, untouched)))
+    mocker.patch.object(instructions_overview.messagebox, "showinfo")
+    offers = []
+    dialog = instructions_overview.InstructionsDialog(
+        tk_root, mock_config,
+        on_commit_offer=lambda path, label: offers.append((path, label)))
+    wait_for(lambda: dialog._fleet is not None, timeout_s=3.0)
+
+    dialog._finish_bulk([
+        (wired, ApplyOutcome(OUTCOME_WIRED, changed_files=("CLAUDE.md",))),
+        (aligned, ApplyOutcome(OUTCOME_ALREADY_RESOLVED,
+                               alignment=ia.AlignResult(
+                                   changed_files=(".gitignore",)))),
+        (untouched, ApplyOutcome(OUTCOME_ALREADY_RESOLVED)),
+    ])
+
+    assert offers == [("D:/a", "CLAUDE.md"), ("D:/b", ".gitignore")]
+
+
 def _labels(widget):
     """Every button label under a widget, depth-first."""
     out = []

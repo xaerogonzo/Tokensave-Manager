@@ -892,7 +892,8 @@ class ProjectsTabController:
         looked at one project at a time.
         """
         from dialogs.instructions_overview import InstructionsDialog
-        InstructionsDialog(self._root, self._cfg, on_log=self._on_log)
+        InstructionsDialog(self._root, self._cfg, on_log=self._on_log,
+                           on_commit_offer=self._offer_commit_after_change)
 
     def _sync_bind_label(self, path: str) -> None:
         """Point the entry at whichever direction this project can go.
