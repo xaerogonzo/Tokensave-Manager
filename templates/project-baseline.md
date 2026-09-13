@@ -39,9 +39,12 @@ codebase, this rule wins.
 index last synced. A stale graph is not a broken tool, but it is a wrong answer,
 and the honest move is to say so rather than quietly work from it.
 
-**The body read is a tokensave call too.** `tokensave_read` slices with
-`mode: "lines"`, maps symbols with `mode: "map"`, and is cached across
-sessions. It reads any path, indexed or not, including a `.md`.
+**The body read is a tokensave call too.** `tokensave_read` takes `file`,
+not `path`: `{"file": "src/x.py", "mode": "lines", "lines": "120-180"}`,
+or `mode: "map"`. If tokensave tools are deferred, load their schemas with
+`ToolSearch` before the first call: a guessed argument fails, and one failure
+is enough to abandon the tool. It reads any path, indexed or not, including a
+`.md`. A file you are about to `Edit` still needs `Read`.
 
 **The rule is the act, not the tool name.** Paging or searching through the
 shell (`sed -n`, `cat`, `grep`, `rg`, `Select-String`) is the same act and is
