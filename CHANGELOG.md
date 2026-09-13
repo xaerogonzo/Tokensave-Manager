@@ -3,6 +3,9 @@
 
 ## [Unreleased]
 
+### Fixed
+- (instructions) **A second split could move its own index, and Suggest proposed operational tables.** On KicomAI, Suggest after a first split ticked `Common Edit Locations` (a 76-row lookup), `Sandbox Testing` and the `## Lessons (moved out of this file)` index. The index's checkbox was disabled, but Suggest set its variable anyway, so Apply carried the index into `docs/LESSONS.md` and wrote a new index listing itself. `compute_split` now removes the index on every route; the budget's suggestion skips sections that are 75%+ table rows (measured: 17 such sections in fleet CLAUDE.md files, none in any lessons file), which a person can still tick; and appending to a target that already holds a moved index is refused until it is repaired by hand. Suggest can still propose prose operational sections such as a "Do NOT" list, as its tooltip says
+
 ### Added
 - (instructions) **Manager-written instruction files now follow the git visibility of the file that refers to them.** `helpers/ignore_alignment.py` asks git (`ls-files`, `check-ignore`), never reads ignore patterns itself, and only ever writes `.gitignore`: a companion (`BASIC_INSTRUCTIONS.md`, `project-baseline.md`, `docs/LESSONS.md` when it exists) that git would commit while its referrer is ignored gets an anchored ignore rule, re-read before writing and confirmed by git after. Untracking, un-ignoring and anything unknown are reported, never acted on. The Instructions panel shows "git alignment" as its own line with a **Match .gitignore…** button, Repair all includes it, and Retrofit and Relocate run it too
 - (instructions) **Instructions and Split offer the commit.** After a repair, a Repair all (one prompt per changed project) or a split, the Manager's existing commit offer opens the Git Commit dialog; no new commit path. The split confirmation now states the measured git state instead of claiming "both files are in git"

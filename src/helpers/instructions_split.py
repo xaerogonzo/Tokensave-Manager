@@ -54,6 +54,18 @@ _HEADING = re.compile(r"^(#{2,3})\s+(.*?)\s*#*$")
 _BOLD_LEAD = re.compile(r"^\*\*(.+?)\*\*")
 #: Below this many, a section is small enough to read and the note is noise.
 _ENTRY_NOTE_MIN = 8
+#: A section whose non-blank body is at least this share of table rows is a
+#: LOOKUP, not a log entry, and the byte budget never proposes moving it.
+#: Measured across every CLAUDE.md and docs/LESSONS.md in the fleet
+#: (2026-09-13): 17 sections reached 0.75 and every one sat in a CLAUDE.md --
+#: file maps, documentation tables, tech stacks, and KicomAI's 76-row "Common
+#: Edit Locations", which the budget did carry off. No section of a lessons
+#: file reached it: the highest was 0.71 on a 7-line section, then 0.43.
+_REFERENCE_TABLE_SHARE = 0.75
+#: ...and it must have at least this many non-blank lines. A two-row table in
+#: a lesson is a figure, and a heading over three rows is not what the budget
+#: was taking.
+_REFERENCE_MIN_LINES = 5
 #: The heading the index is written under. Detection and rendering share it,
 #: because a SECOND split of an already-split file must merge into the index
 #: that is there rather than write a rival one beside it -- which is exactly
@@ -74,6 +86,12 @@ def is_index_section(section) -> bool:
     from finding it -- so the next split writes a second index beside nothing.
     """
     return section.level == 2 and section.title == _INDEX_TITLE
+
+
+def _target_holds_an_index(target_text: str) -> bool:
+    """Did an earlier split move its own index into the target?"""
+    _pre, sections = _compute_sections(target_text)
+    return any(is_index_section(s) for s in sections)
 
 
 def is_our_target(target_text: str) -> bool:
@@ -119,6 +137,9 @@ class Section:
     #: note for a log that carries no headings at all -- which is the shape
     #: of the largest one here.
     entry_count: int = 0
+    #: Mostly a table: a lookup the reader needs loaded, not a log entry. Only
+    #: the byte budget's SUGGESTION honours it; a person can still move one.
+    is_reference: bool = False
 
     @property
     def anchor(self) -> str:
@@ -228,6 +249,10 @@ def _compute_sections(text: str) -> "tuple[int, list]":
         entries = sum(1 for j in range(start, end)
                       if not fenced[j] and _BOLD_LEAD.match(lines[j])
                       and j > 0 and not lines[j - 1].strip())
+        body = [l for l in lines[start + 1:end] if l.strip()]
+        table_rows = sum(1 for l in body if l.lstrip().startswith("|"))
+        reference = (len(body) >= _REFERENCE_MIN_LINES
+                     and table_rows >= _REFERENCE_TABLE_SHARE * len(body))
         if level == 2:
             last_top = n
             parent = None
@@ -236,7 +261,8 @@ def _compute_sections(text: str) -> "tuple[int, list]":
         sections.append(Section(
             index=n, title=title, start=start, end=end, size=size,
             has_directive=any(start <= d < end for d in directive_lines),
-            level=level, parent=parent, total_size=size, entry_count=entries))
+            level=level, parent=parent, total_size=size, entry_count=entries,
+            is_reference=reference))
 
     # Second pass: a parent's total includes its children. Done here rather
     # than in the loop because a parent is built before its children exist.
@@ -436,6 +462,23 @@ def _render_new_target(lines, sections, moved, chosen, source_rel: str,
     return new_target
 
 
+def _target_refusal(target_rel: str, target_text: str) -> str:
+    """Why an existing target must not be appended to, or ""."""
+    if not is_our_target(target_text):
+        return ("%s exists and was not written by this tool, so there is "
+                "nothing safe to add it to" % target_rel)
+    if _target_holds_an_index(target_text):
+        # Written by a version without the never-move-the-index rule. Adding
+        # to it would bury the lost entries further, and the repair is a
+        # person's call: which moved sections were really lessons is exactly
+        # what went wrong.
+        return ("%s contains a moved index (\"## %s\"), so an earlier split "
+                "carried the index and probably sections that were not "
+                "lessons into it. Repair it by hand first."
+                % (target_rel, _INDEX_TITLE))
+    return ""
+
+
 def compute_split(text: str, source_rel: str = "CLAUDE.md",
                   target_rel: str = DEFAULT_TARGET,
                   keep_bytes: int = DEFAULT_KEEP_BYTES,
@@ -494,6 +537,17 @@ def compute_split(text: str, source_rel: str = "CLAUDE.md",
     # orphan them under whatever heading happened to follow.
     chosen = with_descendants(sections, chosen)
 
+    # THE INDEX NEVER MOVES, BY ANY ROUTE. The dialog disables its checkbox,
+    # and that guarded one route of three: "Suggest" set the box's variable
+    # straight from this function's own budget tail, which reached the index
+    # whenever it was last in the file -- i.e. after every first split. On
+    # KicomAI that carried the index into the target and wrote a new index
+    # listing itself. Enforced here, where every route arrives.
+    chosen -= {s.index for s in sections if is_index_section(s)}
+    if move_indices is None:
+        # The SUGGESTION skips lookups; an explicit tick is still honoured.
+        chosen -= {s.index for s in sections if s.is_reference}
+
     kept = tuple(s for s in sections if s.index not in chosen)
     moved = tuple(s for s in sections if s.index in chosen)
 
@@ -528,12 +582,10 @@ def compute_split(text: str, source_rel: str = "CLAUDE.md",
                                     chosen, target_rel, nl)
 
     appending = bool(target_text.strip())
-    if appending and not is_our_target(target_text):
-        return SplitPlan(
-            source_rel, target_rel, preamble, kept, moved, text, "",
-            digest_of(text),
-            blocked=("%s exists and was not written by this tool, so there is "
-                     "nothing safe to add it to" % target_rel))
+    refusal = _target_refusal(target_rel, target_text) if appending else ""
+    if refusal:
+        return SplitPlan(source_rel, target_rel, preamble, kept, moved, text,
+                         "", digest_of(text), blocked=refusal)
     new_target = _render_new_target(lines, sections, moved, chosen,
                                     source_rel, target_text, appending, nl)
 

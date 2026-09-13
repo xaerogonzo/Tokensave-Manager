@@ -273,6 +273,14 @@ class SplitProposalDialog(UiPumpMixin, tk.Toplevel):
                      "name the section. It records the count instead, and the "
                      "entries are found by grepping for the bold line that "
                      "opens each one.")
+        if section.is_reference:
+            lookup = tk.Label(row, text="table", font=("Segoe UI", 8),
+                              bg=C["base"], fg=C["overlay0"])
+            lookup.pack(side=tk.RIGHT, padx=(6, 0))
+            _Tooltip(lookup,
+                     "Mostly a table: a lookup that is usually needed on every "
+                     "message, like a file map or \"where to edit\" list. "
+                     "Suggest never ticks it; you still can.")
         if section.has_directive:
             chain = tk.Label(row, text="@include", font=("Segoe UI", 8, "bold"),
                              bg=C["base"], fg=C["peach"])
