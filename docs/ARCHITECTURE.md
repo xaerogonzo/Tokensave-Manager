@@ -81,7 +81,7 @@ Token Save Manager Source/
 │   │                              report/wait/quit. `report what=geometry` runs the visual
 │   │                              oracle. Committed scripts live in scripts/drive/.
 │   │
-│   ├── helpers/                  120 modules of pure / IO helpers — no UI deps.
+│   ├── helpers/                  121 modules of pure / IO helpers — no UI deps.
 │   │   ├── config.py              _load_config, _save_config, _migrate_config
 │   │   ├── detection.py           _detect_git/_gh/_npm/_codegraph/_claude_cli,
 │   │   │                          _root_path/_label, _version_lt
@@ -430,6 +430,14 @@ Token Save Manager Source/
 │   │   │                          {version, full_sync_at, db} after a Manager-run
 │   │   │                          full index; CURRENT / BUILT_BY_OLDER / UNKNOWN.
 │   │   │                          Never infers from timestamps or exe mtime.
+│   │   ├── index_scope.py         Tracked `vendor/` code the graph's `exclude` hides
+│   │   │                          (Doctor "Index scope"). `tokensave init` seeds
+│   │   │                          `**/vendor/**`; a project that OWNS that folder is
+│   │   │                          invisible to every graph query. Pattern semantics
+│   │   │                          measured on 7.12.1: anchored to root unless `**/`,
+│   │   │                          `include` does not override. Unlisted pattern shapes
+│   │   │                          are NOT EVALUATED, never "does not hide". Reports
+│   │   │                          the population; never says the exclusion is wrong.
 │   │   ├── graph_trust.py         How much of tokensave's call graph can be believed,
 │   │   │                          and *where the index is*. Four trust states, because
 │   │   │                          'could not look' and 'looked and found nothing' are

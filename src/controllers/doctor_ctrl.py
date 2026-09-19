@@ -67,6 +67,7 @@ from helpers.doctor_rules import (                      # noqa: E402
     _audit_project_tree,
     audit_graph_trust,
     audit_index_extractor_version,
+    audit_index_scope,
     audit_pyscope_cache,
     audit_instructions,
     audit_observations,
@@ -765,6 +766,7 @@ class DoctorController:
         self._log_observations(project_path)
         self._log_shadow_health(project_path)
         self._log_index_extractor(project_path)
+        self._log_index_scope(project_path)
         self._log_graph_trust(project_path)
         self._log_pyscope_cache(project_path)
         self._log_mcp_posture()
@@ -835,6 +837,20 @@ class DoctorController:
         if not notes:
             return
         self._on_log("=== Index freshness ===", C["mauve"])
+        for note in notes:
+            self._on_log(note, C["peach"])
+
+    def _log_index_scope(self, project_path: str) -> None:
+        """Warn-only. Tracked vendor/ code the graph's exclude list hides.
+
+        Silent unless a tracked file under a vendor directory is hidden (or
+        that could not be established). Not a violation: the exclusion is a
+        property of the index config, and it may be exactly right.
+        """
+        notes = audit_index_scope(project_path, self._cfg.git_exe)
+        if not notes:
+            return
+        self._on_log("=== Index scope ===", C["mauve"])
         for note in notes:
             self._on_log(note, C["peach"])
 
