@@ -13,6 +13,7 @@ it actually pressed even when pressing it destroys that button.
 from __future__ import annotations
 
 import json
+import os
 
 import pytest
 
@@ -165,3 +166,119 @@ def test_shot_without_a_path_is_reported_not_raised(capsys):
     driver = _Driver(_FakeApp(), [])
     driver._do_shot({"do": "shot"})
     assert "no path" in capsys.readouterr().out
+
+
+# -- select / doctor / log: driving the REAL Doctor without a mouse ----------
+
+import threading
+from tkinter import ttk
+
+
+def _tree_app(tk_root, paths, *, cmd_doctor=None):
+    """An app whose Projects tab has a nested tree of `proj:` rows."""
+    tree = ttk.Treeview(tk_root)
+    tree.insert("", "end", iid="cat:Random", text="Random", open=False)
+    for path in paths:
+        tree.insert("cat:Random", "end", iid="proj:" + path, text=path)
+    app = _FakeApp()
+    calls = []
+    bar = type("Bar", (), {"cmd_doctor": lambda self: calls.append("doctor")})()
+    app._projects = type("P", (), {"_tree": tree, "_cmd_bar": bar})()
+    return app, tree, calls
+
+
+def test_select_finds_a_row_by_normalised_path_and_opens_its_parent(
+        tk_root, capsys):
+    app, tree, _ = _tree_app(tk_root, ["D:/Random Projects/OpenChem Studio"])
+    driver = _Driver(app, [])
+
+    ok = driver._do_select({"project": "D:\\Random Projects\\OpenChem Studio"})
+
+    assert ok is True
+    assert tree.selection() == ("proj:D:/Random Projects/OpenChem Studio",)
+    assert tree.item("cat:Random", "open") in (1, True)     # a collapsed parent
+    assert "select ->" in capsys.readouterr().out
+
+
+def test_select_says_so_when_no_row_matches(tk_root, capsys):
+    app, tree, _ = _tree_app(tk_root, ["D:/a"])
+    assert _Driver(app, [])._do_select({"project": "D:/nope"}) is False
+    assert tree.selection() == ()
+    assert "no project row" in capsys.readouterr().out
+
+
+def test_select_without_a_tree_is_reported_not_raised(capsys):
+    assert _Driver(_FakeApp(), [])._do_select({"project": "D:/a"}) is False
+    assert "no project tree" in capsys.readouterr().out
+
+
+def test_doctor_is_not_started_when_the_row_cannot_be_selected(tk_root):
+    """A missing row must never reach `_selected_path`, which raises a modal."""
+    app, _, calls = _tree_app(tk_root, ["D:/a"])
+    driver = _Driver(app, [])
+    driver._do_doctor({"project": "D:/nope"})
+    assert calls == []
+    assert driver._hold is None
+
+
+def test_doctor_holds_the_chain_until_the_worker_thread_ends(tk_root):
+    app, _, calls = _tree_app(tk_root, ["D:/a"])
+    driver = _Driver(app, [{"do": "wait"}])
+    release = threading.Event()
+    worker = threading.Thread(target=release.wait, name="doctor-worker",
+                              daemon=True)
+    worker.start()
+
+    driver._do_doctor({"project": "D:/a"})
+
+    assert calls == ["doctor"]
+    driver._run_next()
+    assert driver._index == 0                    # held: the step did not run
+    assert app.scheduled[-1][0] == 500           # and it will look again
+    release.set()
+    worker.join(2)
+    driver._run_next()
+    assert driver._index == 1                    # released: the chain moved on
+    assert driver._hold is None
+
+
+def test_doctor_gives_up_at_the_timeout_instead_of_hanging_the_run(
+        tk_root, capsys):
+    app, _, _ = _tree_app(tk_root, ["D:/a"])
+    driver = _Driver(app, [])
+    release = threading.Event()
+    worker = threading.Thread(target=release.wait, name="doctor-worker",
+                              daemon=True)
+    worker.start()
+    try:
+        driver._do_doctor({"project": "D:/a", "timeout_ms": 0})
+        assert driver._hold() is False
+        assert "still running at the timeout" in capsys.readouterr().out
+    finally:
+        release.set()
+        worker.join(2)
+
+
+def _log_app(tk_root, text):
+    widget = tk.Text(tk_root)
+    widget.insert("1.0", text)
+    app = _FakeApp()
+    app._output = type("Out", (), {"text": widget})()
+    return app
+
+
+def test_log_report_starts_at_the_last_line_naming_the_marker(tk_root, capsys):
+    lines = ["old", "=== Extra checkouts ===", "first",
+             "=== Extra checkouts ===", "second", ""]
+    text = os.linesep.join(lines)
+    _Driver(_log_app(tk_root, text), [])._report_log({"from": "Extra checkouts"})
+    out = capsys.readouterr().out
+    assert "found=True" in out and "second" in out and "first" not in out
+
+
+def test_log_report_says_when_the_marker_is_absent(tk_root, capsys):
+    """Absent and never-looked-for must not read alike."""
+    _Driver(_log_app(tk_root, "nothing to see"), [])._report_log(
+        {"from": "Extra checkouts"})
+    out = capsys.readouterr().out
+    assert "found=False" in out and "0 line(s)" in out

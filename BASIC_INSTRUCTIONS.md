@@ -578,6 +578,9 @@ TOKENSAVE_MANAGER_DRIVE=/path/to/script.json python src/app.py
     {"do": "tab",    "name": "Projects"}     matches on containment, so no glyph
     {"do": "dialog", "name": "mcp"}          also "settings"; grab is released
     {"do": "click",  "text": "show"}         Button.invoke() — no cursor
+    {"do": "select", "project": "D:/x"}      Projects-tab row, by path
+    {"do": "doctor", "project": "D:/x"}      the REAL Doctor, waited on
+    {"do": "report", "what": "log", "from": "Extra checkouts"}   OUTPUT pane
     {"do": "scroll", "to": "bottom"}
     {"do": "report", "what": "mcp"}          per-row state + badge + issue
     {"do": "shot",   "path": "C:/tmp/x.png"}
