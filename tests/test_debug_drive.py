@@ -189,15 +189,27 @@ def _tree_app(tk_root, paths, *, cmd_doctor=None):
 
 def test_select_finds_a_row_by_normalised_path_and_opens_its_parent(
         tk_root, capsys):
-    app, tree, _ = _tree_app(tk_root, ["D:/Random Projects/OpenChem Studio"])
+    row = os.path.join("root", "Random Projects", "OpenChem Studio")
+    spelled = os.path.join("root", "Random Projects", "x", "..",
+                           "OpenChem Studio")            # differs on every OS
+    app, tree, _ = _tree_app(tk_root, [row])
     driver = _Driver(app, [])
 
-    ok = driver._do_select({"project": "D:\\Random Projects\\OpenChem Studio"})
+    ok = driver._do_select({"project": spelled})
 
     assert ok is True
-    assert tree.selection() == ("proj:D:/Random Projects/OpenChem Studio",)
+    assert tree.selection() == ("proj:" + row,)
     assert tree.item("cat:Random", "open") in (1, True)     # a collapsed parent
     assert "select ->" in capsys.readouterr().out
+
+
+@pytest.mark.skipif(os.name != "nt", reason="backslash separators are Windows")
+def test_select_matches_backslash_and_forward_slash_spellings(tk_root):
+    """The case a real script hits: the tree holds `D:/x`, a user types `D:\\x`."""
+    app, tree, _ = _tree_app(tk_root, ["D:/Random Projects/OpenChem Studio"])
+    ok = _Driver(app, [])._do_select(
+        {"project": "D:\\Random Projects\\OpenChem Studio"})
+    assert ok is True
 
 
 def test_select_says_so_when_no_row_matches(tk_root, capsys):
