@@ -126,6 +126,19 @@ After any code change, update the minimum set of docs necessary — **proportion
 
 ---
 
+## Extra checkouts: keep them findable and short-lived
+
+Prefer not to make one. The usual reason is running the suite at another commit, or comparing against a baseline -- and `git show <sha>:<path>` or `git archive` often answers that without a checkout at all.
+
+If you do need one:
+
+- **Where:** `<drive>:\_scratch\<repo>-<short-sha>`, on the repo's own drive. Never loose at a drive root, and never under a name nothing recognises. One known folder is what lets the Manager's Doctor list them; a copy made anywhere else cannot be found later.
+- **Index it at once:** `tokensave init <that path>`. Without its own index, tokensave walks upward and answers with the ORIGINAL checkout's code. Session MCP tools stay bound to the original checkout, so query the copy through the tokensave CLI, run from inside it.
+- **Logs** go inside the copy or the session scratchpad, never the drive root.
+- **Clean up:** `git worktree remove <path>`, then delete the folder and its logs. Nothing removes them for you, so say in your final message which extra checkouts still exist.
+
+---
+
 ## Git Discipline
 
 - Commit messages explain **why**, not just what (bad: "fix bug"; good: "fix null check in scanner — crashed on empty file list")
