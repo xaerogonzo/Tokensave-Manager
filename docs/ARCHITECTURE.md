@@ -81,7 +81,7 @@ Token Save Manager Source/
 │   │                              report/wait/quit. `report what=geometry` runs the visual
 │   │                              oracle. Committed scripts live in scripts/drive/.
 │   │
-│   ├── helpers/                  121 modules of pure / IO helpers — no UI deps.
+│   ├── helpers/                  122 modules of pure / IO helpers — no UI deps.
 │   │   ├── config.py              _load_config, _save_config, _migrate_config
 │   │   ├── detection.py           _detect_git/_gh/_npm/_codegraph/_claude_cli,
 │   │   │                          _root_path/_label, _version_lt
@@ -438,6 +438,14 @@ Token Save Manager Source/
 │   │   │                          `include` does not override. Unlisted pattern shapes
 │   │   │                          are NOT EVALUATED, never "does not hide". Reports
 │   │   │                          the population; never says the exclusion is wrong.
+│   │   ├── stray_checkouts.py     Extra working copies of a project that nothing
+│   │   │                          tracks (Doctor "Extra checkouts"). Registered
+│   │   │                          worktrees outside `.claude/worktrees` and
+│   │   │                          `<drive>:\_scratch`, plus unexplained scratch
+│   │   │                          entries. Own `git worktree list` call so a git
+│   │   │                          failure is UNKNOWN, not "none". Cannot see plain
+│   │   │                          copies or clones, and says so. No size (du on a
+│   │   │                          drive-root worktree with a .venv took >2 min).
 │   │   ├── graph_trust.py         How much of tokensave's call graph can be believed,
 │   │   │                          and *where the index is*. Four trust states, because
 │   │   │                          'could not look' and 'looked and found nothing' are

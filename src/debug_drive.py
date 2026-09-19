@@ -33,6 +33,10 @@ The script is a JSON list of steps, run in order:
                                                 // ("settings" still works and
                                                 //  routes to the tab above)
       {"do": "click",  "text": "show"},
+      {"do": "select", "project": "D:/path/to/project"},  // Projects tab row
+      {"do": "doctor", "project": "D:/path/to/project",   // the REAL Doctor,
+                       "timeout_ms": 120000},             //  waited on
+      {"do": "report", "what": "log", "from": "Extra checkouts"},  // OUTPUT pane
       {"do": "report", "what": "mcp", "after_ms": 3000},
       {"do": "report", "what": "posture"},      // MCP state, not rendered text
       {"do": "report", "what": "instructions"}, // carriage vs reach, per project
@@ -130,6 +134,15 @@ def _walk(widget):
         yield from _walk(child)
 
 
+def _tree_iids(tree, parent: str = "") -> "list[str]":
+    """Every row id in a Treeview, depth first, including collapsed rows."""
+    out = []
+    for iid in tree.get_children(parent):
+        out.append(iid)
+        out.extend(_tree_iids(tree, iid))
+    return out
+
+
 def _widget_text(widget) -> str:
     """A widget's visible text, or "" — `cget` raises for those without it."""
     try:
@@ -149,12 +162,21 @@ class _Driver:
         #: `click` default to it, because a script that just opened a dialog
         #: is almost always talking about that dialog.
         self._dialog = None
+        #: A callable returning True while a background job a step started is
+        #: still running. `_run_next` re-checks it instead of advancing, which
+        #: is how `doctor` is waited on without a guessed `after_ms`.
+        self._hold = None
 
     def start(self) -> None:
         _say("drive: %d step(s) from %s" % (len(self._steps), _DRIVE_SCRIPT))
         self._app.after(600, self._run_next)
 
     def _run_next(self) -> None:
+        if self._hold is not None:
+            if self._hold():
+                self._app.after(500, self._run_next)
+                return
+            self._hold = None
         if self._index >= len(self._steps):
             _say("drive: done")
             return
@@ -347,6 +369,61 @@ class _Driver:
             pass
         _say("drive: dialog -> %s" % type(self._dialog).__name__)
 
+    def _do_select(self, step: "dict[str, Any]") -> bool:
+        """Select a Projects-tab row by path. True when a row was selected.
+
+        The same selection a user's click makes, so anything that reads the
+        selected project (`_cmd_bar.cmd_doctor`) sees it. Matching is on the
+        normalised path, because the tree holds the path as discovered and a
+        script should not have to spell it identically.
+        """
+        tree = getattr(getattr(self._app, "_projects", None), "_tree", None)
+        if tree is None:
+            _say("drive: select: the app has no project tree")
+            return False
+        want = os.path.normcase(os.path.normpath(self._project(step)))
+        for iid in _tree_iids(tree):
+            if iid.startswith("proj:") and os.path.normcase(
+                    os.path.normpath(iid[5:])) == want:
+                tree.selection_set(iid)
+                tree.see(iid)              # opens collapsed parent categories
+                _say("drive: select -> %s" % iid[5:])
+                return True
+        _say("drive: select: no project row matching %r" % want)
+        return False
+
+    def _do_doctor(self, step: "dict[str, Any]") -> None:
+        """Run the REAL Doctor on a project, and hold the chain until it ends.
+
+        Goes through `CommandBarCtrl.cmd_doctor`, the callback the right-click
+        menu binds, so the tokensave subprocess, the analysis and every audit
+        block run exactly as they do for a user. It does not click the
+        follow-up dialogs Doctor may offer (purge, worktree repair); those are
+        offers, and a drive run never accepts one.
+
+        Waits on the `doctor-worker` thread rather than a fixed delay, up to
+        `timeout_ms`. Selecting first is what keeps a missing row from
+        reaching `_selected_path`, which would raise a modal warning.
+        """
+        import threading
+        import time
+
+        ctrl = getattr(self._app, "_projects", None)
+        if ctrl is None or not self._do_select(step):
+            return
+        ctrl._cmd_bar.cmd_doctor()
+        deadline = time.monotonic() + int(step.get("timeout_ms", 120000)) / 1000
+
+        def running() -> bool:
+            alive = any(t.name == "doctor-worker" and t.is_alive()
+                        for t in threading.enumerate())
+            if alive and time.monotonic() >= deadline:
+                _say("drive: doctor: still running at the timeout; moving on")
+                return False
+            return alive
+
+        self._hold = running
+
     def _do_click(self, step: "dict[str, Any]") -> None:
         """Invoke a button by its text.
 
@@ -492,6 +569,9 @@ class _Driver:
         if what == "output":
             self._report_output()
             return
+        if what == "log":
+            self._report_log(step)
+            return
         lines = [t for t in (_widget_text(w).strip() for w in _walk(target))
                  if t]
         _say("drive: report (%d labels)" % len(lines))
@@ -526,6 +606,27 @@ class _Driver:
                  % (win.geometry(), win.state(), out._peer.index("end-1c")))
         _say("  paned height: %d, panes=%d"
              % (paned.winfo_height(), len(paned.panes())))
+
+    def _report_log(self, step: "dict[str, Any]") -> None:
+        """The OUTPUT pane's text, optionally from the last line naming `from`.
+
+        The pane is where Doctor writes, so this is what a user would read.
+        `from` reports whether the marker was found at all: a block that is
+        absent and a block that was never looked for must not read alike.
+        """
+        out = getattr(self._app, "_output", None)
+        if out is None:
+            _say("drive: log: the app has no output pane")
+            return
+        lines = out.text.get("1.0", "end-1c").splitlines()
+        marker = str(step.get("from", ""))
+        if marker:
+            hits = [i for i, line in enumerate(lines) if marker in line]
+            _say("drive: log: marker %r found=%s" % (marker, bool(hits)))
+            lines = lines[hits[-1]:] if hits else []
+        _say("drive: log: %d line(s)" % len(lines))
+        for line in lines[:int(step.get("max", 200))]:
+            _say("    " + line)
 
     def _report_geometry(self, target, step: "dict[str, Any]") -> None:
         """Assert geometric invariants on what is actually on screen.

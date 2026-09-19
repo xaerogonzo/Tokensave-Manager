@@ -69,6 +69,7 @@ from helpers.doctor_rules import (                      # noqa: E402
     audit_index_extractor_version,
     audit_index_scope,
     audit_pyscope_cache,
+    audit_stray_checkouts,
     audit_instructions,
     audit_observations,
     audit_mcp_auto_approve,
@@ -767,6 +768,7 @@ class DoctorController:
         self._log_shadow_health(project_path)
         self._log_index_extractor(project_path)
         self._log_index_scope(project_path)
+        self._log_stray_checkouts(project_path)
         self._log_graph_trust(project_path)
         self._log_pyscope_cache(project_path)
         self._log_mcp_posture()
@@ -851,6 +853,20 @@ class DoctorController:
         if not notes:
             return
         self._on_log("=== Index scope ===", C["mauve"])
+        for note in notes:
+            self._on_log(note, C["peach"])
+
+    def _log_stray_checkouts(self, project_path: str) -> None:
+        """Warn-only. Extra working copies nothing tracks or cleans up.
+
+        Silent when every registered worktree is under .claude/worktrees or
+        the scratch folder. Not a violation: a detached worktree may be a
+        suite still running, and this never judges that.
+        """
+        notes = audit_stray_checkouts(project_path, self._cfg.git_exe)
+        if not notes:
+            return
+        self._on_log("=== Extra checkouts ===", C["mauve"])
         for note in notes:
             self._on_log(note, C["peach"])
 

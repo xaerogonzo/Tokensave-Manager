@@ -841,6 +841,76 @@ def audit_index_scope(project_path: str, git_exe: str = "") -> list:
     return lines
 
 
+def audit_stray_checkouts(project_path: str, git_exe: str = "",
+                          scratch_root: "str | None" = None) -> list:
+    """Extra working copies of this project that nothing keeps track of.
+
+    An agent needing the suite at another commit makes a second checkout.
+    Measured on OpenChem Studio: two detached-HEAD worktrees loose at ``D:\\``
+    and eighteen logs beside them. Nothing removes them, each carries its own
+    ``.venv``, and a session started in one is answered from the original
+    checkout's graph until it is indexed.
+
+    Reports registered worktrees outside ``.claude/worktrees`` and the scratch
+    folder, and unexplained scratch entries named for this project. Warn-only,
+    never a violation, and never says a checkout is abandoned -- a detached
+    worktree may be a suite still running.
+
+    Always states what it cannot see: a plain copy or fresh clone is not
+    registered with git, so "found none" would be a claim it cannot make.
+    Logic lives in :mod:`helpers.stray_checkouts`, imported lazily to keep this
+    module's import surface exactly ``ast``, ``os`` and ``re``.
+    """
+    if not project_path:
+        return []
+
+    import datetime
+
+    from helpers import stray_checkouts as sc
+    rep = sc.scan(project_path, git_exe, scratch_root)
+    if rep.state in (sc.NOT_APPLICABLE, sc.CLEAR):
+        return []
+    if rep.state == sc.UNKNOWN:
+        return [
+            "  Could not list this project's git worktrees: %s." % rep.reason,
+            "  That is unknown, not clean -- run `git worktree list` by hand.",
+        ]
+
+    lines = []
+    if rep.strays:
+        lines.append(
+            "  %d git worktree(s) of this project sit outside "
+            ".claude/worktrees and %s:" % (len(rep.strays), rep.scratch_root))
+        for co in rep.strays[:10]:
+            if not co.exists:
+                lines.append("    %s  (registered, but the folder is gone -- "
+                             "`git worktree prune`)" % co.path)
+                continue
+            when = datetime.datetime.fromtimestamp(co.modified).strftime(
+                "%Y-%m-%d") if co.modified else "unknown"
+            lines.append("    %s  %s  %s  index: %s  folder changed: %s"
+                         % (co.path, co.head, co.branch or "detached",
+                            "yes" if co.has_index else "NO", when))
+        if len(rep.strays) > 10:
+            lines.append("    ... and %d more." % (len(rep.strays) - 10))
+        lines.append(
+            "  Nothing removes these. If one is finished: `git worktree "
+            "remove <path>`, then delete the folder if it lingers (see docs/"
+            "WINDOWS_WORKTREE_CLEANUP.md). A detached one may be a run still "
+            "in progress -- this does not judge that.")
+    if rep.unregistered:
+        lines.append(
+            "  %d folder(s) in %s are named for this project but are not "
+            "registered git worktrees (plain copies or clones):"
+            % (len(rep.unregistered), rep.scratch_root))
+        lines.extend("    %s" % p for p in rep.unregistered[:10])
+    lines.append(
+        "  Not a full inventory: a copy made with cp -r or a fresh clone is "
+        "not registered with git and cannot be listed from here. Only %s can "
+        "be checked, which is why the baseline names it." % rep.scratch_root)
+    return lines
+
+
 def audit_pyscope_cache(project_path: str, pyscope_exe: str = "") -> list:
     """A recommendation about where PyScope keeps this project's analysis.
 
