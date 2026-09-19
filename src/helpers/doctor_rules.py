@@ -776,6 +776,71 @@ def _index_provenance_unknown(prov, indexed: str, indexed_problem: str) -> list:
     return lines
 
 
+def audit_index_scope(project_path: str, git_exe: str = "") -> list:
+    """Tracked ``vendor/`` code that tokensave's exclude list hides.
+
+    ``tokensave init`` seeds ``exclude`` with ``**/vendor/**`` on the
+    convention that ``vendor`` is third-party. A project that OWNS and edits
+    that folder (OpenChem Studio's naming engine, 51 files plus 116 tests) is
+    then invisible to every graph query, and each agent task touching it falls
+    back to Grep/Read with no error anywhere.
+
+    Never says the exclusion is wrong -- ownership is a fact about the team,
+    not the tree -- so it reports the population and lets the person decide.
+    Warn-only, never a violation: the exclusion is a property of the index
+    config, not a defect in the source. Silent when nothing tracked sits under
+    a ``vendor`` directory, or the project is not a git-tracked tokensave
+    project. UNKNOWN is said, never rendered as silence: a pattern this check
+    does not interpret is "not evaluated", not "does not hide".
+
+    Logic lives in :mod:`helpers.index_scope`, imported lazily to keep this
+    module's import surface exactly ``ast``, ``os`` and ``re``.
+    """
+    if not project_path:
+        return []
+
+    from helpers import index_scope as sc
+    rep = sc.scan(project_path, git_exe)
+    if rep.state in (sc.NOT_APPLICABLE, sc.CLEAR):
+        return []
+    if rep.state == sc.UNKNOWN:
+        return [
+            "  Could not tell whether the graph hides tracked vendor code: "
+            "%s." % rep.reason,
+            "  That is unknown, not clean -- check `exclude` in "
+            ".tokensave/config.json by hand.",
+        ]
+
+    lines = []
+    for pattern, files in rep.hidden.items():
+        dirs: dict = {}
+        for rel in files:
+            key = sc.vendor_dir_of(rel)
+            dirs[key] = dirs.get(key, 0) + 1
+        shown = ", ".join("%s/ (%d)" % (d, n)
+                          for d, n in sorted(dirs.items())[:5])
+        more = len(dirs) - 5
+        if more > 0:
+            shown += ", and %d more" % more
+        lines.append("  `%s` in .tokensave/config.json hides %d tracked "
+                     "file(s) from the graph: %s." % (pattern, len(files),
+                                                     shown))
+    lines.append(
+        "  If that is third-party code, the exclusion is right and this is "
+        "only a note. If you own and edit it, search, context and callers "
+        "find nothing there and agents fall back to Grep/Read.")
+    lines.append(
+        "  To index it, remove the pattern above from `exclude` (an `include` "
+        "entry does not override it -- measured on 7.12.1), then run "
+        "`tokensave sync --force`. `vendor/**` is anchored to the project "
+        "root; `**/vendor/**` matches at any depth.")
+    if rep.not_evaluated:
+        lines.append(
+            "  Not evaluated (a shape this check does not interpret): %s."
+            % ", ".join("`%s`" % p for p in rep.not_evaluated))
+    return lines
+
+
 def audit_pyscope_cache(project_path: str, pyscope_exe: str = "") -> list:
     """A recommendation about where PyScope keeps this project's analysis.
 
