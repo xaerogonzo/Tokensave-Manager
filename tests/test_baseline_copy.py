@@ -154,3 +154,33 @@ def test_an_empty_template_writes_nothing(tmp_path):
     result = bc.write_copy(str(tmp_path), "")
     assert not result.ok
     assert not (tmp_path / "project-baseline.md").exists()
+
+
+# -- the shipped BASIC_INSTRUCTIONS template ---------------------------------
+
+TEMPLATES_DIR = os.path.join(os.path.dirname(os.path.dirname(
+    os.path.abspath(__file__))), "templates")
+
+
+def test_the_shipped_template_carries_the_relative_include():
+    """The template must already say what the loader would rewrite it to.
+
+    Claude Code loads nothing from an absolute Windows include (see
+    templates/gotchas/claude-md-external-includes.md). The template carried one
+    for months after the loader learned to rewrite it, which was invisible in
+    every scaffolded file and wrong in any copy made by hand -- and it kept the
+    placeholder check, which compares the whole file to the template, from ever
+    matching an untouched scaffold.
+    """
+    from helpers.project_discovery import load_basic_instructions_template
+
+    path = os.path.join(TEMPLATES_DIR, "claude-md-template.md")
+    with open(path, encoding="utf-8") as handle:
+        raw = handle.read()
+    include_lines = [line for line in raw.splitlines()
+                     if line.startswith("@") and "project-baseline.md" in line]
+    assert include_lines == ["@project-baseline.md"]
+
+    written = load_basic_instructions_template(path, "@project-baseline.md")
+    assert written.strip() == raw.strip(), (
+        "a scaffolded, untouched BASIC_INSTRUCTIONS.md must equal the template")

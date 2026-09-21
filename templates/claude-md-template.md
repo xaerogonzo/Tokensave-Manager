@@ -8,7 +8,7 @@
         Discipline, Code Quality, Git) exactly as-is.
      4. Remove this comment block when done. -->
 
-@D:\Claude Co worker\Token Save Manager Source\templates\project-baseline.md
+@project-baseline.md
 
 ---
 
