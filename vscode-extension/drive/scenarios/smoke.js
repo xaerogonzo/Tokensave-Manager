@@ -1,12 +1,12 @@
 /**
- * Does the driver work here at all: launch, see the workbench, see TokenSave
- * Manager report itself in the status bar. The cheapest scenario, and the first
- * thing to run when something looks wrong.
+ * Does the driver work here at all, and does the extension come up on its own:
+ * launch, see the workbench, see TokenSave Manager report itself in the status bar
+ * without anyone opening a view or running a command.
  */
 
 "use strict";
 
-const { activate, statusItem } = require("./common");
+const { statusItem, waitForActivation } = require("./common");
 
 module.exports = async function smoke(editor) {
   await editor.step("the workbench is up", async () => {
@@ -15,16 +15,12 @@ module.exports = async function smoke(editor) {
     editor.check("a status bar exists", (await editor.statusBar()).length > 0);
   });
 
-  await editor.step("opening its view activates it, and it reports itself in the status bar", async () => {
-    await editor.shot("before activation");
-    const { presentBeforeActivation } = await activate(editor);
-    editor.check(
-      "the status bar item did not exist before activation (documents: no activationEvents)",
-      !presentBeforeActivation,
-    );
-    await editor.shot("status bar");
-    const items = await editor.statusBar();
-    editor.note(`status bar: ${items.join(" | ")}`);
-    editor.check("a TokenSave item is present (found by its accessibility label)", await statusItem(editor).count());
+  await editor.step("the extension activates on its own and reports itself in the status bar", async () => {
+    // Nothing has been opened or run. It used to declare no activation events, so
+    // this item did not exist until a view or command was first used.
+    await waitForActivation(editor);
+    await editor.shot("status bar, nothing opened");
+    editor.note(`status bar: ${(await editor.statusBar()).join(" | ")}`);
+    editor.check("a TokenSave item is present with nothing opened (found by its accessibility label)", await statusItem(editor).count());
   });
 };

@@ -210,6 +210,31 @@ class Editor {
     }
   }
 
+  /**
+   * Press a chord until what it should cause has happened.
+   *
+   * Right after launch, or after a click, the workbench occasionally drops the
+   * first keystroke of a chord (seen as a panel that never opens, about one run in
+   * six). A person notices and presses again; so does this. `probe` should wait a
+   * few seconds for the effect and throw if it does not come.
+   */
+  async pressUntil(combo, probe, { tries = 3 } = {}) {
+    let last;
+    for (let attempt = 1; attempt <= tries; attempt += 1) {
+      await this.keys(combo);
+      try {
+        return await probe();
+      } catch (error) {
+        last = error;
+        if (attempt < tries) {
+          this.note(`${combo} had no effect (attempt ${attempt}); pressing again`);
+          await this.escape();
+        }
+      }
+    }
+    throw last;
+  }
+
   /** Run a command by its palette title, the way most people find one. */
   async palette(title) {
     await this.keys("ctrl+shift+p");

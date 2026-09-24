@@ -8,7 +8,7 @@
 
 const path = require("node:path");
 
-const { activate, statusItem } = require("./common");
+const { waitForActivation, statusItem } = require("./common");
 
 const manifest = require(path.join(__dirname, "..", "..", "package.json"));
 const commands = manifest.contributes.commands;
@@ -19,25 +19,35 @@ const hiddenFromPalette = new Set(
 module.exports = async function menu(editor) {
   await editor.step("open a Python file", async () => {
     await editor.openFile("broken.py");
-    await activate(editor);
+    await waitForActivation(editor);
     // Back to the editor: activating opened the sidebar view, and a click in the
     // text is what the next step needs.
     await editor.shot("file open");
     editor.note(`status bar: ${(await editor.statusBar()).join(" | ")}`);
   });
 
-  await editor.step("right-click in the editor: what does this extension add?", async () => {
+  await editor.step("right-click in the editor: one TokenSave Manager submenu, not loose entries", async () => {
     await editor.clickLine("import");
     await editor.clickLine("import", { button: "right" });
     await editor.page.waitForSelector(".monaco-menu", { timeout: 10_000 });
-    const items = await editor.menuItems();
+    const top = await editor.menuItems();
     await editor.shot("editor context menu");
-    editor.note(`top-level items: ${items.map((i) => `${i.label}${i.submenu ? " ›" : ""}`).join(", ")}`);
-    editor.check("Checks This File is offered", items.some((i) => i.label === "Checks This File"));
-    editor.check("Test Gaps for This File is offered", items.some((i) => i.label === "Test Gaps for This File"));
+    editor.note(`top-level items: ${top.map((i) => `${i.label}${i.submenu ? " ›" : ""}`).join(", ")}`);
+    const entry = top.find((i) => i.label === "TokenSave Manager");
+    editor.check("a TokenSave Manager entry exists", entry);
+    editor.check("and it opens a submenu (has the arrow)", entry?.submenu);
+    const loose = top.filter((i) => /^(Checks This File|Test Gaps for This File)$/.test(i.label));
+    editor.check("no loose entries beside it", loose.length === 0, loose.map((i) => i.label).join(", "));
 
-    const ours = items.filter((i) => /Checks This File|Test Gaps for This File|TokenSave/.test(i.label));
-    editor.note(`this extension adds ${ours.length} top-level item(s) to the context menu, ${ours.filter((i) => i.submenu).length} of them a submenu`);
+    await editor.page.locator(".monaco-menu .action-item", { hasText: /^TokenSave Manager$/ }).first().hover();
+    await editor.page.waitForTimeout(700);
+    await editor.shot("TokenSave Manager submenu");
+    const items = (await editor.menuItems()).map((i) => i.label);
+    editor.note(`submenu: ${items.join(", ")}`);
+    for (const label of ["Checks This File", "Test Gaps for This File", "Propose a Commit…", "Open this project in the Manager", "Open Manager"]) {
+      editor.check(`the submenu offers ${label}`, items.includes(label));
+    }
+    await editor.escape();
     await editor.escape();
   });
 
@@ -77,7 +87,8 @@ module.exports = async function menu(editor) {
     await editor.page.waitForSelector(".monaco-menu", { timeout: 10_000 });
     const items = (await editor.menuItems()).map((i) => i.label);
     await editor.shot("explorer context menu");
-    editor.check("Checks This File is offered", items.includes("Checks This File"), items.join(", "));
+    editor.check("the Explorer menu has the same single submenu", items.includes("TokenSave Manager"), items.join(", "));
+    editor.check("and no loose Checks This File beside it", !items.includes("Checks This File"));
     await editor.escape();
   });
 };

@@ -1,28 +1,13 @@
 /**
  * What every TokenSave Manager scenario needs first.
  *
- * This extension declares no `activationEvents`, so VS Code activates it only on
- * first use of one of its views or commands. A freshly opened window therefore has
- * no TokenSave status bar item, no save watchers and no CodeLens until something
- * touches it. Scenarios record that, then activate it the way a reader would: by
- * opening its view.
+ * The extension activates once VS Code has finished starting (`onStartupFinished`).
+ * It used to declare no activation events at all, which meant a fresh window had no
+ * status bar item, save watchers or CodeLens until a view or command was first
+ * used; `smoke` now holds it to the new behaviour.
  */
 
 "use strict";
-
-/** Note the state before activation, then open the view container to activate. */
-async function activate(editor) {
-  const before = await editor.statusBar();
-  const present = before.some((item) => /TokenSave/i.test(item));
-  editor.note(`before anything touches it, the status bar ${present ? "already has" : "has no"} TokenSave item`);
-
-  // An activity bar entry is an icon: it is named by aria-label, not by text.
-  const tab = editor.page.locator('.activitybar [aria-label*="TokenSave" i]').first();
-  await tab.waitFor({ timeout: 15_000 });
-  await tab.click();
-  await editor.waitForText("TokenSave", 60_000);
-  return { presentBeforeActivation: present };
-}
 
 /**
  * The extension's status bar item, however it is currently worded.
@@ -36,4 +21,18 @@ const statusItem = (editor) =>
     .locator('.statusbar-item:has([aria-label*="TokenSave" i]), .statusbar-item[aria-label*="TokenSave" i]')
     .first();
 
-module.exports = { activate, statusItem };
+/** Wait for the extension to activate on its own, without anyone opening anything. */
+async function waitForActivation(editor) {
+  await statusItem(editor).waitFor({ timeout: 60_000 });
+}
+
+/** Open the extension's view container, as a reader would from the activity bar. */
+async function openView(editor) {
+  // An activity bar entry is an icon: it is named by aria-label, not by text.
+  const tab = editor.page.locator('.activitybar [aria-label*="TokenSave" i]').first();
+  await tab.waitFor({ timeout: 15_000 });
+  await tab.click();
+  await editor.page.waitForFunction(() => /TokenSave/i.test(document.querySelector(".sidebar")?.innerText ?? ""), null, { timeout: 30_000 });
+}
+
+module.exports = { statusItem, waitForActivation, openView };

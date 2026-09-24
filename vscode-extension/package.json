@@ -14,6 +14,9 @@
     "vscode": "^1.85.0",
     "node": ">=20"
   },
+  "activationEvents": [
+    "onStartupFinished"
+  ],
   "categories": [
     "Other"
   ],
@@ -210,31 +213,40 @@
       ],
       "explorer/context": [
         {
-          "command": "tokensaveManager.proposeCommit",
+          "submenu": "tokensaveManager.contextMenu",
           "when": "!explorerResourceIsFolder",
           "group": "tokensave@1"
-        },
-        {
-          "command": "tokensaveManager.checksFile",
-          "when": "resourceExtname == .py",
-          "group": "tokensave@2"
-        },
-        {
-          "command": "tokensaveManager.testGapsFile",
-          "when": "resourceExtname == .py",
-          "group": "tokensave@3"
         }
       ],
       "editor/context": [
         {
-          "command": "tokensaveManager.checksFile",
+          "submenu": "tokensaveManager.contextMenu",
           "when": "resourceExtname == .py",
           "group": "tokensave@1"
+        }
+      ],
+      "tokensaveManager.contextMenu": [
+        {
+          "command": "tokensaveManager.checksFile",
+          "when": "resourceExtname == .py",
+          "group": "1_file@1"
         },
         {
           "command": "tokensaveManager.testGapsFile",
           "when": "resourceExtname == .py",
-          "group": "tokensave@2"
+          "group": "1_file@2"
+        },
+        {
+          "command": "tokensaveManager.proposeCommit",
+          "group": "2_commit@1"
+        },
+        {
+          "command": "tokensaveManager.openInManager",
+          "group": "3_manager@1"
+        },
+        {
+          "command": "tokensaveManager.focus",
+          "group": "3_manager@2"
         }
       ]
     },
@@ -353,6 +365,12 @@
             }
           }
         ]
+      }
+    ],
+    "submenus": [
+      {
+        "id": "tokensaveManager.contextMenu",
+        "label": "TokenSave Manager"
       }
     ]
   },

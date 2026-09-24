@@ -27,10 +27,14 @@ What is specific to this extension is `run.js` and `scenarios/`.
   files, one of them containing a file the checks flag. The driver looks at the states
   the suite asserts about, and inherits the fixture's own proof that it can produce
   them.
-- **The extension activates lazily.** It declares no `activationEvents`, so a freshly
-  opened window has no TokenSave status bar item, no save watchers and no CodeLens
-  until a view or command is first used. Scenarios record that and then activate it by
-  opening its view (`scenarios/common.js`).
+- **The extension activates once startup has finished** (`onStartupFinished`). It
+  used to declare no `activationEvents`, so a freshly opened window had no TokenSave
+  status bar item, save watchers or CodeLens until a view or command was first used;
+  the driver found that, and `smoke` now holds the extension to the new behaviour
+  (`scenarios/common.js`).
+- **One context submenu.** *Checks This File*, *Test Gaps for This File*, *Propose a
+  Commit…* and the two Manager commands sit under a single **TokenSave Manager ›**
+  entry in the editor and Explorer menus; `menu` checks there are no loose entries.
 - **The status item is found by accessibility label**, not text: its text goes from
   `TokenSave: ?` to a git summary like `master ●4`, and only the label keeps the name.
 - **An activity bar entry is an icon**, named by `aria-label`, not by text.

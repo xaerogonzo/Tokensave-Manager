@@ -5,11 +5,11 @@
 
 "use strict";
 
-const { activate } = require("./common");
+const { openView } = require("./common");
 
 module.exports = async function views(editor) {
   await editor.step("open the TokenSave Manager view container", async () => {
-    await activate(editor);
+    await openView(editor);
     await editor.page.waitForTimeout(1500);
     await editor.shot("TokenSave Manager view");
     editor.check("the activity bar entry opened a sidebar", await editor.page.locator(".sidebar").isVisible());
