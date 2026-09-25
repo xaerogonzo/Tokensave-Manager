@@ -80,8 +80,11 @@ Token Save Manager Source/
 │   │                              behind anything. 8 steps: tab/dialog/click/scroll/shot/
 │   │                              report/wait/quit. `report what=geometry` runs the visual
 │   │                              oracle. Committed scripts live in scripts/drive/.
+│   │                              Also `expect` / `expect_clean` / `log_report`: the run
+│   │                              writes <script>.report.json and exits non-zero on failure.
+│   │                              Lifecycle here; observation lives in helpers/drive_ledger.py.
 │   │
-│   ├── helpers/                  124 modules of pure / IO helpers — no UI deps.
+│   ├── helpers/                  125 modules of pure / IO helpers — no UI deps.
 │   │   ├── config.py              _load_config, _save_config, _migrate_config
 │   │   ├── detection.py           _detect_git/_gh/_npm/_codegraph/_claude_cli,
 │   │   │                          _root_path/_label, _version_lt
@@ -406,6 +409,12 @@ Token Save Manager Source/
 │   │   ├── lessons_delivery.py    The explicit inventory of shared gotchas delivered to
 │   │   │                          docs/gotchas/; per-artifact facts and outcomes, never
 │   │   │                          a transaction, never a delete. Imports managed_copy only.
+│   │   ├── drive_ledger.py        What a driven run SAW, kept rather than printed:
+│   │   │                          fail-open hooks on logging / Tk callbacks / warnings /
+│   │   │                          sys+threading excepthook, conditionally restored
+│   │   │                          (drift is recorded, never clobbered); startup vs drive
+│   │   │                          phases; expectations; one-shot finalize + atomic report.
+│   │   │                          Imports no Tk, App or config.
 │   │   ├── install_analyzers.py   How an analyzer is OBTAINED (npm / uv), kept
 │   │   │                          apart from how it is run.
 │   │   ├── observations.py        Diagnostics the Manager RECEIVES already

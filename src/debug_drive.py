@@ -49,6 +49,26 @@ The script is a JSON list of steps, run in order:
 `after_ms` is how long to wait BEFORE the next step, which is how a background
 check is waited on. Every step defaults to 400 ms.
 
+**A run is evidence, not only a demonstration.** The ledger
+(`helpers/drive_ledger.py`) starts before the window is built and hears
+`logging`, Tk callback exceptions, Python warnings, and uncaught exceptions on
+any thread. Three steps turn that into a verdict:
+
+    {"do": "expect", "id": "on_git", "check": "tab", "text": "Git",
+     "within_ms": 4000}                      assert state, waiting for it
+    {"do": "expect_clean", "settle_ms": 1500}  the app said nothing wrong, and
+                                               kept quiet for a moment after
+    {"do": "log_report"}                       print what the ledger holds
+
+`expect` knows the checks `tab`, `dialog_open`, `log_contains`, `widget_text`
+and `diagnostic_contains` (the last reads the LIVE ledger, never a report
+file). A failed expectation is permanent: a later success never erases it.
+On the way out -- `quit`, or interpreter exit, exactly once -- the run writes
+`<script>.report.json` beside the script (gitignored) and exits non-zero if
+anything it was meant to prove failed. Two simultaneous drives of one script
+are unsupported: they would share that file (the report's `run_id`/`pid` say
+whose it is).
+
 Give `shot` an **absolute** path outside the repository: a relative one
 resolves against the working directory, and a diagnostic run should not leave
 untracked images in a checkout.
@@ -64,16 +84,26 @@ second way to do everything.
 
 from __future__ import annotations
 
+import atexit
 import json
 import os
 import sys
+import threading
+import time
 import tkinter as tk
 from pathlib import Path
 from typing import Any
 
+from helpers import drive_ledger
+
 #: Read at import so a script named after the app has already started is
 #: ignored — a half-driven window is worse than an undriven one.
 _DRIVE_SCRIPT = os.environ.get("TOKENSAVE_MANAGER_DRIVE")
+
+#: The ledger for this process, started by `begin()` before the window is
+#: built so launch diagnostics are on the record. None unless a drive was asked
+#: for, which is what keeps a normal launch untouched.
+_LEDGER: "drive_ledger.Ledger | None" = None
 
 #: Pause between steps when one does not say otherwise. Long enough for a
 #: layout pass and a queued event to be delivered, short enough that a
@@ -99,6 +129,31 @@ def _say(message: str) -> None:
               file=stream, flush=True)
 
 
+def begin(app=None) -> None:
+    """Start listening, when `TOKENSAVE_MANAGER_DRIVE` names a script.
+
+    Called by `App.__init__` as early as a Tk root exists, so what the
+    application says while it is being built -- a callback that raises during
+    layout, a warning from an import -- is on the record. It is tagged
+    `startup`: it can never fail a script's `expect_clean`, and never vanishes.
+    """
+    global _LEDGER
+    if not _DRIVE_SCRIPT or _LEDGER is not None:
+        return
+    _LEDGER = drive_ledger.Ledger()
+    _LEDGER.install()
+    if app is not None:
+        _LEDGER.install_tk(app)
+
+
+def end() -> None:
+    """Put every hook back. Idempotent."""
+    global _LEDGER
+    if _LEDGER is not None:
+        _LEDGER.uninstall()
+        _LEDGER = None
+
+
 def start_if_requested(app) -> "_Driver | None":
     """Begin driving `app` when `TOKENSAVE_MANAGER_DRIVE` names a script.
 
@@ -118,7 +173,7 @@ def start_if_requested(app) -> "_Driver | None":
         _say("TOKENSAVE_MANAGER_DRIVE: %s is not a JSON list of steps"
              % _DRIVE_SCRIPT)
         return None
-    driver = _Driver(app, steps)
+    driver = _Driver(app, steps, ledger=_LEDGER, script=_DRIVE_SCRIPT)
     driver.start()
     return driver
 
@@ -154,10 +209,21 @@ def _widget_text(widget) -> str:
 class _Driver:
     """Runs the steps on Tk's own timer, one at a time."""
 
-    def __init__(self, app, steps: "list[dict[str, Any]]") -> None:
+    def __init__(self, app, steps: "list[dict[str, Any]]", *,
+                 ledger: "drive_ledger.Ledger | None" = None,
+                 script: "str | None" = None) -> None:
         self._app = app
         self._steps = steps
         self._index = 0
+        #: Never None, so `expect_clean` always has something to ask. A driver
+        #: built by hand gets a ledger that listens to nothing and so is clean.
+        self._ledger = ledger if ledger is not None else drive_ledger.Ledger()
+        self._script = script
+        self._run_id = drive_ledger.new_run_id()
+        self._started = time.time()
+        self._shots: "list[str]" = []
+        #: How often `_run_next` re-checks a held chain. `expect` shortens it.
+        self._hold_ms = 500
         #: The dialog most recently opened by a `dialog` step. `shot` and
         #: `click` default to it, because a script that just opened a dialog
         #: is almost always talking about that dialog.
@@ -169,33 +235,55 @@ class _Driver:
 
     def start(self) -> None:
         _say("drive: %d step(s) from %s" % (len(self._steps), _DRIVE_SCRIPT))
+        self._ledger.start_drive()
+        # The fallback for a run that ends WITHOUT a `quit` step (the window
+        # closed, the interpreter exiting under an error). `os._exit` bypasses
+        # atexit, so `_do_quit` finalizes itself; `finalize` is one-shot, so
+        # both being armed is safe.
+        atexit.register(self._finalize, "exit")
         self._app.after(600, self._run_next)
 
     def _run_next(self) -> None:
+        """Perform the next step **and arm the one after it**.
+
+        The timer is the half `step()` deliberately does not have: anything
+        driving this by hand should call that, or every call leaves a shot
+        armed on a window nobody is going to let fire.
+        """
         if self._hold is not None:
             if self._hold():
-                self._app.after(500, self._run_next)
+                self._app.after(self._hold_ms, self._run_next)
                 return
-            self._hold = None
+            self._hold, self._hold_ms = None, 500
+        if not self.step():
+            return
+        last = self._steps[self._index - 1]
+        delay = int(last.get("after_ms", _DEFAULT_AFTER_MS)) \
+            if isinstance(last, dict) else _DEFAULT_AFTER_MS
+        self._app.after(max(0, delay), self._run_next)
+
+    def step(self) -> bool:
+        """Perform the next step and arm nothing. True if one ran."""
         if self._index >= len(self._steps):
             _say("drive: done")
-            return
+            return False
         step = self._steps[self._index]
         self._index += 1
         name = str(step.get("do", "")) if isinstance(step, dict) else ""
         handler = getattr(self, "_do_" + name, None)
         if handler is None:
             _say("drive: unknown step %r" % (step,))
+            self._ledger.step_failed(self._index, name, "unknown step")
         else:
             try:
                 handler(step)
             except Exception as exc:                         # noqa: BLE001
                 # One bad step must not strand the rest: the remaining steps
-                # usually include the `quit` that ends the run.
+                # usually include the `quit` that ends the run. It is also a
+                # failure OF the run, not a remark -- `_say` alone lost it.
                 _say("drive: step %r failed: %s" % (name, exc))
-        delay = int(step.get("after_ms", _DEFAULT_AFTER_MS)) \
-            if isinstance(step, dict) else _DEFAULT_AFTER_MS
-        self._app.after(max(0, delay), self._run_next)
+                self._ledger.step_failed(self._index, name, str(exc), exc)
+        return True
 
     # ── targets ────────────────────────────────────────────────────────
 
@@ -475,6 +563,8 @@ class _Driver:
         target = self._target(step)
         target.update_idletasks()
         ok, detail = capture_window(hwnd_for(target), path)
+        if ok:
+            self._shots.append(path)
         _say("drive: shot -> %s %s" % (path if ok else "FAILED", detail))
 
     def _report_settings(self) -> None:
@@ -869,24 +959,171 @@ class _Driver:
     def _do_wait(self, step: "dict[str, Any]") -> None:
         """Do nothing. `after_ms` is the point of the step."""
 
+    # -- evidence ---------------------------------------------------------
+
+    def _check_value(self, step: "dict[str, Any]") -> "tuple[bool, Any]":
+        """One `expect` check as (satisfied, what was actually seen)."""
+        check = str(step.get("check", ""))
+        text = str(step.get("text", ""))
+        want = text.strip().lower()
+        if check == "tab":
+            notebook = getattr(self._app, "nb", None)
+            label = str(notebook.tab(notebook.select(), "text")) if notebook else ""
+            return want in label.strip().lower(), label
+        if check == "dialog_open":
+            dialog = self._dialog
+            alive = dialog is not None and bool(dialog.winfo_exists())
+            return alive, alive
+        if check == "log_contains":
+            out = getattr(self._app, "_output", None)
+            body = out.text.get("1.0", "end") if out is not None else ""
+            return want in body.lower(), "%d chars" % len(body)
+        if check == "widget_text":
+            hit = next((_widget_text(w).strip() for w in _walk(self._target(step))
+                        if want and want in _widget_text(w).lower()), "")
+            return bool(hit), hit
+        if check == "diagnostic_contains":
+            # The LIVE ledger, not a report file: nothing is written until the
+            # run ends, so a check against the file could only ever see the
+            # previous run.
+            return self._ledger.contains(text), self._ledger.summary()
+        raise ValueError("unknown check %r" % check)
+
+    def _do_expect(self, step: "dict[str, Any]") -> None:
+        """Assert state, waiting up to `within_ms` for it to become true.
+
+        Tk state settles asynchronously, so a single look is a race. Failure is
+        permanent: it is written to the ledger, and a later success on the same
+        id does not erase it.
+        """
+        ident = str(step.get("id") or step.get("check") or "expect")
+        within = int(step.get("within_ms", 0))
+        began = time.monotonic()
+        expected = {k: step[k] for k in ("check", "text") if k in step}
+
+        def poll() -> bool:
+            """True while still waiting."""
+            elapsed = int((time.monotonic() - began) * 1000)
+            try:
+                ok, actual = self._check_value(step)
+            except Exception as exc:                         # noqa: BLE001
+                self._ledger.expect(ident, False, expected=expected,
+                                    actual=None, elapsed_ms=elapsed,
+                                    reason="check raised: %s" % exc)
+                _say("drive: expect %s: FAILED (%s)" % (ident, exc))
+                return False
+            if ok:
+                self._ledger.expect(ident, True, expected=expected,
+                                    actual=actual, elapsed_ms=elapsed)
+                _say("drive: expect %s: ok (%d ms)" % (ident, elapsed))
+                return False
+            if elapsed >= within:
+                self._ledger.expect(ident, False, expected=expected,
+                                    actual=actual, elapsed_ms=elapsed,
+                                    reason="not satisfied within %d ms" % within)
+                _say("drive: expect %s: FAILED, saw %r" % (ident, actual))
+                return False
+            return True
+
+        if poll():
+            self._hold, self._hold_ms = poll, 100
+
+    def _do_expect_clean(self, step: "dict[str, Any]") -> None:
+        """The application said nothing wrong -- and kept quiet for a moment.
+
+        `settle_ms` is the observation window. Without it a callback that posts
+        work and throws 200 ms later would sail past a check made at 100 ms:
+        the expectation would pass and the run still not be clean.
+        """
+        settle = int(step.get("settle_ms", 1000))
+        began = time.monotonic()
+        deadline = began + settle / 1000
+
+        def poll() -> bool:
+            elapsed = int((time.monotonic() - began) * 1000)
+            bad = self._ledger.drive_diagnostics()
+            if bad:
+                self._ledger.expect("expect_clean", False,
+                                    expected="no diagnostics",
+                                    actual=self._ledger.summary(),
+                                    elapsed_ms=elapsed,
+                                    reason=self._ledger.summary())
+                _say("drive: expect_clean: FAILED -- %s" % self._ledger.summary())
+                return False
+            if time.monotonic() >= deadline:
+                self._ledger.expect("expect_clean", True,
+                                    expected="no diagnostics", actual="none",
+                                    elapsed_ms=elapsed)
+                _say("drive: expect_clean: ok (%d ms window)" % settle)
+                return False
+            return True
+
+        if poll():
+            self._hold, self._hold_ms = poll, 100
+
+    def _do_log_report(self, step: "dict[str, Any]") -> None:
+        """Print what the ledger holds, so the transcript carries it too."""
+        _say("drive: ledger: startup -- %s"
+             % self._ledger.summary(drive_ledger.STARTUP))
+        _say("drive: ledger: drive   -- %s"
+             % self._ledger.summary(drive_ledger.DRIVE))
+        passed = sum(1 for e in self._ledger.expectations if e["passed"])
+        _say("drive: ledger: %d/%d expectation(s) passed"
+             % (passed, len(self._ledger.expectations)))
+
+    def _report_path(self) -> "str | None":
+        if not self._script:
+            return None
+        return str(Path(self._script).with_suffix(".report.json"))
+
+    def _finalize(self, reason: str) -> "dict[str, Any]":
+        """Snapshot, write the report, once. Never raises.
+
+        Order matters: hooks are uninstalled and the ledger frozen BEFORE the
+        report is built, and the report exists on disk BEFORE anything exits.
+        A second caller (`atexit` after `quit`) gets the first result and
+        writes nothing again.
+        """
+        git_exe = str(getattr(getattr(self._app, "_cfg", None), "git_exe", "") or "")
+        first = not self._ledger.finalized
+        report = self._ledger.finalize(lambda: drive_ledger.build_report(
+            self._ledger, script=self._script, run_id=self._run_id,
+            started=self._started, reason=reason, shots=self._shots,
+            git_exe=git_exe, cwd=str(Path(__file__).resolve().parent)))
+        path = self._report_path()
+        if first and path:
+            try:
+                drive_ledger.write_report_atomically(path, report)
+                _say("drive: report -> %s" % path)
+            except (OSError, ValueError, TypeError) as exc:
+                _say("drive: could not write %s: %s" % (path, exc))
+        return report
+
     def _do_quit(self, step: "dict[str, Any]") -> None:
-        _say("drive: quit")
+        report = self._finalize("quit")
+        code = 0 if report["passed"] else 1
+        _say("drive: quit (%s, exit %d)"
+             % ("passed" if code == 0 else "FAILED", code))
+        # `destroy` alone leaves the tray thread holding the process open,
+        # and a diagnostic run that never exits cannot be scripted.
+        # `os._exit` skips interpreter shutdown, which includes flushing --
+        # so `_exit_now` flushes first, and the exit is on a timer so the
+        # destroy below has run. A driver built by hand (no script) never
+        # exits the process: that would take the test runner with it.
+        if self._script:
+            timer = threading.Timer(0.2, self._exit_now, args=(code,))
+            timer.daemon = True
+            timer.start()
         try:
             self._app.destroy()
         except tk.TclError:
             pass
-        # `destroy` alone leaves the tray thread holding the process open,
-        # and a diagnostic run that never exits cannot be scripted.
-        # `os._exit` skips interpreter shutdown, which includes flushing --
-        # so a piped transcript can lose its tail, and the run then looks like
-        # it died mid-report.
-        self._app.after(200, self._exit_now)
 
     @staticmethod
-    def _exit_now() -> None:
+    def _exit_now(code: int = 0) -> None:
         for stream in (sys.stdout, sys.stderr):
             try:
                 stream.flush()
             except (OSError, ValueError):
                 pass
-        os._exit(0)
+        os._exit(code)
