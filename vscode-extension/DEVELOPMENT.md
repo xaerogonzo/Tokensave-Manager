@@ -8,6 +8,7 @@ Four commands, in increasing cost and decreasing frequency.
 | `npm run test:live` | Real VS Code, extension loaded from `out/` | an editor, python |
 | `npm run test:vsix` | Real VS Code, extension **installed from a packaged .vsix** | as above |
 | `npm run test:mutations` | Breaks each property and requires a failure | as above |
+| `npm run drive` | Real VS Code on a private desktop, driven like a person, with screenshots (`drive/README.md`) | as above |
 
 `npm test` is what CI gates on today. The live suite runs non-blocking in the
 `extension-live` job and is promoted by deleting one `continue-on-error` line,

@@ -5,3 +5,4 @@ out/
 bin/windows-x64/tokensave-manager-cli.exe
 .vscode-test/
 .vscode-test-vsix/
+drive-out/

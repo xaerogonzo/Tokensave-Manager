@@ -38,7 +38,10 @@ from typing import TYPE_CHECKING
 
 from constants import C
 from helpers import ignore_alignment as ia
-from helpers.baseline_copy import COPY_EDITED, COPY_OUTDATED, read_template
+from helpers import lessons_delivery as ld
+from helpers.baseline_copy import (
+    COPY_ABSENT, COPY_CURRENT, COPY_EDITED, COPY_OUTDATED, read_template,
+)
 from helpers.instructions_posture import (
     DELIVERY_EXTERNAL_APPROVED,
     DELIVERY_EXTERNAL_BLOCKED,
@@ -145,6 +148,35 @@ def _read_alignment(fleet, git_exe: str) -> dict:
     return out
 
 
+def _read_lessons(fleet, template_dir: str) -> dict:
+    """root -> per-lesson facts, for projects whose baseline copy is current.
+
+    Only those: a lesson is delivered because the baseline indexes it. Reads
+    files, so call it off the Tk thread. A project outside that set has no
+    entry, which is different from an entry saying every lesson is current.
+    """
+    eligible = [p for p in fleet.projects
+                if not p.excluded and p.reach == REACH_RESOLVED
+                and p.copy_state == COPY_CURRENT]
+    if not eligible:
+        return {}
+    corpus = ld.load_corpus(template_dir)
+    return {p.root: ld.read_lessons(p.display_root, corpus) for p in eligible}
+
+
+def _lessons_line(facts) -> "tuple[str, str]":
+    """(text, colour) for the lessons line. A fact of its own: it never
+    changes the reach badge above it."""
+    if not facts:
+        return "", ""
+    text = "lessons: %s" % ld.summarize(f.state for f in facts)
+    if any(f.state in (COPY_EDITED, ld.STATE_SOURCE_UNREADABLE) for f in facts):
+        return text, "peach"
+    if any(f.actionable for f in facts):
+        return text, "yellow"
+    return text, "overlay0"
+
+
 def _alignment_line(alignment) -> "tuple[str, str]":
     """(text, colour) for the git alignment line, or ("", "") for none."""
     if alignment is None:
@@ -190,6 +222,9 @@ class InstructionsDialog(UiPumpMixin, tk.Toplevel):
         #: root -> `ignore_alignment.Alignment` from the last scan. Display
         #: only: `align` re-reads before it writes.
         self._alignment = {}
+        #: root -> `lessons_delivery.LessonFact` tuple from the last scan.
+        #: Display only: delivery re-reads each file before writing it.
+        self._lessons = {}
         self._busy = False
 
         tk.Label(self, text="Do the shared rules actually reach each project?",
@@ -272,11 +307,12 @@ class InstructionsDialog(UiPumpMixin, tk.Toplevel):
             try:
                 fleet = read_posture(roots, cfg)
                 alignment = _read_alignment(fleet, cfg.git_exe)
+                lessons = _read_lessons(fleet, getattr(cfg, "template_dir", ""))
             except Exception as exc:            # noqa: BLE001 - shown to user
                 message = str(exc)
                 self._post(lambda: self._render_error(message))
                 return
-            self._post(lambda: self._render(fleet, alignment))
+            self._post(lambda: self._render(fleet, alignment, lessons))
 
         threading.Thread(target=worker, daemon=True).start()
 
@@ -292,9 +328,10 @@ class InstructionsDialog(UiPumpMixin, tk.Toplevel):
 
     # ── rendering ────────────────────────────────────────────────────────
 
-    def _render(self, fleet, alignment=None) -> None:
+    def _render(self, fleet, alignment=None, lessons=None) -> None:
         self._fleet = fleet
         self._alignment = alignment or {}
+        self._lessons = lessons or {}
         self._clear()
 
         if not fleet.baseline_ok:
@@ -377,6 +414,14 @@ class InstructionsDialog(UiPumpMixin, tk.Toplevel):
                      "Adds ignore rules so the Manager-written files stay as "
                      "local as the file that uses them. The files themselves "
                      "are not touched.")
+        elif self._lessons_pending(project):
+            deliver = ttk.Button(row, text="Deliver lessons…",
+                                 command=lambda p=project: self._wire_one(p))
+            deliver.pack(side=tk.RIGHT)
+            _Tooltip(deliver,
+                     "Copies the shared lessons the baseline points at into "
+                     "docs/gotchas/. A lesson you edited by hand is never "
+                     "overwritten.")
 
         # Offered per project and never in a bulk action: moving a lesson log
         # is a large editorial change to a file a person wrote, and no
@@ -401,7 +446,19 @@ class InstructionsDialog(UiPumpMixin, tk.Toplevel):
         tk.Label(self._body, text="        " + sub, font=("Segoe UI", 8),
                  bg=C["base"], fg=C["overlay0"], anchor=tk.W, justify=tk.LEFT,
                  wraplength=860).pack(fill=tk.X, padx=12, pady=(0, 3))
+        self._render_lessons(project)
         self._render_alignment(alignment)
+
+    def _render_lessons(self, project) -> None:
+        text, colour = _lessons_line(self._lessons.get(project.root))
+        if not text:
+            return
+        tk.Label(self._body, text="        " + text, font=("Segoe UI", 8),
+                 bg=C["base"], fg=C[colour], anchor=tk.W, justify=tk.LEFT,
+                 wraplength=860).pack(fill=tk.X, padx=12, pady=(0, 3))
+
+    def _lessons_pending(self, project) -> bool:
+        return any(f.actionable for f in self._lessons.get(project.root, ()))
 
     def _render_alignment(self, alignment) -> None:
         """Git alignment is its own line: a separate dimension from reach."""
@@ -460,11 +517,17 @@ class InstructionsDialog(UiPumpMixin, tk.Toplevel):
         return apply_to_project(
             project, baseline or "", self._cfg.template_dir,
             self._template_text(), self._has_template(),
-            read_template(baseline or ""), git_exe=self._cfg.git_exe)
+            read_template(baseline or ""), git_exe=self._cfg.git_exe,
+            lessons=ld.load_corpus(self._cfg.template_dir))
 
     def _preview_lines(self, project, plan) -> list:
         """Every file a repair would touch, the ignore rules included."""
         lines = ["%s — %s" % (step.path, step.label) for step in plan.steps]
+        for fact in self._lessons.get(project.root, ()):
+            if fact.actionable:
+                lines.append("%s — %s lesson" % (
+                    fact.dest_rel,
+                    "add" if fact.state == COPY_ABSENT else "update"))
         alignment = self._alignment.get(project.root)
         if alignment is not None and alignment.pending:
             lines.append(".gitignore — add %s (the files themselves are "
@@ -525,7 +588,8 @@ class InstructionsDialog(UiPumpMixin, tk.Toplevel):
         if self._busy or not self._fleet:
             return
         candidates = [p for p in self._fleet.projects
-                      if p.repairable or self._alignment_pending(p)]
+                      if p.repairable or self._alignment_pending(p)
+                      or self._lessons_pending(p)]
         if not candidates:
             messagebox.showinfo("Wire all",
                                 "Nothing to wire — every project either "

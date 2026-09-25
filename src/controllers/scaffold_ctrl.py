@@ -29,13 +29,15 @@ import tkinter as tk
 from constants import C, CREATE_NO_WINDOW, _ANSI
 from helpers import drive_template
 from helpers import ignore_alignment as ia
+from helpers import lessons_delivery as ld
 from helpers.baseline_copy import COPY_BASENAME, read_template, write_copy
 from helpers.graph_trust import INDEX_PRESENT, index_state
 from helpers.instructions_posture import (BASIC_MD, CLAUDE_MD, excluded_roots,
                                           parse_baseline_target,
                                           read_project)
 from helpers.instructions_posture import canonical as canonical_path
-from helpers.instructions_wiring import apply_wiring, plan_wiring
+from helpers.instructions_wiring import (apply_wiring, deliver_lessons,
+                                         plan_wiring)
 from helpers.project_discovery import load_basic_instructions_template
 from helpers.runtime import log
 from helpers.scaffold import _scaffold_git_hook
@@ -392,7 +394,7 @@ class ScaffoldRetrofitController:
             log.info("  baseline chain already resolves — skipped")
             self._on_log("  Baseline chain already resolves — skipped",
                          C["overlay0"])
-            return self._align_posture(posture)
+            return self._deliver_lessons(posture) + self._align_posture(posture)
 
         template_text = ""
         if has_template:
@@ -410,7 +412,7 @@ class ScaffoldRetrofitController:
             log.info("  nothing to wire")
             self._on_log("  Baseline chain already resolves — skipped",
                          C["overlay0"])
-            return self._align_posture(posture)
+            return self._deliver_lessons(posture) + self._align_posture(posture)
 
         for changed in result.changed_files:
             self._on_log(f"  Wired {changed}", C["green"])
@@ -418,7 +420,30 @@ class ScaffoldRetrofitController:
         after = read_project(path, name, cfg.template_dir, baseline)
         return (["Wired the baseline chain in %s"
                  % ", ".join(result.changed_files)]
-                + self._align_posture(after))
+                + self._deliver_lessons(after) + self._align_posture(after))
+
+    def _deliver_lessons(self, posture) -> list[str]:
+        """The shared gotchas, for a project whose baseline copy is current.
+
+        Each lesson is judged on its own, so a hand-edited one is reported and
+        the rest still arrive. Delivered BEFORE git alignment so the files exist
+        when it looks for companions.
+        """
+        outcomes = deliver_lessons(
+            posture, ld.load_corpus(self._cfg.template_dir))
+        return self._report_lessons(outcomes)
+
+    def _report_lessons(self, outcomes) -> list[str]:
+        if not outcomes:
+            return []
+        text = ld.outcomes_text(outcomes)
+        wrote = bool(ld.written_files(outcomes))
+        problem = any(o.outcome in (ld.OUT_REFUSED, ld.OUT_FAILED)
+                      for o in outcomes)
+        self._on_log("  Lessons: %s" % text,
+                     C["yellow"] if problem else
+                     C["green"] if wrote else C["overlay0"])
+        return ["Lessons: %s" % text] if wrote or problem else []
 
     def _align_posture(self, posture) -> list[str]:
         """Git alignment for the companions this posture's chain reaches."""
@@ -554,17 +579,28 @@ class ScaffoldRetrofitController:
         if not written.ok:
             self._on_log(f"  project-baseline.md: {written.error}", C["peach"])
             return []
-        if not written.changed:
-            return []
-        self._on_log("  Wrote project-baseline.md", C["green"])
-        return ["Wrote project-baseline.md"] + self._align_with_git(path)
+        actions = []
+        if written.changed:
+            self._on_log("  Wrote project-baseline.md", C["green"])
+            actions.append("Wrote project-baseline.md")
+        # The baseline indexes the shared gotchas, so a project that now holds a
+        # current baseline gets them too. Judged per lesson; never stops early.
+        actions += self._report_lessons(ld.sync_lessons(
+            path, ld.load_corpus(self._cfg.template_dir)))
+        return actions + self._align_with_git(path) if actions else []
 
     def _align_with_git(self, path: str) -> list[str]:
         """Keep the new instruction files as local as the CLAUDE.md using them."""
-        return self._report_alignment(ia.align(path, self._cfg.git_exe, (
-            ia.CompanionPair(BASIC_MD, CLAUDE_MD, ia.KIND_BASIC),
-            ia.CompanionPair(COPY_BASENAME, BASIC_MD,
-                             ia.KIND_BASELINE_COPY))))
+        pairs = [ia.CompanionPair(BASIC_MD, CLAUDE_MD, ia.KIND_BASIC),
+                 ia.CompanionPair(COPY_BASENAME, BASIC_MD,
+                                  ia.KIND_BASELINE_COPY)]
+        # The lessons are referred to by the baseline copy, so they take its
+        # visibility: the third level of the chain.
+        pairs += [ia.CompanionPair(rel, COPY_BASENAME, ia.KIND_GOTCHA)
+                  for rel in ld.dest_rels()
+                  if os.path.isfile(os.path.join(path, *rel.split("/")))]
+        return self._report_alignment(
+            ia.align(path, self._cfg.git_exe, tuple(pairs)))
 
     def _retrofit_add_shadow_links(self, path: str, ext_map: dict) -> list[str]:
         """Generate shadow extension links and update .gitignore. Returns actions taken."""
