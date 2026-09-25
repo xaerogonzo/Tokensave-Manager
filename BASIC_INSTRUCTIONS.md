@@ -338,6 +338,31 @@ The documentation was better than the help and simply was not the help.
   `tests/test_build_ships_help_corpus.py` parses it so the list maintains
   itself.
 
+### D1h. Lessons are delivered, not indexed
+
+`helpers/lessons_delivery.py`. Paid for by a measurement: every wired project
+carried a baseline whose index said "read `gotchas/x.md`", and only the Manager
+had those files (Fortuna Lab: a `project-baseline.md` and no gotchas at all).
+
+- **An index is a promise about files.** The baseline names `docs/gotchas/*`, so
+  the same operation that writes the baseline must be able to write them, and a
+  test compares what the index names with what is delivered, both ways.
+- **The corpus is an explicit inventory (`LESSONS`), not a glob.** A file added
+  to `templates/gotchas/` changes what every project receives only by editing the
+  list, and a test fails until somebody does.
+- **Per artifact, never a transaction.** Ten lessons are ten judgments. One edited
+  or unreadable file is reported and the rest still arrive; nothing is deleted.
+- **Lesson status is its own fact.** It never changes `reach` or `delivery`: a
+  stale gotcha does not make a resolving chain read as stale (D1c).
+- **A lesson follows its referrer into git.** Gotchas are referred to by
+  `project-baseline.md`, so `ignore_alignment` gives them that file's visibility.
+  A new Manager-written file that is not registered as a companion is the KicomAI
+  defect again.
+- **Skipped means skipped whole.** An excluded project gets neither the baseline
+  nor the lessons; otherwise it would hold an index pointing at withheld files.
+- **Lifecycles differ, on purpose.** The baseline is compiled and synced; the
+  gotchas are synced to the existing fleet.
+
 ### D2. Agent CLIs: a new agent is a table row, never a new literal
 
 `helpers/agent_cli.py` holds one capability table. Adding Codex, Gemini CLI or
