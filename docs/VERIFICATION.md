@@ -291,6 +291,33 @@ a red build.
 
 ---
 
+## A driven run is evidence, not a demonstration
+
+The in-process driver (`src/debug_drive.py`) used to print what each step did
+and keep nothing, and `quit` always exited 0. A run that "finished" therefore
+proved only that the script reached its last line: a Tk callback that raised
+went to `manager.log`, a worker thread that died went nowhere. Measured on
+OpenChem Studio and Fortuna Lab, which each patched their own copy.
+
+| A script says | It means |
+|---|---|
+| `expect` | State holds within `within_ms`. Polled, because Tk settles asynchronously. A failure is permanent. |
+| `expect_clean` | The application recorded nothing during the drive AND stayed quiet for `settle_ms`. |
+| `log_report` | Print the ledger (startup and drive kept apart) and the expectation tally. |
+
+Checks for `expect`: `tab`, `dialog_open`, `log_contains`, `widget_text`,
+`diagnostic_contains` (the live ledger, never a report file).
+
+The exit code is the verdict: non-zero on an uncaught exception (either phase),
+a failed expectation or a failed step. A warning fails a run only through
+`expect_clean`. `<script>.report.json` is written before the process exits and
+is gitignored. Two simultaneous drives of one script are unsupported.
+
+**Prove a new check can say no once**: a script whose `expect` names a tab that
+does not exist must exit 1 and list the failure in the report; the same script
+with a real tab must exit 0. Both were run live against the real window when
+this shipped.
+
 ## Checklist for a new guard
 
 1. Decide the failure class first, then pick the technique from the table.

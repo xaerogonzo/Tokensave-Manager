@@ -80,8 +80,11 @@ Token Save Manager Source/
 │   │                              behind anything. 8 steps: tab/dialog/click/scroll/shot/
 │   │                              report/wait/quit. `report what=geometry` runs the visual
 │   │                              oracle. Committed scripts live in scripts/drive/.
+│   │                              Also `expect` / `expect_clean` / `log_report`: the run
+│   │                              writes <script>.report.json and exits non-zero on failure.
+│   │                              Lifecycle here; observation lives in helpers/drive_ledger.py.
 │   │
-│   ├── helpers/                  122 modules of pure / IO helpers — no UI deps.
+│   ├── helpers/                  123 modules of pure / IO helpers — no UI deps.
 │   │   ├── config.py              _load_config, _save_config, _migrate_config
 │   │   ├── detection.py           _detect_git/_gh/_npm/_codegraph/_claude_cli,
 │   │   │                          _root_path/_label, _version_lt
@@ -399,6 +402,12 @@ Token Save Manager Source/
 │   │   ├── headless_analyzers.py  One capability table for ruff / pyright /
 │   │   │                          markdownlint. Four availability states; FAILED is
 │   │   │                          never a pass.
+│   │   ├── drive_ledger.py        What a driven run SAW, kept rather than printed:
+│   │   │                          fail-open hooks on logging / Tk callbacks / warnings /
+│   │   │                          sys+threading excepthook, conditionally restored
+│   │   │                          (drift is recorded, never clobbered); startup vs drive
+│   │   │                          phases; expectations; one-shot finalize + atomic report.
+│   │   │                          Imports no Tk, App or config.
 │   │   ├── install_analyzers.py   How an analyzer is OBTAINED (npm / uv), kept
 │   │   │                          apart from how it is run.
 │   │   ├── observations.py        Diagnostics the Manager RECEIVES already
