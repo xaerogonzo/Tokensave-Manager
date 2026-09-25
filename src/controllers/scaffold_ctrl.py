@@ -27,6 +27,7 @@ from typing import TYPE_CHECKING, Callable
 import tkinter as tk
 
 from constants import C, CREATE_NO_WINDOW, _ANSI
+from helpers import drive_template
 from helpers import ignore_alignment as ia
 from helpers.baseline_copy import COPY_BASENAME, read_template, write_copy
 from helpers.graph_trust import INDEX_PRESENT, index_state
@@ -154,13 +155,26 @@ class ScaffoldRetrofitController:
                 C["sky"])
         return actions
 
+    def _scaffold_drive_template(self, path: str) -> list[str]:
+        """Copy the live-driver starting point into a NEW project. Never
+        overwrites; see `helpers/drive_template` for why it is not retrofitted."""
+        lines = drive_template.scaffold_drive_template(
+            self._cfg.template_dir, path)
+        for line in lines:
+            self._on_log("  %s" % line,
+                         C["green"] if line.startswith("Created ")
+                         else C["overlay0"])
+        return [line for line in lines if line.startswith("Created ")]
+
     def _scaffold_project(self, path: str, create_bi: bool = True,
                           run_init: bool = True, scaffold_nuitka: bool = False,
-                          add_git_hook: bool = False) -> None:
+                          add_git_hook: bool = False,
+                          scaffold_drive: bool = False) -> None:
         """Write BASIC_INSTRUCTIONS.md and/or run tokensave init."""
         name = os.path.basename(path)
         log.info(f"SCAFFOLD {path}  create_bi={create_bi} run_init={run_init} "
-                 f"nuitka={scaffold_nuitka} git_hook={add_git_hook}")
+                 f"nuitka={scaffold_nuitka} git_hook={add_git_hook} "
+                 f"drive={scaffold_drive}")
 
         if create_bi:
             basic_md = os.path.join(path, "BASIC_INSTRUCTIONS.md")
@@ -180,6 +194,9 @@ class ScaffoldRetrofitController:
 
         if scaffold_nuitka:
             self._scaffold_nuitka_build(path)
+
+        if scaffold_drive:
+            self._scaffold_drive_template(path)
 
         if add_git_hook:
             for action in _scaffold_git_hook(path):

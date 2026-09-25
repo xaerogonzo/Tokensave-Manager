@@ -1,9 +1,9 @@
 """ScaffoldDialog — options dialog shown before scaffolding a new project.
 
-Four checkboxes (BASIC_INSTRUCTIONS, tokensave init, Nuitka build files,
-auto-commit Stop hook), each pre-checked or greyed based on what's
-already present in the project folder. On Apply, fires the callback
-with the four flags as kwargs.
+Five checkboxes (BASIC_INSTRUCTIONS, tokensave init, Nuitka build files,
+auto-commit Stop hook, live-driver template), each pre-checked or greyed
+based on what's already present in the project folder. On Apply, fires the
+callback with the five flags as kwargs.
 """
 
 from __future__ import annotations
@@ -105,6 +105,24 @@ class ScaffoldDialog(tk.Toplevel):
                  bg=C["base"], fg=C["overlay0"], font=("Segoe UI", 9),
                  wraplength=420, justify=tk.LEFT).pack(padx=20, pady=(0, 12))
 
+        # Checkbox: live-driver template
+        ttk.Separator(self, orient="horizontal").pack(fill=tk.X, padx=20, pady=(4, 4))
+
+        has_drive = os.path.isdir(os.path.join(path, "drive_template"))
+        drive_note = "  (already present)" if has_drive else "  (drive_template/)"
+        self._drive_var = tk.BooleanVar(value=False)
+        drive_frame = tk.Frame(self, bg=C["base"])
+        drive_frame.pack(anchor=tk.W, **pad)
+        ttk.Checkbutton(drive_frame, text="Add live-driver template",
+                        variable=self._drive_var).pack(side=tk.LEFT)
+        tk.Label(drive_frame, text=drive_note, bg=C["base"],
+                 fg=C["overlay0"], font=("Segoe UI", 9)).pack(side=tk.LEFT)
+        tk.Label(self,
+                 text="  A starting point for driving the real window from inside the app,\n"
+                      "  with an evidence ledger and an exit code. Read its README first.",
+                 bg=C["base"], fg=C["overlay0"], font=("Segoe UI", 9),
+                 wraplength=420, justify=tk.LEFT).pack(padx=20, pady=(0, 12))
+
         # Buttons
         btn_row = tk.Frame(self, bg=C["base"])
         btn_row.pack(pady=(0, 16))
@@ -122,6 +140,8 @@ class ScaffoldDialog(tk.Toplevel):
         run_init        = self._init_var.get()
         scaffold_nuitka = self._nuitka_var.get()
         add_git_hook    = self._hook_var.get()
+        scaffold_drive  = self._drive_var.get()
         self.destroy()
         self.callback(self.path, create_bi=create_bi, run_init=run_init,
-                      scaffold_nuitka=scaffold_nuitka, add_git_hook=add_git_hook)
+                      scaffold_nuitka=scaffold_nuitka, add_git_hook=add_git_hook,
+                      scaffold_drive=scaffold_drive)

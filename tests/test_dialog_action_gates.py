@@ -137,6 +137,7 @@ def _scaffold(**flags):
     dlg._init_var = _Var(flags.get("init", False))
     dlg._nuitka_var = _Var(flags.get("nuitka", False))
     dlg._hook_var = _Var(flags.get("hook", False))
+    dlg._drive_var = _Var(flags.get("drive", False))
     dlg.path = "C:/new-project"
     dlg.callback = rec.callback
     dlg.destroy = rec.destroy
@@ -150,14 +151,16 @@ def test_scaffold_calls_back_even_with_nothing_ticked():
     dlg._apply()
     assert rec.calls == [("C:/new-project",)]
     assert rec.kwargs == [{"create_bi": False, "run_init": False,
-                           "scaffold_nuitka": False, "add_git_hook": False}]
+                           "scaffold_nuitka": False, "add_git_hook": False,
+                           "scaffold_drive": False}]
 
 
 def test_scaffold_forwards_every_option_by_keyword():
-    dlg, rec = _scaffold(bi=True, init=True, nuitka=True, hook=True)
+    dlg, rec = _scaffold(bi=True, init=True, nuitka=True, hook=True, drive=True)
     dlg._apply()
     assert rec.kwargs == [{"create_bi": True, "run_init": True,
-                           "scaffold_nuitka": True, "add_git_hook": True}]
+                           "scaffold_nuitka": True, "add_git_hook": True,
+                           "scaffold_drive": True}]
 
 
 # ── WorkspaceBuilderDialog ──────────────────────────────────────────────
