@@ -117,3 +117,6 @@ dist/
 
 # tokensave MCP binding (TokenSave Manager) — machine-local by choice
 .mcp.json
+
+# Drive-run evidence (helpers/drive_ledger.py)
+*.report.json

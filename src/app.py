@@ -97,6 +97,10 @@ def _geometry_on_screen(root: "tk.Tk", geom: str) -> bool:
 class App(UiPumpMixin, tk.Tk):
     def __init__(self):
         super().__init__()
+        # First thing a Tk root allows, so launch diagnostics are recorded.
+        # No-op unless TOKENSAVE_MANAGER_DRIVE names a script.
+        import debug_drive
+        debug_drive.begin(self)
         self.title("TokenSave Manager")
         self.geometry("760x600")
         self.minsize(600, 520)

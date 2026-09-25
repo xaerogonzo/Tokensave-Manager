@@ -294,3 +294,179 @@ def test_log_report_says_when_the_marker_is_absent(tk_root, capsys):
         {"from": "Extra checkouts"})
     out = capsys.readouterr().out
     assert "found=False" in out and "0 line(s)" in out
+
+
+# -- the ledger: what a run proves, not only that it reached the end ---------
+
+from helpers import drive_ledger
+
+
+def _evidence(steps, **kw):
+    app = _FakeApp()
+    ledger = drive_ledger.Ledger()
+    ledger.start_drive()
+    return app, ledger, _Driver(app, steps, ledger=ledger, **kw)
+
+
+def test_a_raising_step_is_a_failure_of_the_run_not_a_remark(capsys, monkeypatch):
+    app, ledger, driver = _evidence([{"do": "boom"}])
+    monkeypatch.setattr(
+        _Driver, "_do_boom",
+        lambda self, step: (_ for _ in ()).throw(RuntimeError("nope")),
+        raising=False)
+    driver.step()
+    [entry] = ledger.in_phase(drive_ledger.DRIVE)
+    assert entry.kind == drive_ledger.STEP_FAILURE
+    assert entry.detail["step"] == "boom" and entry.detail["exception"] == "RuntimeError"
+    assert ledger.failed
+
+
+def test_an_unknown_step_is_a_failure_of_the_run(capsys):
+    _, ledger, driver = _evidence([{"do": "nonsense"}])
+    driver.step()
+    assert ledger.failed
+
+
+def test_step_arms_no_timer_but_run_next_does():
+    """The half a hand-driven test wants. A per-step timer leaked into a later
+    test is what corrupted Fortuna's suite with a heap error."""
+    app, _, driver = _evidence([{"do": "wait"}, {"do": "wait"}])
+    assert driver.step() is True
+    assert app.scheduled == []
+    driver._run_next()
+    assert len(app.scheduled) == 1
+
+
+def test_expect_passes_at_once_when_the_state_already_holds():
+    app, ledger, driver = _evidence(
+        [{"do": "expect", "id": "seen", "check": "diagnostic_contains",
+          "text": "hello"}])
+    ledger.record(drive_ledger.APPLICATION_WARNING, "logging", "WARNING", "f", "hello")
+    driver.step()
+    assert driver._hold is None
+    assert [e["passed"] for e in ledger.expectations] == [True]
+    assert not ledger.failed
+
+
+def test_expect_fails_permanently_when_the_state_never_arrives():
+    _, ledger, driver = _evidence(
+        [{"do": "expect", "id": "never", "check": "diagnostic_contains",
+          "text": "absent", "within_ms": 0}])
+    driver.step()
+    assert ledger.failed
+    assert ledger.expectations[0]["failure_reason"]
+
+
+def test_expect_waits_for_state_that_settles_later():
+    app, ledger, driver = _evidence(
+        [{"do": "expect", "id": "later", "check": "diagnostic_contains",
+          "text": "eventually", "within_ms": 60000}])
+    driver.step()
+    assert driver._hold is not None and driver._hold_ms == 100
+    assert driver._hold() is True                       # still waiting
+    ledger.record(drive_ledger.APPLICATION_WARNING, "logging", "WARNING", "f",
+                  "eventually")
+    assert driver._hold() is False                      # arrived
+    assert ledger.expectations[-1]["passed"] and not ledger.failed
+
+
+def test_an_unknown_check_is_a_recorded_failure_not_a_dead_chain():
+    _, ledger, driver = _evidence([{"do": "expect", "check": "bogus"}])
+    driver.step()
+    assert ledger.failed
+    assert "unknown check" in ledger.expectations[0]["failure_reason"]
+
+
+def test_expect_clean_passes_over_a_quiet_window():
+    _, ledger, driver = _evidence([{"do": "expect_clean", "settle_ms": 0}])
+    driver.step()
+    assert not ledger.failed and ledger.expectations[0]["passed"]
+
+
+def test_expect_clean_fails_on_a_drive_warning():
+    _, ledger, driver = _evidence([{"do": "expect_clean", "settle_ms": 0}])
+    ledger.record(drive_ledger.APPLICATION_WARNING, "logging", "WARNING", "f", "bad")
+    driver.step()
+    assert ledger.failed
+
+
+def test_expect_clean_is_not_failed_by_launch_noise():
+    app = _FakeApp()
+    ledger = drive_ledger.Ledger()
+    ledger.record(drive_ledger.APPLICATION_WARNING, "logging", "WARNING", "f", "launch")
+    ledger.start_drive()
+    _Driver(app, [{"do": "expect_clean", "settle_ms": 0}], ledger=ledger).step()
+    assert not ledger.failed
+
+
+def test_expect_clean_catches_a_callback_that_throws_after_the_check_began():
+    """The false green the observation window exists to prevent."""
+    _, ledger, driver = _evidence([{"do": "expect_clean", "settle_ms": 60000}])
+    driver.step()
+    assert driver._hold() is True                       # quiet so far
+    ledger.record(drive_ledger.UNCAUGHT_EXCEPTION, "tk.callback", "CRITICAL", "f",
+                  "late")
+    assert driver._hold() is False
+    assert ledger.failed and not ledger.expectations[-1]["passed"]
+
+
+def test_a_failed_expect_does_not_make_expect_clean_report_itself_twice():
+    _, ledger, driver = _evidence([{"do": "expect_clean", "settle_ms": 0}])
+    ledger.expect("x", False, expected=1, actual=2, elapsed_ms=1, reason="r")
+    driver.step()
+    assert ledger.expectations[-1]["id"] == "expect_clean"
+    assert ledger.expectations[-1]["passed"], \
+        "the script's own failure was blamed on the application"
+
+
+def test_finalize_writes_the_report_once_beside_the_script(tmp_path):
+    script = tmp_path / "s.json"
+    script.write_text("[]", encoding="utf-8")
+    _, ledger, driver = _evidence([], script=str(script))
+    ledger.expect("e", False, expected=1, actual=2, elapsed_ms=1, reason="r")
+
+    report = driver._finalize("quit")
+    written = tmp_path / "s.report.json"
+    first = written.read_text(encoding="utf-8")
+    driver._finalize("exit")                            # atexit after quit
+
+    assert report["passed"] is False
+    assert json.loads(first)["finished_because"] == "quit"
+    assert written.read_text(encoding="utf-8") == first, "second finalize rewrote"
+
+
+def test_quit_on_a_hand_built_driver_never_exits_the_process(capsys):
+    """No script means a test, and `os._exit` would end the test runner."""
+    app, _, driver = _evidence([])
+    driver._do_quit({"do": "quit"})
+    assert getattr(app, "destroyed", False)
+    assert "exit 0" in capsys.readouterr().out
+
+
+def test_quit_reports_a_failed_run_with_a_nonzero_code(capsys):
+    _, ledger, driver = _evidence([])
+    ledger.expect("e", False, expected=1, actual=2, elapsed_ms=1, reason="r")
+    driver._do_quit({"do": "quit"})
+    assert "exit 1" in capsys.readouterr().out
+
+
+def test_log_report_prints_the_ledger(capsys):
+    _, ledger, driver = _evidence([])
+    driver._do_log_report({"do": "log_report"})
+    out = capsys.readouterr().out
+    assert "startup" in out and "drive" in out and "expectation(s) passed" in out
+
+
+def test_a_real_tk_callback_exception_reaches_the_ledger(tk_root, capsys):
+    """Through real Tk dispatch, not a hand-called hook: this is the channel
+    that used to vanish into manager.log with the run still 'finishing'."""
+    ledger = drive_ledger.Ledger()
+    ledger.install_tk(tk_root)
+    ledger.start_drive()
+    try:
+        tk_root.after(0, lambda: 1 / 0)
+        tk_root.update()
+    finally:
+        ledger.uninstall()
+    assert ledger.contains("ZeroDivisionError")
+    assert ledger.failed
