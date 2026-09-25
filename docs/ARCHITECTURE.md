@@ -84,7 +84,7 @@ Token Save Manager Source/
 │   │                              writes <script>.report.json and exits non-zero on failure.
 │   │                              Lifecycle here; observation lives in helpers/drive_ledger.py.
 │   │
-│   ├── helpers/                  125 modules of pure / IO helpers — no UI deps.
+│   ├── helpers/                  126 modules of pure / IO helpers — no UI deps.
 │   │   ├── config.py              _load_config, _save_config, _migrate_config
 │   │   ├── detection.py           _detect_git/_gh/_npm/_codegraph/_claude_cli,
 │   │   │                          _root_path/_label, _version_lt
@@ -415,6 +415,9 @@ Token Save Manager Source/
 │   │   │                          (drift is recorded, never clobbered); startup vs drive
 │   │   │                          phases; expectations; one-shot finalize + atomic report.
 │   │   │                          Imports no Tk, App or config.
+│   │   ├── drive_template.py      Copies templates/drive/ into a NEW project's
+│   │   │                          drive_template/, once, never overwriting. Not a
+│   │   │                          managed copy: a person edits it afterwards.
 │   │   ├── install_analyzers.py   How an analyzer is OBTAINED (npm / uv), kept
 │   │   │                          apart from how it is run.
 │   │   ├── observations.py        Diagnostics the Manager RECEIVES already
@@ -863,6 +866,9 @@ Token Save Manager Source/
 │   ├── nuitka-build.py.template   Python-based alternative build script
 │   ├── nuitka-build.bat.template  One-line bat launcher template for other projects
 │   ├── NUITKA_GOTCHAS.md          Nuitka pitfalls reference (14 known issues with fixes)
+│   ├── drive/                     Live-driver starting point: drive_ledger.py (== the
+│   │                              Manager's), debug_drive_tk.py, README. Scaffolded
+│   │                              into NEW projects only; never refreshed.
 │   └── gotchas/                   Cross-project failure modes, indexed by project-baseline.md
 │       ├── windows-filesystem.md      Directory locks, 8.3 paths, venv moves
 │       ├── customtkinter.md           Appearance mode, Tk roots, after() teardown
@@ -1673,6 +1679,9 @@ silently accepts an early post is how the ordering defect stays unfixed.
 into `dist/templates/` by `build.ps1` -- **recursively**, because `gotchas/` is a
 subdirectory and without `-Recurse` the shipped baseline would index files that are not
 there -- and shipped to end users.
+
+### `templates/drive/`
+The live-driver starting point. **Lifecycle differs from its neighbours on purpose:** the baseline is compiled and synced, the gotchas are synced to the existing fleet, and this is only *scaffolded into new projects* -- it is a starting point people edit, so it is never judged outdated or overwritten. `tests/test_drive_template.py` keeps its `drive_ledger.py` identical to `src/helpers/drive_ledger.py`.
 
 ### `templates/claude-md-template.md`
 Written as `BASIC_INSTRUCTIONS.md` into scaffolded projects. Contains an `@include`

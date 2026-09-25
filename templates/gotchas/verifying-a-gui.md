@@ -187,6 +187,28 @@ contract; here, a tooltip with no text passed for one.
 
 ---
 
+## 11. A run that reached its last line proved nothing
+
+A driver that printed each step and kept nothing "finished" while the app it
+drove logged warnings, raised inside callbacks and lost worker threads. Three
+projects found this independently and patched it three times. What they
+converged on, and the starting point is `drive/` in the Manager's templates:
+
+- **Keep what the app said about itself** -- `logging`, the toolkit's callback
+  exception hook, `warnings`, `sys.excepthook`, `threading.excepthook` -- from
+  launch, in a startup phase that cannot fail every later check but *can* fail on
+  an exception.
+- **Every hook is fail-open**: record inside a `try`, then always chain the
+  original. **Restore conditionally**: put a hook back only if it is still yours;
+  leave a replacement alone and record drift.
+- **`expect_clean` needs an observation window.** A callback that posts work and
+  throws 200 ms later passes a check made at 100 ms.
+- **A failed expectation is permanent.** A later success must not erase it.
+- **The exit code is the verdict.** Write the report *before* `os._exit(code)`,
+  which skips `atexit`; finalize exactly once.
+- **`step()` arms no timer, `_run_next()` does.** One armed timer per hand-driven
+  step corrupted a whole suite (heap error, no traceback, a moving crash site).
+
 ## When you add to this file
 
 The bar: >15 minutes, it failed *silently* or misleadingly, it is not specific to
