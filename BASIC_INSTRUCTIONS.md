@@ -363,6 +363,33 @@ had those files (Fortuna Lab: a `project-baseline.md` and no gotchas at all).
 - **Lifecycles differ, on purpose.** The baseline is compiled and synced; the
   gotchas are synced to the existing fleet.
 
+### D1i. A Manager commit stages only what it can PROVE is its own
+
+`helpers/manager_changes.py`, `helpers/batch_commit.py`. Paid for by the shape of
+the request (one popup per project after a bulk Repair) and by what a convenient
+answer would do to a working tree.
+
+- **Three questions, kept apart.** *Which paths might be ours?* is the
+  operation's report, and is only where to look. *Is each exactly our change,
+  now?* is ownership. *What did we commit?* is read back from git afterwards.
+- **A name proves nothing.** `.gitignore` and `CLAUDE.md` match a Manager
+  pattern and may also hold a person's edit. Ownership comes from evidence
+  recorded around the write (`OperationEvidence`: what was dirty before, the hash
+  of what was written): eligible only if clean before, unchanged since, and
+  different from HEAD. Anything mixed is excluded whole; there is no partial-file
+  staging.
+- **The inspection a person saw is not an authorization.** Re-inspect
+  immediately before committing, and build the message from the files that
+  survive, so a count describes the real commit.
+- **Never consume the user's index.** `git add -- <proven files>`, then a
+  pathspec commit; never `git reset` first. A failed commit resets only the
+  paths this batch added. A file already staged before we began is never eligible.
+- **Messages are data.** Exact fixtures per combination, an approved verb, at
+  most 72 characters, no decision tree in `compose`. Same eligible set, same
+  message; a person's edit is kept as theirs.
+- **Side effects follow success per project.** The private-repo sync runs after
+  that project's verified commit, never after a failure and never as a batch tail.
+
 ### D2. Agent CLIs: a new agent is a table row, never a new literal
 
 `helpers/agent_cli.py` holds one capability table. Adding Codex, Gemini CLI or
