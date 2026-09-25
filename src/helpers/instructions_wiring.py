@@ -80,6 +80,7 @@ from helpers.instructions_posture import (
 )
 from helpers.io_utils import _atomic_write
 from helpers import ignore_alignment as ia
+from helpers import lessons_delivery as ld
 
 # ── plan vocabulary ──────────────────────────────────────────────────────
 
@@ -539,6 +540,10 @@ class ApplyOutcome:
     changed_files: tuple = ()
     #: `ignore_alignment.AlignResult`, when a git exe was given.
     alignment: object = None
+    #: One `lessons_delivery.LessonOutcome` per lesson, when a corpus was given.
+    #: A different fact from `outcome`: the chain can be wired while one lesson
+    #: is refused because somebody edited it.
+    lessons: tuple = ()
 
     @property
     def wrote(self) -> bool:
@@ -549,8 +554,13 @@ class ApplyOutcome:
         return self.alignment.changed_files if self.alignment else ()
 
     @property
+    def lesson_files(self) -> tuple:
+        return ld.written_files(self.lessons)
+
+    @property
     def all_files(self) -> tuple:
-        return tuple(dict.fromkeys(self.changed_files + self.alignment_files))
+        return tuple(dict.fromkeys(self.changed_files + self.lesson_files
+                                   + self.alignment_files))
 
     @property
     def mutated(self) -> bool:
@@ -567,10 +577,17 @@ class ApplyOutcome:
         text = _OUTCOME_TEXT.get(self.outcome, self.outcome)
         text = "%s - %s" % (text, self.reason) if self.reason else text
         aligned = self.alignment.render() if self.alignment else ""
-        # Two dimensions, never one sentence: instructions can be resolved
-        # while their git alignment is what changed.
-        return "instructions: %s · git alignment: %s" % (text, aligned) \
-            if aligned else text
+        lessons = ld.outcomes_text(self.lessons) if self.lessons else ""
+        # Separate dimensions, never one sentence: instructions can be
+        # resolved while a lesson was refused or the git alignment changed.
+        if not (aligned or lessons):
+            return text
+        parts = ["instructions: %s" % text]
+        if lessons:
+            parts.append("lessons: %s" % lessons)
+        if aligned:
+            parts.append("git alignment: %s" % aligned)
+        return " · ".join(parts)
 
 
 def _align(posture, git_exe: str):
@@ -581,6 +598,18 @@ def _align(posture, git_exe: str):
                     ia.companions_of(posture))
 
 
+def deliver_lessons(posture, lessons) -> tuple:
+    """The shared lessons, for a project whose baseline copy is current.
+
+    Only then: a lesson is delivered because the baseline indexes it, so a
+    project without a current, resolving baseline has nothing referring to one.
+    """
+    if not lessons or posture.reach != REACH_RESOLVED \
+            or posture.copy_state != bc.COPY_CURRENT:
+        return ()
+    return ld.sync_lessons(posture.display_root, lessons)
+
+
 def _state_key(posture) -> tuple:
     return (posture.reach, posture.delivery, posture.copy_state)
 
@@ -588,12 +617,19 @@ def _state_key(posture) -> tuple:
 def apply_to_project(posture, baseline: str, template_dir: str,
                      template_text: str, has_template: bool,
                      baseline_template_text: str = "",
-                     claude_projects=None, git_exe: str = "") -> ApplyOutcome:
+                     claude_projects=None, git_exe: str = "",
+                     lessons=None) -> ApplyOutcome:
     """Re-read, re-plan, write, re-read. One project.
 
     With *git_exe*, a project whose chain resolves then has its Manager-written
     companions aligned with git (`ignore_alignment.align`). Without it,
     behaviour is exactly what it was.
+
+    With *lessons* (`lessons_delivery.load_corpus`), a project whose baseline
+    copy is current also receives the shared gotchas, each judged on its own.
+    A skipped or blocked project gets neither the baseline nor the lessons, so
+    it never holds a baseline whose index points at files that were withheld.
+    The lessons are written BEFORE git alignment so the companions exist for it.
 
     The plan built for the preview is deliberately NOT reused: between the
     preview and the click the disk may have moved on, and writing a stale plan
@@ -625,8 +661,10 @@ def apply_to_project(posture, baseline: str, template_dir: str,
     if plan.blocked:
         return ApplyOutcome(OUTCOME_SKIPPED_BLOCKED, plan.blocked)
     if plan.is_noop:
+        delivered = deliver_lessons(fresh, lessons)
         return ApplyOutcome(OUTCOME_ALREADY_RESOLVED,
-                            alignment=_align(fresh, git_exe))
+                            alignment=_align(fresh, git_exe),
+                            lessons=delivered)
 
     result = apply_wiring(posture.display_root, plan, posture.name,
                           template_text, baseline_template_text)
@@ -636,8 +674,10 @@ def apply_to_project(posture, baseline: str, template_dir: str,
 
     after = reread()
     if after.healthy and after.copy_state == bc.COPY_CURRENT:
+        delivered = deliver_lessons(after, lessons)
         return ApplyOutcome(OUTCOME_WIRED, changed_files=result.changed_files,
-                            alignment=_align(after, git_exe))
+                            alignment=_align(after, git_exe),
+                            lessons=delivered)
     return ApplyOutcome(OUTCOME_UNVERIFIED,
                         "still %s after writing" % "/".join(_state_key(after)),
                         result.changed_files)

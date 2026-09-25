@@ -81,7 +81,7 @@ Token Save Manager Source/
 │   │                              report/wait/quit. `report what=geometry` runs the visual
 │   │                              oracle. Committed scripts live in scripts/drive/.
 │   │
-│   ├── helpers/                  122 modules of pure / IO helpers — no UI deps.
+│   ├── helpers/                  124 modules of pure / IO helpers — no UI deps.
 │   │   ├── config.py              _load_config, _save_config, _migrate_config
 │   │   ├── detection.py           _detect_git/_gh/_npm/_codegraph/_claude_cli,
 │   │   │                          _root_path/_label, _version_lt
@@ -399,6 +399,13 @@ Token Save Manager Source/
 │   │   ├── headless_analyzers.py  One capability table for ruff / pyright /
 │   │   │                          markdownlint. Four availability states; FAILED is
 │   │   │                          never a pass.
+│   │   ├── managed_copy.py        The ONE safety implementation behind every
+│   │   │                          Manager-written copy: sha-headed with the SOURCE
+│   │   │                          named (identical bodies stay distinct), per-artifact
+│   │   │                          states, compare-and-apply, never overwrites an edit.
+│   │   ├── lessons_delivery.py    The explicit inventory of shared gotchas delivered to
+│   │   │                          docs/gotchas/; per-artifact facts and outcomes, never
+│   │   │                          a transaction, never a delete. Imports managed_copy only.
 │   │   ├── install_analyzers.py   How an analyzer is OBTAINED (npm / uv), kept
 │   │   │                          apart from how it is run.
 │   │   ├── observations.py        Diagnostics the Manager RECEIVES already

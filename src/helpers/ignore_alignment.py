@@ -32,6 +32,7 @@ from dataclasses import dataclass, field
 
 from constants import CREATE_NO_WINDOW
 from helpers import baseline_copy as bc
+from helpers import lessons_delivery as ld
 from helpers.gitignore import ensure_pattern
 from helpers.instructions_posture import BASIC_MD, CLAUDE_MD, canonical
 from helpers.instructions_split import DEFAULT_TARGET as LESSONS_REL
@@ -43,6 +44,8 @@ GIT_TIMEOUT_S = 15
 KIND_BASIC = "basic"
 KIND_BASELINE_COPY = "baseline_copy"
 KIND_LESSONS = "lessons"
+#: A shared lesson under `docs/gotchas/`, referred to by project-baseline.md.
+KIND_GOTCHA = "gotcha"
 
 FS_EXISTS = "exists"
 FS_MISSING = "missing"
@@ -163,6 +166,16 @@ def companions_of(posture, root: str = "") -> tuple:
                                        KIND_BASELINE_COPY))
     if os.path.isfile(os.path.join(root, LESSONS_REL)):
         pairs.append(CompanionPair(LESSONS_REL, CLAUDE_MD, KIND_LESSONS))
+    # The chain is three deep: CLAUDE.md -> BASIC_INSTRUCTIONS.md ->
+    # project-baseline.md -> docs/gotchas/*. A lesson is referred to by the
+    # baseline copy that indexes it, so it takes THAT file's visibility -- never
+    # "referrers ignored, lessons open". Only when the copy is in the chain:
+    # without it nothing refers to them. `align` decides again until nothing
+    # new is pending, which is what carries LOCAL down all three levels.
+    if copy_path in chain:
+        for rel in ld.dest_rels():
+            if os.path.isfile(os.path.join(root, *rel.split("/"))):
+                pairs.append(CompanionPair(rel, bc.COPY_BASENAME, KIND_GOTCHA))
     return tuple(pairs)
 
 
