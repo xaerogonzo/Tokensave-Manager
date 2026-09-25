@@ -156,6 +156,8 @@ class ProjectsTabController:
         on_seed_ask=None,      # (text, path) -> None — refactor-scout Investigate;
                                # passed as a lambda from App because AskTabController
                                # doesn't exist yet at our construction time.
+        on_commit_batch=None,  # (items) -> None — one dialog for a bulk action's
+                               # commits (App._offer_commit_batch)
     ):
         self._notebook       = notebook
         self._cfg            = cfg
@@ -170,6 +172,7 @@ class ProjectsTabController:
         self._on_set_running = on_set_running
         self._on_settings    = on_settings
         self._on_seed_ask    = on_seed_ask
+        self._on_commit_batch = on_commit_batch
 
         # ── Sub-controllers ───────────────────────────────────────────────────
         # Constructed after self._tab exists (codegraph_ctrl needs the frame).
@@ -893,7 +896,8 @@ class ProjectsTabController:
         """
         from dialogs.instructions_overview import InstructionsDialog
         InstructionsDialog(self._root, self._cfg, on_log=self._on_log,
-                           on_commit_offer=self._offer_commit_after_change)
+                           on_commit_offer=self._offer_commit_after_change,
+                           on_commit_batch=self._on_commit_batch)
 
     def _sync_bind_label(self, path: str) -> None:
         """Point the entry at whichever direction this project can go.

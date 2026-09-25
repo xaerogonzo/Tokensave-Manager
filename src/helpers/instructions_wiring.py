@@ -57,6 +57,7 @@ dominant terminator.
 
 from __future__ import annotations
 
+import dataclasses
 import os
 from dataclasses import dataclass
 
@@ -79,6 +80,7 @@ from helpers.instructions_posture import (
     unescape_target,
 )
 from helpers.io_utils import _atomic_write
+from helpers import batch_commit as bcm
 from helpers import ignore_alignment as ia
 from helpers import lessons_delivery as ld
 
@@ -544,6 +546,10 @@ class ApplyOutcome:
     #: A different fact from `outcome`: the chain can be wired while one lesson
     #: is refused because somebody edited it.
     lessons: tuple = ()
+    #: `manager_changes.OperationEvidence`: what git said was already dirty before
+    #: the write, and the hash of everything written. What lets a later commit
+    #: PROVE a file is exactly the Manager's change. None without a git exe.
+    evidence: object = None
 
     @property
     def wrote(self) -> bool:
@@ -660,24 +666,39 @@ def apply_to_project(posture, baseline: str, template_dir: str,
     plan = plan_wiring(fresh, has_template=has_template)
     if plan.blocked:
         return ApplyOutcome(OUTCOME_SKIPPED_BLOCKED, plan.blocked)
+
+    # What git already called dirty, recorded BEFORE anything is written: it is
+    # the only way a later commit can tell our change from a person's edit in
+    # the same file. None (git unreadable) is kept as None, never as "all clean".
+    dirty_before = bcm.capture_dirty(git_exe, posture.display_root) \
+        if git_exe else None
+
+    def finish(outcome):
+        if not git_exe or not outcome.all_files:
+            return outcome
+        return dataclasses.replace(outcome, evidence=bcm.make_evidence(
+            git_exe, posture.display_root, dirty_before, outcome.all_files))
+
     if plan.is_noop:
         delivered = deliver_lessons(fresh, lessons)
-        return ApplyOutcome(OUTCOME_ALREADY_RESOLVED,
-                            alignment=_align(fresh, git_exe),
-                            lessons=delivered)
+        return finish(ApplyOutcome(OUTCOME_ALREADY_RESOLVED,
+                                   alignment=_align(fresh, git_exe),
+                                   lessons=delivered))
 
     result = apply_wiring(posture.display_root, plan, posture.name,
                           template_text, baseline_template_text)
     if not result.ok:
-        return ApplyOutcome(OUTCOME_FAILED, result.error or result.skipped,
-                            result.changed_files)
+        return finish(ApplyOutcome(OUTCOME_FAILED, result.error or result.skipped,
+                                   result.changed_files))
 
     after = reread()
     if after.healthy and after.copy_state == bc.COPY_CURRENT:
         delivered = deliver_lessons(after, lessons)
-        return ApplyOutcome(OUTCOME_WIRED, changed_files=result.changed_files,
-                            alignment=_align(after, git_exe),
-                            lessons=delivered)
-    return ApplyOutcome(OUTCOME_UNVERIFIED,
-                        "still %s after writing" % "/".join(_state_key(after)),
-                        result.changed_files)
+        return finish(ApplyOutcome(OUTCOME_WIRED,
+                                   changed_files=result.changed_files,
+                                   alignment=_align(after, git_exe),
+                                   lessons=delivered))
+    return finish(ApplyOutcome(
+        OUTCOME_UNVERIFIED,
+        "still %s after writing" % "/".join(_state_key(after)),
+        result.changed_files))

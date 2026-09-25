@@ -84,7 +84,7 @@ Token Save Manager Source/
 │   │                              writes <script>.report.json and exits non-zero on failure.
 │   │                              Lifecycle here; observation lives in helpers/drive_ledger.py.
 │   │
-│   ├── helpers/                  126 modules of pure / IO helpers — no UI deps.
+│   ├── helpers/                  128 modules of pure / IO helpers — no UI deps.
 │   │   ├── config.py              _load_config, _save_config, _migrate_config
 │   │   ├── detection.py           _detect_git/_gh/_npm/_codegraph/_claude_cli,
 │   │   │                          _root_path/_label, _version_lt
@@ -418,6 +418,12 @@ Token Save Manager Source/
 │   │   ├── drive_template.py      Copies templates/drive/ into a NEW project's
 │   │   │                          drive_template/, once, never overwriting. Not a
 │   │   │                          managed copy: a person edits it afterwards.
+│   │   ├── manager_changes.py     Which Manager writes are provably OURS (ownership from
+│   │   │                          recorded evidence + current git state, never path
+│   │   │                          patterns) and the data table of commit subjects.
+│   │   ├── batch_commit.py        Evidence capture, re-inspection, and the staging
+│   │   │                          protocol (add proven files, pathspec commit, undo only
+│   │   │                          what the batch added, read the result back).
 │   │   ├── install_analyzers.py   How an analyzer is OBTAINED (npm / uv), kept
 │   │   │                          apart from how it is run.
 │   │   ├── observations.py        Diagnostics the Manager RECEIVES already
@@ -567,7 +573,7 @@ Token Save Manager Source/
 │   │   ├── io_utils.py            Shared IO helpers for the patcher modules.
 │   │   └── ui.py                  UI helpers shared across controllers and dialogs.
 │   │
-│   ├── dialogs/                   57 dialog / panel modules — a tk.Toplevel per file,
+│   ├── dialogs/                   58 dialog / panel modules — a tk.Toplevel per file,
 │   │                          plus the panels the bigger dialogs are built from.
 │   │   ├── release_wizard.py      ReleaseWizardDialog + _ReleaseCtx (paired)
 │   │   ├── mcp_config.py          MCPConfigDialog
@@ -623,6 +629,9 @@ Token Save Manager Source/
 │   │   │                          artifact delta, fleet exposure in fleet units,
 │   │   │                          and never recompiles on open.
 │   │   ├── instructions_overview.py InstructionsDialog - fleet instruction-chain view.
+│   │   ├── batch_commit.py        BatchCommitDialog - ONE prompt for what a bulk action wrote.
+│   │   │                          Shows what is provably ours per project, the exact
+│   │   │                          files, and a rule-built message a person may edit.
 │   │   ├── instructions_split.py  SplitProposalDialog - the oversized-chain offer.
 │   │   │                          Per project, never bulk.
 │   │   ├── relocate.py            RelocateDialog — one action for "this install
@@ -1080,7 +1089,7 @@ app.py
   ├── constants.py       — palette, regex, paths
   ├── theme.py           — _Tooltip
   ├── helpers/*          — pure / IO helpers (no UI)
-  ├── dialogs/*          — 57 tk.Toplevel / panel modules
+  ├── dialogs/*          — 58 tk.Toplevel / panel modules
   └── controllers/*      — 28 tab and sub-controllers
         └── controllers/* each import the dialogs they instantiate
             (lazy in-handler imports for any cross-dialog cycle risk —

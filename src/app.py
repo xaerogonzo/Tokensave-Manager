@@ -387,6 +387,7 @@ class App(UiPumpMixin, tk.Tk):
             on_shell=self._shell_capture,
             on_log=self._log,
             on_commit=self._open_commit_dialog,
+            on_commit_batch=self._offer_commit_batch,
             on_refresh=self.refresh,
             on_project_select=self._on_project_selected,
             on_set_running=self._set_running,
@@ -960,6 +961,23 @@ class App(UiPumpMixin, tk.Tk):
         else:
             self._log("  Working tree left dirty — commit when you're ready.",
                       C["yellow"])
+
+    def _offer_commit_batch(self, items) -> None:
+        """One dialog for what a bulk action wrote to many projects.
+
+        *items* is an immutable tuple of `batch_commit.BatchItem`: candidate
+        paths plus the evidence recorded around the write. The dialog decides
+        what is provably the Manager's own change; nothing here trusts the list.
+        The private-repo sync runs per project, after that project's commit.
+        """
+        from dialogs.batch_commit import BatchCommitDialog
+
+        def committed(path: str, message: str) -> None:
+            self._start_private_sync(path, message)
+            self.refresh()
+
+        BatchCommitDialog(self, tuple(items), self._cfg, on_log=self._log,
+                          on_committed=committed)
 
     def _do_git_commit(self, path: str, message: str, selected: list):
         """Stage and commit the picked files. `selected` is a list of

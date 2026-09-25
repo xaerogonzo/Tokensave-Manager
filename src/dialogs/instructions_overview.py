@@ -208,7 +208,7 @@ class InstructionsDialog(UiPumpMixin, tk.Toplevel):
     """Fleet view of instruction-chain reachability, with the repair."""
 
     def __init__(self, parent, cfg: "ManagerConfig", on_log=None,
-                 on_commit_offer=None):
+                 on_commit_offer=None, on_commit_batch=None):
         super().__init__(parent)
         self.title("📄 Instructions")
         self.configure(bg=C["base"])
@@ -218,6 +218,9 @@ class InstructionsDialog(UiPumpMixin, tk.Toplevel):
         #: `(path, label)`: the Manager's existing commit offer. Never a second
         #: commit pipeline - it checks porcelain and opens GitCommitDialog.
         self._on_commit_offer = on_commit_offer
+        #: `(items) -> None`: ONE dialog for everything a bulk action wrote. The
+        #: per-project offer above stays as the fallback when it is not given.
+        self._on_commit_batch = on_commit_batch
         self._fleet = None
         #: root -> `ignore_alignment.Alignment` from the last scan. Display
         #: only: `align` re-reads before it writes.
@@ -535,11 +538,27 @@ class InstructionsDialog(UiPumpMixin, tk.Toplevel):
         return lines
 
     def _offer_commit(self, results) -> None:
-        """One existing commit prompt per project the Manager changed."""
+        """Offer to commit what the Manager changed: one dialog, not one per project.
+
+        *results* is `(path, label)` pairs; the evidence needed to prove which
+        files are the Manager's own lives on the outcomes, so callers with it use
+        `_offer_commit_batch`. This is the fallback for a caller without one.
+        """
         if not self._on_commit_offer:
             return
         for path, label in results:
             self._on_commit_offer(path, label)
+
+    def _offer_commit_batch(self, changed) -> None:
+        """A single batch dialog for `(project, ApplyOutcome)` pairs."""
+        from helpers.batch_commit import BatchItem
+        if not self._on_commit_batch:
+            self._offer_commit([(p.display_root, ", ".join(r.all_files))
+                                for p, r in changed])
+            return
+        self._on_commit_batch(tuple(
+            BatchItem(p.display_root, p.name, tuple(r.all_files), r.evidence)
+            for p, r in changed))
 
     def _wire_one(self, project) -> None:
         plan = plan_wiring(project, has_template=self._has_template())
@@ -554,8 +573,7 @@ class InstructionsDialog(UiPumpMixin, tk.Toplevel):
         result = self._apply_to(project)
         self._log_outcome(project.name, result)
         if result.mutated:
-            self._offer_commit([(project.display_root,
-                                 ", ".join(result.all_files))])
+            self._offer_commit_batch([(project, result)])
         self._scan()
 
     def _split_one(self, project) -> None:
@@ -652,8 +670,7 @@ class InstructionsDialog(UiPumpMixin, tk.Toplevel):
         messagebox.showinfo("Repair complete", "\n".join(report), parent=self)
         # After the summary, one prompt per changed project. The commit offer
         # itself checks porcelain, so a change git ignores prompts nothing.
-        self._offer_commit([(p.display_root, ", ".join(r.all_files))
-                            for p, r in changed])
+        self._offer_commit_batch(changed)
         self._scan()
 
     # ── agent rules (separate blast radius) ──────────────────────────────
