@@ -25,11 +25,22 @@ Nothing here re-implements a rule.
 from __future__ import annotations
 
 from helpers import managed_copy as mc
-from helpers.managed_copy import (  # noqa: F401 - the module's public surface
+from helpers.managed_copy import (
     COPY_ABSENT, COPY_CURRENT, COPY_EDITED, COPY_INVALID, COPY_OUTDATED,
     COPY_UNMANAGED, COPY_UNREADABLE, HEADER_ABSENT, HEADER_INVALID, HEADER_OK,
     CopyFacts, CopyWrite, content_sha, lf,
 )
+
+#: The names other modules import from here. Declared, rather than left as
+#: unused-looking imports, because the pre-push pyflakes gate (rightly) cannot
+#: tell a deliberate re-export from a forgotten import and ignores `noqa`.
+__all__ = [
+    "COPY_ABSENT", "COPY_BASENAME", "COPY_CURRENT", "COPY_EDITED",
+    "COPY_INVALID", "COPY_OUTDATED", "COPY_UNMANAGED", "COPY_UNREADABLE",
+    "HEADER_ABSENT", "HEADER_INVALID", "HEADER_OK", "LOCAL_INCLUDE_LINE",
+    "CopyFacts", "CopyWrite", "classify_copy", "content_sha", "lf",
+    "parse_copy", "read_copy", "read_template", "render_copy", "write_copy",
+]
 
 COPY_BASENAME = "project-baseline.md"
 #: The include line a localized `BASIC_INSTRUCTIONS.md` carries.
