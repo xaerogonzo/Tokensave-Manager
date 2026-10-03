@@ -36,6 +36,16 @@ codebase, this rule wins.
 | Find biggest or most-connected classes | `tokensave_hotspots`, `tokensave_god_class` | — |
 | Check code health before/after a change | `tokensave_health`, `tokensave_session_start` / `tokensave_session_end` | — |
 
+**A tool named here is not in your tool list? Ask for it.** Since tokensave 7.14
+the server lists only 12 core tools (`tokensave_context`, `_search`, `_status`,
+`_read`, `_body`, `_files`, `_callers`, `_callees`, `_impact`, `_str_replace`,
+`_multi_str_replace`, `_more`). The rest, such as `tokensave_module_api`,
+`tokensave_todos`, `tokensave_hotspots`, `tokensave_god_class` and
+`tokensave_health`, are still callable but invisible until you call
+`tokensave_more` with their area (`navigate`, `analysis`, `git`, `edit`,
+`memory` or `all`). Missing from the list is not missing from tokensave, so do
+not fall back to `Read`/`Grep` before asking.
+
 **Check freshness before trusting an answer.** `tokensave_status` says when the
 index last synced. A stale graph is not a broken tool, but it is a wrong answer,
 and the honest move is to say so rather than quietly work from it.

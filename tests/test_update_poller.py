@@ -407,7 +407,7 @@ class TestIntegrationCheckWorker:
         """Test _integration_check_worker runs subprocess without extra args."""
         mock_run.return_value = Mock(stdout="Success", returncode=0)
 
-        controller = UpdatePollerController(Mock(), Mock(), Mock(), Mock())
+        controller = UpdatePollerController(Mock(tokensave_exe=""), Mock(), Mock(), Mock())
         controller._integration_check_worker("/path/to/script.py")
 
         mock_run.assert_called_once()
@@ -420,7 +420,7 @@ class TestIntegrationCheckWorker:
         """Test _integration_check_worker includes available version in args."""
         mock_run.return_value = Mock(stdout="Success", returncode=0)
 
-        controller = UpdatePollerController(Mock(), Mock(), Mock(), Mock())
+        controller = UpdatePollerController(Mock(tokensave_exe=""), Mock(), Mock(), Mock())
         controller._available_version = "1.5.0"
         controller._integration_check_worker("/path/to/script.py")
 
@@ -434,7 +434,7 @@ class TestIntegrationCheckWorker:
         """Test _integration_check_worker includes --fix flag when fix_mode=True."""
         mock_run.return_value = Mock(stdout="Success", returncode=0)
 
-        controller = UpdatePollerController(Mock(), Mock(), Mock(), Mock())
+        controller = UpdatePollerController(Mock(tokensave_exe=""), Mock(), Mock(), Mock())
         controller._integration_check_worker("/path/to/script.py", fix_mode=True)
 
         call_args = mock_run.call_args
@@ -446,7 +446,7 @@ class TestIntegrationCheckWorker:
         """Test _integration_check_worker calls subprocess.run with correct kwargs."""
         mock_run.return_value = Mock(stdout="Output", stderr="", returncode=0)
 
-        controller = UpdatePollerController(Mock(), Mock(), Mock(), Mock())
+        controller = UpdatePollerController(Mock(tokensave_exe=""), Mock(), Mock(), Mock())
         controller._integration_check_worker("/path/to/script.py")
 
         call_kwargs = mock_run.call_args[1]
@@ -463,7 +463,7 @@ class TestIntegrationCheckWorker:
         """Test _integration_check_worker with both available version and fix mode."""
         mock_run.return_value = Mock(stdout="Success", returncode=0)
 
-        controller = UpdatePollerController(Mock(), Mock(), Mock(), Mock())
+        controller = UpdatePollerController(Mock(tokensave_exe=""), Mock(), Mock(), Mock())
         controller._available_version = "2.0.0"
         controller._integration_check_worker("/path/to/script.py", fix_mode=True)
 
@@ -539,3 +539,103 @@ class TestIntegration:
         # Same contract as TestCmdUpgrade: starting an upgrade is not evidence
         # that one happened. App._run calls reprobe() when the run exits.
         assert controller.available_version == "2.0.0"
+
+
+def _immediate_post(fn, *args):
+    """Stand-in for App._post: runs the callback at once, which is what the
+    single Tk thread's serialisation amounts to for ordering purposes."""
+    fn(*args)
+
+
+class TestVersionObservation:
+    """The installed version is recorded once, whoever looks first."""
+
+    def _controller(self, raw, version):
+        from types import SimpleNamespace
+        cfg = SimpleNamespace(raw=raw, tokensave_exe="tokensave.exe", save=Mock())
+        c = UpdatePollerController(cfg, Mock(), Mock(), Mock(),
+                                   post=_immediate_post)
+        c._probe_installed = lambda: version
+        c._check_updates = lambda: None
+        c._show_integration_output = Mock()
+        return c, cfg
+
+    def _seeded(self):
+        return {"tokensave_last_seen_version": "7.13.0"}
+
+    @patch('subprocess.run')
+    def test_poller_first_then_check_leave_one_transition(self, mock_run):
+        mock_run.return_value = Mock(stdout="ok", stderr="", returncode=0)
+        raw = self._seeded()
+        c, cfg = self._controller(raw, "7.14.1")
+        c._probe_worker()
+        after_poller = dict(raw)
+        c._integration_check_worker("/s.py")
+        assert raw == after_poller
+        assert raw["tokensave_version_transition"]["from"] == "7.13.0"
+        assert raw["tokensave_version_transition"]["to"] == "7.14.1"
+        assert cfg.save.call_count == 1
+
+    @patch('subprocess.run')
+    def test_check_first_then_poller_end_in_the_same_state(self, mock_run):
+        mock_run.return_value = Mock(stdout="ok", stderr="", returncode=0)
+        raw_a, raw_b = self._seeded(), self._seeded()
+        ca, _ = self._controller(raw_a, "7.14.1")
+        ca._probe_worker()
+        ca._integration_check_worker("/s.py")
+        cb, cfg_b = self._controller(raw_b, "7.14.1")
+        cb._integration_check_worker("/s.py")
+        cb._probe_worker()
+        strip = lambda r: {k: v for k, v in r.items() if k != "tokensave_version_transition"}
+        assert strip(raw_a) == strip(raw_b)
+        for r in (raw_a, raw_b):
+            t = r["tokensave_version_transition"]
+            assert (t["from"], t["to"]) == ("7.13.0", "7.14.1")
+        assert cfg_b.save.call_count == 1
+
+    @patch('subprocess.run')
+    def test_transition_is_recorded_before_the_script_runs(self, mock_run):
+        raw = self._seeded()
+        seen = {}
+
+        def run(*a, **k):
+            seen["transition"] = dict(raw).get("tokensave_version_transition")
+            return Mock(stdout="ok", stderr="", returncode=0)
+        mock_run.side_effect = run
+        c, _ = self._controller(raw, "7.14.1")
+        c._integration_check_worker("/s.py")
+        assert seen["transition"]["from"] == "7.13.0"
+
+    @patch('subprocess.run')
+    def test_failed_probe_still_runs_the_check_and_records_nothing(self, mock_run):
+        mock_run.return_value = Mock(stdout="ok", stderr="", returncode=0)
+        raw = self._seeded()
+        c, cfg = self._controller(raw, None)
+        c._integration_check_worker("/s.py")
+        mock_run.assert_called_once()
+        assert raw == self._seeded()
+        cfg.save.assert_not_called()
+
+    @patch('subprocess.run')
+    def test_a_main_thread_that_never_answers_does_not_block_the_check(self, mock_run):
+        mock_run.return_value = Mock(stdout="ok", stderr="", returncode=0)
+        raw = self._seeded()
+        c, cfg = self._controller(raw, "7.14.1")
+        c._post = Mock()
+        c._OBSERVE_WAIT_S = 0.01
+        c._integration_check_worker("/s.py")
+        mock_run.assert_called_once()
+        cfg.save.assert_not_called()
+
+    def test_unchanged_version_is_not_written(self):
+        raw = {"tokensave_last_seen_version": "7.14.1"}
+        c, cfg = self._controller(raw, "7.14.1")
+        c._probe_worker()
+        cfg.save.assert_not_called()
+
+    def test_poller_never_forwards_a_from_argument(self):
+        with patch('subprocess.run') as run:
+            run.return_value = Mock(stdout="ok", stderr="", returncode=0)
+            c, _ = self._controller(self._seeded(), "7.14.1")
+            c._integration_check_worker("/s.py")
+        assert "--from" not in run.call_args[0][0]

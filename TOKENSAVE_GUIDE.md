@@ -167,6 +167,14 @@ Claude uses tokensave MCP tools automatically
 
 These are the 48 tools Claude uses automatically when tokensave is active. You can reference them by name in prompts to guide Claude toward specific analyses.
 
+> **Only 12 core tools are listed by default (tokensave 7.14).** `tokensave_context`,
+> `_search`, `_status`, `_read`, `_body`, `_files`, `_callers`, `_callees`, `_impact`,
+> `_str_replace`, `_multi_str_replace` and `_more`. Every other tool below is still
+> callable, but a model only sees it after `tokensave_more` is called with its area
+> (`navigate`, `analysis`, `git`, `edit`, `memory`, `all`). To list everything every
+> turn, set `"tools": "full"` in `.tokensave/config.json` or `TOKENSAVE_TOOLS=full`.
+> The roster is also printed by `tokensave tool`.
+
 ### Discovery & Navigation
 
 | Tool | What it does |
@@ -189,7 +197,7 @@ These are the 48 tools Claude uses automatically when tokensave is active. You c
 | `tokensave_callers_for` | Callers for a specific named node. |
 | `tokensave_impact` | Full impact analysis — what breaks or changes if you modify X. |
 | `tokensave_affected` | Find test files affected by changes to given source files. |
-| `tokensave_rename_preview` | Preview every file/line that would change if you rename a symbol. |
+| `tokensave_rename` | Rename a symbol and every reference the graph records. Dry run by default; each site is `exact`, `heuristic`, `ambiguous` or `text_only`, and apply is refused unless every site is exact (or `allow_heuristic`). Replaces `tokensave_rename_preview`, which survives as a hidden dry-run alias. |
 | `tokensave_hotspots` | Find the most frequently changed code (git history-based). |
 
 ### Code Quality Analysis
@@ -457,10 +465,10 @@ Use tokensave_impact to analyse what would be affected if I modify [function or 
 Show me the full impact chain and flag anything that could break.
 ```
 
-**Safe rename preview**
+**Safe rename**
 ```
-Use tokensave_rename_preview to show what would change if I rename [old name] to [new name].
-List every affected file and line before we proceed.
+Use tokensave_rename (dry run) to show what would change if I rename [old name] to [new name].
+List every affected file and line, with its exact/heuristic/ambiguous/text_only class, before we proceed.
 ```
 
 ---

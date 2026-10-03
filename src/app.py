@@ -144,6 +144,7 @@ class App(UiPumpMixin, tk.Tk):
             on_log=self._log,
             on_run=self._run,
             root=self,
+            post=self._post,
         )
         self._update_poller.start()
         log.info("=" * 60)

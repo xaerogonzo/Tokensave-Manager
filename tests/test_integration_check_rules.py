@@ -30,7 +30,7 @@ def test_fix_rules_is_parsed_separately_from_fix(monkeypatch):
     mod = _load()
     monkeypatch.setattr(sys, "argv", ["x", "--fix"])
     assert mod._parse_args() == {"available": None, "fix": True,
-                                 "fix_rules": ""}
+                                 "fix_rules": "", "from": None}
     monkeypatch.setattr(sys, "argv", ["x", "--fix-rules=abc123"])
     assert mod._parse_args()["fix_rules"] == "abc123"
     assert mod._parse_args()["fix"] is False

@@ -111,7 +111,7 @@ Desktop is `C:\windows\system32`, not the project folder.
 | Category | Tools | Purpose |
 |----------|-------|---------|
 | Discovery | `tokensave_context`, `tokensave_search`, `tokensave_node`, `tokensave_files`, `tokensave_module_api`, `tokensave_similar`, `tokensave_by_qualified_name`, `tokensave_status` | Navigate the codebase without reading files |
-| Call graph | `tokensave_callers`, `tokensave_callees`, `tokensave_callers_for`, `tokensave_impact`, `tokensave_affected`, `tokensave_rename_preview`, `tokensave_hotspots` | Trace how code connects and what breaks when you change things |
+| Call graph | `tokensave_callers`, `tokensave_callees`, `tokensave_callers_for`, `tokensave_impact`, `tokensave_affected`, `tokensave_rename`, `tokensave_hotspots` | Trace how code connects and what breaks when you change things |
 | Code quality | `tokensave_health`, `tokensave_complexity`, `tokensave_god_class`, `tokensave_dead_code`, `tokensave_unused_imports`, `tokensave_circular`, `tokensave_coupling`, `tokensave_doc_coverage`, `tokensave_gini`, `tokensave_dependency_depth`, `tokensave_dsm`, `tokensave_test_risk`, `tokensave_largest`, `tokensave_distribution`, `tokensave_simplify_scan` | Measure and improve code health |
 | Types | `tokensave_type_hierarchy`, `tokensave_inheritance_depth`, `tokensave_recursion`, `tokensave_rank` | Explore type structure and inheritance |
 | Editing | `tokensave_str_replace`, `tokensave_multi_str_replace`, `tokensave_insert_at`, `tokensave_ast_grep_rewrite` | Graph-aware code edits |

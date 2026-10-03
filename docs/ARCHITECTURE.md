@@ -84,7 +84,7 @@ Token Save Manager Source/
 │   │                              writes <script>.report.json and exits non-zero on failure.
 │   │                              Lifecycle here; observation lives in helpers/drive_ledger.py.
 │   │
-│   ├── helpers/                  128 modules of pure / IO helpers — no UI deps.
+│   ├── helpers/                  129 modules of pure / IO helpers — no UI deps.
 │   │   ├── config.py              _load_config, _save_config, _migrate_config
 │   │   ├── detection.py           _detect_git/_gh/_npm/_codegraph/_claude_cli,
 │   │   │                          _root_path/_label, _version_lt
@@ -486,6 +486,13 @@ Token Save Manager Source/
 │   │   │                          CLI-invoked command cannot drift; run_sync/run_init
 │   │   │                          report a missing executable as a *result*, never an
 │   │   │                          exception. No Tk: the headless CLI imports this.
+│   │   ├── tokensave_versions.py  Which tokensave versions the Manager OBSERVED and
+│   │   │                          which releases lie in (from, to]. observe() records
+│   │   │                          last-seen + the latest upward transition (never
+│   │   │                          called an "upgrade"); span_for() is RECORDED /
+│   │   │                          OVERRIDDEN / STALE / UNKNOWN, and a damaged record
+│   │   │                          is UNKNOWN, never reseeded. Pure; applied on the Tk
+│   │   │                          main thread because cfg.save() is unsynchronised.
 │   │   ├── tokensave_rules.py     Is ~/.claude/rules/tokensave.md what the installed
 │   │   │                          tokensave writes? Generates via an isolated
 │   │   │                          `install --local`, guards the real state it cannot

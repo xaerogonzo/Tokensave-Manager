@@ -332,7 +332,7 @@ PROMPT_SNIPPETS: list[tuple[str, str]] = [
         "  1. tokensave_coupling — what is the target bound to\n"
         "  2. tokensave_dependency_depth — its layer-cake position\n"
         "  3. tokensave_callers + tokensave_callees — blast radius\n"
-        "  4. tokensave_rename_preview — if any renames involved\n"
+        "  4. tokensave_rename (dry run) — if any renames involved\n"
         "  5. tokensave_test_map — what tests cover it\n"
         "Output a step-by-step plan with file:line per step, ordered "
         "least-coupled first so the diff can ship in small reviewable "
@@ -537,6 +537,109 @@ PROMPT_SNIPPETS: list[tuple[str, str]] = [
         "that has callers outside the changed files."
     ),
 
+    # ─────────────────────── 🧰 v7.14 CORE TOOLSET + NEW TOOLS ───────────────
+    # tokensave 7.14 lists only 12 core tools; the rest are callable but
+    # invisible until tokensave_more(area) is called. Snippets that use a
+    # non-core tool say so, because a model that cannot see it will not try.
+    (
+        "🧰  Load the hidden tokensave tools",
+        "tokensave lists only its 12 core tools by default. Before this "
+        "task, call tokensave_more with area=[[navigate | analysis | git | "
+        "edit | memory | all]] to list the rest for this session, then "
+        "report which of these you can now see: tokensave_module_api, "
+        "tokensave_node, tokensave_affected, tokensave_todos, "
+        "tokensave_hotspots, tokensave_health. Do not fall back to Read or "
+        "Grep because a tool was missing from the list — ask for its area "
+        "first."
+    ),
+    (
+        "🏷  Safe rename",
+        "Rename [[old name]] to [[new name]] without breaking callers. If "
+        "tokensave_rename is not in your tool list, call tokensave_more "
+        "(area=edit) first.\n\n"
+        "  1. tokensave_rename symbol=[[old name]] new_name=[[new name]] "
+        "— dry run (the default). Read the counts per class: exact, "
+        "heuristic, ambiguous, text_only.\n"
+        "  2. tokensave_impact on the symbol — anything the graph cannot "
+        "see (dynamic calls, **kwargs, strings) is yours to check.\n"
+        "  3. Apply only when every site is exact. Otherwise list each "
+        "heuristic, ambiguous and text_only site as file:line and stop; "
+        "allow_heuristic=true is a decision for me, not a default.\n\n"
+        "Output: counts per class, the sites that need a human, and the "
+        "verdict — safe to apply, or why not."
+    ),
+    (
+        "📖  Read a symbol, not the file",
+        "Answer [[question about a function or file]] reading the least "
+        "code that will do.\n\n"
+        "  1. tokensave_body symbol=[[symbol]] — one symbol's source.\n"
+        "  2. tokensave_read mode=map file=[[path]] — the file's symbols, "
+        "when you do not yet know which one.\n"
+        "  3. tokensave_read mode=lines lines=A-B — only the range you "
+        "need. Use the harness Read only for the range you are about to "
+        "Edit.\n\n"
+        "Output: the answer, with file:line for every claim."
+    ),
+    (
+        "🏗  Who builds or touches this",
+        "For [[struct or field name]], list where it is created and used. "
+        "Both tools are outside the core set — call tokensave_more "
+        "(area=navigate) if they are not listed.\n\n"
+        "  1. tokensave_constructors — every place the struct is "
+        "instantiated as a literal.\n"
+        "  2. tokensave_field_sites — every read and write of the field.\n"
+        "  3. tokensave_impact — what else depends on the type.\n\n"
+        "Output: two tables (constructed at / read or written at) with "
+        "file:line, then a one-line note on any site that writes the "
+        "field outside its own module."
+    ),
+    (
+        "🧬  Type family",
+        "Show everything related to [[trait, interface or class]]. Call "
+        "tokensave_more (area=navigate) first if these are not listed.\n\n"
+        "  1. tokensave_type_hierarchy — all implementors and extenders.\n"
+        "  2. tokensave_impls — impl blocks for the trait or type.\n"
+        "  3. tokensave_callers on the trait's methods — who depends on "
+        "the abstraction rather than a concrete type.\n\n"
+        "Output: a tree of the hierarchy with file:line, then any "
+        "implementor that no caller reaches through the abstraction."
+    ),
+    (
+        "🔎  Find by signature or similar name",
+        "Find [[what you are looking for]] when you do not know the exact "
+        "name. Call tokensave_more (area=navigate) if these are not "
+        "listed.\n\n"
+        "  1. tokensave_signature_search — match on return type, "
+        "parameter substring, async or visibility.\n"
+        "  2. tokensave_similar — symbols with similar names.\n"
+        "  3. tokensave_search with the best candidate to confirm it.\n\n"
+        "Output: the top 5 candidates as name | file:line | signature, "
+        "and which one you would pick and why."
+    ),
+    (
+        "🧹  Pre-commit quality scan",
+        "Check the files I changed before I commit. Call tokensave_more "
+        "(area=analysis) if these are not listed.\n\n"
+        "  1. tokensave_simplify_scan — duplication, dead code, coupling "
+        "and complexity in the changed files.\n"
+        "  2. tokensave_doc_coverage — public symbols I added without a "
+        "docstring.\n"
+        "  3. tokensave_affected — tests that cover the change.\n\n"
+        "Output: findings ranked by how much they would cost to fix "
+        "later, each with file:line. Say plainly if there are none."
+    ),
+    (
+        "🚚  Port progress",
+        "Track porting [[source directory]] to [[target directory]]. Call "
+        "tokensave_more (area=all) if these are not listed.\n\n"
+        "  1. tokensave_port_status — what exists in the source but not "
+        "yet in the target.\n"
+        "  2. tokensave_port_order on the source — leaves first, "
+        "dependents after.\n\n"
+        "Output: the next 5 symbols to port, in order, each with its "
+        "dependencies already ported, plus the percentage done."
+    ),
+
     # ─────────────────────── 🔄 UPGRADE INTEGRATION ──────────────────────────
     (
         "🔄  Integration audit (after upgrade)",
@@ -547,14 +650,21 @@ PROMPT_SNIPPETS: list[tuple[str, str]] = [
         "You are auditing a tokensave upgrade for TokenSave Manager.\n\n"
         "STEP 1 — What changed in tokensave?\n"
         "  NOTE: tokensave_changelog diffs THIS project's git refs — it\n"
-        "  does NOT enumerate tokensave's own tool roster. Instead, read\n"
-        "  tokensave's upstream release notes for every version after the\n"
-        "  one you had installed:\n"
+        "  does NOT enumerate tokensave's own tool roster. The report above\n"
+        "  has an '### Upgrade span' section: its Coverage line is the\n"
+        "  REQUIRED set of versions to review. For EVERY version listed,\n"
+        "  including those marked [skipped] (e.g. v7.13.0 -> v7.14.1 skips\n"
+        "  v7.14.0), read the full upstream release notes — the report\n"
+        "  truncates long notes and says so:\n"
         "    gh release view vX.Y.Z --repo aovestdipaperino/tokensave\n"
-        "  (or fetch CHANGELOG.md from that repo). List every new tool,\n"
-        "  removed tool, renamed tool, and CLI/schema change. Extract tool\n"
-        "  names exactly (word boundaries — tokensave_auth_login ≠\n"
-        "  tokensave_auth, and tokensave_diff ≠ tokensave_diff_context).\n\n"
+        "  (or fetch CHANGELOG.md from that repo). The FROM version is\n"
+        "  context only, not a version to review. If the span State is\n"
+        "  UNKNOWN, STALE or PARTIAL, say so and ask me for the version I\n"
+        "  upgraded from instead of assuming nothing was skipped. List every\n"
+        "  new tool, removed tool, renamed tool, and CLI/schema change, per\n"
+        "  version. Extract tool names exactly (word boundaries —\n"
+        "  tokensave_auth_login ≠ tokensave_auth, and tokensave_diff ≠\n"
+        "  tokensave_diff_context).\n\n"
         "STEP 2 — Snippet coverage\n"
         "  Read src/prompts.py. For each NEW tool from Step 1, search the\n"
         "  snippet bodies for that exact tool name. List any that have no\n"

@@ -25,6 +25,7 @@ import tkinter as tk
 from typing import TYPE_CHECKING, Callable
 
 from constants import C, CREATE_NO_WINDOW, _BASE_DIR
+from helpers import tokensave_versions
 from helpers.detection import _version_lt
 from helpers.runtime import log
 
@@ -89,17 +90,26 @@ class UpdatePollerController:
         "https://api.github.com/repos/aovestdipaperino/tokensave/releases/latest"
     )
 
+    # How long the integration check waits for the main thread to record the
+    # observed version before it runs the script anyway.
+    _OBSERVE_WAIT_S = 5.0
+
     def __init__(
         self,
         cfg: "ManagerConfig",
         on_log: Callable,
         on_run: Callable,
         root,
+        post: "Callable | None" = None,
     ) -> None:
         self._cfg    = cfg
         self._on_log = on_log
         self._on_run = on_run
         self._root   = root
+        # Workers hand work to the Tk thread through `post` (App._post, the
+        # queue-backed pump that is safe from any thread). The fallback is for
+        # a caller with no pump; the application always injects one.
+        self._post = post or (lambda fn, *a: root.after(0, fn, *a))
 
         self._current_version:        str | None = None
         self._available_version:      str | None = None
@@ -257,7 +267,19 @@ class UpdatePollerController:
         ).start()
 
     def _integration_check_worker(self, script: str, fix_mode: bool = False) -> None:
-        """Background worker: run the integration check script and surface output."""
+        """Background worker: run the integration check script and surface output.
+
+        Observes the installed version first and waits for it to be recorded:
+        the check runs right after `tokensave upgrade`, before the re-probe has
+        finished, and the script reads the recorded transition from disk. A
+        failed probe or a timeout does not stop the check -- the script then
+        reports the Upgrade span as UNKNOWN rather than guessing.
+        """
+        version = self._probe_installed()
+        if version:
+            recorded = threading.Event()
+            self._post(self._apply_observation, version, recorded)
+            recorded.wait(self._OBSERVE_WAIT_S)
         args = [sys.executable, script]
         if self._available_version:
             args += ["--available", self._available_version]
@@ -452,8 +474,14 @@ class UpdatePollerController:
         "You are a tokensave integration auditor with full tool access.\n"
         "The pre-fetched integration report above contains live GitHub issue "
         "statuses from the manager's GraphQL queries.\n\n"
-        "STEP 1 — Call tokensave_changelog. List every new tool, removed tool,\n"
-        "  and CLI/schema change. Extract tool names exactly.\n\n"
+        "STEP 1 — The report's '### Upgrade span' Coverage line is the required\n"
+        "  set of tokensave versions. For EVERY version listed, including\n"
+        "  [skipped] ones, read the full release notes (`gh release view vX.Y.Z\n"
+        "  --repo aovestdipaperino/tokensave`; the report may truncate them).\n"
+        "  FROM is context, not a version to review. If the State is UNKNOWN,\n"
+        "  STALE or PARTIAL, flag the gap rather than assuming continuity. List\n"
+        "  every new tool, removed tool, and CLI/schema change, per version.\n"
+        "  Extract tool names exactly.\n\n"
         "STEP 2 — Read src/prompts.py. For each NEW tool from Step 1, check\n"
         "  snippet coverage. List any new tools with no covering snippet.\n\n"
         "STEP 3 — For each REMOVED tool from Step 1, check if any snippet body\n"
@@ -727,15 +755,10 @@ class UpdatePollerController:
 
     # ── Internal workers ──────────────────────────────────────────────────────
 
-    def _probe_worker(self) -> None:
-        """Best-effort read of the installed tokensave version.
-
-        Runs `tokensave --version` once at startup (background thread to avoid
-        blocking the GUI). Caches the version string; failures leave it as None.
-        After a successful probe, triggers a single update check immediately.
-        """
+    def _probe_installed(self) -> str | None:
+        """Run `tokensave --version`; the version string, or None if it can't be read."""
         if not self._cfg.tokensave_exe or not os.path.isfile(self._cfg.tokensave_exe):
-            return
+            return None
         try:
             r = subprocess.run(
                 [self._cfg.tokensave_exe, "--version"],
@@ -747,12 +770,40 @@ class UpdatePollerController:
                 errors="replace",
             )
         except (OSError, subprocess.TimeoutExpired):
-            return
-        out = (r.stdout or "").strip()
-        m = re.search(r"(\d+\.\d+\.\d+(?:\.\d+)?)", out)
-        if m:
-            self._current_version = m.group(1)
+            return None
+        m = re.search(r"(\d+\.\d+\.\d+(?:\.\d+)?)", (r.stdout or "").strip())
+        return m.group(1) if m else None
+
+    def _apply_observation(self, installed: str,
+                           done: "threading.Event | None" = None) -> None:
+        """Main thread: record the observed version, saving only when it changed.
+
+        On the main thread because ManagerConfig.save() is an unsynchronised
+        dump of `raw`; a worker saving while the UI mutates it can raise or
+        truncate the file. Tk runs these callbacks one at a time, so the
+        poller and the integration check cannot interleave, and whichever
+        arrives second sees an unchanged version and writes nothing.
+        """
+        try:
+            if tokensave_versions.observe(self._cfg.raw, installed):
+                self._cfg.save()
+        finally:
+            if done is not None:
+                done.set()
+
+    def _probe_worker(self) -> None:
+        """Best-effort read of the installed tokensave version.
+
+        Runs `tokensave --version` once at startup (background thread to avoid
+        blocking the GUI). Caches the version string; failures leave it as None.
+        After a successful probe, records the observation and triggers a
+        single update check immediately.
+        """
+        version = self._probe_installed()
+        if version:
+            self._current_version = version
             log.debug(f"tokensave installed version: {self._current_version}")
+            self._post(self._apply_observation, version)
             # Immediate one-shot check right after we know the local version.
             # Subsequent checks fire from the hourly poller.
             self._check_updates()

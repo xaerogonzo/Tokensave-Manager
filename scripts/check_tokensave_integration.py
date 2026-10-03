@@ -3,8 +3,13 @@
 Usage:
     python scripts/check_tokensave_integration.py [--available VERSION] [--fix]
                                                   [--fix-rules=<installed-sha>]
+                                                  [--from VERSION]
 
     --available VERSION  Show an upgrade nudge when VERSION is newer than installed.
+    --from VERSION       The version you upgraded FROM. Report-only: it picks the
+                         interval the Upgrade span covers and is never recorded.
+                         Needed once for an upgrade made before the Manager began
+                         recording version transitions; after that it is automatic.
     --fix                Apply pending lifecycle actions (archive resolved issues,
                          create stubs for new open issues). Without this flag the
                          script is read-only and only reports what would change.
@@ -88,6 +93,12 @@ _CHANGELOG = _ROOT / "CHANGELOG.md"
 _ISSUES    = _ROOT / "docs" / "upstream-issues"
 _PROMPTS   = _ROOT / "src" / "prompts.py"
 _TRACKED   = _ROOT / "docs" / "tracked-issues.json"
+
+# helpers/ is pure (no Tk), so importing it here is safe; the path insert is
+# what makes `python scripts/check_...py` work from any cwd.
+if str(_ROOT / "src") not in sys.path:
+    sys.path.insert(0, str(_ROOT / "src"))
+from helpers import tokensave_versions as _tv  # noqa: E402
 
 # ── Regexes ────────────────────────────────────────────────────────────────────
 
@@ -289,37 +300,98 @@ def _check_github_issues_graphql(
     return results
 
 
-def _fetch_tokensave_releases(
-    repo: str, gh_exe: str, installed_version: str
-) -> str:
-    """Fetch GitHub releases newer than installed_version and format as text.
+_RELEASE_PAGE_SIZE = 100
+_RELEASE_PAGE_CAP = 10        # hard stop: 1000 releases is far past any real span
+_NOTES_LIMIT = 1500
 
-    Uses a single API call (per_page=10, no --paginate).
-    Returns an empty string when no newer releases are found or gh fails.
+
+def _fetch_releases_back_to(
+    repo: str, gh_exe: str, from_version: str
+) -> tuple[list[dict], bool, str | None]:
+    """Page through GitHub releases until the FROM boundary is covered.
+
+    Returns ``(releases, complete, error)``. ``complete`` is True only when the
+    oldest release fetched is at or below ``from_version`` or GitHub ran out of
+    pages; hitting the page cap or a failed page leaves it False, because a
+    list that stopped early cannot prove nothing was skipped.
     """
-    data, _err = _fetch_gh_json(gh_exe, f"repos/{repo}/releases?per_page=10")
-    if not isinstance(data, list):
-        return ""
+    lo = _tv.version_key(from_version)
+    collected: list[dict] = []
+    for page in range(1, _RELEASE_PAGE_CAP + 1):
+        data, err = _fetch_gh_json(
+            gh_exe,
+            f"repos/{repo}/releases?per_page={_RELEASE_PAGE_SIZE}&page={page}")
+        if not isinstance(data, list):
+            return collected, False, err or "unexpected response"
+        collected.extend(data)
+        keys = [k for k in (_tv.version_key(r.get("tag_name")) for r in data
+                            if isinstance(r, dict)) if k]
+        if len(data) < _RELEASE_PAGE_SIZE or (keys and min(keys) <= lo):
+            return collected, True, None
+    return collected, False, f"stopped after {_RELEASE_PAGE_CAP} pages"
 
-    installed_tuple = _parse_version(installed_version)
-    newer = [
-        r for r in data
-        if _parse_version(r.get("tag_name", "")) > installed_tuple
-    ]
-    if not newer:
-        return ""
 
-    lines = [f"### GitHub releases — {repo} (since v{installed_version})\n"]
-    for rel in newer:
-        tag = rel.get("tag_name", "?")
-        published = (rel.get("published_at") or "")[:10]  # YYYY-MM-DD
-        body = (rel.get("body") or "").strip()
-        if len(body) > 1500:
-            body = body[:1500] + "\n  … (truncated)"
-        lines.append(f"\n#### {tag} — {published}")
+def _format_upgrade_span(
+    span, found, complete: bool, err: str | None, repo: str,
+    available: str | None,
+) -> str:
+    """Render the Upgrade span section. Pure, so every state is testable.
+
+    UNKNOWN and STALE never read as "no newer releases": they say the baseline
+    is untrustworthy and how to supply one.
+    """
+    out = ["\n### Upgrade span"]
+    if span.state in (_tv.UNKNOWN, _tv.STALE):
+        out.append(f"  State:    {span.state}")
+        if span.state == _tv.STALE:
+            out.append(
+                f"  The recorded transition {_tv.display(span.from_)} -> "
+                f"{_tv.display(span.to)} does not match the installed version.")
+        else:
+            out.append("  The previous installed version was not recorded.")
+        out.append(
+            "  The Manager cannot tell whether releases were skipped.\n"
+            "  Re-run with:  python scripts/check_tokensave_integration.py "
+            "--from <version>")
+        return "\n".join(out) + _newer_line(available, span)
+    state = span.state if complete else "PARTIAL"
+    out.append(f"  State:    {state}")
+    if not complete:
+        out.append(f"  Basis:    {span.state}")
+    out.append(f"  From:     {_tv.display(span.from_)}   "
+               "(context only, not part of the span)")
+    seen = f"; observed {span.observed_at}" if span.observed_at else ""
+    out.append(f"  To:       {_tv.display(span.to)}   (installed{seen})")
+    covered = ", ".join(f"{_tv.display(r.version)} [{r.status}]"
+                        for r in found.releases)
+    out.append(f"  Coverage: {covered or '(no releases listed in this interval)'}")
+    if not complete:
+        out.append(
+            f"  Release list NOT proven complete ({err}). Do not treat the "
+            "coverage above as the full span.")
+    elif not found.from_release_found:
+        out.append(
+            f"  GitHub has no release entry for {_tv.display(span.from_)} "
+            "itself; the list above is complete for the interval.")
+    for rel in found.releases:
+        out.append(f"\n#### {rel.tag} [{rel.status}] — {rel.published}")
+        body = rel.body
+        if len(body) > _NOTES_LIMIT:
+            out.append(
+                f"Notes: truncated to {_NOTES_LIMIT} chars — full text: "
+                f"gh release view {rel.tag} --repo {repo}")
+            body = body[:_NOTES_LIMIT]
         if body:
-            lines.append(body)
-    return "\n".join(lines)
+            out.append(body)
+    return "\n".join(out) + _newer_line(available, span)
+
+
+def _newer_line(available: str | None, span) -> str:
+    """One line for a release newer than what is installed; kept out of the span."""
+    if (available and span.to and _tv.version_key(available)
+            and _tv.version_key(available) > _tv.version_key(span.to)):
+        return f"\n  Newer release available: {_tv.display(available)}"
+    return ""
 
 
 # ── Snippet / CHANGELOG helpers ────────────────────────────────────────────────
@@ -447,13 +519,23 @@ def _check_upstream_issues() -> list[tuple[str, str | None]]:
 # ── CLI arg parsing ────────────────────────────────────────────────────────────
 
 def _parse_args() -> dict:
-    """Parse CLI arguments. Returns dict with keys: available, fix, fix_rules."""
-    result: dict = {"available": None, "fix": False, "fix_rules": ""}
+    """Parse CLI arguments. Returns dict with keys: available, fix, fix_rules, from.
+
+    ``--from`` is validated here so a typo fails loudly instead of becoming an
+    empty release list that reads like a clean audit.
+    """
+    result: dict = {"available": None, "fix": False, "fix_rules": "", "from": None}
     args = sys.argv[1:]
     i = 0
     while i < len(args):
         if args[i] == "--available" and i + 1 < len(args):
             result["available"] = args[i + 1]
+            i += 2
+        elif args[i] == "--from" and i + 1 < len(args):
+            frm = _tv.canonical(args[i + 1])
+            if frm is None:
+                sys.exit(f"--from: {args[i + 1]!r} is not a version (expected e.g. 7.13.0)")
+            result["from"] = frm
             i += 2
         elif args[i] == "--fix":
             result["fix"] = True
@@ -475,12 +557,16 @@ def _parse_args() -> dict:
 # never summarised into one "tokensave is current" line.
 
 _AUDIT_SCOPE = (
-    "  Audited automatically: installed binary version, running servers, index\n"
-    "  provenance, the Claude rules artifact, tracked issues, releases newer\n"
-    "  than the installed binary, upstream-issue docs, stale snippet refs.\n"
-    "  NOT audited: release notes of the version you upgraded FROM (the\n"
-    "  releases list above is empty after an upgrade), subcommand --help\n"
-    "  changes, closed upstream issues not in tracked-issues.json.\n"
+    "  Checked automatically: installed binary version, running servers, index\n"
+    "  provenance, the Claude rules artifact, tracked issues, upstream-issue\n"
+    "  docs, stale snippet refs.\n"
+    "  Upgrade span: the report INCLUDES the release notes of every version in\n"
+    "  (FROM, installed] -- including skipped ones -- when the span state is\n"
+    "  RECORDED, OVERRIDDEN or PARTIAL. Including them is not reviewing them:\n"
+    "  the audit step must still read each one. FROM itself is context, not a\n"
+    "  covered release. UNKNOWN / STALE means no interval was established.\n"
+    "  NOT checked: subcommand --help changes, closed upstream issues not in\n"
+    "  tracked-issues.json.\n"
     "  A clean report here is not a full integration review."
 )
 
@@ -833,23 +919,24 @@ def main() -> None:
 
     # ── GitHub releases since installed ───────────────────────────────────────
 
-    print("\n### GitHub releases (since installed version)")
-    if not gh_exe:
+    span = _tv.span_for(cfg, installed, cli["from"])
+    if cli["from"] and installed and span.state == _tv.UNKNOWN:
+        sys.exit(f"--from {cli['from']} must be older than the installed v{installed}")
+    if span.state in (_tv.UNKNOWN, _tv.STALE):
+        print(_format_upgrade_span(span, None, True, None, "", cli["available"]))
+    elif not gh_exe:
+        print("\n### Upgrade span")
+        print(f"  State:    {span.state}  "
+              f"{_tv.display(span.from_)} -> {_tv.display(span.to)}")
         print("  ⚠  GitHub CLI (gh) not found on PATH — cannot fetch release notes")
-    elif not installed:
-        print("  ⚠  Installed version unknown — cannot filter releases")
     else:
-        releases_text = ""
-        for entry in (tracked_entries or [{"repo": "aovestdipaperino/tokensave"}]):
-            repo = entry.get("repo", "")
-            if not repo:
-                continue
-            releases_text = _fetch_tokensave_releases(repo, gh_exe, installed)
-            break  # only the first repo for now
-        if releases_text:
-            print(releases_text)
-        else:
-            print("  ✓  No newer releases found (already on latest)")
+        repo = next((e.get("repo") for e in tracked_entries if e.get("repo")),
+                    "aovestdipaperino/tokensave")
+        fetched, complete, fetch_err = _fetch_releases_back_to(
+            repo, gh_exe, span.from_)
+        found = _tv.releases_in_span(fetched, span.from_, span.to)
+        print(_format_upgrade_span(
+            span, found, complete, fetch_err, repo, cli["available"]))
 
     # ── Upstream-issue docs ───────────────────────────────────────────────────
     # Keep this section for backwards compatibility — existing .md files are

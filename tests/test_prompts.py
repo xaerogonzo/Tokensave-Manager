@@ -125,3 +125,43 @@ def test_integration_audit_uses_release_notes_not_changelog_tool():
     assert audit is not None, "Integration audit snippet not found"
     assert "gh release view" in audit
     assert "Call tokensave_changelog" not in audit
+
+
+# ── tokensave 7.14: core toolset + tokensave_rename ──────────────────────────
+
+def test_rename_preview_is_not_recommended_any_more():
+    # 7.14.0 replaced it with tokensave_rename; the old name is only a hidden alias.
+    assert "tokensave_rename_preview" not in _all_bodies()
+
+
+@pytest.mark.parametrize("tool", [
+    "tokensave_rename", "tokensave_more", "tokensave_body", "tokensave_read",
+    "tokensave_constructors", "tokensave_field_sites",
+    "tokensave_type_hierarchy", "tokensave_impls",
+    "tokensave_signature_search", "tokensave_similar",
+    "tokensave_simplify_scan", "tokensave_doc_coverage",
+    "tokensave_port_status", "tokensave_port_order",
+])
+def test_v714_tool_has_a_snippet(tool):
+    assert re.search(rf"\b{re.escape(tool)}\b", _all_bodies()), \
+        f"no snippet references {tool}"
+
+
+_CORE_TOOLS = {
+    "tokensave_context", "tokensave_search", "tokensave_status",
+    "tokensave_read", "tokensave_body", "tokensave_files",
+    "tokensave_callers", "tokensave_callees", "tokensave_impact",
+    "tokensave_str_replace", "tokensave_multi_str_replace", "tokensave_more",
+}
+
+
+def test_a_snippet_using_a_hidden_tool_says_how_to_get_it():
+    # A model cannot call a tool it cannot see; the snippets added for 7.14's
+    # non-core tools must carry the tokensave_more instruction.
+    for title, body in PROMPT_SNIPPETS:
+        if not re.search(r"Safe rename|Who builds|Type family|signature or"
+                         r" similar|Pre-commit quality|Port progress", title):
+            continue
+        used = set(re.findall(r"\btokensave_[a-z_]+", body)) - _CORE_TOOLS
+        if used:
+            assert "tokensave_more" in body, f"{title!r} omits tokensave_more"

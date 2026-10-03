@@ -33,9 +33,15 @@ Status legend:
 
 ### Follow-ups
 
-- 🔮 **Report the release notes of the version upgraded FROM.** The check's
-  "releases since installed version" is structurally empty when run after an
-  upgrade, which its own instructions require.
+- ✅ **Report the release notes of every version upgraded THROUGH.** The
+  integration check's Upgrade span lists the releases in `(from, to]`, skipped
+  ones included, from a recorded version transition (`helpers/tokensave_versions.py`).
+- 🔮 **A "since last audited" baseline.** Only the latest transition is kept, so
+  two upgrades before an audit (7.13.0 → 7.14.0 → 7.14.1) report `from` as
+  7.14.0. Fixing it needs an acknowledgement step (the audit being run), which
+  is why it was left out.
+- 💭 **`_save_config` is not atomic** (`open(..., "w")` truncates first). Found
+  while placing the version observation; a crash mid-save loses the config.
 - 🔮 **A surface for `tokensave audit-edges`.** Comparative by design (index two
   commits, diff); a natural Doctor companion to graph trust.
 - 🔮 **File the two drafts** in `docs/upstream-issues/` (resync skips the Claude

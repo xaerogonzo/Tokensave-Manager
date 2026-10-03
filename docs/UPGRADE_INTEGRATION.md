@@ -77,8 +77,44 @@ Both open a scrollable report dialog showing:
 | Section | What it checks |
 |---------|----------------|
 | **Installed version** | Reads `tokensave --version` via the configured `tokensave_exe` |
+| **Upgrade span** | Which version you came from, and the release notes of every version in between, **including skipped ones** (see below) |
 | **Upstream issues** | Scans `docs/upstream-issues/*.md` for `STATUS:` lines; flags any that aren't FIXED / SHIPPED / MOOT |
 | **Stale snippet references** | Finds tool names in CHANGELOG `### Removed` blocks; checks whether any snippet body in `src/prompts.py` still calls them |
+
+### The Upgrade span: what you came from, and what you skipped
+
+Going from v7.13.0 straight to v7.14.1 skips v7.14.0, and its notes matter just as
+much as the latest release's. The Manager records the version it observes
+(`tokensave_last_seen_version`) and, when that goes up, a transition
+(`tokensave_version_transition`: `from`, `to`, `observed_at`). It is a *transition*
+rather than an upgrade because the Manager sees two different versions, not who
+replaced the binary; `observed_at` is when it noticed.
+
+The report lists exactly the releases in `(from, to]` — FROM itself is context, not a
+release to review — each marked `[skipped]` or `[installed]`, with its notes. A
+note cut at 1,500 characters says so and names the `gh release view` command.
+
+| State | Meaning |
+|-------|---------|
+| `RECORDED` | A transition is on file and its `to` is the installed version |
+| `OVERRIDDEN` | You passed `--from VERSION` |
+| `STALE` | The record names a different installed version (you downgraded, or swapped the binary since) |
+| `UNKNOWN` | Nothing usable on file: first run, a damaged value, or a contradictory record |
+| `PARTIAL` | The release list stopped before reaching FROM (a page failed, or the 10-page cap) — do not treat it as the whole span |
+
+`UNKNOWN` and `STALE` mean the Manager **cannot tell** whether anything was skipped; they
+never read as "no newer releases". An upgrade made before this feature existed has no
+record, so run it once with `--from <the version you left>`:
+
+```
+python scripts/check_tokensave_integration.py --from 7.13.0
+```
+
+`--from` is a one-off repair of missing history, not a substitute for the recorder: it is
+report-only and is never saved. Every transition observed after that is recorded
+automatically, including upgrades run from a shell. Only the latest transition is kept:
+two upgrades before an audit (7.13.0 → 7.14.0 → 7.14.1) report `from` as 7.14.0, so pass
+`--from` if you skipped an audit.
 
 ### From a terminal (source-only)
 
@@ -112,7 +148,9 @@ it into a **Claude Code CLI session** (`claude`) opened in this project's direct
 
 The prompt instructs Claude to:
 
-1. Call `tokensave_changelog` — reads tokensave's own release notes directly
+1. Read the upstream release notes for **every version in the report's Upgrade span**
+   (`gh release view vX.Y.Z`), including `[skipped]` ones — and ask for the missing FROM
+   version rather than assume continuity when the span is `UNKNOWN` / `STALE` / `PARTIAL`
 2. Cross-reference new/removed tool names against `src/prompts.py` snippet bodies
 3. Read `docs/upstream-issues/*.md` and flag which issues the changelog resolves
 4. Scan the modules that wrap a tokensave CLI command or MCP tool for wrappers
