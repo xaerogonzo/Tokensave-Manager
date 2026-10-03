@@ -236,7 +236,7 @@ These are the 48 tools Claude uses automatically when tokensave is active. You c
 | `tokensave_str_replace` | Find and replace text across the codebase. |
 | `tokensave_multi_str_replace` | Multiple find/replace operations in one call. |
 | `tokensave_insert_at` | Insert code at a specific location. |
-| `tokensave_ast_grep_rewrite` | Advanced AST-based structural rewriting (handles syntax correctly). |
+| `tokensave_ast_grep_rewrite` | Advanced AST-based structural rewriting (handles syntax correctly). **Only exists when the external `ast-grep` binary is on PATH at server start** (`winget install ast-grep.ast-grep` or `npm i -g @ast-grep/cli`, then restart the server); without it the tool is not listed and `tokensave tool` does not show it. |
 
 ### Git & Workflow
 
