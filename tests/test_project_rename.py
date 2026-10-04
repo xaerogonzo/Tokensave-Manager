@@ -67,7 +67,9 @@ def test_case_only_rename_is_not_a_collision(tmp_path):
     # treat that as "a file already exists at the new path".
     check = pr.validate_destination(str(old), new)
     assert check.ok
-    assert pr.is_case_only_rename(str(old), new)
+    # normcase folds case only on Windows; on POSIX Foo and foo are two
+    # different directories, so there is no case-only rename to detect.
+    assert pr.is_case_only_rename(str(old), new) is (os.name == "nt")
 
 
 def test_destination_collision_is_rejected(tmp_path):
