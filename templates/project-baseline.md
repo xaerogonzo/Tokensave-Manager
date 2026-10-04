@@ -79,6 +79,7 @@ This index is the cheap part; the files are the expensive part.
 |---|---|
 | compile to a standalone `.exe` | `docs/gotchas/nuitka-build-setup.md`, then `docs/gotchas/NUITKA_GOTCHAS.md` |
 | rename/move a directory, or chase a file lock | `docs/gotchas/windows-filesystem.md` |
+| rename a project folder that's indexed, bound to Claude, or in a worktree | `docs/gotchas/renaming-a-project-folder.md` |
 | touch a CustomTkinter/Tk view, or screenshot one | `docs/gotchas/customtkinter.md` |
 | build or change a plain Tk/ttk dialog | `docs/gotchas/tkinter-patterns.md` |
 | extract shared code into a package two projects use | `docs/gotchas/shared-python-packages.md` |

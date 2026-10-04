@@ -385,6 +385,27 @@ class SyncStatusController:
 
         self._run_project_batch(list(ts_projects), ["sync"], "Sync")
 
+    def cmd_force_sync_all(self) -> None:
+        """Full rebuild across every indexed project — not incremental.
+
+        Same project list as cmd_sync_all; the confirmation (one prompt for
+        the whole batch) and the sequential runner both already live in
+        run_batch's "force" op, so this only needs to gather the paths.
+        """
+        projects = self._get_projects()
+        if not projects:
+            messagebox.showinfo("No Projects", "No projects found.", parent=self._root)
+            return
+        ts_projects = [p for p in projects if p.get("has_tokensave", True)]
+        if not ts_projects:
+            messagebox.showinfo(
+                "No indexed projects",
+                "None of your projects have a tokensave index yet.\n\n"
+                "Right-click any project → ⚙ Retrofit… to add one.",
+                parent=self._root)
+            return
+        self.run_batch([p["path"] for p in ts_projects], "force")
+
     def _run_project_batch(self, projects_snapshot: list, argv: list,
                            label: str) -> None:
         """Shared sequential runner: stream one op over N projects."""

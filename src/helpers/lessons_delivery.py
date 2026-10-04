@@ -50,6 +50,7 @@ _GOTCHA_NAMES = (
     "moving-content-moves-its-guards",
     "nuitka-build-setup",
     "powershell-silent-failures",
+    "renaming-a-project-folder",
     "shared-python-packages",
     "tests-that-pass-without-testing",
     "tkinter-patterns",

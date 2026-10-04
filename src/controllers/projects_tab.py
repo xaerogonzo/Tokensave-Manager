@@ -49,6 +49,7 @@ from controllers.ai_tasks_ctrl import AITasksController
 from controllers.project_sync_ctrl import ProjectSyncCtrl
 from controllers.command_bar_ctrl import CommandBarCtrl
 from dialogs.assign_category import AssignCategoryDialog
+from dialogs.rename_project import RenameProjectDialog
 
 if TYPE_CHECKING:
     from state import ManagerConfig
@@ -58,6 +59,21 @@ if TYPE_CHECKING:
 #: against the same strings the menu uses.
 _STRICT_TREE_ON_LABEL = "🛡  Enable strict_tree…"
 _STRICT_TREE_OFF_LABEL = "🛡  Disable strict_tree…"
+
+
+def _all_project_iids(tree, parent: str = "") -> list:
+    """Every `proj:` iid under *parent* in *tree*, recursing through category
+    rows. A free function (not a method) so it doesn't count against
+    ProjectsTabController's method cap for what is pure tree traversal."""
+    if tree is None:
+        return []
+    out: list = []
+    for iid in tree.get_children(parent):
+        if iid.startswith("proj:"):
+            out.append(iid)
+        else:
+            out.extend(_all_project_iids(tree, iid))
+    return out
 
 #: The pin commands, which exist only while something reads the pin.
 #:
@@ -582,13 +598,42 @@ class ProjectsTabController:
                  "Adds a .tokensave/ directory. Your own files are not moved\n"
                  "or edited.")
 
-        btn_sync_all = ttk.Button(btns, text="↺↺  Sync All",
+        # Split button: the left part keeps the plain "Sync All" behaviour
+        # unchanged; the ▼ on the right is the discoverable, always-visible
+        # way to reach "Force Sync All" (full rebuild) without adding a 5th
+        # permanent toolbar button.
+        sync_all_frame = tk.Frame(btns, bg=C["base"])
+        sync_all_frame.pack(side=tk.LEFT)
+
+        btn_sync_all = ttk.Button(sync_all_frame, text="↺↺  Sync All",
                                   command=self._cmd_bar.cmd_sync_all)
         btn_sync_all.pack(side=tk.LEFT)
         _Tooltip(btn_sync_all,
                  "Re-index EVERY project in the list, one after another.\n\n"
                  "Can take several minutes on a long list. A single project\n"
-                 "can be synced from its right-click menu instead.")
+                 "can be synced from its right-click menu instead.\n\n"
+                 "For a full rebuild instead of an incremental update\n"
+                 "(e.g. after a tokensave upgrade), use the ▼ menu.")
+
+        # No literal "▼" in the text — ttk's Menubutton style already draws
+        # its own dropdown-indicator glyph, and the two stacked into a
+        # visible double arrow.
+        sync_all_menu_btn = ttk.Menubutton(sync_all_frame, width=1)
+        sync_all_menu_btn.pack(side=tk.LEFT, padx=(1, 0), fill=tk.Y)
+        sync_all_menu = tk.Menu(sync_all_menu_btn, tearoff=False,
+                                bg=C["base"], fg=C["text"])
+        sync_all_menu_btn["menu"] = sync_all_menu
+        sync_all_menu.add_command(
+            label="↺↺  Sync All (incremental)",
+            command=self._cmd_bar.cmd_sync_all)
+        sync_all_menu.add_command(
+            label="⚠  Force Sync All (full rebuild)…",
+            command=self._cmd_bar.cmd_force_sync_all)
+        _Tooltip(sync_all_menu_btn,
+                 "⚠ Force Sync All rebuilds the code graph from scratch for\n"
+                 "EVERY project — not an incremental update. Use after a\n"
+                 "tokensave upgrade, or when a project's index looks wrong.\n\n"
+                 "Much slower than Sync All; confirms once before it starts.")
 
         btn_refresh = ttk.Button(btns, text="⟳  Refresh",
                                  command=self._on_refresh)
@@ -823,6 +868,8 @@ class ProjectsTabController:
                             command=self._cmd_bar.cmd_retrofit_selected)
         maint_m.add_command(label="📁  Assign Category…",
                             command=self.cmd_assign_category)
+        maint_m.add_command(label="✏️  Rename Project…",
+                            command=self.cmd_rename_project)
         if self._menu_has_pin:
             maint_m.add_command(label=_AUTO_LABEL,
                                 command=self._cmd_bar.cmd_auto)
@@ -1321,4 +1368,38 @@ class ProjectsTabController:
             self._on_log(f"  Assigned {os.path.basename(path)} → {cat}{sub_str}", C["blue"])
         self._cfg.save()
         self._on_refresh()
+
+    def cmd_rename_project(self) -> None:
+        """Open the coordinated-rename dialog for the selected project.
+
+        See `helpers/project_rename.py` for why this is a migration (stop
+        tokensave, move the folder, repoint manager-config.json and
+        ~/.claude.json, repair git worktree metadata) rather than a plain
+        OS rename.
+        """
+        path = self._selected_path()
+        if not path:
+            return
+        RenameProjectDialog(self._root, self._cfg, path,
+                            on_done=self._on_rename_done, on_log=self._on_log)
+
+    def _on_rename_done(self, new_path: str, ok: bool) -> None:
+        """Refresh the tree and reselect the renamed project at its new path.
+
+        A plain `_on_refresh()` alone would leave the selection empty — the
+        old row is gone and nothing re-selects the new one automatically.
+        Reselecting via `selection_set` is what the Projects tab already
+        treats as the single source of truth for "the current project": it
+        fires `<<TreeviewSelect>>`, which routes to the Git/Ask tabs exactly
+        as a user's own click would (`_on_tree_select` -> `_on_project_select`).
+        """
+        self._on_refresh()
+        if not ok:
+            return
+        want = os.path.normcase(os.path.normpath(new_path))
+        for iid in _all_project_iids(self._tree):
+            if os.path.normcase(os.path.normpath(iid[5:])) == want:
+                self._tree.selection_set(iid)
+                self._tree.see(iid)
+                return
 

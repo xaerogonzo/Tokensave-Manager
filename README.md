@@ -121,7 +121,7 @@ The manager's design philosophy: **never force a choice you don't want to make**
 
 ### Code Intelligence — tokensave AND CodeGraph
 - **Two backends, one UI** — right-click a project to run tokensave's `↺ Sync / 📊 Status / ⟳ Force Re-sync / 🔍 Doctor` and CodeGraph's `🧠 CodeGraph Init / Sync / Status / Remove Index` from the same menu. The manager handles both lifecycles independently
-- **Sync All** — syncs every tokensave-indexed project sequentially with `[i/n]` progress logging; git-only and CodeGraph-only projects are skipped with a note
+- **Sync All** — syncs every tokensave-indexed project sequentially with `[i/n]` progress logging; git-only and CodeGraph-only projects are skipped with a note. The **▼** next to the button opens **Force Sync All**, which rebuilds the graph from scratch for every project instead of an incremental update — use it after a tokensave upgrade, when an index's extractor provenance is stale, or when a project's graph looks wrong
 - **Friendly install nudges** — clicking a CodeGraph action on a project without the tool installed opens a dialog explaining how to install (Settings → Integrations → CodeGraph → Install via npm)
 - **CodeGraph install button** — Settings → Integrations → CodeGraph has an **"Install via npm"** button that runs `npm install -g @colbymchenry/codegraph` in the background. Windows `EPERM`/`EACCES` failures (the common system-wide-Node trap) surface a specific hint about reinstalling Node per-user or running as admin
 - **Auto-detected paths** — both `tokensave_exe` and `codegraph_exe` auto-detect on save; `.cmd`-first Windows shim resolution handles npm-installed binaries correctly
@@ -308,7 +308,7 @@ The main tab. Shows all discovered tokensave projects grouped by category.
 **Toolbar buttons:**
 - **+ Scaffold** — initialise a new project with Claude instructions and/or tokensave index
 - **⚙ Retrofit Existing** — add tokensave + Claude instructions to a project that already exists
-- **↺↺ Sync All** — sync every project in the list one by one
+- **↺↺ Sync All** — sync every project in the list one by one; its **▼** menu offers **Force Sync All** (full rebuild, not incremental) as a second, always-visible option
 - **⟳ Refresh** — re-scan search roots now (also happens automatically every 60s)
 - **⚙ Settings** — jump to the Settings tab
 
@@ -662,6 +662,7 @@ of them landed.
 |---|---|
 | ⚙ Retrofit… | Add tokensave rules, `BASIC_INSTRUCTIONS.md`, or Nuitka build files |
 | 📁 Assign Category… | Move the project to a different category or sub-category |
+| ✏️ Rename Project… | Rename the project's folder as a coordinated migration — stops any running tokensave server first, then repoints the Manager's own config and Claude Code's per-project trust record so you don't lose them |
 | 🗑 Remove Index… | Delete `.tokensave/` and drop the project from the list. Project files untouched |
 | Auto-detect | Clear the pin and return to automatic project selection |
 
