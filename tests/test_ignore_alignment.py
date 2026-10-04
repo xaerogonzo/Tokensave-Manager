@@ -24,6 +24,7 @@ COPY = "project-baseline.md"
 LESSONS = "docs/LESSONS.md"
 BASIC = "BASIC_INSTRUCTIONS.md"
 CLAUDE = "CLAUDE.md"
+GOTCHA = "docs/gotchas/x.md"
 
 
 def _pair(companion, referrer, kind=ia.KIND_BASELINE_COPY):
@@ -71,6 +72,55 @@ def test_ignored_companion_under_a_visible_referrer_is_only_reported(ref):
 def test_aligned_states_do_nothing(ref, comp):
     result = ia.decide([_pair(COPY, CLAUDE)], _both(ref, comp))
     assert result.patterns == () and not result.notes and not result.unknown
+
+# ── a committed head above a local-only middle ───────────────────────────
+# Paid for by Polyshield: CLAUDE.md tracked, BASIC_INSTRUCTIONS.md ignored, so
+# the baseline "followed" BASIC into .gitignore and a fresh clone was left with
+# a committed CLAUDE.md pointing at files that do not exist.
+
+def _chain(claude, basic, copy, gotcha=None):
+    paths = {CLAUDE: ia.PathFact(ia.FS_EXISTS, claude),
+             BASIC: ia.PathFact(ia.FS_EXISTS, basic),
+             COPY: ia.PathFact(ia.FS_EXISTS, copy)}
+    pairs = [_pair(BASIC, CLAUDE, ia.KIND_BASIC), _pair(COPY, BASIC)]
+    if gotcha is not None:
+        paths[GOTCHA] = ia.PathFact(ia.FS_EXISTS, gotcha)
+        pairs.append(_pair(GOTCHA, COPY, ia.KIND_GOTCHA))
+    return pairs, ia.Facts(ia.REPO, paths)
+
+
+def test_a_tracked_head_over_a_local_middle_is_not_ignored_further():
+    pairs, facts = _chain(ia.TRACKED, ia.LOCAL, ia.OPEN)
+    result = ia.decide(pairs, facts)
+    assert result.patterns == ()
+    assert any(COPY in note and "committed" in note for note in result.notes)
+
+
+def test_the_same_shape_already_ignored_is_reported_not_silent():
+    pairs, facts = _chain(ia.TRACKED, ia.LOCAL, ia.LOCAL)
+    result = ia.decide(pairs, facts)
+    assert result.patterns == ()
+    assert any(COPY in note and "committed" in note for note in result.notes)
+
+
+def test_a_committed_ancestor_reaches_every_level_below():
+    pairs, facts = _chain(ia.TRACKED, ia.LOCAL, ia.LOCAL, gotcha=ia.OPEN)
+    assert ia.decide(pairs, facts).patterns == ()
+
+
+@pytest.mark.parametrize("claude", [ia.LOCAL, ia.OPEN])
+def test_no_committed_ancestor_still_follows_the_referrer(claude):
+    pairs, facts = _chain(claude, ia.LOCAL, ia.OPEN)
+    assert ia.decide(pairs, facts).patterns == ("/" + COPY,)
+
+
+def test_a_referrer_cycle_terminates():
+    pairs = [_pair(BASIC, COPY, ia.KIND_BASIC), _pair(COPY, BASIC)]
+    facts = ia.Facts(ia.REPO, {
+        BASIC: ia.PathFact(ia.FS_EXISTS, ia.LOCAL),
+        COPY: ia.PathFact(ia.FS_EXISTS, ia.OPEN)})
+    assert ia.decide(pairs, facts).patterns == ("/" + COPY,)
+
 
 
 def test_a_missing_companion_is_never_acted_on():
@@ -207,6 +257,20 @@ def test_a_tracked_referrer_adds_nothing(tmp_path):
     result = ia.align(str(root), GIT, [_pair(COPY, CLAUDE)])
     assert result.changed_files == ()
     assert not (root / ".gitignore").exists()
+
+@needs_git
+def test_a_tracked_head_over_an_ignored_middle_writes_no_gitignore(tmp_path):
+    root = _repo(tmp_path, gitignore="BASIC_INSTRUCTIONS.md\n",
+                 tracked=[CLAUDE], files=[BASIC, COPY])
+    _run(root, "add", ".gitignore")
+    _run(root, "commit", "-q", "-m", "ignore")
+    before = (root / ".gitignore").read_bytes()
+    result = ia.align(str(root), GIT, [_pair(BASIC, CLAUDE, ia.KIND_BASIC),
+                                       _pair(COPY, BASIC)])
+    assert result.confirmed == () and result.changed_files == ()
+    assert (root / ".gitignore").read_bytes() == before
+    assert "project-baseline.md" in _porcelain(root)
+
 
 
 @needs_git

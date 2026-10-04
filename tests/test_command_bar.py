@@ -141,6 +141,12 @@ def test_cmd_sync_all_always_delegates(subs):
     subs["sync"].cmd_sync_all.assert_called_once_with()
 
 
+def test_cmd_force_sync_all_always_delegates(subs):
+    ctrl, _gp, _rt = _make(subs, path=None)
+    ctrl.cmd_force_sync_all()
+    subs["sync"].cmd_force_sync_all.assert_called_once_with()
+
+
 def test_cmd_scaffold_always_delegates(subs):
     ctrl, _gp, _rt = _make(subs, path=None)
     ctrl.cmd_scaffold()

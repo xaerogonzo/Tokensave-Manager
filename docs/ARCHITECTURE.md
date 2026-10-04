@@ -84,7 +84,7 @@ Token Save Manager Source/
 │   │                              writes <script>.report.json and exits non-zero on failure.
 │   │                              Lifecycle here; observation lives in helpers/drive_ledger.py.
 │   │
-│   ├── helpers/                  129 modules of pure / IO helpers — no UI deps.
+│   ├── helpers/                  130 modules of pure / IO helpers — no UI deps.
 │   │   ├── config.py              _load_config, _save_config, _migrate_config
 │   │   ├── detection.py           _detect_git/_gh/_npm/_codegraph/_claude_cli,
 │   │   │                          _root_path/_label, _version_lt
@@ -503,6 +503,15 @@ Token Save Manager Source/
 │   │   ├── tokensave_daemon.py    Find running `tokensave serve` processes, and say
 │   │   │                          honestly how confident we are about which project
 │   │   │                          each one serves.
+│   │   ├── project_rename.py      Rename a project folder as a coordinated migration,
+│   │   │                          not an atomic OS rename: gathers independent hazard
+│   │   │                          facts (attributed tokensave servers, a locked/nested
+│   │   │                          git worktree, session-transcript evidence, the
+│   │   │                          Manager's own CWD), moves the directory (or runs
+│   │   │                          `git worktree move`/`repair` for a linked worktree),
+│   │   │                          and repoints manager-config.json's path-keyed fields
+│   │   │                          plus ~/.claude.json's project key (non-clobbering
+│   │   │                          merge, re-verified after writing).
 │   │   ├── codegraph_daemon.py    List + stop running CodeGraph MCP daemons.
 │   │   │                          Fail-open: any subprocess or parse problem yields
 │   │   │                          [] rather than a wrong answer.
@@ -580,7 +589,7 @@ Token Save Manager Source/
 │   │   ├── io_utils.py            Shared IO helpers for the patcher modules.
 │   │   └── ui.py                  UI helpers shared across controllers and dialogs.
 │   │
-│   ├── dialogs/                   58 dialog / panel modules — a tk.Toplevel per file,
+│   ├── dialogs/                   59 dialog / panel modules — a tk.Toplevel per file,
 │   │                          plus the panels the bigger dialogs are built from.
 │   │   ├── release_wizard.py      ReleaseWizardDialog + _ReleaseCtx (paired)
 │   │   ├── mcp_config.py          MCPConfigDialog
@@ -601,6 +610,9 @@ Token Save Manager Source/
 │   │   ├── new_branch.py          NewBranchDialog
 │   │   ├── switch_branch.py       SwitchBranchDialog (+ static pick() helper)
 │   │   ├── assign_category.py     AssignCategoryDialog
+│   │   ├── rename_project.py      RenameProjectDialog — preflight findings, typed
+│   │   │                          confirmation on session evidence, re-preflight
+│   │   │                          immediately before mutating (helpers/project_rename.py)
 │   │   ├── untrack_ignored.py     UntrackIgnoredDialog
 │   │   ├── tool_manager.py        v4.8 ToolManagerDialog — unified install/update/
 │   │   │                          uninstall for both code-graph tools in one dialog.
@@ -1096,7 +1108,7 @@ app.py
   ├── constants.py       — palette, regex, paths
   ├── theme.py           — _Tooltip
   ├── helpers/*          — pure / IO helpers (no UI)
-  ├── dialogs/*          — 58 tk.Toplevel / panel modules
+  ├── dialogs/*          — 59 tk.Toplevel / panel modules
   └── controllers/*      — 28 tab and sub-controllers
         └── controllers/* each import the dialogs they instantiate
             (lazy in-handler imports for any cross-dialog cycle risk —

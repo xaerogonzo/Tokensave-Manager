@@ -104,6 +104,9 @@ class CommandBarCtrl:
     def cmd_sync_all(self) -> None:
         self._sync.cmd_sync_all()
 
+    def cmd_force_sync_all(self) -> None:
+        self._sync.cmd_force_sync_all()
+
     def cmd_status(self) -> None:
         path = self.get_path()
         if path and self.require_tokensave(path):

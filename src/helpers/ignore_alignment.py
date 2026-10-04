@@ -297,11 +297,42 @@ def _unknown_all(root, rels, paths, reason) -> dict:
 
 # ── deciding (pure) ──────────────────────────────────────────────────────
 
+def _committed_ancestor(pair, by_companion: dict, facts: Facts) -> str:
+    """The nearest committed file above *pair*'s referrer, or "".
+
+    A companion follows its referrer into local-only, but only when nothing
+    committed reaches it: a tracked CLAUDE.md over an ignored
+    BASIC_INSTRUCTIONS.md must not drag the baseline into .gitignore, or a
+    fresh clone holds a committed include of a file it cannot have (Polyshield).
+    """
+    if facts.of(pair.referrer_rel).git != LOCAL             or facts.of(pair.companion_rel).git not in (OPEN, LOCAL):
+        return ""
+    seen, current = {pair.companion_rel}, pair.referrer_rel
+    while current not in seen:
+        seen.add(current)
+        upper = by_companion.get(current)
+        if upper is None:
+            return ""
+        current = upper.referrer_rel
+        if facts.of(current).git == TRACKED:
+            return current
+    return ""
+
+
+def _reach_note(pair, anchor: str, comp_git: str) -> str:
+    return ("%s is %s while the committed %s reaches it through local-only "
+            "%s; clones and worktrees won't get it unless it is committed"
+            % (pair.companion_rel, "ignored" if comp_git == LOCAL
+               else "left open", anchor, pair.referrer_rel))
+
+
 def decide(pairs, facts: Facts) -> Alignment:
     """What alignment each pair needs. Acts only on complete, known facts."""
     pending, notes, unknown = [], [], []
     if facts.repo in (NO_REPO, NOT_OWN_REPO):
         return Alignment()
+    pairs = tuple(pairs)
+    by_companion = {p.companion_rel: p for p in pairs}
     for pair in pairs:
         comp, ref = facts.of(pair.companion_rel), facts.of(pair.referrer_rel)
         if facts.repo != REPO or UNKNOWN in (comp.git, ref.git):
@@ -311,7 +342,10 @@ def decide(pairs, facts: Facts) -> Alignment:
             continue
         if comp.fs != FS_EXISTS or ref.fs != FS_EXISTS:
             continue
-        if ref.git == LOCAL and comp.git == OPEN:
+        anchor = _committed_ancestor(pair, by_companion, facts)
+        if anchor:
+            notes.append(_reach_note(pair, anchor, comp.git))
+        elif ref.git == LOCAL and comp.git == OPEN:
             pending.append(pair)
         elif ref.git == LOCAL and comp.git == TRACKED:
             notes.append("%s is committed while %s is local-only; "

@@ -559,8 +559,9 @@ class TestContextMenuGrouping:
         # "Generate VS Code workspace..." beside the tasks generator; 40
         # since the PyScope cascade added Analyze / Status / Register /
         # Open in PyScope; 41 with "Bind to Claude Code..."; 42 with
-        # "Instructions..." (the instruction-chain fleet view).
-        assert len(cmds) == 42, f"expected 42 commands, found {len(cmds)}"
+        # "Instructions..." (the instruction-chain fleet view); 43 with
+        # "Rename Project..." beside "Assign Category...".
+        assert len(cmds) == 43, f"expected 43 commands, found {len(cmds)}"
 
     def test_the_everyday_actions_stay_one_click_away(self):
         """Burying Sync in a submenu would make the common case worse.
