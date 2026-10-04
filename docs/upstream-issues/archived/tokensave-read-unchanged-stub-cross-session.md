@@ -1,5 +1,6 @@
 <!--
-STATUS: FILED 2026-09-13 as issue #556 - awaiting maintainer response.
+STATUS: CLOSED — verified via GitHub API 2026-10-01
+  PRIOR: FILED 2026-09-13 as issue #556 - awaiting maintainer response.
   https://github.com/aovestdipaperino/tokensave/issues/556
 
 DUPLICATE SEARCH (gh search issues, repo-scoped, 2026-09-13):
