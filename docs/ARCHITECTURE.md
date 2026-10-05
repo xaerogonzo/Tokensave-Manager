@@ -229,9 +229,11 @@ Token Save Manager Source/
 │   │   │                          since_last_commit / since_last_tag / custom),
 │   │   │                          changed_file_paths. Roadmap-6 Tier B.
 │   │   ├── read_nudge.py          Post-read advisory hook. Renders + installs the
-│   │   │                          PostToolUse:Read hook that tells Claude tokensave_read
-│   │   │                          can serve an indexed file, after a whole-file Read,
-│   │   │                          or (PAGED, v2) on the second Read slice of one file.
+│   │   │                          PostToolUse:Read|Bash|PowerShell hook that tells Claude
+│   │   │                          tokensave_read can serve an indexed file, after a
+│   │   │                          whole-file Read, or (PAGED, v2) on the second Read
+│   │   │                          slice of one file; v3 adds shell paging (sed -n / head /
+│   │   │                          tail, and a large cat) with the parser living in the hook.
 │   │   │                          Emits additionalContext ONLY -- never a permission key,
 │   │   │                          since `allow` would skip the permission prompt. Owns ONE
 │   │   │                          entry structurally (marker + body hash), so a foreign Read
@@ -562,7 +564,9 @@ Token Save Manager Source/
 │   │   ├── claude_hooks.py        One owned Claude Code hook, described by a
 │   │   │                          HookSpec row rather than written twice. Shared
 │   │   │                          by read_nudge and session_note: interpreter
-│   │   │                          resolution, structural ownership, backup +
+│   │   │                          resolution, ownership BY SCRIPT (a matcher change
+│   │   │                          migrates in place; tests/test_claude_hooks.py runs the
+│   │   │                          invariants over every spec), backup +
 │   │   │                          atomic settings write, install AND uninstall.
 │   │   ├── claude_tasks.py        Pure functions for scanning Claude Code sessions and
 │   │   │                          git worktrees.

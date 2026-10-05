@@ -851,6 +851,32 @@ def _auto_archive_resolved(number: int, title: str) -> "str | None":
 
 # ── Main report ────────────────────────────────────────────────────────────────
 
+_DEFAULT_REPO = "aovestdipaperino/tokensave"
+
+
+def _tracked_repo() -> str:
+    """The upstream repo named by tracked-issues.json, else the default."""
+    return next((e.get("repo") for e in _load_tracked_issues() if e.get("repo")),
+                _DEFAULT_REPO)
+
+
+def _print_install_dates(installed: str, exe: str, gh_exe: str, repo: str) -> None:
+    """Print when the installed version was released and when the binary landed."""
+    released, err = None, None
+    if not gh_exe:
+        err = "GitHub CLI (gh) not on PATH"
+    else:
+        data, err = _fetch_gh_json(gh_exe, f"repos/{repo}/releases/tags/v{installed}")
+        if isinstance(data, dict):
+            released = data.get("published_at") or None
+            err = None if released else "release has no published date"
+    try:
+        mtime = os.path.getmtime(exe)
+    except OSError:
+        mtime = None
+    print("\n".join(_tv.format_install_dates(released, err, mtime)))
+
+
 def main() -> None:
     cli = _parse_args()
     fix_mode: bool = cli["fix"]
@@ -861,13 +887,14 @@ def main() -> None:
     gh_exe = shutil.which("gh") or ""
 
     fix_banner = "  [--fix mode: lifecycle mutations will be applied]\n" if fix_mode else ""
-    print(f"\n## Tokensave integration check — {date.today()}\n{fix_banner}")
+    print(f"\n## Tokensave integration check — run {date.today()}\n{fix_banner}")
 
     # ── Version ──────────────────────────────────────────────────────────────
 
     installed = _get_installed_version(tokensave_exe)
     if installed:
         print(f"Installed:  v{installed}")
+        _print_install_dates(installed, tokensave_exe, gh_exe, _tracked_repo())
     else:
         print("Installed:  ⚠ could not determine (tokensave_exe not set or not found)")
 
@@ -931,7 +958,7 @@ def main() -> None:
         print("  ⚠  GitHub CLI (gh) not found on PATH — cannot fetch release notes")
     else:
         repo = next((e.get("repo") for e in tracked_entries if e.get("repo")),
-                    "aovestdipaperino/tokensave")
+                    _DEFAULT_REPO)
         fetched, complete, fetch_err = _fetch_releases_back_to(
             repo, gh_exe, span.from_)
         found = _tv.releases_in_span(fetched, span.from_, span.to)

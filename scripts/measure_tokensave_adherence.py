@@ -43,8 +43,6 @@ import datetime
 import glob
 import json
 import os
-import re
-import shlex
 import sys
 
 sys.path.insert(0, os.path.join(
@@ -83,55 +81,8 @@ TS_READ = "ts_read"
 COLUMNS = (WHOLE, ELIGIBLE_COL, SLICE_FOR_EDIT, SLICE_LOCATING, SHELL_PAGE,
            TS_READ)
 
-#: A newline separates commands too: multi-line shell calls are common here.
-_SEGMENT_SPLIT = re.compile(r"&&|\|\||;|\||\n")
-_PAGERS = frozenset({"cat", "head", "tail", "get-content", "gc", "type"})
-
-
-def shell_page_target(command):
-    """The file a shell command pages through, or "". Pure.
-
-    Recognises `sed -n <range>p FILE`, `cat FILE`, `head`/`tail [...] FILE` and
-    `Get-Content FILE`, only for an extension the hook would advise on. A
-    heredoc (`cat > x <<EOF`), `sed -i`, and a pager reading a pipe (no file
-    argument) are not pages. Deliberately narrow: `grep -n PATTERN FILE` is a
-    search, which tokensave's own PreToolUse hook already polices.
-    """
-    command = command or ""
-    # A heredoc's BODY is data, often Python, and must not be read as commands.
-    if "<<" in command:
-        command = command.split("<<", 1)[0]
-    for segment in _SEGMENT_SPLIT.split(command):
-        try:
-            words = shlex.split(segment, posix=True)
-        except ValueError:
-            continue
-        target = _segment_target(words)
-        if target:
-            return target
-    return ""
-
-
-def _segment_target(words):
-    if not words:
-        return ""
-    verb = words[0].lower()
-    if any(w.startswith((">", "<")) or w in (">", ">>", "<<") for w in words):
-        return ""
-    if verb == "sed":
-        if "-n" not in words or any(w.startswith("-i") for w in words):
-            return ""
-        files = [w for w in words[1:] if not w.startswith("-")
-                 and not re.fullmatch(r"\d*,?\$?\d*p", w)]
-    elif verb in _PAGERS:
-        files = [w for w in words[1:] if not w.startswith("-")
-                 and not re.fullmatch(r"\d+", w)]
-    else:
-        return ""
-    for word in files:
-        if os.path.splitext(word)[1].lower() in NUDGE.NUDGE_EXTENSIONS:
-            return word
-    return ""
+#: The shell-page parser is the hook's own, imported -- see the module docstring.
+shell_page_target = NUDGE.shell_page_target
 
 
 def _parse_timestamp(text):

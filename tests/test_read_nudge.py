@@ -375,7 +375,7 @@ def test_install_writes_one_entry_and_reports_current(paths):
 
     entries = _load(settings_path)["hooks"]["PostToolUse"]
     assert len(entries) == 1
-    assert entries[0]["matcher"] == "Read"
+    assert entries[0]["matcher"] == "Read|Bash|PowerShell"
     assert entries[0]["hooks"][0]["args"] == [script_path]
     # `command` + `args`, never one quoted string -- no shell quoting involved.
     assert entries[0]["hooks"][0]["type"] == "command"
@@ -618,7 +618,8 @@ def test_the_measurement_defines_no_second_copy_of_the_predicate():
         source = handle.read()
     for forbidden in ("def classify_read", "NUDGE_EXTENSIONS = ",
                       "EXCLUDED_SPECIAL = ", "MIN_RESPONSE_BYTES = ",
-                      "def project_with_tokensave_metadata"):
+                      "def project_with_tokensave_metadata",
+                      "def _segment_target", "def _segment_page"):
         assert forbidden not in source, (
             "the measurement re-implements %r instead of importing it"
             % forbidden)
@@ -843,3 +844,89 @@ def test_the_report_prints_no_headline_ratio(tmp_path):
     assert "per eligible" not in text
     for column in ("slice_loc", "sh_page", "ts_read", "explore", "implement"):
         assert column in text
+
+
+# ── Shell paging: sed -n / head / tail / cat through Bash ─────────────────
+#
+# Measured 2026-10-05: Sonnet 5.5 made 0 tokensave calls against 265 Bash calls
+# in one OpenChem session. Paging had moved off Read slices onto the shell,
+# where a Read-only matcher cannot see it.
+
+def _shell_payload(command, root, session="sh-s", size=300, tool="Bash"):
+    return _payload(tool_name=tool, tool_input={"command": command},
+                    tool_response={"stdout": "x" * size},
+                    cwd=str(root), session_id=session)
+
+
+def test_the_hook_covers_the_shell_tools():
+    assert "Bash" in rn.HOOK_MATCHER and "PowerShell" in rn.HOOK_MATCHER
+
+
+def test_the_first_shell_slice_is_silent_and_the_second_advises_once(
+        nudge, isolated_state):
+    root, _source = _make_project(isolated_state)
+    first = nudge.decide(_shell_payload("sed -n 1,40p src/mod.py", root))
+    second = nudge.decide(_shell_payload("head -80 src/mod.py", root))
+    third = nudge.decide(_shell_payload("tail -n 30 src/mod.py", root))
+    assert first == (nudge.SLICED, "")
+    assert second == (nudge.PAGED, nudge.SHELL_PAGED_ADVICE)
+    assert third == (nudge.ALREADY_NUDGED, "")
+
+
+def test_a_read_slice_and_a_shell_slice_count_as_paging_together(
+        nudge, isolated_state):
+    root, source = _make_project(isolated_state)
+    assert nudge.decide(_slice_payload(source, root, session="sh-s"))[0] == \
+        nudge.SLICED
+    verdict, advice = nudge.decide(_shell_payload("sed -n 5,9p src/mod.py", root))
+    assert (verdict, advice) == (nudge.PAGED, nudge.SHELL_PAGED_ADVICE)
+
+
+def test_a_big_cat_advises_like_a_whole_file_read_and_a_small_one_does_not(
+        nudge, isolated_state):
+    root, _source = _make_project(isolated_state)
+    assert nudge.decide(_shell_payload("cat src/mod.py", root, size=100)) == \
+        (nudge.SMALL, "")
+    assert nudge.decide(_shell_payload("cat src/mod.py", root, size=9000)) == \
+        (nudge.ELIGIBLE, nudge.ADVICE)
+    assert nudge.decide(_shell_payload("cat src/mod.py", root, size=9000))[0] \
+        == nudge.ALREADY_NUDGED
+
+
+def test_powershell_get_content_is_a_page(nudge, isolated_state):
+    root, _source = _make_project(isolated_state)
+    assert nudge.decide(_shell_payload("Get-Content src/mod.py", root,
+                                       size=9000, tool="PowerShell"))[0] == \
+        nudge.ELIGIBLE
+
+
+@pytest.mark.parametrize("command", [
+    "uv run pytest -q", "grep -n def src/mod.py", "sed -i s/a/b/ src/mod.py",
+    "cat build.log", "git status",
+])
+def test_commands_that_are_not_pages_are_silent(nudge, isolated_state, command):
+    root, _source = _make_project(isolated_state)
+    for _ in range(3):
+        assert nudge.decide(_shell_payload(command, root)) == \
+            (nudge.NOT_A_PAGE, "")
+
+
+def test_shell_paging_keeps_the_project_gate(nudge, isolated_state):
+    root, _source = _make_project(isolated_state, with_metadata=False)
+    for _ in range(3):
+        assert nudge.decide(_shell_payload("sed -n 1,9p src/mod.py", root)) == \
+            (nudge.NO_METADATA_PROJECT, "")
+
+
+def test_shell_advice_never_carries_a_permission_key(nudge, tmp_path):
+    root, _source = _make_project(tmp_path)
+    outputs = []
+    for rng in ("1,9p", "20,30p"):
+        proc = _run_script(nudge, json.dumps(_shell_payload(
+            "sed -n %s src/mod.py" % rng, root)), state_dir=tmp_path)
+        assert proc.returncode == 0
+        outputs.append(proc.stdout.strip())
+    assert outputs[0] == ""
+    body = json.loads(outputs[1])
+    assert set(body["hookSpecificOutput"]) == {"hookEventName",
+                                               "additionalContext"}

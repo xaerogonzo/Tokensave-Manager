@@ -154,6 +154,28 @@ def span_for(raw: dict, installed, override=None) -> Span:
     return Span(STALE, frm, rec_to, observed)
 
 
+def format_install_dates(released: str | None, released_err: str | None,
+                         mtime: float | None) -> list[str]:
+    """The two dates beside ``Installed:``, as indented report lines.
+
+    ``released`` is the GitHub ``published_at`` of the installed tag; ``mtime``
+    is when the binary was last WRITTEN, which a copy or rebuild also moves, so
+    it is labelled as that and never as "upgraded on". Either may be unknown and
+    then says so with the reason: a missing line would read as "nothing to
+    report" (BASIC_INSTRUCTIONS D1b).
+    """
+    if released:
+        rel = f"  Released:   {released[:10]}   (GitHub release published)"
+    else:
+        rel = f"  Released:   unknown ({released_err or 'no release date found'})"
+    if mtime is None:
+        disk = "  On disk:    unknown (tokensave_exe not found)"
+    else:
+        day = datetime.datetime.fromtimestamp(mtime).date().isoformat()
+        disk = f"  On disk:    {day}   (tokensave.exe last written)"
+    return [rel, disk]
+
+
 @dataclasses.dataclass(frozen=True)
 class SpanRelease:
     tag: str
