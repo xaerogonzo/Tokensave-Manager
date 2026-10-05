@@ -162,3 +162,34 @@ class TestParseFrom:
         with pytest.raises(SystemExit) as exc:
             mod._parse_args()
         assert "not a version" in str(exc.value)
+
+
+class TestInstallDates:
+    def test_both_known(self):
+        noon = __import__("datetime").datetime(2026, 10, 2, 12).timestamp()
+        out = tv.format_install_dates("2026-10-02T12:15:13Z", None, noon)
+        assert out[0] == "  Released:   2026-10-02   (GitHub release published)"
+        assert out[1].startswith("  On disk:    2026-10-02")
+        assert "last written" in out[1]
+
+    def test_release_unknown_says_why_and_is_not_omitted(self):
+        out = tv.format_install_dates(None, "GitHub CLI (gh) not on PATH", 0.0)
+        assert out[0] == "  Released:   unknown (GitHub CLI (gh) not on PATH)"
+        assert len(out) == 2
+
+    def test_disk_unknown(self):
+        out = tv.format_install_dates("2026-10-02T00:00:00Z", None, None)
+        assert "unknown" in out[1]
+
+    def test_script_prints_both_dates(self, monkeypatch, capsys):
+        mod = _load()
+        monkeypatch.setattr(mod, "_fetch_gh_json", lambda *a, **k: (
+            {"published_at": "2026-10-02T12:15:13Z"}, None))
+        mod._print_install_dates("7.14.1", __file__, "gh", "o/r")
+        out = capsys.readouterr().out
+        assert "Released:   2026-10-02" in out and "On disk:" in out
+
+    def test_script_without_gh_reports_unknown(self, capsys):
+        mod = _load()
+        mod._print_install_dates("7.14.1", __file__, "", "o/r")
+        assert "Released:   unknown (GitHub CLI (gh) not on PATH)" in capsys.readouterr().out

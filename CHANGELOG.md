@@ -3,6 +3,9 @@
 
 ## [Unreleased]
 
+### Added
+- (tokensave) **The integration check now says when the installed tokensave was released and written to disk.** Its only date was the run date. `Installed: vX` now carries `Released:` (GitHub release `published_at`) and `On disk:` (binary last-written); an unreachable `gh` prints `unknown (<reason>)` instead of dropping the line. The header reads `check — run <date>`.
+
 ### Fixed
 - (instructions) **A committed CLAUDE.md over an ignored BASIC_INSTRUCTIONS.md no longer drags the baseline into `.gitignore`.** Ignore-alignment made each companion follow its referrer, so on Polyshield the baseline, `docs/LESSONS.md` and 17 gotchas were ignored under a tracked `CLAUDE.md` that includes them, and a fresh clone held a broken chain. `decide` now adds no ignore rule when a committed file reaches the companion through the chain, and reports it instead (also for entries already written). A wholly local-only chain (KicomAI) is unchanged.
 - (instructions) **The BASIC_INSTRUCTIONS template still carried the absolute baseline include.** `templates/claude-md-template.md` kept `@D:\...\project-baseline.md`, which Claude Code never loads, after the loader learned to rewrite it to `@project-baseline.md`. Scaffolded files were right, but a hand copy was not, and an untouched scaffold never equalled the template, so the placeholder check could not match it. The template now says what the loader writes, and `test_baseline_copy.py` pins it.
