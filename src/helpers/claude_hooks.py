@@ -150,10 +150,17 @@ def hook_entry(spec: HookSpec, interpreter: str, script_path: str) -> dict:
 
 
 def is_owned_entry(spec: HookSpec, entry: dict, script_path: str) -> bool:
-    """Ours, structurally — never "an entry that looks a bit like ours"."""
+    """Ours, structurally — never "an entry that looks a bit like ours".
+
+    Identity is the SCRIPT an entry runs, and nothing else. The matcher is a
+    property of the entry that this Manager chooses and may change between
+    versions: v3 of the read nudge widened it from `Read` to
+    `Read|Bash|PowerShell`, and while the matcher was part of identity the old
+    entry stopped being ours, `install` appended a second one and
+    `installed_state` still said CURRENT. A different matcher on our script is
+    drift (see `installed_state`), not somebody else's hook.
+    """
     if not isinstance(entry, dict):
-        return False
-    if spec.matcher and entry.get("matcher") != spec.matcher:
         return False
     target = os.path.normcase(os.path.abspath(script_path))
     for handler in entry.get("hooks") or []:
@@ -218,6 +225,10 @@ def installed_state(spec: HookSpec, settings_path: str = "",
         return DUPLICATE, ("%d owned %s entries; exactly one is expected"
                            % (len(indices), spec.event))
 
+    entry = ((settings.get("hooks") or {}).get(spec.event) or [])[indices[0]]
+    if (entry.get("matcher") or "") != spec.matcher:
+        return STALE, ("%s matches %r; this Manager generates %r"
+                       % (HALF_ENTRY, entry.get("matcher") or "", spec.matcher))
     if not os.path.exists(script_path):
         return STALE, "%s present, but %s is missing" % (HALF_ENTRY, script_path)
     try:
