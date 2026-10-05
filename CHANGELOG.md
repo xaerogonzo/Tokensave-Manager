@@ -4,6 +4,7 @@
 ## [Unreleased]
 
 ### Added
+- (tokensave) **The read nudge now covers shell paging.** Measured on Sonnet 5.5 in an OpenChem session: 0 tokensave calls against 265 Bash, because paging had moved from `Read` slices to `sed -n` / `head` / `tail` / `cat`, which a `Read`-only matcher never saw. Hook v3 matches `Read|Bash|PowerShell`; the second page of one file (Read or shell) advises once, a large `cat` advises like a whole-file read, same extension/project/size gates, never a permission key. The shell parser now lives in the hook and the adherence script imports it. The installed hook reads STALE until reinstalled from Doctor.
 - (tokensave) **The integration check now says when the installed tokensave was released and written to disk.** Its only date was the run date. `Installed: vX` now carries `Released:` (GitHub release `published_at`) and `On disk:` (binary last-written); an unreachable `gh` prints `unknown (<reason>)` instead of dropping the line. The header reads `check — run <date>`.
 
 ### Fixed
