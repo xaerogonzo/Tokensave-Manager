@@ -42,6 +42,7 @@ GOTCHA_DIR = "docs/gotchas"
 
 _GOTCHA_NAMES = (
     "agent-scripting",
+    "agent-tool-contract",
     "ci-green-for-the-wrong-reason",
     "claude-md-external-includes",
     "customtkinter",

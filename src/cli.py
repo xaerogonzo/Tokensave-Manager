@@ -57,7 +57,7 @@ from cli_support import (
     AUTO_BASE, Result, _envelope,
     _resolve_project, _Prerequisite, _load_manager_config,
     _tokensave_exe_from, _tokensave_exe, _is_frozen,
-    _resolve_paths, _filter_findings,
+    _resolve_paths, _filter_findings, describe_cli,
 )
 
 from cli_test_commands import _cmd_test_gaps, _cmd_test_run, _cmd_tests
@@ -763,7 +763,13 @@ def _cmd_commands(args) -> Result:
     extension had to have a folder open before it could learn what it may
     invoke.
     """
-    return Result(EXIT_OK, commands.as_json(),
+    # `as_json()` is the table; `describe_cli` adds what only the parser knows
+    # (flags, and the derived unattended-safe set). Merged here rather than in
+    # `helpers/commands.py`, which cannot import the parser. Keys are additive:
+    # nothing the table already emitted changes.
+    payload = commands.as_json()
+    payload.update(describe_cli(_build_parser(), UNATTENDED_SAFE_COMMANDS))
+    return Result(EXIT_OK, payload,
                   human=f"{len(commands.COMMANDS)} command(s)")
 
 
