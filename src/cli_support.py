@@ -20,6 +20,7 @@ call time for the same reason - see `cli_test_commands`.
 """
 from __future__ import annotations
 
+import argparse
 import json
 import os
 
@@ -72,6 +73,65 @@ def _envelope(command: str, result: Result) -> dict:
         "findings": to_envelope(result.findings),
         "warnings": result.warnings,
         "error": result.error or None,
+    }
+
+
+#: Whether the tool's commands act on a project it is POINTED AT (`--project`)
+#: or on the project it lives in. The Manager is the first kind; see
+#: docs/AGENT_TOOL_CONTRACT.md for why the two are never conflated.
+TOOL_SCOPE = "target"
+
+
+def _describe_arg(action: argparse.Action) -> dict:
+    """One flag, as a machine-readable row. Reads the parser, never restates it."""
+    if isinstance(action, (argparse._StoreTrueAction, argparse._StoreFalseAction)):
+        kind = "flag"
+    elif action.type is float:
+        kind = "number"
+    elif action.type is int:
+        kind = "integer"
+    else:
+        kind = "string"
+    default = action.default
+    if not isinstance(default, (str, int, float, bool, list, type(None))):
+        default = None
+    return {
+        "flag": max(action.option_strings, key=len),
+        "kind": kind,
+        "required": bool(action.required),
+        "multiple": action.nargs in ("*", "+"),
+        "default": default,
+        "choices": list(action.choices) if action.choices else None,
+        "help": action.help or "",
+    }
+
+
+def describe_cli(parser: argparse.ArgumentParser,
+                 unattended_safe: frozenset) -> dict:
+    """The part of `commands --json` that only the argument parser knows.
+
+    Derived from the parser itself, so a flag added to a subcommand appears here
+    without anyone editing a second list. `unattended_safe` is passed in rather
+    than recomputed: `cli.UNATTENDED_SAFE_COMMANDS` is the one definition, and
+    this module cannot import `cli` back.
+
+    Keyed by the CLI subcommand name, which is the `cli` field of a table row;
+    an operation with no CLI form has no entry. It reaches into argparse's
+    `_actions` because argparse offers no public way to enumerate a parser.
+    """
+    subs = next(a for a in parser._actions
+                if isinstance(a, argparse._SubParsersAction))
+    invocation = {}
+    for name, sp in subs.choices.items():
+        invocation[name] = {
+            "unattended_safe": name in unattended_safe,
+            "args": [_describe_arg(a) for a in sp._actions
+                     if not isinstance(a, argparse._HelpAction)],
+        }
+    return {
+        "tool": {"name": parser.prog, "cli_version": APP_VERSION,
+                 "schema_version": SCHEMA_VERSION, "scope": TOOL_SCOPE},
+        "invocation": invocation,
     }
 
 

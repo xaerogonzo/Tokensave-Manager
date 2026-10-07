@@ -1041,6 +1041,8 @@ Token Save Manager Source/
     ├── ARCHITECTURE.md             This file
     ├── ARCHITECTURE_TOKENSAVE.md   tokensave tool internals reference
     ├── AGENT_ARCHITECTURE.md       LocalAgent loop + tool registry + propose-only rules
+    ├── AGENT_TOOL_CONTRACT.md      How a project becomes callable by an agent session: CLI as the
+    │                               canonical seam, target- vs self-scoped tools, side-effect classes
     ├── AGENT_BACKENDS.md           How dispatch_llm / _call_llm resolve a configured
     │                               provider to a transport, and what each tier supports
     ├── UPGRADE_INTEGRATION.md      Tokensave upgrade workflow — 4-step sequence (upgrade →

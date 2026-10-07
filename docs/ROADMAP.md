@@ -23,6 +23,16 @@ Status legend:
 
 ---
 
+## Agent tool contract — phase 1 shipped
+
+- ✅ `docs/AGENT_TOOL_CONTRACT.md`: CLI as the canonical agent-facing seam, target-scoped vs self-scoped tools, side-effect classes, discovery pointer.
+- ✅ **Manifest argument schema + tool identity** in `commands --json`: `tool` and `invocation` keys, derived from the parser (`cli_support.describe_cli`), additive only.
+- 🔮 **Fleet delivery** of the contract doc, a short baseline pointer and optional `.agent-tool.json`, through the existing baseline/lessons path. Starts with a read-only audit of which projects have a headless CLI.
+- 🔮 **A CLI template** for projects that only have a GUI drive; offered per project, never bulk-written.
+- 💭 **`--plan` / `--apply`** for the mutating commands (`sync`, `commit-request`, `request`). None has a preview mode today.
+- 💭 **MCP adapter generated from the manifest**, delegating to the CLI. Check Claude Code's current stdio-MCP and Skills behaviour first.
+- 🧊 **A project-local `.claude/skills/` skill.** `.claude/` is gitignored, so it would never travel with the repo; the delivered-doc channel is the right one.
+
 ## tokensave 7.12 integration — shipped
 
 - ✅ Integration check reports binary / servers / graph provenance / rules
