@@ -13,6 +13,14 @@ verification technique available here also the least repeatable one.
 TOKENSAVE_MANAGER_DRIVE=scripts/drive/geometry-sweep.json python src/app.py
 ```
 
+With a real Manager already open (hidden to the tray counts), that command would
+raise the open window and exit. Run through the launcher instead, which works on
+a scratch copy of the config and never writes the real one:
+
+```bash
+python scripts/drive/run_isolated.py scripts/drive/geometry-sweep.json
+```
+
 Steps run on Tk's own timer inside the real process: no cursor, no focus
 stealing, and `shot` renders with `PrintWindow`, so **the window can sit
 behind whatever you are working in**. Never drive this app with mouse or

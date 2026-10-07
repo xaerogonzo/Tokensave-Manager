@@ -83,8 +83,10 @@ Token Save Manager Source/
 │   │                              Also `expect` / `expect_clean` / `log_report`: the run
 │   │                              writes <script>.report.json and exits non-zero on failure.
 │   │                              Lifecycle here; observation lives in helpers/drive_ledger.py.
+│   │                              Runs beside a real Manager through scripts/drive/run_isolated.py
+│   │                              (scratch config, no lock, no request poller, no tray).
 │   │
-│   ├── helpers/                  130 modules of pure / IO helpers — no UI deps.
+│   ├── helpers/                  131 modules of pure / IO helpers — no UI deps.
 │   │   ├── config.py              _load_config, _save_config, _migrate_config
 │   │   ├── detection.py           _detect_git/_gh/_npm/_codegraph/_claude_cli,
 │   │   │                          _root_path/_label, _version_lt
@@ -398,6 +400,10 @@ Token Save Manager Source/
 │   │   ├── instructions_split.py  Moves a lesson log out of the always-loaded
 │   │   │                          file. Reports the repo population keyed to the
 │   │   │                          filename it is about to empty.
+│   │   ├── isolated_run.py        When a driven run may sit beside a real Manager: the
+│   │   │                          drive variable AND a config override that is not the
+│   │   │                          install's own file. Proven, never requested; either
+│   │   │                          alone keeps the single-instance lock.
 │   │   ├── install_identity.py    Where am I (FIRST_RUN/SAME/MOVED) and who owns
 │   │   │                          the fleet (HERE/ELSEWHERE/SPLIT/UNOWNED). Two
 │   │   │                          questions, never conflated.
