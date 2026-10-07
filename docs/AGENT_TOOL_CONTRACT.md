@@ -5,7 +5,7 @@ How a project makes its own functionality callable by an agent session
 people and agents **adding** a callable surface to a project. It is not a help
 topic: the in-app Help corpus is deliberately limited to user-facing documents.
 
-Status: **contract; phases 1-2 shipped.** The Manager's own surface (`src/cli.py`,
+Status: **contract; phases 1-3 shipped.** The Manager's own surface (`src/cli.py`,
 `helpers/commands.py`) already implements most of it; the gaps are listed at the
 end. Live-session, MCP and cross-provider verification are deferred.
 
@@ -153,6 +153,7 @@ Also present (phase 2): the tool-identity block and per-command argument rows in
 
 Not yet: a `--plan` / `--apply` split for the mutating
 commands (`sync`, `commit-request`, `request`), none of which has a preview mode
-today; delivery of this contract and `.agent-tool.json` to the fleet (phase 3);
-a CLI template for projects that have only a GUI drive (phase 4); an MCP adapter
+today; `.agent-tool.json` for projects other than the three self-scoped CLIs, which
+need a CLI first (phase 3 delivered the contract itself as the
+`docs/gotchas/agent-tool-contract.md` lesson, not as a baseline paragraph); a CLI template for projects that have only a GUI drive (phase 4); an MCP adapter
 generated from the manifest (later, and only delegating to the CLI).

@@ -84,6 +84,7 @@ This index is the cheap part; the files are the expensive part.
 | build or change a plain Tk/ttk dialog | `docs/gotchas/tkinter-patterns.md` |
 | extract shared code into a package two projects use | `docs/gotchas/shared-python-packages.md` |
 | write files from a script, or run a bulk rename | `docs/gotchas/agent-scripting.md` |
+| call a project's own code as a tool, or give it a CLI an agent can run | `docs/gotchas/agent-tool-contract.md` |
 | write or trust a test, a guard or a mutation run | `docs/gotchas/tests-that-pass-without-testing.md` |
 | read a CI result, or write a workflow | `docs/gotchas/ci-green-for-the-wrong-reason.md` |
 | check a window, dialog or layout by hand | `docs/gotchas/verifying-a-gui.md` |

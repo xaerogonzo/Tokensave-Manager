@@ -1776,6 +1776,7 @@ stay on disk (expensive, read when the table says to).
 | `customtkinter.md` | Appearance mode at module scope, the second-`CTk()`-root flake, `after()` raising from a worker thread after teardown, one-row-per-item gridding, off-screen capture vs a hidden desktop |
 | `shared-python-packages.md` | `sys.modules` aliasing vs re-export and the monkeypatch contract, PEP 420 across two distributions, Nuitka and editable installs, declaring a dependency in every install path |
 | `agent-scripting.md` | Backslash escapes eaten between tool call and Python (silent tabs and BEL characters in paths), assert-before-write so a failed edit is a no-op, CRLF in multi-line searches, bulk renames rewriting the document that explains the rename |
+| `agent-tool-contract.md` | Calling a project's own code as a tool, or giving it a CLI an agent can run: the `.agent-tool.json` pointer, "no surface yet" rather than a guess, and ten failures that raised nothing (a returned value read as a pass, silently ignored parameters, non-deterministic defaults, computed-not-verified, undeclared side effects, one envelope under a deadline). The specification stays in `docs/AGENT_TOOL_CONTRACT.md` |
 
 **Admission criteria**, stated in the baseline so the corpus does not rot into a
 junk drawer: a gotcha earns a place when it (a) cost more than ~15 minutes,
