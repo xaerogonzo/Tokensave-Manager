@@ -224,8 +224,28 @@ class TasksController:
         """
         return "sess:%s:%s" % (row.get("agent") or "claude", row["session_id"])
 
+    @classmethod
+    def _dedupe_sessions(cls, sessions: list[dict]) -> list[dict]:
+        """One row per identity, keeping the most recently active.
+
+        A session id is not unique on disk: a worktree's transcript folder and
+        its sibling can each hold a file announcing the same `sessionId`
+        (measured: 1 of 342 on this machine). The scanner is right to report
+        both -- they are two files -- but a Treeview iid must be unique, and
+        `insert` raises TclError on a repeat. Order of first appearance is
+        kept, so a list already sorted newest-first stays that way.
+        """
+        best: dict[str, dict] = {}
+        for row in sessions:
+            iid = cls._sess_iid(row)
+            held = best.get(iid)
+            if held is None or (row.get("last_activity") or 0) > (held.get("last_activity") or 0):
+                best[iid] = row
+        return list(best.values())
+
     def _update_sess_tree(self, sessions: list[dict]) -> None:
         tree = self._sess_tree
+        sessions = self._dedupe_sessions(sessions)
         current_iids = set(tree.get_children())
         new_iids = {self._sess_iid(s) for s in sessions}
 
