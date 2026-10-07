@@ -578,7 +578,21 @@ PROMPT_SNIPPETS: list[tuple[str, str]] = [
         "  3. tokensave_read mode=lines lines=A-B — only the range you "
         "need. Use the harness Read only for the range you are about to "
         "Edit.\n\n"
+        "If tokensave_body returns a candidate list instead of a body, the "
+        "name is ambiguous: re-call with Type.Member or the node_id.\n\n"
         "Output: the answer, with file:line for every claim."
+    ),
+    (
+        "🔎  Find call sites (literal)",
+        "Find where [[function or method name]] is called.\n\n"
+        "  1. tokensave_search query=\".Name(\" literal=true — calls "
+        "through an object.\n"
+        "  2. tokensave_search query=\"Name(\" literal=true — every call.\n"
+        "  3. tokensave_callers — resolved callers, once you have the "
+        "node id (pass ids=true).\n\n"
+        "Use grep only for a regex or a file type the index skips. "
+        "Output: file:line for every call site, and a note if the "
+        "result was truncated."
     ),
     (
         "🏗  Who builds or touches this",

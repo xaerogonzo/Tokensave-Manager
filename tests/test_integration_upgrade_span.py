@@ -193,3 +193,17 @@ class TestInstallDates:
         mod = _load()
         mod._print_install_dates("7.14.1", __file__, "", "o/r")
         assert "Released:   unknown (GitHub CLI (gh) not on PATH)" in capsys.readouterr().out
+
+
+def test_came_from_line_names_previous_version_in_header():
+    mod = _load()
+    raw = {tv.KEY_LAST_SEEN: "7.15.0", tv.KEY_TRANSITION: {
+        "from": "7.14.1", "to": "7.15.0", "observed_at": "2026-10-07T17:10:59Z"}}
+    line = mod._came_from_line(tv.span_for(raw, "7.15.0"))
+    assert "v7.14.1" in line and "2026-10-07" in line
+
+
+def test_came_from_line_admits_unknown_rather_than_omitting():
+    mod = _load()
+    line = mod._came_from_line(tv.span_for({}, "7.15.0"))
+    assert "not recorded" in line and "UNKNOWN" in line
