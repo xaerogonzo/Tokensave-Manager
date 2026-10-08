@@ -660,6 +660,29 @@ exists because every badge here is `✓`/`⚠`/`✗` and a cp1252 console raises
 `UnicodeEncodeError` inside the step handler, which stops the timer chain and
 looks exactly like the app hanging.
 
+**A drive cannot start while a real Manager is open, so run it isolated.** The
+single-instance mutex makes a second launch raise the user's window and exit
+(hidden to the tray counts as open), and closing the user's instance is not an
+option: it may hold unsaved Settings or an operation in flight. Use the launcher:
+
+```bash
+python scripts/drive/run_isolated.py scripts/drive/geometry-sweep.json
+```
+
+It copies the real `manager-config.json` into a scratch folder, points
+`TOKENSAVE_MANAGER_CONFIG` at the copy and starts the app with the drive. **The
+lock is skipped only when isolation is proven** (`helpers/isolated_run.py`): the
+drive variable set AND a config override that is not the install's own file.
+Either alone changes nothing, because two processes saving one config is
+last-writer-wins. An isolated run also leaves out the extension-request poller
+(both instances would answer one request), the tray and the update poller, keeps
+its logs beside the scratch config, and titles its window `TokenSave Manager
+[drive]` so nothing that looks for "the Manager" can pick it. It never creates
+the mutex, so `manager_running()` still describes the real Manager.
+
+What it does not isolate: a drive step that writes a PROJECT (wire, sync, commit)
+writes the real repository. Report and screenshot steps are the safe ones.
+
 The same pattern lives in Fortuna Lab (`FORTUNA_DRIVE`) and OpenChem Studio
 (`OPENCHEM_DRIVE`); this is the Tk port of it.
 

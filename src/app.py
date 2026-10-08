@@ -55,6 +55,7 @@ from dialogs.untrack_ignored import UntrackIgnoredDialog
 from helpers.commit_messages import _suggest_commit_message
 from helpers.git import _find_tracked_but_ignored, _is_git_repo, _is_local_git_repo
 from helpers.index_provenance import begin_full_index, report_full_index
+from helpers.isolated_run import DRIVE_TITLE_SUFFIX, is_isolated
 from helpers.project_discovery import find_projects, get_pinned
 from helpers.source_watch import (
     changed_files,
@@ -101,7 +102,13 @@ class App(UiPumpMixin, tk.Tk):
         # No-op unless TOKENSAVE_MANAGER_DRIVE names a script.
         import debug_drive
         debug_drive.begin(self)
-        self.title("TokenSave Manager")
+        # An isolated driven run is a SECOND instance beside a real one: its own
+        # config and logs, no lock, and none of the services that act on shared
+        # state. It is told apart by title as well, so nothing that looks for
+        # "the Manager window" can mistake it for the user's.
+        self._isolated = is_isolated()
+        self.title("TokenSave Manager" + (DRIVE_TITLE_SUFFIX if self._isolated
+                                          else ""))
         self.geometry("760x600")
         self.minsize(600, 520)
         self.configure(bg=C["base"])
@@ -146,7 +153,8 @@ class App(UiPumpMixin, tk.Tk):
             root=self,
             post=self._post,
         )
-        self._update_poller.start()
+        if not self._isolated:      # a second poller is a second GitHub call
+            self._update_poller.start()
         log.info("=" * 60)
         log.info("TokenSave Manager started")
         log.info(f"  exe      : {self._cfg.tokensave_exe}")
@@ -159,20 +167,27 @@ class App(UiPumpMixin, tk.Tk):
         # Soon, not in a minute: the extension files a request and then tells
         # the user to look at the Manager, so the first check has to be close
         # to startup rather than one refresh period away.
-        from controllers.requests_ctrl import RequestsController
-        self._requests = RequestsController(
-            root=self,
-            cfg=self._cfg,
-            get_projects=lambda: self._projects,
-            open_commit_dialog=self._open_commit_dialog,
-            get_current_proc=lambda: self._current_proc,
-            get_project_list=lambda: getattr(self, "projects", []) or [],
-        )
-        self._requests.start()
-        self._tray_mgr = TrayManager(self, self._cfg, self._on_tray_quit,
-                                     can_quit=self._confirm_quit)
-        self._tray_mgr.setup()
-        self.protocol("WM_DELETE_WINDOW", self._tray_mgr.hide)
+        # An isolated run must not answer the extension's requests: the inbox is
+        # the user's, and both instances would act on the same request.
+        if not self._isolated:
+            from controllers.requests_ctrl import RequestsController
+            self._requests = RequestsController(
+                root=self,
+                cfg=self._cfg,
+                get_projects=lambda: self._projects,
+                open_commit_dialog=self._open_commit_dialog,
+                get_current_proc=lambda: self._current_proc,
+                get_project_list=lambda: getattr(self, "projects", []) or [],
+            )
+            self._requests.start()
+            self._tray_mgr = TrayManager(self, self._cfg, self._on_tray_quit,
+                                         can_quit=self._confirm_quit)
+            self._tray_mgr.setup()
+            self.protocol("WM_DELETE_WINDOW", self._tray_mgr.hide)
+        else:
+            # No tray icon to hide to, so closing the window ends the run.
+            self.protocol("WM_DELETE_WINDOW",
+                          lambda: (self._on_tray_quit(), self.destroy()))
         # The three post-launch checks, and the stagger that keeps their
         # dialogs and log writes off each other, live together in one place.
         from controllers.startup_checks_ctrl import StartupChecksController
@@ -1132,11 +1147,13 @@ def main() -> None:
     Launch TokenSave Manager.bat) and by the Nuitka-bundled .exe.
 
     Behaviour matches the legacy monolith's __main__ guard:
-      • Single-instance lock via _acquire_instance_lock
+      • Single-instance lock via _acquire_instance_lock, except for an
+        ISOLATED driven run (see helpers/isolated_run.py), which proves it
+        cannot touch the real install and so may run beside one
       • If already running, bring the existing window to front and exit
       • Otherwise, construct App() and enter the Tk main loop
     """
-    if not _acquire_instance_lock():
+    if not is_isolated() and not _acquire_instance_lock():
         _bring_existing_to_front()
         sys.exit(0)
     app = App()

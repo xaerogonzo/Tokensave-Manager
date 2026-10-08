@@ -49,8 +49,30 @@ def _resolve_base_dir(env: dict, argv0: str, module_file: str) -> str:
 
 _BASE_DIR = _resolve_base_dir(os.environ, sys.argv[0], __file__)
 
-_CONFIG_PATH = os.path.join(_BASE_DIR, "manager-config.json")
-LOG_DIR      = os.path.join(_BASE_DIR, "logs")
+#: Names the config file to read AND write instead of `<install>/manager-config.json`.
+#: It exists so a driven run (`TOKENSAVE_MANAGER_DRIVE`) can work on a scratch
+#: copy and never write the real file -- see `helpers/isolated_run.py`.
+CONFIG_ENV = "TOKENSAVE_MANAGER_CONFIG"
+
+
+def _resolve_config_path(env, base_dir: str) -> str:
+    """The config file this process uses. Pure, so it is testable without
+    re-importing the module. Blank or absent means the install's own file."""
+    override = (env.get(CONFIG_ENV) or "").strip()
+    if override:
+        return os.path.abspath(os.path.expanduser(override))
+    return os.path.join(base_dir, "manager-config.json")
+
+
+#: The install's own config, whatever this process was told to use. The one
+#: place an isolated run is told apart from a real one.
+DEFAULT_CONFIG_PATH = os.path.join(_BASE_DIR, "manager-config.json")
+_CONFIG_PATH = _resolve_config_path(os.environ, _BASE_DIR)
+# A redirected config takes its logs with it: two processes appending to one
+# RotatingFileHandler file cannot rotate it on Windows.
+LOG_DIR      = (os.path.join(os.path.dirname(_CONFIG_PATH), "logs")
+                if _CONFIG_PATH != DEFAULT_CONFIG_PATH
+                else os.path.join(_BASE_DIR, "logs"))
 LOG_FILE     = os.path.join(LOG_DIR, "manager.log")
 
 
