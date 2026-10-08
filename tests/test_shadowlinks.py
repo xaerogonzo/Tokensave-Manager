@@ -74,9 +74,14 @@ def test_cmd_shadow_links_opens_dialog_when_supported(tk_root, monkeypatch, tmp_
 # ── _do_shadow_links: worker thread logic ─────────────────────────────────────
 
 def _patch_threading_sync(monkeypatch):
-    """Patch threading.Thread so worker runs synchronously in the calling thread."""
-    import threading as _threading
+    """Make the controller's worker run synchronously in the calling thread.
 
+    Rebinds the controller module's own ``threading`` attribute rather
+    than ``...threading.Thread``. The latter string target resolves to
+    the real, process-wide ``threading`` module, so it would swap
+    ``Thread`` out for EVERY thread started anywhere in the interpreter
+    for the duration of the test, including pytest's and Tk's.
+    """
     class _SyncThread:
         def __init__(self, target=None, daemon=False, **kw):
             self._target = target
@@ -85,7 +90,8 @@ def _patch_threading_sync(monkeypatch):
             if self._target:
                 self._target()
 
-    monkeypatch.setattr("controllers.shadowlinks_ctrl.threading.Thread", _SyncThread)
+    monkeypatch.setattr("controllers.shadowlinks_ctrl.threading",
+                        SimpleNamespace(Thread=_SyncThread))
 
 
 def test_do_shadow_links_logs_created_count(tk_root, monkeypatch, tmp_path):
