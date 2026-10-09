@@ -877,6 +877,19 @@ def _print_install_dates(installed: str, exe: str, gh_exe: str, repo: str) -> No
     print("\n".join(_tv.format_install_dates(released, err, mtime)))
 
 
+def _came_from_line(span) -> str:
+    """The header line naming the previous version, beside ``Installed:``.
+
+    Only RECORDED / OVERRIDDEN know it; UNKNOWN and STALE say so rather than
+    leaving the line out, because absence reads as "nothing was recorded".
+    """
+    if span.state in (_tv.RECORDED, _tv.OVERRIDDEN):
+        seen = f"   (observed {span.observed_at})" if span.observed_at else ""
+        tag = "  [--from override]" if span.state == _tv.OVERRIDDEN else ""
+        return f"  Came from: {_tv.display(span.from_)}{seen}{tag}"
+    return f"  Came from: not recorded ({span.state}) -- see Upgrade span below"
+
+
 def main() -> None:
     cli = _parse_args()
     fix_mode: bool = cli["fix"]
@@ -895,6 +908,7 @@ def main() -> None:
     if installed:
         print(f"Installed:  v{installed}")
         _print_install_dates(installed, tokensave_exe, gh_exe, _tracked_repo())
+        print(_came_from_line(_tv.span_for(cfg, installed, cli["from"])))
     else:
         print("Installed:  ⚠ could not determine (tokensave_exe not set or not found)")
 
