@@ -430,7 +430,8 @@ _SELECTION_DETAIL = {
 
 def list_tokensave_servers(tokensave_exe: str = "",
                            known_projects: "list | None" = None,
-                           *, tolerance_s: float = DEFAULT_TOLERANCE_S
+                           *, tolerance_s: float = DEFAULT_TOLERANCE_S,
+                           strict: bool = False
                            ) -> "list[TokensaveServer]":
     """Every running tokensave server, attributed as well as honestly possible.
 
@@ -441,9 +442,10 @@ def list_tokensave_servers(tokensave_exe: str = "",
 
     Fail-open: any enumeration problem yields ``[]`` rather than raising,
     matching the convention in ``codegraph_daemon`` and
-    ``codegraph_freshness``.
+    ``codegraph_freshness``. ``strict=True`` raises :class:`EnumerationFailed`
+    instead, for a caller that must tell "none running" from "could not ask".
     """
-    procs = _enumerate_processes()
+    procs = _enumerate_processes(strict=strict)
     if not procs:
         return []
     registry = read_server_registry(tokensave_exe)

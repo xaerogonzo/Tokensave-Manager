@@ -144,7 +144,6 @@ _KNOWN_OFFENDERS: dict = {
     "src/controllers/scaffold_ctrl.py": 4,
     "src/controllers/shadowlinks_ctrl.py": 4,
     "src/controllers/sync_ctrl.py": 5,
-    "src/controllers/tasks_tab.py": 1,
     "src/controllers/update_poller.py": 4,
     "src/dialogs/settings_ai.py": 2,
     "src/dialogs/settings_codegraph.py": 10,
