@@ -918,7 +918,7 @@ Token Save Manager Source/
 │   └── controllers/               4 tab controllers (Projects/Git/Ask/Snippets)
 │
 ├── templates/
-│   ├── claude-md-template.md      BASIC_INSTRUCTIONS template for new projects
+│   ├── claude-md-template.md      reference text for spotting an untouched BASIC_INSTRUCTIONS.md
 │   ├── project-baseline.md        Universal rules @included by retrofitted projects
 │   ├── nuitka-build.ps1.template  Nuitka build script template
 │   ├── nuitka-build.py.template   Python-based alternative build script

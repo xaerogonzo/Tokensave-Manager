@@ -906,7 +906,7 @@ Token Save Manager Source/
 │                                  broken' are otherwise identical output. See its README.
 │
 ├── templates/                     Data files used by the manager + shipped in dist\
-│   ├── claude-md-template.md      BASIC_INSTRUCTIONS.md template for other projects
+│   ├── claude-md-template.md      reference text for spotting an untouched BASIC_INSTRUCTIONS.md
 │   ├── project-baseline.md        Universal rules file — @included by retrofitted projects
 │   ├── nuitka-build.ps1.template  Generic Nuitka build script template (PowerShell)
 │   ├── nuitka-build.py.template   Python-based alternative build script
@@ -1731,9 +1731,12 @@ there -- and shipped to end users.
 The live-driver starting point. **Lifecycle differs from its neighbours on purpose:** the baseline is compiled and synced, the gotchas are synced to the existing fleet, and this is only *scaffolded into new projects* -- it is a starting point people edit, so it is never judged outdated or overwritten. `tests/test_drive_template.py` keeps its `drive_ledger.py` identical to `src/helpers/drive_ledger.py`.
 
 ### `templates/claude-md-template.md`
-Written as `BASIC_INSTRUCTIONS.md` into scaffolded projects. Contains an `@include`
-pointing to `project-baseline.md`, placeholder sections for overview / architecture /
-key files / rules, and comment blocks telling Claude to fill them in on first use.
+No longer written into any project: Scaffold and Retrofit wire `CLAUDE.md` straight to
+`project-baseline.md`. It stays because it is the reference an *untouched*
+`BASIC_INSTRUCTIONS.md` is compared against (the Doctor's placeholder note, and
+`instructions_migrate` deciding not to paste a template into `CLAUDE.md`). It contains an
+`@include` pointing to `project-baseline.md` and placeholder sections for overview /
+architecture / key files / rules.
 
 ### `templates/project-baseline.md`
 A universal rules file `@include`d at the top of every retrofitted project's CLAUDE.md.

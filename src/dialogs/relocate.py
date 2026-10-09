@@ -148,8 +148,7 @@ class RelocateDialog(UiPumpMixin, tk.Toplevel):
                   ("Segoe UI", 8, "italic"))
 
         if plan.projects:
-            self._heading("%d project(s) — BASIC_INSTRUCTIONS.md baseline "
-                          "include" % len(plan.projects))
+            self._heading("%d project(s) — baseline include" % len(plan.projects))
             for name in plan.projects:
                 self._row(name, "text", 1, ("Segoe UI", 9))
             self._row("Each is re-read and re-planned at the moment it is "

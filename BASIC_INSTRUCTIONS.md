@@ -540,7 +540,7 @@ Must be updated when the project moves to a new location or machine.
 | `src/tokensave-wrapper.py` | MCP server wrapper for Claude Desktop — reads same `manager-config.json`. **MUST stay single-threaded AND pass `sys.stdin/stdout/stderr` to `Popen` explicitly** — read `docs/MCP_INTEGRATION_GOTCHAS.md` before touching. |
 | `manager-config.json` | Single source of truth for all machine-specific paths |
 | `templates/project-baseline.md` | @included by every retrofitted project's CLAUDE.md — edit here to update all |
-| `templates/claude-md-template.md` | Written as `BASIC_INSTRUCTIONS.md` when scaffolding a new project |
+| `templates/claude-md-template.md` | Reference text for recognising an untouched `BASIC_INSTRUCTIONS.md`; no longer written into projects |
 | `build.ps1` / `build.bat` | Nuitka build pipeline — compiles to standalone `.exe` files in `dist\` |
 | `Launch TokenSave Manager.bat` | Reads `python_exe` from `manager-config.json` via PowerShell, launches manager |
 | `docs/ARCHITECTURE.md` | Class structure, UI layout, data flow, threading model, config system |

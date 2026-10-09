@@ -1131,7 +1131,9 @@ def audit_instructions(project_path: str, baseline_include_line: str = "",
         notes.append(
             "  BASIC_INSTRUCTIONS.md is still the untouched template, so it "
             "says nothing about this project yet. %s"
-            % ("It is on the include chain, so it loads as-is."
+            % ("It is on the include chain, so it loads as-is. Right-click "
+               "the project -> Instructions... -> Move into CLAUDE.md... "
+               "retires it."
                if on_chain else
                "Nothing on the chain reaches it, so it is not read at all "
                "-- if the project's own instructions live in CLAUDE.md, this "
