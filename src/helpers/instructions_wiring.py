@@ -3,11 +3,20 @@
 ## Scope, and why it is narrower than the classifier
 
 `instructions_posture` resolves a bounded, general include graph. **This module
-writes exactly one topology**::
+writes two topologies, and which one is decided by what the project already
+has**::
 
-    CLAUDE.md  ->  @BASIC_INSTRUCTIONS.md  ->  @project-baseline.md
-                                               (a Manager copy of the template,
-                                                committed in the project)
+    new project (no BASIC_INSTRUCTIONS.md):
+        CLAUDE.md  ->  @project-baseline.md
+    project that already has a BASIC_INSTRUCTIONS.md:
+        CLAUDE.md  ->  @BASIC_INSTRUCTIONS.md  ->  @project-baseline.md
+
+`project-baseline.md` is a Manager copy of the template, committed in the
+project. The first is the default for anything wired from scratch: the middle
+file added a hop and a second place for rules to live without adding anything,
+and Scaffold no longer creates it. The second is preserved, not preferred -
+re-shaping a project that already works is a migration somebody opts into, not
+something a repair does as a side effect.
 
 That asymmetry is deliberate and is documented in both modules because it is
 easy to erode: reading the classifier alone suggests Retrofit ought to repair
@@ -90,7 +99,8 @@ from helpers import lessons_delivery as ld
 ACTION_LINK_BASIC = "link_basic"
 #: Create `CLAUDE.md` carrying only that link.
 ACTION_CREATE_CLAUDE = "create_claude"
-#: Create `BASIC_INSTRUCTIONS.md` from the template.
+#: Create `BASIC_INSTRUCTIONS.md` from the template. No longer planned by
+#: `plan_wiring`; kept so an old plan can still be applied and rendered.
 ACTION_CREATE_BASIC = "create_basic"
 #: Add `@project-baseline.md` to an existing file.
 ACTION_ADD_BASELINE = "add_baseline"
@@ -218,16 +228,14 @@ def _absent_steps(posture, has_template: bool) -> "tuple[list, str]":
     elif posture.copy_state != bc.COPY_CURRENT:
         steps.append(WiringStep(ACTION_WRITE_COPY, bc.COPY_BASENAME))
     if posture.has_basic:
+        # Keep the shape the project already has. Its BASIC file may hold
+        # authored rules, and linking it is what makes them load.
         steps.append(WiringStep(ACTION_ADD_BASELINE, BASIC_MD))
-    elif has_template:
-        steps.append(WiringStep(ACTION_CREATE_BASIC, BASIC_MD))
+        steps.append(WiringStep(ACTION_LINK_BASIC, CLAUDE_MD))
     else:
-        # Nothing to create BASIC_INSTRUCTIONS.md from. Wire the one-hop shape
-        # rather than refusing: `CLAUDE.md` -> baseline is a documented topology
-        # too, and it needs no file the user did not ask for.
+        # Default for a project wired from scratch: no middle file. This needs
+        # no template, which is why `has_template` no longer matters here.
         steps.append(WiringStep(ACTION_ADD_BASELINE, CLAUDE_MD))
-        return steps, ""
-    steps.append(WiringStep(ACTION_LINK_BASIC, CLAUDE_MD))
     return steps, ""
 
 
@@ -299,6 +307,16 @@ def compute_created_claude(project_name: str) -> str:
     document.
     """
     return "# %s — Claude Instructions\n\n@%s\n" % (project_name, BASIC_MD)
+
+
+def compute_created_claude_direct(project_name: str) -> str:
+    """A brand-new `CLAUDE.md` that includes the baseline copy directly.
+
+    Same minimal shape as `compute_created_claude`, one hop shorter. The
+    project's own rules go below the include, in this file.
+    """
+    return "# %s — Claude Instructions\n\n%s\n" % (
+        project_name, bc.LOCAL_INCLUDE_LINE)
 
 
 def compute_link_basic(existing: str) -> "tuple[str, bool]":
@@ -401,6 +419,8 @@ def _render_step(step: WiringStep, path: str, existing: str,
         return template_text, bool(template_text), ""
 
     if step.action == ACTION_ADD_BASELINE:
+        if not exists and step.path == CLAUDE_MD:
+            return compute_created_claude_direct(project_name), True, ""
         return compute_add_baseline(existing) + ("",)
 
     if step.action == ACTION_LOCALIZE:

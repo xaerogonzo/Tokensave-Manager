@@ -119,13 +119,47 @@ def test_orphan_is_localized_and_linked(tmp_path, templates):
         (iw.ACTION_LINK_BASIC, "CLAUDE.md")]
 
 
-def test_absent_with_no_basic_plans_the_copy_and_both_files(tmp_path,
-                                                            templates):
+def test_absent_with_no_basic_wires_claude_straight_to_the_baseline(
+        tmp_path, templates):
+    """A project wired from scratch no longer gets a BASIC_INSTRUCTIONS.md,
+    whether or not a template is available to make one from."""
     root = make_project(tmp_path, claude="# Notes\n")
-    plan = iw.plan_wiring(posture_of(root, templates), has_template=True)
-    assert plan.steps[0].action == iw.ACTION_WRITE_COPY
-    assert set(plan.files) == {"project-baseline.md", "BASIC_INSTRUCTIONS.md",
-                               "CLAUDE.md"}
+    for has_template in (True, False):
+        plan = iw.plan_wiring(posture_of(root, templates),
+                              has_template=has_template)
+        assert plan.steps[0].action == iw.ACTION_WRITE_COPY
+        assert set(plan.files) == {"project-baseline.md", "CLAUDE.md"}
+        assert iw.ACTION_CREATE_BASIC not in [s.action for s in plan.steps]
+        assert iw.ACTION_LINK_BASIC not in [s.action for s in plan.steps]
+
+
+def test_a_project_with_nothing_gets_a_starter_claude_md_and_no_basic(
+        tmp_path, templates):
+    root = make_project(tmp_path)
+    plan, result = wire(root, templates, template_text="# BASIC template\n")
+    assert result.ok, result.error
+    text = (root / "CLAUDE.md").read_text(encoding="utf-8")
+    assert text == "# proj — Claude Instructions\n\n%s\n" % LOCAL
+    assert not (root / "BASIC_INSTRUCTIONS.md").exists()
+    assert posture_of(root, templates).healthy
+
+
+def test_existing_claude_prose_survives_the_direct_wiring(tmp_path, templates):
+    prose = "# Mine\n\nAlways run the linter.\n"
+    root = make_project(tmp_path, claude=prose)
+    _plan, result = wire(root, templates)
+    assert result.ok, result.error
+    after = (root / "CLAUDE.md").read_text(encoding="utf-8")
+    assert after.startswith(LOCAL) and after.endswith(prose)
+    assert not (root / "BASIC_INSTRUCTIONS.md").exists()
+
+
+def test_an_existing_unlinked_basic_keeps_the_chain_shape(tmp_path, templates):
+    """Preserved, not preferred: reshaping a working project is a migration."""
+    root = make_project(tmp_path, claude="# Notes\n", basic="# My rules\n")
+    plan = iw.plan_wiring(posture_of(root, templates))
+    assert [a for a, _ in actions(plan)] == [
+        iw.ACTION_WRITE_COPY, iw.ACTION_ADD_BASELINE, iw.ACTION_LINK_BASIC]
 
 
 def test_unknown_is_blocked_not_planned(tmp_path, templates):

@@ -131,8 +131,10 @@ They govern `helpers/instructions_posture.py`, `helpers/instructions_wiring.py`,
 **A file the Manager writes follows its referrer into or out of git** (`helpers/ignore_alignment.py`). A repo that ignores `CLAUDE.md` keeps its instructions local, and KicomAI was left with a committable copy and `docs/LESSONS.md`. Git's `ls-files`/`check-ignore` decide, never our pattern reading; only `.gitignore` is written; untracking, un-ignoring and anything unknown are reported, never done.
 
 **Parser scope is wider than repair scope, on purpose.** The classifier resolves a
-bounded general include graph; the writer repairs exactly one topology
-(`CLAUDE.md → @BASIC_INSTRUCTIONS.md → @project-baseline.md`). Resolving broadly
+bounded general include graph; the writer produces exactly two topologies, chosen by
+what the project already has: `CLAUDE.md → @project-baseline.md` for anything wired
+from scratch, and `CLAUDE.md → @BASIC_INSTRUCTIONS.md → @project-baseline.md` for a
+project that already carries a BASIC file (preserved, not preferred). Resolving broadly
 is what stops the panel offering a "fix" to a project that already works through
 its own valid chain — a fix that would add a SECOND path to the same baseline.
 Do not collapse the two.
