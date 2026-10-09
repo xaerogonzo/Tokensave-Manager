@@ -62,6 +62,7 @@ from helpers.instructions_posture import (
     parse_baseline_target,
     read_posture,
 )
+from helpers import instructions_migrate as im
 from helpers.instructions_wiring import (
     OUTCOME_FAILED, ApplyOutcome, apply_to_project, plan_wiring,
 )
@@ -426,6 +427,19 @@ class InstructionsDialog(UiPumpMixin, tk.Toplevel):
                      "docs/gotchas/. A lesson you edited by hand is never "
                      "overwritten.")
 
+        # Per project and never in a bulk action, for the same reason as Split:
+        # it moves text a person wrote, and 11 of the 14 projects on this chain
+        # hold authored rules in BASIC_INSTRUCTIONS.md.
+        if im.eligible(project):
+            move = ttk.Button(row, text="Move into CLAUDE.md…",
+                              command=lambda p=project: self._migrate_one(p))
+            move.pack(side=tk.RIGHT, padx=(0, 6))
+            _Tooltip(move,
+                     "Inlines BASIC_INSTRUCTIONS.md into CLAUDE.md where it is "
+                     "included today, so Claude loads the same text in the "
+                     "same order with one file fewer. BASIC_INSTRUCTIONS.md "
+                     "itself is left untouched.")
+
         # Offered per project and never in a bulk action: moving a lesson log
         # is a large editorial change to a file a person wrote, and no
         # mechanical rule decides where the log starts.
@@ -571,6 +585,36 @@ class InstructionsDialog(UiPumpMixin, tk.Toplevel):
                 parent=self):
             return
         result = self._apply_to(project)
+        self._log_outcome(project.name, result)
+        if result.mutated:
+            self._offer_commit_batch([(project, result)])
+        self._scan()
+
+    def _migrate_one(self, project) -> None:
+        """Fold BASIC_INSTRUCTIONS.md into CLAUDE.md for one project."""
+        claude_text, basic_text = im.read_pair(project.display_root)
+        placeholder = self._template_text()
+        plan = (im.plan_migration(claude_text, basic_text, placeholder)
+                if claude_text is not None and basic_text is not None
+                else im.MigrationPlan(blocked="could not read the instruction "
+                                              "files"))
+        if plan.is_blocked:
+            messagebox.showinfo("Move into CLAUDE.md",
+                                "%s\n\nNothing was changed: %s"
+                                % (project.name, plan.blocked), parent=self)
+            return
+        if not messagebox.askyesno(
+                "Move into CLAUDE.md — %s" % project.name,
+                "%s\n\n%s.\n\nBASIC_INSTRUCTIONS.md is left exactly as it is "
+                "and nothing is deleted; once CLAUDE.md no longer includes it, "
+                "you can remove it yourself. The project is re-read immediately "
+                "before writing." % (project.display_root, plan.preview()),
+                parent=self):
+            return
+        baseline = parse_baseline_target(self._cfg.baseline_include_line) or ""
+        result = im.migrate_project(
+            project, baseline, self._cfg.template_dir, placeholder,
+            read_template(baseline), git_exe=self._cfg.git_exe)
         self._log_outcome(project.name, result)
         if result.mutated:
             self._offer_commit_batch([(project, result)])

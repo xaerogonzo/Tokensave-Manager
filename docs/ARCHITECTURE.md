@@ -86,7 +86,7 @@ Token Save Manager Source/
 │   │                              Runs beside a real Manager through scripts/drive/run_isolated.py
 │   │                              (scratch config, no lock, no request poller, no tray).
 │   │
-│   ├── helpers/                  132 modules of pure / IO helpers — no UI deps.
+│   ├── helpers/                  133 modules of pure / IO helpers — no UI deps.
 │   │   ├── config.py              _load_config, _save_config, _migrate_config
 │   │   ├── detection.py           _detect_git/_gh/_npm/_codegraph/_claude_cli,
 │   │   │                          _root_path/_label, _version_lt
@@ -397,6 +397,10 @@ Token Save Manager Source/
 │   │   ├── instructions_wiring.py The ONE writer. Copies the baseline into the
 │   │   │                          project, then repoints the include; never
 │   │   │                          deletes authored prose.
+│   │   ├── instructions_migrate.py Folds BASIC_INSTRUCTIONS.md into CLAUDE.md at the
+│   │   │                          line that included it (a splice, same text same
+│   │   │                          order). Never deletes, never pastes the untouched
+│   │   │                          template, compare-and-apply on both files.
 │   │   ├── instructions_split.py  Moves a lesson log out of the always-loaded
 │   │   │                          file. Reports the repo population keyed to the
 │   │   │                          filename it is about to empty.

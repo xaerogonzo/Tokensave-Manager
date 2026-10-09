@@ -139,6 +139,8 @@ is what stops the panel offering a "fix" to a project that already works through
 its own valid chain — a fix that would add a SECOND path to the same baseline.
 Do not collapse the two.
 
+**Retiring the middle hop is a splice, not a merge** (`helpers/instructions_migrate.py`). BASIC's text replaces the one line that included it, so Claude loads the same text in the same order; BASIC itself is left in place. Measured before it was built: of 14 projects on the three-file chain, **11 hold authored rules in BASIC** (up to 70,947 B) and only 3 the untouched template, so "mostly a rename" was a guess the fleet contradicted. An untouched template is never pasted into a working CLAUDE.md. Offered per project, never in bulk, because it moves text a person wrote.
+
 **The writer never deletes and never rewrites authored prose.** An obsolete direct
 include is reported (`ADVISORY_DOUBLE_LOAD`), not removed. A project whose
 `CLAUDE.md` tells the agent to reach for Grep first keeps saying so after wiring;
