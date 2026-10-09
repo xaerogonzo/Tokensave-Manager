@@ -264,7 +264,7 @@ def test_retrofit_dialog_forwards_the_rules_flags(tk_root, project):
     captured = {}
     dlg = RetrofitDialog(tk_root, project,
                          lambda *a, **k: captured.update(kwargs=k, args=a))
-    for name in ("var_ts", "var_bi", "var_nuitka", "var_shadow", "var_hook"):
+    for name in ("var_ts", "var_nuitka", "var_shadow", "var_hook"):
         getattr(dlg, name).set(False)
     dlg.var_agents.set(True)
     dlg.var_cursor_rule.set(True)

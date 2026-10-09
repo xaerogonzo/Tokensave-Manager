@@ -30,10 +30,9 @@ from constants import C, CREATE_NO_WINDOW, _ANSI
 from helpers import drive_template
 from helpers import ignore_alignment as ia
 from helpers import lessons_delivery as ld
-from helpers.baseline_copy import COPY_BASENAME, read_template, write_copy
+from helpers.baseline_copy import read_template
 from helpers.graph_trust import INDEX_PRESENT, index_state
-from helpers.instructions_posture import (BASIC_MD, CLAUDE_MD, excluded_roots,
-                                          parse_baseline_target,
+from helpers.instructions_posture import (excluded_roots, parse_baseline_target,
                                           read_project)
 from helpers.instructions_posture import canonical as canonical_path
 from helpers.instructions_wiring import (apply_wiring, deliver_lessons,
@@ -168,30 +167,29 @@ class ScaffoldRetrofitController:
                          else C["overlay0"])
         return [line for line in lines if line.startswith("Created ")]
 
-    def _scaffold_project(self, path: str, create_bi: bool = True,
+    def _scaffold_project(self, path: str, create_instructions: bool = True,
                           run_init: bool = True, scaffold_nuitka: bool = False,
                           add_git_hook: bool = False,
                           scaffold_drive: bool = False) -> None:
-        """Write BASIC_INSTRUCTIONS.md and/or run tokensave init."""
-        name = os.path.basename(path)
-        log.info(f"SCAFFOLD {path}  create_bi={create_bi} run_init={run_init} "
-                 f"nuitka={scaffold_nuitka} git_hook={add_git_hook} "
-                 f"drive={scaffold_drive}")
+        """Wire the project's Claude instructions and/or run tokensave init.
 
-        if create_bi:
-            basic_md = os.path.join(path, "BASIC_INSTRUCTIONS.md")
+        Instructions go through the same planner Retrofit uses, so a scaffold
+        ends with `CLAUDE.md -> @project-baseline.md` resolving. What this
+        replaced wrote `BASIC_INSTRUCTIONS.md` and a baseline copy but never a
+        `CLAUDE.md`, which is the only file Claude Code reads: every freshly
+        scaffolded project started out orphaned until somebody retrofitted it.
+        """
+        name = os.path.basename(path)
+        log.info(f"SCAFFOLD {path}  instructions={create_instructions} "
+                 f"run_init={run_init} nuitka={scaffold_nuitka} "
+                 f"git_hook={add_git_hook} drive={scaffold_drive}")
+
+        if create_instructions:
             try:
-                template = load_basic_instructions_template(
-                    self._cfg.basic_instructions_template,
-                    self._cfg.project_baseline_include_line)
-                with open(basic_md, "w", encoding="utf-8") as f:
-                    f.write(template)
-                self._on_log(f"  Created BASIC_INSTRUCTIONS.md in {name}", C["green"])
-                log.info("  created BASIC_INSTRUCTIONS.md")
-                self._write_baseline_copy(path)
+                self._retrofit_add_tokensave(path, name)
             except Exception as e:
-                self._on_log(f"  Error writing BASIC_INSTRUCTIONS.md: {e}", C["red"])
-                log.exception("  SCAFFOLD write failed")
+                self._on_log(f"  Error wiring Claude instructions: {e}", C["red"])
+                log.exception("  SCAFFOLD instructions wiring failed")
                 return
 
         if scaffold_nuitka:
@@ -253,7 +251,6 @@ class ScaffoldRetrofitController:
     # ── Retrofit internals ────────────────────────────────────────────────────
 
     def _do_retrofit(self, path: str, add_tokensave: bool,
-                     add_basic_instructions: bool,
                      add_nuitka: bool = False,
                      add_shadow_links: bool = False,
                      shadow_ext_map: dict | None = None,
@@ -264,7 +261,6 @@ class ScaffoldRetrofitController:
         name = os.path.basename(path)
         flags = {
             "tokensave":          add_tokensave,
-            "basic_instructions": add_basic_instructions,
             "nuitka":             add_nuitka,
             "shadow_links":       add_shadow_links,
             "shadow_ext_map":     shadow_ext_map or DEFAULT_SHADOW_EXT_MAP,
@@ -287,7 +283,7 @@ class ScaffoldRetrofitController:
 
     def _log_retrofit_start(self, path: str, name: str, flags: dict) -> None:
         log.info(f"RETROFIT {path}  ts={flags['tokensave']} "
-                 f"bi={flags['basic_instructions']} nuitka={flags['nuitka']}")
+                 f"nuitka={flags['nuitka']}")
         self._on_log(f"Retrofitting {name}…", C["peach"])
 
     def _run_retrofit_steps(self, path: str, name: str, flags: dict) -> list[str]:
@@ -301,8 +297,6 @@ class ScaffoldRetrofitController:
             # doc check short-circuited the whole option.
             actions.extend(self._retrofit_add_tokensave(path, name))
             actions.extend(self._retrofit_init_index(path))
-        if flags["basic_instructions"]:
-            actions.extend(self._retrofit_add_basic_instructions(path))
         if flags["nuitka"]:
             actions.extend(self._scaffold_nuitka_build(path))
         if flags["shadow_links"]:
@@ -354,6 +348,11 @@ class ScaffoldRetrofitController:
 
     def _retrofit_add_tokensave(self, path: str, name: str) -> list[str]:
         """Make the baseline chain resolve from CLAUDE.md. Returns actions taken.
+
+        Used by both Retrofit and Scaffold. For a project with no
+        `BASIC_INSTRUCTIONS.md` the result is `CLAUDE.md -> @project-baseline.md`
+        (the file is created if absent); a project that already has one keeps
+        its chain.
 
         The decision belongs to `instructions_posture`, not to this method —
         one classifier, consulted by every caller that writes.
@@ -551,56 +550,6 @@ class ScaffoldRetrofitController:
         log.info("  initialised tokensave index")
         self._on_log("  Initialised tokensave index", C["green"])
         return ["Initialised tokensave index"]
-
-    def _retrofit_add_basic_instructions(self, path: str) -> list[str]:
-        """Write BASIC_INSTRUCTIONS.md from the template. Returns actions taken."""
-        basic_md = os.path.join(path, "BASIC_INSTRUCTIONS.md")
-        if os.path.isfile(basic_md):
-            log.info("  BASIC_INSTRUCTIONS.md already exists — skipped")
-            self._on_log("  BASIC_INSTRUCTIONS.md already exists — skipped", C["overlay0"])
-            return []
-        template = load_basic_instructions_template(
-            self._cfg.basic_instructions_template,
-            self._cfg.project_baseline_include_line)
-        with open(basic_md, "w", encoding="utf-8") as f:
-            f.write(template)
-        log.info("  created BASIC_INSTRUCTIONS.md")
-        self._on_log("  Created BASIC_INSTRUCTIONS.md", C["green"])
-        return ["Created BASIC_INSTRUCTIONS.md"] + self._write_baseline_copy(path)
-
-    def _write_baseline_copy(self, path: str) -> list[str]:
-        """The project's copy of the baseline, which the new include names.
-
-        Without it a freshly scaffolded BASIC_INSTRUCTIONS.md would include a
-        file that is not there.
-        """
-        baseline = parse_baseline_target(self._cfg.baseline_include_line)
-        written = write_copy(path, read_template(baseline or ""))
-        if not written.ok:
-            self._on_log(f"  project-baseline.md: {written.error}", C["peach"])
-            return []
-        actions = []
-        if written.changed:
-            self._on_log("  Wrote project-baseline.md", C["green"])
-            actions.append("Wrote project-baseline.md")
-        # The baseline indexes the shared gotchas, so a project that now holds a
-        # current baseline gets them too. Judged per lesson; never stops early.
-        actions += self._report_lessons(ld.sync_lessons(
-            path, ld.load_corpus(self._cfg.template_dir)))
-        return actions + self._align_with_git(path) if actions else []
-
-    def _align_with_git(self, path: str) -> list[str]:
-        """Keep the new instruction files as local as the CLAUDE.md using them."""
-        pairs = [ia.CompanionPair(BASIC_MD, CLAUDE_MD, ia.KIND_BASIC),
-                 ia.CompanionPair(COPY_BASENAME, BASIC_MD,
-                                  ia.KIND_BASELINE_COPY)]
-        # The lessons are referred to by the baseline copy, so they take its
-        # visibility: the third level of the chain.
-        pairs += [ia.CompanionPair(rel, COPY_BASENAME, ia.KIND_GOTCHA)
-                  for rel in ld.dest_rels()
-                  if os.path.isfile(os.path.join(path, *rel.split("/")))]
-        return self._report_alignment(
-            ia.align(path, self._cfg.git_exe, tuple(pairs)))
 
     def _retrofit_add_shadow_links(self, path: str, ext_map: dict) -> list[str]:
         """Generate shadow extension links and update .gitignore. Returns actions taken."""

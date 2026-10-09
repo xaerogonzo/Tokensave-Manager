@@ -132,7 +132,7 @@ The manager's design philosophy: **never force a choice you don't want to make**
 - **Per-project category overrides** — saved in `manager-config.json` so they survive restarts
 
 ### Scaffolding & Retrofit
-- **Scaffold new project** — picks a folder and optionally writes a `BASIC_INSTRUCTIONS.md` (Claude session instructions), runs `tokensave init`, adds a Nuitka build pipeline, and/or adds an auto-commit Stop hook for Claude Code sessions
+- **Scaffold new project** — picks a folder and optionally sets up Claude instructions (a `CLAUDE.md` that loads the shared baseline), runs `tokensave init`, adds a Nuitka build pipeline, and/or adds an auto-commit Stop hook for Claude Code sessions
 - **Retrofit existing project** — adds tokensave MCP rules to an existing `CLAUDE.md` via `@include`, optionally with all the same extras as Scaffold
 - **Shadow Links** — generates NTFS hardlinks of source files with a secondary extension (e.g. `.zsc` → `.zsc.cpp`) so editors with limited language support can still parse them. Right-click → **🔗 Shadow Links…**
 - **Manage .gitignore dialog** — right-click → **📋 Manage .gitignore…** opens a full editor: scrollable list of current entries with per-row `×` remove (real strikethrough font on marked rows), one-click template injection for 11 categories (Baseline, Python, Node.js, Rust, Java/JVM, .NET, VS Code, JetBrains, macOS, Windows, Nuitka), custom-entry field with dedup + sanity check, live `+`/`−` diff preview before saving. Atomic file write; the existing commit-after-change flow then offers to commit the result. The baseline category includes `.tokensave/`, `.codegraph/`, `.claude/`, Python cache, Nuitka output, virtual environments, and OS noise — all auto-protected so binary index DBs never get committed
@@ -303,7 +303,7 @@ The main tab. Shows all discovered tokensave projects grouped by category.
 - **Last Synced** — age of the tokensave index (how long ago the last sync ran); `—` for projects without tokensave
 - **CG** — `✓` if CodeGraph has indexed this project (`.codegraph/codegraph.db` exists); `—` otherwise. CodeGraph auto-syncs while its MCP server is running, so unlike tokensave there's no meaningful "last synced age" to show
 - **Git** — at-a-glance git status: `✓` clean (all pushed, no changes), `●` uncommitted changes (yellow row), `↑N` N commits ahead of remote (sky row), `↓N` N commits behind (red row), `●↑N` mixed (peach row), `—` not a git repo. Computed asynchronously after `refresh()` with `.git/index` mtime caching so unchanged projects skip the subprocess call
-- **Scaffold** — `✔` means `BASIC_INSTRUCTIONS.md` exists; `—` means Claude has no instructions for this project yet
+- **Scaffold** — `✔` means the project has a `CLAUDE.md` (or an older `BASIC_INSTRUCTIONS.md`); `—` means Claude has no instructions for this project yet
 
 **Toolbar buttons:**
 - **+ Scaffold** — initialise a new project with Claude instructions and/or tokensave index
@@ -660,7 +660,7 @@ of them landed.
 
 | Item | What it does |
 |---|---|
-| ⚙ Retrofit… | Add tokensave rules, `BASIC_INSTRUCTIONS.md`, or Nuitka build files |
+| ⚙ Retrofit… | Add tokensave rules (wires `CLAUDE.md` to the shared baseline), or Nuitka build files |
 | 📁 Assign Category… | Move the project to a different category or sub-category |
 | ✏️ Rename Project… | Rename the project's folder as a coordinated migration — stops any running tokensave server first, then repoints the Manager's own config and Claude Code's per-project trust record so you don't lose them |
 | 🗑 Remove Index… | Delete `.tokensave/` and drop the project from the list. Project files untouched |

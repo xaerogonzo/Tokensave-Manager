@@ -1269,7 +1269,7 @@ App (tk.Tk)
 ├── Data methods
 │   ├── refresh()           — re-scans projects, rebuilds treeview
 │   ├── _auto_refresh()     — 60s timer, skips if a proc is running
-│   └── _has_scaffold()     — checks BASIC_INSTRUCTIONS.md exists in a path
+│   └── _has_scaffold()     — checks CLAUDE.md or BASIC_INSTRUCTIONS.md exists in a path
 ├── Command handlers (cmd_*)
 │   ├── cmd_set_active / cmd_auto
 │   ├── cmd_sync / cmd_sync_all / cmd_force_sync
@@ -1290,9 +1290,9 @@ App (tk.Tk)
     ├── _run()                   — generic tokensave CLI call (threaded, streaming); delegates _auto_commit_after_sync() for the post-sync commit; amends previous commit if last message was "chore: tokensave sync"
     ├── _run_capture()           — tokensave call returning (output, rc, elapsed); synchronous from thread
     ├── _shell_capture()         — generic shell call returning (output, rc); catches FileNotFoundError
-    ├── _scaffold_project()      — write BASIC_INSTRUCTIONS + optional tokensave init + Nuitka + git hook
+    ├── _scaffold_project()      — wire CLAUDE.md → baseline (via the Retrofit planner) + optional tokensave init + Nuitka + git hook
     ├── _scaffold_nuitka_build() — copy nuitka-build.ps1/bat templates into a project folder
-    ├── _do_retrofit()           — prepend @include to CLAUDE.md + optional BASIC_INSTRUCTIONS + Nuitka + shadow links + git hook
+    ├── _do_retrofit()           — wire CLAUDE.md → baseline + index + Nuitka + shadow links + git hook
     ├── _do_shadow_links()       — generate hardlinks in background thread, optionally run sync after
     ├── _do_assign_category()    — write project_categories override to config, refresh tree
     ├── _do_git_commit()         — git reset → git add -- <selected_files> → git commit -m, background thread; commits only ticked files from GitCommitDialog
@@ -1346,8 +1346,8 @@ AskTabController (standalone class, App._ask_ctrl)
     ├── 🤖 Ask tab: chat log Text, Send/Stop/Clear controls, _ask_messages conversation history
     └── on_tab_selected() — called by App._on_tab_changed when Ask tab gains focus
 
-RetrofitDialog (tk.Toplevel)     — modal: 5 checkboxes: tokensave rules / BASIC_INSTRUCTIONS / Nuitka build / shadow links / auto-commit hook
-ScaffoldDialog (tk.Toplevel)     — modal: 4 checkboxes: BASIC_INSTRUCTIONS / tokensave init / Nuitka build / auto-commit hook
+RetrofitDialog (tk.Toplevel)     — modal: checkboxes: tokensave rules / AGENTS.md / Cursor rule / Nuitka build / shadow links / auto-commit hook
+ScaffoldDialog (tk.Toplevel)     — modal: checkboxes: Claude instructions / tokensave init / Nuitka build / auto-commit hook / live-driver template
 SettingsDialog (tk.Toplevel)      — modal: edit manager-config.json; search roots as labeled two-column Treeview; auto-commit toggle; "AI commit messages" section with provider/model/api-key/base-URL fields + Anthropic/LM Studio/Ollama preset buttons. Content wrapped in a `Canvas + body Frame` with vertical scrollbar (mousewheel-bound on canvas AND body) so the growing dialog scrolls when its natural height exceeds the window. Save/Cancel buttons packed on `self` (NOT body) so they stay anchored at the bottom outside the scroll area. Resizable, 760×700 default, 640×500 minsize
 SnippetEditDialog (tk.Toplevel)  — modal: title + body for adding or editing a user-defined prompt snippet
 ShadowLinksDialog (tk.Toplevel)  — modal: editable extension/name map + sync toggle; right-click 🔗 Shadow Links…
@@ -1608,9 +1608,9 @@ All CLI calls are non-blocking. The GUI stays responsive during indexing.
 ```
 + Scaffold button
   → filedialog.askdirectory()
-  → ScaffoldDialog (modal: checkboxes for BASIC_INSTRUCTIONS + init + Nuitka build files)
+  → ScaffoldDialog (modal: checkboxes for Claude instructions + init + Nuitka build files)
       → Apply: _scaffold_project(path, create_bi, run_init, scaffold_nuitka)
-          → write BASIC_INSTRUCTIONS.md synchronously (if checked)
+          → wire CLAUDE.md → project-baseline.md synchronously (if checked)
           → _scaffold_nuitka_build(path) synchronously (if checked)
               → copy nuitka-build.ps1.template → build.ps1 (fills [PROJECT_NAME])
               → copy nuitka-build.bat.template → build.bat
@@ -1621,7 +1621,7 @@ All CLI calls are non-blocking. The GUI stays responsive during indexing.
 ```
 ⚙ Retrofit Existing button  (also available via right-click → ⚙ Retrofit…)
   → filedialog.askdirectory()
-  → RetrofitDialog (modal: checkboxes for tokensave rules + BASIC_INSTRUCTIONS + Nuitka + shadow links)
+  → RetrofitDialog (modal: checkboxes for tokensave rules + Nuitka + shadow links)
       → Apply: _do_retrofit(path, add_tokensave, add_basic_instructions, add_nuitka, add_shadow_links, shadow_ext_map)
           → worker thread:
               → if add_tokensave: instructions_posture.read_project()
@@ -1629,8 +1629,7 @@ All CLI calls are non-blocking. The GUI stays responsive during indexing.
                                  → apply_wiring() — wires CLAUDE.md → @BASIC_INSTRUCTIONS.md
                                    → @project-baseline.md, or repoints a stale
                                    include. Refuses rather than guesses; never deletes.
-              → if add_bi: write BASIC_INSTRUCTIONS.md
-              → if add_nuitka: _scaffold_nuitka_build(path)
+                            → if add_nuitka: _scaffold_nuitka_build(path)
               → if add_shadow_links: generate_shadow_links(path, shadow_ext_map) + update_gitignore_for_shadows
               → self.after(0, messagebox.showinfo("summary"))
 ```
