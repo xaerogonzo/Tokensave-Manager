@@ -173,17 +173,23 @@ a project" points at a folder you already have.
 
 Pick any folder — empty or existing — and choose what to create:
 
-- **Create BASIC_INSTRUCTIONS.md** — project template for Claude
+- **Set up Claude instructions** — creates a `CLAUDE.md` that loads the shared
+  project baseline, plus the project's copy of that baseline. If the folder
+  already has a `CLAUDE.md`, the include is added at the top and everything you
+  wrote is kept.
 - **Run tokensave init** — build the code graph (~10–30 s)
 - **Add Nuitka build files** — copies `build.ps1` + `build.bat`
+- **Add auto-commit Stop hook** and **Add live-driver template** — optional extras
 
 While init runs the project appears in the list immediately as `(indexing…)`.
-Claude reads `BASIC_INSTRUCTIONS.md` on first session and adapts to whatever
-structure already exists.
+
+`CLAUDE.md` is the one file Claude Code reads on its own, so that is the file
+scaffolding writes. Your project's own rules go in it, below the include. Older
+projects may also have a `BASIC_INSTRUCTIONS.md`; scaffolding no longer creates
+one. To fold an existing one into `CLAUDE.md`, see *The Instructions panel*.
 
 If the folder already has a tokensave index, *Run tokensave init* is unchecked
-by default. If `BASIC_INSTRUCTIONS.md` already exists, the checkbox notes that
-it will be overwritten.
+by default.
 
 <!-- help:retrofit -->
 ### ⚙ Add tokensave to a project
@@ -191,26 +197,32 @@ it will be overwritten.
 Add tokensave wiring to a project that already exists — without touching any of
 its current files destructively.
 
-- **Add tokensave rules to CLAUDE.md** — prepends a single `@include` line.
-  Non-destructive: all existing content is kept.
-- **Create BASIC_INSTRUCTIONS.md** — optional project template for Claude.
-  Skipped silently if the file already exists.
+- **Add tokensave rules + index the project** — makes `CLAUDE.md` load the
+  shared project baseline (creating `CLAUDE.md` if there is none) and builds the
+  code-graph index if the project has none. Non-destructive: existing content
+  and an existing index are both left alone. A project that already has a
+  `BASIC_INSTRUCTIONS.md` keeps it and its current chain.
+- **Add AGENTS.md** and **Add .cursor/rules/tokensave.mdc** — the same rules for
+  agents that cannot follow an `@include`.
 - **Add Nuitka build files** — copies `build.ps1` + `build.bat`. Skipped
   silently if `build.ps1` already exists.
+- **Generate shadow extension links** and **Add auto-commit Stop hook** —
+  optional extras.
 
 After applying, a summary popup lists exactly what was created or skipped.
 
 <!-- help:scaffold-column -->
 ### The Scaffold column
 
-The *Scaffold* column in the project list shows whether
-`BASIC_INSTRUCTIONS.md` has been created for each project.
+The *Scaffold* column in the project list shows whether the project has Claude
+instructions of its own.
 
-- **✔** — `BASIC_INSTRUCTIONS.md` exists
-- **—** — not yet scaffolded; use ＋ Scaffold or ⚙ Add tokensave to a project
+- **✔** — the project has a `CLAUDE.md` (or an older `BASIC_INSTRUCTIONS.md`)
+- **—** — none yet; use ＋ Scaffold or ⚙ Add tokensave to a project
 
-The column only checks for `BASIC_INSTRUCTIONS.md`. It does not indicate whether
-`CLAUDE.md` has the `@include` line, or whether Nuitka build files are present.
+The column only checks that a file exists. It does not say whether the shared
+baseline actually reaches the project — the Instructions panel answers that — or
+whether Nuitka build files are present.
 
 ---
 
@@ -553,7 +565,7 @@ disabled with the reason rather than failing obscurely when it is not.
 ---
 
 <!-- help:agent-policy -->
-## Agent Policy
+## Agent Policy: may agents commit and push?
 
 **What every wired project is told about committing and pushing, as toggles.**
 Settings → Git & Policy → 🎛 Agent Policy.
@@ -605,6 +617,15 @@ on disk.
   baseline past its size ceiling is refused with the arithmetic shown, rather
   than discovered later.
 
+### If one project still asks before committing
+
+The policy is compiled into the shared baseline, and a project's own
+`CLAUDE.md` (or an older `BASIC_INSTRUCTIONS.md`) is loaded alongside it. If
+that file carries its own wording about commits, the model sees both, and
+nothing here can tell it which to prefer. This Manager does not read project
+prose for commit rules, so the only check is to open the project's `CLAUDE.md`
+and search it for "commit".
+
 ### What the claim actually is
 
 A rendered instruction is what projects are **told**. Whether an agent obeys it
@@ -613,6 +634,81 @@ The preview shows the cost in fleet units — `+189 chars × 15 projects` — be
 the baseline is loaded by every wired project on every message.
 
 ---
+
+<!-- help:fleet-wide-settings -->
+## Settings that apply to every project
+
+A few choices change what **all** your projects are told, yet are opened from a
+place that looks like it belongs to one project. They are easy to miss for that
+reason.
+
+| You want to… | Open |
+|---|---|
+| Decide whether agents may commit or push, in every wired project | **Settings → Git & Policy → Agent Policy…** (see *Agent Policy*) |
+| See whether the shared rules reach each project, repair the ones that do not, deliver the shared lessons, or fold `BASIC_INSTRUCTIONS.md` into `CLAUDE.md` | **Right-click any project → 🗂 Index → 📄 Instructions…** (see *The Instructions panel*) |
+
+The Instructions panel is under a project's right-click menu only because that
+is where the menu is. It opens a list of **every** project, and what it shows
+does not depend on which one you clicked.
+
+Both change a file the Manager compiles or copies into your projects, so each
+shows what it would write before it writes anything.
+
+<!-- help:instructions-panel -->
+## The Instructions panel
+
+**Right-click any project → 🗂 Index → 📄 Instructions…** It answers one
+question for every project at once: *do the shared rules actually reach it?*
+
+Claude Code reads `CLAUDE.md` and nothing else on its own. A baseline include
+that sits in a file `CLAUDE.md` never links is read by no session at all. The
+panel follows the include chain from `CLAUDE.md` and reports where it ends up:
+the baseline inside the project, an out-of-date copy, an unlinked file, or
+nothing. It says the chain **resolves**, never that the rules were **loaded** —
+the Manager reads files and cannot see a Claude session.
+
+### What a project's setup can look like
+
+```
+CLAUDE.md  →  @project-baseline.md                         (the default)
+CLAUDE.md  →  @BASIC_INSTRUCTIONS.md  →  @project-baseline.md   (older)
+```
+
+`project-baseline.md` is a copy of the shared baseline kept inside the project,
+because an include that points outside the project is not loaded unless it is
+approved for each project separately.
+
+### Buttons
+
+- **Repair all…** — for every project that needs it: the include chain, the
+  project's copy of the baseline, the shared lessons, and the git ignore rules
+  for the files it writes. It does not create `AGENTS.md` or touch your own
+  text. Re-reads each project right before writing it; one that changed since
+  the preview is skipped, not overwritten.
+- **Generate agent rules…** — creates `AGENTS.md` and the Cursor rule across the
+  fleet. Kept apart because it creates files rather than repairing a line.
+- **↻ Re-scan** — read everything again.
+
+On a project's own row, depending on its state: the repair button,
+**Match .gitignore…**, **Deliver lessons…**, **Split…** (moves the append-only
+sections of a very large instruction file out of what loads every time) and
+**Move into CLAUDE.md…**.
+
+### Move into CLAUDE.md…
+
+For a project on the older three-file chain. Claude Code expands an include where
+the line stands, so the Manager replaces the `@BASIC_INSTRUCTIONS.md` line with
+that file's text. Claude then loads the same text in the same order, with one
+file fewer.
+
+- `BASIC_INSTRUCTIONS.md` is **left exactly as it is**. Nothing is deleted; once
+  `CLAUDE.md` no longer includes it you can remove it yourself.
+- If it is still the untouched template, only its baseline include moves; the
+  placeholder text is not pasted into your `CLAUDE.md`.
+- It refuses, and says why, if `CLAUDE.md` includes the file twice, if it has an
+  unclosed code fence, or if the baseline would end up loading twice.
+- It is offered one project at a time, never in bulk, because it moves text a
+  person wrote. The preview names how many bytes move.
 
 <!-- help:agent-cli -->
 ## Choosing a coding agent
