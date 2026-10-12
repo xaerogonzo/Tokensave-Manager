@@ -190,3 +190,20 @@ def test_the_panel_offers_a_migration_only_on_the_three_file_chain(
     assert im.eligible(posture(chain, templates))
     assert not im.eligible(posture(direct, templates)), \
         "BASIC is unreferenced there; there is nothing to fold in"
+
+
+# -- the hazard BASIC being left behind creates ------------------------------
+
+def test_a_project_that_cites_basic_by_name_is_warned_it_will_no_longer_load(
+        tmp_path, templates):
+    root = make(tmp_path, "@BASIC_INSTRUCTIONS.md\n", AUTHORED)
+    (root / "notes.md").write_text("See BASIC_INSTRUCTIONS.md rule A.\n",
+                                   encoding="utf-8")
+    note = im.left_behind_note(str(root))
+    assert "1 files" in note and "no effect" in note
+    assert "BASIC_INSTRUCTIONS.md" in note
+
+
+def test_a_project_that_never_mentions_it_gets_no_warning(tmp_path, templates):
+    root = make(tmp_path, "@BASIC_INSTRUCTIONS.md\n", AUTHORED)
+    assert im.left_behind_note(str(root)) == ""

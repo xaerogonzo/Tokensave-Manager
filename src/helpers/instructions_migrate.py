@@ -231,6 +231,27 @@ def eligible(posture) -> bool:
     return canonical(os.path.join(posture.display_root, BASIC_MD)) in posture.chain
 
 
+def left_behind_note(project_root: str) -> str:
+    """What a person should know before BASIC stops being loaded, or "".
+
+    BASIC is left in place, so nothing is stranded in the sense of a missing
+    file. The hazard is the opposite: a file that still exists, is still cited
+    by name, and is no longer read -- an edit made there would silently do
+    nothing. `instructions_split.scan_mentions` already counts the files that
+    name a given file; this reuses it rather than growing a second scanner.
+    Reported as a population, never as a dependency graph.
+    """
+    from helpers.instructions_split import scan_mentions
+    report = scan_mentions(project_root, source_rel=BASIC_MD,
+                           target_rel=CLAUDE_MD)
+    if not report.files_with_mentions:
+        return ""
+    return ("%s. BASIC_INSTRUCTIONS.md stays where it is but nothing loads it "
+            "any more, so an edit made there would have no effect - update "
+            "those references, or the file itself, if they should follow."
+            % report.summary())
+
+
 # -- applying -------------------------------------------------------------
 
 def apply_migration(project_root: str, plan: MigrationPlan

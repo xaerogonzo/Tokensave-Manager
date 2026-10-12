@@ -599,12 +599,15 @@ class InstructionsDialog(UiPumpMixin, tk.Toplevel):
                                 "%s\n\nNothing was changed: %s"
                                 % (project.name, plan.blocked), parent=self)
             return
+        note = im.left_behind_note(project.display_root)
         if not messagebox.askyesno(
                 "Move into CLAUDE.md — %s" % project.name,
                 "%s\n\n%s.\n\nBASIC_INSTRUCTIONS.md is left exactly as it is "
                 "and nothing is deleted; once CLAUDE.md no longer includes it, "
-                "you can remove it yourself. The project is re-read immediately "
-                "before writing." % (project.display_root, plan.preview()),
+                "you can remove it yourself.%s\n\nThe project is re-read "
+                "immediately before writing."
+                % (project.display_root, plan.preview(),
+                   ("\n\n" + note) if note else ""),
                 parent=self):
             return
         baseline = parse_baseline_target(self._cfg.baseline_include_line) or ""

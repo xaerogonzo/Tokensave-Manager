@@ -703,7 +703,10 @@ that file's text. Claude then loads the same text in the same order, with one
 file fewer.
 
 - `BASIC_INSTRUCTIONS.md` is **left exactly as it is**. Nothing is deleted; once
-  `CLAUDE.md` no longer includes it you can remove it yourself.
+  `CLAUDE.md` no longer includes it you can remove it yourself. Because it is
+  no longer loaded, an edit made there has no effect — the confirmation counts
+  the files in your project that still mention it by name, so you can update
+  those first.
 - If it is still the untouched template, only its baseline include moves; the
   placeholder text is not pasted into your `CLAUDE.md`.
 - It refuses, and says why, if `CLAUDE.md` includes the file twice, if it has an
