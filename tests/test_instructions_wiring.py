@@ -61,11 +61,10 @@ def posture_of(root, templates, claude_projects=None):
                            {} if claude_projects is None else claude_projects)
 
 
-def wire(root, templates, template_text=""):
+def wire(root, templates):
     p = posture_of(root, templates)
-    plan = iw.plan_wiring(p, has_template=bool(template_text))
-    return plan, iw.apply_wiring(str(root), plan, root.name, template_text,
-                                 BASELINE_TEXT)
+    plan = iw.plan_wiring(p)
+    return plan, iw.apply_wiring(str(root), plan, root.name, BASELINE_TEXT)
 
 
 def actions(plan):
@@ -121,22 +120,20 @@ def test_orphan_is_localized_and_linked(tmp_path, templates):
 
 def test_absent_with_no_basic_wires_claude_straight_to_the_baseline(
         tmp_path, templates):
-    """A project wired from scratch no longer gets a BASIC_INSTRUCTIONS.md,
-    whether or not a template is available to make one from."""
+    """A project wired from scratch no longer gets a BASIC_INSTRUCTIONS.md."""
     root = make_project(tmp_path, claude="# Notes\n")
-    for has_template in (True, False):
-        plan = iw.plan_wiring(posture_of(root, templates),
-                              has_template=has_template)
-        assert plan.steps[0].action == iw.ACTION_WRITE_COPY
-        assert set(plan.files) == {"project-baseline.md", "CLAUDE.md"}
-        assert iw.ACTION_CREATE_BASIC not in [s.action for s in plan.steps]
-        assert iw.ACTION_LINK_BASIC not in [s.action for s in plan.steps]
+    plan = iw.plan_wiring(posture_of(root, templates))
+    assert plan.steps[0].action == iw.ACTION_WRITE_COPY
+    assert set(plan.files) == {"project-baseline.md", "CLAUDE.md"}
+    assert iw.ACTION_LINK_BASIC not in [s.action for s in plan.steps]
+    assert not hasattr(iw, "ACTION_CREATE_BASIC"), \
+        "nothing can plan it, so the action must not exist to be applied"
 
 
 def test_a_project_with_nothing_gets_a_starter_claude_md_and_no_basic(
         tmp_path, templates):
     root = make_project(tmp_path)
-    plan, result = wire(root, templates, template_text="# BASIC template\n")
+    plan, result = wire(root, templates)
     assert result.ok, result.error
     text = (root / "CLAUDE.md").read_text(encoding="utf-8")
     assert text == "# proj — Claude Instructions\n\n%s\n" % LOCAL
@@ -238,7 +235,7 @@ def test_an_unlinked_placeholder_include_does_not_block_the_live_one(
     assert actions(plan) == [(iw.ACTION_WRITE_COPY, "project-baseline.md"),
                              (iw.ACTION_LOCALIZE, "CLAUDE.md")]
 
-    result = iw.apply_wiring(str(root), plan, root.name, "", BASELINE_TEXT)
+    result = iw.apply_wiring(str(root), plan, root.name, BASELINE_TEXT)
     assert result.ok, result.error
     assert posture_of(root, templates).healthy
     assert (root / "BASIC_INSTRUCTIONS.md").read_text(encoding="utf-8") == placeholder
@@ -248,11 +245,11 @@ def test_planner_refuses_an_excluded_project(tmp_path, templates):
     root = make_project(tmp_path, claude="# upstream clone\n")
     p = dataclasses.replace(posture_of(root, templates), excluded=True,
                             exclude_reason="vendor clone")
-    plan = iw.plan_wiring(p, has_template=True)
+    plan = iw.plan_wiring(p)
     assert plan.steps == ()
     assert plan.blocked == "vendor clone"
     before = sorted(os.listdir(root))
-    iw.apply_wiring(str(root), plan, root.name, "x", BASELINE_TEXT)
+    iw.apply_wiring(str(root), plan, root.name, BASELINE_TEXT)
     assert sorted(os.listdir(root)) == before
 
 
@@ -328,7 +325,7 @@ def test_a_file_edited_between_plan_and_apply_gets_nothing_written(
     edited = b"@C:/somebody/else/project-baseline.md\n"
     (root / "BASIC_INSTRUCTIONS.md").write_bytes(edited)
 
-    result = iw.apply_wiring(str(root), plan, root.name, "", BASELINE_TEXT)
+    result = iw.apply_wiring(str(root), plan, root.name, BASELINE_TEXT)
 
     assert not result.ok and "changed since the plan" in result.error
     assert (root / "BASIC_INSTRUCTIONS.md").read_bytes() == edited
@@ -344,8 +341,7 @@ def test_the_include_is_never_repointed_when_the_copy_cannot_be_written(
     reversed_plan = iw.WiringPlan(steps=tuple(reversed(plan.steps)))
     before = (root / "BASIC_INSTRUCTIONS.md").read_bytes()
 
-    result = iw.apply_wiring(str(root), reversed_plan, root.name, "",
-                             baseline_template_text="")   # copy write fails
+    result = iw.apply_wiring(str(root), reversed_plan, root.name, baseline_template_text="")   # copy write fails
 
     assert not result.ok
     assert (root / "BASIC_INSTRUCTIONS.md").read_bytes() == before
@@ -442,12 +438,11 @@ def test_authored_contradiction_survives_wiring(tmp_path, templates):
     assert ip.ADVISORY_CONTRADICTS in posture_of(root, templates).advisories
 
 
-def test_absent_without_a_template_wires_the_one_hop_shape(tmp_path, templates):
-    """A blank template path must not leave a project unwired."""
+def test_absent_wires_the_one_hop_shape(tmp_path, templates):
     root = make_project(tmp_path, claude="# Notes\n")
-    plan = iw.plan_wiring(posture_of(root, templates), has_template=False)
+    plan = iw.plan_wiring(posture_of(root, templates))
     assert plan.files == ("project-baseline.md", "CLAUDE.md")
-    result = iw.apply_wiring(str(root), plan, root.name, "", BASELINE_TEXT)
+    result = iw.apply_wiring(str(root), plan, root.name, BASELINE_TEXT)
     assert result.ok
     assert (root / "CLAUDE.md").read_text(encoding="utf-8").startswith(LOCAL)
     assert posture_of(root, templates).healthy
@@ -458,10 +453,10 @@ def test_absent_without_a_template_wires_the_one_hop_shape(tmp_path, templates):
 # These assert on MEMBERS. If any of them needs `in result.render()` to tell two
 # situations apart, the shape has regressed.
 
-def apply_one(root, templates, template_text="", posture=None):
+def apply_one(root, templates, posture=None):
     return iw.apply_to_project(
         posture or posture_of(root, templates), baseline_of(templates),
-        str(templates), template_text, bool(template_text), BASELINE_TEXT,
+        str(templates), BASELINE_TEXT,
         claude_projects={})
 
 
@@ -558,7 +553,7 @@ class TestGitAlignment:
         _local_only_repo(root)
         result = iw.apply_to_project(
             posture_of(root, templates), baseline_of(templates),
-            str(templates), "", False, BASELINE_TEXT, claude_projects={},
+            str(templates), BASELINE_TEXT, claude_projects={},
             git_exe=GIT)
         assert result.outcome == iw.OUTCOME_WIRED, result.render()
         assert "project-baseline.md" in result.changed_files
@@ -578,7 +573,7 @@ class TestGitAlignment:
         _local_only_repo(root)
         result = iw.apply_to_project(
             posture_of(root, templates), baseline_of(templates),
-            str(templates), "", False, BASELINE_TEXT, claude_projects={},
+            str(templates), BASELINE_TEXT, claude_projects={},
             git_exe=GIT)
         assert result.outcome == iw.OUTCOME_ALREADY_RESOLVED
         assert result.wrote is False and result.mutated is True

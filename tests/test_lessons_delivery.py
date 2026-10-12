@@ -291,7 +291,7 @@ def _apply(root, templates, lessons, git_exe=""):
     return iw.apply_to_project(
         _posture_of(root, templates),
         ip.canonical(str(templates / "project-baseline.md")), str(templates),
-        "", False, BASELINE_TEXT, claude_projects={}, git_exe=git_exe,
+        BASELINE_TEXT, claude_projects={}, git_exe=git_exe,
         lessons=lessons)
 
 
@@ -332,7 +332,7 @@ def test_an_excluded_project_gets_neither_the_baseline_nor_the_lessons(
                         lambda *a, **k: posture)
     result = iw.apply_to_project(
         posture, ip.canonical(str(templates / "project-baseline.md")),
-        str(templates), "", False, BASELINE_TEXT, claude_projects={},
+        str(templates), BASELINE_TEXT, claude_projects={},
         lessons=_corpus())
     assert result.outcome == iw.OUTCOME_SKIPPED_BLOCKED
     assert result.lessons == ()

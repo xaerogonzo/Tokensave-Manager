@@ -512,16 +512,13 @@ class InstructionsDialog(UiPumpMixin, tk.Toplevel):
 
     # ── writing ──────────────────────────────────────────────────────────
 
-    def _template_text(self) -> str:
+    def _placeholder_text(self) -> str:
+        """The shipped BASIC template, used only to recognise an untouched one."""
         template_file = getattr(self._cfg, "basic_instructions_template", "")
         if not template_file or not os.path.isfile(template_file):
             return ""
         return load_basic_instructions_template(
             template_file, self._cfg.project_baseline_include_line)
-
-    def _has_template(self) -> bool:
-        template_file = getattr(self._cfg, "basic_instructions_template", "")
-        return bool(template_file) and os.path.isfile(template_file)
 
     def _apply_to(self, project):
         """Supply the cfg-derived values; the orchestration lives in the helper.
@@ -533,7 +530,6 @@ class InstructionsDialog(UiPumpMixin, tk.Toplevel):
         baseline = parse_baseline_target(self._cfg.baseline_include_line)
         return apply_to_project(
             project, baseline or "", self._cfg.template_dir,
-            self._template_text(), self._has_template(),
             read_template(baseline or ""), git_exe=self._cfg.git_exe,
             lessons=ld.load_corpus(self._cfg.template_dir))
 
@@ -575,7 +571,7 @@ class InstructionsDialog(UiPumpMixin, tk.Toplevel):
             for p, r in changed))
 
     def _wire_one(self, project) -> None:
-        plan = plan_wiring(project, has_template=self._has_template())
+        plan = plan_wiring(project)
         listing = "\n".join("    " + line
                             for line in self._preview_lines(project, plan))
         if not messagebox.askyesno(
@@ -593,7 +589,7 @@ class InstructionsDialog(UiPumpMixin, tk.Toplevel):
     def _migrate_one(self, project) -> None:
         """Fold BASIC_INSTRUCTIONS.md into CLAUDE.md for one project."""
         claude_text, basic_text = im.read_pair(project.display_root)
-        placeholder = self._template_text()
+        placeholder = self._placeholder_text()
         plan = (im.plan_migration(claude_text, basic_text, placeholder)
                 if claude_text is not None and basic_text is not None
                 else im.MigrationPlan(blocked="could not read the instruction "
@@ -659,7 +655,7 @@ class InstructionsDialog(UiPumpMixin, tk.Toplevel):
                                 "Manager will not guess at.", parent=self)
             return
 
-        plans = [(p, plan_wiring(p, has_template=self._has_template()))
+        plans = [(p, plan_wiring(p))
                  for p in candidates]
         lines = []
         for project, plan in plans:

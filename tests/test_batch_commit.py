@@ -342,7 +342,7 @@ def test_apply_to_project_records_evidence_that_lets_only_our_files_commit(tmp_p
     corpus = tuple(ld.Lesson(s, "# %s\n" % s.source_rel) for s in ld.LESSONS)
     baseline = ip.canonical(str(templates / "project-baseline.md"))
     posture = ip.read_project(str(root), "wired", str(templates), baseline, base, "", {})
-    outcome = iw.apply_to_project(posture, baseline, str(templates), "", False, base,
+    outcome = iw.apply_to_project(posture, baseline, str(templates), base,
                                   claude_projects={}, git_exe=GIT, lessons=corpus)
 
     ev = outcome.evidence

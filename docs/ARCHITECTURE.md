@@ -1626,13 +1626,14 @@ All CLI calls are non-blocking. The GUI stays responsive during indexing.
 ⚙ Retrofit Existing button  (also available via right-click → ⚙ Retrofit…)
   → filedialog.askdirectory()
   → RetrofitDialog (modal: checkboxes for tokensave rules + Nuitka + shadow links)
-      → Apply: _do_retrofit(path, add_tokensave, add_basic_instructions, add_nuitka, add_shadow_links, shadow_ext_map)
+      → Apply: _do_retrofit(path, add_tokensave, add_nuitka, add_shadow_links, shadow_ext_map, ...)
           → worker thread:
               → if add_tokensave: instructions_posture.read_project()
                                  → instructions_wiring.plan_wiring()   (pure)
-                                 → apply_wiring() — wires CLAUDE.md → @BASIC_INSTRUCTIONS.md
-                                   → @project-baseline.md, or repoints a stale
-                                   include. Refuses rather than guesses; never deletes.
+                                 → apply_wiring() — wires CLAUDE.md → @project-baseline.md
+                                   (or keeps an existing BASIC_INSTRUCTIONS.md chain), or
+                                   repoints a stale include. Refuses rather than guesses;
+                                   never deletes.
                             → if add_nuitka: _scaffold_nuitka_build(path)
               → if add_shadow_links: generate_shadow_links(path, shadow_ext_map) + update_gitignore_for_shadows
               → self.after(0, messagebox.showinfo("summary"))

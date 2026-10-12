@@ -37,7 +37,6 @@ from helpers.instructions_posture import (excluded_roots, parse_baseline_target,
 from helpers.instructions_posture import canonical as canonical_path
 from helpers.instructions_wiring import (apply_wiring, deliver_lessons,
                                          plan_wiring)
-from helpers.project_discovery import load_basic_instructions_template
 from helpers.runtime import log
 from helpers.scaffold import _scaffold_git_hook
 # Aliased: `run_init` is already a bool parameter on _scaffold_project,
@@ -379,9 +378,7 @@ class ScaffoldRetrofitController:
             self._on_log("  Instructions: excluded in manager-config.json "
                          "(instructions_skip_paths) — skipped", C["overlay0"])
             return []
-        template_file = getattr(cfg, "basic_instructions_template", "") or ""
-        has_template = bool(template_file) and os.path.isfile(template_file)
-        plan = plan_wiring(posture, has_template=has_template)
+        plan = plan_wiring(posture)
 
         if plan.blocked:
             # Refusing is a result, not a failure: every blocked state is one
@@ -395,13 +392,7 @@ class ScaffoldRetrofitController:
                          C["overlay0"])
             return self._deliver_lessons(posture) + self._align_posture(posture)
 
-        template_text = ""
-        if has_template:
-            template_text = load_basic_instructions_template(
-                template_file, cfg.project_baseline_include_line)
-
-        result = apply_wiring(path, plan, name, template_text,
-                              read_template(baseline or ""))
+        result = apply_wiring(path, plan, name, read_template(baseline or ""))
         if not result.ok:
             detail = result.error or result.skipped
             log.warning(f"  instructions wiring failed: {detail}")
