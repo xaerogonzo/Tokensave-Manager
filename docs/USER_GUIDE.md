@@ -638,18 +638,18 @@ the baseline is loaded by every wired project on every message.
 <!-- help:fleet-wide-settings -->
 ## Settings that apply to every project
 
-A few choices change what **all** your projects are told, yet are opened from a
-place that looks like it belongs to one project. They are easy to miss for that
-reason.
+A few choices change what **all** your projects are told. Both are on the first
+page of the Settings tab, under **Applies to every project**, and also where
+they were before:
 
 | You want to… | Open |
 |---|---|
-| Decide whether agents may commit or push, in every wired project | **Settings → Git & Policy → Agent Policy…** (see *Agent Policy*) |
-| See whether the shared rules reach each project, repair the ones that do not, deliver the shared lessons, or fold `BASIC_INSTRUCTIONS.md` into `CLAUDE.md` | **Right-click any project → 🗂 Index → 📄 Instructions…** (see *The Instructions panel*) |
+| Decide whether agents may commit or push, in every wired project | **Settings → Applies to every project → 🎛 Agent Policy…**, or Settings → Git & Policy → Agent Policy… (see *Agent Policy*) |
+| See whether the shared rules reach each project, repair the ones that do not, deliver the shared lessons, or fold `BASIC_INSTRUCTIONS.md` into `CLAUDE.md` | **Settings → Applies to every project → 📄 Instructions…**, or right-click any project → 🗂 Index → 📄 Instructions… (see *The Instructions panel*) |
 
-The Instructions panel is under a project's right-click menu only because that
-is where the menu is. It opens a list of **every** project, and what it shows
-does not depend on which one you clicked.
+The Instructions panel is also under a project's right-click menu, which is
+easy to read as "about this project". It opens a list of **every** project, and
+what it shows does not depend on which one you clicked.
 
 Both change a file the Manager compiles or copies into your projects, so each
 shows what it would write before it writes anything.
@@ -657,8 +657,9 @@ shows what it would write before it writes anything.
 <!-- help:instructions-panel -->
 ## The Instructions panel
 
-**Right-click any project → 🗂 Index → 📄 Instructions…** It answers one
-question for every project at once: *do the shared rules actually reach it?*
+**Settings → Applies to every project → 📄 Instructions…**, or right-click any
+project → 🗂 Index → 📄 Instructions…. It answers one question for every
+project at once: *do the shared rules actually reach it?*
 
 Claude Code reads `CLAUDE.md` and nothing else on its own. A baseline include
 that sits in a file `CLAUDE.md` never links is read by no session at all. The

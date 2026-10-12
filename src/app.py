@@ -443,6 +443,7 @@ class App(UiPumpMixin, tk.Tk):
             get_tokensave_versions=lambda: (
                 self._update_poller.current_version,
                 self._update_poller.available_version),
+            open_instructions=self._projects.cmd_instructions,
         )
         from helpers.detection import _root_path
         self._tasks_ctrl = TasksController(
