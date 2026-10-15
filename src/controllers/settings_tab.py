@@ -121,7 +121,7 @@ class SettingsTabController:
     def __init__(self, notebook: "ttk.Notebook", cfg: "ManagerConfig", *,
                  host, save_fn, on_saved,
                  on_upgrade_tokensave, on_integration_check,
-                 get_tokensave_versions) -> None:
+                 get_tokensave_versions, open_instructions=None) -> None:
         self._cfg = cfg
         self._host = host
         self._save_fn = save_fn
@@ -129,6 +129,7 @@ class SettingsTabController:
         self._on_upgrade_tokensave = on_upgrade_tokensave
         self._on_integration_check = on_integration_check
         self._get_tokensave_versions = get_tokensave_versions
+        self._open_instructions = open_instructions
 
         self._sections: list = []
         self._pages: dict = {}
@@ -202,6 +203,8 @@ class SettingsTabController:
         self._pages = frames
 
         host, cfg = self._host, self._cfg
+        # Packed first, so it sits above the paths on the page a person lands on.
+        self._build_fleet_block(bodies["paths"])
         self._paths = PathsSection(
             host, bodies["paths"], cfg,
             open_tool_manager=self._open_tool_manager,
@@ -227,6 +230,41 @@ class SettingsTabController:
 
         self._hydrating = True
         self._host.after(DETECTION_SETTLE_MS, self._settle)
+
+    def _build_fleet_block(self, body) -> None:
+        """The two controls that change what EVERY project is told.
+
+        Both used to be reachable only by accident of where their menus were:
+        Agent Policy two clicks into Git & Policy, and the Instructions panel
+        under ONE project's right-click menu although it lists them all. Not a
+        section: it has no values, so it takes no part in dirty tracking or
+        Save, and it packs onto the page body like everything else here.
+        """
+        tk.Label(body, text="Applies to every project", font=("Segoe UI", 10, "bold"),
+                 bg=C["base"], fg=C["text"]).pack(anchor=tk.W, padx=20,
+                                                  pady=(12, 2))
+        tk.Label(body, text="  These change what all your wired projects are "
+                            "told, not just the selected one.",
+                 font=("Segoe UI", 8), bg=C["base"], fg=C["overlay0"],
+                 justify=tk.LEFT).pack(anchor=tk.W, padx=20, pady=(0, 4))
+        row = tk.Frame(body, bg=C["base"])
+        row.pack(anchor=tk.W, padx=20, pady=(0, 4))
+        ttk.Button(row, text="\U0001f39b  Agent Policy…",
+                   command=self._open_agent_policy).pack(side=tk.LEFT,
+                                                         padx=(0, 6))
+        instructions = ttk.Button(row, text="\U0001f4c4  Instructions…",
+                                  command=self._open_instructions_panel)
+        instructions.pack(side=tk.LEFT)
+        if self._open_instructions is None:
+            instructions.state(["disabled"])
+        tk.Label(body, text="  Agent Policy: may agents commit or push.   "
+                            "Instructions: do the shared rules reach each "
+                            "project, and repair the ones that do not.",
+                 font=("Segoe UI", 8), bg=C["base"], fg=C["overlay0"],
+                 justify=tk.LEFT, wraplength=620).pack(anchor=tk.W, padx=20,
+                                                       pady=(0, 4))
+        ttk.Separator(body, orient="horizontal").pack(fill=tk.X, padx=20,
+                                                      pady=(8, 4))
 
     def _build_tool_buttons(self, body) -> None:
         """The three manager dialogs, beside the paths that configure them.
@@ -331,6 +369,14 @@ class SettingsTabController:
         self._refresh_bar()
 
     # ── Dialog launchers (lazy imports, per the project rule) ────────────
+
+    def _open_agent_policy(self) -> None:
+        # The Git & Policy section already owns this launcher; one opener, not two.
+        self._git._open_instruction_composer()
+
+    def _open_instructions_panel(self) -> None:
+        if self._open_instructions is not None:
+            self._open_instructions()
 
     def _open_tool_manager(self) -> None:
         from dialogs.tool_manager import ToolManagerDialog

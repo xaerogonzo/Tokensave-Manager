@@ -86,7 +86,7 @@ Token Save Manager Source/
 │   │                              Runs beside a real Manager through scripts/drive/run_isolated.py
 │   │                              (scratch config, no lock, no request poller, no tray).
 │   │
-│   ├── helpers/                  131 modules of pure / IO helpers — no UI deps.
+│   ├── helpers/                  133 modules of pure / IO helpers — no UI deps.
 │   │   ├── config.py              _load_config, _save_config, _migrate_config
 │   │   ├── detection.py           _detect_git/_gh/_npm/_codegraph/_claude_cli,
 │   │   │                          _root_path/_label, _version_lt
@@ -397,6 +397,10 @@ Token Save Manager Source/
 │   │   ├── instructions_wiring.py The ONE writer. Copies the baseline into the
 │   │   │                          project, then repoints the include; never
 │   │   │                          deletes authored prose.
+│   │   ├── instructions_migrate.py Folds BASIC_INSTRUCTIONS.md into CLAUDE.md at the
+│   │   │                          line that included it (a splice, same text same
+│   │   │                          order). Never deletes, never pastes the untouched
+│   │   │                          template, compare-and-apply on both files.
 │   │   ├── instructions_split.py  Moves a lesson log out of the always-loaded
 │   │   │                          file. Reports the repo population keyed to the
 │   │   │                          filename it is about to empty.
@@ -511,6 +515,9 @@ Token Save Manager Source/
 │   │   ├── tokensave_daemon.py    Find running `tokensave serve` processes, and say
 │   │   │                          honestly how confident we are about which project
 │   │   │                          each one serves.
+│   │   ├── mcp_runtime_rows.py    Running tokensave servers + CodeGraph daemons as
+│   │   │                          display rows for the Tasks tab's MCP view; one
+│   │   │                          status per source, never summed, failed != none.
 │   │   ├── project_rename.py      Rename a project folder as a coordinated migration,
 │   │   │                          not an atomic OS rename: gathers independent hazard
 │   │   │                          facts (attributed tokensave servers, a locked/nested
@@ -864,7 +871,8 @@ Token Save Manager Source/
 │                                  Orchestrates only; all shared infra in helpers/.
 │                                  CLI briefing via temp .md file-handoff pattern
 │                                  (avoids cmd.exe /k newline-as-Enter quirk).
-│       ├── tasks_tab.py           TasksController — owns the Tasks tab.
+│       ├── tasks_tab.py           TasksController — owns the Tasks tab (view dropdown:
+│       │                          sessions & worktrees, or running MCP servers).
 │       ├── command_bar_ctrl.py    CommandBarCtrl sub-controller.
 │       ├── project_sync_ctrl.py   ProjectSyncCtrl sub-controller.
 │       ├── pr_draft_ctrl.py       PRDraftCtrl sub-controller — PR body generation and
@@ -898,7 +906,7 @@ Token Save Manager Source/
 │                                  broken' are otherwise identical output. See its README.
 │
 ├── templates/                     Data files used by the manager + shipped in dist\
-│   ├── claude-md-template.md      BASIC_INSTRUCTIONS.md template for other projects
+│   ├── claude-md-template.md      reference text for spotting an untouched BASIC_INSTRUCTIONS.md
 │   ├── project-baseline.md        Universal rules file — @included by retrofitted projects
 │   ├── nuitka-build.ps1.template  Generic Nuitka build script template (PowerShell)
 │   ├── nuitka-build.py.template   Python-based alternative build script
@@ -1265,7 +1273,7 @@ App (tk.Tk)
 ├── Data methods
 │   ├── refresh()           — re-scans projects, rebuilds treeview
 │   ├── _auto_refresh()     — 60s timer, skips if a proc is running
-│   └── _has_scaffold()     — checks BASIC_INSTRUCTIONS.md exists in a path
+│   └── _has_scaffold()     — checks CLAUDE.md or BASIC_INSTRUCTIONS.md exists in a path
 ├── Command handlers (cmd_*)
 │   ├── cmd_set_active / cmd_auto
 │   ├── cmd_sync / cmd_sync_all / cmd_force_sync
@@ -1286,9 +1294,9 @@ App (tk.Tk)
     ├── _run()                   — generic tokensave CLI call (threaded, streaming); delegates _auto_commit_after_sync() for the post-sync commit; amends previous commit if last message was "chore: tokensave sync"
     ├── _run_capture()           — tokensave call returning (output, rc, elapsed); synchronous from thread
     ├── _shell_capture()         — generic shell call returning (output, rc); catches FileNotFoundError
-    ├── _scaffold_project()      — write BASIC_INSTRUCTIONS + optional tokensave init + Nuitka + git hook
+    ├── _scaffold_project()      — wire CLAUDE.md → baseline (via the Retrofit planner) + optional tokensave init + Nuitka + git hook
     ├── _scaffold_nuitka_build() — copy nuitka-build.ps1/bat templates into a project folder
-    ├── _do_retrofit()           — prepend @include to CLAUDE.md + optional BASIC_INSTRUCTIONS + Nuitka + shadow links + git hook
+    ├── _do_retrofit()           — wire CLAUDE.md → baseline + index + Nuitka + shadow links + git hook
     ├── _do_shadow_links()       — generate hardlinks in background thread, optionally run sync after
     ├── _do_assign_category()    — write project_categories override to config, refresh tree
     ├── _do_git_commit()         — git reset → git add -- <selected_files> → git commit -m, background thread; commits only ticked files from GitCommitDialog
@@ -1342,8 +1350,8 @@ AskTabController (standalone class, App._ask_ctrl)
     ├── 🤖 Ask tab: chat log Text, Send/Stop/Clear controls, _ask_messages conversation history
     └── on_tab_selected() — called by App._on_tab_changed when Ask tab gains focus
 
-RetrofitDialog (tk.Toplevel)     — modal: 5 checkboxes: tokensave rules / BASIC_INSTRUCTIONS / Nuitka build / shadow links / auto-commit hook
-ScaffoldDialog (tk.Toplevel)     — modal: 4 checkboxes: BASIC_INSTRUCTIONS / tokensave init / Nuitka build / auto-commit hook
+RetrofitDialog (tk.Toplevel)     — modal: checkboxes: tokensave rules / AGENTS.md / Cursor rule / Nuitka build / shadow links / auto-commit hook
+ScaffoldDialog (tk.Toplevel)     — modal: checkboxes: Claude instructions / tokensave init / Nuitka build / auto-commit hook / live-driver template
 SettingsDialog (tk.Toplevel)      — modal: edit manager-config.json; search roots as labeled two-column Treeview; auto-commit toggle; "AI commit messages" section with provider/model/api-key/base-URL fields + Anthropic/LM Studio/Ollama preset buttons. Content wrapped in a `Canvas + body Frame` with vertical scrollbar (mousewheel-bound on canvas AND body) so the growing dialog scrolls when its natural height exceeds the window. Save/Cancel buttons packed on `self` (NOT body) so they stay anchored at the bottom outside the scroll area. Resizable, 760×700 default, 640×500 minsize
 SnippetEditDialog (tk.Toplevel)  — modal: title + body for adding or editing a user-defined prompt snippet
 ShadowLinksDialog (tk.Toplevel)  — modal: editable extension/name map + sync toggle; right-click 🔗 Shadow Links…
@@ -1462,7 +1470,7 @@ Contents of the zip are 1:1 whatever `dist/` holds after the build, which is con
 |--------|---------|
 | `instructions_posture.read_posture(roots, cfg)` / `read_project(...)` | Whether each project's Claude instruction chain resolves. Splits `carriage` (what the files declare) from `reach` (what the chain from `CLAUDE.md` arrives at) — the pair whose conflation hid eleven orphaned `BASIC_INSTRUCTIONS.md` files. Bounded include walk (depth 8 / 32 files / 2 MB, ancestry-based cycle detection); the permitted target boundary is the project subtree **or the configured `template_dir`**, because the shared baseline lives outside every project by design. Pure apart from `read_posture`. |
 | `instructions_posture.parse_baseline_target(line)` | Runs the directive parser over `cfg.baseline_include_line` itself, so a malformed configured baseline is `UNKNOWN` rather than making every project look stale. |
-| `instructions_wiring.plan_wiring(posture)` / `apply_wiring(...)` | The one writer. Writes `CLAUDE.md → @BASIC_INSTRUCTIONS.md → @project-baseline.md` (the project's copy): `WRITE_COPY` / `REFRESH_COPY` / `LOCALIZE`. A resolving external include is localized **even when approved**, because a committed machine path breaks other checkouts and worktrees. Every `LOCALIZE` carries the exact directive and line it was planned from and all of them are checked before ANY write; copy steps always run before a repoint, whatever order a plan lists them in. Repairs exactly ONE topology even though the classifier resolves a general graph — resolving broadly is what stops the panel "fixing" a project that already works through its own valid chain. Never deletes, never rewrites authored prose, refuses on duplicate directives. Reads with `newline=""` so a one-line insert cannot silently convert a CRLF file. |
+| `instructions_wiring.plan_wiring(posture)` / `apply_wiring(...)` | The one writer. Writes `CLAUDE.md → @project-baseline.md` (the project's copy) for a project with no `BASIC_INSTRUCTIONS.md`, and the older `CLAUDE.md → @BASIC_INSTRUCTIONS.md → @project-baseline.md` only where a BASIC file already exists: `WRITE_COPY` / `REFRESH_COPY` / `LOCALIZE`. A resolving external include is localized **even when approved**, because a committed machine path breaks other checkouts and worktrees. Every `LOCALIZE` carries the exact directive and line it was planned from and all of them are checked before ANY write; copy steps always run before a repoint, whatever order a plan lists them in. Repairs only those two topologies even though the classifier resolves a general graph — resolving broadly is what stops the panel "fixing" a project that already works through its own valid chain. Never deletes, never rewrites authored prose, refuses on duplicate directives. Reads with `newline=""` so a one-line insert cannot silently convert a CRLF file. |
 | `dialogs/instructions_split.SplitProposalDialog` | The offer, on the row it applies to. Per project and never bulk: moving a lesson log is a large editorial change to a file a person wrote. Every section is listed with its byte cost and a tick, and **nothing is ticked on open**: the budget guesses a tail, which was wrong on three of the four real files it met — once selecting an operational section — and a pre-ticked box reads as a recommendation. `Suggest from budget` offers the guess on request. Recompute is live (18 ms on the 954 KB file). Two guards are mutation-tested — building the proposal writes nothing, and applying writes exactly the two files it represented. A refusal is a sentence beside the button, never only a greyed control. |
 | `instructions_split.compute_split(text, ...)` / `apply_split(...)` | Moves an append-only lesson log out of the always-loaded file, leaving an index. The boundary is **proposed, never decided** — ALL-CAPS headings are 81% / 34% / 0% of the three oversized projects’ sections and all three are logs, so casing is a project ritual rather than a rule. Pure compute returns the complete new contents of BOTH files; `apply_split` refuses if the source’s sha256 moved since (two targets have live agents appending), refuses to overwrite an existing target, and writes the target first so a failure leaves the project untouched. Directive detection is delegated to `instructions_posture.scan_text`, and the newline to `instructions_wiring.dominant_newline`. The sections to move are an explicit `move_indices` set rather than a boundary, because *“the tail is the log”* was falsified by two of the three projects it was written for; the index renders **where the moved run was**, so the surviving document still reads in order. Sections are a **two-level tree** — `##` is not the unit of a lesson, and one project keeps a 64,030 B operational section holding twenty `###` ones — so a subsection moves alone, a parent carries its children, and a `###` whose parent stays is filed under a `## From:` heading in the target. A second split merges into the index the first wrote and appends to the existing target under a **second** digest guard; appending is offered only for a target this module wrote. |
 | `install_identity.read_identity(raw, base_dir)` / `read_ownership(projects, here)` | **Two questions, never conflated.** *Where am I* — `FIRST_RUN`/`SAME`/`MOVED` from the recorded `install_dir`; no record is deliberately **not** a move. *Who owns the fleet* — `OWNED_HERE`/`OWNED_ELSEWHERE`/`SPLIT`/`UNOWNED`, derived from the projects and computed only over those that reach a baseline. `SAME` + `OWNED_ELSEWHERE` is a state, never an instruction: taking ownership from another install is an operation somebody invokes. `SPLIT` carries per-owner canonical paths and counts. Identity is **lexical** (reuses `instructions_posture.canonical`), so a junction reads as a different install — an intentional invariant, tested as the contract. |
@@ -1604,9 +1612,9 @@ All CLI calls are non-blocking. The GUI stays responsive during indexing.
 ```
 + Scaffold button
   → filedialog.askdirectory()
-  → ScaffoldDialog (modal: checkboxes for BASIC_INSTRUCTIONS + init + Nuitka build files)
+  → ScaffoldDialog (modal: checkboxes for Claude instructions + init + Nuitka build files)
       → Apply: _scaffold_project(path, create_bi, run_init, scaffold_nuitka)
-          → write BASIC_INSTRUCTIONS.md synchronously (if checked)
+          → wire CLAUDE.md → project-baseline.md synchronously (if checked)
           → _scaffold_nuitka_build(path) synchronously (if checked)
               → copy nuitka-build.ps1.template → build.ps1 (fills [PROJECT_NAME])
               → copy nuitka-build.bat.template → build.bat
@@ -1617,16 +1625,16 @@ All CLI calls are non-blocking. The GUI stays responsive during indexing.
 ```
 ⚙ Retrofit Existing button  (also available via right-click → ⚙ Retrofit…)
   → filedialog.askdirectory()
-  → RetrofitDialog (modal: checkboxes for tokensave rules + BASIC_INSTRUCTIONS + Nuitka + shadow links)
-      → Apply: _do_retrofit(path, add_tokensave, add_basic_instructions, add_nuitka, add_shadow_links, shadow_ext_map)
+  → RetrofitDialog (modal: checkboxes for tokensave rules + Nuitka + shadow links)
+      → Apply: _do_retrofit(path, add_tokensave, add_nuitka, add_shadow_links, shadow_ext_map, ...)
           → worker thread:
               → if add_tokensave: instructions_posture.read_project()
                                  → instructions_wiring.plan_wiring()   (pure)
-                                 → apply_wiring() — wires CLAUDE.md → @BASIC_INSTRUCTIONS.md
-                                   → @project-baseline.md, or repoints a stale
-                                   include. Refuses rather than guesses; never deletes.
-              → if add_bi: write BASIC_INSTRUCTIONS.md
-              → if add_nuitka: _scaffold_nuitka_build(path)
+                                 → apply_wiring() — wires CLAUDE.md → @project-baseline.md
+                                   (or keeps an existing BASIC_INSTRUCTIONS.md chain), or
+                                   repoints a stale include. Refuses rather than guesses;
+                                   never deletes.
+                            → if add_nuitka: _scaffold_nuitka_build(path)
               → if add_shadow_links: generate_shadow_links(path, shadow_ext_map) + update_gitignore_for_shadows
               → self.after(0, messagebox.showinfo("summary"))
 ```
@@ -1724,9 +1732,12 @@ there -- and shipped to end users.
 The live-driver starting point. **Lifecycle differs from its neighbours on purpose:** the baseline is compiled and synced, the gotchas are synced to the existing fleet, and this is only *scaffolded into new projects* -- it is a starting point people edit, so it is never judged outdated or overwritten. `tests/test_drive_template.py` keeps its `drive_ledger.py` identical to `src/helpers/drive_ledger.py`.
 
 ### `templates/claude-md-template.md`
-Written as `BASIC_INSTRUCTIONS.md` into scaffolded projects. Contains an `@include`
-pointing to `project-baseline.md`, placeholder sections for overview / architecture /
-key files / rules, and comment blocks telling Claude to fill them in on first use.
+No longer written into any project: Scaffold and Retrofit wire `CLAUDE.md` straight to
+`project-baseline.md`. It stays because it is the reference an *untouched*
+`BASIC_INSTRUCTIONS.md` is compared against (the Doctor's placeholder note, and
+`instructions_migrate` deciding not to paste a template into `CLAUDE.md`). It contains an
+`@include` pointing to `project-baseline.md` and placeholder sections for overview /
+architecture / key files / rules.
 
 ### `templates/project-baseline.md`
 A universal rules file `@include`d at the top of every retrofitted project's CLAUDE.md.

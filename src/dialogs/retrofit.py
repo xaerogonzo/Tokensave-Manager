@@ -1,9 +1,9 @@
 """RetrofitDialog — 5 checkboxes for retrofitting an existing project.
 
 Each checkbox toggles one retrofit step (tokensave CLAUDE.md rules,
-BASIC_INSTRUCTIONS.md, Nuitka build files, shadow extension links,
-auto-commit Stop hook). On Apply, fires the callback with the five
-flags if any was checked.
+AGENTS.md, Cursor rule, Nuitka build files, shadow extension links,
+auto-commit Stop hook). On Apply, fires the callback with the flags
+if any was checked.
 """
 
 from __future__ import annotations
@@ -41,17 +41,10 @@ class RetrofitDialog(tk.Toplevel):
         # Checkbox: tokensave integration
         self.var_ts = self._opt_row(
             "Add tokensave rules + index the project",
-            "  Prepends an @include line so Claude always loads the\n"
-            "  tokensave lookup table, and builds the code-graph index if\n"
-            "  this project has none. Non-destructive: existing content and\n"
-            "  an existing index are both left alone.",
-            pad, default=True)
-
-        # Checkbox: BASIC_INSTRUCTIONS.md
-        self.var_bi = self._opt_row(
-            "Also create BASIC_INSTRUCTIONS.md",
-            "  Drops a full project template (overview, architecture,\n"
-            "  key files, rules) for Claude to fill in on first use.",
+            "  Makes CLAUDE.md load the shared project baseline (creating\n"
+            "  CLAUDE.md if there is none), and builds the code-graph index\n"
+            "  if this project has none. Non-destructive: existing content\n"
+            "  and an existing index are both left alone.",
             pad, default=True)
 
         ttk.Separator(self, orient="horizontal").pack(fill=tk.X, padx=20, pady=(4, 4))
@@ -154,7 +147,6 @@ class RetrofitDialog(tk.Toplevel):
         # Every var is read BEFORE destroy(): the widgets own them, and
         # reading through a destroyed dialog is a race nobody needs.
         ts      = self.var_ts.get()
-        bi      = self.var_bi.get()
         nuitka  = self.var_nuitka.get()
         shadow  = self.var_shadow.get()
         hook    = self.var_hook.get()
@@ -163,8 +155,8 @@ class RetrofitDialog(tk.Toplevel):
         self.destroy()
         # The guard lists EVERY flag. Omitting one makes ticking only that box
         # close the dialog and do nothing, which reads as the button being broken.
-        if ts or bi or nuitka or shadow or hook or agents or cursor:
-            self.callback(self.path, ts, bi, nuitka, shadow,
+        if ts or nuitka or shadow or hook or agents or cursor:
+            self.callback(self.path, ts, nuitka, shadow,
                           add_git_hook=hook,
                           add_agents=agents,
                           add_cursor_rule=cursor)

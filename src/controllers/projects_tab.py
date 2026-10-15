@@ -490,8 +490,15 @@ class ProjectsTabController:
 
     @staticmethod
     def _has_scaffold(path: str) -> bool:
-        """Return True if this project has BASIC_INSTRUCTIONS.md."""
-        return os.path.isfile(os.path.join(path, "BASIC_INSTRUCTIONS.md"))
+        """True if this project has Claude instructions of its own.
+
+        A file-presence fact, not whether they load (that is the Instructions
+        panel's job). `CLAUDE.md` counts: a project scaffolded now has no
+        `BASIC_INSTRUCTIONS.md`, and keying on that file alone would show a
+        correctly wired project as having no instructions.
+        """
+        return any(os.path.isfile(os.path.join(path, name))
+                   for name in ("CLAUDE.md", "BASIC_INSTRUCTIONS.md"))
 
     def _selected_path(self) -> str | None:
         """Return the selected project path, or show a warning and return None."""

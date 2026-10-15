@@ -63,7 +63,6 @@ def _retrofit(**flags):
     rec = _Recorder()
     dlg = object.__new__(RetrofitDialog)
     dlg.var_ts = _Var(flags.get("ts", False))
-    dlg.var_bi = _Var(flags.get("bi", False))
     dlg.var_nuitka = _Var(flags.get("nuitka", False))
     dlg.var_shadow = _Var(flags.get("shadow", False))
     dlg.var_hook = _Var(flags.get("hook", False))
@@ -87,7 +86,7 @@ def test_retrofit_does_nothing_when_every_option_is_unticked():
 def test_retrofit_acts_when_any_single_option_is_ticked():
     dlg, rec = _retrofit(shadow=True)
     dlg._apply()
-    assert rec.calls == [("C:/other-project", False, False, False, True)]
+    assert rec.calls == [("C:/other-project", False, False, True)]
     assert rec.kwargs == [{"add_git_hook": False, "add_agents": False,
                            "add_cursor_rule": False}]
 
@@ -116,7 +115,7 @@ def test_retrofit_reads_every_var_before_destroying_the_dialog():
     """Reading a Tk var through a destroyed dialog is a race nobody needs."""
     order = []
     dlg, rec = _retrofit(cursor_rule=True)
-    for name in ("var_ts", "var_bi", "var_nuitka", "var_shadow",
+    for name in ("var_ts", "var_nuitka", "var_shadow",
                  "var_hook", "var_agents", "var_cursor_rule"):
         var = getattr(dlg, name)
         original = var.get
@@ -133,7 +132,7 @@ def test_retrofit_reads_every_var_before_destroying_the_dialog():
 def _scaffold(**flags):
     rec = _Recorder()
     dlg = object.__new__(ScaffoldDialog)
-    dlg._bi_var = _Var(flags.get("bi", False))
+    dlg._ci_var = _Var(flags.get("ci", False))
     dlg._init_var = _Var(flags.get("init", False))
     dlg._nuitka_var = _Var(flags.get("nuitka", False))
     dlg._hook_var = _Var(flags.get("hook", False))
@@ -150,15 +149,15 @@ def test_scaffold_calls_back_even_with_nothing_ticked():
     dlg, rec = _scaffold()
     dlg._apply()
     assert rec.calls == [("C:/new-project",)]
-    assert rec.kwargs == [{"create_bi": False, "run_init": False,
+    assert rec.kwargs == [{"create_instructions": False, "run_init": False,
                            "scaffold_nuitka": False, "add_git_hook": False,
                            "scaffold_drive": False}]
 
 
 def test_scaffold_forwards_every_option_by_keyword():
-    dlg, rec = _scaffold(bi=True, init=True, nuitka=True, hook=True, drive=True)
+    dlg, rec = _scaffold(ci=True, init=True, nuitka=True, hook=True, drive=True)
     dlg._apply()
-    assert rec.kwargs == [{"create_bi": True, "run_init": True,
+    assert rec.kwargs == [{"create_instructions": True, "run_init": True,
                            "scaffold_nuitka": True, "add_git_hook": True,
                            "scaffold_drive": True}]
 
