@@ -1,10 +1,17 @@
 """TasksController — owns the Tasks tab.
 
-Shows:
-  - Active git worktrees for the selected project (merge / delete / open actions)
-  - Recent Claude Code sessions across all indexed projects (title, project, age)
+Two views, chosen from the toolbar dropdown:
+  - Sessions & worktrees: active git worktrees for the selected project
+    (merge / delete / open actions) and recent Claude Code / Cursor sessions
+    across all indexed projects. The dot beside a session is transcript-file
+    recency, NOT a live process.
+  - MCP servers: the tokensave servers and CodeGraph daemons running right
+    now (`helpers/mcp_runtime_rows`). Read-only; stopping stays in the daemon
+    manager dialogs. Servers are per PROJECT -- nothing here links one to a
+    particular session.
 
-Layout: a compact toolbar row above a ttk.Panedwindow with two resizable panes.
+Layout: a compact toolbar row above either a ttk.Panedwindow with two
+resizable panes, or the MCP server list.
 """
 from __future__ import annotations
 
@@ -17,9 +24,11 @@ from tkinter import messagebox, ttk
 from typing import TYPE_CHECKING, Callable
 
 from constants import C, CREATE_NO_WINDOW
-from theme import _Tooltip
+from theme import UiPumpMixin, _Tooltip
 from helpers.claude_tasks import scan_sessions, scan_worktrees
 from helpers.cursor_tasks import scan_cursor_sessions
+from helpers.mcp_runtime_rows import collect as collect_mcp_runtime
+from helpers.project_discovery import find_projects
 from helpers.worktree_cleanup import (
     LOCK_TOKENSAVE_DB,
     LOCK_WORKTREE_DIRECTORY,
@@ -33,8 +42,12 @@ if TYPE_CHECKING:
 
 AUTO_REFRESH_MS = 60_000  # 60 s between background refreshes
 
+VIEW_SESSIONS = "Sessions & worktrees"
+VIEW_MCP = "MCP servers"
+_VIEWS = (VIEW_SESSIONS, VIEW_MCP)
 
-class TasksController:
+
+class TasksController(UiPumpMixin):
     def __init__(
         self,
         notebook: ttk.Notebook,
@@ -54,7 +67,11 @@ class TasksController:
         notebook.add(self._tab, text="  📋 Tasks  ")
 
         self._build()
+        self._start_ui_pump()
         self._tab.after(AUTO_REFRESH_MS, self._maybe_refresh)
+
+    def _ui_host(self):
+        return self._tab
 
     # ── Build ──────────────────────────────────────────────────────────────────
 
@@ -67,21 +84,48 @@ class TasksController:
         refresh_btn = ttk.Button(toolbar, text="⟳ Refresh", command=self._refresh)
         refresh_btn.pack(side=tk.RIGHT)
         _Tooltip(refresh_btn,
-                 "Re-scan for git worktrees and recent Claude Code\n"
-                 "sessions.\n\n"
-                 "Reads only — nothing is created, merged or deleted.")
+                 "Re-scan the current view.\n\n"
+                 "Reads only — nothing is created, merged, deleted or stopped.")
 
-        # Resizable split
-        paned = ttk.Panedwindow(tab, orient=tk.VERTICAL)
-        paned.pack(fill=tk.BOTH, expand=True, padx=6, pady=6)
+        tk.Label(toolbar, text="View:", bg=C["base"], fg=C["subtext"]
+                 ).pack(side=tk.LEFT)
+        self._view_var = tk.StringVar(value=VIEW_SESSIONS)
+        self._view_combo = ttk.Combobox(
+            toolbar, textvariable=self._view_var, values=_VIEWS,
+            state="readonly", width=22)
+        self._view_combo.pack(side=tk.LEFT, padx=(4, 0))
+        self._view_combo.bind("<<ComboboxSelected>>", self._on_view_changed)
+        _Tooltip(self._view_combo,
+                 "Sessions & worktrees: what Claude/Cursor have been doing.\n"
+                 "MCP servers: which tokensave / CodeGraph servers are\n"
+                 "running right now.")
 
-        self._wt_frame = ttk.LabelFrame(paned, text="Worktrees")
-        sess_frame = ttk.LabelFrame(paned, text="Claude Sessions — all projects")
-        paned.add(self._wt_frame, weight=1)
-        paned.add(sess_frame, weight=3)
+        # Only shown in the MCP view; packed after Refresh so it sits left of it.
+        self._manage_btn = ttk.Menubutton(toolbar, text="Manage…")
+        manage_menu = tk.Menu(self._manage_btn, tearoff=0)
+        manage_menu.add_command(label="tokensave servers…",
+                                command=self._open_tokensave_manager)
+        manage_menu.add_command(label="CodeGraph daemons…",
+                                command=self._open_codegraph_manager)
+        self._manage_btn["menu"] = manage_menu
+
+        # Sessions & worktrees view (the default)
+        self._sessions_view = ttk.Panedwindow(tab, orient=tk.VERTICAL)
+        self._sessions_view.pack(fill=tk.BOTH, expand=True, padx=6, pady=6)
+
+        self._wt_frame = ttk.LabelFrame(self._sessions_view, text="Worktrees")
+        sess_frame = ttk.LabelFrame(self._sessions_view,
+                                    text="Claude Sessions — all projects")
+        self._sessions_view.add(self._wt_frame, weight=1)
+        self._sessions_view.add(sess_frame, weight=3)
 
         self._build_worktrees_panel(self._wt_frame)
         self._build_sessions_panel(sess_frame)
+
+        # MCP servers view (built hidden; shown by the dropdown)
+        self._mcp_view = ttk.LabelFrame(tab, text="Running MCP servers")
+        self._build_mcp_panel(self._mcp_view)
+        self._mcp_req_id: int = 0
 
     def _build_worktrees_panel(self, parent: tk.Widget) -> None:
         cols = ("branch", "head", "path")
@@ -128,9 +172,100 @@ class TasksController:
 
         self._sess_tree.bind("<Double-1>", self._sess_open_folder)
 
+    def _build_mcp_panel(self, parent: tk.Widget) -> None:
+        self._mcp_summary = tk.Label(
+            parent, text="Not scanned yet.", anchor="w", justify=tk.LEFT,
+            bg=C["base"], fg=C["text"], wraplength=1200)
+        self._mcp_summary.pack(fill=tk.X, padx=8, pady=(6, 0))
+        tk.Label(
+            parent, anchor="w", justify=tk.LEFT, bg=C["base"], fg=C["overlay0"],
+            wraplength=1200,
+            text="Servers belong to a project, not to one session — this view "
+                 "cannot say which Claude window started which server. "
+                 "'guess' rows are inferred from timing, not confirmed.",
+        ).pack(fill=tk.X, padx=8, pady=(0, 4))
+
+        cols = ("server", "project", "pid", "started", "version", "attribution")
+        self._mcp_tree = ttk.Treeview(parent, columns=cols, show="headings")
+        for col, text, width in (
+                ("server", "Server", 80), ("project", "Project", 420),
+                ("pid", "PID", 60), ("started", "Started", 110),
+                ("version", "Version", 70), ("attribution", "Project is…", 110)):
+            self._mcp_tree.heading(col, text=text)
+            self._mcp_tree.column(col, width=width, minwidth=50,
+                                  stretch=(col == "project"))
+        self._mcp_tree.tag_configure("guess", foreground=C["yellow"])
+        vsb = ttk.Scrollbar(parent, orient=tk.VERTICAL,
+                            command=self._mcp_tree.yview)
+        self._mcp_tree.configure(yscrollcommand=vsb.set)
+        vsb.pack(side=tk.RIGHT, fill=tk.Y)
+        self._mcp_tree.pack(fill=tk.BOTH, expand=True)
+
+    # ── View switching ─────────────────────────────────────────────────────────
+
+    def _in_mcp_view(self) -> bool:
+        return self._view_var.get() == VIEW_MCP
+
+    def _on_view_changed(self, _event=None) -> None:
+        if self._in_mcp_view():
+            self._sessions_view.pack_forget()
+            self._mcp_view.pack(fill=tk.BOTH, expand=True, padx=6, pady=6)
+            self._manage_btn.pack(side=tk.RIGHT, padx=(0, 6))
+        else:
+            self._mcp_view.pack_forget()
+            self._manage_btn.pack_forget()
+            self._sessions_view.pack(fill=tk.BOTH, expand=True, padx=6, pady=6)
+        self._refresh()
+
+    def _open_tokensave_manager(self) -> None:
+        from dialogs.tokensave_daemon_manager import TokensaveDaemonManagerDialog
+        TokensaveDaemonManagerDialog(
+            self._tab.winfo_toplevel(), self._cfg, on_done=self._refresh)
+
+    def _open_codegraph_manager(self) -> None:
+        from dialogs.codegraph_daemon_manager import CodegraphDaemonManagerDialog
+        CodegraphDaemonManagerDialog(self._tab.winfo_toplevel(), self._cfg)
+
     # ── Refresh ────────────────────────────────────────────────────────────────
 
+    def _refresh_mcp(self) -> None:
+        self._mcp_req_id += 1
+        my_id = self._mcp_req_id
+        self._mcp_summary.configure(text="Scanning for running servers…")
+        ts_exe = self._cfg.tokensave_exe or ""
+        cg_exe = self._cfg.codegraph_exe or ""
+        roots = list(self._cfg.search_roots or [])
+
+        def _scan() -> None:
+            # Project discovery walks the disk and the process scan spawns
+            # PowerShell, so both belong off the Tk thread.
+            projects = [p["path"] for p in find_projects(roots)]
+            snap = collect_mcp_runtime(ts_exe, cg_exe, projects)
+
+            # A worker never touches Tk: hand the result to the pump.
+            self._post(self._apply_mcp_if_current, my_id, snap)
+
+        threading.Thread(target=_scan, daemon=True).start()
+
+    def _apply_mcp_if_current(self, req: int, snap) -> None:
+        if self._mcp_req_id == req and self._tab.winfo_exists():
+            self._apply_mcp(snap)
+
+    def _apply_mcp(self, snap) -> None:
+        self._mcp_summary.configure(text=snap.summary)
+        tree = self._mcp_tree
+        tree.delete(*tree.get_children())
+        for i, r in enumerate(snap.rows):
+            tree.insert(
+                "", tk.END, iid="srv:%d:%s:%d" % (i, r.server, r.pid),
+                values=(r.server, r.project or "(unknown)", r.pid, r.started,
+                        r.version, r.attribution),
+                tags=("guess",) if r.attribution != "confirmed" else ())
+
     def _refresh(self) -> None:
+        if self._in_mcp_view():
+            self._refresh_mcp()
+            return
         self._tasks_refresh_id += 1
         my_id = self._tasks_refresh_id
         path = self._get_project_path()
@@ -147,19 +282,20 @@ class TasksController:
         sess = scan_sessions(known) + scan_cursor_sessions(known)
         sess.sort(key=lambda row: row.get("last_activity") or 0, reverse=True)
 
-        def _apply(req=req_id, w=wt, s=sess):
-            if self._tasks_refresh_id != req:
-                return
-            self._apply_results(w, s)
+        self._post(self._apply_if_current, req_id, wt, sess)
 
-        self._tab.after(0, _apply)
+    def _apply_if_current(self, req: int, worktrees: list, sessions: list) -> None:
+        if self._tasks_refresh_id == req:
+            self._apply_results(worktrees, sessions)
 
     def _maybe_refresh(self) -> None:
         try:
             wt_open = bool(self._wt_menu.winfo_ismapped())
         except tk.TclError:
             wt_open = False
-        if not wt_open:
+        # The MCP scan spawns PowerShell: only worth it while it is on screen.
+        hidden_mcp = self._in_mcp_view() and not self._tab.winfo_ismapped()
+        if not wt_open and not hidden_mcp:
             self._refresh()
         self._tab.after(AUTO_REFRESH_MS, self._maybe_refresh)
 

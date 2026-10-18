@@ -453,3 +453,41 @@ def test_no_settings_module_walks_up_the_widget_tree():
     assert offenders == [], (
         "settings modules must receive their host, never discover it: %s"
         % offenders)
+
+
+# ── The "applies to every project" block ────────────────────────────────────
+
+def _buttons(widget):
+    found = []
+    for child in widget.winfo_children():
+        if isinstance(child, ttk.Button):
+            found.append(child)
+        found.extend(_buttons(child))
+    return found
+
+
+def test_the_fleet_wide_controls_are_on_the_first_page(tk_root, mock_config,
+                                                       mocker):
+    """Agent Policy and Instructions change every project, so they sit where a
+    person lands, not two clicks into Git & Policy or in one project's menu."""
+    ctl = _build(tk_root, mock_config, mocker)
+    first = ctl._inner.nametowidget(ctl._inner.tabs()[0])
+    labels = [str(b.cget("text")) for b in _buttons(first)]
+    assert any("Agent Policy" in t for t in labels), labels
+    assert any("Instructions" in t for t in labels), labels
+
+
+def test_the_instructions_button_calls_the_injected_opener(tk_root, mock_config,
+                                                           mocker):
+    from controllers.settings_tab import SettingsTabController
+    opened = []
+    notebook = ttk.Notebook(tk_root)
+    mocker.patch("dialogs.settings_mcp._mcp_configs", return_value=[])
+    ctl = SettingsTabController(
+        notebook, mock_config, host=tk_root, save_fn=lambda: None,
+        on_saved=lambda: None, on_upgrade_tokensave=lambda: None,
+        on_integration_check=lambda: None,
+        get_tokensave_versions=lambda: ("7.11.1", None),
+        open_instructions=lambda: opened.append(True))
+    ctl._open_instructions_panel()
+    assert opened == [True]

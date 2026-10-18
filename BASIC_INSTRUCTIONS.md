@@ -131,11 +131,15 @@ They govern `helpers/instructions_posture.py`, `helpers/instructions_wiring.py`,
 **A file the Manager writes follows its referrer into or out of git** (`helpers/ignore_alignment.py`). A repo that ignores `CLAUDE.md` keeps its instructions local, and KicomAI was left with a committable copy and `docs/LESSONS.md`. Git's `ls-files`/`check-ignore` decide, never our pattern reading; only `.gitignore` is written; untracking, un-ignoring and anything unknown are reported, never done.
 
 **Parser scope is wider than repair scope, on purpose.** The classifier resolves a
-bounded general include graph; the writer repairs exactly one topology
-(`CLAUDE.md → @BASIC_INSTRUCTIONS.md → @project-baseline.md`). Resolving broadly
+bounded general include graph; the writer produces exactly two topologies, chosen by
+what the project already has: `CLAUDE.md → @project-baseline.md` for anything wired
+from scratch, and `CLAUDE.md → @BASIC_INSTRUCTIONS.md → @project-baseline.md` for a
+project that already carries a BASIC file (preserved, not preferred). Resolving broadly
 is what stops the panel offering a "fix" to a project that already works through
 its own valid chain — a fix that would add a SECOND path to the same baseline.
 Do not collapse the two.
+
+**Retiring the middle hop is a splice, not a merge** (`helpers/instructions_migrate.py`). BASIC's text replaces the one line that included it, so Claude loads the same text in the same order; BASIC itself is left in place. Measured before it was built: of 14 projects on the three-file chain, **11 hold authored rules in BASIC** (up to 70,947 B) and only 3 the untouched template, so "mostly a rename" was a guess the fleet contradicted. An untouched template is never pasted into a working CLAUDE.md. Offered per project, never in bulk, because it moves text a person wrote.
 
 **The writer never deletes and never rewrites authored prose.** An obsolete direct
 include is reported (`ADVISORY_DOUBLE_LOAD`), not removed. A project whose
@@ -536,7 +540,7 @@ Must be updated when the project moves to a new location or machine.
 | `src/tokensave-wrapper.py` | MCP server wrapper for Claude Desktop — reads same `manager-config.json`. **MUST stay single-threaded AND pass `sys.stdin/stdout/stderr` to `Popen` explicitly** — read `docs/MCP_INTEGRATION_GOTCHAS.md` before touching. |
 | `manager-config.json` | Single source of truth for all machine-specific paths |
 | `templates/project-baseline.md` | @included by every retrofitted project's CLAUDE.md — edit here to update all |
-| `templates/claude-md-template.md` | Written as `BASIC_INSTRUCTIONS.md` when scaffolding a new project |
+| `templates/claude-md-template.md` | Reference text for recognising an untouched `BASIC_INSTRUCTIONS.md`; no longer written into projects |
 | `build.ps1` / `build.bat` | Nuitka build pipeline — compiles to standalone `.exe` files in `dist\` |
 | `Launch TokenSave Manager.bat` | Reads `python_exe` from `manager-config.json` via PowerShell, launches manager |
 | `docs/ARCHITECTURE.md` | Class structure, UI layout, data flow, threading model, config system |
@@ -732,7 +736,7 @@ The same pattern lives in Fortuna Lab (`FORTUNA_DRIVE`) and OpenChem Studio
 
 ### Commit / Release
 
-> **Prefer the manager's Git Commit dialog for commits on this project.** It uses Ollama (or another configured local LLM) to draft the commit message at near-zero cost, and the pre-commit AI review hook gives a free quality gate. This is not a hard rule — use `git commit` directly when it's clearly faster or the manager isn't running — but avoid reflexively committing via Claude Code CLI (`git commit` in a bash tool call) when the dialog is available, since that burns Anthropic API tokens for something Ollama handles better. The user can always commit from the manager after you finish making code changes.
+> **Commit and push policy comes from the Agent Policy, not from this file.** `project-baseline.md` (compiled from Settings → Git & Policy → Agent Policy…) says whether an agent may commit or push; follow it and do not ask for permission it already grants. When commits are allowed, a local `git commit` from the session is fine. The Manager's Git Commit dialog (Ollama-drafted message, pre-commit AI review) is an option the user can choose, not a default to steer them toward. Never force-push, and never push tags or delete remote branches.
 
 - **`_suggest_commit_message(repo_path, status_text)`** is the multi-strategy orchestrator for the Git Commit dialog suggestion. Chain order (highest-quality first): LLM (if enabled) → CHANGELOG.md staged bullets → diff content → file-name patterns. Every non-empty result passes through `_sanitize_commit_message` which enforces 72-char subjects, imperative mood, blocks filename listings, and escalates generic `chore:` to `refactor:` when source files changed. NEVER duplicate any of these helpers.
 - **`_pending_diff(repo_path, *paths)` uses `git diff HEAD`, NOT `git diff --cached`.** The Git Commit dialog generates suggestions BEFORE the user stages files — `--cached` would always return empty. Any new helper needing the pre-commit diff MUST use this function.

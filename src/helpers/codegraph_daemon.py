@@ -52,18 +52,28 @@ _DAEMON_LINE_RE = re.compile(
 _KILL_TIMEOUT = 10
 
 
-def list_codegraph_daemons(codegraph_exe: str) -> list:
+class ListingFailed(RuntimeError):
+    """``codegraph daemon`` could not be run -- distinct from "none running"."""
+
+
+def list_codegraph_daemons(codegraph_exe: str, *, strict: bool = False) -> list:
     """Return every running CodeGraph daemon as a list of dicts.
 
     Each entry: ``{"pid": int, "version": str, "uptime": str, "path": str}``.
     Fail-open: any subprocess or parse problem yields ``[]`` rather than
     raising, matching ``codegraph_freshness.py``'s convention.
 
+    ``strict=True`` raises :class:`ListingFailed` when the command could not
+    run at all (a missing exe counts), so a caller can tell "none running"
+    from "could not ask".
+
     ``stdin=subprocess.DEVNULL`` is load-bearing — ``codegraph daemon`` is
     normally an interactive picker; closing stdin is what makes it print
     and exit instead of waiting on a TTY (confirmed live).
     """
     if not codegraph_exe or not os.path.isfile(codegraph_exe):
+        if strict:
+            raise ListingFailed("codegraph is not installed")
         return []
     try:
         proc = subprocess.run(
@@ -73,7 +83,9 @@ def list_codegraph_daemons(codegraph_exe: str) -> list:
             creationflags=CREATE_NO_WINDOW,
             encoding="utf-8", errors="replace",
         )
-    except (OSError, subprocess.TimeoutExpired):
+    except (OSError, subprocess.TimeoutExpired) as exc:
+        if strict:
+            raise ListingFailed(str(exc)) from exc
         return []
     out = proc.stdout or ""
     daemons: list = []

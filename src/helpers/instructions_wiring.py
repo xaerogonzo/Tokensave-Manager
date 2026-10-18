@@ -3,11 +3,20 @@
 ## Scope, and why it is narrower than the classifier
 
 `instructions_posture` resolves a bounded, general include graph. **This module
-writes exactly one topology**::
+writes two topologies, and which one is decided by what the project already
+has**::
 
-    CLAUDE.md  ->  @BASIC_INSTRUCTIONS.md  ->  @project-baseline.md
-                                               (a Manager copy of the template,
-                                                committed in the project)
+    new project (no BASIC_INSTRUCTIONS.md):
+        CLAUDE.md  ->  @project-baseline.md
+    project that already has a BASIC_INSTRUCTIONS.md:
+        CLAUDE.md  ->  @BASIC_INSTRUCTIONS.md  ->  @project-baseline.md
+
+`project-baseline.md` is a Manager copy of the template, committed in the
+project. The first is the default for anything wired from scratch: the middle
+file added a hop and a second place for rules to live without adding anything,
+and Scaffold no longer creates it. The second is preserved, not preferred -
+re-shaping a project that already works is a migration somebody opts into, not
+something a repair does as a side effect.
 
 That asymmetry is deliberate and is documented in both modules because it is
 easy to erode: reading the classifier alone suggests Retrofit ought to repair
@@ -88,10 +97,6 @@ from helpers import lessons_delivery as ld
 
 #: Add `@BASIC_INSTRUCTIONS.md` to an existing `CLAUDE.md`.
 ACTION_LINK_BASIC = "link_basic"
-#: Create `CLAUDE.md` carrying only that link.
-ACTION_CREATE_CLAUDE = "create_claude"
-#: Create `BASIC_INSTRUCTIONS.md` from the template.
-ACTION_CREATE_BASIC = "create_basic"
 #: Add `@project-baseline.md` to an existing file.
 ACTION_ADD_BASELINE = "add_baseline"
 #: Create `<root>/project-baseline.md` from the template.
@@ -103,8 +108,6 @@ ACTION_LOCALIZE = "localize"
 
 _LABELS = {
     ACTION_LINK_BASIC: "link BASIC_INSTRUCTIONS.md from CLAUDE.md",
-    ACTION_CREATE_CLAUDE: "create CLAUDE.md",
-    ACTION_CREATE_BASIC: "create BASIC_INSTRUCTIONS.md",
     ACTION_ADD_BASELINE: "add the baseline include",
     ACTION_WRITE_COPY: "write the project's copy of the baseline",
     ACTION_REFRESH_COPY: "update the project's copy of the baseline",
@@ -207,7 +210,7 @@ def _localize_steps(posture) -> "tuple[list, str]":
     return steps, ""
 
 
-def _absent_steps(posture, has_template: bool) -> "tuple[list, str]":
+def _absent_steps(posture) -> "tuple[list, str]":
     blocked = _COPY_BLOCKS.get(posture.copy_state)
     if blocked:
         return [], blocked
@@ -218,16 +221,13 @@ def _absent_steps(posture, has_template: bool) -> "tuple[list, str]":
     elif posture.copy_state != bc.COPY_CURRENT:
         steps.append(WiringStep(ACTION_WRITE_COPY, bc.COPY_BASENAME))
     if posture.has_basic:
+        # Keep the shape the project already has. Its BASIC file may hold
+        # authored rules, and linking it is what makes them load.
         steps.append(WiringStep(ACTION_ADD_BASELINE, BASIC_MD))
-    elif has_template:
-        steps.append(WiringStep(ACTION_CREATE_BASIC, BASIC_MD))
+        steps.append(WiringStep(ACTION_LINK_BASIC, CLAUDE_MD))
     else:
-        # Nothing to create BASIC_INSTRUCTIONS.md from. Wire the one-hop shape
-        # rather than refusing: `CLAUDE.md` -> baseline is a documented topology
-        # too, and it needs no file the user did not ask for.
+        # Default for a project wired from scratch: no middle file.
         steps.append(WiringStep(ACTION_ADD_BASELINE, CLAUDE_MD))
-        return steps, ""
-    steps.append(WiringStep(ACTION_LINK_BASIC, CLAUDE_MD))
     return steps, ""
 
 
@@ -249,7 +249,7 @@ def _refusal(posture) -> str:
     return ""
 
 
-def plan_wiring(posture, has_template: bool = True) -> WiringPlan:
+def plan_wiring(posture) -> WiringPlan:
     """Decide the writes for one project from its posture. Pure.
 
     Takes an already-classified `ProjectInstructions` rather than re-reading
@@ -269,7 +269,7 @@ def plan_wiring(posture, has_template: bool = True) -> WiringPlan:
     elif posture.reach in (REACH_STALE, REACH_ORPHANED):
         steps, blocked = _localize_steps(posture)
     elif posture.reach == REACH_ABSENT:
-        steps, blocked = _absent_steps(posture, has_template)
+        steps, blocked = _absent_steps(posture)
     else:
         return WiringPlan()
     if blocked:
@@ -299,6 +299,16 @@ def compute_created_claude(project_name: str) -> str:
     document.
     """
     return "# %s — Claude Instructions\n\n@%s\n" % (project_name, BASIC_MD)
+
+
+def compute_created_claude_direct(project_name: str) -> str:
+    """A brand-new `CLAUDE.md` that includes the baseline copy directly.
+
+    Same minimal shape as `compute_created_claude`, one hop shorter. The
+    project's own rules go below the include, in this file.
+    """
+    return "# %s — Claude Instructions\n\n%s\n" % (
+        project_name, bc.LOCAL_INCLUDE_LINE)
 
 
 def compute_link_basic(existing: str) -> "tuple[str, bool]":
@@ -382,7 +392,7 @@ class WiringResult:
 
 
 def _render_step(step: WiringStep, path: str, existing: str,
-                 project_name: str, template_text: str) -> "tuple[str, bool, str]":
+                 project_name: str) -> "tuple[str, bool, str]":
     """The text one step would write, whether it differs, and any refusal."""
     exists = os.path.isfile(path)
 
@@ -391,16 +401,9 @@ def _render_step(step: WiringStep, path: str, existing: str,
             return compute_created_claude(project_name), True, ""
         return compute_link_basic(existing) + ("",)
 
-    if step.action == ACTION_CREATE_CLAUDE:
-        return compute_created_claude(project_name), True, ""
-
-    if step.action == ACTION_CREATE_BASIC:
-        if exists:
-            # Never overwrite a file the user may have filled in.
-            return existing, False, ""
-        return template_text, bool(template_text), ""
-
     if step.action == ACTION_ADD_BASELINE:
+        if not exists and step.path == CLAUDE_MD:
+            return compute_created_claude_direct(project_name), True, ""
         return compute_add_baseline(existing) + ("",)
 
     if step.action == ACTION_LOCALIZE:
@@ -431,13 +434,11 @@ def _ordered(steps: tuple) -> list:
 
 
 def apply_wiring(project_root: str, plan: WiringPlan, project_name: str,
-                 template_text: str = "",
                  baseline_template_text: str = "") -> WiringResult:
     """Execute *plan*, stopping at the first failure. Returns what changed.
 
-    *template_text* is the BASIC_INSTRUCTIONS.md template; *baseline_template_text*
-    is the shared baseline a copy is rendered from. Reports the files it
-    CHANGED rather than the files it considered.
+    *baseline_template_text* is the shared baseline a copy is rendered from.
+    Reports the files it CHANGED rather than the files it considered.
     """
     if plan.blocked:
         return WiringResult(ok=False, skipped=plan.blocked)
@@ -472,7 +473,7 @@ def apply_wiring(project_root: str, plan: WiringPlan, project_name: str,
             existing = raw
 
         text, changed_now, refusal = _render_step(step, path, existing,
-                                                  project_name, template_text)
+                                                  project_name)
         if refusal:
             return WiringResult(ok=False, changed_files=tuple(changed),
                                 error="%s: %s" % (step.path, refusal))
@@ -621,7 +622,6 @@ def _state_key(posture) -> tuple:
 
 
 def apply_to_project(posture, baseline: str, template_dir: str,
-                     template_text: str, has_template: bool,
                      baseline_template_text: str = "",
                      claude_projects=None, git_exe: str = "",
                      lessons=None) -> ApplyOutcome:
@@ -663,7 +663,7 @@ def apply_to_project(posture, baseline: str, template_dir: str,
                             "was %s, now %s" % ("/".join(_state_key(posture)),
                                                 "/".join(_state_key(fresh))))
 
-    plan = plan_wiring(fresh, has_template=has_template)
+    plan = plan_wiring(fresh)
     if plan.blocked:
         return ApplyOutcome(OUTCOME_SKIPPED_BLOCKED, plan.blocked)
 
@@ -686,7 +686,7 @@ def apply_to_project(posture, baseline: str, template_dir: str,
                                    lessons=delivered))
 
     result = apply_wiring(posture.display_root, plan, posture.name,
-                          template_text, baseline_template_text)
+                          baseline_template_text)
     if not result.ok:
         return finish(ApplyOutcome(OUTCOME_FAILED, result.error or result.skipped,
                                    result.changed_files))

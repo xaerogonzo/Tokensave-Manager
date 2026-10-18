@@ -1,6 +1,6 @@
 """ScaffoldDialog — options dialog shown before scaffolding a new project.
 
-Five checkboxes (BASIC_INSTRUCTIONS, tokensave init, Nuitka build files,
+Five checkboxes (Claude instructions, tokensave init, Nuitka build files,
 auto-commit Stop hook, live-driver template), each pre-checked or greyed
 based on what's already present in the project folder. On Apply, fires the
 callback with the five flags as kwargs.
@@ -28,7 +28,7 @@ class ScaffoldDialog(tk.Toplevel):
         self.callback = callback
         self._parent = parent
 
-        has_bi = os.path.isfile(os.path.join(path, "BASIC_INSTRUCTIONS.md"))
+        has_ci = os.path.isfile(os.path.join(path, "CLAUDE.md"))
         has_db = os.path.isfile(os.path.join(path, ".tokensave", "tokensave.db"))
 
         pad = dict(padx=20, pady=6)
@@ -40,14 +40,16 @@ class ScaffoldDialog(tk.Toplevel):
                  font=("Consolas", 9), padx=10, pady=6,
                  wraplength=400, justify=tk.LEFT).pack(fill=tk.X, padx=20, pady=(2, 10))
 
-        # Checkbox: BASIC_INSTRUCTIONS.md
-        self._bi_var = tk.BooleanVar(value=not has_bi)
-        bi_text = "Create BASIC_INSTRUCTIONS.md"
-        bi_note = "  (already exists — will overwrite)" if has_bi else "  (Claude instruction template)"
-        bi_frame = tk.Frame(self, bg=C["base"])
-        bi_frame.pack(anchor=tk.W, **pad)
-        ttk.Checkbutton(bi_frame, text=bi_text, variable=self._bi_var).pack(side=tk.LEFT)
-        tk.Label(bi_frame, text=bi_note, bg=C["base"],
+        # Checkbox: Claude instructions (CLAUDE.md -> shared baseline)
+        self._ci_var = tk.BooleanVar(value=True)
+        ci_text = "Set up Claude instructions"
+        ci_note = ("  (CLAUDE.md exists — the baseline include is added, "
+                   "your text is kept)" if has_ci
+                   else "  (creates CLAUDE.md that loads the shared baseline)")
+        ci_frame = tk.Frame(self, bg=C["base"])
+        ci_frame.pack(anchor=tk.W, **pad)
+        ttk.Checkbutton(ci_frame, text=ci_text, variable=self._ci_var).pack(side=tk.LEFT)
+        tk.Label(ci_frame, text=ci_note, bg=C["base"],
                  fg=C["overlay0"], font=("Segoe UI", 9)).pack(side=tk.LEFT)
 
         # Checkbox: tokensave init
@@ -136,12 +138,13 @@ class ScaffoldDialog(tk.Toplevel):
         self.geometry(f"+{px}+{py}")
 
     def _apply(self):
-        create_bi       = self._bi_var.get()
+        create_instructions = self._ci_var.get()
         run_init        = self._init_var.get()
         scaffold_nuitka = self._nuitka_var.get()
         add_git_hook    = self._hook_var.get()
         scaffold_drive  = self._drive_var.get()
         self.destroy()
-        self.callback(self.path, create_bi=create_bi, run_init=run_init,
+        self.callback(self.path, create_instructions=create_instructions,
+                      run_init=run_init,
                       scaffold_nuitka=scaffold_nuitka, add_git_hook=add_git_hook,
                       scaffold_drive=scaffold_drive)

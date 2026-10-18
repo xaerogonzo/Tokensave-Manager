@@ -30,7 +30,6 @@ from helpers.sync_service import InitResult
 
 TOKENSAVE_FLAGS = {
     "tokensave": True,
-    "basic_instructions": False,
     "nuitka": False,
     "shadow_links": False,
     "shadow_ext_map": {},
