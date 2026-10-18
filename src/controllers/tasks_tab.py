@@ -1,17 +1,19 @@
 """TasksController — owns the Tasks tab.
 
-Two views, chosen from the toolbar dropdown:
-  - Sessions & worktrees: active git worktrees for the selected project
-    (merge / delete / open actions) and recent Claude Code / Cursor sessions
-    across all indexed projects. The dot beside a session is transcript-file
-    recency, NOT a live process.
-  - MCP servers: the tokensave servers and CodeGraph daemons running right
-    now (`helpers/mcp_runtime_rows`). Read-only; stopping stays in the daemon
-    manager dialogs. Servers are per PROJECT -- nothing here links one to a
-    particular session.
+Three views, chosen from the toolbar dropdown:
+  - Active sessions (the default): the Claude Code sessions running RIGHT NOW,
+    read from the process table, each with the state of its tokensave server
+    (`helpers/live_sessions`). This is the only view that is about the present.
+  - History & worktrees: git worktrees for the selected project (merge / delete
+    / open actions) and past Claude Code / Cursor sessions across all indexed
+    projects, read from TRANSCRIPT FILES. A session that is running now is
+    marked ▶; otherwise the dot only means "modified in the last five minutes".
+  - MCP servers: the tokensave servers and CodeGraph daemons running right now
+    (`helpers/mcp_runtime_rows`), per PROJECT. Read-only; stopping stays in the
+    daemon manager dialogs.
 
-Layout: a compact toolbar row above either a ttk.Panedwindow with two
-resizable panes, or the MCP server list.
+Layout: a compact toolbar row above a ttk.Panedwindow with two resizable panes
+(history), or a single list (the other two).
 """
 from __future__ import annotations
 
@@ -25,6 +27,7 @@ from typing import TYPE_CHECKING, Callable
 
 from constants import C, CREATE_NO_WINDOW
 from theme import UiPumpMixin, _Tooltip
+from helpers import live_sessions as live
 from helpers.claude_tasks import scan_sessions, scan_worktrees
 from helpers.cursor_tasks import scan_cursor_sessions
 from helpers.mcp_runtime_rows import collect as collect_mcp_runtime
@@ -42,9 +45,10 @@ if TYPE_CHECKING:
 
 AUTO_REFRESH_MS = 60_000  # 60 s between background refreshes
 
-VIEW_SESSIONS = "Sessions & worktrees"
+VIEW_LIVE = "Active sessions"
+VIEW_SESSIONS = "History & worktrees"
 VIEW_MCP = "MCP servers"
-_VIEWS = (VIEW_SESSIONS, VIEW_MCP)
+_VIEWS = (VIEW_LIVE, VIEW_SESSIONS, VIEW_MCP)
 
 
 class TasksController(UiPumpMixin):
@@ -89,16 +93,18 @@ class TasksController(UiPumpMixin):
 
         tk.Label(toolbar, text="View:", bg=C["base"], fg=C["subtext"]
                  ).pack(side=tk.LEFT)
-        self._view_var = tk.StringVar(value=VIEW_SESSIONS)
+        self._view_var = tk.StringVar(value=VIEW_LIVE)
         self._view_combo = ttk.Combobox(
             toolbar, textvariable=self._view_var, values=_VIEWS,
             state="readonly", width=22)
         self._view_combo.pack(side=tk.LEFT, padx=(4, 0))
         self._view_combo.bind("<<ComboboxSelected>>", self._on_view_changed)
         _Tooltip(self._view_combo,
-                 "Sessions & worktrees: what Claude/Cursor have been doing.\n"
+                 "Active sessions: Claude Code sessions running now, and\n"
+                 "whether tokensave is serving each one.\n"
+                 "History & worktrees: past sessions (transcript files).\n"
                  "MCP servers: which tokensave / CodeGraph servers are\n"
-                 "running right now.")
+                 "running right now, per project.")
 
         # Only shown in the MCP view; packed after Refresh so it sits left of it.
         self._manage_btn = ttk.Menubutton(toolbar, text="Manage…")
@@ -109,13 +115,13 @@ class TasksController(UiPumpMixin):
                                 command=self._open_codegraph_manager)
         self._manage_btn["menu"] = manage_menu
 
-        # Sessions & worktrees view (the default)
+        # History & worktrees view (built hidden; shown by the dropdown)
         self._sessions_view = ttk.Panedwindow(tab, orient=tk.VERTICAL)
-        self._sessions_view.pack(fill=tk.BOTH, expand=True, padx=6, pady=6)
 
         self._wt_frame = ttk.LabelFrame(self._sessions_view, text="Worktrees")
-        sess_frame = ttk.LabelFrame(self._sessions_view,
-                                    text="Claude Sessions — all projects")
+        sess_frame = ttk.LabelFrame(
+            self._sessions_view,
+            text="Past Claude sessions (transcript files) — ▶ = running now")
         self._sessions_view.add(self._wt_frame, weight=1)
         self._sessions_view.add(sess_frame, weight=3)
 
@@ -126,6 +132,14 @@ class TasksController(UiPumpMixin):
         self._mcp_view = ttk.LabelFrame(tab, text="Running MCP servers")
         self._build_mcp_panel(self._mcp_view)
         self._mcp_req_id: int = 0
+
+        # Active sessions view: the default, so it is the one packed now.
+        self._live_view = ttk.LabelFrame(tab, text="Running Claude Code sessions")
+        self._build_live_panel(self._live_view)
+        self._live_req_id: int = 0
+        self._live_ids: frozenset = frozenset()
+        self._live_view.pack(fill=tk.BOTH, expand=True, padx=6, pady=6)
+        self._manage_btn.pack(side=tk.RIGHT, padx=(0, 6))
 
     def _build_worktrees_panel(self, parent: tk.Widget) -> None:
         cols = ("branch", "head", "path")
@@ -201,20 +215,59 @@ class TasksController(UiPumpMixin):
         vsb.pack(side=tk.RIGHT, fill=tk.Y)
         self._mcp_tree.pack(fill=tk.BOTH, expand=True)
 
+    def _build_live_panel(self, parent: tk.Widget) -> None:
+        self._live_summary = tk.Label(
+            parent, text="Not scanned yet.", anchor="w", justify=tk.LEFT,
+            bg=C["base"], fg=C["text"], wraplength=1200)
+        self._live_summary.pack(fill=tk.X, padx=8, pady=(6, 0))
+        tk.Label(
+            parent, anchor="w", justify=tk.LEFT, bg=C["base"], fg=C["overlay0"],
+            wraplength=1200,
+            text="Sessions started by the Claude desktop app. A session started "
+                 "from a terminal is not detected yet. “serving this folder” "
+                 "means tokensave's own registry says its server is on the "
+                 "session's folder; “?” means that could not be established.",
+        ).pack(fill=tk.X, padx=8, pady=(0, 4))
+
+        cols = ("project", "title", "started", "model", "tokensave", "pid")
+        self._live_tree = ttk.Treeview(parent, columns=cols, show="headings")
+        for col, text, width, stretch in (
+                ("project", "Folder", 380, True), ("title", "Title", 200, True),
+                ("started", "Running for", 90, False),
+                ("model", "Model · effort", 150, False),
+                ("tokensave", "tokensave server", 300, True),
+                ("pid", "PID", 60, False)):
+            self._live_tree.heading(col, text=text)
+            self._live_tree.column(col, width=width, minwidth=50, stretch=stretch)
+        self._live_tree.tag_configure("other", foreground=C["peach"])
+        self._live_tree.tag_configure("unsure", foreground=C["yellow"])
+        self._live_tree.tag_configure("none", foreground=C["overlay0"])
+        vsb = ttk.Scrollbar(parent, orient=tk.VERTICAL,
+                            command=self._live_tree.yview)
+        self._live_tree.configure(yscrollcommand=vsb.set)
+        vsb.pack(side=tk.RIGHT, fill=tk.Y)
+        self._live_tree.pack(fill=tk.BOTH, expand=True)
+
     # ── View switching ─────────────────────────────────────────────────────────
 
+    def _view(self) -> str:
+        return self._view_var.get()
+
     def _in_mcp_view(self) -> bool:
-        return self._view_var.get() == VIEW_MCP
+        return self._view() == VIEW_MCP
 
     def _on_view_changed(self, _event=None) -> None:
-        if self._in_mcp_view():
-            self._sessions_view.pack_forget()
-            self._mcp_view.pack(fill=tk.BOTH, expand=True, padx=6, pady=6)
-            self._manage_btn.pack(side=tk.RIGHT, padx=(0, 6))
-        else:
-            self._mcp_view.pack_forget()
+        view = self._view()
+        for frame in (self._sessions_view, self._mcp_view, self._live_view):
+            frame.pack_forget()
+        shown = {VIEW_LIVE: self._live_view, VIEW_MCP: self._mcp_view}.get(
+            view, self._sessions_view)
+        shown.pack(fill=tk.BOTH, expand=True, padx=6, pady=6)
+        # The daemon managers fit both views that are about running servers.
+        if view == VIEW_SESSIONS:
             self._manage_btn.pack_forget()
-            self._sessions_view.pack(fill=tk.BOTH, expand=True, padx=6, pady=6)
+        else:
+            self._manage_btn.pack(side=tk.RIGHT, padx=(0, 6))
         self._refresh()
 
     def _open_tokensave_manager(self) -> None:
@@ -251,6 +304,52 @@ class TasksController(UiPumpMixin):
         if self._mcp_req_id == req and self._tab.winfo_exists():
             self._apply_mcp(snap)
 
+    def _refresh_live(self) -> None:
+        self._live_req_id += 1
+        my_id = self._live_req_id
+        self._live_summary.configure(text="Looking for running sessions…")
+        ts_exe = self._cfg.tokensave_exe or ""
+        roots = list(self._cfg.search_roots or [])
+
+        def _scan() -> None:
+            projects = [p["path"] for p in find_projects(roots)]
+            snap = live.collect(ts_exe, projects)
+            self._post(self._apply_live_if_current, my_id, snap)
+
+        threading.Thread(target=_scan, daemon=True).start()
+
+    def _apply_live_if_current(self, req: int, snap) -> None:
+        if self._live_req_id == req and self._tab.winfo_exists():
+            self._apply_live(snap)
+
+    def _apply_live(self, snap) -> None:
+        self._live_summary.configure(text=snap.summary)
+        tree = self._live_tree
+        tree.delete(*tree.get_children())
+        now = time.time()
+        for s in snap.sessions:
+            tag = {live.OTHER_FOLDER: "other", live.NO_SERVER: "none",
+                   live.UNVERIFIED: "unsure", live.MULTIPLE: "unsure"}.get(s.state, "")
+            tree.insert(
+                "", tk.END, iid="live:%d" % s.pid,
+                values=(s.project or "(folder unknown)", s.title or "(untitled)",
+                        live.age_text(s.started_at, now), live.model_text(s),
+                        live.server_text(s), s.pid),
+                tags=(tag,) if tag else ())
+        for stray in snap.strays:
+            where = os.path.basename(stray.project) if stray.project \
+                else "project unknown"
+            tree.insert(
+                "", tk.END, iid="stray:%d" % stray.pid,
+                values=("(under no running session)", "",
+                        live.age_text(stray.started_at, now), "",
+                        "tokensave server — serving %s" % where, stray.pid),
+                tags=("unsure",))
+        # A failed scan leaves the history marks alone; a real zero clears them.
+        if not snap.failed:
+            self._live_ids = frozenset(s.session_id for s in snap.sessions
+                                       if s.session_id)
+
     def _apply_mcp(self, snap) -> None:
         self._mcp_summary.configure(text=snap.summary)
         tree = self._mcp_tree
@@ -263,18 +362,26 @@ class TasksController(UiPumpMixin):
                 tags=("guess",) if r.attribution != "confirmed" else ())
 
     def _refresh(self) -> None:
-        if self._in_mcp_view():
+        view = self._view()
+        if view == VIEW_MCP:
             self._refresh_mcp()
+            return
+        if view == VIEW_LIVE:
+            self._refresh_live()
             return
         self._tasks_refresh_id += 1
         my_id = self._tasks_refresh_id
         path = self._get_project_path()
         known = self._get_known_paths()
+        # Marking which past sessions are running costs a process scan, so it is
+        # only worth it while this tab is actually on screen.
+        want_live = bool(self._tab.winfo_ismapped())
         threading.Thread(
-            target=self._worker, args=(my_id, path, known), daemon=True
+            target=self._worker, args=(my_id, path, known, want_live), daemon=True
         ).start()
 
-    def _worker(self, req_id: int, path: str | None, known: list[str]) -> None:
+    def _worker(self, req_id: int, path: str | None, known: list[str],
+                want_live: bool = False) -> None:
         wt = scan_worktrees(path, self._cfg.git_exe) if path else []
         # Two scanners, one list. `scan_cursor_sessions` returns the same dict
         # shape plus an "agent" key, so this is a concatenation rather than a
@@ -282,20 +389,24 @@ class TasksController(UiPumpMixin):
         sess = scan_sessions(known) + scan_cursor_sessions(known)
         sess.sort(key=lambda row: row.get("last_activity") or 0, reverse=True)
 
-        self._post(self._apply_if_current, req_id, wt, sess)
+        # None = could not look, which must not clear the marks already shown.
+        running = live.running_session_ids() if want_live else None
+        self._post(self._apply_if_current, req_id, wt, sess, running)
 
-    def _apply_if_current(self, req: int, worktrees: list, sessions: list) -> None:
+    def _apply_if_current(self, req: int, worktrees: list, sessions: list,
+                          running: "frozenset | None" = None) -> None:
         if self._tasks_refresh_id == req:
-            self._apply_results(worktrees, sessions)
+            self._apply_results(worktrees, sessions, running)
 
     def _maybe_refresh(self) -> None:
         try:
             wt_open = bool(self._wt_menu.winfo_ismapped())
         except tk.TclError:
             wt_open = False
-        # The MCP scan spawns PowerShell: only worth it while it is on screen.
-        hidden_mcp = self._in_mcp_view() and not self._tab.winfo_ismapped()
-        if not wt_open and not hidden_mcp:
+        # The live and MCP scans spawn PowerShell: only worth it on screen.
+        hidden_scan = (self._view() != VIEW_SESSIONS
+                       and not self._tab.winfo_ismapped())
+        if not wt_open and not hidden_scan:
             self._refresh()
         self._tab.after(AUTO_REFRESH_MS, self._maybe_refresh)
 
@@ -305,13 +416,16 @@ class TasksController(UiPumpMixin):
 
     # ── Apply results (differential update) ────────────────────────────────────
 
-    def _apply_results(self, worktrees: list[dict], sessions: list[dict]) -> None:
+    def _apply_results(self, worktrees: list[dict], sessions: list[dict],
+                       running: "frozenset | None" = None) -> None:
         path = self._get_project_path()
         proj_name = os.path.basename(path) if path else "(no project selected)"
         self._wt_frame.configure(text=f"Worktrees — {proj_name}")
 
+        if running is not None:
+            self._live_ids = running
         self._update_wt_tree(worktrees)
-        self._update_sess_tree(sessions)
+        self._update_sess_tree(sessions, self._live_ids)
         self._last_refresh_ts = time.monotonic()
 
     def _update_wt_tree(self, worktrees: list[dict]) -> None:
@@ -379,7 +493,8 @@ class TasksController(UiPumpMixin):
                 best[iid] = row
         return list(best.values())
 
-    def _update_sess_tree(self, sessions: list[dict]) -> None:
+    def _update_sess_tree(self, sessions: list[dict],
+                          running: frozenset = frozenset()) -> None:
         tree = self._sess_tree
         sessions = self._dedupe_sessions(sessions)
         current_iids = set(tree.get_children())
@@ -390,7 +505,9 @@ class TasksController(UiPumpMixin):
 
         for s in sessions:
             iid = self._sess_iid(s)
-            status = "🟢" if s["is_recent"] else "⚫"
+            is_live = (s.get("agent") != "cursor"
+                       and str(s.get("session_id", "")).lower() in running)
+            status = "▶" if is_live else ("🟢" if s["is_recent"] else "⚫")
             agent = "Cursor" if s.get("agent") == "cursor" else "Claude"
             ts = s["last_activity"]
             try:

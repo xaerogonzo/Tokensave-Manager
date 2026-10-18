@@ -348,6 +348,39 @@ class App(UiPumpMixin, tk.Tk):
             background=[("selected", C["base"])],
             foreground=[("selected", C["blue"])])
 
+        # Combobox and Menubutton had no style here, so clam's light defaults
+        # showed through on every one: a pale grey read-only box with
+        # near-invisible text, white editable and disabled boxes, and a
+        # Menubutton whose arrow floated away from its label because the
+        # button itself had no background to hold them together.
+        s.configure("TCombobox",
+            fieldbackground=C["surface0"], background=C["surface1"],
+            foreground=C["text"], arrowcolor=C["text"],
+            bordercolor=C["surface1"], lightcolor=C["surface0"],
+            darkcolor=C["surface0"], selectbackground=C["surface1"],
+            selectforeground=C["text"], padding=(6, 3))
+        s.map("TCombobox",
+            fieldbackground=[("readonly", C["surface0"]),
+                             ("disabled", C["mantle"])],
+            foreground=[("disabled", C["overlay0"])],
+            arrowcolor=[("disabled", C["overlay0"])],
+            selectbackground=[("readonly", C["surface0"])],
+            selectforeground=[("readonly", C["text"])],
+            background=[("active", C["surface1"])])
+        # The dropdown list is a plain Tk Listbox, which ttk styles do not reach.
+        self.option_add("*TCombobox*Listbox.background", C["mantle"])
+        self.option_add("*TCombobox*Listbox.foreground", C["text"])
+        self.option_add("*TCombobox*Listbox.selectBackground", C["surface1"])
+        self.option_add("*TCombobox*Listbox.selectForeground", C["text"])
+        self.option_add("*TCombobox*Listbox.font", ("Segoe UI", 10))
+
+        s.configure("TMenubutton",
+            background=C["surface0"], foreground=C["text"],
+            arrowcolor=C["text"], padding=(10, 5), relief="flat",
+            font=("Segoe UI", 10))
+        s.map("TMenubutton",
+            background=[("active", C["surface1"]), ("pressed", C["surface1"])])
+
     # ── Layout ─────────────────────────────────────────────────────────────────
 
     def _build(self):

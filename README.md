@@ -502,10 +502,13 @@ out. **Clear view** empties the display only; it never stops a running command.
 <!-- help:tasks-tab -->
 ### 📋 Tasks Tab
 
-Two lists, side by side in resizable panes:
+A **View** dropdown on the toolbar switches between three views. The first is the default.
 
-- **Active git worktrees** for the selected project, with merge, delete and open actions. A worktree is a second checkout of the same repository on another branch, which is how Claude Code runs work in isolation
-- **Recent Claude Code sessions** across every indexed project — title, project and age — so you can see what has been running where
+- **Active sessions** — the Claude Code sessions running *right now*, read from the process table, not from files. For each one: its folder, its title (the one the desktop app shows), how long it has been running, model and effort, and the state of its **tokensave server**: `✓ serving this folder`, `⚠ serving <another project>`, `✗ no tokensave server`, or `?` when that could not be established. A `⚠` row whose folder is inside the served project is usually a worktree, whose tokensave is answering about the parent checkout rather than the one being edited. Tokensave servers that belong to no running session are listed too. Sessions started by the Claude desktop app are detected; a session started from a terminal is not yet, and the view says so.
+- **History & worktrees** — git worktrees for the selected project (merge, delete and open actions) and **past** Claude Code sessions across every indexed project, read from transcript files. A session that is running now is marked ▶; otherwise the dot only means "modified in the last five minutes". A worktree is a second checkout of the same repository on another branch, which is how Claude Code runs work in isolation.
+- **MCP servers** — every running tokensave server and CodeGraph daemon, per project, with how sure the project attribution is.
+
+Everything here reads only. A scan that could not run says "could not check" rather than showing an empty list, so an empty list always means none.
 
 ---
 
