@@ -109,10 +109,11 @@ def test_rows_group_by_project_then_server():
 
 # -- the Tasks tab view switch -------------------------------------------------
 
-def test_dropdown_switches_between_the_two_views(tk_root, mocker):
+def test_dropdown_switches_between_the_three_views(tk_root, mocker):
     from tkinter import ttk
     from types import SimpleNamespace
-    from controllers.tasks_tab import TasksController, VIEW_MCP, VIEW_SESSIONS
+    from controllers.tasks_tab import (
+        TasksController, VIEW_LIVE, VIEW_MCP, VIEW_SESSIONS)
 
     nb = ttk.Notebook(tk_root)
     cfg = SimpleNamespace(git_exe="git", search_roots=[], tokensave_exe="",
@@ -120,19 +121,29 @@ def test_dropdown_switches_between_the_two_views(tk_root, mocker):
     ctrl = TasksController(nb, cfg, get_project_path=lambda: None,
                            get_known_paths=lambda: [])
     refresh = mocker.patch.object(ctrl, "_refresh")
+    frames = {VIEW_LIVE: ctrl._live_view, VIEW_SESSIONS: ctrl._sessions_view,
+              VIEW_MCP: ctrl._mcp_view}
 
-    assert ctrl._sessions_view.winfo_manager() == "pack"
-    assert ctrl._mcp_view.winfo_manager() == ""
+    def shown():
+        return [name for name, frame in frames.items()
+                if frame.winfo_manager() == "pack"]
+
+    # The default is the one about the PRESENT; history is one step away.
+    assert ctrl._view_var.get() == VIEW_LIVE
+    assert shown() == [VIEW_LIVE]
+    assert ctrl._manage_btn.winfo_manager() == "pack"
 
     ctrl._view_var.set(VIEW_MCP)
     ctrl._on_view_changed()
-    assert ctrl._sessions_view.winfo_manager() == ""
-    assert ctrl._mcp_view.winfo_manager() == "pack"
+    assert shown() == [VIEW_MCP]
     assert ctrl._manage_btn.winfo_manager() == "pack"
 
     ctrl._view_var.set(VIEW_SESSIONS)
     ctrl._on_view_changed()
-    assert ctrl._sessions_view.winfo_manager() == "pack"
-    assert ctrl._mcp_view.winfo_manager() == ""
+    assert shown() == [VIEW_SESSIONS]
     assert ctrl._manage_btn.winfo_manager() == ""
-    assert refresh.call_count == 2
+
+    ctrl._view_var.set(VIEW_LIVE)
+    ctrl._on_view_changed()
+    assert shown() == [VIEW_LIVE]
+    assert refresh.call_count == 3

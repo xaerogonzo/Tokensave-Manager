@@ -86,7 +86,7 @@ Token Save Manager Source/
 │   │                              Runs beside a real Manager through scripts/drive/run_isolated.py
 │   │                              (scratch config, no lock, no request poller, no tray).
 │   │
-│   ├── helpers/                  133 modules of pure / IO helpers — no UI deps.
+│   ├── helpers/                  134 modules of pure / IO helpers — no UI deps.
 │   │   ├── config.py              _load_config, _save_config, _migrate_config
 │   │   ├── detection.py           _detect_git/_gh/_npm/_codegraph/_claude_cli,
 │   │   │                          _root_path/_label, _version_lt
@@ -515,6 +515,9 @@ Token Save Manager Source/
 │   │   ├── tokensave_daemon.py    Find running `tokensave serve` processes, and say
 │   │   │                          honestly how confident we are about which project
 │   │   │                          each one serves.
+│   │   ├── live_sessions.py       Which Claude Code sessions run NOW (process table, not
+│   │   │                          transcripts) and the state of the tokensave server under
+│   │   │                          each: parent PID + --resume id; failure never reads as none.
 │   │   ├── mcp_runtime_rows.py    Running tokensave servers + CodeGraph daemons as
 │   │   │                          display rows for the Tasks tab's MCP view; one
 │   │   │                          status per source, never summed, failed != none.
@@ -872,7 +875,7 @@ Token Save Manager Source/
 │                                  CLI briefing via temp .md file-handoff pattern
 │                                  (avoids cmd.exe /k newline-as-Enter quirk).
 │       ├── tasks_tab.py           TasksController — owns the Tasks tab (view dropdown:
-│       │                          sessions & worktrees, or running MCP servers).
+│       │                          active sessions, history & worktrees, MCP servers).
 │       ├── command_bar_ctrl.py    CommandBarCtrl sub-controller.
 │       ├── project_sync_ctrl.py   ProjectSyncCtrl sub-controller.
 │       ├── pr_draft_ctrl.py       PRDraftCtrl sub-controller — PR body generation and
