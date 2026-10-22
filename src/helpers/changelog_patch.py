@@ -412,10 +412,14 @@ def insert_changelog_release(
         return False, "CHANGELOG.md not found"
 
     try:
-        with open(changelog_path, encoding="utf-8-sig") as f:
+        with open(changelog_path, encoding="utf-8-sig", newline="") as f:
             text = f.read()
     except OSError as e:
         return False, f"Could not read CHANGELOG.md: {e}"
+    # Work in LF, write back in the file's own line ending: a CRLF changelog must not
+    # become an all-lines diff just because a release section was inserted.
+    eol = "\r\n" if "\r\n" in text else "\n"
+    text = text.replace("\r\n", "\n")
 
     # Normalise the block: ensure exactly one trailing blank line after, so
     # the spacing between sections stays consistent whether we insert or
@@ -450,8 +454,8 @@ def insert_changelog_release(
 
     tmp_path = changelog_path + ".tmp"
     try:
-        with open(tmp_path, "w", encoding="utf-8", newline="\n") as f:
-            f.write(updated)
+        with open(tmp_path, "w", encoding="utf-8", newline="") as f:
+            f.write(updated.replace("\n", eol))
         os.replace(tmp_path, changelog_path)
     except OSError as e:
         # Best-effort cleanup of stray .tmp on failure
