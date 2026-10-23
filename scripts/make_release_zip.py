@@ -18,14 +18,15 @@ from helpers import frozen_smoke as fs  # noqa: E402
 from helpers import release_zip as rz  # noqa: E402
 
 DEFAULT_SCRIPT = ROOT / "scripts" / "drive" / "frozen-smoke.json"
+CONFIGURED_SCRIPT = ROOT / "scripts" / "drive" / "frozen-smoke-configured.json"
 
 
 def _smoke(version: str, script: Path):
     def run(extracted: Path) -> bool:
-        results = fs.smoke_dist(str(extracted), version, str(script))
+        results = fs.smoke_dist(str(extracted), version, str(script), configured_script=str(CONFIGURED_SCRIPT))
         for r in results:
             print("  " + r.line())
-        return all(r.judgement.ok for r in results)
+        return all(fs.layer_ok(r) for r in results)
     return run
 
 

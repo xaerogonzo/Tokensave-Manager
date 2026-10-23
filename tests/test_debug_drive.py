@@ -14,6 +14,7 @@ from __future__ import annotations
 
 import json
 import os
+import sys
 
 import pytest
 
@@ -470,3 +471,52 @@ def test_a_real_tk_callback_exception_reaches_the_ledger(tk_root, capsys):
         ledger.uninstall()
     assert ledger.contains("ZeroDivisionError")
     assert ledger.failed
+
+
+# ── the project_row check ─────────────────────────────────────────────────
+
+class _Tree:
+    """A Treeview stand-in: rows are flat ids under the root."""
+
+    def __init__(self, iids):
+        self._iids = iids
+
+    def get_children(self, parent=""):
+        return list(self._iids) if parent == "" else []
+
+
+class _AppWithTree(_FakeApp):
+    def __init__(self, iids):
+        super().__init__()
+        self._projects = type("P", (), {"_tree": _Tree(iids)})()
+
+
+def _row_check(app, project):
+    driver = _Driver(app, [])
+    return driver._check_value({"check": "project_row", "project": project})
+
+
+def test_project_row_is_satisfied_by_a_listed_project_however_the_separators_and_dots_are_spelled():
+    app = _AppWithTree(["cat:Work", "proj:C:/roots/project"])
+    assert _row_check(app, "C:/roots/project")[0]
+    assert _row_check(app, "C:/roots/./project")[0]
+    assert _row_check(app, "C:/roots/other/../project")[0]
+
+
+@pytest.mark.skipif(sys.platform != "win32",
+                    reason="os.path.normpath only turns backslashes into separators on Windows, which is the "
+                           "only platform the Manager runs on; _do_select has the same rule")
+def test_project_row_accepts_a_windows_backslash_spelling():
+    app = _AppWithTree(["cat:Work", "proj:C:/roots/project"])
+    assert _row_check(app, "C:\\roots\\project")[0]
+
+
+def test_project_row_is_not_satisfied_by_a_category_row_or_a_missing_project():
+    app = _AppWithTree(["cat:project", "proj:C:/roots/other"])
+    ok, seen = _row_check(app, "C:/roots/project")
+    assert not ok and seen == "1 project row(s)"
+
+
+def test_project_row_with_no_project_named_never_passes_and_no_tree_is_a_failure_not_a_crash():
+    assert not _row_check(_AppWithTree(["proj:C:/x"]), "")[0]
+    assert not _row_check(_FakeApp(), "C:/x")[0]

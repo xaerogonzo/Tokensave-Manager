@@ -60,8 +60,8 @@ any thread. Three steps turn that into a verdict:
                                                kept quiet for a moment after
     {"do": "log_report"}                       print what the ledger holds
 
-`expect` knows the checks `tab`, `dialog_open`, `log_contains`, `widget_text`
-and `diagnostic_contains` (the last reads the LIVE ledger, never a report
+`expect` knows the checks `tab`, `dialog_open`, `log_contains`, `widget_text`,
+`project_row` (a Projects-tab row for `project`) and `diagnostic_contains` (the last reads the LIVE ledger, never a report
 file). A failed expectation is permanent: a later success never erases it.
 On the way out -- `quit`, or interpreter exit, exactly once -- the run writes
 `<script>.report.json` beside the script (gitignored) and exits non-zero if
@@ -970,6 +970,16 @@ class _Driver:
             notebook = getattr(self._app, "nb", None)
             label = str(notebook.tab(notebook.select(), "text")) if notebook else ""
             return want in label.strip().lower(), label
+        if check == "project_row":
+            # A `select` or `tab` step that matches nothing only prints; it does not fail the
+            # run. This is the assertion that a project the script put in a search root was
+            # actually discovered and listed.
+            tree = getattr(getattr(self._app, "_projects", None), "_tree", None)
+            rows = [os.path.normcase(os.path.normpath(i[5:]))
+                    for i in (_tree_iids(tree) if tree is not None else []) if i.startswith("proj:")]
+            wanted = str(step.get("project", "")).strip()
+            found = bool(wanted) and os.path.normcase(os.path.normpath(wanted)) in rows
+            return found, "%d project row(s)" % len(rows)
         if check == "dialog_open":
             dialog = self._dialog
             alive = dialog is not None and bool(dialog.winfo_exists())

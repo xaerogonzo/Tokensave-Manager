@@ -152,7 +152,9 @@ Token Save Manager Source/
 │   │   │                          (Summary / Technical / Threat Model / Verification)
 │   │   ├── frozen_smoke.py        Run the BUILT exes and judge each layer apart: version resource of all
 │   │   │                          three, CLI envelope from a foreign cwd (cli_version must match), GUI on
-│   │   │                          scripts/drive/frozen-smoke.json judged on the drive report. Fail closed;
+│   │   │                          scripts/drive/frozen-smoke.json judged on the drive report, then the CLI and
+│   │   │                          GUI again CONFIGURED (real tokensave+git, the build's templates, an indexed
+│   │   │                          scratch repo; scripts/drive/frozen-smoke-configured.json). Fail closed;
 │   │   │                          scratch config so dist\ is never written. Launcher scripts/frozen_smoke.py
 │   │   ├── release_zip.py         Versioned-folder release zip: .partial then promote, inventory check (incl.
 │   │   │                          a config still clean, no logs/), smoke on an extracted copy in a path with
