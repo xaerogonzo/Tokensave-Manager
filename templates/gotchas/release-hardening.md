@@ -85,6 +85,10 @@ is current.
 
 ---
 
+**Starting points:** the Manager's `templates/release/` holds adapted, opt-in versions of the workflow,
+tag/version check, zip builder, smoke judge and Inno script. They are not delivered to projects;
+adopt them deliberately with `python scripts/adopt_release.py` from the Manager checkout, then edit.
+
 **What this does not give you:** a signature. SmartScreen still says "unknown
 publisher". A checksum, a provenance attestation and a green smoke test say the file is
 the one the workflow built and that it starts; they do not say who you are.

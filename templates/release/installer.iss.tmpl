@@ -1,0 +1,279 @@
+; Starter from TokenSave Manager templates/release/installer.iss.tmpl (adapted from OpenChem Studio,
+; xaerogonzo/OpenChem-Studio, master 2026-10-22). Yours to edit once adopted.
+;
+; Inno Setup script for <<PRODUCT_NAME>>. Compile with ISCC, passing AppVersion and SourceDir
+; (the built dist\<<APP_FOLDER>>) on the command line.
+;
+; WHAT IT DOES
+;   * Install: per-user OR all-users, chosen by the person at the start (the dialog
+;     Inno shows when PrivilegesRequiredOverridesAllowed=dialog). Per-user needs no
+;     administrator and is the default.
+;   * Upgrade: the same AppId replaces the old version in place. The previous
+;     `<<RUNTIME_DIR>>` folder is DELETED first, so a file the new version no longer ships
+;     cannot linger and mix two versions' DLLs (the reason a zip is unpacked into a
+;     versioned folder). `plugins\` is NOT cleared: people add their own there.
+;   * Uninstall: removes what the installer put down. A small form then asks whether
+;     to ALSO remove the settings (registry) and the data folder (caches, downloaded
+;     tools, recovery copies). Both are unchecked: the default is to keep everything.
+;     Saved project files live wherever the person saved them and are never touched.
+;
+; Silent use (what an installer test drives): /VERYSILENT /SUPPRESSMSGBOXES /CURRENTUSER /DIR=...
+;   Silent uninstall keeps everything unless /REMOVESETTINGS=1 and/or /REMOVEDATA=1 is given.
+;
+; NOT SIGNED. Windows SmartScreen will say "unknown publisher" until it is.
+
+#ifndef AppVersion
+  #error AppVersion must be passed: ISCC /DAppVersion=0.10.0 ...
+#endif
+#ifndef SourceDir
+  #error SourceDir must be passed: ISCC /DSourceDir=dist\<<APP_FOLDER>> ...
+#endif
+#ifndef OutputDir
+  #define OutputDir "."
+#endif
+
+; A test build uses its own AppId (so it can never be mistaken for, or clobber, a real
+; installation), a sandbox data folder and registry key (so removal can be tested without
+; touching the person's real data), and cheaper compression. The shipped script is this
+; same file with none of these defined.
+#ifdef TestBuild
+  #define AppIdGuid "{{<<TEST_APP_ID_GUID>>}"
+  #define OutputName "<<ARTIFACT_PREFIX>>-TEST-setup"
+#else
+  #define AppIdGuid "{{<<APP_ID_GUID>>}"
+  #define OutputName "<<ARTIFACT_PREFIX>>-v" + AppVersion + "-<<PLATFORM_TAG>>-setup"
+#endif
+
+[Setup]
+AppId={#AppIdGuid}
+AppName=<<PRODUCT_NAME>>
+AppVersion={#AppVersion}
+AppVerName=<<PRODUCT_NAME>> {#AppVersion}
+AppPublisher=<<PUBLISHER>>
+AppPublisherURL=<<PROJECT_URL>>
+AppSupportURL=<<PROJECT_URL>>/issues
+AppUpdatesURL=<<PROJECT_URL>>/releases
+VersionInfoVersion={#AppVersion}
+VersionInfoProductVersion={#AppVersion}
+VersionInfoProductName=<<PRODUCT_NAME>>
+VersionInfoCompany=<<PUBLISHER>>
+VersionInfoDescription=<<PRODUCT_NAME>> Setup
+VersionInfoCopyright=<<COPYRIGHT>>
+DefaultDirName={autopf}\<<PRODUCT_NAME>>
+DisableProgramGroupPage=yes
+PrivilegesRequired=lowest
+PrivilegesRequiredOverridesAllowed=dialog
+ArchitecturesAllowed=x64compatible
+ArchitecturesInstallIn64BitMode=x64compatible
+MinVersion=10.0
+LicenseFile={#SourceDir}\LICENSE
+OutputDir={#OutputDir}
+OutputBaseFilename={#OutputName}
+WizardStyle=modern
+UninstallDisplayName=<<PRODUCT_NAME>>
+UninstallDisplayIcon={app}\<<EXE_NAME>>
+CloseApplications=yes
+RestartApplications=no
+SetupLogging=yes
+#ifdef TestBuild
+Compression=lzma2/fast
+SolidCompression=no
+#else
+Compression=lzma2/normal
+SolidCompression=yes
+#endif
+
+[Languages]
+Name: "english"; MessagesFile: "compiler:Default.isl"
+
+[Tasks]
+Name: "desktopicon"; Description: "Create a &desktop shortcut"; GroupDescription: "Shortcuts:"; Flags: unchecked
+
+[Files]
+Source: "{#SourceDir}\*"; DestDir: "{app}"; Flags: recursesubdirs createallsubdirs ignoreversion
+
+[InstallDelete]
+; The whole previous runtime goes first (see the header). Not the folders people add to.
+Type: filesandordirs; Name: "{app}\<<RUNTIME_DIR>>"
+
+[Icons]
+Name: "{autoprograms}\<<PRODUCT_NAME>>"; Filename: "{app}\<<EXE_NAME>>"
+Name: "{autodesktop}\<<PRODUCT_NAME>>"; Filename: "{app}\<<EXE_NAME>>"; Tasks: desktopicon
+
+[Run]
+Filename: "{app}\<<EXE_NAME>>"; Description: "Launch <<PRODUCT_NAME>>"; Flags: nowait postinstall skipifsilent
+
+[UninstallDelete]
+; The runtime is ours entirely. A folder people add files to is not removed wholesale: Inno
+; leaves a folder that still holds files it did not install.
+Type: filesandordirs; Name: "{app}\<<RUNTIME_DIR>>"
+
+[Code]
+var
+  RemoveSettings: Boolean;
+  RemoveData: Boolean;
+
+{ Where the application keeps its caches, downloaded tools and recovery copies by default.
+  The application must use the same folder (a per-user data directory, never the install folder). }
+function DataFolder(): String;
+begin
+#ifdef TestBuild
+  Result := ExpandConstant('{param:TESTDATADIR|{localappdata}\<<DATA_FOLDER_NAME>>-TEST}');
+#else
+  Result := ExpandConstant('{localappdata}\<<DATA_FOLDER_NAME>>');
+#endif
+end;
+
+{ Settings (window layout, preferences) written to this registry key. Delete this function's
+  use if the application keeps its settings in a file under the data folder instead. }
+function SettingsKey(): String;
+begin
+#ifdef TestBuild
+  Result := 'Software\<<DATA_FOLDER_NAME>>-TEST';
+#else
+  Result := 'Software\<<DATA_FOLDER_NAME>>';
+#endif
+end;
+
+{ If the person moved their data folder, the application writes the real location to
+  data_root.txt inside the default folder (it must do so for this to work). We never delete a folder somebody chose elsewhere;
+  we only tell them where it is. Empty when the data is in the default place. }
+function MovedDataFolder(): String;
+var
+  Recorded: AnsiString;
+begin
+  Result := '';
+  if LoadStringFromFile(DataFolder() + '\data_root.txt', Recorded) then
+  begin
+    Recorded := Trim(Recorded);
+    if (Recorded <> '') and (CompareText(RemoveBackslash(String(Recorded)), RemoveBackslash(DataFolder())) <> 0) then
+      Result := String(Recorded);
+  end;
+end;
+
+function ParamIsOne(Name: String): Boolean;
+begin
+  Result := ExpandConstant('{param:' + Name + '|0}') = '1';
+end;
+
+function AskWhatToRemove(): Boolean;
+var
+  Form: TSetupForm;
+  Heading, Note, Moved: TNewStaticText;
+  SettingsBox, DataBox: TNewCheckBox;
+  OkButton, CancelButton: TNewButton;
+  MovedPath: String;
+begin
+  Result := True;
+  Form := CreateCustomForm(ScaleX(460), ScaleY(330), True, False);
+  try
+    Form.Caption := 'Uninstall <<PRODUCT_NAME>>';
+
+    Heading := TNewStaticText.Create(Form);
+    Heading.Parent := Form;
+    Heading.Left := ScaleX(16);
+    Heading.Top := ScaleY(14);
+    Heading.Width := Form.ClientWidth - ScaleX(32);
+    Heading.AutoSize := False;
+    Heading.WordWrap := True;
+    Heading.Height := ScaleY(48);
+    Heading.Caption := 'The program will be removed. Your saved project files are never deleted. ' +
+      'Tick below only if you also want to remove what the program stored for you:';
+
+    SettingsBox := TNewCheckBox.Create(Form);
+    SettingsBox.Parent := Form;
+    SettingsBox.Left := ScaleX(16);
+    SettingsBox.Top := Heading.Top + Heading.Height + ScaleY(6);
+    SettingsBox.Width := Form.ClientWidth - ScaleX(32);
+    SettingsBox.Caption := 'Remove my settings and window layout';
+
+    DataBox := TNewCheckBox.Create(Form);
+    DataBox.Parent := Form;
+    DataBox.Left := ScaleX(16);
+    DataBox.Top := SettingsBox.Top + SettingsBox.Height + ScaleY(8);
+    DataBox.Width := Form.ClientWidth - ScaleX(32);
+    DataBox.Caption := 'Remove caches, downloaded tools and recovery copies';
+
+    Note := TNewStaticText.Create(Form);
+    Note.Parent := Form;
+    Note.Left := ScaleX(36);
+    Note.Top := DataBox.Top + DataBox.Height + ScaleY(2);
+    Note.Width := Form.ClientWidth - ScaleX(52);
+    Note.AutoSize := False;
+    Note.WordWrap := True;
+    Note.Height := ScaleY(64);
+    Note.Caption := DataFolder() + #13#10 + 'This can be large if you downloaded optional tools.';
+
+    MovedPath := MovedDataFolder();
+    Moved := TNewStaticText.Create(Form);
+    Moved.Parent := Form;
+    Moved.Left := ScaleX(16);
+    Moved.Top := Note.Top + Note.Height + ScaleY(6);
+    Moved.Width := Form.ClientWidth - ScaleX(32);
+    Moved.AutoSize := False;
+    Moved.WordWrap := True;
+    Moved.Height := ScaleY(64);
+    if MovedPath <> '' then
+      Moved.Caption := 'Your data folder was moved to ' + MovedPath + '. That folder is never removed here; delete it yourself if you no longer need it.'
+    else
+      Moved.Caption := '';
+
+    OkButton := TNewButton.Create(Form);
+    OkButton.Parent := Form;
+    OkButton.Caption := 'Uninstall';
+    OkButton.ModalResult := mrOk;
+    OkButton.Default := True;
+    OkButton.Width := ScaleX(90);
+    OkButton.Height := ScaleY(26);
+    OkButton.Left := Form.ClientWidth - ScaleX(16) - ScaleX(90) - ScaleX(8) - ScaleX(90);
+    OkButton.Top := Form.ClientHeight - ScaleY(26) - ScaleY(14);
+
+    CancelButton := TNewButton.Create(Form);
+    CancelButton.Parent := Form;
+    CancelButton.Caption := 'Cancel';
+    CancelButton.ModalResult := mrCancel;
+    CancelButton.Cancel := True;
+    CancelButton.Width := ScaleX(90);
+    CancelButton.Height := ScaleY(26);
+    CancelButton.Left := Form.ClientWidth - ScaleX(16) - ScaleX(90);
+    CancelButton.Top := OkButton.Top;
+
+    if Form.ShowModal() = mrOk then
+    begin
+      RemoveSettings := SettingsBox.Checked;
+      RemoveData := DataBox.Checked;
+    end
+    else
+      Result := False;
+  finally
+    Form.Free();
+  end;
+end;
+
+function InitializeUninstall(): Boolean;
+begin
+  Result := True;
+  RemoveSettings := ParamIsOne('REMOVESETTINGS');
+  RemoveData := ParamIsOne('REMOVEDATA');
+  { Silent: only what the command line asked for. Interactive: ask, defaulting to keep. }
+  if not UninstallSilent() then
+    Result := AskWhatToRemove();
+  Log(Format('Uninstall choices: remove settings=%d, remove data=%d', [Ord(RemoveSettings), Ord(RemoveData)]));
+end;
+
+procedure CurUninstallStepChanged(CurUninstallStep: TUninstallStep);
+var
+  Folder: String;
+begin
+  if CurUninstallStep <> usPostUninstall then
+    Exit;
+  if RemoveSettings then
+    Log(Format('Removing settings key %s: %d', [SettingsKey(), Ord(RegDeleteKeyIncludingSubkeys(HKEY_CURRENT_USER, SettingsKey()))]));
+  if RemoveData then
+  begin
+    Folder := RemoveBackslash(DataFolder());
+    { Only ever the application's own folder, never a drive root or a parent of it. }
+    if (Pos('<<DATA_FOLDER_NAME>>', ExtractFileName(Folder)) = 1) and DirExists(Folder) then
+      DelTree(Folder, True, True, True);
+  end;
+end;
