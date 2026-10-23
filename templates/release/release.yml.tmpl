@@ -1,0 +1,221 @@
+# Starter from TokenSave Manager templates/release/release.yml.tmpl (adapted from OpenChem Studio, xaerogonzo/OpenChem-Studio, master 2026-10-22).
+# It is yours to edit once adopted; nothing keeps it in step with the template.
+# Build the release on a clean machine, from a tag, and DRAFT it. Nothing here publishes.
+#
+#   * A `v<version>` tag push builds the zip and the installer with `build.ps1 -Release -Installer`
+#     (which smoke-tests the built app, the extracted zip and the installed app), attests where
+#     the files came from, and creates a DRAFT GitHub Release. A person reads it, tries the
+#     installer, and presses Publish. How to cut one: docs/RELEASING.md.
+#   * A pull request that touches how the release is made runs the same build as a DRY RUN
+#     (no attestation, no release), so a change that breaks the freeze is found in the PR.
+#   * `workflow_dispatch` runs the same dry run on demand.
+#
+# WHAT THIS IS FOR, AND WHAT IT IS NOT. A release built here is reproducible (a clean
+# checkout, pinned tools, nothing from a developer's machine) and carries a build provenance
+# attestation: `gh attestation verify <file> --repo <<REPO>>` proves a file
+# was produced by THIS workflow from THIS repository. That is not a code signature. Windows
+# SmartScreen still says "unknown publisher" until the files are signed; SignPath Foundation
+# (free for open-source projects) wants exactly this kind of automated build first.
+#
+# PERMISSIONS. Nothing by default. The build job reads the repository and may write an
+# attestation; ONLY the release job can write contents, and only on a tag push.
+#
+# EVERY THIRD-PARTY ACTION IS PINNED TO A FULL COMMIT SHA (the tag is in the comment), because
+# this workflow can create a release. The other workflows here use major tags; this one does
+# not, on purpose. Update a pin by resolving the new tag and changing both the SHA and the
+# comment. The installer for Inno Setup is pinned by version AND sha256 for the same reason.
+
+name: release
+
+on:
+  push:
+    tags:
+      - 'v[0-9]+.[0-9]+.[0-9]+'
+  pull_request:
+    # What changes how a release is made or whether it can be. Not every PR: the build is long.
+    paths:
+      - '.github/workflows/release.yml'
+      - 'packaging/**'
+      - 'build.ps1'
+      - '<<VERSION_FILE>>'
+      - '<<SMOKE_SCRIPT>>'
+      - 'tools/make_release_zip.py'
+      - 'tools/frozen_smoke.py'
+      - 'tools/release_info.py'
+  workflow_dispatch:
+
+permissions: {}
+
+concurrency:
+  group: release-${{ github.ref }}
+  # Never cancel a tag build half way; a superseded pull request build is just waste.
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
+jobs:
+  build:
+    name: build release files (Windows)
+    runs-on: windows-latest
+    timeout-minutes: 75
+    permissions:
+      contents: read
+      id-token: write       # to sign the attestation; used only on a tag push
+      attestations: write
+
+    steps:
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5
+        with:
+          persist-credentials: false
+
+      # Fail in seconds, not after a 20 minute build. `release_info.py` is standard library only,
+      # and the runner's Python is newer than the 3.11 `tomllib` needs.
+      - name: The tag must name this version
+        if: github.ref_type == 'tag'
+        shell: bash
+        env:
+          TAG: ${{ github.ref_name }}
+        run: python tools/release_info.py check-tag "$TAG"
+
+      # The release notes are the tag's CHANGELOG section. Checking they exist HERE means a
+      # missing section fails now and not after the build.
+      - name: The changelog must have this version's section
+        if: github.ref_type == 'tag'
+        shell: bash
+        env:
+          TAG: ${{ github.ref_name }}
+        run: python tools/release_info.py notes "$TAG" > /dev/null
+
+      - name: Install uv
+        uses: astral-sh/setup-uv@37802adc94f370d6bfd71619e3f0bf239e1f3b78 # v7
+        with:
+          enable-cache: true
+
+      # Pinned by version and checked against the sha256 Inno Setup's maintainers publish (the
+      # same value winget's manifest carries). Not Chocolatey: it has no 6.7.3 package. Installed
+      # per-user so it needs no elevation, and `ISCC` names it so `tools/make_installer.py` cannot
+      # pick up some other copy the image happens to have.
+      - name: Install Inno Setup 6.7.3
+        shell: pwsh
+        run: |
+          $url = "https://github.com/jrsoftware/issrc/releases/download/is-6_7_3/innosetup-6.7.3.exe"
+          $expected = "9c73c3bae7ed48d44112a0f48e66742c00090bdb5bef71d9d3c056c66e97b732"
+          $setup = Join-Path $env:RUNNER_TEMP "innosetup-6.7.3.exe"
+          Invoke-WebRequest -Uri $url -OutFile $setup
+          $actual = (Get-FileHash -Algorithm SHA256 $setup).Hash.ToLower()
+          if ($actual -ne $expected) { throw "Inno Setup installer hash mismatch: got $actual, expected $expected" }
+          Start-Process -FilePath $setup -ArgumentList "/VERYSILENT","/SUPPRESSMSGBOXES","/NORESTART","/CURRENTUSER" -Wait
+          $iscc = Join-Path $env:LOCALAPPDATA "Programs\Inno Setup 6\ISCC.exe"
+          if (-not (Test-Path $iscc)) { throw "Inno Setup did not install to $iscc" }
+          "ISCC=$iscc" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
+
+      # `--frozen`: exactly the locked versions, never a fresh resolve. NOT `--all-extras`
+      # (the `docking` extra builds `vina` from source); these are what the release ships.
+      - name: Sync dependencies
+        shell: pwsh
+        run: <<SETUP_COMMAND>>
+
+      # The whole pipeline: freeze, check the tree, smoke-test the built app, make the zip and
+      # smoke-test its extracted copy, make the installer and really install, upgrade and
+      # uninstall it. It refuses a dirty tree, which a fresh checkout is not.
+      - name: Build, smoke-test and package
+        shell: pwsh
+        run: <<BUILD_COMMAND>>
+
+      - name: Check the checksums of what was built
+        shell: bash
+        working-directory: dist
+        run: |
+          cat SHA256SUMS.txt
+          sha256sum -c SHA256SUMS.txt
+
+      - name: Keep the release files
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: release-files
+          path: |
+            dist/<<ARTIFACT_PREFIX>>-v*-<<PLATFORM_TAG>>.zip
+            dist/<<ARTIFACT_PREFIX>>-v*-<<PLATFORM_TAG>>-setup.exe
+            dist/SHA256SUMS.txt
+          if-no-files-found: error
+          retention-days: 30
+
+      # Only for a real release: a pull request from a fork has no token to sign with, and a
+      # dry run's files are not something to vouch for.
+      - name: Attest where these files came from
+        if: github.event_name == 'push' && github.ref_type == 'tag'
+        uses: actions/attest-build-provenance@4d101475d8b20a2381f78447822ac1eab6504dd8 # v4.2.2
+        with:
+          subject-path: |
+            dist/<<ARTIFACT_PREFIX>>-v*-<<PLATFORM_TAG>>.zip
+            dist/<<ARTIFACT_PREFIX>>-v*-<<PLATFORM_TAG>>-setup.exe
+
+      # A failed smoke test leaves its report and the app's own log in a temp folder. Without
+      # this the only evidence is a message saying it failed.
+      - name: Keep the smoke test's evidence
+        if: failure()
+        shell: pwsh
+        run: |
+          $out = Join-Path $env:RUNNER_TEMP "evidence"
+          New-Item -ItemType Directory -Force $out | Out-Null
+          foreach ($pattern in "<<TEMP_PREFIX>>-smoke-*", "<<TEMP_PREFIX>> installer test *", "<<TEMP_PREFIX>> uninstall log *") {
+            Get-ChildItem -Path $env:TEMP -Directory -Filter $pattern -ErrorAction SilentlyContinue |
+              ForEach-Object { Copy-Item $_.FullName -Destination (Join-Path $out $_.Name) -Recurse -ErrorAction SilentlyContinue }
+          }
+          Get-ChildItem $out -Recurse -File | Measure-Object | ForEach-Object { "$($_.Count) evidence file(s)" }
+
+      - name: Upload the evidence
+        if: failure()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: release-evidence
+          path: ${{ runner.temp }}/evidence
+          if-no-files-found: ignore
+          retention-days: 14
+
+  # A DRAFT. It is not visible to anyone but the repository's writers until a person presses
+  # Publish, which is the moment to try the installer and read the notes.
+  draft:
+    name: draft the GitHub release
+    needs: build
+    if: github.event_name == 'push' && github.ref_type == 'tag'
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    permissions:
+      contents: write
+
+    steps:
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5
+        with:
+          persist-credentials: false
+
+      - name: Fetch the release files
+        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
+        with:
+          name: release-files
+          path: dist
+
+      # The files travelled between machines; check they arrived as they left.
+      - name: Check the checksums again
+        shell: bash
+        working-directory: dist
+        run: sha256sum -c SHA256SUMS.txt
+
+      - name: Write the release notes from the changelog
+        shell: bash
+        env:
+          TAG: ${{ github.ref_name }}
+        run: python3 tools/release_info.py notes "$TAG" --out notes.md
+
+      - name: Create the draft release
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TAG: ${{ github.ref_name }}
+        run: |
+          gh release create "$TAG" \
+            --draft \
+            --verify-tag \
+            --title "<<PRODUCT_NAME>> ${TAG#v}" \
+            --notes-file notes.md \
+            dist/<<ARTIFACT_PREFIX>>-v*-<<PLATFORM_TAG>>.zip \
+            dist/<<ARTIFACT_PREFIX>>-v*-<<PLATFORM_TAG>>-setup.exe \
+            dist/SHA256SUMS.txt

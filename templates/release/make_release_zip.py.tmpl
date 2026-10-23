@@ -1,0 +1,227 @@
+"""Package a built `dist/<<APP_FOLDER>>` as a release zip that cannot be mistaken for a finished one.
+
+    python tools/make_release_zip.py --dist dist/<<APP_FOLDER>> --version 0.10.0 --out-dir dist
+
+The order is the point, and each gate stops the rest:
+
+  1. write `<<ARTIFACT_PREFIX>>-v<version>-<<PLATFORM_TAG>>.zip.partial`, every entry under ONE
+     versioned top folder (so unzipping a new version beside an old one cannot mix two
+     versions' DLLs);
+  2. validate the inventory (one prefix, no traversal, the exe present, nothing that
+     must not ship);
+  3. extract it to a fresh folder whose name contains a SPACE and run the frozen smoke
+     test on THAT copy, because the thing people get is the zip, not `dist/`;
+  4. only then hash the exact final bytes into `SHA256SUMS.txt` and promote both files.
+
+A failure at any step leaves no file that looks final. An existing release of the same
+version is never overwritten without `--force`. The checksum detects corruption in
+transit; it is not a signature and says nothing about who published the zip.
+"""
+
+# Starter from TokenSave Manager templates/release/make_release_zip.py.tmpl (adapted from OpenChem Studio, xaerogonzo/OpenChem-Studio, master 2026-10-22).
+# Yours to edit once adopted; nothing keeps it in step with the template.
+from __future__ import annotations
+
+import argparse
+import hashlib
+import os
+import shutil
+import sys
+import tempfile
+import zipfile
+from pathlib import Path, PurePosixPath
+
+ROOT = Path(__file__).resolve().parent.parent
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+
+ARTIFACT_PREFIX = "<<ARTIFACT_PREFIX>>"
+PLATFORM_TAG = "<<PLATFORM_TAG>>"
+EXE_NAME = "<<EXE_NAME>>"
+
+#: Must be in the archive (relative to the top folder).
+REQUIRED = <<REQUIRED_FILES>>
+
+#: Must NOT be loose in the archive: they live in the executable, or are build debris.
+FORBIDDEN_PARTS = ("__pycache__",)
+#: Directory prefixes end in "/"; anything else is an exact relative path.
+FORBIDDEN_PATHS = <<FORBIDDEN_PATHS>>
+
+
+class ReleaseError(RuntimeError):
+    """The zip cannot be made or does not pass its own checks."""
+
+
+def zip_name(version: str) -> str:
+    return f"{ARTIFACT_PREFIX}-v{version}-{PLATFORM_TAG}.zip"
+
+
+def top_folder(version: str) -> str:
+    return f"{ARTIFACT_PREFIX}-v{version}"
+
+
+def check_version(version: str) -> None:
+    if not version or version.lower() == "unknown" or any(c in version for c in '/\\ "'):
+        raise ReleaseError(f"refusing to build a release with the version {version!r}")
+
+
+def write_zip(source: Path, destination: Path, version: str) -> int:
+    """Every file under `source`, deflated, under the versioned top folder. Returns the entry count."""
+    top = top_folder(version)
+    count = 0
+    with zipfile.ZipFile(destination, "w", zipfile.ZIP_DEFLATED, compresslevel=6) as archive:
+        for path in sorted(source.rglob("*")):
+            if path.is_dir():
+                continue
+            relative = path.relative_to(source).as_posix()
+            if any(part in FORBIDDEN_PARTS for part in PurePosixPath(relative).parts):
+                continue
+            archive.write(path, f"{top}/{relative}")
+            count += 1
+    return count
+
+
+def validate_inventory(archive_path: Path, version: str) -> list[str]:
+    """Everything wrong with the archive's contents; empty means it may ship."""
+    problems: list[str] = []
+    top = top_folder(version)
+    try:
+        with zipfile.ZipFile(archive_path) as archive:
+            names = archive.namelist()
+            bad = archive.testzip()
+    except (OSError, zipfile.BadZipFile) as exc:
+        return [f"the archive cannot be read: {exc}"]
+    if bad:
+        problems.append(f"a corrupt entry: {bad}")
+    if not names:
+        return problems + ["the archive is empty"]
+    inside = set()
+    for name in names:
+        pure = PurePosixPath(name)
+        if name.startswith("/") or "\\" in name or ".." in pure.parts or (len(name) > 1 and name[1] == ":"):
+            problems.append(f"an entry escapes its folder: {name!r}")
+            continue
+        if pure.parts[0] != top:
+            problems.append(f"an entry is outside {top}/: {name!r}")
+            continue
+        relative = "/".join(pure.parts[1:])
+        inside.add(relative)
+        if any(part in FORBIDDEN_PARTS for part in pure.parts):
+            problems.append(f"build debris in the archive: {name!r}")
+        if any(relative == f.rstrip("/") or relative.startswith(f) for f in FORBIDDEN_PATHS if f.endswith("/")) or relative in FORBIDDEN_PATHS:
+            problems.append(f"a file that must not ship loose: {name!r}")
+    for required in REQUIRED:
+        if required not in inside:
+            problems.append(f"missing from the archive: {required}")
+    return problems
+
+
+def sha256_of(path: Path) -> str:
+    digest = hashlib.sha256()
+    with path.open("rb") as stream:
+        while chunk := stream.read(1 << 20):
+            digest.update(chunk)
+    return digest.hexdigest()
+
+
+def checksum_line(archive_path: Path, name: str | None = None) -> str:
+    """`<sha256> *<name>` for the exact bytes on disk (binary-mode marker, as sha256sum writes it)."""
+    return f"{sha256_of(archive_path)} *{name or archive_path.name}\n"
+
+
+def write_checksums(sums_path: Path, archive_path: Path, name: str | None = None, keep_from: Path | None = None) -> None:
+    """Write this file's line, keeping the other lines of `keep_from` (the installer's, say).
+
+    UTF-8, no BOM, LF: a BOM or CRLF makes `sha256sum -c` read the first name wrongly.
+    """
+    line = checksum_line(archive_path, name).rstrip("\n")
+    own = f" *{name or archive_path.name}"
+    kept: list[str] = []
+    if keep_from is not None and keep_from.exists():
+        kept = [
+            existing for existing in keep_from.read_text(encoding="utf-8").splitlines()
+            if existing.strip() and not existing.rstrip().endswith(own)
+        ]
+    sums_path.write_bytes(("\n".join([line] + kept) + "\n").encode("utf-8"))
+
+
+def extract(archive_path: Path, destination: Path) -> None:
+    with zipfile.ZipFile(archive_path) as archive:
+        archive.extractall(destination)
+
+
+def build_release(
+    dist: Path,
+    version: str,
+    out_dir: Path,
+    *,
+    force: bool = False,
+    smoke=None,
+) -> Path:
+    """The whole pipeline. `smoke(exe_path) -> bool` runs the smoke test on the extracted copy."""
+    check_version(version)
+    exe = dist / EXE_NAME
+    if not exe.is_file():
+        raise ReleaseError(f"{dist} does not hold a built application (no {EXE_NAME})")
+    out_dir.mkdir(parents=True, exist_ok=True)
+    final = out_dir / zip_name(version)
+    sums = out_dir / "SHA256SUMS.txt"
+    partial = final.with_name(final.name + ".partial")
+    partial_sums = sums.with_name(sums.name + ".partial")
+    if (final.exists() or sums.exists()) and not force:
+        raise ReleaseError(f"{final.name} already exists; pass --force to replace it")
+    for stale in (partial, partial_sums):
+        stale.unlink(missing_ok=True)
+
+    scratch: Path | None = None
+    try:
+        count = write_zip(dist, partial, version)
+        print(f"make_release_zip: wrote {count} entries to {partial.name}")
+        problems = validate_inventory(partial, version)
+        if problems:
+            raise ReleaseError("the archive failed its inventory check:\n  " + "\n  ".join(problems))
+        # A folder name WITH A SPACE: the path a person actually extracts to.
+        scratch = Path(tempfile.mkdtemp(prefix="<<TEMP_PREFIX>> release "))
+        extract(partial, scratch)
+        extracted_exe = scratch / top_folder(version) / EXE_NAME
+        if smoke is not None and not smoke(extracted_exe):
+            raise ReleaseError("the smoke test failed on the extracted zip")
+        # The sums name the FINAL file, which is what a downloader has.
+        write_checksums(partial_sums, partial, final.name, keep_from=sums)
+        os.replace(partial, final)
+        os.replace(partial_sums, sums)
+    except BaseException:
+        partial.unlink(missing_ok=True)
+        partial_sums.unlink(missing_ok=True)
+        raise
+    finally:
+        if scratch is not None:
+            shutil.rmtree(scratch, ignore_errors=True)
+    print(f"make_release_zip: {final}\nmake_release_zip: {sums.read_text(encoding='utf-8').strip()}")
+    return final
+
+
+def main(argv: list[str] | None = None) -> int:
+    parser = argparse.ArgumentParser(description=__doc__.splitlines()[0])
+    parser.add_argument("--dist", type=Path, required=True)
+    parser.add_argument("--version", required=True)
+    parser.add_argument("--out-dir", type=Path, required=True)
+    parser.add_argument("--force", action="store_true")
+    parser.add_argument("--no-smoke", action="store_true", help="skip the smoke test (tests only)")
+    args = parser.parse_args(argv)
+
+    def smoke(exe: Path) -> bool:
+        import frozen_smoke
+
+        judgement, _ = frozen_smoke.run_smoke([str(exe)])
+        return judgement.ok
+
+    try:
+        build_release(args.dist, args.version, args.out_dir, force=args.force, smoke=None if args.no_smoke else smoke)
+    except ReleaseError as exc:
+        print(f"make_release_zip: {exc}", file=sys.stderr)
+        return 1
+    return 0
+
+
+if __name__ == "__main__":
+    sys.exit(main())

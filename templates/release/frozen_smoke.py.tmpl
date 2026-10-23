@@ -1,0 +1,219 @@
+"""Launch the BUILT exe on a drive script and judge what it did.
+
+    python tools/frozen_smoke.py --exe dist/<<APP_FOLDER>>/<<EXE_NAME>>
+
+`build.ps1` runs this on every build and, for a release, again on the zip's
+extracted copy. It exists because the build used to end with "launch it and
+look", and a release that could not start (data files missing from the packaging spec) was
+invisible to every check until somebody tried it.
+
+WHY PYTHON AND NOT `Start-Process -Wait`. `-Wait` also waits for the child
+processes the app starts (an embedded browser engine's helpers), so a run that hung could hang
+the build too. Here the wait is on THIS process with a timeout, and on overrun
+only this process's own tree is killed (`taskkill /T /F /PID`), never by image
+name, so an unrelated copy of the app someone has open is untouched.
+
+`judge` is pure and FAILS CLOSED: a pass needs an exit status of 0, a report
+written by THIS process, verdict PASS, every required assertion present and
+ok, nothing dropped from the error ledger, and the whole script run.
+
+THE CONTRACT WITH THE APPLICATION. The application, started with <<ENV_PREFIX>>_DRIVE naming a
+script, runs it on its own event loop and writes <<ENV_PREFIX>>_DRIVE_REPORT as JSON:
+  {"verdict": "PASS", "exit_code": 0,
+   "run": {"started": <ISO time>, "script_sha256": <sha256 of the script file>},
+   "steps": {"run": N, "in_script": N},
+   "assertions": [{"step": "<name>", "ok": true, "detail": "..."}],
+   "ledger": {"dropped": 0, "driver_failures": []}}
+with <<ENV_PREFIX>>_DATA_ROOT as its private data directory. Writing that driver is the project's
+job (see the Manager's src/debug_drive.py for one); this file only launches and judges.
+"""
+
+# Starter from TokenSave Manager templates/release/frozen_smoke.py.tmpl (adapted from OpenChem Studio, xaerogonzo/OpenChem-Studio, master 2026-10-22).
+# Yours to edit once adopted; nothing keeps it in step with the template.
+from __future__ import annotations
+
+import argparse
+import hashlib
+import json
+import os
+import subprocess
+import sys
+import tempfile
+import time
+from dataclasses import dataclass, field
+from datetime import datetime, timedelta, timezone
+from pathlib import Path
+from typing import Any
+
+ROOT = Path(__file__).resolve().parent.parent
+DEFAULT_SCRIPT = ROOT / "<<SMOKE_SCRIPT>>"
+
+#: Steps that must appear, each at least once and each ok. A script that quietly
+#: lost one of these asserts less than it used to, and that must not pass.
+REQUIRED_ASSERTIONS = <<REQUIRED_ASSERTIONS>>
+
+#: How much of the app's own log to show when a run fails.
+_LOG_TAIL_LINES = 40
+
+
+@dataclass
+class Judgement:
+    ok: bool
+    failures: list[str] = field(default_factory=list)
+
+    def text(self) -> str:
+        return "PASS" if self.ok else "FAIL: " + "; ".join(self.failures)
+
+
+def _sha256(path: Path) -> str:
+    return hashlib.sha256(path.read_bytes()).hexdigest()
+
+
+def judge(
+    report_path: Path,
+    *,
+    exit_code: int | None,
+    timed_out: bool,
+    launched_at: datetime,
+    script: Path,
+    required: tuple[str, ...] = REQUIRED_ASSERTIONS,
+) -> Judgement:
+    """Every way a run can be wrong, each its own reason. Nothing here passes by default."""
+    failures: list[str] = []
+    if timed_out:
+        failures.append("the run did not finish in time")
+    if exit_code != 0:
+        failures.append(f"exit status {exit_code!r}, expected 0")
+    try:
+        report: Any = json.loads(report_path.read_text(encoding="utf-8"))
+    except FileNotFoundError:
+        return Judgement(False, failures + ["no report was written"])
+    except (OSError, ValueError):
+        return Judgement(False, failures + ["the report could not be read as JSON"])
+    if not isinstance(report, dict):
+        return Judgement(False, failures + ["the report is not an object"])
+
+    if report.get("verdict") != "PASS":
+        failures.append(f"report verdict is {report.get('verdict')!r}")
+    if report.get("exit_code") != 0:
+        failures.append(f"the report records exit_code {report.get('exit_code')!r}")
+
+    run = report.get("run") if isinstance(report.get("run"), dict) else {}
+    # FRESH, not merely present: the report names when its run started, and that
+    # must not precede this launch. (Not a pid: on Windows a launcher or a venv
+    # shim can stand between the process started and the one that writes.)
+    try:
+        started = datetime.fromisoformat(str(run.get("started")))
+        if started.tzinfo is None:
+            started = started.replace(tzinfo=timezone.utc)
+        if started < launched_at - timedelta(seconds=2):
+            failures.append(f"the report is stale: its run started {started.isoformat()}, before this launch")
+    except ValueError:
+        failures.append("the report does not say when its run started")
+    try:
+        if run.get("script_sha256") != _sha256(script):
+            failures.append("the report is for a different version of the script")
+    except OSError:
+        failures.append("the script could not be read to compare")
+
+    steps = report.get("steps") if isinstance(report.get("steps"), dict) else {}
+    if not steps or steps.get("run") != steps.get("in_script"):
+        failures.append(f"the script did not run to the end ({steps.get('run')!r} of {steps.get('in_script')!r} steps)")
+
+    assertions = report.get("assertions")
+    if not isinstance(assertions, list) or not assertions:
+        failures.append("the report holds no assertions")
+        assertions = []
+    for name in required:
+        mine = [a for a in assertions if isinstance(a, dict) and a.get("step") == name]
+        if not mine:
+            failures.append(f"required assertion {name!r} never ran")
+    for assertion in assertions:
+        if isinstance(assertion, dict) and not assertion.get("ok"):
+            failures.append(f"assertion {assertion.get('step')!r} failed: {str(assertion.get('detail'))[:300]}")
+
+    ledger = report.get("ledger") if isinstance(report.get("ledger"), dict) else {}
+    if ledger.get("dropped", 1) != 0:
+        failures.append(f"the error ledger dropped {ledger.get('dropped')!r} records, so it cannot vouch for the run")
+    if ledger.get("driver_failures", ["unreadable"]):
+        failures.append(f"driver failures: {ledger.get('driver_failures')!r}")
+    return Judgement(not failures, failures)
+
+
+def _kill_tree(pid: int) -> None:
+    """This process and its children, by pid. Never by name."""
+    if sys.platform == "win32":
+        subprocess.run(["taskkill", "/T", "/F", "/PID", str(pid)], capture_output=True, check=False)
+    else:
+        try:
+            os.kill(pid, 9)
+        except OSError:
+            pass
+
+
+def run_smoke(
+    command: list[str],
+    script: Path = DEFAULT_SCRIPT,
+    *,
+    timeout: float = 180.0,
+    workdir: Path | None = None,
+) -> tuple[Judgement, Path]:
+    """Launch `command` on `script` in a fresh directory and judge the report. Returns (judgement, work dir)."""
+    work = Path(tempfile.mkdtemp(prefix="<<TEMP_PREFIX>>-smoke-", dir=workdir))
+    report = work / "report.json"
+    data_root = work / "data"
+    data_root.mkdir()
+    env = dict(os.environ)
+    env.update(
+        <<ENV_PREFIX>>_DRIVE=str(script),
+        <<ENV_PREFIX>>_DRIVE_REPORT=str(report),
+        <<ENV_PREFIX>>_DATA_ROOT=str(data_root),
+    )
+    launched_at = datetime.now(timezone.utc)
+    started = time.monotonic()
+    with open(work / "stdout.txt", "wb") as out, open(work / "stderr.txt", "wb") as err:
+        process = subprocess.Popen(command, env=env, stdout=out, stderr=err, cwd=str(work))
+        timed_out = False
+        try:
+            exit_code: int | None = process.wait(timeout=timeout)
+        except subprocess.TimeoutExpired:
+            timed_out = True
+            _kill_tree(process.pid)
+            try:
+                exit_code = process.wait(timeout=30)
+            except subprocess.TimeoutExpired:
+                exit_code = None
+    judgement = judge(report, exit_code=exit_code, timed_out=timed_out, launched_at=launched_at, script=script)
+    print(f"frozen_smoke: {judgement.text()} ({time.monotonic() - started:.0f} s; work dir {work})")
+    if not judgement.ok:
+        _print_diagnostics(work)
+    return judgement, work
+
+
+def _print_diagnostics(work: Path) -> None:
+    for name in ("stderr.txt", "stdout.txt"):
+        path = work / name
+        if path.is_file() and path.stat().st_size:
+            tail = path.read_text(encoding="utf-8", errors="replace").splitlines()[-_LOG_TAIL_LINES:]
+            print(f"--- {name} (last {len(tail)} lines)\n" + "\n".join(tail))
+    logs = sorted((work / "data" / "logs").glob("*.log")) if (work / "data" / "logs").is_dir() else []
+    if logs:
+        tail = logs[-1].read_text(encoding="utf-8", errors="replace").splitlines()[-_LOG_TAIL_LINES:]
+        print(f"--- {logs[-1].name} (last {len(tail)} lines)\n" + "\n".join(tail))
+
+
+def main(argv: list[str] | None = None) -> int:
+    parser = argparse.ArgumentParser(description=__doc__.splitlines()[0])
+    parser.add_argument("--exe", type=Path, required=True)
+    parser.add_argument("--script", type=Path, default=DEFAULT_SCRIPT)
+    parser.add_argument("--timeout", type=float, default=180.0)
+    args = parser.parse_args(argv)
+    if not args.exe.is_file():
+        print(f"frozen_smoke: no executable at {args.exe}", file=sys.stderr)
+        return 2
+    judgement, work = run_smoke([str(args.exe)], args.script, timeout=args.timeout)
+    return 0 if judgement.ok else 1
+
+
+if __name__ == "__main__":
+    sys.exit(main())
