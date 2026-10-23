@@ -247,6 +247,13 @@ def test_a_dist_with_missing_executables_fails_every_layer_instead_of_running_fe
     assert len([r for r in results if r.layer == fs.LAYER_VERSION]) == len(fs.ALL_EXES)
 
 
+def test_the_layer_names_say_which_state_each_run_was_in():
+    """A bare "gui" in a report read as THE test; the first-run layers must say what they are."""
+    assert "first run" in fs.LAYER_CLI and "first run" in fs.LAYER_GUI
+    assert "configured" in fs.LAYER_CLI_CONFIGURED and "configured" in fs.LAYER_GUI_CONFIGURED
+    assert len({fs.LAYER_VERSION, fs.LAYER_CLI, fs.LAYER_GUI, fs.LAYER_CLI_CONFIGURED, fs.LAYER_GUI_CONFIGURED}) == 5
+
+
 def test_the_shipped_drive_script_carries_every_required_expectation_id():
     steps = json.loads((ROOT / "scripts" / "drive" / "frozen-smoke.json").read_text(encoding="utf-8"))
     ids = {s.get("id") for s in steps if s.get("do") == "expect"} | ({"expect_clean"} if any(s.get("do") == "expect_clean" for s in steps) else set())

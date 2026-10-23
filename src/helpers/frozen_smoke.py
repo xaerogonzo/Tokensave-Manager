@@ -63,8 +63,11 @@ ALL_EXES = (GUI_EXE, WRAPPER_EXE, CLI_EXE)
 GUI_REQUIRED_IDS = ("on_projects", "expect_clean")
 
 LAYER_VERSION = "version resource"
-LAYER_CLI = "cli"
-LAYER_GUI = "gui"
+# "first run" is in the name so a report never shows a bare "gui" that reads as THE test: these
+# start the program with nothing configured, which is what a new user has, and say little about
+# tokensave or git. The "(configured)" layers are the ones that do.
+LAYER_CLI = "cli (first run)"
+LAYER_GUI = "gui (first run)"
 LAYER_CLI_CONFIGURED = "cli (configured)"
 LAYER_GUI_CONFIGURED = "gui (configured)"
 
