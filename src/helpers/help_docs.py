@@ -43,13 +43,33 @@ list is the "unknown is never false" failure this codebase keeps writing rules
 about -- a reader cannot tell a document that has nothing to say from one that
 failed to load. Duplicate keys are a test failure; at run time the first wins,
 deterministically, and says so.
+
+WHERE THE TEXT COMES FROM, which is the one decision this module makes about
+delivery. A SOURCE CHECKOUT reads the repository's own files, every time: the
+person most likely to have Help open is the person editing the documents. A
+FROZEN BUILD reads a bundle compiled into the executable and NEVER falls back
+to disk, so a release's help is read-only and cannot drift from the build:
+`dist\\docs\\` is a human copy the application does not read, and a save there
+used to be able to drop an anchor and leave a topic empty. `build.ps1` generates
+the bundle from `HELP_DOCUMENTS` (`scripts/build_help_bundle.py`), so there is
+still exactly one list of documents. A frozen build whose bundle is missing,
+altered or short says so as a `Problem` per document; it does not quietly show
+fewer topics. The digest detects accidental damage only: it rides inside the
+same unsigned executable, so it is not authenticity.
 """
 
 from __future__ import annotations
 
+import base64
 import dataclasses
+import hashlib
+import importlib
+import json
 import os
 import re
+import stat
+import tempfile
+import zlib
 
 from constants import _BASE_DIR
 
@@ -116,6 +136,156 @@ class HelpUnavailable(RuntimeError):
     """A topic or document that should be there is not."""
 
 
+# ── Where the text comes from ─────────────────────────────────────────────
+
+SOURCE_DISK = "disk"
+SOURCE_BUNDLE = "bundle"
+
+#: The generated module `build.ps1` compiles in. Absent from a checkout (it is
+#: gitignored), and ignored there even if a stale copy is lying around.
+BUNDLE_MODULE = "_help_bundle"
+BUNDLE_SCHEMA = 1
+
+
+class BundleError(RuntimeError):
+    """The bundle cannot be used, and says why."""
+
+
+def _frozen() -> bool:
+    """True in a packaged build. The same signal `constants._resolve_base_dir`
+    uses; a function so a test can stand in for a build."""
+    return bool(os.environ.get("NUITKA_ONEFILE_PARENT"))
+
+
+def source() -> str:
+    return SOURCE_BUNDLE if _frozen() else SOURCE_DISK
+
+
+def _doc_key(document: str) -> str:
+    """The bundle's spelling of a document path: forward slashes on every platform."""
+    return document.replace(os.sep, "/").replace("\\", "/")
+
+
+def encode_bundle(documents: dict) -> "tuple[int, str, str]":
+    """`(schema, digest, payload)` for `{document: text}`. Pure.
+
+    The payload is base64 of zlib of JSON, so it is a plain string literal in a
+    generated module: no code runs on import, and nothing but text is trusted.
+    """
+    raw = json.dumps({_doc_key(k): v for k, v in documents.items()},
+                     ensure_ascii=False, sort_keys=True).encode("utf-8")
+    payload = base64.b64encode(zlib.compress(raw, 9)).decode("ascii")
+    return BUNDLE_SCHEMA, hashlib.sha256(payload.encode("ascii")).hexdigest(), payload
+
+
+def decode_bundle(schema, digest, payload) -> dict:
+    """The `{document: text}` a bundle holds, or `BundleError` saying what is wrong."""
+    if schema != BUNDLE_SCHEMA:
+        raise BundleError("bundle schema %r, expected %r" % (schema, BUNDLE_SCHEMA))
+    if not isinstance(payload, str) or not isinstance(digest, str):
+        raise BundleError("bundle fields are not text")
+    if hashlib.sha256(payload.encode("ascii", "replace")).hexdigest() != digest:
+        raise BundleError("bundle digest does not match its payload (damaged)")
+    try:
+        data = json.loads(zlib.decompress(base64.b64decode(payload.encode("ascii"))).decode("utf-8"))
+    except (ValueError, zlib.error) as exc:
+        raise BundleError("bundle payload cannot be decoded: %s" % exc) from exc
+    if not isinstance(data, dict) or not all(isinstance(k, str) and isinstance(v, str) for k, v in data.items()):
+        raise BundleError("bundle payload is not a mapping of documents to text")
+    return data
+
+
+def source_documents() -> dict:
+    """`{document: text}` for every help document, read from disk.
+
+    The generator's input. Raises `BundleError` for a document that is missing,
+    empty or not UTF-8: a bundle built from fewer documents is a smaller Help,
+    silently, and the build must stop instead.
+    """
+    out, bad = {}, []
+    for document in HELP_DOCUMENTS:
+        try:
+            with open(document_path(document), encoding="utf-8-sig") as handle:
+                text = handle.read()
+        except (OSError, UnicodeDecodeError) as exc:
+            bad.append("%s: %s" % (document, exc))
+            continue
+        if not text.strip():
+            bad.append("%s: is empty" % document)
+            continue
+        out[document] = text
+    if bad:
+        raise BundleError("cannot build the help bundle: " + "; ".join(bad))
+    return out
+
+
+def _import_bundle():
+    """The generated module, or ImportError. A seam, so tests need no build."""
+    return importlib.import_module(BUNDLE_MODULE)
+
+
+_bundle_cache: "list" = []
+
+
+def reset_cache() -> None:
+    """Forget the decoded bundle. A frozen build never needs this; a test does."""
+    del _bundle_cache[:]
+
+
+def _bundle_documents() -> "tuple[dict | None, str]":
+    """`(documents, reason)`: the decoded bundle, or None and why not. Cached."""
+    if _bundle_cache:
+        return _bundle_cache[0]
+    try:
+        module = _import_bundle()
+        result = (decode_bundle(getattr(module, "SCHEMA", None), getattr(module, "DIGEST", None),
+                                getattr(module, "PAYLOAD", None)), "")
+    except ImportError:
+        result = (None, "this build has no help bundle (%s was not compiled in)" % BUNDLE_MODULE)
+    except BundleError as exc:
+        result = (None, str(exc))
+    _bundle_cache.append(result)
+    return result
+
+
+def _unreadable_reason(document: str) -> str:
+    """Why `_read` returned None, for the Problem that states it."""
+    if _frozen():
+        documents, reason = _bundle_documents()
+        return reason if documents is None else "is not in the help bundle"
+    return "could not be read"
+
+
+def can_view(document: str) -> bool:
+    """Is there something to open for `document`? Makes no file, so it is cheap to ask on every click."""
+    if not _frozen():
+        return os.path.isfile(document_path(document))
+    documents, _ = _bundle_documents()
+    return documents is not None and _doc_key(document) in documents
+
+
+def viewable_path(document: str) -> "str | None":
+    """A file a person can open to read `document`.
+
+    In a checkout that is the real file (they edit the documents). In a build it
+    is a READ-ONLY temporary copy of what the bundle holds, never `dist\\docs\\`:
+    opening that one would invite an edit that changes nothing Help shows.
+    """
+    if not _frozen():
+        path = document_path(document)
+        return path if os.path.isfile(path) else None
+    documents, _ = _bundle_documents()
+    text = None if documents is None else documents.get(_doc_key(document))
+    if text is None:
+        return None
+    folder = tempfile.mkdtemp(prefix="tokensave-manager-help-")
+    path = os.path.join(folder, os.path.basename(document))
+    with open(path, "w", encoding="utf-8", newline="") as handle:
+        handle.write(text)
+    os.chmod(path, stat.S_IREAD)
+    return path
+
+
 def docs_directory() -> str:
     """Where the corpus lives: the installation root.
 
@@ -132,7 +302,16 @@ def document_path(document: str) -> str:
 
 
 def _read(document: str) -> "tuple | None":
-    """The document's lines, or None when it cannot be read."""
+    """The document's lines, or None when it cannot be read.
+
+    In a build ONLY the bundle is consulted; in a checkout ONLY the disk is.
+    Neither falls back to the other, because a fallback is how a release shows
+    text the build was not made from.
+    """
+    if _frozen():
+        documents, _ = _bundle_documents()
+        text = None if documents is None else documents.get(_doc_key(document))
+        return None if text is None else tuple(text.splitlines())
     try:
         with open(document_path(document), encoding="utf-8-sig") as handle:
             return tuple(handle.read().splitlines())
@@ -169,7 +348,7 @@ def scan() -> "tuple":
         if lines is None:
             # Reported, never silently skipped: a shorter topic list is
             # indistinguishable from a document with nothing to say.
-            problems.append(Problem(document, "could not be read"))
+            problems.append(Problem(document, _unreadable_reason(document)))
             continue
         for index, line in enumerate(lines):
             match = _ANCHOR.match(line)
@@ -366,3 +545,54 @@ def _snippet(body: str, needle: str, width: int = 90) -> str:
         return (("..." if start else "") + stripped[start:end].strip()
                 + ("..." if end < len(stripped) else ""))
     return ""
+
+
+# ── A verdict on the corpus, for a driven run ─────────────────────────────
+
+@dataclasses.dataclass(frozen=True)
+class CorpusReport:
+    source: str
+    documents: int
+    topics: int
+    problems: "tuple"
+    #: Topic keys whose section could not be extracted.
+    unresolved: "tuple"
+    searchable: bool
+
+
+def corpus_report() -> CorpusReport:
+    """What Help can actually serve right now. Reads through the same paths a user does."""
+    found, problems = scan()
+    unresolved = []
+    for item in found:
+        try:
+            if not topic_markdown(item.key).strip():
+                unresolved.append(item.key)
+        except HelpUnavailable:
+            unresolved.append(item.key)
+    needle = found[0].title.split()[0] if found else ""
+    return CorpusReport(source(), len(HELP_DOCUMENTS) - len([p for p in problems if "duplicate" not in p.detail
+                                                           and "anchor" not in p.detail]),
+                        len(found), problems, tuple(unresolved), bool(needle and search(needle)))
+
+
+def corpus_verdict(report: CorpusReport, frozen: bool) -> "list[str]":
+    """Every reason the corpus is not what this kind of run must serve. Empty means it is.
+
+    A build must serve the BUNDLE and a checkout the DISK: the verdict is what
+    turns "Help opened" into "Help is the help this build was made from".
+    """
+    want = SOURCE_BUNDLE if frozen else SOURCE_DISK
+    out = []
+    if report.source != want:
+        out.append("help is read from %r, expected %r" % (report.source, want))
+    if report.documents != len(HELP_DOCUMENTS):
+        out.append("%d of %d help documents loaded" % (report.documents, len(HELP_DOCUMENTS)))
+    out += ["%s: %s" % (p.document, p.detail) for p in report.problems]
+    if not report.topics:
+        out.append("no topics")
+    if report.unresolved:
+        out.append("topics with no body: %s" % ", ".join(report.unresolved[:5]))
+    if not report.searchable:
+        out.append("search found nothing for a word in the first topic's title")
+    return out

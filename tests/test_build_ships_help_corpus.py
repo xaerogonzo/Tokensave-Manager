@@ -1,10 +1,11 @@
-"""tests/test_build_ships_help_corpus.py — the build must ship what Help reads.
+"""tests/test_build_ships_help_corpus.py — the build must ship every help document.
 
-`helpers/help_docs.HELP_DOCUMENTS` is read at RUN TIME from `_BASE_DIR`, which
-in a Nuitka build is the folder beside the exe. A document `build.ps1` forgets
-to copy is therefore a help topic that silently disappears from the shipped
-application while every test on this machine still passes, because a source
-checkout has the file sitting right there.
+`helpers/help_docs.HELP_DOCUMENTS` is compiled into the GUI exe in a build (the
+app no longer reads the loose copy), but `build.ps1` still ships the documents
+as a human copy beside the exe, and a document it forgets to copy is one a
+person cannot read while every test on this machine still passes, because a
+source checkout has the file sitting right there. (The bundle generator
+separately fails the build on a document that is missing from the checkout.)
 
 WHY NOT JUST COPY `docs\\` RECURSIVELY. It was the obvious fix and it is the
 wrong one: `docs/` also holds ROADMAP, VERIFICATION, the upstream-issue files
@@ -58,11 +59,11 @@ def test_every_help_document_is_shipped():
     missing = [d for d in help_docs.HELP_DOCUMENTS
                if os.path.basename(d) not in copied]
     assert missing == [], (
-        "build.ps1 does not copy %s -- the Help tab reads these at run time, "
-        "so a build without them loses those topics silently" % missing)
+        "build.ps1 does not copy %s -- it is a help document and ships as a human copy, "
+        "so a person reading the download would be missing those documents" % missing)
 
 
-def test_readme_is_shipped_because_help_reads_it():
+def test_readme_is_shipped_because_it_is_a_help_document():
     """Called out on its own: README moved from "nice to include" to load
     bearing when it became the largest help document."""
     assert "README.md" in _copied_names()

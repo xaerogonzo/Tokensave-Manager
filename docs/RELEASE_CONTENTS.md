@@ -18,10 +18,10 @@ is missing from the first table. The page is a guard, not a description someone 
 | `tokensave-manager-cli.exe` | The headless CLI (console subsystem) | runs | no |
 | `manager-config.json` | A **clean** first-run config; the user's settings are written here | yes | yes, it is theirs (see below) |
 | `manager-config.example.json` | Annotated template of every key | no | n/a |
-| `README.md`, `TOKENSAVE_GUIDE.md`, `CHANGELOG.md` | Documentation; the changelog is the release's notes | `CHANGELOG.md` shown in-app | no point |
+| `README.md`, `TOKENSAVE_GUIDE.md`, `CHANGELOG.md` | Documentation; the changelog is the release's notes. `README.md` and `TOKENSAVE_GUIDE.md` are also Help documents, compiled into the GUI | `CHANGELOG.md` shown in-app; the other two no | no point |
 | `LICENSE` | MIT licence text | no | no |
 | `templates/` | Baseline, gotchas, drive template, release starters; copied recursively | yes: the baseline and lessons are delivered into projects from here | no: edits are overwritten by the next release |
-| `docs/` | The Help corpus and architecture references (a fixed list in `build.ps1`) | yes: Help reads these at run time | no |
+| `docs/` | The Help documents and architecture references (a fixed list in `build.ps1`) | **no**: Help is compiled into the GUI exe; this is a human copy | no point: editing it changes nothing Help shows |
 
 **Not in the zip, and checked not to be:** `logs/` (a run of the app writes it; v2.1.0 shipped one)
 and a `manager-config.json` carrying any key a clean config does not have (a run adds

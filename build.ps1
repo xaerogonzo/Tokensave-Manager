@@ -251,7 +251,19 @@ Assert-CleanTree
 
 New-Item -ItemType Directory -Force -Path $DIST | Out-Null
 
-Build-Exe "$ROOT\src\app.py" "tokensave-manager.exe" $guiArgs
+# The in-app Help is compiled INTO the GUI exe, so a release's help is read-only and cannot drift from
+# the build (docs\ in dist is a human copy the app does not read). The bundle is generated from
+# helpers/help_docs.HELP_DOCUMENTS, named for the compiler, and removed afterwards even when the
+# compile fails: a stale generated module in src\ would be picked up by the next source run.
+# The GUI is the only target that has a Help tab; the CLI and the wrapper do not import it.
+$HELP_BUNDLE = "$ROOT\src\_help_bundle.py"
+& python "$ROOT\scripts\build_help_bundle.py"
+if ($LASTEXITCODE -ne 0) { throw "the help bundle could not be built (see above); the GUI would ship with a smaller Help" }
+try {
+    Build-Exe "$ROOT\src\app.py" "tokensave-manager.exe" ($guiArgs + "--include-module=_help_bundle")
+} finally {
+    Remove-Item -LiteralPath $HELP_BUNDLE -Force -ErrorAction SilentlyContinue
+}
 Build-Exe "$ROOT\src\tokensave-wrapper.py" "tokensave-wrapper.exe" $wrapperArgs
 Build-Exe "$ROOT\src\cli.py" "tokensave-manager-cli.exe" $consoleCliArgs
 
@@ -307,7 +319,8 @@ $docsSrc  = "$ROOT\docs"
 $docsDest = "$DIST\docs"
 New-Item -ItemType Directory -Force -Path $docsDest | Out-Null
 # Every document in helpers/help_docs.HELP_DOCUMENTS must appear here or
-# in the root-markdown loop above: the Help tab READS these at runtime,
+# in the root-markdown loop above: the Help tab no longer reads these (it is compiled
+# into the GUI exe from the same list; see build_help_bundle.py), but they ship as a human copy,
 # so one missing from a build is a help topic that silently disappears.
 # tests/test_build_ships_help_corpus.py parses this list and fails when
 # a corpus document is not covered -- the alternative was a hand-kept

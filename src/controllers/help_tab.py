@@ -287,7 +287,7 @@ class HelpTabController:
 
         text = help_docs.substitute(markdown, self._placeholder_values())
         self._fill(render(text))
-        self._wire_footer(help_docs.document_path(item.document), item.title)
+        self._wire_footer(item.document, item.title)
 
     def _render_problems(self) -> None:
         spans = [("Help corpus problems\n", "h1"),
@@ -311,9 +311,19 @@ class HelpTabController:
         self._help_txt.configure(state=tk.DISABLED)
         self._help_txt.yview_moveto(0)
 
-    def _wire_footer(self, doc_path, title: str) -> None:
-        if doc_path and os.path.isfile(doc_path):
-            self._doc_btn.configure(command=lambda p=doc_path: _open_doc(p))
+    def _open_document(self, document: str) -> None:
+        """Open a help document. In a build that is a read-only copy of what the
+        bundle holds (made now, not on every topic click), never `docs\\` beside the exe."""
+        path = help_docs.viewable_path(document)
+        if path:
+            _open_doc(path)
+
+    def _wire_footer(self, document, title: str) -> None:
+        if document and help_docs.can_view(document):
+            built = help_docs.source() == help_docs.SOURCE_BUNDLE
+            self._doc_btn.configure(
+                text="\U0001f4c4 Open read-only copy" if built else "\U0001f4c4 Open docs",
+                command=lambda d=document: self._open_document(d))
             self._doc_btn.pack(side=tk.LEFT, padx=(0, 6))
         else:
             self._doc_btn.pack_forget()

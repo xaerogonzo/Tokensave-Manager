@@ -60,7 +60,9 @@ ALL_EXES = (GUI_EXE, WRAPPER_EXE, CLI_EXE)
 
 #: Expectation ids the shipped drive script must have recorded as passed. A script that
 #: quietly lost one asserts less than it used to, and that must not pass.
-GUI_REQUIRED_IDS = ("on_projects", "expect_clean")
+# `help_corpus`: Help serves the text THIS build was made from (the compiled-in bundle, not the
+# loose docs beside the exe). A build that left the bundle out opens Help fine and shows nothing.
+GUI_REQUIRED_IDS = ("on_projects", "help_corpus", "expect_clean")
 
 LAYER_VERSION = "version resource"
 # "first run" is in the name so a report never shows a bare "gui" that reads as THE test: these
@@ -72,7 +74,7 @@ LAYER_CLI_CONFIGURED = "cli (configured)"
 LAYER_GUI_CONFIGURED = "gui (configured)"
 
 #: Expectation ids the configured drive script must have recorded as passed.
-GUI_CONFIGURED_REQUIRED_IDS = ("on_projects", "project_listed", "expect_clean")
+GUI_CONFIGURED_REQUIRED_IDS = ("on_projects", "project_listed", "help_corpus", "expect_clean")
 
 #: A config that is valid but points at nothing: what a first-time user has.
 CLEAN_CONFIG = {

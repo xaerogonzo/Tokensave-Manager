@@ -520,3 +520,34 @@ def test_project_row_is_not_satisfied_by_a_category_row_or_a_missing_project():
 def test_project_row_with_no_project_named_never_passes_and_no_tree_is_a_failure_not_a_crash():
     assert not _row_check(_AppWithTree(["proj:C:/x"]), "")[0]
     assert not _row_check(_FakeApp(), "C:/x")[0]
+
+
+# ── the help_corpus check ─────────────────────────────────────────────────
+
+def _corpus_check():
+    return _Driver(_FakeApp(), [])._check_value({"check": "help_corpus"})
+
+
+def test_help_corpus_is_satisfied_by_the_real_corpus_read_from_disk_in_a_checkout():
+    ok, seen = _corpus_check()
+    assert ok and seen.startswith("disk:")
+
+
+def test_help_corpus_fails_in_a_build_that_has_no_bundle(monkeypatch):
+    from helpers import help_docs
+    monkeypatch.setattr(help_docs, "_frozen", lambda: True)
+    monkeypatch.setattr(help_docs, "_import_bundle", lambda: (_ for _ in ()).throw(ImportError("none")))
+    help_docs.reset_cache()
+    try:
+        ok, seen = _corpus_check()
+    finally:
+        help_docs.reset_cache()
+    assert not ok and "bundle" in seen
+
+
+def test_help_corpus_fails_when_a_checkout_is_somehow_reading_a_bundle(monkeypatch):
+    """The source must match the kind of run: a build on the loose copy is the failure this exists to catch."""
+    from helpers import help_docs
+    monkeypatch.setattr(help_docs, "source", lambda: help_docs.SOURCE_BUNDLE)
+    ok, seen = _corpus_check()
+    assert not ok and "expected 'disk'" in seen

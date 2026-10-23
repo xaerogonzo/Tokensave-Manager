@@ -61,7 +61,9 @@ any thread. Three steps turn that into a verdict:
     {"do": "log_report"}                       print what the ledger holds
 
 `expect` knows the checks `tab`, `dialog_open`, `log_contains`, `widget_text`,
-`project_row` (a Projects-tab row for `project`) and `diagnostic_contains` (the last reads the LIVE ledger, never a report
+`project_row` (a Projects-tab row for `project`), `help_corpus` (Help serves the
+text this kind of run must: the bundle in a build, the disk in a checkout) and
+`diagnostic_contains` (the last reads the LIVE ledger, never a report
 file). A failed expectation is permanent: a later success never erases it.
 On the way out -- `quit`, or interpreter exit, exactly once -- the run writes
 `<script>.report.json` beside the script (gitignored) and exits non-zero if
@@ -980,6 +982,16 @@ class _Driver:
             wanted = str(step.get("project", "")).strip()
             found = bool(wanted) and os.path.normcase(os.path.normpath(wanted)) in rows
             return found, "%d project row(s)" % len(rows)
+        if check == "help_corpus":
+            # Not "Help opened": that Help is serving the text THIS build was made from. A build
+            # whose bundle was left out opens Help fine and shows nothing, or the wrong thing.
+            from helpers import help_docs
+            frozen = help_docs._frozen()
+            report = help_docs.corpus_report()
+            failures = help_docs.corpus_verdict(report, frozen)
+            return not failures, "%s: %d topic(s), %d document(s)%s" % (
+                report.source, report.topics, report.documents,
+                ("; " + "; ".join(failures[:3])) if failures else "")
         if check == "dialog_open":
             dialog = self._dialog
             alive = dialog is not None and bool(dialog.winfo_exists())

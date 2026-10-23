@@ -36,6 +36,7 @@ def _report(script: Path, launched: float, **over) -> dict:
         "finished_at": launched + 5.0, "finished_because": "quit", "passed": True,
         "expectations": [
             {"id": "on_projects", "passed": True, "elapsed_ms": 5, "expected": "x", "actual": "x", "failure_reason": ""},
+            {"id": "help_corpus", "passed": True, "elapsed_ms": 5, "expected": "x", "actual": "x", "failure_reason": ""},
             {"id": "expect_clean", "passed": True, "elapsed_ms": 5, "expected": "x", "actual": "x", "failure_reason": ""},
         ],
         "steps_failed": [], "startup_diagnostics": [], "drive_diagnostics": [], "shots": [],
@@ -185,7 +186,8 @@ now = time.time()
 report = {"report_schema": drive_ledger.REPORT_SCHEMA, "script_hash": drive_ledger.script_hash(script),
           "started_at": now, "finished_at": now + 0.1, "finished_because": "quit",
           "passed": mode != "fail",
-          "expectations": [{"id": "on_projects", "passed": True}, {"id": "expect_clean", "passed": True}],
+          "expectations": [{"id": "on_projects", "passed": True}, {"id": "help_corpus", "passed": True},
+                           {"id": "expect_clean", "passed": True}],
           "steps_failed": [], "startup_diagnostics": [], "drive_diagnostics": []}
 open(os.path.splitext(script)[0] + ".report.json", "w").write(json.dumps(report))
 sys.exit(0 if mode != "fail" else 1)
@@ -443,3 +445,12 @@ def test_the_configured_drive_script_names_a_project_variable_and_every_required
     assert set(fs.GUI_CONFIGURED_REQUIRED_IDS) <= ids
     listed = next(s for s in steps if s.get("id") == "project_listed")
     assert listed["check"] == "project_row" and listed["project"] == "<<PROJECT>>"
+
+
+def test_a_run_that_never_checked_the_help_corpus_does_not_pass(tmp_path):
+    """A build that left the bundle out opens Help fine; only this expectation catches it."""
+    without = lambda s, t: _report(s, t, expectations=[  # noqa: E731
+        {"id": "on_projects", "passed": True}, {"id": "expect_clean", "passed": True}])
+    j = _judge(tmp_path, without)
+    assert not j.ok and any("'help_corpus' never ran" in f for f in j.failures)
+    assert "help_corpus" in fs.GUI_REQUIRED_IDS and "help_corpus" in fs.GUI_CONFIGURED_REQUIRED_IDS
