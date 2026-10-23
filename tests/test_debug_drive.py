@@ -14,6 +14,7 @@ from __future__ import annotations
 
 import json
 import os
+import sys
 
 import pytest
 
@@ -495,9 +496,18 @@ def _row_check(app, project):
     return driver._check_value({"check": "project_row", "project": project})
 
 
-def test_project_row_is_satisfied_by_a_listed_project_however_the_path_is_spelled():
+def test_project_row_is_satisfied_by_a_listed_project_however_the_separators_and_dots_are_spelled():
     app = _AppWithTree(["cat:Work", "proj:C:/roots/project"])
     assert _row_check(app, "C:/roots/project")[0]
+    assert _row_check(app, "C:/roots/./project")[0]
+    assert _row_check(app, "C:/roots/other/../project")[0]
+
+
+@pytest.mark.skipif(sys.platform != "win32",
+                    reason="os.path.normpath only turns backslashes into separators on Windows, which is the "
+                           "only platform the Manager runs on; _do_select has the same rule")
+def test_project_row_accepts_a_windows_backslash_spelling():
+    app = _AppWithTree(["cat:Work", "proj:C:/roots/project"])
     assert _row_check(app, "C:\\roots\\project")[0]
 
 
