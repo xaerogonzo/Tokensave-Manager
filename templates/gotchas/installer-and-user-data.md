@@ -1,0 +1,63 @@
+# An installer that upgrades by deleting the folder deletes the user's data
+
+Harvested from OpenChem Studio's Inno Setup installer (PR #413) and the question it
+raised for TokenSave Manager, which keeps `manager-config.json` beside its executable.
+An installer has two jobs that pull against each other: leave no stale program file
+behind after an upgrade, and never touch anything a person made. They are only
+compatible if the project has already decided where each kind of file lives.
+
+> **Decide which files are the program's and which are the user's, before writing the installer.**
+
+---
+
+## 1. The file inventory comes first
+
+Sort every file the application reads or writes into classes, and give each class its
+rule. Mixing them is the bug.
+
+| Class | Examples | Upgrade | Uninstall |
+|---|---|---|---|
+| Program | executables, bundled libraries, immutable data | replaced; the previous program folder's contents are removed first so no stale file survives (OpenChem: `_internal`) | removed |
+| Extensions people add | `plugins\` | **never cleared** | a project decision; write it down |
+| Settings | config file, window layout, registry key | **never replaced or deleted** | removed only if the person ticks a box |
+| User data | projects, logs, caches, downloaded tools, recovery copies | untouched | removed only if the person ticks a box; the person's own project files are never touched |
+
+A config file beside the executable falls in the wrong class: a "clean the old install
+folder" upgrade deletes it. The fix is either to move mutable state to a per-user data
+folder with a tested migration from the old location, or to keep it and preserve it by
+explicit, tested file rules. An ordinary upgrade must never silently replace or delete
+settings.
+
+## 2. Per-user by default
+
+Default to a per-user install (no administrator rights, no prompt) and offer all-users
+at the start. The all-users path asks Windows for permission, so it cannot be driven
+unattended; put it on the by-hand checklist rather than pretending it was tested.
+
+## 3. Uninstall asks, and the defaults are "keep"
+
+Show two boxes, both **unticked**: remove settings and layout; remove caches, downloaded
+tools and recovery copies. A silent uninstall keeps everything unless the removal flags
+are passed explicitly. Cancel aborts. A data folder the person *moved* elsewhere is
+reported and never deleted. Removal is confined to a folder named for the application:
+never `rmdir` a path read from a setting without checking its name.
+
+## 4. Test it by really installing it
+
+Drive the real installer: per-user, silent, into a folder with a space; smoke-test the
+**installed** app; upgrade over it; uninstall. Use a separate test build with its own
+application id, data folder and registry key, and **refuse to run if the real
+application id is already registered**, so a test can never replace a real
+installation's uninstall entry. Cover each removal option, the moved-folder case and the
+not-our-folder refusal.
+
+## 5. Ship every executable the product has
+
+If the build produces a GUI, a helper and a headless CLI, the installer lists all three
+or states why one is excluded. An installer that omits the CLI turns a supported
+deliverable into a zip-only one without anyone deciding that.
+
+## 6. What it does not give you
+
+An unsigned installer shows Windows SmartScreen's "unknown publisher". Say so in the
+README, and do not describe a checksum or attestation as a signature.
