@@ -132,6 +132,22 @@ CREATE_NO_WINDOW = 0x08000000 if sys.platform == "win32" else 0
 CREATE_NEW_CONSOLE = 0x00000010 if sys.platform == "win32" else 0
 
 
+def show_no_activate_startupinfo():
+    """A STARTUPINFO that shows the child's first window WITHOUT taking focus, or None.
+
+    For a driven or smoke-tested GUI that should not pull keyboard input away from whatever
+    is being typed into. None off Windows: `subprocess.STARTUPINFO` does not exist there, and
+    naming it elsewhere in src/ is what tests/test_no_windows_only_subprocess_flags.py rejects.
+    """
+    if sys.platform != "win32":
+        return None
+    import subprocess
+    info = subprocess.STARTUPINFO()
+    info.dwFlags |= subprocess.STARTF_USESHOWWINDOW
+    info.wShowWindow = 4  # SW_SHOWNOACTIVATE
+    return info
+
+
 # ── App refresh cadence ──────────────────────────────────────────────────────
 AUTO_REFRESH_MS = 60_000   # auto-refresh project list every 60 s
 

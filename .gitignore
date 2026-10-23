@@ -120,3 +120,5 @@ dist/
 
 # Drive-run evidence (helpers/drive_ledger.py)
 *.report.json
+# release zip + SHA256SUMS.txt written by scripts/make_release_zip.py
+release/
