@@ -19,6 +19,10 @@ from helpers import release_zip as rz
 ROOT = Path(__file__).resolve().parent.parent
 DOC = (ROOT / "docs" / "RELEASE_CONTENTS.md").read_text(encoding="utf-8")
 BUILD = (ROOT / "build.ps1").read_text(encoding="utf-8")
+# Only this part of the script decides what lands in dist\: the rest builds, judges and packages. The
+# whole file also names `scripts\...` (commands it RUNS), which must not read as "staged".
+_STAGE_FROM = BUILD.index("=== Staging distribution files ===")
+STAGING = BUILD[_STAGE_FROM:BUILD.index("if ($Release) {", _STAGE_FROM)]
 
 
 def _section(title: str) -> str:
@@ -60,12 +64,11 @@ def test_every_tracked_top_level_entry_has_a_row_and_every_row_is_tracked():
 def test_a_no_row_is_never_staged_and_a_yes_row_always_is():
     for row in _rows(_section("The repository's top level")):
         name, ships = _names(row[0])[0], row[1]
-        copied = any("Copy-Item" in line and name in line for line in BUILD.splitlines())
-        named = ('$ROOT\\%s' % name) in BUILD or ('"%s"' % name) in BUILD
+        named = ('$ROOT\\%s' % name) in STAGING or ('"%s"' % name) in STAGING
         if ships == "No":
-            assert not copied, "%s is marked No but build.ps1 copies it" % name
+            assert not named, "%s is marked No but the staging section of build.ps1 names it" % name
         elif ships in ("Yes", "Partial"):
-            assert named, "%s is marked %s but build.ps1 never stages it" % (name, ships)
+            assert named, "%s is marked %s but the staging section of build.ps1 never names it" % (name, ships)
 
 
 def test_every_file_the_zip_requires_is_on_the_page():
