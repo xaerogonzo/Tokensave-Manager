@@ -1,0 +1,394 @@
+"""frozen_smoke -- run the BUILT executables and judge what they did.
+
+`smoke_runner.py` runs the pytest suite against source. That proves the code, not the
+build: v2.6.0 shipped a headline command that did not work in the packaged exe, and only a
+by-hand run found it. This module launches the real `.exe`s, in a scratch folder with a
+scratch config, and returns one verdict per layer:
+
+  * **version resource** -- each exe's Properties > Details version equals the app version;
+  * **cli** -- `commands --json` and `status --json` from a foreign working directory
+    return a well-formed envelope carrying the expected `cli_version`;
+  * **gui** -- the exe, started on a drive script, writes the drive report
+    (`helpers/drive_ledger`) and `judge_drive_report` accepts it.
+
+Each layer is separate evidence: source tests passing, the frozen GUI starting, the frozen
+CLI answering and an extracted zip passing are different claims, and a release needs all
+of them.
+
+**Fail closed.** Every judge starts from "not ok" and every way a run can be wrong is its
+own reason. A report that is missing, unreadable, stale, for another script, from a run
+that did not quit, or that holds no passing expectation for a REQUIRED id is a failure;
+unknown is never a pass.
+
+**The scratch folder is the point.** A GUI smoke test used to pollute `dist\\` (`logs\\`
+and a rewritten `manager-config.json`) and the zip shipped the residue. The app is started
+isolated (`TOKENSAVE_MANAGER_CONFIG` names a config in a scratch folder, so the install's
+own config, logs and single-instance lock are untouched), and the drive script is copied
+there so its report lands there too.
+
+Standard library plus `helpers.drive_ledger` (no Tk). Safe off Windows to import; the
+version-resource reader says so when it cannot run.
+"""
+
+from __future__ import annotations
+
+import json
+import os
+import shutil
+import subprocess
+import sys
+import tempfile
+import time
+from dataclasses import dataclass, field
+
+from constants import CREATE_NO_WINDOW, show_no_activate_startupinfo
+from helpers import drive_ledger
+
+GUI_EXE = "tokensave-manager.exe"
+CLI_EXE = "tokensave-manager-cli.exe"
+WRAPPER_EXE = "tokensave-wrapper.exe"
+ALL_EXES = (GUI_EXE, WRAPPER_EXE, CLI_EXE)
+
+#: Expectation ids the shipped drive script must have recorded as passed. A script that
+#: quietly lost one asserts less than it used to, and that must not pass.
+GUI_REQUIRED_IDS = ("on_projects", "expect_clean")
+
+LAYER_VERSION = "version resource"
+LAYER_CLI = "cli"
+LAYER_GUI = "gui"
+
+#: A config that is valid but points at nothing: what a first-time user has.
+CLEAN_CONFIG = {
+    "tokensave_exe": "", "template_dir": "", "python_exe": "", "editor_cmd": "code",
+    "git_exe": "", "codegraph_exe": "", "search_roots": [], "project_categories": {},
+    "user_snippets": [], "auto_commit_after_sync": False,
+}
+
+_LOG_TAIL_LINES = 40
+_CLOCK_SLACK_S = 2.0
+
+
+@dataclass
+class Judgement:
+    ok: bool
+    failures: "list[str]" = field(default_factory=list)
+
+    def text(self) -> str:
+        return "PASS" if self.ok else "FAIL: " + "; ".join(self.failures)
+
+
+@dataclass
+class LayerResult:
+    layer: str
+    target: str
+    judgement: Judgement
+    work_dir: str = ""
+    seconds: float = 0.0
+
+    def line(self) -> str:
+        return "%-17s %-26s %s" % (self.layer, self.target, self.judgement.text())
+
+
+# ── the drive report ──────────────────────────────────────────────────────
+
+def judge_drive_report(report_path: str, *, exit_code: "int | None", timed_out: bool,
+                       launched_at: float, script: str,
+                       required_ids: "tuple[str, ...]" = GUI_REQUIRED_IDS,
+                       allow_startup_diagnostics: bool = False) -> Judgement:
+    """Every way a driven run can be wrong, each its own reason. Nothing passes by default."""
+    failures: "list[str]" = []
+    if timed_out:
+        failures.append("the run did not finish in time")
+    if exit_code != 0:
+        failures.append("exit status %r, expected 0" % (exit_code,))
+    try:
+        with open(report_path, encoding="utf-8") as fh:
+            report = json.load(fh)
+    except FileNotFoundError:
+        return Judgement(False, failures + ["no report was written"])
+    except (OSError, ValueError):
+        return Judgement(False, failures + ["the report could not be read as JSON"])
+    if not isinstance(report, dict):
+        return Judgement(False, failures + ["the report is not an object"])
+    failures += _report_identity(report, launched_at, script)
+    failures += _report_findings(report, required_ids, allow_startup_diagnostics)
+    return Judgement(not failures, failures)
+
+
+def _report_identity(report: dict, launched_at: float, script: str) -> "list[str]":
+    """Is this report about THIS launch of THIS script, and did it end the normal way?"""
+    out: "list[str]" = []
+    if report.get("report_schema") != drive_ledger.REPORT_SCHEMA:
+        out.append("report schema is %r, expected %r"
+                   % (report.get("report_schema"), drive_ledger.REPORT_SCHEMA))
+    if report.get("finished_because") != "quit":
+        out.append("the run ended because of %r, not by reaching quit" % (report.get("finished_because"),))
+    if report.get("passed") is not True:
+        out.append("the report says passed=%r" % (report.get("passed"),))
+    started, finished = report.get("started_at"), report.get("finished_at")
+    if not isinstance(started, (int, float)) or not isinstance(finished, (int, float)):
+        out.append("the report does not say when the run started and finished")
+    else:
+        if started < launched_at - _CLOCK_SLACK_S:
+            out.append("the report is stale: its run started before this launch")
+        if finished < started:
+            out.append("the report finished before it started")
+    want = drive_ledger.script_hash(script)
+    if want is None:
+        out.append("the script could not be read to compare")
+    elif report.get("script_hash") != want:
+        out.append("the report is for a different version of the script")
+    return out
+
+
+def _first(value) -> str:
+    if not isinstance(value, list):
+        return "unreadable"
+    return "%d, first %s" % (len(value), str(value[0])[:200])
+
+
+def _report_findings(report: dict, required_ids: "tuple[str, ...]", allow_startup: bool) -> "list[str]":
+    out: "list[str]" = []
+    expectations = report.get("expectations")
+    if not isinstance(expectations, list) or not expectations:
+        out.append("the report holds no expectations")
+        expectations = []
+    for ident in required_ids:
+        if not any(isinstance(e, dict) and e.get("id") == ident for e in expectations):
+            out.append("required expectation %r never ran" % ident)
+    for e in expectations:
+        if isinstance(e, dict) and e.get("passed") is not True:
+            out.append("expectation %r failed: %s" % (e.get("id"), str(e.get("failure_reason"))[:300]))
+    for key, label in (("steps_failed", "failed steps"), ("drive_diagnostics", "diagnostics during the run")):
+        if report.get(key) != []:
+            out.append("%s: %s" % (label, _first(report.get(key))))
+    if report.get("startup_diagnostics") != [] and not allow_startup:
+        out.append("startup diagnostics: %s" % _first(report.get("startup_diagnostics")))
+    return out
+
+
+# ── the CLI envelope ──────────────────────────────────────────────────────
+
+def judge_cli_envelope(stdout: str, exit_code: "int | None", *, command: str,
+                       expected_version: str, require_ok: bool = True) -> Judgement:
+    """A frozen CLI answered in the documented shape, and says it is the expected version."""
+    failures: "list[str]" = []
+    if exit_code is None:
+        failures.append("the process did not finish")
+    try:
+        envelope = json.loads(stdout)
+    except ValueError:
+        return Judgement(False, failures + ["stdout is not JSON: %r" % stdout[:120]])
+    if not isinstance(envelope, dict):
+        return Judgement(False, failures + ["the envelope is not an object"])
+    if envelope.get("command") != command:
+        failures.append("command is %r, expected %r" % (envelope.get("command"), command))
+    if envelope.get("cli_version") != expected_version:
+        failures.append("cli_version is %r, expected %r" % (envelope.get("cli_version"), expected_version))
+    if require_ok and envelope.get("ok") is not True:
+        failures.append("ok is %r (error: %s)" % (envelope.get("ok"), str(envelope.get("error"))[:200]))
+    if require_ok and exit_code != 0:
+        failures.append("exit status %r, expected 0" % (exit_code,))
+    return Judgement(not failures, failures)
+
+
+# ── the Windows version resource ──────────────────────────────────────────
+
+@dataclass(frozen=True)
+class VersionInfo:
+    file_version: "tuple[int, int, int, int]"
+    product_version: "tuple[int, int, int, int]"
+    product_name: str = ""
+
+
+def read_version_info(path: str) -> "VersionInfo | None":
+    """The fixed version fields of a Windows executable, or None when they cannot be read.
+
+    None is "not known", never "matches": the judge treats it as a failure.
+    """
+    if sys.platform != "win32":
+        return None
+    import ctypes
+    from ctypes import wintypes
+
+    version = ctypes.WinDLL("version", use_last_error=True)
+    size = version.GetFileVersionInfoSizeW(path, None)
+    if not size:
+        return None
+    buffer = ctypes.create_string_buffer(size)
+    if not version.GetFileVersionInfoW(path, 0, size, buffer):
+        return None
+    pointer, length = ctypes.c_void_p(), wintypes.UINT()
+    if not version.VerQueryValueW(buffer, "\\", ctypes.byref(pointer), ctypes.byref(length)) or length.value < 52:
+        return None
+    fixed = (wintypes.DWORD * 13).from_address(pointer.value)
+
+    def quad(ms: int, ls: int) -> "tuple[int, int, int, int]":
+        return (ms >> 16, ms & 0xFFFF, ls >> 16, ls & 0xFFFF)
+
+    return VersionInfo(quad(fixed[4], fixed[5]), quad(fixed[6], fixed[7]), _product_name(version, buffer))
+
+
+def _product_name(version, buffer) -> str:
+    import ctypes
+    from ctypes import wintypes
+
+    pointer, length = ctypes.c_void_p(), wintypes.UINT()
+    if not version.VerQueryValueW(buffer, "\\VarFileInfo\\Translation", ctypes.byref(pointer), ctypes.byref(length)) or length.value < 4:
+        return ""
+    lang = ctypes.c_uint16.from_address(pointer.value).value
+    page = ctypes.c_uint16.from_address(pointer.value + 2).value
+    key = "\\StringFileInfo\\%04x%04x\\ProductName" % (lang, page)
+    if not version.VerQueryValueW(buffer, key, ctypes.byref(pointer), ctypes.byref(length)) or not length.value:
+        return ""
+    return ctypes.wstring_at(pointer.value, length.value).rstrip("\x00")
+
+
+def _dotted(parts: "tuple[int, ...]") -> str:
+    return ".".join(map(str, parts))
+
+
+def judge_version_info(info: "VersionInfo | None", expected: str, *, expected_product: str = "") -> Judgement:
+    """`expected` is the dotted app version ('2.6.0'); the resource's fourth part must be 0."""
+    if info is None:
+        return Judgement(False, ["the version resource could not be read (no resource, or not Windows)"])
+    want = tuple(int(p) for p in expected.split(".")) + (0,)
+    failures = []
+    if info.file_version != want:
+        failures.append("file version is %s, expected %s" % (_dotted(info.file_version), _dotted(want)))
+    if info.product_version != want:
+        failures.append("product version is %s, expected %s" % (_dotted(info.product_version), _dotted(want)))
+    if expected_product and info.product_name != expected_product:
+        failures.append("product name is %r, expected %r" % (info.product_name, expected_product))
+    return Judgement(not failures, failures)
+
+
+# ── launching ─────────────────────────────────────────────────────────────
+
+def _kill_tree(pid: int) -> None:
+    """This process and its children, by pid. Never by image name: another copy of the
+    app that somebody has open must not be touched."""
+    if sys.platform == "win32":
+        subprocess.run(["taskkill", "/T", "/F", "/PID", str(pid)], capture_output=True, check=False,
+                       creationflags=CREATE_NO_WINDOW)
+    else:
+        try:
+            os.kill(pid, 9)
+        except OSError:
+            pass
+
+
+def _scratch(prefix: str, workdir: "str | None") -> "tuple[str, str]":
+    """(folder, scratch config path): a valid, empty first-run config in a folder of its own."""
+    folder = tempfile.mkdtemp(prefix=prefix, dir=workdir)
+    config = os.path.join(folder, "manager-config.json")
+    with open(config, "w", encoding="utf-8") as fh:
+        json.dump(CLEAN_CONFIG, fh)
+    return folder, config
+
+
+def _run(argv: "list[str]", *, env: dict, cwd: str, timeout: float, out_dir: str,
+         gui: bool) -> "tuple[int | None, bool, str]":
+    """Run to completion or kill our own tree. Returns (exit code, timed out, stdout text)."""
+    stdout_path = os.path.join(out_dir, "stdout.txt")
+    with open(stdout_path, "wb") as out, open(os.path.join(out_dir, "stderr.txt"), "wb") as err:
+        process = subprocess.Popen(
+            argv, env=env, cwd=cwd, stdout=out, stderr=err, stdin=subprocess.DEVNULL,
+            startupinfo=show_no_activate_startupinfo() if gui else None,
+            creationflags=CREATE_NO_WINDOW)
+        timed_out = False
+        try:
+            code: "int | None" = process.wait(timeout=timeout)
+        except subprocess.TimeoutExpired:
+            timed_out = True
+            _kill_tree(process.pid)
+            try:
+                code = process.wait(timeout=30)
+            except subprocess.TimeoutExpired:
+                code = None
+    with open(stdout_path, encoding="utf-8", errors="replace") as fh:
+        return code, timed_out, fh.read()
+
+
+def run_gui(exe: "str | list[str]", script: str, *, timeout: float = 150.0, workdir: "str | None" = None,
+            required_ids: "tuple[str, ...]" = GUI_REQUIRED_IDS) -> LayerResult:
+    """Start the GUI on `script` in isolation and judge its report.
+
+    `exe` is the built executable, or an argv (`[python, "src/app.py"]`) to run the same
+    judgement against source, which is how the harness itself is checked.
+    """
+    argv = [exe] if isinstance(exe, str) else list(exe)
+    folder, config = _scratch("tsm-smoke-gui-", workdir)
+    copy = os.path.join(folder, "drive.json")
+    shutil.copyfile(script, copy)  # the report is written beside the script: keep it here
+    env = dict(os.environ, TOKENSAVE_MANAGER_DRIVE=copy, TOKENSAVE_MANAGER_CONFIG=config)
+    launched, began = time.time(), time.monotonic()
+    code, timed_out, _ = _run(argv, env=env, cwd=folder, timeout=timeout, out_dir=folder, gui=True)
+    judgement = judge_drive_report(os.path.join(folder, "drive.report.json"), exit_code=code,
+                                   timed_out=timed_out, launched_at=launched, script=copy,
+                                   required_ids=required_ids)
+    return LayerResult(LAYER_GUI, os.path.basename(argv[-1]), judgement, folder, time.monotonic() - began)
+
+
+def run_cli(exe: "str | list[str]", expected_version: str, *, timeout: float = 90.0,
+            workdir: "str | None" = None) -> "list[LayerResult]":
+    """`commands` and `status` from a working directory that is not the exe's own."""
+    prefix = [exe] if isinstance(exe, str) else list(exe)
+    folder, config = _scratch("tsm-smoke-cli-", workdir)
+    project = os.path.join(folder, "project")
+    os.mkdir(project)
+    env = dict(os.environ, TOKENSAVE_MANAGER_CONFIG=config)
+    results = []
+    for label, args, require_ok in (("commands", ["commands", "--json"], True),
+                                    ("status", ["status", "--project", project, "--json"], False)):
+        began = time.monotonic()
+        sub = os.path.join(folder, label)
+        os.mkdir(sub)
+        code, timed_out, stdout = _run([*prefix, *args], env=env, cwd=sub, timeout=timeout, out_dir=sub, gui=False)
+        judgement = judge_cli_envelope(stdout, None if timed_out else code, command=label,
+                                       expected_version=expected_version, require_ok=require_ok)
+        results.append(LayerResult(LAYER_CLI, "%s %s" % (os.path.basename(prefix[-1]), label), judgement, sub,
+                                   time.monotonic() - began))
+    return results
+
+
+def check_versions(dist: str, expected: str, *, expected_product: str = "") -> "list[LayerResult]":
+    results = []
+    for name in ALL_EXES:
+        path = os.path.join(dist, name)
+        if not os.path.isfile(path):
+            results.append(LayerResult(LAYER_VERSION, name, Judgement(False, ["%s is not there" % path])))
+            continue
+        results.append(LayerResult(LAYER_VERSION, name, judge_version_info(read_version_info(path), expected,
+                                                                            expected_product=expected_product)))
+    return results
+
+
+def smoke_dist(dist: str, expected_version: str, script: str, *, workdir: "str | None" = None,
+               expected_product: str = "", gui_timeout: float = 150.0) -> "list[LayerResult]":
+    """Every layer for one folder of built executables (dist\\ or an extracted release)."""
+    results = check_versions(dist, expected_version, expected_product=expected_product)
+    cli = os.path.join(dist, CLI_EXE)
+    gui = os.path.join(dist, GUI_EXE)
+    # A missing exe is a failed layer, not a smaller run.
+    if os.path.isfile(cli):
+        results += run_cli(cli, expected_version, workdir=workdir)
+    else:
+        results.append(LayerResult(LAYER_CLI, CLI_EXE, Judgement(False, ["%s is not there" % cli])))
+    if os.path.isfile(gui):
+        results.append(run_gui(gui, script, workdir=workdir, timeout=gui_timeout))
+    else:
+        results.append(LayerResult(LAYER_GUI, GUI_EXE, Judgement(False, ["%s is not there" % gui])))
+    return results
+
+
+def evidence_tail(work_dir: str) -> str:
+    """The last lines of what a failed run printed, so a failure is more than a verdict."""
+    chunks = []
+    for name in ("stderr.txt", "stdout.txt"):
+        path = os.path.join(work_dir, name)
+        if os.path.isfile(path) and os.path.getsize(path):
+            with open(path, encoding="utf-8", errors="replace") as fh:
+                tail = fh.read().splitlines()[-_LOG_TAIL_LINES:]
+            chunks.append("--- %s (last %d lines)\n%s" % (name, len(tail), "\n".join(tail)))
+    return "\n".join(chunks)

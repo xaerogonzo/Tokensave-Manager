@@ -112,7 +112,7 @@ def main(argv: list[str] | None = None) -> int:
             if args.out:
                 args.out.write_text(text, encoding="utf-8", newline="\n")
             else:
-                sys.stdout.write(text)
+                sys.stdout.buffer.write(text.encode("utf-8"))  # not stdout.write: a cp1252 console cannot encode a changelog
     except (ReleaseInfoError, OSError) as exc:
         print(f"release_info: {exc}", file=sys.stderr)
         return 1

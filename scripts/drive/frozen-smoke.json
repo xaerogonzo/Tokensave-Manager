@@ -1,0 +1,7 @@
+[
+  {"do": "wait", "after_ms": 4000},
+  {"do": "tab", "name": "Projects", "after_ms": 800},
+  {"do": "expect", "id": "on_projects", "check": "tab", "text": "Projects", "within_ms": 6000},
+  {"do": "expect_clean", "settle_ms": 1500},
+  {"do": "quit"}
+]

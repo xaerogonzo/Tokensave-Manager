@@ -221,6 +221,17 @@ def test_release_info_notes_are_the_versions_section_and_refuse_a_missing_or_emp
     assert code == 1 and "empty" in err
 
 
+def test_release_info_notes_survive_a_console_that_cannot_encode_them(tmp_path):
+    """A Windows console is cp1252; a changelog with an arrow in it must not crash the print."""
+    arrow, dash, nl = chr(0x2192), chr(0x2014), chr(10)
+    text = nl.join(["# C", "", "## [1.2.3] " + dash + " d", "", "### Added", "- a " + arrow + " b", ""])
+    p = _project_with_version(tmp_path, changelog=text)
+    done = subprocess.run([sys.executable, "-I", str(p / "tools" / "release_info.py"), "notes", "v1.2.3"],
+                          cwd=p, capture_output=True, env={**os.environ, "PYTHONIOENCODING": "cp1252"})
+    assert done.returncode == 0, done.stderr
+    assert ("a " + arrow + " b").encode("utf-8") in done.stdout
+
+
 def test_release_info_reads_a_version_that_is_not_in_pyproject(tmp_path):
     rs.adopt(str(tmp_path), TEMPLATES, ["release-info"],
              {**SUPPLIED, "VERSION_FILE": "src/constants.py", "VERSION_REGEX": r'(?m)^APP_VERSION = "(\d+\.\d+\.\d+)"'})
@@ -331,7 +342,7 @@ def test_the_smoke_judge_passes_only_a_complete_fresh_report(tmp_path):
     ("exit status", lambda s: _report(s), {"exit_code": 3}, "exit status"),
     ("timeout", lambda s: _report(s), {"timed_out": True}, "in time"),
     ("verdict", lambda s: _report(s, verdict="FAIL"), {}, "verdict"),
-    ("stale", lambda s: _report(s), {"launched": datetime.now(timezone.utc) + timedelta(minutes=5)}, "stale"),
+    ("stale", lambda s: _report(s), {"launched": "five minutes from when the test runs"}, "stale"),
     ("wrong script", lambda s: _report(s, run={"started": datetime.now(timezone.utc).isoformat(), "script_sha256": "0"}), {}, "different version"),
     ("cut short", lambda s: _report(s, steps={"run": 1, "in_script": 3}), {}, "did not run to the end"),
     ("required assertion gone", lambda s: _report(s, assertions=[{"step": "other", "ok": True}]), {}, "never ran"),
@@ -342,6 +353,10 @@ def test_the_smoke_judge_passes_only_a_complete_fresh_report(tmp_path):
 ])
 def test_every_way_the_smoke_run_can_be_wrong_is_its_own_failure(tmp_path, label, report, kwargs, expect):
     m = _smoke_module(tmp_path)
+    if isinstance(kwargs.get("launched"), str):
+        # Resolved NOW, not at collection: a parametrize value computed at import goes stale
+        # during a long suite, which made this case fail only in the full run.
+        kwargs = {**kwargs, "launched": datetime.now(timezone.utc) + timedelta(minutes=5)}
     judgement = _judge(m, tmp_path, report, **kwargs)
     assert not judgement.ok and any(expect in f for f in judgement.failures), (label, judgement.failures)
 
