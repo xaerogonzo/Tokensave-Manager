@@ -86,7 +86,7 @@ Token Save Manager Source/
 │   │                              Runs beside a real Manager through scripts/drive/run_isolated.py
 │   │                              (scratch config, no lock, no request poller, no tray).
 │   │
-│   ├── helpers/                  134 modules of pure / IO helpers — no UI deps.
+│   ├── helpers/                  135 modules of pure / IO helpers — no UI deps.
 │   │   ├── config.py              _load_config, _save_config, _migrate_config
 │   │   ├── detection.py           _detect_git/_gh/_npm/_codegraph/_claude_cli,
 │   │   │                          _root_path/_label, _version_lt
@@ -150,6 +150,9 @@ Token Save Manager Source/
 │   │   │                          integration (daemon mode dropped upstream).
 │   │   ├── pr_draft.py            generate_pr_draft — LLM-backed structured PR description
 │   │   │                          (Summary / Technical / Threat Model / Verification)
+│   │   ├── changelog_fragments.py Changelog fragments (changelog.d/): new / check / preview / build;
+│   │   │                          fold per-category bullets into [Unreleased], recover from a
+│   │   │                          half-finished delete. Stdlib only; launcher scripts/changelog.py
 │   │   ├── changelog_patch.py     insert_changelog_release (versioned release patcher);
 │   │   │                          update_unreleased (replaces [Unreleased] body, EOF-safe);
 │   │   │                          read_unreleased / read_unreleased_from_text (returns
@@ -886,6 +889,7 @@ Token Save Manager Source/
 │       │                          handoff banner.
 │
 ├── scripts/                       Source-only developer tools (NOT shipped in dist\)
+│   ├── changelog.py               Launcher for helpers/changelog_fragments.py
 │   ├── check_tokensave_integration.py
 │                                  Free deterministic audit script (~130 lines, pure
 │                                  stdlib). Checks: (1) installed tokensave version via
