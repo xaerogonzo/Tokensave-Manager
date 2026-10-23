@@ -10,8 +10,8 @@ Why: every PR inserted its entry at the top of the same ``### Added`` / ``### Fi
 group in ``## [Unreleased]``, so whichever PR merged second conflicted. Two files with
 different names cannot conflict.
 
-Adapted from OpenChem Studio's ``tools/changelog.py`` (xaerogonzo/OpenChem-Studio PR #432,
-commit 3707d9744d6eda405b126fab4ed65fd7f77e6724). That tool takes one ``### Title`` per
+Adapted from OpenChem Studio's ``tools/changelog.py`` (xaerogonzo/OpenChem-Studio PR #432, merged
+as a248c91c9c45d36ef04d34fd19ddf0e095868e51; the tool is identical to PR head 3707d97). That tool takes one ``### Title`` per
 fragment; this changelog is grouped by category, so a fragment here holds one or more
 ``### <Category>`` sections and ``build`` merges each into the matching group. The two are
 an adaptation, not a mirror; do not sync them.
@@ -285,6 +285,49 @@ def _merge_category(lines: list[str], category: str, block_lines: list[str]) -> 
     if at == end and at > 0 and lines[at - 1].strip():
         new = [""] + new
     return lines[:at] + new + lines[at:]
+
+
+@dataclass
+class Collected:
+    """Every fragment on disk, classified, with their bullets merged per category."""
+
+    sections: dict[str, list[str]] = field(default_factory=dict)  # newest first within a category
+    folded: list[Path] = field(default_factory=list)              # to promote into a release
+    stale: list[Path] = field(default_factory=list)               # already in [Unreleased]
+    errors: list[str] = field(default_factory=list)
+
+
+def collect(root: Path) -> Collected:
+    """Classify the fragments under ``root`` without writing anything.
+
+    A missing or unreadable CHANGELOG.md is an error entry, never an empty result: "no
+    fragments" and "could not look" must not read alike.
+    """
+    try:
+        _, changelog = _read(root)
+        fold, stale, errors = classify(root, changelog)
+    except ChangelogError as exc:
+        return Collected(errors=[str(exc)])
+    merged: dict[str, list[str]] = {}
+    for _, sections in fold:
+        for category, blocks in sections.items():
+            merged.setdefault(category, []).extend(blocks)
+    return Collected(merged, [p for p, _ in fold], stale, errors)
+
+
+def render_section(version: str, date: str, sections: dict[str, list[str]]) -> str:
+    """The versioned release section the fragments become, in canonical category order.
+
+    Same ``## [version] — date`` header and trailing newline as helpers.release's renderer, so
+    it goes through ``insert_changelog_release`` unchanged. Pure.
+    """
+    lines = [f"## [{version.lstrip('v')}] — {date}", ""]
+    for category in CATEGORIES:
+        if sections.get(category):
+            lines += [f"### {category}"] + [ln for b in sections[category] for ln in b.split("\n")] + [""]
+    while lines and not lines[-1]:
+        lines.pop()
+    return "\n".join(lines) + "\n"
 
 
 def _read(root: Path) -> tuple[Path, str]:

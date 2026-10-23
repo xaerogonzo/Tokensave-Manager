@@ -18,7 +18,10 @@ python scripts/changelog.py preview                # the CHANGELOG.md `build` wo
   A category may appear once per fragment. Continuation lines and fenced blocks belong to the bullet above.
 - **`check` rejects** an unedited template, an unknown or repeated category, a category with no bullet,
   text outside a bullet, an unclosed fence, and a bullet that duplicates another fragment's.
-- **`build`** (release preparation) merges each category into its `[Unreleased]` group, newest on top,
-  then deletes the fragments. It makes no commit. If a deletion fails, run it again: a fragment whose
-  bullets are all already in `[Unreleased]` is recognised as folded and only removed.
+- **The Release Wizard** drafts the release notes from the fragments, then writes the version section and
+  `git rm`s the fragments in the one release-prep commit. An invalid fragment blocks Publish. If a step fails
+  the message gives the restore command; restore, then run the Wizard again.
+- **`build`** (for a project that does not release through the Wizard) merges each category into its
+  `[Unreleased]` group, newest on top, then deletes the fragments. It makes no commit. If a deletion fails,
+  run it again: a fragment whose bullets are all already in `[Unreleased]` is recognised as folded and only removed.
 - Existing `[Unreleased]` entries are left as they are.

@@ -25,6 +25,7 @@ import pytest
 tk = pytest.importorskip("tkinter")
 
 from dialogs.release_wizard import ReleaseWizardDialog, _ReleaseCtx
+from helpers.changelog_fragments import Collected
 
 
 class _Var:
@@ -189,7 +190,8 @@ def test_a_patched_changelog_is_staged_for_the_release_commit(mocker):
                  return_value=(True, "inserted"))
     mocker.patch.object(ReleaseWizardDialog, "_set_status")
     dialog = _bare(_sync_cl_var=_Var(True), _has_changelog=True,
-                   _changelog_path="CHANGELOG.md", _app=mocker.MagicMock())
+                   _changelog_path="CHANGELOG.md", _app=mocker.MagicMock(),
+                   _frag=Collected())
     ctx = _ReleaseCtx(tag="v1.0.0", title="T", notes="n")
 
     assert dialog._pub_patch_changelog(ctx) is True
@@ -202,7 +204,8 @@ def test_the_version_written_to_the_changelog_has_no_v_prefix(mocker):
                            return_value=(True, "inserted"))
     mocker.patch.object(ReleaseWizardDialog, "_set_status")
     dialog = _bare(_sync_cl_var=_Var(True), _has_changelog=True,
-                   _changelog_path="CHANGELOG.md", _app=mocker.MagicMock())
+                   _changelog_path="CHANGELOG.md", _app=mocker.MagicMock(),
+                   _frag=Collected())
 
     dialog._pub_patch_changelog(_ReleaseCtx(tag="v1.0.0", title="T",
                                             notes="n"))
@@ -217,7 +220,8 @@ def test_a_failed_changelog_patch_aborts_and_keeps_the_notes(mocker):
     mocker.patch.object(ReleaseWizardDialog, "_set_status")
     fail = mocker.patch.object(ReleaseWizardDialog, "_fail")
     dialog = _bare(_sync_cl_var=_Var(True), _has_changelog=True,
-                   _changelog_path="CHANGELOG.md", _app=mocker.MagicMock())
+                   _changelog_path="CHANGELOG.md", _app=mocker.MagicMock(),
+                   _frag=Collected())
     ctx = _ReleaseCtx(tag="v1.0.0", title="T", notes="n")
     ctx.notes_file = "/tmp/notes.md"
 

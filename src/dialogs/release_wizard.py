@@ -45,6 +45,7 @@ from helpers.release import (
     _zip_dist, _fmt_size,
 )
 from helpers.changelog_patch import insert_changelog_release
+from helpers import changelog_fragments as cf
 from helpers.git import _fetch_tags, _git_tag, _git_push_with_tags
 
 if TYPE_CHECKING:
@@ -60,6 +61,9 @@ class _ReleaseCtx:
     zip_path: str | None = None
     notes_file: str | None = None
     staged_files: list = dataclasses.field(default_factory=list)
+    #: Fragment files this release consumes (repo-relative); removed with `git rm` in
+    #: the same commit that writes the CHANGELOG section.
+    remove_files: list = dataclasses.field(default_factory=list)
 
 
 class ReleaseWizardDialog(UiPumpMixin, tk.Toplevel):
@@ -121,6 +125,10 @@ class ReleaseWizardDialog(UiPumpMixin, tk.Toplevel):
         self._changelog_path = os.path.join(path, "CHANGELOG.md")
         self._has_changelog  = (os.path.isfile(self._changelog_path)
                                 and self._changelog_has_unreleased())
+        # Fragments (changelog.d/) are the release notes when a project has any.
+        self._frag = (cf.collect(path)
+                      if os.path.isdir(os.path.join(path, cf.FRAGMENT_DIR))
+                      else cf.Collected())
 
         # ── State vars ──────────────────────────────────────────────────────
         self._bump_var       = tk.StringVar(value=self._suggested_kind)
@@ -314,6 +322,11 @@ class ReleaseWizardDialog(UiPumpMixin, tk.Toplevel):
                  wraplength=600, justify=tk.LEFT
                  ).pack(anchor=tk.W, padx=(44, 20), pady=(0, 4))
 
+        self._notes_source_lbl = tk.Label(
+            body, text="", font=("Segoe UI", 8), bg=C["base"], fg=C["peach"],
+            wraplength=600, justify=tk.LEFT)
+        self._notes_source_lbl.pack(anchor=tk.W, padx=(44, 20), pady=(0, 4))
+
         notes_row = tk.Frame(body, bg=C["base"])
         notes_row.pack(fill=tk.X, padx=(44, 20), pady=(0, 4))
         ttk.Button(notes_row, text="🔄  Regenerate from commits",
@@ -432,16 +445,31 @@ class ReleaseWizardDialog(UiPumpMixin, tk.Toplevel):
         injected an "Edit this summary…" line that some users shipped to
         GitHub by accident.)
         """
-        sections = _classify_commits_for_changelog(self._commits)
         from datetime import datetime as _dt
         date_str = _dt.now().strftime("%Y-%m-%d")
         tag_clean = self._next_tag().lstrip("v")
-        notes = _render_release_notes(tag_clean, date_str, sections)
+        if self._frag.folded and not self._frag.errors:
+            notes = cf.render_section(tag_clean, date_str, self._frag.sections)
+        else:
+            notes = _render_release_notes(
+                tag_clean, date_str, _classify_commits_for_changelog(self._commits))
+        self._notes_source_lbl.config(text=self._notes_source_text())
         self._notes_txt.delete("1.0", tk.END)
         self._notes_txt.insert("1.0", notes)
         # Cascade — title, resolved-tag preview, and artefact label all
         # depend on the resolved tag. _refresh_resolved_tag handles them all.
         self._refresh_resolved_tag()
+
+    def _notes_source_text(self) -> str:
+        """One line saying where the draft came from: fragments replace commit-derived notes."""
+        frag = self._frag
+        if frag.errors:
+            return ("changelog.d has problems, so the draft is from commits and Publish is "
+                    "blocked until they are fixed:\n  " + "\n  ".join(frag.errors[:4]))
+        if frag.folded:
+            return (f"Source: {len(frag.folded)} changelog fragment(s) in changelog.d/ "
+                    "(they replace the commit-derived notes). Publishing consumes them.")
+        return "Source: commits since the last tag."
 
     def _refresh_title(self):
         # Default title: "v1.0.4 — <first non-summary heading or top item>".
@@ -585,6 +613,13 @@ class ReleaseWizardDialog(UiPumpMixin, tk.Toplevel):
                 "the textarea.", parent=self)
             return
 
+        if self._frag.errors:
+            messagebox.showwarning(
+                "Changelog fragments need fixing",
+                "changelog.d has problems; nothing was changed:\n\n  "
+                + "\n  ".join(self._frag.errors[:8]), parent=self)
+            return
+
         # Confirm
         confirm = messagebox.askyesno(
             "Publish release",
@@ -593,6 +628,7 @@ class ReleaseWizardDialog(UiPumpMixin, tk.Toplevel):
             f"  • Run the build  ({'yes' if self._run_build_var.get() else 'no'})\n"
             f"  • Zip dist/ as the release artefact\n"
             f"  • {'Update CHANGELOG.md, commit, ' if self._sync_cl_var.get() else ''}"
+            f"{self._fragment_consumption_note()}"
             f"create local tag {tag}, push, then call gh release create.",
             parent=self)
         if not confirm:
@@ -607,6 +643,15 @@ class ReleaseWizardDialog(UiPumpMixin, tk.Toplevel):
             args=(tag, title, notes),
             daemon=True,
         ).start()
+
+    def _fragment_consumption_note(self) -> str:
+        pending = len(self._frag.folded) + len(self._frag.stale)
+        if not pending:
+            return ""
+        if self._sync_cl_var.get() and self._has_changelog:
+            return f"remove {pending} changelog fragment(s) in the same commit, "
+        return (f"leave {pending} changelog fragment(s) in place (CHANGELOG sync is off, "
+                "so they will be released again next time), ")
 
     def _set_status(self, text: str, fg: str = None):
         """Thread-safe status update."""
@@ -716,6 +761,8 @@ class ReleaseWizardDialog(UiPumpMixin, tk.Toplevel):
             return False
         self._app._log(f"  CHANGELOG.md {msg}", C["green"])
         ctx.staged_files.append("CHANGELOG.md")
+        ctx.remove_files = [f"{cf.FRAGMENT_DIR}/{p.name}"
+                            for p in self._frag.folded + self._frag.stale]
         return True
 
     def _pub_stage_commit(self, ctx: "_ReleaseCtx") -> bool:
@@ -731,13 +778,23 @@ class ReleaseWizardDialog(UiPumpMixin, tk.Toplevel):
             self._fail(f"git add CHANGELOG.md failed (rc={rc}).\n{out[-300:]}",
                        keep_temp=True, temp_path=ctx.notes_file)
             return False
+        if ctx.remove_files:
+            # `git rm` stages the deletion and removes the file; it fails as a whole, so a
+            # failure leaves every fragment on disk and a re-run regenerates the same notes.
+            out, rc = sh([git, "-C", path, "rm", "--quiet", "--"] + ctx.remove_files, path)
+            if rc != 0:
+                self._fail(f"git rm of changelog fragments failed (rc={rc}).\n{out[-300:]}\n\n"
+                           "CHANGELOG.md already has the new section; the fragments are untouched.\n"
+                           "Recover: git restore --staged --worktree CHANGELOG.md changelog.d",
+                           keep_temp=True, temp_path=ctx.notes_file)
+                return False
         commit_cmd = ([git, "-C", path, "commit",
                        "-m", f"chore: release prep for {ctx.tag}", "--"]
-                      + ctx.staged_files)
+                      + ctx.staged_files + ctx.remove_files)
         out, rc = sh(commit_cmd, path)
         if rc != 0:
             self._fail(f"Commit failed (rc={rc}).\n{out[-300:]}\n\n"
-                       "Recover: git restore --staged CHANGELOG.md",
+                       "Recover: git restore --staged --worktree CHANGELOG.md changelog.d",
                        keep_temp=True, temp_path=ctx.notes_file)
             return False
         self._app._log("  committed release-prep changes", C["green"])
