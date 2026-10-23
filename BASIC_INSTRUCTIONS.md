@@ -335,12 +335,19 @@ The documentation was better than the help and simply was not the help.
 - **`markdown_tk` is a SUBSET, not a markdown implementation**, and unsupported
   syntax is asserted to render literally. Without those tests it is one "just
   add links" away from a parser nobody trusts.
-- **The build must ship every corpus document.** Help reads them from
-  `_BASE_DIR` at run time, so one missing from `dist\` is a topic that vanishes
-  while a source checkout still passes every test. `build.ps1` keeps an explicit
-  list — a recursive `docs\` copy would ship dev notes to users — and
-  `tests/test_build_ships_help_corpus.py` parses it so the list maintains
-  itself.
+- **A checkout reads the disk; a build reads a bundle compiled into the exe, and never the disk.**
+  `build.ps1` generates `src/_help_bundle.py` from `HELP_DOCUMENTS` (`scripts/build_help_bundle.py`,
+  gitignored, removed in a `finally`) and compiles it into the GUI only, so a release's help is
+  read-only and cannot drift from the build. There is no fallback in either direction: a stray
+  bundle in a checkout is ignored, and a build whose bundle is missing, damaged or short reports a
+  `Problem` per document instead of a shorter list. The digest detects accidental damage only; it
+  rides inside the same unsigned exe. `dist\docs\` is a human copy the app does not read, and the
+  Help tab's *Open* button in a build opens a read-only copy of what the bundle holds. Frozen
+  smoke requires a `help_corpus` expectation, so a build that left the bundle out fails.
+- **The build must still ship every corpus document**, now as the human copy. `build.ps1` keeps an
+  explicit list — a recursive `docs\` copy would ship dev notes to users — and
+  `tests/test_build_ships_help_corpus.py` parses it so the list maintains itself. The generator
+  also fails the build on a document that is missing, empty or not UTF-8.
 
 ### D1h. Lessons are delivered, not indexed
 

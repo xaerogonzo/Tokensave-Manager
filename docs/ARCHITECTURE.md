@@ -289,7 +289,9 @@ Token Save Manager Source/
 │   │   │                          detection. v4 alignment-aware: refuses if the candidate
 │   │   │                          sections don't reach the alignment threshold (≥ 2
 │   │   │                          weighted points; tiered scoring per v4.1 Revision C).
-│   │   ├── help_docs.py         The help corpus: topics keyed by <!-- help:key -->
+│   │   ├── help_docs.py         The help corpus: topics keyed by <!-- help:key -->; reads the disk in a
+│   │   │                        checkout and a compiled-in bundle (encode/decode, digest) in a build,
+│   │   │                        never both; corpus_report/verdict for the frozen smoke
 │   │   │                        anchors in the shipped markdown. Python owns WHICH
 │   │   │                        documents; markdown owns WHAT TOPICS.
 │   │   ├── markdown_tk.py       Pure markdown subset -> (text, tag) spans for the
@@ -907,6 +909,7 @@ Token Save Manager Source/
 │   ├── release_info.py            Rendered from the release-info starter for this repo: tag must equal
 │   │                              constants.APP_VERSION; notes are that version's CHANGELOG section
 │   ├── frozen_smoke.py            Launcher: version resource + CLI + GUI layers for a folder of built exes
+│   ├── build_help_bundle.py       Generates src/_help_bundle.py (gitignored) for the GUI compile; build.ps1 removes it
 │   ├── make_release_zip.py        Launcher: dist\ -> release/Tokensave-Manager-v<ver>-windows.zip + sums
 │   ├── check_tokensave_integration.py
 │                                  Free deterministic audit script (~130 lines, pure
