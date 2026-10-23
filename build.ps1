@@ -59,6 +59,23 @@ $COMPANY = "Alexander L Corthell"
 # A release is built from a committed tree or it is not a release: the zip is named for a
 # version, and uncommitted changes make that name a claim about code nobody can reproduce.
 # An ordinary build only warns, so everyday local builds are unchanged.
+# dist\ is build OUTPUT and is not cleaned between builds, so a file an older build staged rides
+# into the next zip: the clean manager-config.json this build no longer writes did exactly that, and
+# the archive check refused the zip only after the 25-minute compile. Ask first. Nothing is deleted:
+# these can be the developer's own settings (they may be running the Manager out of dist\) or the
+# only copy of a log, so the build names them and stops, and a person decides.
+function Assert-DistHoldsNoUserFiles {
+    if (-not $Release) { return }
+    $left = @("manager-config.json", "config-migration.json", "logs") |
+        Where-Object { Test-Path -LiteralPath (Join-Path $DIST $_) }
+    if ($left.Count -gt 0) {
+        throw ("-Release refuses a dist\ that holds: " + ($left -join ", ") + ". They are settings or run residue, not " +
+               "build output, and a release must not ship them. Nothing was deleted: move or delete them yourself " +
+               "(if manager-config.json is your real settings, the Manager copies it into " +
+               "%LOCALAPPDATA%\TokenSaveManager\ on its next start), then build again.")
+    }
+}
+
 function Assert-CleanTree {
     $dirty = @(& git -C $ROOT status --porcelain 2>$null)
     if ($dirty.Count -eq 0) { return }
@@ -249,6 +266,7 @@ Write-Host "=== TokenSave Manager - Nuitka build (v$VERSION) ===" -ForegroundCol
 Write-Host ""
 
 Assert-CleanTree
+Assert-DistHoldsNoUserFiles
 
 New-Item -ItemType Directory -Force -Path $DIST | Out-Null
 
