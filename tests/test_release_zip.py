@@ -8,32 +8,25 @@ cannot quietly leave the other behind.
 from __future__ import annotations
 
 import hashlib
-import json
-import re
 import zipfile
 from pathlib import Path
 
 import pytest
 
-from helpers import frozen_smoke as fs
 from helpers import release_zip as rz
 
 ROOT = Path(__file__).resolve().parent.parent
 VERSION = "2.6.0"
-DIRTY = {"tokensave_exe": "", "mcp_skip_warnings": []}
 
 
-def _dist(tmp_path: Path, *, drop=(), extra=(), config=None) -> Path:
+def _dist(tmp_path: Path, *, drop=(), extra=()) -> Path:
     dist = tmp_path / "dist"
     for rel in rz.REQUIRED:
         if rel in drop:
             continue
         path = dist / rel
         path.parent.mkdir(parents=True, exist_ok=True)
-        if rel == "manager-config.json":
-            path.write_text(json.dumps(config if config is not None else {k: "" for k in rz.CLEAN_CONFIG_KEYS}), encoding="utf-8")
-        else:
-            path.write_bytes(b"x" + rel.encode())
+        path.write_bytes(b"x" + rel.encode())
     for rel in extra:
         (dist / rel).parent.mkdir(parents=True, exist_ok=True)
         (dist / rel).write_bytes(b"y")
@@ -57,13 +50,14 @@ def test_one_versioned_folder_checksums_of_the_final_bytes_and_no_partial(tmp_pa
     assert seen and " " in seen[0][0] and seen[0][1]  # extracted to a path with a space, with the exe inside
 
 
-@pytest.mark.parametrize("case", ["missing_exe", "missing_data", "logs", "dirty_config", "smoke"])
+@pytest.mark.parametrize("case", ["missing_exe", "missing_data", "logs", "a_config", "a_migration_record", "smoke"])
 def test_a_bad_archive_leaves_nothing_that_looks_final(tmp_path, case):
     dist = {
         "missing_exe": lambda: _dist(tmp_path, drop=("tokensave-wrapper.exe",)),
         "missing_data": lambda: _dist(tmp_path, drop=("templates/project-baseline.md",)),
         "logs": lambda: _dist(tmp_path, extra=("logs/manager.log",)),
-        "dirty_config": lambda: _dist(tmp_path, config=DIRTY),
+        "a_config": lambda: _dist(tmp_path, extra=("manager-config.json",)),
+        "a_migration_record": lambda: _dist(tmp_path, extra=("config-migration.json",)),
         "smoke": lambda: _dist(tmp_path),
     }[case]()
     with pytest.raises(rz.ReleaseError):
@@ -78,9 +72,19 @@ def test_build_debris_is_left_out_of_the_archive_rather_than_shipped(tmp_path):
         assert not any("__pycache__" in n for n in archive.namelist())
 
 
-def test_the_dirty_config_message_names_the_added_key(tmp_path):
-    with pytest.raises(rz.ReleaseError, match="mcp_skip_warnings"):
-        _build(tmp_path, _dist(tmp_path, config=DIRTY))
+@pytest.mark.parametrize("content", ['{"tokensave_exe": "", "mcp_skip_warnings": []}', "{}", '{"tokensave_exe": "D:/mine/tokensave.exe"}'])
+def test_a_manager_config_is_refused_whether_it_is_clean_or_someones_real_settings(tmp_path, content):
+    """A clean one overwrites real settings on an unzip-over and reads as an old config to import;
+    a real one is a leak. Either way it is not in a release."""
+    dist = _dist(tmp_path)
+    (dist / "manager-config.json").write_text(content, encoding="utf-8")
+    with pytest.raises(rz.ReleaseError, match="residue is in the archive: .*manager-config.json"):
+        _build(tmp_path, dist)
+    assert not list((tmp_path / "out").glob("*.zip"))
+
+
+def test_manager_config_is_no_longer_a_required_file():
+    assert "manager-config.json" not in rz.REQUIRED and "manager-config.json" in rz.FORBIDDEN_PATHS
 
 
 def test_it_never_replaces_without_force_and_a_failed_rebuild_keeps_the_previous_release(tmp_path):
@@ -129,12 +133,12 @@ def test_an_entry_outside_the_top_folder_or_escaping_it_is_reported(tmp_path):
 
 # ── ties to the other places that know the same facts ───────────────────
 
-def test_the_clean_config_keys_agree_across_the_build_the_zip_check_and_the_smoke_harness():
+def test_the_build_no_longer_writes_or_copies_a_manager_config():
     text = (ROOT / "build.ps1").read_text(encoding="utf-8")
-    block = text[text.index("$cleanConfig = [ordered]@{"):]
-    block = block[:block.index("\n}\n")]
-    in_build = set(re.findall(r"^\s{4}(\w+)\s*=", block, re.M))
-    assert in_build == set(rz.CLEAN_CONFIG_KEYS) == set(fs.CLEAN_CONFIG)
+    assert "$cleanConfig" not in text
+    stage = text[text.index("=== Staging distribution files ==="):text.index("if ($Release) {", text.index("=== Staging distribution files ==="))]
+    assert 'manager-config.json"' not in stage.replace("manager-config.example.json", "")
+    assert "manager-config.example.json" in stage  # the annotated template still ships
 
 
 def test_every_file_the_zip_requires_is_something_the_build_stages():

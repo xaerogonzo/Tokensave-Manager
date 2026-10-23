@@ -14,8 +14,9 @@
 #     tokensave-manager.exe        - main GUI
 #     tokensave-wrapper.exe        - MCP wrapper for Claude Desktop
 #     tokensave-manager-cli.exe    - headless CLI (console subsystem)
-#     manager-config.json          - clean config (user configures on first run)
 #     manager-config.example.json  - annotated template showing all keys
+#                                    (no manager-config.json: settings live in
+#                                    %LOCALAPPDATA%\TokenSaveManager\, see src/config_home.py)
 #     TOKENSAVE_GUIDE.md
 #     CHANGELOG.md
 #     templates\
@@ -271,23 +272,11 @@ Build-Exe "$ROOT\src\cli.py" "tokensave-manager-cli.exe" $consoleCliArgs
 Write-Host ""
 Write-Host "=== Staging distribution files ===" -ForegroundColor Cyan
 
-# -- Clean config (blank paths - user fills in via Settings on first run) --
-$cleanConfig = [ordered]@{
-    tokensave_exe          = ""
-    template_dir           = ""
-    python_exe             = ""
-    editor_cmd             = "code"
-    git_exe                = ""
-    codegraph_exe          = ""
-    search_roots           = @()
-    project_categories     = [ordered]@{}
-    user_snippets          = @()
-    auto_commit_after_sync = $false
-}
-[System.IO.File]::WriteAllText(
-    "$DIST\manager-config.json",
-    ($cleanConfig | ConvertTo-Json -Depth 3))
-Write-Host "  [file] manager-config.json" -ForegroundColor Green
+# -- NO manager-config.json. A packaged Manager keeps its settings in
+#    %LOCALAPPDATA%\TokenSaveManager\ (src/config_home.py), so a release must not ship one: a
+#    clean config beside the exe is what overwrote a user's real settings when a zip was
+#    unzipped over an old folder, and it would now be mistaken for an old config to import.
+#    The inventory check in make_release_zip.py refuses an archive that contains one.
 
 # -- Example config (annotated template for reference) --
 if (Test-Path "$ROOT\manager-config.example.json") {

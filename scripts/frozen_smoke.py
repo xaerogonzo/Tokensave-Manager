@@ -7,8 +7,10 @@ Layers (each is separate evidence): the version resource of all three executable
 from a foreign working directory and the GUI on `scripts/drive/frozen-smoke.json` (a first-run
 config, so every tokensave and git field is empty), and then the same executables CONFIGURED: the
 real tokensave and git, the build's own templates, and a scratch repository that `tokensave init`
-has really indexed, which the program must be seen to use. No tokensave on this machine is a
-failure; `--no-tokensave` skips those two layers and says SKIPPED. Everything
+has really indexed, which the program must be seen to use (the MCP wrapper is started and sent an
+`initialize` request too). A separate migration layer runs the GUI as a packaged first run with an old
+settings file beside it and requires the settings to have been copied into the user-data home. No
+tokensave on this machine is a failure; `--no-tokensave` skips the configured layers and says SKIPPED. Everything
 runs in a scratch folder with a scratch config, so `dist/` is not written to. Exit status 1 if
 any layer fails, and a failed run prints the tail of what the program said.
 """
@@ -25,6 +27,7 @@ from constants import APP_VERSION  # noqa: E402
 
 DEFAULT_SCRIPT = ROOT / "scripts" / "drive" / "frozen-smoke.json"
 CONFIGURED_SCRIPT = ROOT / "scripts" / "drive" / "frozen-smoke-configured.json"
+MIGRATION_SCRIPT = ROOT / "scripts" / "drive" / "frozen-smoke-migration.json"
 
 
 def main(argv: "list[str] | None" = None) -> int:
@@ -34,6 +37,7 @@ def main(argv: "list[str] | None" = None) -> int:
     parser.add_argument("--script", type=Path, default=DEFAULT_SCRIPT)
     parser.add_argument("--product", default="", help="expected product name in the version resource")
     parser.add_argument("--configured-script", type=Path, default=CONFIGURED_SCRIPT)
+    parser.add_argument("--migration-script", type=Path, default=MIGRATION_SCRIPT)
     parser.add_argument("--tokensave", default="", help="path to tokensave.exe (default: TOKENSAVE_EXE, then PATH)")
     parser.add_argument("--no-tokensave", action="store_true", help="skip the configured layers (reported as SKIPPED)")
     args = parser.parse_args(argv)
@@ -42,6 +46,7 @@ def main(argv: "list[str] | None" = None) -> int:
         return 2
     results = fs.smoke_dist(str(args.dist), args.version, str(args.script), expected_product=args.product,
                             configured_script=str(args.configured_script), tokensave_exe=args.tokensave,
+                            migration_script=str(args.migration_script),
                             skip_tokensave=args.no_tokensave)
     for result in results:
         print(result.line())

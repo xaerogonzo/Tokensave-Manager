@@ -353,7 +353,8 @@ class ManagerConfig:
     def load(cls) -> "ManagerConfig":
         """Read + migrate manager-config.json from disk, return a fresh instance."""
         # Lazy import — same isolation rationale as refresh_derived.
-        from helpers.config import _load_config, _migrate_config
+        from helpers.config import _load_config, _migrate_config, run_migration
+        run_migration()   # a packaged first run copies the old config into the user-data home
         return cls(raw=_migrate_config(_load_config()))
 
     def save(self) -> None:

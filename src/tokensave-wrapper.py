@@ -82,12 +82,21 @@ import subprocess
 import sys
 import time
 
-if os.environ.get("NUITKA_ONEFILE_PARENT"):
-    _BASE_DIR = os.path.dirname(os.path.abspath(os.environ["NUITKA_ONEFILE_PARENT"]))
+import config_home   # standard library only: the same answer the Manager and the CLI give
+
+_FROZEN = bool(os.environ.get("NUITKA_ONEFILE_PARENT"))
+if _FROZEN:
+    # The marker's VALUE is the parent process's PID, not a path (see
+    # constants._resolve_base_dir). dirname(abspath(<a PID>)) is the CURRENT DIRECTORY, so
+    # this wrapper looked for its config wherever Claude Desktop happened to start it.
+    # sys.argv[0] is the real path of the executable that was launched.
+    _BASE_DIR = os.path.dirname(os.path.abspath(sys.argv[0]))
 else:
     _BASE_DIR = os.path.normpath(os.path.join(os.path.dirname(os.path.abspath(__file__)), ".."))
 
-_CONFIG_PATH = os.path.join(_BASE_DIR, "manager-config.json")
+# READ-ONLY lookup: the user-data home's config, or (until the Manager has migrated) the old
+# file in place. The wrapper is started by Claude Desktop and must never write to a data folder.
+_CONFIG_PATH = config_home.read_path(os.environ, _FROZEN, _BASE_DIR)
 
 def _load_config() -> dict:
     if not os.path.isfile(_CONFIG_PATH):

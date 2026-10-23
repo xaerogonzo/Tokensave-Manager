@@ -39,6 +39,7 @@ from constants import (
     CREATE_NO_WINDOW,
     LOG_FILE,
     _ANSI,
+    _CONFIG_PATH,
     _TOKENSAVE_UPDATE_RE,
 )
 from controllers.ask_tab import AskTabController
@@ -159,9 +160,11 @@ class App(UiPumpMixin, tk.Tk):
         log.info("TokenSave Manager started")
         log.info(f"  exe      : {self._cfg.tokensave_exe}")
         log.info(f"  templates: {self._cfg.template_dir}")
+        log.info(f"  config   : {_CONFIG_PATH}")
         log.info(f"  log file : {LOG_FILE}")
         self._style()
         self._build()
+        self._report_config_migration()
         self.refresh()
         self.after(AUTO_REFRESH_MS, self._auto_refresh)
         # Soon, not in a minute: the extension files a request and then tells
@@ -648,6 +651,21 @@ class App(UiPumpMixin, tk.Tk):
                 text=f"  ★ {name}  ({self._pin_tag(bool(get_pinned()))})  ")
         else:
             self.active_badge.config(text="  No project  ")
+
+    def _report_config_migration(self) -> None:
+        """Say so, once, when this start copied an old settings file into the user-data home.
+
+        Nothing is said about the ordinary cases (a config already there, or a first run):
+        the log line `config   : <path>` already records where the settings are. The failure
+        and "unreadable" cases are said out loud because they mean the Manager started with
+        defaults while an old file exists, which a person would otherwise wonder about.
+        """
+        import config_home
+        from helpers.config import last_migration
+        note = config_home.describe(last_migration())
+        if note:
+            log.info(note)
+            self._log(note, C["peach"])
 
     def _auto_refresh(self):
         ctrl_idle = (not hasattr(self, "_projects") or self._projects.current_proc is None)

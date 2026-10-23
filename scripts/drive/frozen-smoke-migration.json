@@ -1,0 +1,6 @@
+[
+  {"do": "wait", "after_ms": 4000},
+  {"do": "expect", "id": "config_migrated", "check": "config_migrated", "home": "<<HOME>>", "legacy": "<<LEGACY>>", "legacy_sha256": "<<LEGACY_SHA>>", "key": "editor_cmd", "value": "<<MARKER>>", "within_ms": 6000},
+  {"do": "expect_clean", "settle_ms": 1500},
+  {"do": "quit"}
+]

@@ -295,3 +295,31 @@ def test_the_launcher_removes_its_scratch_folder_even_when_the_run_fails(tmp_pat
     code = mod.run(str(script), str(real), command=[sys.executable, "-c", probe])
     assert code == 7
     assert not os.path.exists(seen["folder"])
+
+
+# ── a different HOME folder is isolation too ────────────────────────────────
+
+import config_home as _ch
+
+
+def test_a_drive_with_a_home_folder_other_than_the_installs_is_isolated(tmp_path):
+    env = {iso.DRIVE_ENV: "s.json", _ch.HOME_ENV: str(tmp_path / "scratch-home")}
+    assert iso.is_isolated(env, default_config=str(tmp_path / "real" / _ch.CONFIG_NAME)) is True
+
+
+def test_pointing_the_home_at_the_installs_own_folder_is_not_isolation(tmp_path):
+    real = tmp_path / "real"
+    env = {iso.DRIVE_ENV: "s.json", _ch.HOME_ENV: str(real)}
+    assert iso.is_isolated(env, default_config=str(real / _ch.CONFIG_NAME)) is False
+
+
+def test_a_home_folder_without_a_drive_changes_nothing(tmp_path):
+    assert iso.is_isolated({_ch.HOME_ENV: str(tmp_path / "h")}, default_config=str(tmp_path / "r" / _ch.CONFIG_NAME)) is False
+
+
+def test_one_explicit_config_decides_even_when_a_home_is_also_given(tmp_path):
+    real = tmp_path / "real" / _ch.CONFIG_NAME
+    same = {iso.DRIVE_ENV: "s.json", iso.CONFIG_ENV: str(real), _ch.HOME_ENV: str(tmp_path / "elsewhere")}
+    assert iso.is_isolated(same, default_config=str(real)) is False   # the file in use IS the install's
+    other = {iso.DRIVE_ENV: "s.json", iso.CONFIG_ENV: str(tmp_path / "x.json"), _ch.HOME_ENV: str(tmp_path / "real")}
+    assert iso.is_isolated(other, default_config=str(real)) is True

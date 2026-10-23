@@ -35,6 +35,7 @@ from __future__ import annotations
 
 import os
 
+from config_home import CONFIG_NAME, HOME_ENV
 from constants import CONFIG_ENV, DEFAULT_CONFIG_PATH
 
 DRIVE_ENV = "TOKENSAVE_MANAGER_DRIVE"
@@ -51,8 +52,15 @@ def is_isolated(env=None, default_config: str = DEFAULT_CONFIG_PATH) -> bool:
     env = os.environ if env is None else env
     if not (env.get(DRIVE_ENV) or "").strip():
         return False
+    # The config this process will actually use, if it was told to use one other than the
+    # install's: one explicit file wins over a different home folder, as it does in
+    # `config_home.config_path`. Either way it must not be the install's own.
     override = (env.get(CONFIG_ENV) or "").strip()
-    if not override:
+    home = (env.get(HOME_ENV) or "").strip()
+    if override:
+        used = os.path.abspath(os.path.expanduser(override))
+    elif home:
+        used = os.path.join(os.path.abspath(os.path.expanduser(home)), CONFIG_NAME)
+    else:
         return False
-    return not _same_file(os.path.abspath(os.path.expanduser(override)),
-                          default_config)
+    return not _same_file(used, default_config)

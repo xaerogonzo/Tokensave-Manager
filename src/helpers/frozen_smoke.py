@@ -41,12 +41,14 @@ version-resource reader says so when it cannot run.
 
 from __future__ import annotations
 
+import hashlib
 import json
 import os
 import shutil
 import subprocess
 import sys
 import tempfile
+import threading
 import time
 from dataclasses import dataclass, field
 
@@ -72,6 +74,14 @@ LAYER_CLI = "cli (first run)"
 LAYER_GUI = "gui (first run)"
 LAYER_CLI_CONFIGURED = "cli (configured)"
 LAYER_GUI_CONFIGURED = "gui (configured)"
+
+LAYER_GUI_MIGRATION = "gui (migration)"
+LAYER_WRAPPER = "wrapper (configured)"
+
+#: The migration drive script: a packaged first run copied the old settings into the home and is
+#: using them. Run WITHOUT the config override the other layers use, because that override skips
+#: the code under test.
+GUI_MIGRATION_REQUIRED_IDS = ("config_migrated", "expect_clean")
 
 #: Expectation ids the configured drive script must have recorded as passed.
 GUI_CONFIGURED_REQUIRED_IDS = ("on_projects", "project_listed", "help_corpus", "expect_clean")
@@ -418,13 +428,18 @@ def check_versions(dist: str, expected: str, *, expected_product: str = "") -> "
 def smoke_dist(dist: str, expected_version: str, script: str, *, workdir: "str | None" = None,
                expected_product: str = "", gui_timeout: float = 150.0,
                configured_script: "str | None" = None, tokensave_exe: str = "",
-               skip_tokensave: bool = False) -> "list[LayerResult]":
+               skip_tokensave: bool = False, migration_script: "str | None" = None) -> "list[LayerResult]":
     """Every layer for one folder of built executables (dist\\ or an extracted release).
 
     The configured layers need `configured_script`; they run when tokensave and git are found,
     fail when they are not, and are skipped (visibly, as SKIPPED) only on `skip_tokensave`.
     """
     results = _first_run_layers(dist, expected_version, script, workdir, expected_product, gui_timeout)
+    if migration_script:
+        gui = os.path.join(dist, GUI_EXE)
+        results.append(run_gui_migration(gui, migration_script, dist, workdir=workdir, timeout=gui_timeout)
+                       if os.path.isfile(gui) else
+                       LayerResult(LAYER_GUI_MIGRATION, GUI_EXE, Judgement(False, ["%s is not there" % gui])))
     if configured_script:
         results += configured_layers(dist, expected_version, configured_script, workdir=workdir,
                                      gui_timeout=gui_timeout, tokensave_exe=tokensave_exe, skip=skip_tokensave)
@@ -536,6 +551,7 @@ def configured_layers(dist: str, expected_version: str, script: str, *, workdir:
     if tools.missing():
         why = "%s not found (set TOKENSAVE_EXE or put it on PATH); the program cannot be shown tokensave or git" % " and ".join(tools.missing())
         return (_unavailable(LAYER_CLI_CONFIGURED, CLI_EXE, why, skip)
+                + _unavailable(LAYER_WRAPPER, WRAPPER_EXE, why, skip)
                 + _unavailable(LAYER_GUI_CONFIGURED, GUI_EXE, why, skip))
     folder = tempfile.mkdtemp(prefix="tsm-smoke-proj-", dir=workdir)
     try:
@@ -543,6 +559,7 @@ def configured_layers(dist: str, expected_version: str, script: str, *, workdir:
     except (SetupError, OSError, subprocess.SubprocessError) as exc:
         why = "could not make the indexed scratch project: %s" % exc
         return (_unavailable(LAYER_CLI_CONFIGURED, CLI_EXE, why, False)
+                + _unavailable(LAYER_WRAPPER, WRAPPER_EXE, why, False)
                 + _unavailable(LAYER_GUI_CONFIGURED, GUI_EXE, why, False))
     config = {"tokensave_exe": tools.tokensave_exe.replace("\\", "/"), "git_exe": tools.git_exe.replace("\\", "/"),
               "template_dir": os.path.join(dist, "templates").replace("\\", "/"),
@@ -550,6 +567,9 @@ def configured_layers(dist: str, expected_version: str, script: str, *, workdir:
     results = []
     results += [_configured_cli(cli, expected_version, project, config, workdir)] if os.path.isfile(cli) else \
         _unavailable(LAYER_CLI_CONFIGURED, CLI_EXE, "%s is not there" % cli, False)
+    wrapper = os.path.join(dist, WRAPPER_EXE)
+    results += [run_wrapper(wrapper, tools, os.path.dirname(project), workdir=workdir)] if os.path.isfile(wrapper) else \
+        _unavailable(LAYER_WRAPPER, WRAPPER_EXE, "%s is not there" % wrapper, False)
     if os.path.isfile(gui):
         results.append(run_gui(gui, script, workdir=workdir, timeout=gui_timeout, layer=LAYER_GUI_CONFIGURED,
                                required_ids=GUI_CONFIGURED_REQUIRED_IDS, config=config,
@@ -570,3 +590,124 @@ def _configured_cli(exe: "str | list[str]", expected_version: str, project: str,
     judgement = judge_configured_status(stdout, None if timed_out else code, expected_version=expected_version)
     return LayerResult(LAYER_CLI_CONFIGURED, "%s status" % os.path.basename(prefix[-1]), judgement, folder,
                        time.monotonic() - began)
+
+
+# ── the wrapper, over MCP ─────────────────────────────────────────────────
+
+def judge_mcp_initialize(line: str) -> Judgement:
+    """The wrapper started tokensave and relayed its answer to an MCP `initialize` request."""
+    try:
+        reply = json.loads(line)
+    except ValueError:
+        return Judgement(False, ["no JSON-RPC reply (got %r)" % line[:120]])
+    result = reply.get("result") if isinstance(reply, dict) else None
+    if not isinstance(result, dict):
+        return Judgement(False, ["the reply is not a result: %s" % str(reply)[:200]])
+    failures = []
+    if reply.get("id") != 1:
+        failures.append("reply id is %r, expected 1" % (reply.get("id"),))
+    if "tokensave" not in str((result.get("serverInfo") or {}).get("name", "")).lower():
+        failures.append("serverInfo.name is %r, expected tokensave" % ((result.get("serverInfo") or {}).get("name"),))
+    if not result.get("protocolVersion"):
+        failures.append("no protocolVersion")
+    return Judgement(not failures, failures)
+
+
+def _first_line(stream, box: list) -> None:
+    try:
+        box.append(stream.readline())
+    except (OSError, ValueError):
+        box.append(b"")
+
+
+def run_wrapper(exe: "str | list[str]", tools: Tools, roots: str, *, timeout: float = 45.0,
+                workdir: "str | None" = None) -> LayerResult:
+    """Start the MCP wrapper, send `initialize`, and judge the reply.
+
+    The wrapper is started the way Claude Desktop starts it, with no config override: its settings
+    come from a scratch HOME (`TOKENSAVE_MANAGER_HOME`) holding a real `tokensave_exe` and a
+    search root, so this runs its own config lookup (`config_home`) and spawns the real tokensave.
+    USERPROFILE is scratch too, so the user's project pin and run records are not touched.
+    """
+    prefix = [exe] if isinstance(exe, str) else list(exe)
+    folder = tempfile.mkdtemp(prefix="tsm-smoke-wrapper-", dir=workdir)
+    home = os.path.join(folder, "home")
+    os.makedirs(home)
+    with open(os.path.join(home, "manager-config.json"), "w", encoding="utf-8") as fh:
+        json.dump({"tokensave_exe": tools.tokensave_exe, "search_roots": [roots]}, fh)
+    env = dict(os.environ, TOKENSAVE_MANAGER_HOME=home, USERPROFILE=folder)
+    env.pop("TOKENSAVE_MANAGER_CONFIG", None)
+    began = time.monotonic()
+    request = {"jsonrpc": "2.0", "id": 1, "method": "initialize",
+               "params": {"protocolVersion": "2024-11-05", "capabilities": {},
+                          "clientInfo": {"name": "frozen-smoke", "version": "0"}}}
+    process = subprocess.Popen(prefix, stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+                               env=env, cwd=folder, creationflags=CREATE_NO_WINDOW)
+    box: list = []
+    try:
+        process.stdin.write((json.dumps(request) + "\n").encode("utf-8"))
+        process.stdin.flush()
+        reader = threading.Thread(target=_first_line, args=(process.stdout, box), daemon=True)
+        reader.start()
+        reader.join(timeout)
+        line = box[0].decode("utf-8", "replace") if box else ""
+        judgement = judge_mcp_initialize(line) if line else Judgement(
+            False, ["no reply within %d s" % timeout])
+    except OSError as exc:
+        judgement = Judgement(False, ["could not talk to the wrapper: %s" % exc])
+    finally:
+        try:
+            process.stdin.close()
+        except OSError:
+            pass
+        try:
+            process.wait(timeout=10)
+        except subprocess.TimeoutExpired:
+            _kill_tree(process.pid)
+    return LayerResult(LAYER_WRAPPER, os.path.basename(prefix[-1]), judgement, folder, time.monotonic() - began)
+
+
+# ── the migration, through the real default-path code ─────────────────────
+
+def run_gui_migration(exe: "str | list[str]", script: str, dist: str, *, timeout: float = 150.0,
+                      workdir: "str | None" = None, install: "str | None" = None) -> LayerResult:
+    """A packaged first run, in a scratch install, with an old settings file beside the executable.
+
+    The other GUI layers pass `TOKENSAVE_MANAGER_CONFIG`, which skips the config-home logic
+    altogether, so none of them can see it break. This one passes only `TOKENSAVE_MANAGER_HOME`
+    (a scratch home, which is what keeps it isolated from a real Manager that is open), so the
+    migration, the home lookup and the log location all run for real inside the frozen exe.
+    """
+    argv = [exe] if isinstance(exe, str) else list(exe)
+    folder = tempfile.mkdtemp(prefix="tsm-smoke-migration-", dir=workdir)
+    home = os.path.join(folder, "home")
+    explicit = install is not None   # a caller that runs the program in place says where its folder is
+    if install is None:
+        install = os.path.join(folder, "Tokensave-Manager-v0.0.1-windows")
+        os.makedirs(install)
+    if len(argv) == 1 and not explicit:   # a built exe is copied so its folder is the scratch install
+        installed = os.path.join(install, os.path.basename(argv[0]))
+        shutil.copy2(argv[0], installed)
+        argv = [installed]
+    marker = "migrated-marker-%d" % int(time.time())
+    legacy = os.path.join(install, "manager-config.json")
+    old = {**CLEAN_CONFIG, "editor_cmd": marker,
+           "template_dir": os.path.join(dist, "templates").replace("\\", "/")}
+    with open(legacy, "w", encoding="utf-8", newline="\n") as fh:
+        json.dump(old, fh, indent=2)
+    with open(legacy, "rb") as fh:
+        legacy_sha = hashlib.sha256(fh.read()).hexdigest()
+    copy = os.path.join(folder, "drive.json")
+    with open(script, encoding="utf-8") as fh:
+        text = fh.read()
+    for name, value in (("HOME", home), ("LEGACY", legacy), ("LEGACY_SHA", legacy_sha), ("MARKER", marker)):
+        text = text.replace("<<%s>>" % name, json.dumps(str(value).replace("\\", "/"))[1:-1])
+    with open(copy, "w", encoding="utf-8", newline="\n") as fh:
+        fh.write(text)
+    env = dict(os.environ, TOKENSAVE_MANAGER_DRIVE=copy, TOKENSAVE_MANAGER_HOME=home)
+    env.pop("TOKENSAVE_MANAGER_CONFIG", None)
+    launched, began = time.time(), time.monotonic()
+    code, timed_out, _ = _run(argv, env=env, cwd=folder, timeout=timeout, out_dir=folder, gui=True)
+    judgement = judge_drive_report(os.path.join(folder, "drive.report.json"), exit_code=code, timed_out=timed_out,
+                                   launched_at=launched, script=copy, required_ids=GUI_MIGRATION_REQUIRED_IDS)
+    return LayerResult(LAYER_GUI_MIGRATION, os.path.basename(argv[-1]), judgement, folder, time.monotonic() - began)

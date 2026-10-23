@@ -13,19 +13,44 @@ from __future__ import annotations
 import json
 import os
 
-from constants import _BASE_DIR, _CONFIG_PATH
+import config_home
+from constants import _BASE_DIR, _CONFIG_PATH, _FROZEN
+
+#: What the one startup migration did in this process, for the application to report.
+_last_migration = None
+
+
+def run_migration():
+    """Copy an old beside-the-exe (or previous-release) config into the user-data home, once.
+
+    Called by `ManagerConfig.load`, i.e. only by the Manager itself. The CLI and the wrapper
+    never call it: they are asked questions and must not write into a user's data folder as a
+    side effect, so they read through `config_home.read_path` instead.
+    """
+    global _last_migration
+    _last_migration = config_home.migrate_at_startup(os.environ, _FROZEN, _BASE_DIR)
+    return _last_migration
+
+
+def last_migration():
+    return _last_migration
 
 
 def _load_config() -> dict:
-    """Return the manager-config.json contents as a dict, or {} if missing."""
-    if not os.path.isfile(_CONFIG_PATH):
+    """Return the manager-config.json contents as a dict, or {} if missing.
+
+    Read-only: in a packaged run that has not migrated yet this reads the old file in place.
+    """
+    path = config_home.read_path(os.environ, _FROZEN, _BASE_DIR)
+    if not os.path.isfile(path):
         return {}
-    with open(_CONFIG_PATH, encoding="utf-8-sig") as f:  # utf-8-sig strips BOM if present
+    with open(path, encoding="utf-8-sig") as f:  # utf-8-sig strips BOM if present
         return json.load(f)
 
 
 def _save_config(cfg: dict) -> None:
     """Persist `cfg` to manager-config.json (overwrites whatever's there)."""
+    os.makedirs(os.path.dirname(_CONFIG_PATH), exist_ok=True)  # the user-data home may not exist yet
     with open(_CONFIG_PATH, "w", encoding="utf-8") as f:
         json.dump(cfg, f, indent=2)
 

@@ -39,6 +39,20 @@ somewhere else and is **never** rewritten by a move. Neither are `search_roots`,
 `project_categories` or any other user data, even when one of them happens to
 live inside the Manager's own folder.
 
+## Where your settings live now
+
+In a release build, `manager-config.json` and the logs are in `%LOCALAPPDATA%\TokenSaveManager\`, not beside the
+executable. That is what lets you replace the program folder, or unzip each release into its own versioned
+folder, without touching your settings. The first start of a build with no settings there **copies** the old
+ones across (beside the executable first, then the newest `Tokensave-Manager-v<version>-windows` folder next
+to it), checks the copy, leaves the original where it was and records where it came from in
+`config-migration.json`. It never overwrites settings that are already there and never deletes the old file.
+
+One consequence worth knowing: because the settings now outlive the folder, running a new build from a new
+folder reads as a **move** to the check below. That is accurate, and it is how a `template_dir` you set by
+hand to point into the old folder gets offered a repair. A blank `template_dir` follows the executable and
+needs none.
+
 ## The offer
 
 On startup the Manager asks two questions, and they are not the same question:
