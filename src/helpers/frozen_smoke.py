@@ -221,12 +221,22 @@ def read_version_info(path: str) -> "VersionInfo | None":
     pointer, length = ctypes.c_void_p(), wintypes.UINT()
     if not version.VerQueryValueW(buffer, "\\", ctypes.byref(pointer), ctypes.byref(length)) or length.value < 52:
         return None
-    fixed = (wintypes.DWORD * 13).from_address(pointer.value)
+    fixed = list((wintypes.DWORD * 13).from_address(pointer.value))
+    file_version, product_version = parse_fixed_info(fixed)
+    return VersionInfo(file_version, product_version, _product_name(version, buffer))
 
+
+def parse_fixed_info(fixed: "list[int]") -> "tuple[tuple[int, int, int, int], tuple[int, int, int, int]]":
+    """(file version, product version) from a VS_FIXEDFILEINFO's thirteen DWORDs. Pure.
+
+    Layout: [0] signature, [1] structure version, [2:4] FILE version (MS, LS), [4:6] PRODUCT
+    version (MS, LS), then the flag fields. Reading product from [6:8] returned the flags and
+    only looked right on an executable whose two versions happen to be equal.
+    """
     def quad(ms: int, ls: int) -> "tuple[int, int, int, int]":
         return (ms >> 16, ms & 0xFFFF, ls >> 16, ls & 0xFFFF)
 
-    return VersionInfo(quad(fixed[4], fixed[5]), quad(fixed[6], fixed[7]), _product_name(version, buffer))
+    return quad(fixed[2], fixed[3]), quad(fixed[4], fixed[5])
 
 
 def _product_name(version, buffer) -> str:
@@ -241,7 +251,9 @@ def _product_name(version, buffer) -> str:
     key = "\\StringFileInfo\\%04x%04x\\ProductName" % (lang, page)
     if not version.VerQueryValueW(buffer, key, ctypes.byref(pointer), ctypes.byref(length)) or not length.value:
         return ""
-    return ctypes.wstring_at(pointer.value, length.value).rstrip("\x00")
+    # NUL-terminated read, not the reported length: a compiler may pad the value, and the
+    # length then runs into the next key ("TokenSave Manager" + "FileDescription").
+    return ctypes.wstring_at(pointer.value)
 
 
 def _dotted(parts: "tuple[int, ...]") -> str:

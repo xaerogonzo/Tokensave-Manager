@@ -152,6 +152,12 @@ def test_an_unreadable_version_resource_is_never_a_match():
     assert not fs.judge_version_info(None, "2.6.0").ok
 
 
+def test_the_fixed_file_info_maps_file_and_product_version_to_their_own_fields():
+    """File and product version are different DWORDs, and they differ in real executables."""
+    dwords = [0xFEEF04BD, 0x10000, (2 << 16) | 6, (0 << 16) | 0, (3 << 16) | 1, (4 << 16) | 5, 0x3F, 0x4, 0, 0, 0, 0, 0]
+    assert fs.parse_fixed_info(dwords) == ((2, 6, 0, 0), (3, 1, 4, 5))
+
+
 @pytest.mark.skipif(sys.platform != "win32", reason="Windows version resources")
 def test_the_reader_reads_a_real_executable_and_says_none_for_nothing():
     info = fs.read_version_info(sys.executable)

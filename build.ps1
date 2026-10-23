@@ -27,6 +27,17 @@
 #       ARCHITECTURE.md            - manager internals reference
 #
 # After building, zip dist\ and ship it. Users run tokensave-manager.exe directly.
+#
+# -Release  also judges what was built by RUNNING it (scripts\frozen_smoke.py: version
+#           resource, CLI, GUI), then makes release\Tokensave-Manager-v<ver>-windows.zip and
+#           SHA256SUMS.txt (scripts\make_release_zip.py), which smoke-tests the extracted copy.
+#           Refuses a working tree with uncommitted changes, with no override.
+# -AllowDirty  silences the dirty-tree warning of an ordinary build. -Release ignores it.
+
+param(
+    [switch]$Release,
+    [switch]$AllowDirty
+)
 
 Set-StrictMode -Version Latest
 $ErrorActionPreference = "Stop"
@@ -34,6 +45,29 @@ $ErrorActionPreference = "Stop"
 $ROOT = $PSScriptRoot
 $DIST = "$ROOT\dist"
 $ICON = "$ROOT\icon.ico"
+
+# One version number: constants.APP_VERSION, read by the script the release flow uses, so the
+# build, the tag check and the version resource below cannot each parse it differently.
+$VERSION = (& python "$ROOT\scripts\release_info.py" version | Out-String).Trim()
+if ($LASTEXITCODE -ne 0 -or $VERSION -notmatch '^\d+\.\d+\.\d+$') {
+    throw "cannot read the app version from scripts\release_info.py (got: $VERSION)"
+}
+$PRODUCT = "TokenSave Manager"
+$COMPANY = "Alexander L Corthell"
+
+# A release is built from a committed tree or it is not a release: the zip is named for a
+# version, and uncommitted changes make that name a claim about code nobody can reproduce.
+# An ordinary build only warns, so everyday local builds are unchanged.
+function Assert-CleanTree {
+    $dirty = @(& git -C $ROOT status --porcelain 2>$null)
+    if ($dirty.Count -eq 0) { return }
+    if ($Release) {
+        throw "-Release refuses a working tree with uncommitted changes ($($dirty.Count) path(s), first: $($dirty[0])). Commit or stash, then build."
+    }
+    if (-not $AllowDirty) {
+        Write-Host "  [warn] building from a working tree with $($dirty.Count) uncommitted path(s); pass -AllowDirty to silence" -ForegroundColor Yellow
+    }
+}
 
 # -----------------------------------------------------------------------------
 
@@ -67,6 +101,22 @@ function Build-Exe($script, $outName, $nuArgs) {
     if ((Test-Path $ICON) -and ($isGuiBuild)) {
         $nuArgs += "--windows-icon-from-ico=$ICON"
     }
+
+    # The version resource (Properties > Details). Four parts, the last 0. scripts\frozen_smoke.py
+    # reads it back from the BUILT file and fails on a mismatch.
+    $descriptions = @{
+        "tokensave-manager.exe"     = "$PRODUCT"
+        "tokensave-wrapper.exe"     = "$PRODUCT MCP wrapper"
+        "tokensave-manager-cli.exe" = "$PRODUCT command-line interface"
+    }
+    $nuArgs += @(
+        "--product-name=$PRODUCT",
+        "--product-version=$VERSION.0",
+        "--file-version=$VERSION.0",
+        "--company-name=$COMPANY",
+        "--file-description=$($descriptions[$outName])",
+        "--copyright=Copyright (c) 2026 $COMPANY"
+    )
 
     Clear-NuitkaOrphans $DIST
 
@@ -194,8 +244,10 @@ $consoleCliArgs = @(
 )
 
 Write-Host ""
-Write-Host "=== TokenSave Manager - Nuitka build ===" -ForegroundColor Cyan
+Write-Host "=== TokenSave Manager - Nuitka build (v$VERSION) ===" -ForegroundColor Cyan
 Write-Host ""
+
+Assert-CleanTree
 
 New-Item -ItemType Directory -Force -Path $DIST | Out-Null
 
@@ -231,8 +283,8 @@ if (Test-Path "$ROOT\manager-config.example.json") {
     Write-Host "  [file] manager-config.example.json" -ForegroundColor Green
 }
 
-# -- Root-level markdown --
-foreach ($md in @("README.md", "TOKENSAVE_GUIDE.md", "CHANGELOG.md")) {
+# -- Root-level documents (LICENSE too: an MIT licence travels with every copy) --
+foreach ($md in @("README.md", "TOKENSAVE_GUIDE.md", "CHANGELOG.md", "LICENSE")) {
     $src = "$ROOT\$md"
     if (Test-Path $src) {
         Copy-Item $src "$DIST\$md" -Force
@@ -284,11 +336,27 @@ if ($docsCopied -eq 0) {
     Write-Host "  [warn] no docs\ files found - skipping" -ForegroundColor Yellow
 }
 
+if ($Release) {
+    Write-Host ""
+    Write-Host "=== Running what was built (version resource, CLI, GUI) ===" -ForegroundColor Cyan
+    & python "$ROOT\scripts\frozen_smoke.py" --dist $DIST --version $VERSION --product $PRODUCT
+    if ($LASTEXITCODE -ne 0) { throw "the built executables failed their smoke test (see above); no release was made" }
+
+    Write-Host ""
+    Write-Host "=== Packaging the release zip ===" -ForegroundColor Cyan
+    & python "$ROOT\scripts\make_release_zip.py" --dist $DIST --version $VERSION
+    if ($LASTEXITCODE -ne 0) { throw "the release zip was not made (see above)" }
+}
+
 Write-Host ""
 Write-Host "Build complete -> $DIST" -ForegroundColor Green
 Write-Host ""
 Write-Host "Before distributing:" -ForegroundColor Yellow
-Write-Host "  1. Zip dist\ and ship (or create a GitHub Release - see docs\GITHUB_GUIDE.md)." -ForegroundColor Yellow
+if ($Release) {
+    Write-Host "  1. release\ holds the zip and SHA256SUMS.txt; try the zip, then publish (docs\GITHUB_GUIDE.md)." -ForegroundColor Yellow
+} else {
+    Write-Host "  1. Not a release: build with -Release for a versioned, smoke-tested zip and checksums." -ForegroundColor Yellow
+}
 Write-Host "  2. Users run tokensave-manager.exe and configure paths via Settings on first run." -ForegroundColor Yellow
 Write-Host ""
 

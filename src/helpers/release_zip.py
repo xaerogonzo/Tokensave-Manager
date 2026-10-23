@@ -40,7 +40,7 @@ PLATFORM_TAG = "windows"
 #: reads at run time and whose absence is a feature that silently vanishes.
 REQUIRED = (
     "tokensave-manager.exe", "tokensave-wrapper.exe", "tokensave-manager-cli.exe",
-    "manager-config.json", "README.md", "CHANGELOG.md",
+    "manager-config.json", "README.md", "CHANGELOG.md", "LICENSE",
     "templates/project-baseline.md", "docs/USER_GUIDE.md",
 )
 
