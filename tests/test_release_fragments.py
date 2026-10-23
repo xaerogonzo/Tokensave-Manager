@@ -57,6 +57,10 @@ class _App:
 
 def _repo(tmp_path, *, commit_second=True):
     _git(tmp_path, "init", "-q", "-b", "main")
+    # The Wizard's own `git commit` carries no -c identity, and a CI runner has no global one
+    # ("empty ident name"). Set it in the repo; do not rely on the machine's.
+    _git(tmp_path, "config", "user.name", "t")
+    _git(tmp_path, "config", "user.email", "t@t")
     (tmp_path / "CHANGELOG.md").write_bytes(CHANGELOG.encode("utf-8"))
     (tmp_path / "changelog.d").mkdir()
     (tmp_path / "changelog.d" / "202610221200-a-aaaa.md").write_text("### Added\n- (x) **First.** one\n", newline="\n")
