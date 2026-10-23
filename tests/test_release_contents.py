@@ -119,6 +119,7 @@ def test_release_checks_dist_for_user_files_before_it_compiles_and_deletes_nothi
     assert "if (-not $Release) { return }" in fn
     assert "throw" in fn and "Nothing was deleted" in fn
     assert "Remove-Item" not in fn
+    assert "$left = @(@(" in fn   # strict mode: an empty pipeline is $null, which has no .Count
     call = BUILD.index("\nAssert-DistHoldsNoUserFiles\n")
     assert call < BUILD.index('\nBuild-Exe "')   # asked before the first 25-minute compile
 

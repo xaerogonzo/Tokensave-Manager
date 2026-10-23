@@ -66,8 +66,8 @@ $COMPANY = "Alexander L Corthell"
 # only copy of a log, so the build names them and stops, and a person decides.
 function Assert-DistHoldsNoUserFiles {
     if (-not $Release) { return }
-    $left = @("manager-config.json", "config-migration.json", "logs") |
-        Where-Object { Test-Path -LiteralPath (Join-Path $DIST $_) }
+    $left = @(@("manager-config.json", "config-migration.json", "logs") |
+        Where-Object { Test-Path -LiteralPath (Join-Path $DIST $_) })
     if ($left.Count -gt 0) {
         throw ("-Release refuses a dist\ that holds: " + ($left -join ", ") + ". They are settings or run residue, not " +
                "build output, and a release must not ship them. Nothing was deleted: move or delete them yourself " +
