@@ -15,6 +15,15 @@ Each layer is separate evidence: source tests passing, the frozen GUI starting, 
 CLI answering and an extracted zip passing are different claims, and a release needs all
 of them.
 
+**First-run versus configured.** A fresh install has no `tokensave_exe`, no `git_exe`, no
+`template_dir` and no projects, and that is the state the first layers start the program in.
+Every git and tokensave field in a `status` envelope is then null, so an envelope can be
+well-formed and say nothing. The `(configured)` layers start the same executables with the real
+`tokensave.exe`, `git`, the build's own `templates\\` and a scratch git repository that
+`tokensave init` has really indexed, and require the program to SEE them: `tokensave.indexed`
+true, a git branch, the project listed in the Projects tab. When tokensave cannot be found
+that is a failed layer, not a quiet pass.
+
 **Fail closed.** Every judge starts from "not ok" and every way a run can be wrong is its
 own reason. A report that is missing, unreadable, stale, for another script, from a run
 that did not quit, or that holds no passing expectation for a REQUIRED id is a failure;
@@ -56,6 +65,11 @@ GUI_REQUIRED_IDS = ("on_projects", "expect_clean")
 LAYER_VERSION = "version resource"
 LAYER_CLI = "cli"
 LAYER_GUI = "gui"
+LAYER_CLI_CONFIGURED = "cli (configured)"
+LAYER_GUI_CONFIGURED = "gui (configured)"
+
+#: Expectation ids the configured drive script must have recorded as passed.
+GUI_CONFIGURED_REQUIRED_IDS = ("on_projects", "project_listed", "expect_clean")
 
 #: A config that is valid but points at nothing: what a first-time user has.
 CLEAN_CONFIG = {
@@ -84,9 +98,20 @@ class LayerResult:
     judgement: Judgement
     work_dir: str = ""
     seconds: float = 0.0
+    #: Set only by an EXPLICIT request to leave a layer out. `judgement.ok` stays False, so
+    #: anything that ignores this flag still fails closed; `layer_ok` is the one place that
+    #: reads it.
+    skipped: bool = False
 
     def line(self) -> str:
+        if self.skipped:
+            return "%-17s %-26s SKIPPED (%s)" % (self.layer, self.target, "; ".join(self.judgement.failures))
         return "%-17s %-26s %s" % (self.layer, self.target, self.judgement.text())
+
+
+def layer_ok(result: "LayerResult") -> bool:
+    """A layer passed, or was explicitly skipped. Nothing else counts."""
+    return result.judgement.ok or result.skipped
 
 
 # ── the drive report ──────────────────────────────────────────────────────
@@ -290,12 +315,15 @@ def _kill_tree(pid: int) -> None:
             pass
 
 
-def _scratch(prefix: str, workdir: "str | None") -> "tuple[str, str]":
-    """(folder, scratch config path): a valid, empty first-run config in a folder of its own."""
+def _scratch(prefix: str, workdir: "str | None", extra: "dict | None" = None) -> "tuple[str, str]":
+    """(folder, scratch config path): a valid first-run config in a folder of its own.
+
+    `extra` is merged over the empty config to make the CONFIGURED variant.
+    """
     folder = tempfile.mkdtemp(prefix=prefix, dir=workdir)
     config = os.path.join(folder, "manager-config.json")
     with open(config, "w", encoding="utf-8") as fh:
-        json.dump(CLEAN_CONFIG, fh)
+        json.dump({**CLEAN_CONFIG, **(extra or {})}, fh)
     return folder, config
 
 
@@ -323,23 +351,29 @@ def _run(argv: "list[str]", *, env: dict, cwd: str, timeout: float, out_dir: str
 
 
 def run_gui(exe: "str | list[str]", script: str, *, timeout: float = 150.0, workdir: "str | None" = None,
-            required_ids: "tuple[str, ...]" = GUI_REQUIRED_IDS) -> LayerResult:
+            required_ids: "tuple[str, ...]" = GUI_REQUIRED_IDS, layer: str = LAYER_GUI,
+            config: "dict | None" = None, script_vars: "dict | None" = None) -> LayerResult:
     """Start the GUI on `script` in isolation and judge its report.
 
     `exe` is the built executable, or an argv (`[python, "src/app.py"]`) to run the same
     judgement against source, which is how the harness itself is checked.
     """
     argv = [exe] if isinstance(exe, str) else list(exe)
-    folder, config = _scratch("tsm-smoke-gui-", workdir)
+    folder, config_path = _scratch("tsm-smoke-gui-", workdir, config)
     copy = os.path.join(folder, "drive.json")
-    shutil.copyfile(script, copy)  # the report is written beside the script: keep it here
-    env = dict(os.environ, TOKENSAVE_MANAGER_DRIVE=copy, TOKENSAVE_MANAGER_CONFIG=config)
+    with open(script, encoding="utf-8") as fh:
+        text = fh.read()
+    for name, value in (script_vars or {}).items():
+        text = text.replace("<<%s>>" % name, json.dumps(str(value))[1:-1])  # as the inside of a JSON string
+    with open(copy, "w", encoding="utf-8", newline="\n") as fh:
+        fh.write(text)  # the report is written beside the script: keep it, and its variables, here
+    env = dict(os.environ, TOKENSAVE_MANAGER_DRIVE=copy, TOKENSAVE_MANAGER_CONFIG=config_path)
     launched, began = time.time(), time.monotonic()
     code, timed_out, _ = _run(argv, env=env, cwd=folder, timeout=timeout, out_dir=folder, gui=True)
     judgement = judge_drive_report(os.path.join(folder, "drive.report.json"), exit_code=code,
                                    timed_out=timed_out, launched_at=launched, script=copy,
                                    required_ids=required_ids)
-    return LayerResult(LAYER_GUI, os.path.basename(argv[-1]), judgement, folder, time.monotonic() - began)
+    return LayerResult(layer, os.path.basename(argv[-1]), judgement, folder, time.monotonic() - began)
 
 
 def run_cli(exe: "str | list[str]", expected_version: str, *, timeout: float = 90.0,
@@ -377,8 +411,23 @@ def check_versions(dist: str, expected: str, *, expected_product: str = "") -> "
 
 
 def smoke_dist(dist: str, expected_version: str, script: str, *, workdir: "str | None" = None,
-               expected_product: str = "", gui_timeout: float = 150.0) -> "list[LayerResult]":
-    """Every layer for one folder of built executables (dist\\ or an extracted release)."""
+               expected_product: str = "", gui_timeout: float = 150.0,
+               configured_script: "str | None" = None, tokensave_exe: str = "",
+               skip_tokensave: bool = False) -> "list[LayerResult]":
+    """Every layer for one folder of built executables (dist\\ or an extracted release).
+
+    The configured layers need `configured_script`; they run when tokensave and git are found,
+    fail when they are not, and are skipped (visibly, as SKIPPED) only on `skip_tokensave`.
+    """
+    results = _first_run_layers(dist, expected_version, script, workdir, expected_product, gui_timeout)
+    if configured_script:
+        results += configured_layers(dist, expected_version, configured_script, workdir=workdir,
+                                     gui_timeout=gui_timeout, tokensave_exe=tokensave_exe, skip=skip_tokensave)
+    return results
+
+
+def _first_run_layers(dist: str, expected_version: str, script: str, workdir: "str | None",
+                      expected_product: str, gui_timeout: float) -> "list[LayerResult]":
     results = check_versions(dist, expected_version, expected_product=expected_product)
     cli = os.path.join(dist, CLI_EXE)
     gui = os.path.join(dist, GUI_EXE)
@@ -404,3 +453,115 @@ def evidence_tail(work_dir: str) -> str:
                 tail = fh.read().splitlines()[-_LOG_TAIL_LINES:]
             chunks.append("--- %s (last %d lines)\n%s" % (name, len(tail), "\n".join(tail)))
     return "\n".join(chunks)
+
+
+# ── the CONFIGURED layers ─────────────────────────────────────────────────
+
+@dataclass(frozen=True)
+class Tools:
+    tokensave_exe: str = ""
+    git_exe: str = ""
+
+    def missing(self) -> "list[str]":
+        return [name for name, path in (("tokensave", self.tokensave_exe), ("git", self.git_exe)) if not path]
+
+
+class SetupError(RuntimeError):
+    """The scratch project could not be made, so the configured layers cannot run."""
+
+
+def find_tools(tokensave_exe: str = "") -> Tools:
+    """The real tokensave and git, from an explicit path, `TOKENSAVE_EXE`, or PATH."""
+    ts = tokensave_exe or os.environ.get("TOKENSAVE_EXE", "") or shutil.which("tokensave") or ""
+    return Tools(ts if ts and os.path.isfile(ts) else "", shutil.which("git") or "")
+
+
+def _tool(argv: "list[str]", cwd: str, timeout: float = 180.0) -> None:
+    done = subprocess.run(argv, cwd=cwd, capture_output=True, text=True, timeout=timeout,
+                          creationflags=CREATE_NO_WINDOW, stdin=subprocess.DEVNULL)
+    if done.returncode != 0:
+        raise SetupError("%s failed (exit %d): %s" % (" ".join(argv[:3]), done.returncode,
+                                                      (done.stderr or done.stdout).strip()[-300:]))
+
+
+def make_project(parent: str, tools: Tools) -> str:
+    """A git repository with one commit that `tokensave init` has really indexed."""
+    project = os.path.join(parent, "project")
+    os.makedirs(project)
+    with open(os.path.join(project, "hello.py"), "w", encoding="utf-8", newline="\n") as fh:
+        fh.write("def hello():\n    return 'hi'\n")
+    ident = ["-c", "user.name=smoke", "-c", "user.email=smoke@example.invalid"]
+    _tool([tools.git_exe, *ident, "init", "-q", "-b", "main"], project)
+    _tool([tools.git_exe, *ident, "add", "-A"], project)
+    _tool([tools.git_exe, *ident, "commit", "-q", "-m", "smoke"], project)
+    _tool([tools.tokensave_exe, "init", project], parent)
+    if not os.path.isdir(os.path.join(project, ".tokensave")):
+        raise SetupError("tokensave init produced no .tokensave in %s" % project)
+    return project
+
+
+def judge_configured_status(stdout: str, exit_code: "int | None", *, expected_version: str) -> Judgement:
+    """`status` on an indexed git project must SHOW tokensave and git, not just be well-formed.
+
+    A first-run envelope is well-formed and says nothing (every field null). Here that is a
+    failure: the program was given a real tokensave and a real repository and must have used them.
+    """
+    base = judge_cli_envelope(stdout, exit_code, command="status", expected_version=expected_version)
+    if not base.ok:
+        return base
+    data = json.loads(stdout).get("data") or {}
+    failures = []
+    if (data.get("tokensave") or {}).get("indexed") is not True:
+        failures.append("tokensave.indexed is %r: the program did not see the index" % ((data.get("tokensave") or {}).get("indexed"),))
+    git = data.get("git") or {}
+    if not git.get("branch"):
+        failures.append("git.branch is %r: the program did not read the repository" % (git.get("branch"),))
+    return Judgement(not failures, failures)
+
+
+def _unavailable(layer: str, target: str, reason: str, skip: bool) -> "list[LayerResult]":
+    return [LayerResult(layer, target, Judgement(False, [reason]), skipped=skip)]
+
+
+def configured_layers(dist: str, expected_version: str, script: str, *, workdir: "str | None" = None,
+                      gui_timeout: float = 150.0, tokensave_exe: str = "", skip: bool = False) -> "list[LayerResult]":
+    """CLI `status` and the GUI on a project that really is indexed, with real tools configured."""
+    tools = find_tools(tokensave_exe)
+    cli, gui = os.path.join(dist, CLI_EXE), os.path.join(dist, GUI_EXE)
+    if tools.missing():
+        why = "%s not found (set TOKENSAVE_EXE or put it on PATH); the program cannot be shown tokensave or git" % " and ".join(tools.missing())
+        return (_unavailable(LAYER_CLI_CONFIGURED, CLI_EXE, why, skip)
+                + _unavailable(LAYER_GUI_CONFIGURED, GUI_EXE, why, skip))
+    folder = tempfile.mkdtemp(prefix="tsm-smoke-proj-", dir=workdir)
+    try:
+        project = make_project(os.path.join(folder, "roots"), tools)
+    except (SetupError, OSError, subprocess.SubprocessError) as exc:
+        why = "could not make the indexed scratch project: %s" % exc
+        return (_unavailable(LAYER_CLI_CONFIGURED, CLI_EXE, why, False)
+                + _unavailable(LAYER_GUI_CONFIGURED, GUI_EXE, why, False))
+    config = {"tokensave_exe": tools.tokensave_exe.replace("\\", "/"), "git_exe": tools.git_exe.replace("\\", "/"),
+              "template_dir": os.path.join(dist, "templates").replace("\\", "/"),
+              "search_roots": [os.path.dirname(project).replace("\\", "/")]}
+    results = []
+    results += [_configured_cli(cli, expected_version, project, config, workdir)] if os.path.isfile(cli) else \
+        _unavailable(LAYER_CLI_CONFIGURED, CLI_EXE, "%s is not there" % cli, False)
+    if os.path.isfile(gui):
+        results.append(run_gui(gui, script, workdir=workdir, timeout=gui_timeout, layer=LAYER_GUI_CONFIGURED,
+                               required_ids=GUI_CONFIGURED_REQUIRED_IDS, config=config,
+                               script_vars={"PROJECT": project.replace("\\", "/")}))
+    else:
+        results += _unavailable(LAYER_GUI_CONFIGURED, GUI_EXE, "%s is not there" % gui, False)
+    return results
+
+
+def _configured_cli(exe: "str | list[str]", expected_version: str, project: str, config: dict,
+                    workdir: "str | None") -> LayerResult:
+    prefix = [exe] if isinstance(exe, str) else list(exe)
+    folder, config_path = _scratch("tsm-smoke-cli-cfg-", workdir, config)
+    env = dict(os.environ, TOKENSAVE_MANAGER_CONFIG=config_path)
+    began = time.monotonic()
+    code, timed_out, stdout = _run([*prefix, "status", "--project", project, "--json"], env=env, cwd=folder,
+                                   timeout=90.0, out_dir=folder, gui=False)
+    judgement = judge_configured_status(stdout, None if timed_out else code, expected_version=expected_version)
+    return LayerResult(LAYER_CLI_CONFIGURED, "%s status" % os.path.basename(prefix[-1]), judgement, folder,
+                       time.monotonic() - began)

@@ -75,7 +75,9 @@ that ship a Windows build, adopted by a developer), and it is listed so nobody a
 
 `build.ps1 -Release` refuses a working tree with uncommitted changes, stamps the version resource of
 all three executables from `constants.APP_VERSION`, then runs `scripts/frozen_smoke.py` on `dist\`
-(version resource, CLI from a foreign directory, GUI on a drive script, each its own verdict) and
+(version resource, CLI from a foreign directory and GUI on a drive script in a first-run state, then the CLI and GUI
+again with the real tokensave and git configured, the build's own templates, and an indexed scratch repository,
+each layer its own verdict) and
 `scripts/make_release_zip.py`, which checks the archive's inventory and smoke-tests the **extracted** copy
 in a folder with a space in its name before it promotes the zip and its checksums.
 
