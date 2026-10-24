@@ -85,6 +85,17 @@ file beside it, which must be copied into the user-data home; each layer its own
 `scripts/make_release_zip.py`, which checks the archive's inventory and smoke-tests the **extracted** copy
 in a folder with a space in its name before it promotes the zip and its checksums.
 
-What this does not do: it does not exercise the MCP wrapper beyond its version resource, it does not
-sign anything (Windows SmartScreen will say "unknown publisher"), and a checksum detects a damaged
+## Building it on a clean machine
+
+`.github/workflows/release.yml` runs the same `build.ps1 -Release` on a hosted Windows runner when a
+`v<version>` tag is pushed, and creates a **draft** GitHub Release (zip, `SHA256SUMS.txt`, notes from the
+CHANGELOG section) after attesting where the files came from. Nothing is published until a person presses
+Publish. The runner installs tokensave 7.16.0, pinned by sha256, because the configured smoke layers need a
+real one. A pull request that touches the release path runs the build as a dry run.
+
+The Release Wizard also creates a release when it publishes. The workflow's draft job refuses to touch a release
+that already exists, so use one path per version: let the workflow draft it, or delete the Wizard's release
+(keep the tag) and re-run the job.
+
+What this does not do: it does not sign anything (Windows SmartScreen will say "unknown publisher"), and a checksum detects a damaged
 download, not who published it.

@@ -1,0 +1,219 @@
+# Build the Manager's release on a clean machine, from a tag, and DRAFT it. Nothing here publishes.
+#
+# Adapted from templates/release/release.yml.tmpl (the OpenChem Studio pattern) for a build that
+# has no installer yet: `build.ps1 -Release` freezes the three executables, judges them by running
+# them (scripts/frozen_smoke.py, all layers, on dist\ and again on the extracted zip), and writes
+# release\Tokensave-Manager-v<version>-windows.zip and SHA256SUMS.txt.
+#
+#   * A `v<version>` tag push builds, attests where the files came from, and creates a DRAFT
+#     GitHub Release whose notes are that version's CHANGELOG section. A person reads it, tries
+#     the zip, and presses Publish.
+#   * A pull request that changes how a release is made runs the same build as a DRY RUN (no
+#     attestation, no release), so a change that breaks the freeze is found in the PR.
+#   * `workflow_dispatch` runs the same dry run on demand.
+#
+# WHAT THIS PROVES, AND WHAT IT DOES NOT. Reproducible: a clean checkout, pinned tools, nothing
+# from a developer's machine. `gh attestation verify <file> --repo xaerogonzo/Tokensave-Manager`
+# proves a file was produced by THIS workflow from THIS repository. That is not a code signature:
+# SmartScreen still says "unknown publisher" until the files are signed.
+#
+# PERMISSIONS. None by default. `build` reads the repository and may write an attestation; ONLY
+# `draft` can write contents, and only on a tag push.
+#
+# EVERY THIRD-PARTY ACTION IS PINNED TO A FULL COMMIT SHA (the tag is in the comment), because this
+# workflow can create a release. tokensave and the Python build tools are pinned by version, and
+# tokensave also by sha256. Update a pin by resolving the new tag and changing the SHA AND the
+# comment together.
+#
+# THE RELEASE WIZARD. The Wizard (Git tab) tags, pushes and runs `gh release create` itself. A tag
+# it pushes triggers this workflow too, and `draft` REFUSES to touch a release that already exists,
+# so use one path per release: the Wizard up to and including the push, then let this workflow
+# make the draft, or skip the Wizard's own publish step. See docs/RELEASE_CONTENTS.md.
+
+name: release
+
+on:
+  push:
+    tags:
+      - 'v[0-9]+.[0-9]+.[0-9]+'
+  pull_request:
+    # What changes how a release is made or whether it can be. Not every PR: the build is long.
+    paths:
+      - '.github/workflows/release.yml'
+      - 'build.ps1'
+      - 'src/constants.py'
+      - 'scripts/release_info.py'
+      - 'scripts/make_release_zip.py'
+      - 'scripts/frozen_smoke.py'
+      - 'scripts/build_help_bundle.py'
+      - 'scripts/drive/frozen-smoke*.json'
+      - 'src/helpers/frozen_smoke.py'
+      - 'src/helpers/release_zip.py'
+  workflow_dispatch:
+
+permissions: {}
+
+concurrency:
+  group: release-${{ github.ref }}
+  # Never cancel a tag build half way; a superseded pull request build is just waste.
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
+jobs:
+  build:
+    name: build release files (Windows)
+    runs-on: windows-latest
+    timeout-minutes: 75
+    permissions:
+      contents: read
+      id-token: write       # to sign the attestation; used only on a tag push
+      attestations: write
+
+    steps:
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5
+        with:
+          persist-credentials: false
+
+      - uses: actions/setup-python@ece7cb06caefa5fff74198d8649806c4678c61a1 # v6
+        with:
+          python-version: '3.13'
+
+      # Fail in seconds, not after a long build. release_info.py is standard library only.
+      - name: The tag must name this version
+        if: github.ref_type == 'tag'
+        shell: bash
+        env:
+          TAG: ${{ github.ref_name }}
+        run: python scripts/release_info.py check-tag "$TAG"
+
+      - name: The changelog must have this version's section
+        if: github.ref_type == 'tag'
+        shell: bash
+        env:
+          TAG: ${{ github.ref_name }}
+        run: python scripts/release_info.py notes "$TAG" > /dev/null
+
+      # Pinned versions, the ones the local release build was proven with.
+      - name: Install the build tools
+        shell: pwsh
+        run: python -m pip install nuitka==4.1 ordered-set==4.1.0 zstandard==0.24.0 pillow==11.1.0 pystray==0.19.5
+
+      # The frozen smoke's configured layers need a REAL tokensave and git (a first-run-only smoke
+      # cannot see a missing tokensave path). The runner has git. tokensave is pinned by version
+      # and by the sha256 of its Windows asset, taken from the maintainers' own SHA256SUMS: this
+      # catches a replaced or damaged download, not a compromised release. Re-verify on upgrade.
+      - name: Install tokensave 7.16.0
+        shell: pwsh
+        run: |
+          $url = "https://github.com/aovestdipaperino/tokensave/releases/download/v7.16.0/tokensave-v7.16.0-x86_64-windows.zip"
+          $expected = "43532f8130a9ea964b431b5d521b55e065ebc6cde02b3d7a7f9a1caea402fa3c"
+          $zip = Join-Path $env:RUNNER_TEMP "tokensave.zip"
+          Invoke-WebRequest -Uri $url -OutFile $zip
+          $actual = (Get-FileHash -Algorithm SHA256 $zip).Hash.ToLower()
+          if ($actual -ne $expected) { throw "tokensave download hash mismatch: got $actual, expected $expected" }
+          $dir = Join-Path $env:RUNNER_TEMP "tokensave"
+          Expand-Archive -Path $zip -DestinationPath $dir -Force
+          $exe = Get-ChildItem -Path $dir -Recurse -Filter tokensave.exe | Select-Object -First 1
+          if (-not $exe) { throw "tokensave.exe is not in the downloaded archive" }
+          $said = (& $exe.FullName --version | Out-String).Trim()
+          if ($said -notmatch '7\.16\.0') { throw "unexpected tokensave version: $said" }
+          "TOKENSAVE_EXE=$($exe.FullName)" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
+
+      # The scratch repository the configured layers index needs a commit identity of its own.
+      - name: Git identity for the smoke's scratch repository
+        shell: pwsh
+        run: |
+          git config --global user.name "release-smoke"
+          git config --global user.email "release-smoke@users.noreply.github.com"
+
+      # The whole pipeline: freeze, check the tree, smoke-test the built app, make the zip and
+      # smoke-test its extracted copy. It refuses a dirty tree, which a fresh checkout is not.
+      - name: Build, smoke-test and package
+        shell: pwsh
+        run: ./build.ps1 -Release
+
+      - name: Check the checksums of what was built
+        shell: bash
+        working-directory: release
+        run: |
+          cat SHA256SUMS.txt
+          sha256sum -c SHA256SUMS.txt
+
+      - name: Keep the release files
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: release-files
+          path: |
+            release/Tokensave-Manager-v*-windows.zip
+            release/SHA256SUMS.txt
+          if-no-files-found: error
+          retention-days: 30
+
+      # Only for a real release: a pull request from a fork has no token to sign with, and a
+      # dry run's files are not something to vouch for.
+      - name: Attest where these files came from
+        if: github.event_name == 'push' && github.ref_type == 'tag'
+        uses: actions/attest-build-provenance@4d101475d8b20a2381f78447822ac1eab6504dd8 # v4.2.2
+        with:
+          subject-path: release/Tokensave-Manager-v*-windows.zip
+
+  # A DRAFT. It is not visible to anyone but the repository's writers until a person presses
+  # Publish, which is the moment to try the zip and read the notes.
+  draft:
+    name: draft the GitHub release
+    needs: build
+    if: github.event_name == 'push' && github.ref_type == 'tag'
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    permissions:
+      contents: write
+
+    steps:
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5
+        with:
+          persist-credentials: false
+
+      - name: Fetch the release files
+        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
+        with:
+          name: release-files
+          path: release
+
+      # The files travelled between machines; check they arrived as they left.
+      - name: Check the checksums again
+        shell: bash
+        working-directory: release
+        run: sha256sum -c SHA256SUMS.txt
+
+      - name: Write the release notes from the changelog
+        shell: bash
+        env:
+          TAG: ${{ github.ref_name }}
+        run: python3 scripts/release_info.py notes "$TAG" --out notes.md
+
+      # Refuse rather than attach: a release that already exists (the Release Wizard makes one)
+      # was built from another machine's zip, and two sources for one version's files is exactly
+      # what a draft-only flow exists to prevent.
+      - name: Refuse to touch a release that already exists
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TAG: ${{ github.ref_name }}
+        run: |
+          if gh release view "$TAG" --repo "$GITHUB_REPOSITORY" > /dev/null 2>&1; then
+            echo "::error::A release for $TAG already exists. This workflow only creates drafts; it will not attach files to an existing release. Delete that release (keep the tag) and re-run this job, or publish the existing one."
+            exit 1
+          fi
+
+      - name: Create the draft release
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TAG: ${{ github.ref_name }}
+        run: |
+          gh release create "$TAG" \
+            --draft \
+            --verify-tag \
+            --title "TokenSave Manager ${TAG#v}" \
+            --notes-file notes.md \
+            release/Tokensave-Manager-v*-windows.zip \
+            release/SHA256SUMS.txt
