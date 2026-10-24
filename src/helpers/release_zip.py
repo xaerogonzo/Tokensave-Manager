@@ -6,8 +6,8 @@ The order is the point, and each gate stops the rest:
      versioned top folder, so unzipping a new version beside an old one cannot mix two
      versions' files (the old zip put everything at the archive root);
   2. validate the inventory: one prefix, no traversal, the three executables and the
-     data they read present, no build or run residue, and a `manager-config.json` that is
-     still the clean first-run config;
+     data they read present, no build or run residue, and NO `manager-config.json` of any
+     kind (settings live in the user's data folder; see `config_home`);
   3. extract to a fresh folder whose name contains a SPACE and run the smoke test on THAT
      copy, because what people get is the zip, not `dist\\`;
   4. only then hash the exact final bytes into `SHA256SUMS.txt` and promote both files.
@@ -25,7 +25,6 @@ this build's flat three-executable `dist\\`. Pure standard library; no UI.
 from __future__ import annotations
 
 import hashlib
-import json
 import os
 import shutil
 import tempfile
@@ -40,22 +39,21 @@ PLATFORM_TAG = "windows"
 #: reads at run time and whose absence is a feature that silently vanishes.
 REQUIRED = (
     "tokensave-manager.exe", "tokensave-wrapper.exe", "tokensave-manager-cli.exe",
-    "manager-config.json", "README.md", "CHANGELOG.md", "LICENSE",
+    "README.md", "CHANGELOG.md", "LICENSE",
     "templates/project-baseline.md", "docs/USER_GUIDE.md",
 )
 
 #: Path PARTS that may not appear anywhere (build debris).
 FORBIDDEN_PARTS = ("__pycache__",)
-#: Directory prefixes (ending in "/") and exact paths that may not ship: what a run of the
-#: app leaves behind. `logs/` shipped inside v2.1.0 because a smoke test wrote it into dist.
-FORBIDDEN_PATHS = ("logs/",)
-
-#: The keys of the clean config build.ps1 writes. A key outside this set means the file in
-#: the archive was rewritten by a run of the app, which adds keys (`mcp_skip_warnings`).
-CLEAN_CONFIG_KEYS = frozenset({
-    "tokensave_exe", "template_dir", "python_exe", "editor_cmd", "git_exe", "codegraph_exe",
-    "search_roots", "project_categories", "user_snippets", "auto_commit_after_sync",
-})
+#: Directory prefixes (ending in "/") and exact paths that may not ship.
+#:   * `logs/`: what a run of the app leaves behind. It shipped inside v2.1.0 because a smoke
+#:     test wrote it into dist.
+#:   * `manager-config.json`: the user's settings live in %LOCALAPPDATA%\TokenSaveManager\ now.
+#:     A config in the archive is either a leak of someone's settings or, if it is clean, a file
+#:     that overwrites a real one when unzipped over an old folder and is then mistaken for an old
+#:     config to import. It used to be shipped clean on purpose; that is what changed.
+#:   * `config-migration.json`: the migration record, written beside the settings.
+FORBIDDEN_PATHS = ("logs/", "manager-config.json", "config-migration.json")
 
 
 class ReleaseError(RuntimeError):
@@ -116,7 +114,6 @@ def validate_inventory(archive_path: Path, version: str) -> "list[str]":
         with zipfile.ZipFile(archive_path) as archive:
             names = archive.namelist()
             bad = archive.testzip()
-            config = archive.read("%s/manager-config.json" % top) if "%s/manager-config.json" % top in names else None
     except (OSError, zipfile.BadZipFile) as exc:
         return ["the archive cannot be read: %s" % exc]
     if bad:
@@ -130,20 +127,7 @@ def validate_inventory(archive_path: Path, version: str) -> "list[str]":
         if relative is not None:
             inside.add(relative)
     problems += ["missing from the archive: %s" % r for r in REQUIRED if r not in inside]
-    problems += _config_problems(config)
     return problems
-
-
-def _config_problems(raw: "bytes | None") -> "list[str]":
-    if raw is None:
-        return []  # already reported as missing
-    try:
-        keys = set(json.loads(raw.decode("utf-8-sig")))
-    except (ValueError, TypeError, AttributeError):
-        return ["manager-config.json in the archive is not a JSON object"]
-    extra = sorted(keys - CLEAN_CONFIG_KEYS)
-    return ["manager-config.json holds keys a clean config does not (%s): it was written by a run of the app"
-            % ", ".join(extra)] if extra else []
 
 
 def sha256_of(path: Path) -> str:

@@ -723,7 +723,7 @@ For a project only you work on, you can skip branches entirely:
 <!-- help:configuration -->
 ## Configuration Reference
 
-All settings live in `manager-config.json` at the project root (not committed to git). Edit via the **Settings** dialog or directly in a text editor.
+All settings live in `manager-config.json`. In a **release build** that file is in your user-data folder, `%LOCALAPPDATA%\TokenSaveManager\` (shown as *Manager config* under Help > file locations), so replacing or moving the program folder never touches it. The first start of a new build **copies** your old settings across from beside the executable, or from the newest sibling release folder (`Tokensave-Manager-v<version>-windows`), and leaves the original where it was. In a **source checkout** it is `manager-config.json` at the project root (not committed to git). Edit via the **Settings** dialog or directly in a text editor.
 
 ```json
 {
@@ -798,7 +798,7 @@ integration all depend on it:
   which project you mean, and the Manager has been bitten by that inference
   before.
 - `--config <path>` points a relocated CLI at an install; by default it reads
-  the `manager-config.json` beside the executable.
+  the Manager's own config (the user-data folder in a build, the project root in a checkout).
 
 `checks` needs a real Python interpreter, so it is unavailable in the compiled
 CLI and says so (exit 3) rather than failing obscurely. Run it from a source
@@ -870,8 +870,8 @@ powershell -ExecutionPolicy Bypass -File build.ps1
 dist\
   tokensave-manager.exe       — main GUI (standalone, no Python needed)
   tokensave-wrapper.exe       — MCP wrapper for Claude Desktop
-  manager-config.json         — clean config for new users
-  manager-config.example.json — annotated template
+  manager-config.example.json — annotated template (the real config is created in
+                                %LOCALAPPDATA%\TokenSaveManager\ on first run; the zip carries none)
   TOKENSAVE_GUIDE.md
   CHANGELOG.md
   templates\                  — all template files

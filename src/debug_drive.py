@@ -62,8 +62,9 @@ any thread. Three steps turn that into a verdict:
 
 `expect` knows the checks `tab`, `dialog_open`, `log_contains`, `widget_text`,
 `project_row` (a Projects-tab row for `project`), `help_corpus` (Help serves the
-text this kind of run must: the bundle in a build, the disk in a checkout) and
-`diagnostic_contains` (the last reads the LIVE ledger, never a report
+text this kind of run must: the bundle in a build, the disk in a checkout),
+`config_migrated` (a packaged first run copied the old settings into the user-data
+home and is using them) and `diagnostic_contains` (the last reads the LIVE ledger, never a report
 file). A failed expectation is permanent: a later success never erases it.
 On the way out -- `quit`, or interpreter exit, exactly once -- the run writes
 `<script>.report.json` beside the script (gitignored) and exits non-zero if
@@ -982,6 +983,18 @@ class _Driver:
             wanted = str(step.get("project", "")).strip()
             found = bool(wanted) and os.path.normcase(os.path.normpath(wanted)) in rows
             return found, "%d project row(s)" % len(rows)
+        if check == "config_migrated":
+            # The app's own view, not a file listing: the config this PROCESS is using, and what it
+            # holds in memory, must be the copy in the home, with the original untouched.
+            import constants
+            import config_home
+            cfg = getattr(self._app, "_cfg", None)
+            key = str(step.get("key", ""))
+            failures = config_home.verify_migration(
+                constants._CONFIG_PATH, str(step.get("home", "")), str(step.get("legacy", "")),
+                str(step.get("legacy_sha256", "")), key, step.get("value"),
+                None if cfg is None else cfg.raw.get(key))
+            return not failures, ("migrated into %s" % step.get("home") if not failures else "; ".join(failures[:3]))
         if check == "help_corpus":
             # Not "Help opened": that Help is serving the text THIS build was made from. A build
             # whose bundle was left out opens Help fine and shows nothing, or the wrong thing.

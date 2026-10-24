@@ -19,11 +19,13 @@ from helpers import release_zip as rz  # noqa: E402
 
 DEFAULT_SCRIPT = ROOT / "scripts" / "drive" / "frozen-smoke.json"
 CONFIGURED_SCRIPT = ROOT / "scripts" / "drive" / "frozen-smoke-configured.json"
+MIGRATION_SCRIPT = ROOT / "scripts" / "drive" / "frozen-smoke-migration.json"
 
 
 def _smoke(version: str, script: Path):
     def run(extracted: Path) -> bool:
-        results = fs.smoke_dist(str(extracted), version, str(script), configured_script=str(CONFIGURED_SCRIPT))
+        results = fs.smoke_dist(str(extracted), version, str(script), configured_script=str(CONFIGURED_SCRIPT),
+                                  migration_script=str(MIGRATION_SCRIPT))
         for r in results:
             print("  " + r.line())
         return all(fs.layer_ok(r) for r in results)

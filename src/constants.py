@@ -49,30 +49,36 @@ def _resolve_base_dir(env: dict, argv0: str, module_file: str) -> str:
 
 _BASE_DIR = _resolve_base_dir(os.environ, sys.argv[0], __file__)
 
-#: Names the config file to read AND write instead of `<install>/manager-config.json`.
-#: It exists so a driven run (`TOKENSAVE_MANAGER_DRIVE`) can work on a scratch
-#: copy and never write the real file -- see `helpers/isolated_run.py`.
-CONFIG_ENV = "TOKENSAVE_MANAGER_CONFIG"
+#: True in a packaged (Nuitka onefile) build. Only the marker's presence matters;
+#: its value is a parent PID.
+_FROZEN = bool(os.environ.get("NUITKA_ONEFILE_PARENT"))
+
+# Where the settings live is `config_home`'s business: a packaged Manager keeps its
+# config and logs in `%LOCALAPPDATA%\TokenSaveManager\` (so a release can be replaced
+# without touching them); a source checkout keeps them in the repository root, as it
+# always did. Two environment variables override it, for a driven second instance and
+# for tests: CONFIG_ENV names one explicit file, HOME_ENV a different home folder.
+import config_home as _config_home  # noqa: E402
+
+#: Re-exported under the names the rest of the code already imports from here.
+CONFIG_ENV = _config_home.CONFIG_ENV
+HOME_ENV = _config_home.HOME_ENV
 
 
-def _resolve_config_path(env, base_dir: str) -> str:
+def _resolve_config_path(env, base_dir: str, frozen: bool = False) -> str:
     """The config file this process uses. Pure, so it is testable without
     re-importing the module. Blank or absent means the install's own file."""
-    override = (env.get(CONFIG_ENV) or "").strip()
-    if override:
-        return os.path.abspath(os.path.expanduser(override))
-    return os.path.join(base_dir, "manager-config.json")
+    return _config_home.config_path(env, frozen, base_dir)
 
 
 #: The install's own config, whatever this process was told to use. The one
 #: place an isolated run is told apart from a real one.
-DEFAULT_CONFIG_PATH = os.path.join(_BASE_DIR, "manager-config.json")
-_CONFIG_PATH = _resolve_config_path(os.environ, _BASE_DIR)
-# A redirected config takes its logs with it: two processes appending to one
-# RotatingFileHandler file cannot rotate it on Windows.
-LOG_DIR      = (os.path.join(os.path.dirname(_CONFIG_PATH), "logs")
-                if _CONFIG_PATH != DEFAULT_CONFIG_PATH
-                else os.path.join(_BASE_DIR, "logs"))
+DEFAULT_CONFIG_PATH = _config_home.default_config_path(os.environ, _FROZEN, _BASE_DIR)
+_CONFIG_PATH = _resolve_config_path(os.environ, _BASE_DIR, _FROZEN)
+# Logs sit beside whichever config is in use: a redirected config takes its logs with
+# it, because two processes appending to one RotatingFileHandler file cannot rotate it
+# on Windows.
+LOG_DIR      = os.path.join(os.path.dirname(_CONFIG_PATH), "logs")
 LOG_FILE     = os.path.join(LOG_DIR, "manager.log")
 
 

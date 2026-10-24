@@ -314,10 +314,10 @@ def test_a_skipped_layer_is_still_not_ok_so_a_caller_that_ignores_the_flag_fails
     assert not fs.layer_ok(failed)
 
 
-def test_missing_tools_fail_both_configured_layers_and_only_an_explicit_skip_skips(monkeypatch, tmp_path):
+def test_missing_tools_fail_every_configured_layer_and_only_an_explicit_skip_skips(monkeypatch, tmp_path):
     monkeypatch.setattr(fs, "find_tools", lambda *_: fs.Tools("", ""))
     failed = fs.configured_layers(str(tmp_path), "2.6.0", str(_script(tmp_path)), workdir=str(tmp_path))
-    assert {r.layer for r in failed} == {fs.LAYER_CLI_CONFIGURED, fs.LAYER_GUI_CONFIGURED}
+    assert {r.layer for r in failed} == {fs.LAYER_CLI_CONFIGURED, fs.LAYER_WRAPPER, fs.LAYER_GUI_CONFIGURED}
     assert not any(fs.layer_ok(r) for r in failed) and "tokensave and git not found" in failed[0].judgement.failures[0]
     skipped = fs.configured_layers(str(tmp_path), "2.6.0", str(_script(tmp_path)), workdir=str(tmp_path), skip=True)
     assert all(r.skipped and fs.layer_ok(r) and not r.judgement.ok for r in skipped)
@@ -454,3 +454,147 @@ def test_a_run_that_never_checked_the_help_corpus_does_not_pass(tmp_path):
     j = _judge(tmp_path, without)
     assert not j.ok and any("'help_corpus' never ran" in f for f in j.failures)
     assert "help_corpus" in fs.GUI_REQUIRED_IDS and "help_corpus" in fs.GUI_CONFIGURED_REQUIRED_IDS
+
+
+# ── the wrapper, over MCP ─────────────────────────────────────────────────
+
+def _mcp_reply(**over):
+    reply = {"jsonrpc": "2.0", "id": 1, "result": {"protocolVersion": "2024-11-05", "capabilities": {},
+                                                    "serverInfo": {"name": "tokensave", "version": "7"}}}
+    reply.update(over)
+    return json.dumps(reply)
+
+
+def test_a_tokensave_initialize_reply_passes():
+    assert fs.judge_mcp_initialize(_mcp_reply()).ok
+
+
+@pytest.mark.parametrize("line, expect", [
+    ("", "no JSON-RPC reply"),
+    ("not json", "no JSON-RPC reply"),
+    (json.dumps({"jsonrpc": "2.0", "id": 1, "error": {"code": -1, "message": "no project"}}), "not a result"),
+    (_mcp_reply(id=7), "reply id"),
+    (json.dumps({"id": 1, "result": {"protocolVersion": "x", "serverInfo": {"name": "something-else"}}}), "serverInfo.name"),
+    (json.dumps({"id": 1, "result": {"serverInfo": {"name": "tokensave"}}}), "protocolVersion"),
+    ("[1]", "not a result"),
+])
+def test_each_way_the_wrapper_reply_can_be_wrong_is_named(line, expect):
+    j = fs.judge_mcp_initialize(line)
+    assert not j.ok and any(expect in f for f in j.failures), j.failures
+
+
+STAND_IN_MCP = r'''
+import json, os, sys, time
+mode = os.environ.get("STAND_IN_MODE", "pass")
+home = os.environ["TOKENSAVE_MANAGER_HOME"]
+config = json.load(open(os.path.join(home, "manager-config.json")))
+assert config["tokensave_exe"] and config["search_roots"], config
+assert "TOKENSAVE_MANAGER_CONFIG" not in os.environ, "a config override would skip the lookup under test"
+assert os.environ["USERPROFILE"] != os.environ["REAL_USERPROFILE"], "the wrapper must not run against the real profile"
+line = sys.stdin.readline()
+if mode == "silent":
+    sys.exit(0)
+if mode == "hang":
+    time.sleep(60)
+request = json.loads(line)
+assert request["method"] == "initialize"
+print(json.dumps({"jsonrpc": "2.0", "id": request["id"], "result": {
+    "protocolVersion": "2024-11-05", "serverInfo": {"name": "tokensave"}}}), flush=True)
+'''
+
+
+@pytest.mark.parametrize("mode, ok", [("pass", True), ("silent", False), ("hang", False)])
+def test_the_wrapper_layer_sends_initialize_through_a_scratch_home_and_judges_the_reply(tmp_path, monkeypatch, mode, ok):
+    monkeypatch.setenv("STAND_IN_MODE", mode)
+    monkeypatch.setenv("USERPROFILE", str(tmp_path / "real-profile"))
+    monkeypatch.setenv("REAL_USERPROFILE", str(tmp_path / "real-profile"))
+    tools = fs.Tools("C:/t/tokensave.exe", "C:/g/git.exe")
+    result = fs.run_wrapper(_app(tmp_path, STAND_IN_MCP), tools, "C:/roots", workdir=str(tmp_path),
+                            timeout=3 if mode == "hang" else 30)
+    assert result.layer == fs.LAYER_WRAPPER and result.judgement.ok is ok, result.judgement.failures
+
+
+def test_the_wrapper_is_never_started_with_the_real_users_profile_or_a_config_override(tmp_path, monkeypatch):
+    monkeypatch.setenv("TOKENSAVE_MANAGER_CONFIG", str(tmp_path / "real.json"))   # must be stripped, or the lookup is skipped
+    monkeypatch.setenv("STAND_IN_MODE", "pass")
+    monkeypatch.setenv("USERPROFILE", str(tmp_path / "real-profile"))
+    monkeypatch.setenv("REAL_USERPROFILE", str(tmp_path / "real-profile"))
+    tools = fs.Tools("C:/t/tokensave.exe", "C:/g/git.exe")
+    result = fs.run_wrapper(_app(tmp_path, STAND_IN_MCP), tools, "C:/roots", workdir=str(tmp_path))
+    assert result.judgement.ok, result.judgement.failures   # the stand-in asserts the override is absent
+
+
+# ── the migration layer ───────────────────────────────────────────────────
+
+STAND_IN_MIGRATING_GUI = r'''
+import json, os, sys, time
+sys.path.insert(0, os.environ["TSM_SRC"])
+import config_home
+from helpers import drive_ledger
+mode = os.environ.get("STAND_IN_MODE", "pass")
+assert "TOKENSAVE_MANAGER_CONFIG" not in os.environ, "an override skips the lookup under test"
+script = os.environ["TOKENSAVE_MANAGER_DRIVE"]
+step = next(s for s in json.load(open(script)) if s.get("check") == "config_migrated")
+assert "<<" not in json.dumps(step), step                       # every variable was substituted
+base = os.path.dirname(os.path.abspath(sys.argv[0]))
+env = dict(os.environ)
+result = None if mode == "no_migration" else config_home.migrate_at_startup(env, True, base)
+live = config_home.config_path(env, True, base)
+live_value = json.load(open(live)).get("editor_cmd") if os.path.isfile(live) else None
+failures = config_home.verify_migration(live, step["home"], step["legacy"], step["legacy_sha256"], step["key"],
+                                        step["value"], live_value)
+now = time.time()
+report = {"report_schema": drive_ledger.REPORT_SCHEMA, "script_hash": drive_ledger.script_hash(script),
+          "started_at": now, "finished_at": now + 0.1, "finished_because": "quit", "passed": not failures,
+          "expectations": [{"id": "config_migrated", "passed": not failures, "failure_reason": "; ".join(failures)},
+                           {"id": "expect_clean", "passed": True}],
+          "steps_failed": [], "startup_diagnostics": [], "drive_diagnostics": []}
+open(os.path.splitext(script)[0] + ".report.json", "w").write(json.dumps(report))
+sys.exit(1 if failures else 0)
+'''
+
+
+def _migration_script(tmp_path):
+    path = tmp_path / "migration.json"
+    path.write_text(json.dumps([{"do": "expect", "id": "config_migrated", "check": "config_migrated", "home": "<<HOME>>",
+                                 "legacy": "<<LEGACY>>", "legacy_sha256": "<<LEGACY_SHA>>", "key": "editor_cmd",
+                                 "value": "<<MARKER>>"}]), encoding="utf-8")
+    return str(path)
+
+
+@pytest.mark.parametrize("mode, ok", [("pass", True), ("no_migration", False)])
+def test_the_migration_layer_runs_the_default_path_with_an_old_config_beside_the_program(tmp_path, monkeypatch, mode, ok):
+    monkeypatch.setenv("TSM_SRC", str(ROOT / "src"))
+    monkeypatch.setenv("STAND_IN_MODE", mode)
+    install = tmp_path / "Tokensave-Manager-v0.0.1-windows"
+    install.mkdir()
+    app = install / "stand_in.py"
+    app.write_text(STAND_IN_MIGRATING_GUI, encoding="utf-8")
+    result = fs.run_gui_migration([sys.executable, str(app)], _migration_script(tmp_path), str(tmp_path / "dist"),
+                                  workdir=str(tmp_path), install=str(install))
+    assert result.layer == fs.LAYER_GUI_MIGRATION and result.judgement.ok is ok, result.judgement.failures
+    if ok:   # the original is where it was, byte for byte, and the copy is in the scratch home only
+        assert (install / "manager-config.json").is_file()
+        assert (Path(result.work_dir) / "home" / "manager-config.json").is_file()
+
+
+def test_the_migration_layer_never_passes_a_config_override_so_it_cannot_skip_what_it_tests():
+    text = (ROOT / "src" / "helpers" / "frozen_smoke.py").read_text(encoding="utf-8")
+    body = text[text.index("def run_gui_migration"):]
+    assert 'env.pop("TOKENSAVE_MANAGER_CONFIG", None)' in body and "TOKENSAVE_MANAGER_HOME=home" in body
+
+
+def test_smoke_dist_runs_the_migration_layer_and_fails_it_when_the_gui_is_missing(tmp_path):
+    results = fs.smoke_dist(str(tmp_path), "2.6.0", str(_script(tmp_path)), workdir=str(tmp_path),
+                            migration_script=_migration_script(tmp_path))
+    layer = [r for r in results if r.layer == fs.LAYER_GUI_MIGRATION]
+    assert len(layer) == 1 and not layer[0].judgement.ok
+
+
+def test_the_shipped_migration_script_names_its_variables_and_every_required_id():
+    steps = json.loads((ROOT / "scripts" / "drive" / "frozen-smoke-migration.json").read_text(encoding="utf-8"))
+    text = json.dumps(steps)
+    for variable in ("<<HOME>>", "<<LEGACY>>", "<<LEGACY_SHA>>", "<<MARKER>>"):
+        assert variable in text
+    ids = {s.get("id") for s in steps if s.get("do") == "expect"} | {"expect_clean" for s in steps if s.get("do") == "expect_clean"}
+    assert set(fs.GUI_MIGRATION_REQUIRED_IDS) <= ids and steps[-1] == {"do": "quit"}

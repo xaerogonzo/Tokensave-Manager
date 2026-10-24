@@ -16,24 +16,27 @@ is missing from the first table. The page is a guard, not a description someone 
 | `tokensave-manager.exe` | The GUI, Nuitka onefile | runs | no |
 | `tokensave-wrapper.exe` | MCP wrapper Claude Desktop launches | runs | no |
 | `tokensave-manager-cli.exe` | The headless CLI (console subsystem) | runs | no |
-| `manager-config.json` | A **clean** first-run config; the user's settings are written here | yes | yes, it is theirs (see below) |
 | `manager-config.example.json` | Annotated template of every key | no | n/a |
 | `README.md`, `TOKENSAVE_GUIDE.md`, `CHANGELOG.md` | Documentation; the changelog is the release's notes. `README.md` and `TOKENSAVE_GUIDE.md` are also Help documents, compiled into the GUI | `CHANGELOG.md` shown in-app; the other two no | no point |
 | `LICENSE` | MIT licence text | no | no |
 | `templates/` | Baseline, gotchas, drive template, release starters; copied recursively | yes: the baseline and lessons are delivered into projects from here | no: edits are overwritten by the next release |
 | `docs/` | The Help documents and architecture references (a fixed list in `build.ps1`) | **no**: Help is compiled into the GUI exe; this is a human copy | no point: editing it changes nothing Help shows |
 
-**Not in the zip, and checked not to be:** `logs/` (a run of the app writes it; v2.1.0 shipped one)
-and a `manager-config.json` carrying any key a clean config does not have (a run adds
-`mcp_skip_warnings`). `__pycache__` is skipped when the archive is written.
+**Not in the zip, and checked not to be:** `logs/` (a run of the app writes it; v2.1.0 shipped one),
+any `manager-config.json` (clean or not), and `config-migration.json`. `__pycache__` is skipped when
+the archive is written.
 
-### The config lives beside the executable
+### The settings are not in the zip
 
-`manager-config.json` is the user's state and it is in the program folder, so unzipping a new
-release over an old folder replaces it with the clean one, and unzipping into the new versioned
-folder starts with no settings at all. Moving mutable state to a per-user data folder (with a
-tested migration from here) is the decided fix and is a prerequisite for an installer; until then
-a person carries the file across by hand. This page records the fact; it does not hide it.
+A packaged Manager keeps `manager-config.json` and its logs in `%LOCALAPPDATA%\TokenSaveManager\`
+(`src/config_home.py`), so replacing or moving the program folder never touches them. The zip used to
+carry a clean config beside the exe, which overwrote a user's real settings when it was unzipped over an
+old folder. It carries none now, and the inventory check refuses an archive that does.
+
+The first start of a build with no settings in the home **copies** the old ones across: beside the
+executable first, then the newest sibling `Tokensave-Manager-v<version>-windows` folder. The copy is
+verified, appears atomically, never overwrites, and leaves the original where it was; `config-migration.json` in the home records where it came from. A source checkout is unchanged: its
+config stays in the repository root.
 
 ### Known mismatch
 
@@ -75,9 +78,10 @@ that ship a Windows build, adopted by a developer), and it is listed so nobody a
 
 `build.ps1 -Release` refuses a working tree with uncommitted changes, stamps the version resource of
 all three executables from `constants.APP_VERSION`, then runs `scripts/frozen_smoke.py` on `dist\`
-(version resource, CLI from a foreign directory and GUI on a drive script in a first-run state, then the CLI and GUI
-again with the real tokensave and git configured, the build's own templates, and an indexed scratch repository,
-each layer its own verdict) and
+(version resource, CLI from a foreign directory and GUI on a drive script in a first-run state, then the CLI, the
+MCP wrapper (sent a real `initialize`) and the GUI again with the real tokensave and git configured, the build's
+own templates, and an indexed scratch repository, and finally the GUI as a packaged first run with an old settings
+file beside it, which must be copied into the user-data home; each layer its own verdict) and
 `scripts/make_release_zip.py`, which checks the archive's inventory and smoke-tests the **extracted** copy
 in a folder with a space in its name before it promotes the zip and its checksums.
 

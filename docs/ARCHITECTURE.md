@@ -55,6 +55,9 @@ Token Save Manager Source/
 │   │                              claude_cli_model property — defaults to
 │   │                              "claude-haiku-4-5-20251001"; null-safe (JSON null
 │   │                              returns default, not None).
+│   ├── config_home.py             Where settings live (user-data folder in a build, repo root in a checkout),
+│   │                              the old-config candidates, and the copy-verify-never-overwrite migration
+│   │                              between them. Stdlib only; constants and the wrapper import it
 │   ├── constants.py               Immutable constants: C palette, regex tables,
 │   │                              CREATE_NO_WINDOW, _ANSI, _GIT_ENV_NO_PROMPT,
 │   │                              paths (_BASE_DIR, _CONFIG_PATH, LOG_FILE).

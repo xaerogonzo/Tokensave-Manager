@@ -551,3 +551,56 @@ def test_help_corpus_fails_when_a_checkout_is_somehow_reading_a_bundle(monkeypat
     monkeypatch.setattr(help_docs, "source", lambda: help_docs.SOURCE_BUNDLE)
     ok, seen = _corpus_check()
     assert not ok and "expected 'disk'" in seen
+
+
+# ── the config_migrated check ─────────────────────────────────────────────
+
+import hashlib as _hashlib
+
+import config_home as _ch
+
+
+class _AppWithConfig(_FakeApp):
+    def __init__(self, raw):
+        super().__init__()
+        self._cfg = type("Cfg", (), {"raw": raw})()
+
+
+def _migrated_state(tmp_path):
+    install = tmp_path / "Tokensave-Manager-v2.7.0-windows"
+    install.mkdir()
+    legacy = install / _ch.CONFIG_NAME
+    legacy.write_text(json.dumps({"editor_cmd": "marker"}), encoding="utf-8")
+    sha = _hashlib.sha256(legacy.read_bytes()).hexdigest()
+    home = tmp_path / "home"
+    assert _ch.apply_plan(_ch.plan_migration(str(home / _ch.CONFIG_NAME), str(install))).imported
+    return home, legacy, sha
+
+
+def _migration_step(home, legacy, sha, value="marker"):
+    return {"check": "config_migrated", "home": str(home), "legacy": str(legacy), "legacy_sha256": sha,
+            "key": "editor_cmd", "value": value}
+
+
+def test_config_migrated_is_satisfied_when_the_process_uses_the_copy_and_the_original_is_untouched(tmp_path, monkeypatch):
+    import constants
+    home, legacy, sha = _migrated_state(tmp_path)
+    monkeypatch.setattr(constants, "_CONFIG_PATH", str(home / _ch.CONFIG_NAME))
+    ok, seen = _Driver(_AppWithConfig({"editor_cmd": "marker"}), [])._check_value(_migration_step(home, legacy, sha))
+    assert ok and "migrated into" in seen
+
+
+def test_config_migrated_fails_when_the_process_is_still_on_the_old_file(tmp_path, monkeypatch):
+    import constants
+    home, legacy, sha = _migrated_state(tmp_path)
+    monkeypatch.setattr(constants, "_CONFIG_PATH", str(legacy))
+    ok, seen = _Driver(_AppWithConfig({"editor_cmd": "marker"}), [])._check_value(_migration_step(home, legacy, sha))
+    assert not ok and "is using" in seen
+
+
+def test_config_migrated_fails_when_the_running_app_holds_something_else(tmp_path, monkeypatch):
+    import constants
+    home, legacy, sha = _migrated_state(tmp_path)
+    monkeypatch.setattr(constants, "_CONFIG_PATH", str(home / _ch.CONFIG_NAME))
+    ok, seen = _Driver(_AppWithConfig({"editor_cmd": "stale"}), [])._check_value(_migration_step(home, legacy, sha))
+    assert not ok and "running app holds" in seen
