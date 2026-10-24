@@ -131,3 +131,25 @@ def test_every_path_the_pull_request_filter_names_exists():
 def test_a_tag_build_is_never_cancelled_half_way():
     assert "pull_request" in WF["concurrency"]["cancel-in-progress"]
     assert "cancel-in-progress: true" not in TEXT
+
+
+def test_the_workflow_builds_the_installer_and_ships_it_with_its_provenance():
+    assert "./build.ps1 -Release -Installer" in dict(_runs("build"))["Build, smoke-test and package"]
+    setup = "release/Tokensave-Manager-v*-windows-setup.exe"
+    keep = next(s for s in _steps("build") if "upload-artifact" in s.get("uses", ""))
+    assert setup in keep["with"]["path"]
+    attest = next(s for s in _steps("build") if "attest-build-provenance" in s.get("uses", ""))
+    assert setup in attest["with"]["subject-path"]
+    assert setup in dict(_runs("draft"))["Create the draft release"]
+
+
+def test_inno_setup_is_pinned_by_version_and_hash_and_found_by_path():
+    install = dict(_runs("build"))["Install Inno Setup 6.7.3"]
+    assert re.search(r'\$expected = "[0-9a-f]{64}"', install) and "Get-FileHash" in install and "throw" in install
+    assert "ISCC=" in install and "6_7_3" in install
+
+
+def test_a_change_to_the_installer_triggers_the_dry_run():
+    paths = ON["pull_request"]["paths"]
+    for needed in ("packaging/**", "scripts/make_installer.py", "src/helpers/installer.py", "src/helpers/installer_drive.py"):
+        assert needed in paths, needed
