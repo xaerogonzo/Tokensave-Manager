@@ -33,10 +33,14 @@
 #           resource, CLI, GUI), then makes release\Tokensave-Manager-v<ver>-windows.zip and
 #           SHA256SUMS.txt (scripts\make_release_zip.py), which smoke-tests the extracted copy.
 #           Refuses a working tree with uncommitted changes, with no override.
+# -Installer  with -Release, also makes release\Tokensave-Manager-v<ver>-windows-setup.exe from the zip's
+#           validated contents (scripts\make_installer.py), after really installing, upgrading and
+#           uninstalling a TEST build of it. Needs Inno Setup 6. Unsigned.
 # -AllowDirty  silences the dirty-tree warning of an ordinary build. -Release ignores it.
 
 param(
     [switch]$Release,
+    [switch]$Installer,
     [switch]$AllowDirty
 )
 
@@ -46,6 +50,8 @@ $ErrorActionPreference = "Stop"
 $ROOT = $PSScriptRoot
 $DIST = "$ROOT\dist"
 $ICON = "$ROOT\icon.ico"
+
+if ($Installer -and -not $Release) { throw "-Installer is built from the release zip, so it needs -Release" }
 
 # One version number: constants.APP_VERSION, read by the script the release flow uses, so the
 # build, the tag check and the version resource below cannot each parse it differently.
@@ -366,6 +372,13 @@ if ($Release) {
     Write-Host "=== Packaging the release zip ===" -ForegroundColor Cyan
     & python "$ROOT\scripts\make_release_zip.py" --dist $DIST --version $VERSION
     if ($LASTEXITCODE -ne 0) { throw "the release zip was not made (see above)" }
+
+    if ($Installer) {
+        Write-Host ""
+        Write-Host "=== Building the installer (drives a test build first) ===" -ForegroundColor Cyan
+        & python "$ROOT\scripts\make_installer.py" --version $VERSION
+        if ($LASTEXITCODE -ne 0) { throw "the installer was not made (see above)" }
+    }
 }
 
 Write-Host ""
@@ -373,7 +386,11 @@ Write-Host "Build complete -> $DIST" -ForegroundColor Green
 Write-Host ""
 Write-Host "Before distributing:" -ForegroundColor Yellow
 if ($Release) {
-    Write-Host "  1. release\ holds the zip and SHA256SUMS.txt; try the zip, then publish (docs\GITHUB_GUIDE.md)." -ForegroundColor Yellow
+    if ($Installer) {
+        Write-Host "  1. release\ holds the zip, the setup .exe and SHA256SUMS.txt; try both, then publish (docs\GITHUB_GUIDE.md)." -ForegroundColor Yellow
+    } else {
+        Write-Host "  1. release\ holds the zip and SHA256SUMS.txt; try the zip, then publish (docs\GITHUB_GUIDE.md)." -ForegroundColor Yellow
+    }
 } else {
     Write-Host "  1. Not a release: build with -Release for a versioned, smoke-tested zip and checksums." -ForegroundColor Yellow
 }

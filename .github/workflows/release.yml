@@ -1,9 +1,11 @@
 # Build the Manager's release on a clean machine, from a tag, and DRAFT it. Nothing here publishes.
 #
-# Adapted from templates/release/release.yml.tmpl (the OpenChem Studio pattern) for a build that
-# has no installer yet: `build.ps1 -Release` freezes the three executables, judges them by running
-# them (scripts/frozen_smoke.py, all layers, on dist\ and again on the extracted zip), and writes
-# release\Tokensave-Manager-v<version>-windows.zip and SHA256SUMS.txt.
+# Adapted from templates/release/release.yml.tmpl (the OpenChem Studio pattern).
+# `build.ps1 -Release -Installer` freezes the three executables, judges them by running them
+# (scripts/frozen_smoke.py, all layers, on dist\ and again on the extracted zip), writes
+# release\Tokensave-Manager-v<version>-windows.zip, then really installs, upgrades and uninstalls a TEST
+# build of the installer and compiles the shipped setup .exe from the zip's validated contents. The
+# checksums cover both files.
 #
 #   * A `v<version>` tag push builds, attests where the files came from, and creates a DRAFT
 #     GitHub Release whose notes are that version's CHANGELOG section. A person reads it, tries
@@ -41,6 +43,11 @@ on:
     paths:
       - '.github/workflows/release.yml'
       - 'build.ps1'
+      - 'packaging/**'
+      - 'scripts/make_installer.py'
+      - 'scripts/drive_installer.py'
+      - 'src/helpers/installer.py'
+      - 'src/helpers/installer_drive.py'
       - 'src/constants.py'
       - 'scripts/release_info.py'
       - 'scripts/make_release_zip.py'
@@ -118,6 +125,23 @@ jobs:
           if ($said -notmatch '7\.16\.0') { throw "unexpected tokensave version: $said" }
           "TOKENSAVE_EXE=$($exe.FullName)" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
 
+      # Pinned by version and checked against the sha256 Inno Setup's maintainers publish (the same value
+      # winget's manifest carries). Installed per-user so it needs no elevation; `ISCC` names it so
+      # `helpers/installer.find_iscc` cannot pick up some other copy the image happens to have.
+      - name: Install Inno Setup 6.7.3
+        shell: pwsh
+        run: |
+          $url = "https://github.com/jrsoftware/issrc/releases/download/is-6_7_3/innosetup-6.7.3.exe"
+          $expected = "9c73c3bae7ed48d44112a0f48e66742c00090bdb5bef71d9d3c056c66e97b732"
+          $setup = Join-Path $env:RUNNER_TEMP "innosetup-6.7.3.exe"
+          Invoke-WebRequest -Uri $url -OutFile $setup
+          $actual = (Get-FileHash -Algorithm SHA256 $setup).Hash.ToLower()
+          if ($actual -ne $expected) { throw "Inno Setup installer hash mismatch: got $actual, expected $expected" }
+          Start-Process -FilePath $setup -ArgumentList "/VERYSILENT","/SUPPRESSMSGBOXES","/NORESTART","/CURRENTUSER" -Wait
+          $iscc = Join-Path $env:LOCALAPPDATA "Programs\Inno Setup 6\ISCC.exe"
+          if (-not (Test-Path $iscc)) { throw "Inno Setup did not install to $iscc" }
+          "ISCC=$iscc" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
+
       # The scratch repository the configured layers index needs a commit identity of its own.
       - name: Git identity for the smoke's scratch repository
         shell: pwsh
@@ -126,10 +150,12 @@ jobs:
           git config --global user.email "release-smoke@users.noreply.github.com"
 
       # The whole pipeline: freeze, check the tree, smoke-test the built app, make the zip and
-      # smoke-test its extracted copy. It refuses a dirty tree, which a fresh checkout is not.
+      # smoke-test its extracted copy, then drive a test build of the installer (install, upgrade,
+      # uninstall) and compile the shipped one from the zip. It refuses a dirty tree, which a fresh
+      # checkout is not.
       - name: Build, smoke-test and package
         shell: pwsh
-        run: ./build.ps1 -Release
+        run: ./build.ps1 -Release -Installer
 
       - name: Check the checksums of what was built
         shell: bash
@@ -144,6 +170,7 @@ jobs:
           name: release-files
           path: |
             release/Tokensave-Manager-v*-windows.zip
+            release/Tokensave-Manager-v*-windows-setup.exe
             release/SHA256SUMS.txt
           if-no-files-found: error
           retention-days: 30
@@ -154,7 +181,9 @@ jobs:
         if: github.event_name == 'push' && github.ref_type == 'tag'
         uses: actions/attest-build-provenance@4d101475d8b20a2381f78447822ac1eab6504dd8 # v4.2.2
         with:
-          subject-path: release/Tokensave-Manager-v*-windows.zip
+          subject-path: |
+            release/Tokensave-Manager-v*-windows.zip
+            release/Tokensave-Manager-v*-windows-setup.exe
 
   # A DRAFT. It is not visible to anyone but the repository's writers until a person presses
   # Publish, which is the moment to try the zip and read the notes.
@@ -216,4 +245,5 @@ jobs:
             --title "TokenSave Manager ${TAG#v}" \
             --notes-file notes.md \
             release/Tokensave-Manager-v*-windows.zip \
+            release/Tokensave-Manager-v*-windows-setup.exe \
             release/SHA256SUMS.txt

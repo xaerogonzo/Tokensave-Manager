@@ -66,6 +66,7 @@ that ship a Windows build, adopted by a developer), and it is listed so nobody a
 | `docs` | Partial | A fixed list of seven user-facing documents |
 | `manager-config.example.json` | Yes | Staged to the zip root |
 | `project-baseline.md` | No | This repository's own managed copy of the baseline; the shipped template is `templates/project-baseline.md` |
+| `packaging` | No | The Inno Setup script; compiled into the installer, which is built from the zip's contents |
 | `pyproject.toml` | No | Test configuration only |
 | `requirements-dev.txt` | No | Development dependencies |
 | `scripts` | No | Developer tools, including the release scripts themselves |
@@ -85,13 +86,31 @@ file beside it, which must be copied into the user-data home; each layer its own
 `scripts/make_release_zip.py`, which checks the archive's inventory and smoke-tests the **extracted** copy
 in a folder with a space in its name before it promotes the zip and its checksums.
 
+## The installer
+
+`Tokensave-Manager-v<version>-windows-setup.exe` is made by `build.ps1 -Release -Installer` (`scripts/make_installer.py`, Inno Setup 6) and sits beside the zip, named into the same `SHA256SUMS.txt`. It is compiled from the **validated zip's own contents**, so it holds exactly the inventory the zip check passed: the three executables, `templates/`, `docs/`, the guides and the licence, and no settings.
+
+| | Install | Upgrade | Uninstall |
+|---|---|---|---|
+| Program (`*.exe`) | per-user by default (no administrator), all-users on request | replaced in place under the same AppId | removed |
+| `templates/`, `docs/` | written | **deleted first**, so a file the new version no longer ships cannot linger | removed |
+| Settings (`manager-config.json`, `config-migration.json`) | not written; the app creates them in `%LOCALAPPDATA%\TokenSaveManager\` | never touched (they are not in the install folder) | kept; a box, unticked, removes them |
+| Logs | not written | never touched | kept; a box, unticked, removes them |
+| Projects, indexes, `~\.claude` | not touched | not touched | never touched |
+
+A silent uninstall keeps everything unless `/REMOVESETTINGS=1` and/or `/REMOVEDATA=1` is passed. Removal is confined to a folder named for the application, deletes the settings files and the `logs` folder by name, and removes the folder itself only if it is then empty, so a file a person kept there survives. It does not undo a Claude Desktop registration of `tokensave-wrapper.exe`; the uninstall form says so.
+
+**Tested by really installing it.** Before the shipped installer is compiled, `helpers/installer_drive.py` compiles a TEST build of the same script (its own AppId and data folder), and drives it per-user and silent into a folder with a space: install, the installed application's own smoke test, upgrade over it (a planted stale file must go, settings and logs must stay), and each uninstall option, a file the person kept, and a data folder not named for the application. It refuses to run if the real AppId is registered, and removes only a leftover TEST registration. Not covered: the all-users path (it asks Windows for permission, so it needs a person) and the interactive uninstall form.
+
+The installer is **not signed**: Windows SmartScreen will say "unknown publisher". The checksum and the build attestation say where the file came from, not that a publisher vouches for it.
+
 ## Building it on a clean machine
 
-`.github/workflows/release.yml` runs the same `build.ps1 -Release` on a hosted Windows runner when a
+`.github/workflows/release.yml` runs the same `build.ps1 -Release -Installer` on a hosted Windows runner when a
 `v<version>` tag is pushed, and creates a **draft** GitHub Release (zip, `SHA256SUMS.txt`, notes from the
-CHANGELOG section) after attesting where the files came from. Nothing is published until a person presses
-Publish. The runner installs tokensave 7.16.0, pinned by sha256, because the configured smoke layers need a
-real one. A pull request that touches the release path runs the build as a dry run.
+CHANGELOG section; zip and setup .exe) after attesting where the files came from. Nothing is published until a person presses
+Publish. The runner installs tokensave 7.16.0 and Inno Setup 6.7.3, each pinned by sha256 (the first because the
+configured smoke layers need a real one). A pull request that touches the release path runs the build as a dry run.
 
 The Release Wizard also creates a release when it publishes. The workflow's draft job refuses to touch a release
 that already exists, so use one path per version: let the workflow draft it, or delete the Wizard's release
