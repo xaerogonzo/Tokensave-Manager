@@ -20,6 +20,8 @@ import sys
 import types
 from html.parser import HTMLParser
 from pathlib import Path
+from urllib.parse import urlparse
+from urllib.request import url2pathname
 
 import pytest
 
@@ -278,7 +280,7 @@ def test_a_build_serves_the_page_compiled_into_it_and_never_compiles_one(monkeyp
     monkeypatch.setattr(hd, "compile_page", lambda *a, **k: pytest.fail("a build must not compile a page"))
     uri = hd.page_uri({"app_version": "9.9"}, key="k0", document="README.md")
     assert uri.endswith("#help-k0") and uri.startswith("file:")
-    path = Path(__import__("urllib.request").request.url2pathname(uri[len("file:"):].split("#")[0].lstrip("/")))
+    path = Path(url2pathname(urlparse(uri).path))
     assert path.read_text(encoding="utf-8").endswith("9.9") and not path.stat().st_mode & stat.S_IWRITE
 
 
