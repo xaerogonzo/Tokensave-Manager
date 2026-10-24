@@ -89,7 +89,7 @@ Token Save Manager Source/
 │   │                              Runs beside a real Manager through scripts/drive/run_isolated.py
 │   │                              (scratch config, no lock, no request poller, no tray).
 │   │
-│   ├── helpers/                  140 modules of pure / IO helpers — no UI deps.
+│   ├── helpers/                  141 modules of pure / IO helpers — no UI deps.
 │   │   ├── config.py              _load_config, _save_config, _migrate_config
 │   │   ├── detection.py           _detect_git/_gh/_npm/_codegraph/_claude_cli,
 │   │   │                          _root_path/_label, _version_lt
@@ -304,6 +304,9 @@ Token Save Manager Source/
 │   │   │                        documents; markdown owns WHAT TOPICS.
 │   │   ├── markdown_tk.py       Pure markdown subset -> (text, tag) spans for the
 │   │   │                        Help Text widget. Deliberately not a parser.
+│   │   ├── markdown_html.py     The same subset compiled to ONE self-contained read-only HTML page
+│   │   │                        (inline CSS, no script/image/request, CSP meta, escaped text, links
+│   │   │                        resolved or reported dead). Word-for-word parity with markdown_tk is a test
 │   │   ├── doc_grounding.py       v4 cascade Theme B1. `build_grounding_block` shells out
 │   │   │                          to `tokensave tool context/search`; `build_codegraph_block`
 │   │   │                          (v4.1) does the same for codegraph (incl. `codegraph

@@ -40,7 +40,7 @@ PLATFORM_TAG = "windows"
 REQUIRED = (
     "tokensave-manager.exe", "tokensave-wrapper.exe", "tokensave-manager-cli.exe",
     "README.md", "CHANGELOG.md", "LICENSE",
-    "templates/project-baseline.md", "docs/USER_GUIDE.md",
+    "templates/project-baseline.md", "docs/USER_GUIDE.md", "docs/help.html",
 )
 
 #: Path PARTS that may not appear anywhere (build debris).

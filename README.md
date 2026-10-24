@@ -462,7 +462,7 @@ Recommended starter prompts:
 
 - **The list is grouped by source document**, so it is visible that help and the repository's documents are the same thing
 - **Search reads section bodies, not just titles** — the question a reader actually has is usually about a word in the text. Results rank by title match, then by how often the term appears
-- **📄 Open docs** opens the underlying file in your default viewer; **🔍 Explain** streams a short LLM summary of the open topic; **🤖 Ask** hands the topic to the Ask tab
+- **📄 Open docs** opens the underlying file in your default viewer (in an installed build, **🌐 Open in browser** opens the same documents as one read-only page, at the topic you are reading); **🔍 Explain** streams a short LLM summary of the open topic; **🤖 Ask** hands the topic to the Ask tab
 - A document that cannot be read gets its own row saying so, rather than quietly shortening the list
 
 The Tool, Extension and Test Managers used to live in this tab's left nav. They are actions rather than help, and have moved to Settings → Paths & Tools (Test Manager is also on the Git tab, beside 🧪 Test Gaps).
