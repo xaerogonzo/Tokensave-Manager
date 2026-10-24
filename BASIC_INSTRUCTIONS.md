@@ -341,8 +341,13 @@ The documentation was better than the help and simply was not the help.
   read-only and cannot drift from the build. There is no fallback in either direction: a stray
   bundle in a checkout is ignored, and a build whose bundle is missing, damaged or short reports a
   `Problem` per document instead of a shorter list. The digest detects accidental damage only; it
-  rides inside the same unsigned exe. `dist\docs\` is a human copy the app does not read, and the
-  Help tab's *Open* button in a build opens a read-only copy of what the bundle holds. Frozen
+  rides inside the same unsigned exe. `dist\docs\` is a human copy the app does not read. The corpus is also compiled to ONE
+  self-contained HTML page (`helpers/markdown_html.py`: no script, no resource, escaped text, a CSP
+  meta) that rides in the same bundle with its own digest and ships as `docs\help.html`; in a build the
+  Help tab's *Open* button opens a read-only temporary copy of THAT page at the topic, in the browser,
+  with `{{placeholders}}` filled by HTML-escaped values, and falls back to a read-only copy of the
+  bundle's markdown. A build never compiles a page; a checkout opens the real file. A link into the help
+  that points at nothing stops the build, and a test holds the page and the Tk pane to the same words. Frozen
   smoke requires a `help_corpus` expectation, so a build that left the bundle out fails.
 - **The build must still ship every corpus document**, now as the human copy. `build.ps1` keeps an
   explicit list — a recursive `docs\` copy would ship dev notes to users — and
