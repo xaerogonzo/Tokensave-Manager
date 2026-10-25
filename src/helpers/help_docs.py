@@ -63,6 +63,7 @@ from __future__ import annotations
 import base64
 import dataclasses
 import hashlib
+import html
 import importlib
 import json
 import os
@@ -145,6 +146,10 @@ SOURCE_BUNDLE = "bundle"
 #: gitignored), and ignored there even if a stale copy is lying around.
 BUNDLE_MODULE = "_help_bundle"
 BUNDLE_SCHEMA = 1
+#: The compiled HTML page rides in the same generated module as its own literals (`PAGES_*`), with
+#: its own digest, so the markdown payload above keeps its shape.
+PAGES_SCHEMA = 1
+PAGE_NAME = "help.html"
 
 
 class BundleError(RuntimeError):
@@ -178,20 +183,38 @@ def encode_bundle(documents: dict) -> "tuple[int, str, str]":
     return BUNDLE_SCHEMA, hashlib.sha256(payload.encode("ascii")).hexdigest(), payload
 
 
+def encode_pages(pages: dict) -> "tuple[int, str, str]":
+    """`(schema, digest, payload)` for `{name: html}`, packed exactly as the documents are."""
+    raw = json.dumps(pages, ensure_ascii=False, sort_keys=True).encode("utf-8")
+    payload = base64.b64encode(zlib.compress(raw, 9)).decode("ascii")
+    return PAGES_SCHEMA, hashlib.sha256(payload.encode("ascii")).hexdigest(), payload
+
+
+def decode_pages(schema, digest, payload) -> dict:
+    """The `{name: html}` a bundle holds, or `BundleError` saying what is wrong."""
+    if schema != PAGES_SCHEMA:
+        raise BundleError("pages schema %r, expected %r" % (schema, PAGES_SCHEMA))
+    return _unpack(digest, payload, "pages")
+
+
 def decode_bundle(schema, digest, payload) -> dict:
     """The `{document: text}` a bundle holds, or `BundleError` saying what is wrong."""
     if schema != BUNDLE_SCHEMA:
         raise BundleError("bundle schema %r, expected %r" % (schema, BUNDLE_SCHEMA))
+    return _unpack(digest, payload, "bundle")
+
+
+def _unpack(digest, payload, what: str) -> dict:
     if not isinstance(payload, str) or not isinstance(digest, str):
-        raise BundleError("bundle fields are not text")
+        raise BundleError("%s fields are not text" % what)
     if hashlib.sha256(payload.encode("ascii", "replace")).hexdigest() != digest:
-        raise BundleError("bundle digest does not match its payload (damaged)")
+        raise BundleError("%s digest does not match its payload (damaged)" % what)
     try:
         data = json.loads(zlib.decompress(base64.b64decode(payload.encode("ascii"))).decode("utf-8"))
     except (ValueError, zlib.error) as exc:
-        raise BundleError("bundle payload cannot be decoded: %s" % exc) from exc
+        raise BundleError("%s payload cannot be decoded: %s" % (what, exc)) from exc
     if not isinstance(data, dict) or not all(isinstance(k, str) and isinstance(v, str) for k, v in data.items()):
-        raise BundleError("bundle payload is not a mapping of documents to text")
+        raise BundleError("%s payload is not a mapping of names to text" % what)
     return data
 
 
@@ -230,6 +253,7 @@ _bundle_cache: "list" = []
 def reset_cache() -> None:
     """Forget the decoded bundle. A frozen build never needs this; a test does."""
     del _bundle_cache[:]
+    del _pages_cache[:]
 
 
 def _bundle_documents() -> "tuple[dict | None, str]":
@@ -245,6 +269,27 @@ def _bundle_documents() -> "tuple[dict | None, str]":
     except BundleError as exc:
         result = (None, str(exc))
     _bundle_cache.append(result)
+    return result
+
+
+_pages_cache: "list" = []
+
+
+def _bundle_pages() -> "tuple[dict | None, str]":
+    """`(pages, reason)`: the compiled HTML the bundle holds, or None and why not. Cached."""
+    if _pages_cache:
+        return _pages_cache[0]
+    try:
+        module = _import_bundle()
+        if not hasattr(module, "PAGES_PAYLOAD"):
+            raise BundleError("this build has no compiled help page (the bundle predates it)")
+        result = (decode_pages(getattr(module, "PAGES_SCHEMA", None), getattr(module, "PAGES_DIGEST", None),
+                               getattr(module, "PAGES_PAYLOAD", None)), "")
+    except ImportError:
+        result = (None, "this build has no help bundle (%s was not compiled in)" % BUNDLE_MODULE)
+    except BundleError as exc:
+        result = (None, str(exc))
+    _pages_cache.append(result)
     return result
 
 
@@ -284,6 +329,110 @@ def viewable_path(document: str) -> "str | None":
         handle.write(text)
     os.chmod(path, stat.S_IREAD)
     return path
+
+
+# ── The compiled HTML page ────────────────────────────────────────────────
+
+def compile_page(documents: "dict | None" = None, version: str = ""):
+    """The whole corpus as one `markdown_html.Page`. The generator's job and a checkout's preview.
+
+    A link into the corpus that points at nothing (a heading that was renamed, a document that was
+    removed) stops the compile: a page that quietly drops a link is the shorter-Help failure again.
+    """
+    from helpers import markdown_html
+    page = markdown_html.build_page(source_documents() if documents is None else documents, HELP_DOCUMENTS,
+                                    title="TokenSave Manager Help", version=version)
+    if page.dead_links:
+        raise BundleError("the help page has links into the help that point at nothing: " + "; ".join(
+            "%s -> %s" % pair for pair in page.dead_links[:8]))
+    return page
+
+
+def static_values(version: str) -> dict:
+    """What `{{name}}` says in the copy shipped in the docs folder, which has no machine to ask.
+
+    Neutral descriptions, never a developer's own paths: the page is compiled on the build machine.
+    """
+    return {
+        "template_dir": "the templates folder beside the program",
+        "install_dir": "the folder TokenSave Manager is installed in",
+        "config_path": "%LOCALAPPDATA%\\TokenSaveManager\\manager-config.json",
+        "log_file": "%LOCALAPPDATA%\\TokenSaveManager\\logs",
+        "app_version": version,
+        "wrapper_path": "tokensave-wrapper.exe beside the program",
+    }
+
+
+def fill_page(page_html: str, values: dict) -> str:
+    """`substitute` for a finished page: allowlisted placeholders only, values HTML-escaped.
+
+    Escaping is the point: a path with `&` or `<` in it must not become markup in a page that is
+    opened in a browser.
+    """
+    def _one(match):
+        name = match.group(1)
+        if name not in PLACEHOLDER_KEYS:
+            return match.group(0)
+        value = values.get(name)
+        return html.escape(str(value), quote=True) if value else "unknown"
+
+    return _PLACEHOLDER.sub(_one, page_html or "")
+
+
+def page_html() -> "str | None":
+    """The compiled page, or None when there is none to show.
+
+    A build reads the page compiled INTO it and never builds one; a checkout compiles the documents
+    on disk, so an edit shows without a build step.
+    """
+    if _frozen():
+        pages, _ = _bundle_pages()
+        return None if pages is None else pages.get(PAGE_NAME)
+    try:
+        from constants import APP_VERSION
+        return compile_page(version=APP_VERSION).html
+    except (BundleError, OSError):
+        return None
+
+
+def page_problem() -> str:
+    """Why the compiled page cannot be served, or "" when it can. Empty means nothing is wrong."""
+    if not _frozen():
+        return ""
+    pages, reason = _bundle_pages()
+    if pages is None:
+        return reason
+    text = pages.get(PAGE_NAME)
+    if not text:
+        return "the help bundle has no %s" % PAGE_NAME
+    gone = [t.key for t in topics() if 'id="help-%s"' % t.key not in text]
+    return "the compiled page has no anchor for: " + ", ".join(gone[:5]) if gone else ""
+
+
+def page_uri(values: dict, key: str = "", document: str = "") -> "str | None":
+    """A `file:` URI for a READ-ONLY temporary copy of the page, at a topic or a document.
+
+    Made now, not on every topic click, and never under the docs folder beside the executable: opening that
+    would invite an edit that changes nothing Help shows. Placeholders are filled for this machine.
+    """
+    text = page_html()
+    if not text:
+        return None
+    text = fill_page(text, values)
+    folder = tempfile.mkdtemp(prefix="tokensave-manager-help-")
+    path = os.path.join(folder, PAGE_NAME)
+    with open(path, "w", encoding="utf-8", newline="") as handle:
+        handle.write(text)
+    os.chmod(path, stat.S_IREAD)
+    fragment = ""
+    if key and 'id="help-%s"' % key in text:
+        fragment = "help-" + key
+    elif document:
+        from helpers import markdown_html
+        candidate = markdown_html.doc_id(_doc_key(document))
+        fragment = candidate if 'id="%s"' % candidate in text else ""
+    from pathlib import Path
+    return Path(path).as_uri() + ("#" + fragment if fragment else "")
 
 
 def docs_directory() -> str:
@@ -558,6 +707,8 @@ class CorpusReport:
     #: Topic keys whose section could not be extracted.
     unresolved: "tuple"
     searchable: bool
+    #: Why the compiled HTML page cannot be served in a build; "" when it can (and always in a checkout).
+    page_problem: str = ""
 
 
 def corpus_report() -> CorpusReport:
@@ -573,7 +724,7 @@ def corpus_report() -> CorpusReport:
     needle = found[0].title.split()[0] if found else ""
     return CorpusReport(source(), len(HELP_DOCUMENTS) - len([p for p in problems if "duplicate" not in p.detail
                                                            and "anchor" not in p.detail]),
-                        len(found), problems, tuple(unresolved), bool(needle and search(needle)))
+                        len(found), problems, tuple(unresolved), bool(needle and search(needle)), page_problem())
 
 
 def corpus_verdict(report: CorpusReport, frozen: bool) -> "list[str]":
@@ -595,4 +746,6 @@ def corpus_verdict(report: CorpusReport, frozen: bool) -> "list[str]":
         out.append("topics with no body: %s" % ", ".join(report.unresolved[:5]))
     if not report.searchable:
         out.append("search found nothing for a word in the first topic's title")
+    if frozen and report.page_problem:
+        out.append("html page: " + report.page_problem)
     return out

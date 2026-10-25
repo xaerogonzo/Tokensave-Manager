@@ -40,6 +40,7 @@ import subprocess
 import sys
 import threading
 import tkinter as tk
+import webbrowser
 from tkinter import ttk
 from typing import TYPE_CHECKING, Callable, Optional
 
@@ -287,7 +288,7 @@ class HelpTabController:
 
         text = help_docs.substitute(markdown, self._placeholder_values())
         self._fill(render(text))
-        self._wire_footer(item.document, item.title)
+        self._wire_footer(item.document, item.title, key)
 
     def _render_problems(self) -> None:
         spans = [("Help corpus problems\n", "h1"),
@@ -311,19 +312,25 @@ class HelpTabController:
         self._help_txt.configure(state=tk.DISABLED)
         self._help_txt.yview_moveto(0)
 
-    def _open_document(self, document: str) -> None:
-        """Open a help document. In a build that is a read-only copy of what the
-        bundle holds (made now, not on every topic click), never `docs\\` beside the exe."""
+    def _open_document(self, document: str, key: str = "") -> None:
+        """Open a help document. In a build that is the compiled HTML page (a read-only
+        temporary copy, at this topic) in the default browser; if there is no page or no
+        browser, a read-only copy of the markdown the bundle holds. Never `docs\\` beside
+        the exe, and in a checkout the real file, because that is what is being edited."""
+        if help_docs.source() == help_docs.SOURCE_BUNDLE:
+            uri = help_docs.page_uri(self._placeholder_values(), key=key, document=document)
+            if uri and webbrowser.open(uri):
+                return
         path = help_docs.viewable_path(document)
         if path:
             _open_doc(path)
 
-    def _wire_footer(self, document, title: str) -> None:
+    def _wire_footer(self, document, title: str, key: str = "") -> None:
         if document and help_docs.can_view(document):
             built = help_docs.source() == help_docs.SOURCE_BUNDLE
             self._doc_btn.configure(
-                text="\U0001f4c4 Open read-only copy" if built else "\U0001f4c4 Open docs",
-                command=lambda d=document: self._open_document(d))
+                text="\U0001f310 Open in browser (read-only)" if built else "\U0001f4c4 Open docs",
+                command=lambda d=document, k=key: self._open_document(d, k))
             self._doc_btn.pack(side=tk.LEFT, padx=(0, 6))
         else:
             self._doc_btn.pack_forget()

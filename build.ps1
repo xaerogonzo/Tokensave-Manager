@@ -284,6 +284,12 @@ New-Item -ItemType Directory -Force -Path $DIST | Out-Null
 $HELP_BUNDLE = "$ROOT\src\_help_bundle.py"
 & python "$ROOT\scripts\build_help_bundle.py"
 if ($LASTEXITCODE -ne 0) { throw "the help bundle could not be built (see above); the GUI would ship with a smaller Help" }
+# The same documents compiled into ONE self-contained HTML page: the read-only way to read them
+# outside the app, shipped as docs\help.html. It is also what the Help tab opens in a build (the same
+# function builds both, so they cannot differ). A dead link into the help stops the build here.
+New-Item -ItemType Directory -Force -Path "$DIST\docs" | Out-Null
+& python "$ROOT\scripts\build_help_bundle.py" --page-out "$DIST\docs\help.html"
+if ($LASTEXITCODE -ne 0) { throw "the help page was not compiled (see above)" }
 try {
     Build-Exe "$ROOT\src\app.py" "tokensave-manager.exe" ($guiArgs + "--include-module=_help_bundle")
 } finally {

@@ -252,7 +252,7 @@ def _generator():
     return module
 
 
-def test_the_generated_module_imports_with_three_literals_and_decodes_to_the_source(tmp_path):
+def test_the_generated_module_imports_with_six_literals_and_decodes_to_the_source(tmp_path):
     out = tmp_path / "_help_bundle.py"
     assert _generator().main(["--out", str(out)]) == 0
     spec = importlib.util.spec_from_file_location("generated_bundle_probe", out)
@@ -260,9 +260,11 @@ def test_the_generated_module_imports_with_three_literals_and_decodes_to_the_sou
     spec.loader.exec_module(module)
     assert hd.decode_bundle(module.SCHEMA, module.DIGEST, module.PAYLOAD) == {
         hd._doc_key(k): v for k, v in hd.source_documents().items()}
+    pages = hd.decode_pages(module.PAGES_SCHEMA, module.PAGES_DIGEST, module.PAGES_PAYLOAD)
+    assert list(pages) == [hd.PAGE_NAME] and pages[hd.PAGE_NAME].startswith("<!doctype html>")
     assert not list(tmp_path.glob("*.tmp"))
     text = out.read_text(encoding="utf-8")
-    assert "\r" not in text and text.count("\n") == 4  # a header and three literals, no code
+    assert "\r" not in text and text.count("\n") == 7  # a header and six literals, no code
 
 
 def test_the_generator_writes_nothing_and_fails_when_a_document_is_missing(tmp_path, monkeypatch, capsys):
