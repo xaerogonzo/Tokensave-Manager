@@ -266,3 +266,202 @@ def test_a_missing_changelog_is_not_an_error(tmp_path):
     """Plenty of projects have none; the wizard must still open."""
     missing = str(tmp_path / "nope.md")
     assert _bare(_changelog_path=missing)._changelog_has_unreleased() is False
+
+
+# ── a project whose own workflow drafts the release ─────────────────────
+#
+# With `.github/workflows/release.yml` building and DRAFTING from a pushed tag, the Wizard doing
+# the build, the zip and `gh release create` as well made two sources for one version's files, and
+# `gh release create` fails on a tag the workflow has already drafted. In that mode it stops after
+# the push; every claim below is about what it will and will not do then.
+
+from pathlib import Path
+
+from dialogs import release_wizard as rw
+
+_ROOT = Path(__file__).resolve().parent.parent
+
+
+def _project_with_workflow(tmp_path, text):
+    path = tmp_path / ".github" / "workflows" / "release.yml"
+    path.parent.mkdir(parents=True)
+    path.write_text(text, encoding="utf-8")
+    return str(tmp_path)
+
+
+_DRAFTING = ("on:\n  push:\n    tags:\n      - 'v*'\njobs:\n  d:\n    steps:\n"
+             "      - run: gh release create \"$T\" --draft\n")
+
+
+def test_this_repositorys_own_release_workflow_is_one_the_wizard_hands_over_to():
+    assert rw._release_workflow_drafts(str(_ROOT)) is True
+
+
+def test_a_drafting_workflow_is_recognised(tmp_path):
+    assert rw._release_workflow_drafts(_project_with_workflow(tmp_path, _DRAFTING)) is True
+
+
+@pytest.mark.parametrize("text", [
+    _DRAFTING.replace("--draft", ""),                                  # would publish by itself
+    _DRAFTING.replace("tags:", "branches:"),                           # not triggered by a tag
+    _DRAFTING.replace("gh release create", "gh release view"),         # creates no release
+    "",
+])
+def test_a_workflow_that_does_not_draft_from_a_tag_is_not_handed_the_release(tmp_path, text):
+    assert rw._release_workflow_drafts(_project_with_workflow(tmp_path, text)) is False
+
+
+def test_no_workflow_or_an_unreadable_one_means_the_wizard_does_the_whole_job(tmp_path):
+    assert rw._release_workflow_drafts(str(tmp_path)) is False
+    path = tmp_path / ".github" / "workflows" / "release.yml"
+    path.parent.mkdir(parents=True)
+    path.write_bytes(b"\xff\xfe\x00 not utf-8 \x80")
+    assert rw._release_workflow_drafts(str(tmp_path)) is False
+
+
+def _names(dialog):
+    return [step.__name__ for step in dialog._release_steps()]
+
+
+def test_the_default_pipeline_is_unchanged_and_workflow_mode_stops_after_the_push():
+    assert _names(_bare()) == ["_pub_build", "_pub_zip", "_pub_write_notes", "_pub_patch_changelog",
+                               "_pub_stage_commit", "_pub_tag", "_pub_push", "_pub_gh_release"]
+    assert _names(_bare(_release_workflow=True)) == [
+        "_pub_check_tag", "_pub_patch_changelog", "_pub_stage_commit", "_pub_tag", "_pub_push"]
+
+
+_WORKFLOW_ORDER = ["_pub_check_tag", "_pub_patch_changelog", "_pub_stage_commit", "_pub_tag", "_pub_push"]
+
+
+def _workflow_pipeline(failing, calls):
+    dialog = _bare(_release_workflow=True)
+    for name in _WORKFLOW_ORDER + ["_pub_build", "_pub_zip", "_pub_write_notes", "_pub_gh_release"]:
+        def _step(ctx, _n=name):
+            calls.append(_n)
+            return _n != failing
+        _step.__name__ = name
+        setattr(dialog, name, _step)
+    return dialog
+
+
+def _run_worker(dialog, mocker):
+    status = mocker.patch.object(ReleaseWizardDialog, "_set_status")
+    mocker.patch.object(ReleaseWizardDialog, "_post_after")
+    dialog._app = mocker.MagicMock()
+    dialog._publish_worker("v1.0.0", "T", "notes")
+    return status
+
+
+def test_workflow_mode_never_builds_zips_or_creates_a_release(mocker):
+    calls: list = []
+    _run_worker(_workflow_pipeline(None, calls), mocker)
+    assert calls == _WORKFLOW_ORDER
+
+
+@pytest.mark.parametrize("failing", _WORKFLOW_ORDER[:-1])
+def test_in_workflow_mode_a_failure_still_stops_everything_after_it(failing, mocker):
+    calls: list = []
+    _run_worker(_workflow_pipeline(failing, calls), mocker)
+    assert calls == _WORKFLOW_ORDER[:_WORKFLOW_ORDER.index(failing) + 1]
+
+
+def test_workflow_mode_reports_a_pushed_tag_and_a_draft_never_a_published_release(mocker):
+    status = _run_worker(_workflow_pipeline(None, []), mocker)
+    said = " ".join(str(c) for c in status.call_args_list).lower()
+    assert "drafting" in said and "published" not in said
+
+
+# ── the check that keeps a doomed workflow run from starting ────────────
+
+def _check_dialog(mocker, tmp_path, *, script, result):
+    dialog = _bare(_path=str(tmp_path))
+    dialog._app = mocker.MagicMock()
+    dialog._app._shell_capture.return_value = result
+    mocker.patch.object(ReleaseWizardDialog, "_set_status")
+    fail = mocker.patch.object(ReleaseWizardDialog, "_fail")
+    if script:
+        (tmp_path / "scripts").mkdir()
+        (tmp_path / "scripts" / "release_info.py").write_text("# stand-in", encoding="utf-8")
+    return dialog, fail
+
+
+def test_a_tag_that_matches_the_version_passes_and_asks_the_projects_own_script(mocker, tmp_path):
+    dialog, fail = _check_dialog(mocker, tmp_path, script=True, result=("v2.7.0\n", 0))
+    assert dialog._pub_check_tag(_ReleaseCtx("v2.7.0", "t", "n")) is True
+    fail.assert_not_called()
+    argv = dialog._app._shell_capture.call_args[0][0]
+    assert argv[0] == "python" and argv[2:] == ["check-tag", "v2.7.0"] and argv[1].endswith("release_info.py")
+
+
+def test_a_tag_that_is_not_the_version_stops_before_anything_is_changed(mocker, tmp_path):
+    out = "release_info: tag v2.8.0 does not match the project version 2.7.0\n"
+    dialog, fail = _check_dialog(mocker, tmp_path, script=True, result=(out, 1))
+    assert dialog._pub_check_tag(_ReleaseCtx("v2.8.0", "t", "n")) is False
+    message = fail.call_args[0][0]
+    assert "not this project's version" in message and "Nothing was changed" in message
+
+
+def test_a_check_that_could_not_run_is_a_failure_never_a_pass(mocker, tmp_path):
+    dialog, fail = _check_dialog(mocker, tmp_path, script=True,
+                                 result=("Error: 'python' not found on system PATH.", 1))
+    assert dialog._pub_check_tag(_ReleaseCtx("v2.7.0", "t", "n")) is False
+    assert "Could not check" in fail.call_args[0][0] and "check-tag v2.7.0" in fail.call_args[0][0]
+
+
+def test_a_project_without_the_script_is_not_blocked_and_says_it_skipped(mocker, tmp_path):
+    dialog, fail = _check_dialog(mocker, tmp_path, script=False, result=("", 0))
+    assert dialog._pub_check_tag(_ReleaseCtx("v2.7.0", "t", "n")) is True
+    fail.assert_not_called()
+    dialog._app._shell_capture.assert_not_called()
+    assert "not checking" in dialog._app._log.call_args[0][0]
+
+
+# ── what Publish asks, and what it refuses ──────────────────────────────
+
+class _Text:
+    def get(self, *_args):
+        return "release notes"
+
+
+def _publish_dialog(mocker, *, workflow, sync, has_changelog=True):
+    dialog = _bare(_publishing=False, _release_workflow=workflow, _sync_cl_var=_Var(sync),
+                   _has_changelog=has_changelog, _frag=Collected(), _title_var=_Var(""), _notes_txt=_Text(),
+                   _run_build_var=_Var(False))
+    dialog._next_tag = lambda: "v2.7.0"
+    dialog._publish_btn = mocker.MagicMock()
+    dialog._app = mocker.MagicMock()
+    return dialog
+
+
+def test_workflow_mode_refuses_to_publish_without_the_changelog_step(mocker):
+    box = mocker.patch.object(rw, "messagebox")
+    thread = mocker.patch.object(rw.threading, "Thread")
+    _publish_dialog(mocker, workflow=True, sync=False)._on_publish()
+    assert "CHANGELOG sync is required" in box.showwarning.call_args[0][0]
+    box.askyesno.assert_not_called()
+    thread.assert_not_called()
+
+
+def test_workflow_mode_confirms_in_terms_of_a_draft_and_starts_the_worker_only_on_yes(mocker):
+    box = mocker.patch.object(rw, "messagebox")
+    thread = mocker.patch.object(rw.threading, "Thread")
+    box.askyesno.return_value = False
+    dialog = _publish_dialog(mocker, workflow=True, sync=True)
+    dialog._on_publish()
+    text = box.askyesno.call_args[0][1]
+    assert "DRAFT" in text and "builds nothing" in text and "gh release create" not in text
+    thread.assert_not_called()
+
+    box.askyesno.return_value = True
+    dialog._on_publish()
+    thread.assert_called_once()
+    assert thread.call_args.kwargs["target"] == dialog._publish_worker
+
+
+def test_the_ordinary_confirmation_is_unchanged_for_a_project_without_the_workflow(mocker):
+    box = mocker.patch.object(rw, "messagebox")
+    mocker.patch.object(rw.threading, "Thread")
+    box.askyesno.return_value = False
+    _publish_dialog(mocker, workflow=False, sync=False)._on_publish()
+    text = box.askyesno.call_args[0][1]
+    assert "gh release create" in text and "Zip dist/" in text

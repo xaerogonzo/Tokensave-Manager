@@ -117,8 +117,12 @@ CHANGELOG section; zip and setup .exe) after attesting where the files came from
 Publish. The runner installs tokensave 7.16.0 and Inno Setup 6.7.3, each pinned by sha256 (the first because the
 configured smoke layers need a real one). A pull request that touches the release path runs the build as a dry run.
 
-The Release Wizard also creates a release when it publishes. The workflow's draft job refuses to touch a release
-that already exists, so use one path per version: let the workflow draft it, or delete the Wizard's release
+The Release Wizard (Git tab) hands over to this workflow when the project has one that drafts from a tag: it
+checks the tag against the project's version (`scripts/release_info.py check-tag`), writes the CHANGELOG
+section, commits, tags and pushes, then stops. It builds nothing, zips nothing and creates no release, and
+it refuses to run with the CHANGELOG step unticked, because the workflow takes the notes from that section
+and would fail after the tag was pushed. A project without such a workflow keeps the whole pipeline. The
+workflow's draft job still refuses to touch a release that already exists (made by hand, say): delete it
 (keep the tag) and re-run the job.
 
 What this does not do: it does not sign anything (Windows SmartScreen will say "unknown publisher"), and a checksum detects a damaged

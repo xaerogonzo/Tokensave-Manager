@@ -52,6 +52,27 @@ if TYPE_CHECKING:
     from state import ManagerConfig
 
 
+#: The workflow a project may carry to build and DRAFT its releases from a pushed tag
+#: (templates/release/release.yml.tmpl; this repository's own copy is the reference).
+RELEASE_WORKFLOW = os.path.join(".github", "workflows", "release.yml")
+
+
+def _release_workflow_drafts(path: str) -> bool:
+    """Does `path` build and DRAFT its releases from a pushed tag?
+
+    A deliberately small text check: the file exists, reacts to `tags:` and creates its release
+    with `--draft`. A workflow that does not draft is not one the Wizard may hand the release to
+    (it might publish by itself, or create nothing), so the Wizard keeps doing the whole job.
+    """
+    try:
+        with open(os.path.join(path, RELEASE_WORKFLOW), encoding="utf-8") as handle:
+            text = handle.read()
+    except (OSError, UnicodeDecodeError):
+        return False
+    return (bool(re.search(r"^\s*tags:", text, re.MULTILINE))
+            and "gh release create" in text and "--draft" in text)
+
+
 @dataclasses.dataclass
 class _ReleaseCtx:
     """Shared state bus passed between _pub_* step methods in ReleaseWizardDialog."""
@@ -92,6 +113,11 @@ class ReleaseWizardDialog(UiPumpMixin, tk.Toplevel):
       • working tree clean (CHANGELOG.md is fine to be dirty — we own it)
     """
 
+    #: True when the project's own workflow builds and drafts the release from the pushed tag.
+    #: Then the Wizard stops after the push: one tag, one release, one source for its files.
+    #: A class default so a bare instance (and every older caller) keeps the whole pipeline.
+    _release_workflow = False
+
     def __init__(self, parent, path: str, cfg: "ManagerConfig"):
         super().__init__(parent)
         # Start the worker -> UI channel before anything can post to it.
@@ -122,6 +148,7 @@ class ReleaseWizardDialog(UiPumpMixin, tk.Toplevel):
         self._commits        = _commits_since(path, self._last_tag, self._cfg.git_exe)
         self._suggested_kind = _suggest_bump_kind(self._commits)
         self._build_script   = self._detect_build_script()
+        self._release_workflow = _release_workflow_drafts(path)
         self._changelog_path = os.path.join(path, "CHANGELOG.md")
         self._has_changelog  = (os.path.isfile(self._changelog_path)
                                 and self._changelog_has_unreleased())
@@ -134,7 +161,7 @@ class ReleaseWizardDialog(UiPumpMixin, tk.Toplevel):
         self._bump_var       = tk.StringVar(value=self._suggested_kind)
         self._override_var   = tk.StringVar(value="")
         self._title_var      = tk.StringVar(value="")
-        self._run_build_var  = tk.BooleanVar(value=bool(self._build_script))
+        self._run_build_var  = tk.BooleanVar(value=bool(self._build_script) and not self._release_workflow)
         self._sync_cl_var    = tk.BooleanVar(value=self._has_changelog)
         self._publishing     = False    # guard against double-clicks
 
@@ -351,6 +378,14 @@ class ReleaseWizardDialog(UiPumpMixin, tk.Toplevel):
         self._section_header(body, "4", "Build step")
         build_frame = tk.Frame(body, bg=C["base"])
         build_frame.pack(fill=tk.X, padx=(44, 20), pady=(0, 12))
+        if self._release_workflow:
+            tk.Label(build_frame,
+                     text=f"This project's release workflow ({RELEASE_WORKFLOW}) builds the release and "
+                          "creates a DRAFT on GitHub when the tag is pushed.\nThe Wizard builds nothing and "
+                          "creates no release itself; it stops after the push.",
+                     font=("Segoe UI", 9), bg=C["base"], fg=C["subtext"],
+                     justify=tk.LEFT).pack(anchor=tk.W)
+            return
 
         if self._build_script:
             cmd_preview = (
@@ -378,6 +413,12 @@ class ReleaseWizardDialog(UiPumpMixin, tk.Toplevel):
     def _build_artefact_section(self, body):
         """Step 5 — zip artefact preview label."""
         self._section_header(body, "5", "Artefact")
+        if self._release_workflow:
+            self._artefact_lbl = tk.Label(
+                body, text="Built by the release workflow on a clean machine; nothing is zipped here.",
+                font=("Segoe UI", 9), bg=C["base"], fg=C["subtext"], justify=tk.LEFT)
+            self._artefact_lbl.pack(anchor=tk.W, padx=(44, 20), pady=(0, 12))
+            return
         self._artefact_lbl = tk.Label(body, text="(will be computed at publish time)",
                                        font=("Segoe UI", 9), bg=C["base"],
                                        fg=C["subtext"], justify=tk.LEFT)
@@ -620,17 +661,39 @@ class ReleaseWizardDialog(UiPumpMixin, tk.Toplevel):
                 + "\n  ".join(self._frag.errors[:8]), parent=self)
             return
 
+        if self._release_workflow and not (self._sync_cl_var.get() and self._has_changelog):
+            messagebox.showwarning(
+                "CHANGELOG sync is required",
+                "This project's release workflow takes the release notes from the CHANGELOG section for "
+                f"{tag}, and fails after the tag is pushed if it is not there.\n\n"
+                "Tick the CHANGELOG sync step (it needs CHANGELOG.md with an [Unreleased] section).",
+                parent=self)
+            return
+
         # Confirm
-        confirm = messagebox.askyesno(
-            "Publish release",
-            f"Publish {tag} to GitHub?\n\n"
-            f"This will:\n"
-            f"  • Run the build  ({'yes' if self._run_build_var.get() else 'no'})\n"
-            f"  • Zip dist/ as the release artefact\n"
-            f"  • {'Update CHANGELOG.md, commit, ' if self._sync_cl_var.get() else ''}"
-            f"{self._fragment_consumption_note()}"
-            f"create local tag {tag}, push, then call gh release create.",
-            parent=self)
+        if self._release_workflow:
+            confirm = messagebox.askyesno(
+                "Push release tag",
+                f"Push {tag}?\n\n"
+                f"This will:\n"
+                f"  • check that {tag} matches the project's version\n"
+                f"  • {'Update CHANGELOG.md, commit, ' if self._sync_cl_var.get() else ''}"
+                f"{self._fragment_consumption_note()}"
+                f"create local tag {tag} and push.\n\n"
+                "The release workflow then builds it and creates a DRAFT release on GitHub. Nothing is "
+                "published until you press Publish there. The Wizard builds nothing and creates no release.",
+                parent=self)
+        else:
+            confirm = messagebox.askyesno(
+                "Publish release",
+                f"Publish {tag} to GitHub?\n\n"
+                f"This will:\n"
+                f"  • Run the build  ({'yes' if self._run_build_var.get() else 'no'})\n"
+                f"  • Zip dist/ as the release artefact\n"
+                f"  • {'Update CHANGELOG.md, commit, ' if self._sync_cl_var.get() else ''}"
+                f"{self._fragment_consumption_note()}"
+                f"create local tag {tag}, push, then call gh release create.",
+                parent=self)
         if not confirm:
             return
 
@@ -686,6 +749,33 @@ class ReleaseWizardDialog(UiPumpMixin, tk.Toplevel):
             pass
 
     # ── Publish pipeline step methods ─────────────────────────────────────────
+
+    def _pub_check_tag(self, ctx: "_ReleaseCtx") -> bool:
+        """Workflow mode, before anything irreversible: the tag must name the project's version.
+
+        The release workflow refuses a tag that is not `v` + the version in the source, but it runs
+        AFTER the tag is on the remote. Asking the project's own `scripts/release_info.py` first
+        keeps that failure local. A check that could not run is a failure, not a pass: "could not
+        verify" must not read as "verified".
+        """
+        script = os.path.join(self._path, "scripts", "release_info.py")
+        if not os.path.isfile(script):
+            self._app._log("  (no scripts/release_info.py: not checking the tag against the version)",
+                           C["overlay0"])
+            return True
+        self._set_status(f"Checking {ctx.tag} against the project version…", fg=C["peach"])
+        out, rc = self._app._shell_capture(["python", script, "check-tag", ctx.tag], self._path)
+        if rc == 0:
+            return True
+        if "release_info:" in out:
+            self._fail(f"{ctx.tag} is not this project's version, so the release workflow would refuse it "
+                       f"after the tag was pushed.\n\n{out.strip()[-300:]}\n\n"
+                       "Nothing was changed. Bump the version in the source, commit it, and run the Wizard again.")
+        else:
+            self._fail("Could not check the tag against the project version, so nothing was changed.\n\n"
+                       f"{out.strip()[-300:]}\n\n"
+                       f"Run it yourself: python scripts/release_info.py check-tag {ctx.tag}")
+        return False
 
     def _pub_build(self, ctx: "_ReleaseCtx") -> bool:
         """Step 1: run the optional build script. Returns False on failure."""
@@ -854,20 +944,21 @@ class ReleaseWizardDialog(UiPumpMixin, tk.Toplevel):
             return False
         return True
 
+    def _release_steps(self) -> list:
+        """The pipeline, in order. With a drafting release workflow the Wizard stops after the push:
+        building, zipping and creating the release belong to the workflow, and doing them here too
+        would make two sources for one version's files (and `gh release create` fails on a tag the
+        workflow has already drafted)."""
+        if self._release_workflow:
+            return [self._pub_check_tag, self._pub_patch_changelog, self._pub_stage_commit,
+                    self._pub_tag, self._pub_push]
+        return [self._pub_build, self._pub_zip, self._pub_write_notes, self._pub_patch_changelog,
+                self._pub_stage_commit, self._pub_tag, self._pub_push, self._pub_gh_release]
+
     def _publish_worker(self, tag: str, title: str, notes: str):
         """Sequenced publish pipeline. Runs entirely on a background thread."""
         ctx = _ReleaseCtx(tag=tag, title=title, notes=notes)
-        steps = [
-            self._pub_build,
-            self._pub_zip,
-            self._pub_write_notes,
-            self._pub_patch_changelog,
-            self._pub_stage_commit,
-            self._pub_tag,
-            self._pub_push,
-            self._pub_gh_release,
-        ]
-        for step in steps:
+        for step in self._release_steps():
             if not step(ctx):
                 return
 
@@ -879,8 +970,13 @@ class ReleaseWizardDialog(UiPumpMixin, tk.Toplevel):
                 pass
 
         # Step 10: done — refresh git tab and close wizard
-        self._app._log(f"  ✓ Release {ctx.tag} published — check GitHub!", C["green"])
-        self._set_status(f"✔ Release {ctx.tag} published.", fg=C["green"])
+        if self._release_workflow:
+            self._app._log(f"  ✓ {ctx.tag} pushed — the release workflow is building a DRAFT; "
+                           "review it on GitHub and press Publish.", C["green"])
+            self._set_status(f"✔ {ctx.tag} pushed. The workflow is drafting the release.", fg=C["green"])
+        else:
+            self._app._log(f"  ✓ Release {ctx.tag} published — check GitHub!", C["green"])
+            self._set_status(f"✔ Release {ctx.tag} published.", fg=C["green"])
         def _close():
             self._publishing = False
             self._app._git._git_end_op()

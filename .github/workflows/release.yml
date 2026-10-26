@@ -27,10 +27,10 @@
 # tokensave also by sha256. Update a pin by resolving the new tag and changing the SHA AND the
 # comment together.
 #
-# THE RELEASE WIZARD. The Wizard (Git tab) tags, pushes and runs `gh release create` itself. A tag
-# it pushes triggers this workflow too, and `draft` REFUSES to touch a release that already exists,
-# so use one path per release: the Wizard up to and including the push, then let this workflow
-# make the draft, or skip the Wizard's own publish step. See docs/RELEASE_CONTENTS.md.
+# THE RELEASE WIZARD. In a project with a workflow like this one (it drafts from a tag) the Wizard
+# stops after tagging and pushing: it builds nothing and creates no release, so this workflow is the
+# only source of the release's files. `draft` still REFUSES to touch a release that already exists.
+# See docs/RELEASE_CONTENTS.md.
 
 name: release
 
