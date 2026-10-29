@@ -121,7 +121,7 @@ The Release Wizard (Git tab) hands over to this workflow when the project has on
 checks the tag against the project's version (`scripts/release_info.py check-tag`), writes the CHANGELOG
 section, commits, tags and pushes, then stops. It builds nothing, zips nothing and creates no release, and
 it refuses to run with the CHANGELOG step unticked, because the workflow takes the notes from that section
-and would fail after the tag was pushed. A project without such a workflow keeps the whole pipeline. The
+and would fail after the tag was pushed. The same goes for notes over GitHub's 125,000-character release-body cap: the CHANGELOG section is the body, so keep it a summary and put long detail under its own heading (2.7.0 did exactly that: a short section, with the full backlog under "Full detail of this release"). A project without such a workflow keeps the whole pipeline. The
 workflow's draft job still refuses to touch a release that already exists (made by hand, say): delete it
 (keep the tag) and re-run the job.
 

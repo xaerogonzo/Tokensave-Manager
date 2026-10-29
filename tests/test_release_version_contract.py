@@ -62,3 +62,24 @@ def test_unreleased_is_not_a_version_with_notes():
 def test_the_version_source_is_where_the_script_and_the_runbook_say_it_is():
     assert info.VERSION_FILE == "src/constants.py"
     assert re.search(r'(?m)^APP_VERSION = "\d+\.\d+\.\d+"', (ROOT / "src" / "constants.py").read_text(encoding="utf-8"))
+
+
+# ── the release body cap ──────────────────────────────────────────────────
+
+def test_the_helper_and_the_standalone_script_agree_on_githubs_release_body_cap():
+    from helpers.release import RELEASE_NOTES_LIMIT
+    assert info.NOTES_LIMIT == RELEASE_NOTES_LIMIT == 125_000
+
+
+def test_notes_over_the_cap_are_refused_and_exactly_the_cap_is_not():
+    head = "# C\n\n## [1.2.3] — d\n\n"
+    ok = head + "x" * (info.NOTES_LIMIT - 1) + "\n\n## [1.2.2]\n- old\n"      # the returned text adds one newline
+    assert len(info.release_notes(ok, "1.2.3")) == info.NOTES_LIMIT
+    with pytest.raises(info.ReleaseInfoError, match="125,000"):
+        info.release_notes(ok.replace("x" * (info.NOTES_LIMIT - 1), "x" * info.NOTES_LIMIT), "1.2.3")
+
+
+def test_a_detail_section_under_its_own_heading_is_outside_the_release_notes():
+    big = "x" * (info.NOTES_LIMIT * 2)
+    text = "# C\n\n## [Unreleased]\n\n## [1.2.3] — d\n- summary\n\n## [Full detail of this release]\n%s\n\n## [1.2.2]\n- old\n" % big
+    assert info.release_notes(text, "1.2.3") == "- summary\n"

@@ -32,6 +32,11 @@ ROOT = Path(__file__).resolve().parent.parent
 TAG = re.compile(r"^v(\d+\.\d+\.\d+)$")
 
 
+#: GitHub refuses a release body longer than this many characters. Checked HERE, in seconds, because
+#: the alternative is finding out when `gh release create` fails after the tag has been pushed.
+NOTES_LIMIT = 125_000
+
+
 class ReleaseInfoError(ValueError):
     """The release cannot be cut as asked."""
 
@@ -88,6 +93,12 @@ def release_notes(changelog: str, version: str) -> str:
     text = "\n".join(body).strip()
     if not text:
         raise ReleaseInfoError(f"the '## [{version}]' section of CHANGELOG.md is empty")
+    if len(text) + 1 > NOTES_LIMIT:
+        raise ReleaseInfoError(
+            f"the '## [{version}]' section of CHANGELOG.md is {len(text) + 1:,} characters; GitHub accepts at most "
+            f"{NOTES_LIMIT:,} in a release body. Keep the release notes a summary and move the detail under its "
+            "own heading (a '## [' heading that is not this version ends this section)."
+        )
     return text + "\n"
 
 

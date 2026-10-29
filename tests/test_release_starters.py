@@ -417,3 +417,17 @@ def test_the_rendered_installer_script_compiles_with_the_real_compiler(tmp_path)
                            str(tmp_path / "packaging" / "installer.iss")], capture_output=True, text=True)
     assert done.returncode == 0, done.stdout + done.stderr
     assert (out / "DemoApp-v1.0.0-windows-x64-setup.exe").is_file()
+
+
+# ── a release body GitHub would refuse is caught in seconds ───────────────
+
+def test_notes_over_githubs_cap_are_refused_before_a_tag_exists_to_regret(tmp_path):
+    p = _project_with_version(tmp_path)
+    limit = 125_000
+    fits = "# C\n\n## [1.2.3] — d\n\n" + "x" * (limit - 1) + "\n\n## [1.2.2]\n- old\n"
+    assert _run_info(p, "notes", "v1.2.3")[0] == 0
+    (p / "CHANGELOG.md").write_text(fits, encoding="utf-8")
+    assert _run_info(p, "notes", "v1.2.3")[0] == 0                       # exactly at the cap still fits
+    (p / "CHANGELOG.md").write_text(fits.replace("x" * (limit - 1), "x" * limit), encoding="utf-8")
+    code, _, err = _run_info(p, "notes", "v1.2.3")
+    assert code == 1 and "125,000" in err and "own heading" in err
