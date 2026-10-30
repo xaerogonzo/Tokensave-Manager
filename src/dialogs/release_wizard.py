@@ -33,6 +33,7 @@ import re
 import tempfile
 import threading
 import tkinter as tk
+from pathlib import Path
 from tkinter import ttk, messagebox
 from typing import TYPE_CHECKING
 
@@ -139,23 +140,14 @@ class ReleaseWizardDialog(UiPumpMixin, tk.Toplevel):
         self.grab_set()
 
         # ── Discover state up front ─────────────────────────────────────────
-        # Sync tags from origin first so the detected "last tag" reflects any
-        # releases created remotely (e.g. legacy `gh release create` calls
-        # that never tagged locally). Silent + 5s timeout — never blocks
-        # dialog open on flaky networks.
-        _fetch_tags(path, self._cfg.git_exe)
-        self._last_tag       = _last_release_tag(path, self._cfg.git_exe)
-        self._commits        = _commits_since(path, self._last_tag, self._cfg.git_exe)
-        self._suggested_kind = _suggest_bump_kind(self._commits)
-        self._build_script   = self._detect_build_script()
-        self._release_workflow = _release_workflow_drafts(path)
-        self._changelog_path = os.path.join(path, "CHANGELOG.md")
-        self._has_changelog  = (os.path.isfile(self._changelog_path)
-                                and self._changelog_has_unreleased())
-        # Fragments (changelog.d/) are the release notes when a project has any.
-        self._frag = (cf.collect(path)
-                      if os.path.isdir(os.path.join(path, cf.FRAGMENT_DIR))
-                      else cf.Collected())
+        # Anything that fails here used to leave an EMPTY window behind (the title bar and
+        # nothing else) with the error going to stderr, because this ran outside the
+        # try/except that guards the widgets. Now it says what failed and closes.
+        try:
+            self._discover_state(path)
+        except Exception as ex:
+            self._abort_open(ex)
+            return
 
         # ── State vars ──────────────────────────────────────────────────────
         self._bump_var       = tk.StringVar(value=self._suggested_kind)
@@ -207,6 +199,41 @@ class ReleaseWizardDialog(UiPumpMixin, tk.Toplevel):
         self.geometry(f"{w}x{h}+{max(0, px)}+{max(0, py)}")
 
     # ── Discovery helpers ──────────────────────────────────────────────────
+
+    def _discover_state(self, path: str) -> None:
+        """Read what the wizard needs to know about the repository before it draws anything."""
+        # Sync tags from origin first so the detected "last tag" reflects any
+        # releases created remotely (e.g. legacy `gh release create` calls
+        # that never tagged locally). Silent + 5s timeout — never blocks
+        # dialog open on flaky networks.
+        _fetch_tags(path, self._cfg.git_exe)
+        self._last_tag       = _last_release_tag(path, self._cfg.git_exe)
+        self._commits        = _commits_since(path, self._last_tag, self._cfg.git_exe)
+        self._suggested_kind = _suggest_bump_kind(self._commits)
+        self._build_script   = self._detect_build_script()
+        self._release_workflow = _release_workflow_drafts(path)
+        self._changelog_path = os.path.join(path, "CHANGELOG.md")
+        self._has_changelog  = (os.path.isfile(self._changelog_path)
+                                and self._changelog_has_unreleased())
+        # Fragments (changelog.d/) are the release notes when a project has any. The fragment
+        # helpers take a Path: handing them the str this dialog was given raised TypeError.
+        self._frag = (cf.collect(Path(path))
+                      if os.path.isdir(os.path.join(path, cf.FRAGMENT_DIR))
+                      else cf.Collected())
+
+    def _abort_open(self, error: Exception) -> None:
+        """Tell the person why the wizard could not open, and close it instead of leaving it blank."""
+        import traceback
+        try:
+            self.grab_release()
+        except tk.TclError:
+            pass
+        messagebox.showerror(
+            "Release Wizard — could not open",
+            f"The wizard could not read this repository's release state, so nothing was changed.\n\n"
+            f"{error}\n\n{traceback.format_exc()[-800:]}",
+            parent=self._app)
+        self.destroy()
 
     def _detect_build_script(self) -> str | None:
         """Return ``build.ps1`` or ``build.bat`` if either exists in the repo

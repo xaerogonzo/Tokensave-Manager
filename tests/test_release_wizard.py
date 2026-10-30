@@ -476,3 +476,69 @@ def test_the_wizard_refuses_notes_github_would_reject_before_changing_anything(m
     assert "too long" in box.showwarning.call_args[0][0] and "125,000" in box.showwarning.call_args[0][1]
     box.askyesno.assert_not_called()
     thread.assert_not_called()
+
+
+# ── opening the real dialog ─────────────────────────────────────────────
+#
+# Every test above stands a bare instance in for the dialog, so none of them ever ran the
+# constructor. It crashed on the first real use after fragments were wired in: the fragment
+# helpers want a Path, the dialog passed a str, and because that line ran outside the try/except
+# that guards the widgets the person got an EMPTY window and no message. These build the real thing.
+
+import shutil
+import subprocess
+import types
+
+_GIT = shutil.which("git")
+
+
+def _repo_with_fragment(tmp_path, *, workflow=True):
+    def git(*args):
+        subprocess.run([_GIT, "-C", str(tmp_path), *args], check=True, capture_output=True,
+                       env={**__import__("os").environ, "GIT_CONFIG_GLOBAL": "NUL" if __import__("os").name == "nt" else "/dev/null"})
+    git("init", "-q")
+    git("config", "user.name", "t")
+    git("config", "user.email", "t@example.invalid")
+    (tmp_path / "CHANGELOG.md").write_text("# C\n\n## [Unreleased]\n", encoding="utf-8")
+    (tmp_path / "changelog.d").mkdir()
+    (tmp_path / "changelog.d" / "202601010000-thing-ab12.md").write_text(
+        "### Added\n- (x) **A thing.** Why it matters.\n", encoding="utf-8")
+    if workflow:
+        flow = tmp_path / ".github" / "workflows"
+        flow.mkdir(parents=True)
+        (flow / "release.yml").write_text(_DRAFTING, encoding="utf-8")
+    git("add", "-A")
+    git("commit", "-q", "-m", "init")
+    return str(tmp_path)
+
+
+@pytest.mark.skipif(_GIT is None, reason="needs git")
+def test_the_real_dialog_opens_on_a_repository_with_a_changelog_fragment(tk_root, tmp_path, mocker):
+    mocker.patch.object(rw, "messagebox")
+    path = _repo_with_fragment(tmp_path)
+    dialog = ReleaseWizardDialog(tk_root, path, types.SimpleNamespace(git_exe=_GIT))
+    try:
+        assert dialog.winfo_exists()
+        assert hasattr(dialog, "_body") and dialog._release_workflow is True
+        assert len(dialog._frag.folded) == 1 and not dialog._frag.errors
+        assert "A thing." in dialog._notes_txt.get("1.0", "end")
+        rw.messagebox.showerror.assert_not_called()
+    finally:
+        dialog.destroy()
+
+
+@pytest.mark.skipif(_GIT is None, reason="needs git")
+def test_a_dialog_that_cannot_read_the_repository_says_so_and_closes_instead_of_staying_blank(tk_root, tmp_path, mocker):
+    box = mocker.patch.object(rw, "messagebox")
+    mocker.patch.object(rw.cf, "collect", side_effect=RuntimeError("boom"))
+    path = _repo_with_fragment(tmp_path)
+    created = []
+    original = rw.ReleaseWizardDialog.__init__
+
+    def spy(self, *a, **k):
+        created.append(self)
+        original(self, *a, **k)
+    mocker.patch.object(rw.ReleaseWizardDialog, "__init__", spy)
+    rw.ReleaseWizardDialog(tk_root, path, types.SimpleNamespace(git_exe=_GIT))
+    assert "could not open" in box.showerror.call_args[0][0] and "boom" in box.showerror.call_args[0][1]
+    assert not created[0].winfo_exists(), "the half-built window was left on screen"
