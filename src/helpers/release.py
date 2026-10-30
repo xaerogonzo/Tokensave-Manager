@@ -325,6 +325,11 @@ def _zip_dist(dist_path: str, zip_path: str) -> str | None:
     return os.path.abspath(produced)
 
 
+#: GitHub's cap on a release body, in characters. Mirrors `scripts/release_info.NOTES_LIMIT`, which
+#: a test keeps equal: the script is standard library only and cannot import this.
+RELEASE_NOTES_LIMIT = 125_000
+
+
 def _release_basename(path: str, git_exe: str) -> str:
     """Return a clean release-artefact prefix (no spaces) for ``path``.
 

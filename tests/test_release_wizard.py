@@ -465,3 +465,14 @@ def test_the_ordinary_confirmation_is_unchanged_for_a_project_without_the_workfl
     _publish_dialog(mocker, workflow=False, sync=False)._on_publish()
     text = box.askyesno.call_args[0][1]
     assert "gh release create" in text and "Zip dist/" in text
+
+
+def test_the_wizard_refuses_notes_github_would_reject_before_changing_anything(mocker):
+    box = mocker.patch.object(rw, "messagebox")
+    thread = mocker.patch.object(rw.threading, "Thread")
+    dialog = _publish_dialog(mocker, workflow=True, sync=True)
+    dialog._notes_txt = type("T", (), {"get": lambda self, *a: "x" * (rw.RELEASE_NOTES_LIMIT + 1)})()
+    dialog._on_publish()
+    assert "too long" in box.showwarning.call_args[0][0] and "125,000" in box.showwarning.call_args[0][1]
+    box.askyesno.assert_not_called()
+    thread.assert_not_called()

@@ -41,7 +41,7 @@ from theme import UiPumpMixin, bind_mousewheel
 from helpers.release import (
     _release_basename, _last_release_tag, _commits_since,
     _suggest_bump_kind, _bump_version,
-    _classify_commits_for_changelog, _render_release_notes,
+    _classify_commits_for_changelog, _render_release_notes, RELEASE_NOTES_LIMIT,
     _zip_dist, _fmt_size,
 )
 from helpers.changelog_patch import insert_changelog_release
@@ -652,6 +652,15 @@ class ReleaseWizardDialog(UiPumpMixin, tk.Toplevel):
             messagebox.showwarning("Notes required",
                 "Release notes cannot be empty. Click 🔄 Regenerate or edit "
                 "the textarea.", parent=self)
+            return
+
+        if len(notes) > RELEASE_NOTES_LIMIT:
+            messagebox.showwarning(
+                "Release notes are too long",
+                f"The notes are {len(notes):,} characters; GitHub accepts at most {RELEASE_NOTES_LIMIT:,} in a "
+                "release body, and refuses the release after the tag has been pushed. Nothing was changed.\n\n"
+                "Shorten them: keep a summary and move the detail elsewhere in CHANGELOG.md.",
+                parent=self)
             return
 
         if self._frag.errors:
