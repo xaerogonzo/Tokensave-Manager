@@ -114,6 +114,13 @@ class AgentCLISpec:
     config_key_model: str
     default_model: str
     dir_binaries: tuple = ()
+    #: Flags a headless one-shot run needs before it will start at all. Cursor
+    #: stops at a "Workspace Trust Required" prompt otherwise (measured).
+    trust_args: tuple = ()
+    #: Flags that make a one-shot run unable to edit files or run commands. Empty
+    #: means "no way established to enforce it", which is NOT the same as "not
+    #: needed": the caller can ask `read_only_args` and say so honestly.
+    read_only_args: tuple = ()
 
     def probe_names_for_dirs(self) -> tuple:
         """Binary names to look for inside ``extra_dirs``."""
@@ -144,9 +151,14 @@ CURSOR = AgentCLISpec(
     id="cursor",
     label="Cursor Agent CLI",
     binaries=("cursor-agent.cmd", "cursor-agent.exe", "cursor-agent"),
-    # The Windows installer (`irm 'https://cursor.com/install?win32=true'`)
-    # writes to ~/.local/bin, NOT ~/.cursor/bin.
-    extra_dirs=(r"%USERPROFILE%\.local\bin", "~/.local/bin"),
+    # Measured 2026-10-31 (agent 2026.10.22): the Windows installer
+    # (`irm 'https://cursor.com/install?win32=true'`) writes agent.cmd AND
+    # cursor-agent.cmd to %LOCALAPPDATA%\cursor-agent and adds that folder to
+    # the USER path - which only reaches processes started afterwards, so a
+    # Manager launched earlier must find it here. ~/.local/bin is kept for
+    # older installs and other platforms.
+    extra_dirs=(r"%LOCALAPPDATA%\cursor-agent",
+                r"%USERPROFILE%\.local\bin", "~/.local/bin"),
     dir_binaries=("cursor-agent.cmd", "cursor-agent.exe", "cursor-agent",
                   "agent.cmd", "agent.exe", "agent"),
     print_args=("-p", "--output-format", "text"),
@@ -154,15 +166,20 @@ CURSOR = AgentCLISpec(
     # Cursor has no --append-system-prompt equivalent.
     system_prompt_mode=SYSTEM_PROMPT_PREPEND,
     system_flag="",
-    # Cursor's docs describe the prompt as a positional argument and say
-    # nothing about stdin. Assumed argv until measured against a live install;
-    # flip to TRANSPORT_STDIN once `echo hi | cursor-agent -p` is confirmed.
-    prompt_transport=TRANSPORT_ARGV,
+    # Measured 2026-10-31: `echo <prompt> | agent -p` is read from stdin (the
+    # reply carried a unique token). Judged on the reply, not on an auth error,
+    # which arrives before the prompt is parsed.
+    prompt_transport=TRANSPORT_STDIN,
     interactive=INTERACTIVE_SUPPORTED,
     config_key_exe="cursor_cli_exe",
     config_key_model="cursor_cli_model",
     # Empty: let Cursor pick. Claude's Haiku id is not a valid Cursor model.
     default_model="",
+    # `-p` alone "has access to all tools, including write and shell"; the
+    # Manager's captured calls want text back, so they run in ask mode, which
+    # was measured to work together with -p.
+    trust_args=("--trust",),
+    read_only_args=("--mode", "ask"),
 )
 
 AGENT_CLIS: dict = {CLAUDE.id: CLAUDE, CURSOR.id: CURSOR}
@@ -279,16 +296,23 @@ def build_print_argv(
     prompt: str,
     system_prompt: str = "",
     model: str = "",
+    read_only: bool = True,
 ) -> tuple:
     """Assemble the one-shot print invocation.
 
     Returns ``(argv, stdin_text, err)``. ``stdin_text`` is None when the agent
     carries its prompt in argv. A non-empty ``err`` means do not spawn.
+
+    ``read_only`` defaults to True because every caller here wants text back,
+    not an edit; an agent whose row declares no ``read_only_args`` simply has
+    nothing to add (its enforcement is not established, not absent).
     """
     if not exe:
         return [], None, f"{spec.label} is not configured."
 
-    argv = [exe, *spec.print_args]
+    argv = [exe, *spec.print_args, *spec.trust_args]
+    if read_only:
+        argv += spec.read_only_args
     if model:
         argv += [spec.model_flag, model]
 

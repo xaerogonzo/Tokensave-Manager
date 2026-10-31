@@ -50,13 +50,15 @@ re-create the cascade the table replaced.
 | Capability | Claude Code | Cursor Agent |
 |---|---|---|
 | `print_args` | `--print` | `-p --output-format text` |
-| `prompt_transport` | `stdin` | `argv` (see budgets) |
+| `trust_args` | none | `--trust` (headless stops at "Workspace Trust Required" without it) |
+| `read_only_args` | none established | `--mode ask` (`-p` alone can write files and run shell) |
+| `prompt_transport` | `stdin` | `stdin` (measured 2026-10-31; the argv budgets below still guard any argv-only agent) |
 | `system_prompt_mode` | `native` (`--append-system-prompt`) | `prepend` |
 | `model_flag` | `--model` | `--model` |
 | `interactive` | supported | supported |
 | default model | `claude-haiku-4-5-20251001` | `""` (let Cursor choose) |
-| binaries probed on PATH | `claude.cmd`, `claude` | `cursor-agent.{cmd,exe}`, `cursor-agent` |
-| extra install dirs | `%APPDATA%\npm` | `~/.local/bin` |
+| binaries probed on PATH | `claude.cmd`, `claude` | `cursor-agent.{cmd,exe}`, `cursor-agent` (never a bare `agent`) |
+| extra install dirs | `%APPDATA%\npm` | `%LOCALAPPDATA%\cursor-agent` (current installer), `~/.local/bin` |
 
 Three runners, deliberately NOT derived from one another: `call_print`
 (captured one-shot), `spawn` (terminal **with** an instruction) and
@@ -86,7 +88,7 @@ structures is invisible until their output quality diverges and nobody can say
 why. The fallback **never** fires for a `native` agent — Claude keeps using its
 flag, and prepending as well would duplicate the instructions.
 
-**Cursor carries the prompt in argv, so it has a size budget.** Claude uses
+**An argv-transport agent has a size budget.** (Cursor was one until it was measured to read stdin; the guard stays for the next agent that is.) Claude uses
 stdin precisely to dodge Windows argv mangling, and this manager's prompts are
 routinely multi-KB. The budget belongs to the **runner**, not the agent, because
 the two routes reach the OS differently:
@@ -104,7 +106,23 @@ a POSIX `ARG_MAX` ceiling would invent a failure the platform does not have.
 
 ### Verification status
 
-**Every Cursor path in this manager is fixture-verified, not live-verified.**
+**Live-verified 2026-10-31** against `agent` 2026.10.22-27dcf5f on the machine this was built on (installer, login, then headless turns with `cursor-grok-4.5-low`, the one model family this account's plan allowed):
+
+| Fact | Measured |
+|---|---|
+| Install location | `%LOCALAPPDATA%\cursor-agent\{agent,cursor-agent}.cmd`; nothing in `~/.local/bin`; the folder is added to the USER path, so a process started earlier does not see it |
+| stdin prompt with `-p` | accepted; the reply carried a unique token. An auth error would NOT have proved it (it arrives before parsing) |
+| `--mode ask` with `-p` | works |
+| headless trust | `-p` needs `--trust` or it stops at a prompt |
+| `--output-format json` | carries `usage` (input, output, cache tokens) |
+| models | `agent --list-models` / `agent models` need login; a listed model can still be refused by plan ("GPT-5.4 Nano is not included in your weekly usage") |
+| MCP | `.cursor/mcp.json` is seen; the server shows `needs approval` until `agent mcp enable tokensave`; `agent mcp list-tools tokensave` lists 12 tools |
+| MCP in a headless turn | needs `--approve-mcps` (tools visible) AND `--force` (per-call approval); with `--mode ask` the turn stays read-only. A headless tool call then answered from the worktree's own index |
+| worktrees | the CLI has `-w/--worktree` and `--worktree-base` |
+
+Still **fixture-verified only**: everything below the next paragraph.
+
+**Every other Cursor path in this manager is fixture-verified, not live-verified.**
 Cursor was not installed on the machine this was built on, and there is no
 Cursor subscription on the account. Those are two different blockers, and they
 gate different things, so the open items are split by what each actually needs.
