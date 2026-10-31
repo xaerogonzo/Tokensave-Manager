@@ -53,6 +53,14 @@ if TYPE_CHECKING:
     from state import ManagerConfig
 
 
+#: What the Artefact step says when the project's workflow, not this dialog, makes the release files.
+WORKFLOW_ARTEFACT_NOTE = ("Built by the release workflow on a clean machine; nothing is built or zipped here.")
+
+#: Under the Title field in that mode: the title is not the release's title.
+WORKFLOW_TITLE_NOTE = ("The release workflow titles the release itself. This text only becomes the note on "
+                       "the git tag.")
+
+
 #: The workflow a project may carry to build and DRAFT its releases from a pushed tag
 #: (templates/release/release.yml.tmpl; this repository's own copy is the reference).
 RELEASE_WORKFLOW = os.path.join(".github", "workflows", "release.yml")
@@ -359,7 +367,11 @@ class ReleaseWizardDialog(UiPumpMixin, tk.Toplevel):
         """Step 2 — title entry."""
         self._section_header(body, "2", "Title")
         ttk.Entry(body, textvariable=self._title_var, font=("Segoe UI", 10)
-                  ).pack(fill=tk.X, padx=(44, 20), pady=(0, 12))
+                  ).pack(fill=tk.X, padx=(44, 20), pady=(0, 12 if not self._release_workflow else 2))
+        if self._release_workflow:
+            tk.Label(body, text=WORKFLOW_TITLE_NOTE, font=("Segoe UI", 8), bg=C["base"],
+                     fg=C["overlay0"], justify=tk.LEFT, wraplength=560
+                     ).pack(anchor=tk.W, padx=(44, 20), pady=(0, 12))
 
     def _build_notes_section(self, body):
         """Step 3 — helper text + regenerate/copy buttons + notes textarea."""
@@ -440,12 +452,6 @@ class ReleaseWizardDialog(UiPumpMixin, tk.Toplevel):
     def _build_artefact_section(self, body):
         """Step 5 — zip artefact preview label."""
         self._section_header(body, "5", "Artefact")
-        if self._release_workflow:
-            self._artefact_lbl = tk.Label(
-                body, text="Built by the release workflow on a clean machine; nothing is zipped here.",
-                font=("Segoe UI", 9), bg=C["base"], fg=C["subtext"], justify=tk.LEFT)
-            self._artefact_lbl.pack(anchor=tk.W, padx=(44, 20), pady=(0, 12))
-            return
         self._artefact_lbl = tk.Label(body, text="(will be computed at publish time)",
                                        font=("Segoe UI", 9), bg=C["base"],
                                        fg=C["subtext"], justify=tk.LEFT)
@@ -542,6 +548,11 @@ class ReleaseWizardDialog(UiPumpMixin, tk.Toplevel):
     def _refresh_title(self):
         # Default title: "v1.0.4 — <first non-summary heading or top item>".
         tag = self._next_tag()
+        if self._release_workflow:
+            # A commit subject cut at 60 characters is a poor title, and here it is not the release's
+            # title anyway (the workflow sets that); it only becomes the tag's note.
+            self._title_var.set(f"Release {tag}")
+            return
         first = ""
         sections = _classify_commits_for_changelog(self._commits)
         for sec in ("Breaking", "Added", "Fixed", "Changed", "Docs", "Other"):
@@ -587,6 +598,12 @@ class ReleaseWizardDialog(UiPumpMixin, tk.Toplevel):
         the manager's own dist/ which was misleading. Sizes use `_fmt_size`
         so a 12 KB file shows as `12 KB`, not `0.0 MB`.
         """
+        if self._release_workflow:
+            # The refresh runs on every version change, so this has to live HERE: a one-time label
+            # set while building the section was overwritten with a listing of the local dist/
+            # (which in workflow mode is not what gets released) the first time the tag changed.
+            self._artefact_lbl.config(text=WORKFLOW_ARTEFACT_NOTE)
+            return
         dist_dir = os.path.join(self._path, "dist")
         tag = self._next_tag()
         zip_name  = f"{self._release_basename}-{tag}-windows.zip"

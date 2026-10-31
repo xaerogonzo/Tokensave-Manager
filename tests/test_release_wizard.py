@@ -542,3 +542,88 @@ def test_a_dialog_that_cannot_read_the_repository_says_so_and_closes_instead_of_
     rw.ReleaseWizardDialog(tk_root, path, types.SimpleNamespace(git_exe=_GIT))
     assert "could not open" in box.showerror.call_args[0][0] and "boom" in box.showerror.call_args[0][1]
     assert not created[0].winfo_exists(), "the half-built window was left on screen"
+
+
+# ── what the title and artefact steps say in workflow mode ──────────────
+
+class _SettableVar(_Var):
+    def set(self, value):
+        self._value = value
+
+
+def test_the_default_title_in_workflow_mode_is_plain_and_never_a_cut_commit_subject():
+    commits = [{"subject": "feat(release): the Wizard hands over to a project's drafting release workflow", "body": ""}]
+    plain = _bare(_release_workflow=True, _title_var=_SettableVar(""), _commits=commits)
+    plain._next_tag = lambda: "v2.7.0"
+    plain._refresh_title()
+    assert plain._title_var.get() == "Release v2.7.0"
+
+    ordinary = _bare(_release_workflow=False, _title_var=_SettableVar(""), _commits=commits)
+    ordinary._next_tag = lambda: "v2.7.0"
+    ordinary._refresh_title()
+    assert ordinary._title_var.get().startswith("v2.7.0 — ")            # the ordinary hint is unchanged
+
+
+class _Label:
+    def __init__(self):
+        self.text = "(will be computed at publish time)"
+
+    def config(self, **kw):
+        self.text = kw.get("text", self.text)
+
+
+def test_workflow_mode_never_lists_the_local_dist_as_the_artefact(tmp_path):
+    (tmp_path / "dist").mkdir()
+    (tmp_path / "dist" / "tokensave-manager.exe").write_bytes(b"MZ" * 10)
+    (tmp_path / "dist" / "manager-config.json").write_text("{}", encoding="utf-8")
+    dialog = _bare(_release_workflow=True, _path=str(tmp_path), _artefact_lbl=_Label())
+    dialog._next_tag = lambda: "v2.7.0"
+    dialog._refresh_artefact_preview()
+    assert dialog._artefact_lbl.text == rw.WORKFLOW_ARTEFACT_NOTE
+    assert "tokensave-manager.exe" not in dialog._artefact_lbl.text and "manager-config" not in dialog._artefact_lbl.text
+
+
+def _label_texts(widget):
+    """Every text a widget and its descendants display."""
+    found = []
+    try:
+        found.append(str(widget.cget("text")))
+    except tk.TclError:
+        pass
+    for child in widget.winfo_children():
+        found += _label_texts(child)
+    return found
+
+
+@pytest.mark.skipif(_GIT is None, reason="needs git")
+def test_the_real_dialog_keeps_saying_so_after_the_version_changes(tk_root, tmp_path, mocker):
+    """The artefact label was set once while building the section and overwritten by the first
+    version change with a listing of dist/. The refresh is what has to know."""
+    mocker.patch.object(rw, "messagebox")
+    path = _repo_with_fragment(tmp_path)
+    (tmp_path / "dist").mkdir()
+    (tmp_path / "dist" / "tokensave-manager.exe").write_bytes(b"MZ" * 10)
+    dialog = ReleaseWizardDialog(tk_root, path, types.SimpleNamespace(git_exe=_GIT))
+    try:
+        assert dialog._artefact_lbl.cget("text") == rw.WORKFLOW_ARTEFACT_NOTE
+        dialog._override_var.set("v9.9.9")
+        dialog._refresh_resolved_tag()
+        assert dialog._artefact_lbl.cget("text") == rw.WORKFLOW_ARTEFACT_NOTE
+        assert dialog._title_var.get() == "Release v9.9.9"
+        assert rw.WORKFLOW_TITLE_NOTE in _label_texts(dialog)       # the Title step says what it is for
+    finally:
+        dialog.destroy()
+
+
+@pytest.mark.skipif(_GIT is None, reason="needs git")
+def test_a_project_without_the_workflow_keeps_its_artefact_listing_and_its_title_hint(tk_root, tmp_path, mocker):
+    mocker.patch.object(rw, "messagebox")
+    path = _repo_with_fragment(tmp_path, workflow=False)
+    (tmp_path / "dist").mkdir()
+    (tmp_path / "dist" / "tokensave-manager.exe").write_bytes(b"MZ" * 10)
+    dialog = ReleaseWizardDialog(tk_root, path, types.SimpleNamespace(git_exe=_GIT))
+    try:
+        assert "tokensave-manager.exe" in dialog._artefact_lbl.cget("text")
+        assert not dialog._title_var.get().startswith("Release ")
+    finally:
+        dialog.destroy()
