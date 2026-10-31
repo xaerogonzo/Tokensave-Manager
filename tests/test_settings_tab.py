@@ -22,6 +22,8 @@ no PATH probing or subprocess spawns happen during a build.
 """
 from __future__ import annotations
 
+import types
+
 import pytest
 
 tk = pytest.importorskip("tkinter")
@@ -491,3 +493,75 @@ def test_the_instructions_button_calls_the_injected_opener(tk_root, mock_config,
         open_instructions=lambda: opened.append(True))
     ctl._open_instructions_panel()
     assert opened == [True]
+
+
+# ── Agent per feature ───────────────────────────────────────────────────────
+
+def test_a_config_without_overrides_gains_no_key_on_save(tk_root, mock_config, mocker):
+    """Opening and saving Settings must not migrate an existing install."""
+    assert "agent_overrides" not in mock_config.raw
+    _build(tk_root, mock_config, mocker)._save()
+    assert "agent_overrides" not in mock_config.raw
+
+
+def test_overrides_survive_a_save_unchanged(tk_root, mock_config, mocker):
+    mock_config.raw["agent_overrides"] = {
+        "commit_message": "cursor",
+        # Not a feature this build lists: carried through, not dropped.
+        "legacy_feature": "claude",
+    }
+    _build(tk_root, mock_config, mocker)._save()
+    assert mock_config.raw["agent_overrides"] == {
+        "commit_message": "cursor", "legacy_feature": "claude"}
+
+
+def test_an_unrecognised_stored_agent_is_shown_and_kept_not_reset_to_default(
+        tk_root, mock_config, mocker):
+    """Displaying it as 'inherit' would make the next Save erase it."""
+    mock_config.raw["agent_overrides"] = {"commit_message": "codex"}
+    _build(tk_root, mock_config, mocker)._save()
+    assert mock_config.raw["agent_overrides"] == {"commit_message": "codex"}
+
+
+def _stub_section(choices):
+    """An AISection with only the per-feature variables set."""
+    from dialogs.settings_ai import AISection
+    from helpers.agent_cli import FEATURES, INHERIT
+    stub = types.SimpleNamespace()
+    for fid, _label in FEATURES:
+        value = choices.get(fid, INHERIT)
+        setattr(stub, "_var_override_" + fid,
+                types.SimpleNamespace(get=lambda v=value: v))
+    return AISection._save_agent_overrides, stub
+
+
+def test_choosing_inherit_removes_the_stored_override():
+    save, stub = _stub_section({})            # every row left on inherit
+    raw = {"agent_overrides": {"commit_message": "cursor"}}
+    save(stub, raw)
+    assert "agent_overrides" not in raw
+
+
+def test_only_features_that_differ_from_the_default_are_stored():
+    save, stub = _stub_section({"review": "cursor"})
+    raw = {}
+    save(stub, raw)
+    assert raw["agent_overrides"] == {"review": "cursor"}
+
+
+def test_a_malformed_stored_table_is_replaced_by_what_the_page_shows():
+    save, stub = _stub_section({"ask": "cursor"})
+    raw = {"agent_overrides": ["nonsense"]}
+    save(stub, raw)
+    assert raw["agent_overrides"] == {"ask": "cursor"}
+
+
+def test_saved_overrides_are_what_the_resolver_reads(tk_root, mock_config, mocker):
+    mock_config.raw.update({"agent_cli": "claude",
+                            "agent_overrides": {"review": "cursor"},
+                            "cursor_cli_exe": "C:/x/cursor-agent.exe"})
+    _build(tk_root, mock_config, mocker)._save()
+    from state import ManagerConfig
+    cfg = ManagerConfig(raw=dict(mock_config.raw))
+    assert cfg.resolve_agent_cli("review").spec.id == "cursor"
+    assert cfg.resolve_agent_cli("ask").spec.id == "claude"

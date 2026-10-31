@@ -10,6 +10,7 @@ import os
 from types import SimpleNamespace
 
 from helpers.agent_cli import resolve as agent_cli_resolve
+from helpers.agent_cli import resolve_for_feature
 
 import pytest
 import tkinter as tk
@@ -41,8 +42,10 @@ def _make_ctl(tk_root, project_path=None, llm_cfg=None, enable_grounding=False, 
     # Delegate to the REAL resolver rather than hand-rolling a verdict: a
     # double that answers "ok" to everything would hide exactly the
     # unknown-agent and unavailable cases the Ask tab now has to render.
-    cfg.resolve_agent_cli = lambda: agent_cli_resolve(
-        agent, lambda spec: getattr(cfg, spec.config_key_exe, ""))
+    lookup = lambda spec: getattr(cfg, spec.config_key_exe, "")   # noqa: E731
+    cfg.resolve_agent_cli = lambda feature="": (
+        agent_cli_resolve(agent, lookup) if not feature
+        else resolve_for_feature(agent, None, feature, lookup))
     cfg.agent_model_for = lambda spec: ""
 
     get_path = lambda: project_path  # noqa: E731

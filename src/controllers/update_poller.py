@@ -412,8 +412,8 @@ class UpdatePollerController:
         btn_row.pack(fill=tk.X, padx=10, pady=(0, 10))
 
         # Determine which backends are available
-        from helpers.agent_cli import resolve_from
-        agent = resolve_from(self._cfg)
+        from helpers.agent_cli import FEATURE_INTEGRATION_AUDIT, resolve_from
+        agent = resolve_from(self._cfg, FEATURE_INTEGRATION_AUDIT)
         has_cli = agent.ok
         raw = self._cfg.raw or {}
         llm_cfg = raw.get("ask_tab_llm") or raw.get("commit_message_llm") or {}
@@ -642,9 +642,9 @@ class UpdatePollerController:
 
         # Import on main thread — prevents import-lock deadlock in worker
         if mode == "claude_cli":
-            from helpers.agent_cli import (call_print, model_from,
-                                           resolve_from)
-            _agent = resolve_from(self._cfg)
+            from helpers.agent_cli import (FEATURE_INTEGRATION_AUDIT, call_print,
+                                           model_from, resolve_from)
+            _agent = resolve_from(self._cfg, FEATURE_INTEGRATION_AUDIT)
             # Adapter: the LLM branch's _call_fn takes the exe first,
             # the registry runner takes (spec, exe). Keeping one call
             # shape below is worth this one-line shim.

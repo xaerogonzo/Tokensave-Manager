@@ -1194,9 +1194,9 @@ def _dispatch(effective_backend: str, cfg, system_prompt: str,
 
 def _resolve_backend(backend: str, cfg) -> "str | None":
     """Return the concrete backend to use, or None if nothing is configured."""
-    from helpers.agent_cli import resolve_from
+    from helpers.agent_cli import FEATURE_TEST_GENERATION, resolve_from
     if backend == "auto":
-        if resolve_from(cfg).ok:
+        if resolve_from(cfg, FEATURE_TEST_GENERATION).ok:
             return "claude_cli"
         # Fall back to LLM if any provider is configured
         llm_cfg = cfg.raw.get("commit_message_llm", {})
@@ -1206,7 +1206,7 @@ def _resolve_backend(backend: str, cfg) -> "str | None":
     if backend == "claude_cli":
         # The persisted value still says "claude_cli"; what it resolves to is
         # whichever agent CLI the user selected.
-        return "claude_cli" if resolve_from(cfg).ok else None
+        return "claude_cli" if resolve_from(cfg, FEATURE_TEST_GENERATION).ok else None
     if backend == "llm":
         llm_cfg = cfg.raw.get("commit_message_llm", {})
         if llm_cfg.get("provider") or llm_cfg.get("api_key"):
@@ -1235,9 +1235,10 @@ def _dispatch_claude_cli(cfg, system_prompt: str, user_prompt: str,
     + example) blows ("The command line is too long"). stdin has no such limit, and
     for a one-shot generate the leading-preamble placement is equivalent.
     """
-    from helpers.agent_cli import (call_print, get_last_cli_error,
-                                   model_from, resolve_from)
-    res = resolve_from(cfg)
+    from helpers.agent_cli import (FEATURE_TEST_GENERATION, call_print,
+                                   get_last_cli_error, model_from,
+                                   resolve_from)
+    res = resolve_from(cfg, FEATURE_TEST_GENERATION)
     if not res.ok:
         return None, res.error_message()
     combined = f"{system_prompt}\n\n{user_prompt}" if system_prompt else user_prompt

@@ -33,7 +33,7 @@ from collections import Counter
 
 from constants import CREATE_NO_WINDOW
 from helpers.llm import _build_llm_prompt, _call_llm
-from helpers.agent_cli import CLAUDE, call_print
+from helpers.agent_cli import CLAUDE, FEATURE_COMMIT_MESSAGE, call_print
 
 
 # ── v4.2 grounding helpers ───────────────────────────────────────────────────
@@ -1170,7 +1170,7 @@ def _resolve_strategy_inputs(cfg: dict, mc, repo_path: str,
     # the pre-Cursor behaviour: Claude, read straight from the dict.
     agent_spec = CLAUDE
     if mc is not None:
-        _res = mc.resolve_agent_cli()
+        _res = mc.resolve_agent_cli(FEATURE_COMMIT_MESSAGE)
         # An unknown agent id resolves to no spec at all. Silently running
         # Claude there would generate a commit message with an agent the
         # settings file says is not selected, so skip the CLI strategy and

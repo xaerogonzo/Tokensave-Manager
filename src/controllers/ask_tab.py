@@ -358,7 +358,8 @@ class AskTabController:
         cfg = ((raw.get("ask_tab_llm") or raw.get("commit_message_llm") or {})
                if isinstance(raw, dict) else {})
         if cfg.get("provider") == "claude_cli":
-            _res = self._cfg.resolve_agent_cli()
+            from helpers.agent_cli import FEATURE_ASK
+            _res = self._cfg.resolve_agent_cli(FEATURE_ASK)
             intro = (
                 f"Ready ({_res.label} mode). Ask anything — responses come "
                 f"from the agent CLI in print mode.\n"
@@ -466,9 +467,9 @@ class AskTabController:
         isn't needed. The full conversation history is serialised as plain text
         context, with the current user message sent cleanly as the final turn.
         """
-        from helpers.agent_cli import call_print
+        from helpers.agent_cli import FEATURE_ASK, call_print
 
-        res = self._cfg.resolve_agent_cli()
+        res = self._cfg.resolve_agent_cli(FEATURE_ASK)
         if not res.ok:
             # error_message() distinguishes "not installed" from "unknown
             # agent in config" — two faults with two different fixes.

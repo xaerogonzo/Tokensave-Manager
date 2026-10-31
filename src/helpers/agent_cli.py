@@ -527,6 +527,13 @@ class AgentResolution:
     exe: str
     state: str
     requested_id: str = ""
+    #: The feature whose override chose this agent, or "" when the default did.
+    #: Carried so a failure can say WHERE the choice came from -- a person who
+    #: set Cursor for one feature should not be told to fix "the agent CLI".
+    feature: str = ""
+    #: A ready-made explanation for faults that are not "this id is unknown"
+    #: (a malformed override table). Wins over the generic wording when set.
+    detail: str = ""
 
     @property
     def ok(self) -> bool:
@@ -541,15 +548,21 @@ class AgentResolution:
         """User-facing reason this cannot run, or "" when it can."""
         if self.state == RESOLUTION_OK:
             return ""
+        if self.detail:
+            return self.detail
+        where = (f" for {feature_label(self.feature)}" if self.feature else "")
+        pick = ("Settings → AI → Agent per feature" if self.feature
+                else "Settings → AI → Agent CLI")
         if self.state == RESOLUTION_UNKNOWN_AGENT:
             known = ", ".join(sorted(AGENT_CLIS))
-            return (f"Unknown agent CLI {self.requested_id!r} in settings. "
-                    f"Known agents: {known}. "
-                    f"Fix 'agent_cli' in manager-config.json or pick one in "
-                    f"Settings → AI → Agent CLI.")
-        return (f"{self.label} is not installed or its path is not set. "
-                f"Set it in Settings → Paths, or choose a different agent in "
-                f"Settings → AI → Agent CLI.")
+            key = "agent_overrides" if self.feature else "agent_cli"
+            return (f"Unknown agent CLI {self.requested_id!r}{where} in "
+                    f"settings. Known agents: {known}. "
+                    f"Fix '{key}' in manager-config.json or pick one in "
+                    f"{pick}.")
+        return (f"{self.label}{where} is not installed or its path is not "
+                f"set. Set it in Settings → Paths, or choose a different "
+                f"agent in {pick}.")
 
 
 def resolve(agent_id: str, exe_lookup) -> AgentResolution:
@@ -572,7 +585,78 @@ def resolve(agent_id: str, exe_lookup) -> AgentResolution:
     return AgentResolution(spec, exe, state, spec.id)
 
 
-def resolve_from(cfg) -> AgentResolution:
+# ── Per-feature routing ──────────────────────────────────────────────────────
+#
+# One default agent (`agent_cli`) plus an optional override per feature
+# (`agent_overrides`). There is deliberately ONE table: the orchestration work
+# that follows adds task-kind routing to this same structure rather than
+# growing a second config key that would have to be kept in step with it.
+#
+# Rules, each of which exists because the alternative was worse:
+#   * absent, "" and "inherit" all mean "use the default" -- an override that
+#     was never set must not behave differently from one set to inherit;
+#   * a NAMED agent that is missing is "unavailable". It does not fall through
+#     to the default: the person asked for that agent, and running another one
+#     while the settings said otherwise is the defect `resolve` already refuses;
+#   * an unrecognised id is an error naming the feature, never the default.
+# There is no fallback policy yet. One is added only when something needs it,
+# and it will be an explicit setting, never an implicit rescue.
+
+#: A feature's override meaning "use the default agent".
+INHERIT = "inherit"
+
+FEATURE_COMMIT_MESSAGE = "commit_message"
+FEATURE_DRAFT_PR = "draft_pr"
+FEATURE_REVIEW = "review"
+FEATURE_TEST_GENERATION = "test_generation"
+FEATURE_ASK = "ask"
+FEATURE_SCOUT = "scout"
+FEATURE_INTEGRATION_AUDIT = "integration_audit"
+
+#: (id, label) in the order Settings shows them. The id is persisted.
+FEATURES = (
+    (FEATURE_COMMIT_MESSAGE, "Commit message"),
+    (FEATURE_DRAFT_PR, "Draft PR"),
+    (FEATURE_REVIEW, "Code review"),
+    (FEATURE_TEST_GENERATION, "Test generation"),
+    (FEATURE_ASK, "Ask tab"),
+    (FEATURE_SCOUT, "Refactor scout"),
+    (FEATURE_INTEGRATION_AUDIT, "Integration audit"),
+)
+_FEATURE_LABELS = dict(FEATURES)
+
+
+def feature_label(feature: str) -> str:
+    return _FEATURE_LABELS.get(feature, feature)
+
+
+def resolve_for_feature(default_id: str, overrides, feature: str,
+                        exe_lookup) -> AgentResolution:
+    """`resolve`, honouring this feature's override when it has one.
+
+    Raises ValueError for a feature id that is not in FEATURES: that is a typo
+    in code, and silently treating it as "inherit" would hide it forever.
+    """
+    if feature not in _FEATURE_LABELS:
+        raise ValueError(f"unknown feature {feature!r}")
+    if overrides is None:
+        chosen = ""
+    elif isinstance(overrides, dict):
+        raw = overrides.get(feature)
+        chosen = "" if raw is None else str(raw).strip()
+    else:
+        return AgentResolution(
+            None, "", RESOLUTION_UNKNOWN_AGENT, "", feature,
+            detail=(f"'agent_overrides' in manager-config.json is a "
+                    f"{type(overrides).__name__}, not an object, so the agent "
+                    f"for {feature_label(feature)} cannot be read. Fix it or "
+                    f"pick agents in Settings → AI → Agent per feature."))
+    if not chosen or chosen.lower() == INHERIT:
+        return resolve(default_id, exe_lookup)
+    return dataclasses.replace(resolve(chosen, exe_lookup), feature=feature)
+
+
+def resolve_from(cfg, feature: str = "") -> AgentResolution:
     """Resolve the agent CLI from a ManagerConfig, or anything shaped like one.
 
     A real `ManagerConfig` answers `resolve_agent_cli()`. Several call sites are
@@ -584,7 +668,9 @@ def resolve_from(cfg) -> AgentResolution:
     """
     own = getattr(cfg, "resolve_agent_cli", None)
     if callable(own):
-        return own()
+        # Only a call that names a feature passes one, so a config double that
+        # predates routing keeps working for every call that does not.
+        return own(feature) if feature else own()
     exe = getattr(cfg, "claude_cli_exe", "") or ""
     return AgentResolution(
         CLAUDE, exe,

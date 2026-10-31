@@ -63,6 +63,7 @@ class AISection:
     def save_into(self, raw: dict) -> bool:
         """Write this section's fields into raw. Always succeeds."""
         raw["agent_cli"]               = self._var_agent_cli.get()
+        self._save_agent_overrides(raw)
         raw["draft_pr_backend"]        = self._var_draft_pr_backend.get()
         raw["commit_message_backend"]  = self._var_commit_msg_backend.get()
         raw["enable_llm_grounding"]    = bool(self._var_enable_llm_grounding.get())
@@ -99,6 +100,28 @@ class AISection:
         raw["ollama_num_ctx"]   = self._var_ollama_num_ctx.get()
         raw["ollama_warmup"]    = self._var_ollama_warmup.get()
         return True
+
+    def _save_agent_overrides(self, raw: dict) -> None:
+        """Write `agent_overrides`: only features that DIFFER from the default.
+
+        An "inherit" row is removed rather than stored, so a config that was
+        never customised stays without the key, and an override somebody added
+        by hand for a feature this build does not list is carried through
+        untouched instead of being dropped by a save.
+        """
+        from helpers.agent_cli import FEATURES, INHERIT
+        kept = raw.get("agent_overrides")
+        kept = dict(kept) if isinstance(kept, dict) else {}
+        for fid, _label in FEATURES:
+            choice = getattr(self, "_var_override_" + fid).get()
+            if choice and choice != INHERIT:
+                kept[fid] = choice
+            else:
+                kept.pop(fid, None)
+        if kept:
+            raw["agent_overrides"] = kept
+        else:
+            raw.pop("agent_overrides", None)
 
     def bind_dirty(self, callback) -> None:
         from dialogs.settings_section import bind_vars
@@ -138,6 +161,45 @@ class AISection:
                  justify=tk.LEFT).pack(anchor=tk.W, padx=24, pady=(0, 8))
         return var
 
+    def _build_agent_overrides(self, parent, raw) -> None:
+        """One dropdown per feature: Default, or a specific agent.
+
+        Each choice is its own StringVar ATTRIBUTE (`_var_override_<feature>`)
+        because `bind_vars` finds a section's variables by reading its
+        attributes, and a dict of them would not mark the page dirty.
+
+        A stored value this build does not list (a typo, a downgrade) is shown
+        as-is rather than as "Default": displaying it as the default would
+        make the next Save quietly erase it, which is the coercion the
+        resolver refuses to do.
+        """
+        from helpers.agent_cli import AGENT_CLIS, FEATURES, INHERIT
+        stored = raw.get("agent_overrides")
+        stored = stored if isinstance(stored, dict) else {}
+        tk.Label(parent, text="Agent per feature  —  override the default for one job",
+                 bg=C["base"], fg=C["subtext"],
+                 font=("Segoe UI", 9)).pack(anchor=tk.W, padx=12, pady=(2, 2))
+        grid = tk.Frame(parent, bg=C["base"])
+        grid.pack(anchor=tk.W, padx=24, pady=(0, 2))
+        choices = [INHERIT, *AGENT_CLIS]
+        for row, (fid, label) in enumerate(FEATURES):
+            current = str(stored.get(fid) or INHERIT)
+            var = tk.StringVar(value=current)
+            setattr(self, "_var_override_" + fid, var)
+            tk.Label(grid, text=label, bg=C["base"], fg=C["text"],
+                     font=("Segoe UI", 9), width=18, anchor=tk.W
+                     ).grid(row=row, column=0, sticky=tk.W, pady=1)
+            values = choices if current in choices else [*choices, current]
+            ttk.Combobox(grid, textvariable=var, values=values, width=14,
+                         state="readonly").grid(row=row, column=1, sticky=tk.W,
+                                                pady=1)
+        tk.Label(parent,
+            text="  \"inherit\" uses the Agent CLI above. A named agent that is not\n"
+                 "  installed is reported as unavailable; it never falls back to the\n"
+                 "  default, so a job is never run by an agent you did not pick.",
+            font=("Segoe UI", 8), bg=C["base"], fg=C["overlay0"],
+            justify=tk.LEFT).pack(anchor=tk.W, padx=24, pady=(2, 6))
+
     def _build_backend_selection_section(self, body, raw):
         """AI backend selection LabelFrame: Draft PR, commit message, grounding."""
         ttk.Separator(body, orient="horizontal").pack(fill=tk.X, padx=20, pady=(8, 8))
@@ -173,6 +235,7 @@ class AISection:
                  "  Claude Skills stay on Claude — they are a Claude Code feature.",
             font=("Segoe UI", 8), bg=C["base"], fg=C["overlay0"],
             justify=tk.LEFT).pack(anchor=tk.W, padx=24, pady=(0, 6))
+        self._build_agent_overrides(lf, raw)
         ttk.Separator(lf, orient="horizontal").pack(fill=tk.X, padx=8, pady=(0, 6))
 
         self._var_draft_pr_backend = tk.StringVar(

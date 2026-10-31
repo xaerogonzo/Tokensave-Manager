@@ -69,6 +69,20 @@ of entering interactive mode.
 
 `helpers/claude_cli.py` remains as a thin shim with unchanged signatures.
 
+### One default, optional overrides per feature
+
+`agent_cli` is still the default agent. `agent_overrides` (Settings → AI → Agent per feature) lets one job use another: commit message, Draft PR, code review, test generation, the Ask tab, the refactor scout and the integration audit. It is one table on purpose; the orchestration work extends this structure rather than adding a second key.
+
+| Situation | Result |
+|---|---|
+| no override, `""`, or `"inherit"` | the default agent |
+| a named agent that is installed | that agent, with that agent's own path and model |
+| a named agent that is NOT installed | `unavailable`, naming the feature. It does **not** fall back to the default |
+| an id this build does not know | `unknown_agent`, naming the feature and the `agent_overrides` key |
+| `agent_overrides` is not an object | `unknown_agent` with an explanation, never "inherit" |
+
+There is no fallback policy yet. One is added when something needs it, as an explicit setting; running a job with an agent the person did not pick is the failure this table exists to prevent. Every print-mode call from the Manager still runs read-only for Cursor (`--mode ask`).
+
 ### Two asymmetries, stated rather than papered over
 
 **Cursor has no `--append-system-prompt`.** For `system_prompt_mode = prepend`

@@ -429,8 +429,8 @@ def _dispatch_review_backend(
     cfg: "ManagerConfig", backend: str, user_prompt: str
 ) -> "str | None":
     """Pick a backend and run it. Returns review text or None on failure."""
-    from helpers.agent_cli import model_from, resolve_from
-    agent = resolve_from(cfg)
+    from helpers.agent_cli import FEATURE_REVIEW, model_from, resolve_from
+    agent = resolve_from(cfg, FEATURE_REVIEW)
     has_cc = agent.ok
     llm_cfg = cfg.raw.get("commit_message_llm") or {}
     has_llm = bool(llm_cfg.get("enabled"))
