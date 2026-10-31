@@ -216,3 +216,11 @@ def test_no_selection_is_a_no_op(handoff):
     ctrl._sess_tree = _SelTree(())
     ctrl._sess_continue_in_cursor()
     assert not log.asked and not log.errors
+
+
+def test_only_claude_rows_are_offered_the_handoff():
+    ctrl = _controller()
+    ctrl._update_sess_tree([_row("a", "p", 2.0), _row("b", "p", 1.0, agent="cursor")])
+    assert ctrl._sess_can_hand_off("sess:claude:a") is True
+    assert ctrl._sess_can_hand_off("sess:cursor:b") is False
+    assert ctrl._sess_can_hand_off("sess:claude:unknown") is False

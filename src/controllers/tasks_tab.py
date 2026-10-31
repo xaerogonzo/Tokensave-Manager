@@ -762,16 +762,21 @@ class TasksController(UiPumpMixin):
 
     # ── Session actions ────────────────────────────────────────────────────────
 
+    def _sess_can_hand_off(self, iid: str) -> bool:
+        """Only a Claude session can be handed to Cursor from here.
+
+        The other direction needs Cursor's transcript format and is not built.
+        """
+        row = self._sess_rows.get(iid)
+        return bool(row) and row.get("agent") != "cursor"
+
     def _sess_right_click(self, event: tk.Event) -> None:
         row = self._sess_tree.identify_row(event.y)
         if not row:
             return
         self._sess_tree.selection_set(row)
-        # Only a Claude session can be handed to Cursor from here; the other
-        # direction needs Cursor's transcript format and is not built.
-        is_claude = (self._sess_rows.get(row) or {}).get("agent") != "cursor"
         self._sess_menu.entryconfigure(
-            0, state=tk.NORMAL if is_claude else tk.DISABLED)
+            0, state=tk.NORMAL if self._sess_can_hand_off(row) else tk.DISABLED)
         try:
             self._sess_menu.tk_popup(event.x_root, event.y_root)
         finally:

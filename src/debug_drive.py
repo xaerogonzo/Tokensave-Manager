@@ -349,6 +349,42 @@ class _Driver:
         fresh = [w for w in tops() if id(w) not in before]
         return fresh[-1] if fresh else None
 
+    def _do_sessions(self, step: "dict[str, Any]") -> None:
+        """Show the Tasks tab's History view. Give the scan an `after_ms`.
+
+        The session list is filled by a worker, so a following
+        `sessions_report` wants a few seconds before it counts rows.
+        """
+        from controllers.tasks_tab import VIEW_SESSIONS
+        self._do_tab({"name": "Tasks"})
+        ctrl = self._app._tasks_ctrl
+        ctrl._view_var.set(VIEW_SESSIONS)
+        ctrl._on_view_changed()
+
+    def _do_sessions_report(self, step: "dict[str, Any]") -> None:
+        """What the History view offers, read from the live controller.
+
+        Reports the population first (a count of zero is not a pass), then per
+        row whether "Continue in Cursor" would be offered and whether the
+        scanner found the transcript file the handoff reads. Also the Cursor
+        CLI the REAL config resolves, because that is the lookup a fresh
+        install has to survive. Read-only: it never opens the confirmation and
+        never launches anything.
+        """
+        ctrl = self._app._tasks_ctrl
+        rows = dict(ctrl._sess_rows)
+        _say("drive: sessions: %d row(s) in the list" % len(rows))
+        limit = int(step.get("limit", 8))
+        for iid, row in list(rows.items())[:limit]:
+            path = row.get("path") or ""
+            _say("drive: sessions:   %-40s agent=%-6s handoff=%-5s transcript=%s"
+                 % (iid[:40], row.get("agent") or "claude",
+                    ctrl._sess_can_hand_off(iid),
+                    "found" if path and os.path.isfile(path) else "NOT FOUND"
+                    if path else "(none: cursor row)"))
+        cfg = self._app._cfg
+        _say("drive: sessions: cursor_cli_exe=%r" % (cfg.cursor_cli_exe,))
+
     def _do_settings(self, step: "dict[str, Any]") -> None:
         """Select the Settings tab, optionally on a named page.
 

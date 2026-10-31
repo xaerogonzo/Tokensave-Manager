@@ -1,0 +1,7 @@
+[
+  {"do": "wait",            "after_ms": 3000},
+  {"do": "sessions",        "after_ms": 6000},
+  {"do": "sessions_report", "after_ms": 500},
+  {"do": "shot", "path": "D:/_scratch/continue-in-cursor.png", "after_ms": 500},
+  {"do": "quit"}
+]
