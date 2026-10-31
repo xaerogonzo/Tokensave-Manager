@@ -186,6 +186,14 @@ class TasksController(UiPumpMixin):
 
         self._sess_tree.bind("<Double-1>", self._sess_open_folder)
 
+        # Scanned rows by iid: the Treeview holds display text only, and a
+        # handoff needs the transcript path the scanner found.
+        self._sess_rows: dict[str, dict] = {}
+        self._sess_menu = tk.Menu(self._sess_tree, tearoff=0)
+        self._sess_menu.add_command(label="Continue in Cursor…",
+                                    command=self._sess_continue_in_cursor)
+        self._sess_tree.bind("<Button-3>", self._sess_right_click)
+
     def _build_mcp_panel(self, parent: tk.Widget) -> None:
         self._mcp_summary = tk.Label(
             parent, text="Not scanned yet.", anchor="w", justify=tk.LEFT,
@@ -497,6 +505,7 @@ class TasksController(UiPumpMixin):
                           running: frozenset = frozenset()) -> None:
         tree = self._sess_tree
         sessions = self._dedupe_sessions(sessions)
+        self._sess_rows = {self._sess_iid(s): s for s in sessions}
         current_iids = set(tree.get_children())
         new_iids = {self._sess_iid(s) for s in sessions}
 
@@ -752,6 +761,88 @@ class TasksController(UiPumpMixin):
             return False
 
     # ── Session actions ────────────────────────────────────────────────────────
+
+    def _sess_right_click(self, event: tk.Event) -> None:
+        row = self._sess_tree.identify_row(event.y)
+        if not row:
+            return
+        self._sess_tree.selection_set(row)
+        # Only a Claude session can be handed to Cursor from here; the other
+        # direction needs Cursor's transcript format and is not built.
+        is_claude = (self._sess_rows.get(row) or {}).get("agent") != "cursor"
+        self._sess_menu.entryconfigure(
+            0, state=tk.NORMAL if is_claude else tk.DISABLED)
+        try:
+            self._sess_menu.tk_popup(event.x_root, event.y_root)
+        finally:
+            self._sess_menu.grab_release()
+
+    def _sess_continue_in_cursor(self) -> None:
+        """Start a handoff of the selected Claude session to Cursor's agent.
+
+        Three steps, each on the right thread: find where the session ran
+        (file read, worker), confirm with the person (dialog, Tk), then write
+        the brief (file + git, worker) and launch (Tk). Nothing is written
+        before the confirmation.
+        """
+        sel = self._sess_tree.selection()
+        row = self._sess_rows.get(sel[0]) if sel else None
+        if not row or row.get("agent") == "cursor":
+            return
+        if not self._cfg.cursor_cli_exe:
+            messagebox.showerror(
+                "Cursor Agent CLI not found",
+                "Install the Cursor Agent CLI, or set its path in Settings, "
+                "then try again.", parent=self._tab)
+            return
+
+        def _locate() -> None:
+            from helpers.agent_handoff import transcript_cwd
+            cwd = transcript_cwd(row.get("path") or "")
+            self._post(self._sess_handoff_confirm, row, cwd)
+
+        threading.Thread(target=_locate, daemon=True).start()
+
+    def _sess_handoff_confirm(self, row: dict, project: str) -> None:
+        from helpers.agent_handoff import HANDOFF_DIR
+        if not project or not os.path.isdir(project):
+            messagebox.showerror(
+                "Cannot continue this session",
+                "The folder this session ran in could not be found, so there "
+                "is nowhere to open Cursor.\n\n%s" % (project or "(unknown)"),
+                parent=self._tab)
+            return
+        if not messagebox.askyesno(
+                "Continue in Cursor",
+                "Open Cursor's agent in:\n%s\n\nwith notes from the Claude "
+                "session \"%s\"?\n\nThis writes a brief to %s\\ (git-ignored, "
+                "this machine only) holding your prompts from that session, "
+                "secrets masked on a best-effort basis, plus Claude's last "
+                "message and the repository state now. Cursor will read it, "
+                "which sends its contents to Cursor's service.\n\nThis is a "
+                "handoff, not an import: Claude's memory and the full "
+                "transcript do not come across."
+                % (project, row.get("title") or "untitled", HANDOFF_DIR),
+                parent=self._tab):
+            return
+
+        git_exe = self._cfg.git_exe
+
+        def _prepare() -> None:
+            from helpers.agent_handoff import prepare
+            self._post(self._sess_handoff_launch, prepare(row, project, git_exe))
+
+        threading.Thread(target=_prepare, daemon=True).start()
+
+    def _sess_handoff_launch(self, prepared) -> None:
+        from helpers import agent_cli
+        from helpers.agent_handoff import launch_cursor
+        ok, err = launch_cursor(
+            prepared, self._cfg.cursor_cli_exe,
+            agent_cli.model_from(self._cfg, agent_cli.CURSOR))
+        if not ok:
+            messagebox.showerror("Could not continue in Cursor", err,
+                                 parent=self._tab)
 
     def _sess_open_folder(self, event: tk.Event) -> None:
         sel = self._sess_tree.selection()

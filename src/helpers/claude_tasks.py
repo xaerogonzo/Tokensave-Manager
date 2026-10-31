@@ -106,7 +106,9 @@ def scan_sessions(known_paths: list[str], limit: int = 50) -> list[dict]:
 
     Returned dicts have keys:
       session_id, title, project_encoded, project_display, last_activity (float),
-      is_recent (bool: mtime within last 5 minutes).
+      is_recent (bool: mtime within last 5 minutes), path (the transcript file --
+      a session id is not unique on disk, so a caller that needs THE file must
+      not rebuild its name from the id).
     """
     projects_dir = _claude_projects_dir()
     if not os.path.isdir(projects_dir):
@@ -153,6 +155,7 @@ def scan_sessions(known_paths: list[str], limit: int = 50) -> list[dict]:
                 "project_display": decode_project_path(encoded, known_paths),
                 "last_activity": mtime,
                 "is_recent": (now - mtime) < 300,
+                "path": file_path,
             }
         )
     return sessions

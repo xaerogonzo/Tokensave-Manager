@@ -285,8 +285,14 @@ def _user_prompt(record, content) -> str:
     return said if said and _is_user_authored(record, said) else ""
 
 
-def _scan_one(path, since, want_prose, prompts, prose, tail_from: int = 0) -> bool:
-    """Append fragments from one transcript. Returns whether anything was cut."""
+def _scan_one(path, since, want_prose, prompts, prose, tail_from: int = 0,
+              limit: int = MAX_FRAGMENT_CHARS) -> bool:
+    """Append fragments from one transcript. Returns whether anything was cut.
+
+    ``limit`` caps each fragment. The window scan keeps the small default (it
+    feeds small local models); a handoff passes a larger one, because the
+    original request is exactly the text a cap at 600 cut mid-sentence.
+    """
     cut = False
     try:
         handle = _open_at(path, tail_from)
@@ -309,12 +315,12 @@ def _scan_one(path, since, want_prose, prompts, prose, tail_from: int = 0) -> bo
             if kind == "user":
                 said = _user_prompt(record, content)
                 if said:
-                    prompts.append(Fragment(said[:MAX_FRAGMENT_CHARS],
+                    prompts.append(Fragment(said[:limit],
                                             SOURCE_TRANSCRIPT_PROMPT))
             elif kind == "assistant" and want_prose:
                 said = _assistant_text(content)
                 if said:
-                    prose.append(Fragment(said[:MAX_FRAGMENT_CHARS],
+                    prose.append(Fragment(said[:limit],
                                           SOURCE_TRANSCRIPT_PROSE))
     return cut
 
@@ -366,6 +372,29 @@ def _assistant_text(content) -> str:
     parts = [b.get("text", "") for b in content
              if isinstance(b, dict) and b.get("type") == "text"]
     return "\n".join(p for p in parts if p).strip()
+
+
+def scan_transcript(path: str, *, want_prose: bool = False,
+                    max_bytes: int = MAX_TRANSCRIPT_BYTES,
+                    fragment_chars: int = MAX_FRAGMENT_CHARS) -> tuple:
+    """`(prompts, prose, truncated)` for ONE transcript file. Never raises.
+
+    The single-session counterpart of the window scan above, for callers that
+    already know which session they want (a handoff). An oversized file is read
+    from its TAIL for the reason `_from_transcripts` documents, and `truncated`
+    says so: the first prompt returned is then the first one READ, not
+    necessarily the session's first.
+    """
+    prompts: list = []
+    prose: list = []
+    try:
+        size = os.path.getsize(path)
+        tail_from = max(0, size - max_bytes)
+        cut = _scan_one(path, None, want_prose, prompts, prose,
+                        tail_from=tail_from, limit=fragment_chars)
+    except OSError:
+        return (), (), False
+    return tuple(prompts), tuple(prose), bool(cut or tail_from)
 
 
 def gather(project_path: str, *, include_prompts: bool = True,
