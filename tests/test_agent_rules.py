@@ -14,6 +14,7 @@ import pytest
 from helpers.agent_rules import (
     BEGIN_MARKER,
     END_MARKER,
+    _CURSOR_ADDENDUM,
     _compute_agents_md,
     _compute_cursor_rule,
     agents_md_path,
@@ -118,7 +119,7 @@ def test_a_truncated_marker_pair_does_not_mangle_the_file():
 # ── .cursor/rules/tokensave.mdc ──────────────────────────────────────────────
 
 def test_new_cursor_rule_starts_with_frontmatter():
-    text, changed = _compute_cursor_rule("", BASELINE)
+    text, changed = _compute_cursor_rule("")
     assert changed
     assert text.startswith("---\n")
     assert "alwaysApply: true" in text
@@ -127,44 +128,59 @@ def test_new_cursor_rule_starts_with_frontmatter():
 
 def test_cursor_rule_frontmatter_is_before_the_block():
     """Cursor requires frontmatter at the very top, so it cannot be inside it."""
-    text, _ = _compute_cursor_rule("", BASELINE)
+    text, _ = _compute_cursor_rule("")
     assert text.index("---") < text.index(BEGIN_MARKER)
 
 
-def test_cursor_rule_inlines_the_baseline():
-    text, _ = _compute_cursor_rule("", BASELINE)
-    assert "Use tokensave_context before Read." in text
+def test_cursor_rule_points_at_agents_md_instead_of_inlining_the_baseline():
+    """Cursor loads AGENTS.md AND this always-applied rule (measured), so
+    inlining the baseline here loaded it twice."""
+    text, _ = _compute_cursor_rule("")
+    assert "AGENTS.md" in text
+    assert "Use tokensave_context before Read." not in text
+    assert _CURSOR_ADDENDUM in text
+
+
+def test_cursor_rule_is_small():
+    """It is always applied, so every session pays for it."""
+    text, _ = _compute_cursor_rule("")
+    assert len(text) < 700
 
 
 def test_cursor_rule_rerun_is_byte_identical():
-    first, _ = _compute_cursor_rule("", BASELINE)
-    second, changed = _compute_cursor_rule(first, BASELINE)
+    first, _ = _compute_cursor_rule("")
+    second, changed = _compute_cursor_rule(first)
     assert changed is False
     assert second == first
 
 
 def test_cursor_rule_never_grows_a_second_frontmatter_block():
     """Two frontmatter blocks make a file Cursor rejects outright."""
-    first, _ = _compute_cursor_rule("", BASELINE)
-    second, _ = _compute_cursor_rule(first, BASELINE_2)
+    first, _ = _compute_cursor_rule("")
+    second, _ = _compute_cursor_rule(first)
     assert second.count("alwaysApply: true") == 1
     assert second.count("---\ndescription:") == 1
 
 
 def test_cursor_rule_preserves_user_content_below_the_block():
-    first, _ = _compute_cursor_rule("", BASELINE)
+    first, _ = _compute_cursor_rule("")
     edited = first + "\n## My extra rule\n\nAlways run the linter.\n"
-    updated, changed = _compute_cursor_rule(edited, BASELINE_2)
+    updated, changed = _compute_cursor_rule(edited)
+    assert changed is False
+    assert updated == edited
+
+
+def test_an_old_full_baseline_rule_is_shrunk_in_place():
+    """Migration: a file written before the fix carried the whole baseline."""
+    old = ("---\ndescription: TokenSave Manager project baseline\n"
+           "alwaysApply: true\n---\n\n"
+           + BEGIN_MARKER + "\n" + BASELINE.strip() + "\n" + END_MARKER + "\n"
+           + "\n## Mine\n\nKeep me.\n")
+    updated, changed = _compute_cursor_rule(old)
     assert changed
-    assert "Always run the linter." in updated
-    assert "UPDATED GUIDANCE HERE." in updated
-
-
-def test_cursor_rule_updates_the_managed_block_only():
-    first, _ = _compute_cursor_rule("", BASELINE)
-    updated, _ = _compute_cursor_rule(first, BASELINE_2)
     assert "Use tokensave_context before Read." not in updated
-    assert "UPDATED GUIDANCE HERE." in updated
+    assert _CURSOR_ADDENDUM in updated
+    assert "Keep me." in updated
 
 
 # ── Paths ────────────────────────────────────────────────────────────────────
@@ -190,7 +206,7 @@ def test_write_agents_md_creates_the_file(project):
 
 
 def test_write_cursor_rule_creates_the_nested_directories(project):
-    ok, err, changed = write_cursor_rule(project, BASELINE)
+    ok, err, changed = write_cursor_rule(project)
     assert ok, err
     assert changed
     assert os.path.isfile(cursor_rule_path(project))
@@ -204,14 +220,14 @@ def test_second_write_reports_unchanged_and_leaves_bytes_alone(project):
     assert open(agents_md_path(project), encoding="utf-8").read() == before
 
 
-def test_both_outputs_carry_the_same_baseline(project):
-    """One source, two renderings — nothing to keep in sync."""
+def test_the_baseline_is_written_exactly_once(project):
+    """Cursor loads both files, so the baseline may live in only one of them."""
     write_agents_md(project, BASELINE)
-    write_cursor_rule(project, BASELINE)
+    write_cursor_rule(project)
     agents = open(agents_md_path(project), encoding="utf-8").read()
     rule = open(cursor_rule_path(project), encoding="utf-8").read()
     assert "Use tokensave_context before Read." in agents
-    assert "Use tokensave_context before Read." in rule
+    assert "Use tokensave_context before Read." not in rule
 
 
 def test_writes_use_lf_line_endings(project):

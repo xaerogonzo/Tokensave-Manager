@@ -753,8 +753,9 @@ class InstructionsDialog(UiPumpMixin, tk.Toplevel):
         if not messagebox.askyesno(
                 "Generate agent rules for %d projects" % len(targets),
                 "Cursor, Codex, Gemini CLI and opencode cannot follow the "
-                "@include that CLAUDE.md uses, so they get the baseline's "
-                "CONTENT inlined instead.\n\n%s\n\nEach file's managed block "
+                "@include that CLAUDE.md uses, so AGENTS.md gets the baseline's "
+                "CONTENT inlined instead (the Cursor rule only points at it, "
+                "because Cursor loads both).\n\n%s\n\nEach file's managed block "
                 "is replaced; anything you wrote outside it is preserved."
                 % "\n".join(lines[:40]), parent=self):
             return
@@ -762,10 +763,10 @@ class InstructionsDialog(UiPumpMixin, tk.Toplevel):
         created = 0
         failed = 0
         for project in targets:
-            for writer in (write_agents_md, write_cursor_rule):
-                args = ((project.display_root, baseline_text, project.name)
-                        if writer is write_agents_md
-                        else (project.display_root, baseline_text))
+            for writer, args in (
+                    (write_agents_md,
+                     (project.display_root, baseline_text, project.name)),
+                    (write_cursor_rule, (project.display_root,))):
                 ok, _err, changed = writer(*args)
                 if not ok:
                     failed += 1

@@ -201,7 +201,7 @@ Token Save Manager Source/
 │   │   │                          signatures for ~12 existing call sites
 │   │   ├── agent_rules.py         AGENTS.md + .cursor/rules/*.mdc writers. Marked-block
 │   │   │                          managed; Cursor cannot follow CLAUDE.md's @include,
-│   │   │                          so the baseline is INLINED from one source
+│   │   │                          so the baseline is INLINED into AGENTS.md (once; the .mdc points at it)
 │   │   ├── mcp_cursor.py          .cursor/mcp.json (project + global). Five binding
 │   │   │                          states; malformed never collapses into absent. No
 │   │   │                          trust gate — Cursor has no equivalent
