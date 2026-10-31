@@ -117,7 +117,10 @@ Token Save Manager Source/
 │   │   │                          authoritative prompt never blurs into heuristic
 │   │   │                          prose. Window bounded by the last commit, with
 │   │   │                          no-commits and unreadable named as their own
-│   │   │                          states rather than defaulted to now.
+│   │   │                          states rather than defaulted to now. Cursor's chats are a
+│   │   │                          second source (found by their recorded cwd), merged by time
+│   │   │                          under ONE size budget; `PROSE_SOURCES` says whose words are
+│   │   │                          the agent's, and the Manager's own composed prompts are dropped.
 │   │   ├── shadow_links.py        generate/remove_shadow_links, update_gitignore_for_shadows,
 │   │   │                          DEFAULT_SHADOW_EXT_MAP
 │   │   ├── housekeeping.py        PURE detection for the Housekeeping surface:

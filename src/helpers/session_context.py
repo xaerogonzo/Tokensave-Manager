@@ -55,6 +55,22 @@ SOURCE_TRANSCRIPT_PROSE = "transcript:prose"
 SOURCE_CURSOR_PROMPT = "cursor:prompt"
 SOURCE_CURSOR_PROSE = "cursor:prose"
 
+#: Every source that is an AGENT'S words, not the person's. A consumer that asks
+#: "is this prose?" must use this and not compare against one constant: a new
+#: agent's prose compared against Claude's alone is filed as what the person said.
+PROSE_SOURCES = (SOURCE_TRANSCRIPT_PROSE, SOURCE_CURSOR_PROSE)
+
+#: How a window's material is described to a reader, per origin.
+LABEL_NOTE = "session notes"
+LABEL_CLAUDE = "session transcripts"
+LABEL_CURSOR = "Cursor transcripts"
+
+#: Text the MANAGER composed and sent to an agent (the `[System instructions]`
+#: serialization `agent_cli.compose_prompt` uses). Those runs leave a transcript
+#: in the project too, and their "user" turn is the Manager talking, not the
+#: person.
+_MANAGER_COMPOSED = "[System instructions]"
+
 #: Window fallbacks, each a distinct FACT rather than a shrug. A repository
 #: with no commits is not the same as one whose history could not be read, and
 #: neither is "the last commit was an hour ago".
@@ -76,6 +92,16 @@ class Fragment:
 
     text: str
     source: str
+    #: When it was said, as far as the source knows. `compare=False` so two
+    #: fragments with the same words from the same source stay equal whatever
+    #: the clock says, which is what every existing caller assumes. A Cursor
+    #: transcript has no per-record stamps, so its fragments carry the file's
+    #: modification time: right across sessions, approximate within one.
+    when: "datetime.datetime | None" = dataclasses.field(default=None, compare=False)
+
+
+def is_prose(fragment) -> bool:
+    return fragment.source in PROSE_SOURCES
 
 
 @dataclasses.dataclass(frozen=True)
@@ -92,14 +118,17 @@ class SessionContext:
     #: True when a session note supplied the prompts. The fallback works, but
     #: the consumer should be able to say which it got.
     from_note: bool = False
+    #: Which origins contributed, as `LABEL_*` strings, so a reader is told
+    #: "session notes + Cursor transcripts" rather than guessing from one flag.
+    sources: tuple = ()
 
     @property
     def prompts(self) -> tuple:
-        return tuple(f for f in self.fragments if f.source != SOURCE_TRANSCRIPT_PROSE)
+        return tuple(f for f in self.fragments if not is_prose(f))
 
     @property
     def prose(self) -> tuple:
-        return tuple(f for f in self.fragments if f.source == SOURCE_TRANSCRIPT_PROSE)
+        return tuple(f for f in self.fragments if is_prose(f))
 
 
 def _as_utc(when: "datetime.datetime") -> "datetime.datetime":
@@ -193,7 +222,7 @@ def _from_note(project_path: str, since) -> list:
             text = (said or "").strip()
             if text:
                 out.append(Fragment(text[:MAX_FRAGMENT_CHARS],
-                                    SOURCE_NOTE_PROMPT))
+                                    SOURCE_NOTE_PROMPT, ended))
     return out
 
 
@@ -321,12 +350,12 @@ def _scan_one(path, since, want_prose, prompts, prose, tail_from: int = 0,
                 said = _user_prompt(record, content)
                 if said:
                     prompts.append(Fragment(said[:limit],
-                                            SOURCE_TRANSCRIPT_PROMPT))
+                                            SOURCE_TRANSCRIPT_PROMPT, when))
             elif kind == "assistant" and want_prose:
                 said = _assistant_text(content)
                 if said:
                     prose.append(Fragment(said[:limit],
-                                          SOURCE_TRANSCRIPT_PROSE))
+                                          SOURCE_TRANSCRIPT_PROSE, when))
     return cut
 
 
@@ -480,6 +509,75 @@ def scan_cursor_transcript(path: str, *, want_prose: bool = False,
     return tuple(prompts), tuple(prose), bool(tail_from)
 
 
+def _from_cursor(project_path: str, since, want_prose: bool) -> "tuple":
+    """`(fragments, truncated)` from this project's Cursor chats. Never raises.
+
+    The chats are found by the folder each one RECORDED (`meta.json` carries
+    `cwd`), compared as the same project and not as the same string, and each
+    chat's transcript is then found by id. Nothing here rebuilds Cursor's
+    folder-name encoding, which is not Claude's.
+
+    Prompts the Manager composed itself (its commit-message and review calls run
+    through `agent -p` and leave a transcript here) are dropped: their "user"
+    turn is the Manager talking. A plain prompt sent without a system block cannot
+    be told from a person's, which is a limit of the evidence, not something to
+    paper over.
+    """
+    try:
+        from helpers.cursor_tasks import scan_cursor_sessions
+        from helpers.mcp_paths import _same_project
+        rows = [r for r in scan_cursor_sessions([project_path], limit=200)
+                if r.get("cwd") and _same_project(r["cwd"], project_path)]
+    except Exception:                                           # noqa: BLE001
+        return (), False
+    candidates = []
+    for row in rows:
+        stamp = datetime.datetime.fromtimestamp(
+            row["last_activity"], datetime.timezone.utc).replace(tzinfo=None)
+        if since is None or stamp >= since:
+            candidates.append((stamp, row))
+    candidates.sort(key=lambda pair: pair[0], reverse=True)
+    truncated = len(candidates) > MAX_TRANSCRIPTS
+    prompts, prose, budget = [], [], MAX_TRANSCRIPT_BYTES
+    for stamp, row in candidates[:MAX_TRANSCRIPTS]:
+        path = find_cursor_transcript(str(row.get("session_id") or ""))
+        if not path:
+            continue
+        if budget <= 0:
+            truncated = True
+            break
+        got_prompts, got_prose, cut = scan_cursor_transcript(
+            path, want_prose=want_prose, max_bytes=budget)
+        try:
+            budget -= min(os.path.getsize(path), budget)
+        except OSError:
+            pass
+        truncated = truncated or cut
+        prompts += [dataclasses.replace(f, when=stamp) for f in got_prompts
+                    if not f.text.startswith(_MANAGER_COMPOSED)]
+        prose += [dataclasses.replace(f, when=stamp) for f in got_prose]
+    return tuple(prompts + prose), truncated
+
+
+def _merge(existing: tuple, extra: tuple) -> "tuple[tuple, bool]":
+    """One chronological list from several sources, re-capped as ONE budget.
+
+    The caps exist because added prompt weight measurably degrades small models,
+    so a second source must not double what is handed over: the newest
+    MAX_FRAGMENTS prompts and MAX_PROSE_FRAGMENTS prose survive, whichever agent
+    they came from. A fragment with no time keeps its place ahead of dated ones
+    (the stable sort never reorders equals), and `cut` says the cap bit.
+    """
+    def order(items):
+        return sorted(items, key=lambda f: (f.when is not None,
+                                            f.when or datetime.datetime.min))
+    everything = tuple(existing) + tuple(extra)
+    prompts = order([f for f in everything if not is_prose(f)])
+    prose = order([f for f in everything if is_prose(f)])
+    cut = len(prompts) > MAX_FRAGMENTS or len(prose) > MAX_PROSE_FRAGMENTS
+    return tuple(prompts[-MAX_FRAGMENTS:] + prose[-MAX_PROSE_FRAGMENTS:]), cut
+
+
 def gather(project_path: str, *, include_prompts: bool = True,
            include_prose: bool = False, git_exe: str = "") -> SessionContext:
     """Collect session context for a project. Never raises.
@@ -495,11 +593,13 @@ def gather(project_path: str, *, include_prompts: bool = True,
         floor, reason = _floor(since, reason)
 
         fragments, truncated, from_note = (), False, False
+        sources = []
         if include_prompts:
             noted = _from_note(project_path, floor)
             if noted:
                 fragments, from_note = tuple(noted[-MAX_FRAGMENTS:]), True
                 truncated = len(noted) > MAX_FRAGMENTS
+                sources.append(LABEL_NOTE)
 
         if not from_note or include_prose:
             mined, cut = _from_transcripts(
@@ -515,9 +615,22 @@ def gather(project_path: str, *, include_prompts: bool = True,
                 mined = tuple(f for f in mined
                               if f.source == SOURCE_TRANSCRIPT_PROSE)
             fragments = tuple(fragments) + mined
+            if mined:
+                sources.append(LABEL_CLAUDE)
+
+        if include_prompts or include_prose:
+            cursor, cursor_cut = _from_cursor(project_path, floor, include_prose)
+            if not include_prompts:
+                cursor = tuple(f for f in cursor if is_prose(f))
+            elif not include_prose:
+                cursor = tuple(f for f in cursor if not is_prose(f))
+            if cursor:
+                fragments, merged_cut = _merge(fragments, cursor)
+                truncated = truncated or cursor_cut or merged_cut
+                sources.append(LABEL_CURSOR)
 
         return SessionContext(fragments=fragments, window_reason=reason,
                               since=floor, truncated=truncated,
-                              from_note=from_note)
+                              from_note=from_note, sources=tuple(sources))
     except Exception:
         return SessionContext()
