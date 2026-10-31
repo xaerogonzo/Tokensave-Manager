@@ -205,7 +205,8 @@ Token Save Manager Source/
 │   │   ├── handoff_rules.py       The git-ignored `CLAUDE.local.md` block that tells an agent the
 │   │   │                          publish command (machine paths, so never committed). Ignored via
 │   │   │                          .git/info/exclude BEFORE it is written; a tracked file is refused
-│   │   ├── handoff_ledger.py      `.tokensave/handoff.jsonl`: append-only, content-hash ids,
+│   │   ├── handoff_ledger.py      handoff.jsonl in the git COMMON dir (shared by every worktree,
+│   │   │                          untrackable); `.tokensave/` only outside a repo. Append-only, content-hash ids,
 │   │   │                          locked append, bounded + trimmed, bad lines counted, agent
 │   │   │                          claims kept apart from git-observed facts, secrets masked
 │   │   ├── cursor_ide.py          Open a folder in the Cursor APP (Cursor.exe directly, never

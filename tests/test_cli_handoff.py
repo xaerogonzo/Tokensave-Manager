@@ -129,12 +129,42 @@ def test_a_bad_agent_id_is_a_usage_error_not_a_crash(capsys, project, tmp_path):
     assert code == EXIT_USAGE and "not a valid id" in env["error"]
 
 
-def test_a_ledger_that_would_be_committed_produces_a_warning(capsys, project, tmp_path):
+def _nested(project):
+    """A plain folder inside someone else's repository, with nothing ignoring it."""
     _repo(project)
-    os.remove(os.path.join(project, ".gitignore"))           # nothing ignores .tokensave now
+    os.remove(os.path.join(project, ".gitignore"))
+    child = os.path.join(project, "child")
+    os.makedirs(child)
+    return child
+
+
+def test_a_ledger_that_would_be_committed_produces_a_warning(capsys, project, tmp_path):
+    child = _nested(project)
+    cfg = _config(tmp_path, enable_agent_handoff=True)
+    code, env, _ = _go(capsys, child, cfg, *PUBLISH)
+    assert code == EXIT_OK and any("NOT git-ignored" in w for w in env["warnings"])
+
+
+def test_a_ledger_inside_a_repository_needs_no_ignore_rule_and_says_so(capsys, project, tmp_path):
+    _repo(project)
+    os.remove(os.path.join(project, ".gitignore"))
     cfg = _config(tmp_path, enable_agent_handoff=True)
     code, env, _ = _go(capsys, project, cfg, *PUBLISH)
-    assert code == EXIT_OK and any("NOT git-ignored" in w for w in env["warnings"])
+    assert code == EXIT_OK and env["warnings"] == []
+    assert env["data"]["path"].endswith(os.path.join(".git", "tokensave", "handoff.jsonl"))
+    _, status, _ = _go(capsys, project, cfg)
+    assert status["data"]["location"] == "git" and status["data"]["ignored_by_git"] is True
+
+
+def test_a_worktree_publishes_and_the_main_checkout_lists_it(capsys, project, tmp_path):
+    _repo(project)
+    wt = str(tmp_path / "wt")
+    subprocess.run(["git", "-C", project, "worktree", "add", "-q", "-b", "f", wt],
+                   check=True, capture_output=True)
+    cfg = _config(tmp_path, enable_agent_handoff=True)
+    _go(capsys, wt, cfg, *PUBLISH)
+    _, env, _ = _go(capsys, project, cfg, "--action", "list")
+    assert [e["goal"] for e in env["data"]["entries"]] == ["wire the thing"]
 
 
 def test_a_secret_in_a_published_decision_never_reaches_the_file(capsys, project, tmp_path):
@@ -183,12 +213,11 @@ def test_status_reports_unreadable_lines_instead_of_hiding_them(capsys, project,
 
 
 def test_status_flags_a_ledger_that_git_would_not_ignore(capsys, project, tmp_path):
-    _repo(project)
+    child = _nested(project)
     cfg = _config(tmp_path, enable_agent_handoff=True)
-    _go(capsys, project, cfg, *PUBLISH)
-    os.remove(os.path.join(project, ".gitignore"))
-    _, env, _ = _go(capsys, project, cfg, "--action", "status")
-    assert env["data"]["ignored_by_git"] is False
+    _go(capsys, child, cfg, *PUBLISH)
+    _, env, _ = _go(capsys, child, cfg, "--action", "status")
+    assert env["data"]["ignored_by_git"] is False and env["data"]["location"] == "project"
     assert any("not git-ignored" in w for w in env["warnings"])
 
 

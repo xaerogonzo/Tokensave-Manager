@@ -1,9 +1,18 @@
 """A project's shared handoff ledger: what one agent leaves for the next.
 
-`.tokensave/handoff.jsonl`, one JSON object per line, append-only. It is how a
-Claude session and a Cursor session working on the same project can see each
-other's decisions and open questions without either one's private store being
-readable by the other.
+One JSON object per line, append-only. It is how a Claude session and a Cursor
+session working on the same project can see each other's decisions and open
+questions without either one's private store being readable by the other.
+
+WHERE IT LIVES. In a git repository: `<git common dir>/tokensave/handoff.jsonl`,
+i.e. inside `.git`. That is the one place every worktree of a clone shares (a
+linked worktree's own folder is NOT shared, so a ledger in `.tokensave/` would
+be invisible from its siblings, and worktrees are exactly how these sessions
+are run), and git never tracks it, so there is no `.gitignore` to get wrong and
+nothing to commit by accident. Outside a repository it falls back to
+`<project>/.tokensave/handoff.jsonl`. Only a folder with a `.git` of its own
+counts as a repository: `git` walks upward and would otherwise file a nested
+plain folder's ledger inside its PARENT's `.git`.
 
 WHAT EACH FIELD IS WORTH. An entry mixes statements of different weight, and
 the schema keeps them apart instead of flattening them:
@@ -35,9 +44,10 @@ glue itself to the next entry.
 Reading never pretends: lines that do not parse are COUNTED and reported, not
 dropped, and an unreadable file is a different state from an absent one.
 
-The ledger is machine-local. `.tokensave/` is git-ignored by the baseline, and
-`is_ignored` asks git rather than assuming, because a file holding the person's
-decisions that is not ignored is one `git add -A` from being published.
+The ledger is machine-local. When it falls back to the project folder,
+`is_ignored` asks git rather than assuming `.tokensave/` is covered, because a
+file holding the person's decisions that is not ignored is one `git add -A` from
+being published.
 """
 
 from __future__ import annotations
@@ -56,6 +66,9 @@ from constants import CREATE_NO_WINDOW
 
 SCHEMA_VERSION = 1
 LEDGER_DIR = ".tokensave"
+#: The folder under the git common dir. Its own name rather than `.tokensave`,
+#: because inside `.git` there is no reason to carry the project-folder name.
+GIT_SUBDIR = "tokensave"
 LEDGER_BASENAME = "handoff.jsonl"
 LOCK_SUFFIX = ".lock"
 
@@ -124,8 +137,53 @@ class LedgerRead:
     error: str = ""
 
 
-def ledger_path(project: str) -> str:
+#: Positive answers only. A repository created after a first lookup must be
+#: noticed, so a miss is never remembered.
+_DIR_CACHE: dict = {}
+
+
+def _git_common_dir(project: str, git_exe: str = "") -> str:
+    """The shared git directory of a project that is its OWN repository.
+
+    `""` for a folder with no `.git` of its own (see the module note on nested
+    folders), for git failing, and for git missing. `--path-format=absolute`
+    needs git 2.31; an older git is asked again without it and the relative
+    answer is resolved against the project.
+    """
+    if not project or not os.path.exists(os.path.join(project, ".git")):
+        return ""
+    key = (os.path.abspath(project), git_exe)
+    if key in _DIR_CACHE:
+        return _DIR_CACHE[key]
+    found = ""
+    for flags in (["--path-format=absolute", "--git-common-dir"], ["--git-common-dir"]):
+        try:
+            proc = subprocess.run(
+                [git_exe or "git", "-C", project, "rev-parse", *flags],
+                capture_output=True, text=True, encoding="utf-8", errors="replace",
+                timeout=15, creationflags=CREATE_NO_WINDOW)
+        except (OSError, subprocess.SubprocessError):
+            return ""
+        out = proc.stdout.strip() if proc.returncode == 0 else ""
+        if out:
+            found = os.path.normpath(out if os.path.isabs(out)
+                                     else os.path.join(project, out))
+            break
+    if found:
+        _DIR_CACHE[key] = found
+    return found
+
+
+def ledger_path(project: str, git_exe: str = "") -> str:
+    common = _git_common_dir(project, git_exe)
+    if common:
+        return os.path.join(common, GIT_SUBDIR, LEDGER_BASENAME)
     return os.path.join(project, LEDGER_DIR, LEDGER_BASENAME)
+
+
+def in_git_dir(project: str, git_exe: str = "") -> bool:
+    """Is the ledger inside `.git`, where git cannot track it?"""
+    return bool(_git_common_dir(project, git_exe))
 
 
 def normalize_agent(agent: str) -> str:
@@ -235,9 +293,10 @@ def build_entry(*, agent: str, session_id: str = "", kind: str = KIND_HANDOFF,
 # ── locking and appending ─────────────────────────────────────────────────────
 
 @contextlib.contextmanager
-def _locked(project: str, timeout: float = LOCK_TIMEOUT_SECONDS):
+def _locked(project: str, timeout: float = LOCK_TIMEOUT_SECONDS,
+            git_exe: str = ""):
     """Hold the ledger lock. A stale lock is broken; a live one is waited on."""
-    path = ledger_path(project) + LOCK_SUFFIX
+    path = ledger_path(project, git_exe) + LOCK_SUFFIX
     os.makedirs(os.path.dirname(path), exist_ok=True)
     deadline = time.monotonic() + timeout
     while True:
@@ -283,14 +342,14 @@ def _ids_in(lines: list) -> set:
     return ids
 
 
-def append(project: str, entry: dict) -> AppendResult:
+def append(project: str, entry: dict, git_exe: str = "") -> AppendResult:
     """Append one validated entry. Idempotent on `handoff_id`. Never raises."""
-    path = ledger_path(project)
+    path = ledger_path(project, git_exe)
     handoff_id = str(entry.get("handoff_id") or "")
     try:
         line = json.dumps(entry, ensure_ascii=False,
                           separators=(",", ":")).encode("utf-8") + b"\n"
-        with _locked(project):
+        with _locked(project, git_exe=git_exe):
             existing = _read_lines(path) if os.path.isfile(path) else []
             if handoff_id and handoff_id in _ids_in(existing):
                 return AppendResult(True, handoff_id, True, path)
@@ -330,9 +389,10 @@ def _trim_if_needed(path: str) -> int:
 
 # ── reading and clearing ───────────────────────────────────────────────────────
 
-def read(project: str, limit: "int | None" = None) -> LedgerRead:
+def read(project: str, limit: "int | None" = None,
+         git_exe: str = "") -> LedgerRead:
     """Entries oldest first (the newest `limit` of them). Never raises."""
-    path = ledger_path(project)
+    path = ledger_path(project, git_exe)
     if not os.path.exists(path):
         return LedgerRead(STATE_ABSENT, path=path)
     try:
@@ -355,11 +415,11 @@ def read(project: str, limit: "int | None" = None) -> LedgerRead:
     return LedgerRead(STATE_OK, tuple(entries), bad, path)
 
 
-def clear(project: str) -> "tuple[bool, str]":
+def clear(project: str, git_exe: str = "") -> "tuple[bool, str]":
     """Delete the ledger. Deliberate and total; called only on a person's say-so."""
-    path = ledger_path(project)
+    path = ledger_path(project, git_exe)
     try:
-        with _locked(project):
+        with _locked(project, git_exe=git_exe):
             if os.path.exists(path):
                 os.remove(path)
     except LedgerError as exc:
@@ -410,14 +470,18 @@ def publish(project: str, *, agent: str, session_id: str = "", goal: str = "",
         next_steps=next_steps, open_questions=open_questions, files=files,
         branch=seen["branch"], base_commit=head.strip() if ok else "",
         observed=[ln.strip() for ln in seen["dirty"]])
-    result = append(project, entry)
+    result = append(project, entry, git_exe)
     warnings = []
     if seen["git_error"]:
         # First line only: git's own message for "no commits yet" runs to five.
         why = (seen["git_error"].splitlines() or [""])[0]
         warnings.append(f"git did not answer, so branch and changed files are "
                         f"empty: {why}")
-    if result.ok and is_ignored(project, git_exe) is False:
+    # Inside `.git` there is nothing to ignore. Only the project-folder fallback
+    # (a plain folder, possibly nested in someone else's repository) can be one
+    # `git add -A` from being committed.
+    if (result.ok and not in_git_dir(project, git_exe)
+            and is_ignored(project, git_exe) is False):
         warnings.append(f"{LEDGER_DIR}/{LEDGER_BASENAME} is NOT git-ignored in "
                         f"this project; it holds your decisions and should not "
                         f"be committed")

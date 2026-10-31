@@ -206,7 +206,8 @@ COMMANDS: tuple = (
         label="Agent handoff",
         detail="Publish to, read or clear the ledger agents share. Publishing "
                "is opt-in.",
-        # Writes `.tokensave/handoff.jsonl` in the project. No `vscode` id:
+        # Writes the handoff ledger (inside `.git`, or `.tokensave/` outside a
+        # repository). No `vscode` id:
         # this is for agents and scripts to call, and an editor menu entry that
         # asks for a goal and a decision is a different feature.
         side_effect=MUTATING),

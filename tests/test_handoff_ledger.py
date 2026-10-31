@@ -340,10 +340,25 @@ def test_publish_measures_the_repository_itself(project):
     assert entry["agent_reported_files"] == ["claimed.py"]           # the claim, apart
 
 
-def test_publish_warns_when_the_ledger_would_be_committed(project):
+def _nested(project):
+    """A plain folder inside someone else's repository: no `.git` of its own."""
     _repo(project, ignore=False)
-    result, warnings = publish(project, agent="claude", goal="g")
+    child = os.path.join(project, "child")
+    os.makedirs(child)
+    return child
+
+
+def test_a_nested_plain_folder_still_warns_because_its_parent_repo_would_commit_it(project):
+    child = _nested(project)
+    result, warnings = publish(child, agent="claude", goal="g")
     assert result.ok and any("NOT git-ignored" in w for w in warnings)
+    assert result.path == os.path.join(child, ".tokensave", "handoff.jsonl")
+
+
+def test_a_ledger_inside_a_repository_has_nothing_to_warn_about(project):
+    _repo(project, ignore=False)                      # no .gitignore at all
+    result, warnings = publish(project, agent="claude", goal="g")
+    assert result.ok and not any("git-ignored" in w for w in warnings)
 
 
 def test_publish_outside_a_repository_still_writes_and_says_why_it_is_thin(project):
@@ -372,3 +387,114 @@ def test_a_repository_with_no_commits_gets_a_one_line_warning_not_gits_essay(pro
     assert result.ok
     why = [w for w in warnings if "git did not answer" in w]
     assert why and "\n" not in why[0]
+
+
+# -- where it lives: the git common dir, so worktrees share it ---------------------------------
+
+def test_in_a_repository_the_ledger_is_inside_dot_git_where_git_cannot_track_it(project):
+    _repo(project, ignore=False)
+    result, _ = publish(project, agent="claude", goal="g")
+    assert result.path == os.path.join(project, ".git", "tokensave", "handoff.jsonl")
+    assert hl.in_git_dir(project) is True
+    assert _git_out(project, "status", "--short").strip() == ""       # no ignore rule needed
+    assert not os.path.exists(os.path.join(project, ".tokensave"))
+
+
+def _git_out(project, *args):
+    return subprocess.run(["git", "-C", project, *args], check=True,
+                          capture_output=True, text=True).stdout
+
+
+def test_a_worktree_and_its_main_checkout_share_one_ledger(project, tmp_path):
+    _repo(project, ignore=False)
+    wt = str(tmp_path / "wt")
+    _git(project, "worktree", "add", "-q", "-b", "feature", wt)
+    assert os.path.isfile(os.path.join(wt, ".git"))                  # a pointer file, not a dir
+    from_worktree, _ = publish(wt, agent="cursor", goal="written in the worktree")
+    assert from_worktree.ok
+    seen_from_main = read(project)
+    assert [e["goal"] for e in seen_from_main.entries] == ["written in the worktree"]
+    assert from_worktree.path == seen_from_main.path == ledger_path(project) == ledger_path(wt)
+
+
+def test_a_sibling_worktree_sees_what_another_one_wrote(project, tmp_path):
+    _repo(project, ignore=False)
+    a, b = str(tmp_path / "a"), str(tmp_path / "b")
+    _git(project, "worktree", "add", "-q", "-b", "fa", a)
+    _git(project, "worktree", "add", "-q", "-b", "fb", b)
+    publish(a, agent="claude", goal="from a")
+    publish(b, agent="cursor", goal="from b")
+    assert [e["goal"] for e in read(a).entries] == ["from a", "from b"]
+    assert [e["goal"] for e in read(b).entries] == ["from a", "from b"]
+
+
+def test_each_entry_still_records_which_worktree_branch_it_was_written_from(project, tmp_path):
+    _repo(project, ignore=False)
+    wt = str(tmp_path / "wt")
+    _git(project, "worktree", "add", "-q", "-b", "feature", wt)
+    publish(project, agent="claude", goal="on main")
+    publish(wt, agent="cursor", goal="on feature")
+    assert [e["branch"] for e in read(project).entries] == ["work", "feature"]
+
+
+def test_outside_a_repository_it_falls_back_to_the_project_folder(project):
+    assert ledger_path(project) == os.path.join(project, ".tokensave", "handoff.jsonl")
+    assert hl.in_git_dir(project) is False
+
+
+def test_a_nested_plain_folder_is_not_filed_inside_its_parents_dot_git(project):
+    """git walks upward; without the own-`.git` rule this ledger would land in the
+    parent repository and be shared with unrelated folders."""
+    child = _nested(project)
+    assert hl.in_git_dir(child) is False
+    assert ".git" not in ledger_path(child).split(os.sep)
+
+
+def test_the_git_answer_is_remembered_but_a_miss_is_not(project, monkeypatch):
+    hl._DIR_CACHE.clear()
+    calls = []
+    real = subprocess.run
+
+    def counting(argv, **kw):
+        calls.append(argv)
+        return real(argv, **kw)
+    monkeypatch.setattr(hl.subprocess, "run", counting)
+    assert ledger_path(project).endswith(os.path.join(".tokensave", "handoff.jsonl"))
+    assert calls == []                                    # no `.git`, so git is not even asked
+    _repo(project, ignore=False)                          # a repository appears later
+    first = ledger_path(project)
+    second = ledger_path(project)
+    assert first == second and ".git" in first
+    assert len([c for c in calls if "--git-common-dir" in c]) == 1
+
+
+def test_git_missing_falls_back_and_is_not_remembered(project, monkeypatch):
+    _repo(project, ignore=False)
+    hl._DIR_CACHE.clear()
+
+    def boom(*a, **k):
+        raise FileNotFoundError("git")
+    monkeypatch.setattr(hl.subprocess, "run", boom)
+    assert ledger_path(project) == os.path.join(project, ".tokensave", "handoff.jsonl")
+    monkeypatch.undo()
+    assert ".git" in ledger_path(project)                # recovered: the failure was not cached
+
+
+def test_an_older_git_without_path_format_is_asked_again_without_it(project, monkeypatch):
+    _repo(project, ignore=False)
+    hl._DIR_CACHE.clear()
+    real = subprocess.run
+
+    def old_git(argv, **kw):
+        if any(a.startswith("--path-format") for a in argv):
+            return subprocess.CompletedProcess(argv, 129, "", "unknown option")
+        return real(argv, **kw)
+    monkeypatch.setattr(hl.subprocess, "run", old_git)
+    assert ledger_path(project) == os.path.join(project, ".git", "tokensave", "handoff.jsonl")
+
+
+def test_the_lock_and_temp_files_live_beside_the_ledger_inside_dot_git(project):
+    _repo(project, ignore=False)
+    publish(project, agent="claude", goal="g")
+    leftovers = os.listdir(os.path.dirname(ledger_path(project)))
+    assert leftovers == ["handoff.jsonl"]                # no .lock, no .tmp left behind

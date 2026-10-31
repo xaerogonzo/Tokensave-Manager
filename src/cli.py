@@ -959,7 +959,8 @@ def _cmd_handoff(args) -> Result:
     raw = _load_manager_config(args.config)
     git_exe = raw.get("git_exe") or ""
     enabled = raw.get("enable_agent_handoff") is True
-    path = ledger.ledger_path(project)
+    path = ledger.ledger_path(project, git_exe)
+    in_git = ledger.in_git_dir(project, git_exe)
     # The command a rule tells an agent to run is the one the Manager already
     # uses for its own VS Code tasks, so the two cannot disagree about it.
     runner = vscode_tasks.default_runner(_BASE_DIR, _is_frozen(), "python").argv
@@ -990,8 +991,10 @@ def _cmd_handoff(args) -> Result:
                       human="rule removed" if gone.changed else "no rule was there")
 
     if args.action == "status":
-        seen = ledger.read(project)
-        ignored = ledger.is_ignored(project, git_exe)
+        seen = ledger.read(project, git_exe=git_exe)
+        # Inside `.git` git cannot track it, which is a stronger answer than
+        # "ignored"; reported as ignored so one field still answers the question.
+        ignored = True if in_git else ledger.is_ignored(project, git_exe)
         warnings = []
         if ignored is False and seen.state != ledger.STATE_ABSENT:
             warnings.append(f"{ledger.LEDGER_DIR}/{ledger.LEDGER_BASENAME} is "
@@ -1003,13 +1006,14 @@ def _cmd_handoff(args) -> Result:
             {"enabled": enabled, "state": seen.state, "entries": len(seen.entries),
              "bad_lines": seen.bad_lines, "ignored_by_git": ignored,
              "path": path, "error": seen.error,
+             "location": "git" if in_git else "project",
              "rule": handoff_rules.status(project, runner, config_path, git_exe)},
             warnings,
             human=f"handoff {'on' if enabled else 'off'}; ledger {seen.state}, "
                   f"{len(seen.entries)} entr{'y' if len(seen.entries) == 1 else 'ies'}")
 
     if args.action == "list":
-        seen = ledger.read(project, limit=max(0, args.limit))
+        seen = ledger.read(project, limit=max(0, args.limit), git_exe=git_exe)
         if seen.state == ledger.STATE_UNREADABLE:
             return Result(EXIT_FAILED, {"state": seen.state, "path": path},
                           error=seen.error, human=f"cannot read the ledger: {seen.error}")
@@ -1026,7 +1030,7 @@ def _cmd_handoff(args) -> Result:
             return Result(EXIT_USAGE, error="clearing deletes the whole ledger; "
                           "pass --yes to confirm",
                           human="pass --yes to confirm clearing the ledger")
-        ok, err = ledger.clear(project)
+        ok, err = ledger.clear(project, git_exe)
         if not ok:
             return Result(EXIT_FAILED, error=err, human=err)
         return Result(EXIT_OK, {"cleared": True, "path": path}, human="ledger cleared")
