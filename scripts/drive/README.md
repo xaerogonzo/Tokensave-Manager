@@ -34,6 +34,7 @@ what that cost.
 | `geometry-sweep.json` | Walks every main-window tab and reports laid-out geometry defects on each. The routine check. |
 | `dialog-sweep.json` | Opens the dialogs with a track record of geometry defects and reports each. **This is where the findings are** — the main window has no history of them. |
 | `continue-in-cursor.json` | Opens Tasks -> History, then reports (read-only) how many sessions loaded, whether each is offered "Continue in Cursor", whether its transcript was found, and which Cursor CLI the real config resolves. Never launches anything. Needs `--config` pointing at a real `manager-config.json` when run from a worktree. |
+| `agent-per-feature.json` | Opens Settings -> AI, reports geometry and screenshots the Agent-per-feature rows. |
 | `geometry-selftest.json` | Reports the Git tab twice — once normally, once with an impossible tolerance. **Run this whenever you doubt a clean result.** |
 
 ## Why the self-test exists

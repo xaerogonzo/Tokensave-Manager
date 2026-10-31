@@ -209,10 +209,6 @@ class AISection:
                            relief=tk.GROOVE, bd=1)
         lf.pack(fill=tk.X, padx=20, pady=(0, 8))
 
-        # Draft PR
-        tk.Label(lf, text="Draft PR",
-                 font=("Segoe UI", 9, "bold"),
-                 bg=C["base"], fg=C["text"]).pack(anchor=tk.W, padx=12, pady=(6, 2))
         # Agent CLI selector. This sits ABOVE the per-feature backend
         # radios because it changes what "Claude CLI" MEANS in every
         # one of them: those settings keep the persisted value
@@ -238,6 +234,11 @@ class AISection:
         self._build_agent_overrides(lf, raw)
         ttk.Separator(lf, orient="horizontal").pack(fill=tk.X, padx=8, pady=(0, 6))
 
+        # Draft PR: its heading belongs to ITS backend choice, not to the agent
+        # selector above, which applies to every feature.
+        tk.Label(lf, text="Draft PR",
+                 font=("Segoe UI", 9, "bold"),
+                 bg=C["base"], fg=C["text"]).pack(anchor=tk.W, padx=12, pady=(0, 2))
         self._var_draft_pr_backend = tk.StringVar(
             value=raw.get("draft_pr_backend") or "auto")
         pr_row = tk.Frame(lf, bg=C["base"])
