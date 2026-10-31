@@ -56,6 +56,7 @@ class AISection:
         self._cfg = cfg
         raw = cfg.raw
         self._build_backend_selection_section(body, raw)
+        self._build_handoff_section(body, raw)
         self._build_ollama_section(body, raw)
         self._build_ai_section(body, raw)
         self._build_ask_ai_section(body, raw)
@@ -63,6 +64,10 @@ class AISection:
     def save_into(self, raw: dict) -> bool:
         """Write this section's fields into raw. Always succeeds."""
         raw["agent_cli"]               = self._var_agent_cli.get()
+        # Written only when it is ON or was already in the file: opening
+        # Settings and saving must not add a key to an install that never had it.
+        if self._var_enable_agent_handoff.get() or "enable_agent_handoff" in raw:
+            raw["enable_agent_handoff"] = bool(self._var_enable_agent_handoff.get())
         self._save_agent_overrides(raw)
         raw["draft_pr_backend"]        = self._var_draft_pr_backend.get()
         raw["commit_message_backend"]  = self._var_commit_msg_backend.get()
@@ -160,6 +165,40 @@ class AISection:
                  font=("Segoe UI", 8), bg=C["base"], fg=C["overlay0"],
                  justify=tk.LEFT).pack(anchor=tk.W, padx=24, pady=(0, 8))
         return var
+
+    def _build_handoff_section(self, body, raw):
+        """The machine-wide switch for agents leaving notes for each other.
+
+        Off by default and strictly `True` to enable (the config property says
+        why). A project still takes part only after it has the handoff rule, so
+        this says where that is done rather than implying the switch is enough.
+        """
+        lf = tk.LabelFrame(body, text="Shared agent handoff  (Claude and Cursor)",
+                           bg=C["base"], fg=C["subtext"],
+                           font=("Segoe UI", 9, "bold"), relief=tk.GROOVE, bd=1)
+        lf.pack(fill=tk.X, padx=20, pady=(0, 8))
+        self._var_enable_agent_handoff = tk.BooleanVar(
+            value=raw.get("enable_agent_handoff") is True)
+        chk = ttk.Checkbutton(
+            lf, text="Let agents leave notes for each other",
+            variable=self._var_enable_agent_handoff)
+        chk.pack(anchor=tk.W, padx=12, pady=(8, 2))
+        try:
+            from theme import _Tooltip
+            _Tooltip(chk, "Off by default.\n\nOn: an agent in a project that has the "
+                          "handoff rule can record decisions, next steps and open "
+                          "questions that the next agent (Claude or Cursor) reads.")
+        except Exception:
+            pass
+        tk.Label(lf,
+            text="  Notes live in the project's .git folder, so they are never committed and\n"
+                 "  every worktree of the project shares them. They stay on this machine;\n"
+                 "  secrets are masked on a best-effort basis. Turning this off stops new\n"
+                 "  notes; existing ones stay until cleared.\n"
+                 "  A project takes part only once you add its rule: Projects tab, right-click,\n"
+                 "  AI & docs, \"Enable agent handoff here…\".",
+            font=("Segoe UI", 8), bg=C["base"], fg=C["overlay0"],
+            justify=tk.LEFT).pack(anchor=tk.W, padx=24, pady=(0, 8))
 
     def _build_agent_overrides(self, parent, raw) -> None:
         """One dropdown per feature: Default, or a specific agent.

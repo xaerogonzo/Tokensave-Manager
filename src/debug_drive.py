@@ -349,6 +349,32 @@ class _Driver:
         fresh = [w for w in tops() if id(w) not in before]
         return fresh[-1] if fresh else None
 
+    def _do_menu_entries(self, step: "dict[str, Any]") -> None:
+        """List the Projects tab's context-menu entries matching `contains`.
+
+        Read-only and never pops the menu up: `tk_popup` is modal on Windows and
+        would freeze a driven run. Walks the cascades, so an entry inside a
+        submenu is found with the path of cascades it sits under.
+        """
+        want = str(step.get("contains", "")).lower()
+        menu = getattr(self._app._projects, "_ctx_menu", None)
+        if menu is None:
+            _say("drive: menu_entries: the Projects tab has no context menu")
+            return
+
+        def walk(m, trail):
+            for i in range((m.index("end") or -1) + 1):
+                kind = m.type(i)
+                if kind == "separator":
+                    continue
+                label = str(m.entrycget(i, "label"))
+                if kind == "cascade":
+                    walk(m.nametowidget(m.entrycget(i, "menu")), trail + [label.strip()])
+                elif want in label.lower():
+                    _say("drive: menu: %s > %s  [state=%s]" % (
+                        " > ".join(trail), label.strip(), m.entrycget(i, "state")))
+        walk(menu, [])
+
     def _do_sessions(self, step: "dict[str, Any]") -> None:
         """Show the Tasks tab's History view. Give the scan an `after_ms`.
 
@@ -587,10 +613,18 @@ class _Driver:
     def _do_scroll(self, step: "dict[str, Any]") -> None:
         """Move a dialog's canvas to the top or the bottom."""
         where = str(step.get("to", "bottom")).lower()
+        # "top", "bottom", or a number from 0 to 1: how far down the page, for
+        # reaching a section in the middle of a long scrolling page.
+        try:
+            fraction = float(where)
+        except ValueError:
+            fraction = 0.0 if where == "top" else 1.0
         for widget in _walk(self._target(step)):
-            if isinstance(widget, tk.Canvas):
+            # Only a canvas that is on screen: Settings keeps one scroller per
+            # page, and the first one found belonged to a page nobody was on.
+            if isinstance(widget, tk.Canvas) and widget.winfo_ismapped():
                 widget.update_idletasks()
-                widget.yview_moveto(0.0 if where == "top" else 1.0)
+                widget.yview_moveto(min(1.0, max(0.0, fraction)))
                 _say("drive: scroll -> %s" % where)
                 return
         _say("drive: scroll: no canvas found")

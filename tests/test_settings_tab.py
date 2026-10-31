@@ -565,3 +565,42 @@ def test_saved_overrides_are_what_the_resolver_reads(tk_root, mock_config, mocke
     cfg = ManagerConfig(raw=dict(mock_config.raw))
     assert cfg.resolve_agent_cli("review").spec.id == "cursor"
     assert cfg.resolve_agent_cli("ask").spec.id == "claude"
+
+
+# ── Shared agent handoff switch ─────────────────────────────────────────────
+
+def _handoff_section(on):
+    from dialogs.settings_ai import AISection
+    stub = types.SimpleNamespace(
+        _var_enable_agent_handoff=types.SimpleNamespace(get=lambda: on),
+        _var_agent_cli=types.SimpleNamespace(get=lambda: "claude"))
+    return AISection, stub
+
+
+def test_an_install_that_never_had_the_handoff_key_does_not_gain_one_on_save(
+        tk_root, mock_config, mocker):
+    assert "enable_agent_handoff" not in mock_config.raw
+    _build(tk_root, mock_config, mocker)._save()
+    assert "enable_agent_handoff" not in mock_config.raw
+
+
+def test_turning_the_switch_on_saves_a_literal_true(tk_root, mock_config, mocker):
+    mock_config.raw["enable_agent_handoff"] = True
+    _build(tk_root, mock_config, mocker)._save()
+    assert mock_config.raw["enable_agent_handoff"] is True
+
+
+def test_a_switch_that_was_saved_off_stays_a_saved_false(tk_root, mock_config, mocker):
+    mock_config.raw["enable_agent_handoff"] = False
+    _build(tk_root, mock_config, mocker)._save()
+    assert mock_config.raw["enable_agent_handoff"] is False
+
+
+@pytest.mark.parametrize("stored", ["true", 1, "yes"])
+def test_a_truthy_non_boolean_in_the_config_shows_as_off_and_is_saved_as_false(
+        tk_root, mock_config, mocker, stored):
+    """Only a literal True is consent; showing anything else as ON would let the
+    next Save quietly turn a hand-edited value into a real opt-in."""
+    mock_config.raw["enable_agent_handoff"] = stored
+    _build(tk_root, mock_config, mocker)._save()
+    assert mock_config.raw["enable_agent_handoff"] is False

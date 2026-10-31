@@ -1,0 +1,9 @@
+[
+  {"do": "wait",         "after_ms": 3000},
+  {"do": "menu_entries", "contains": "handoff", "after_ms": 300},
+  {"do": "settings",     "page": "ai", "after_ms": 3500},
+  {"do": "scroll",       "to": "0.3", "after_ms": 800},
+  {"do": "report",       "what": "geometry", "after_ms": 800},
+  {"do": "shot",         "path": "D:/_scratch/agent-handoff-ui.png", "after_ms": 500},
+  {"do": "quit"}
+]

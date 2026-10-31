@@ -36,6 +36,7 @@ from helpers.git import (
 from helpers.project_discovery import (
     fmt_age,
 )
+from controllers import handoff_project_ctrl as handoff_ctrl
 from controllers.codegraph_ctrl import CodeGraphController
 from controllers.pyscope_ctrl import PyScopeController
 from controllers.doctor_ctrl import DoctorController
@@ -119,6 +120,8 @@ class ProjectsTabController:
     #: (submenu, entry index) for the bind toggle, set by
     #: _build_context_menu -- same shape as `_strict_tree_entry`.
     _bind_entry = None
+    #: (submenu, entry index) for the handoff opt-in toggle, same shape again.
+    _handoff_entry = None
     """Owns the Projects tab UI and all per-project commands.
 
     No back-reference to App — all cross-App dependencies flow through the
@@ -852,6 +855,9 @@ class ProjectsTabController:
                          command=self._cmd_bar.cmd_refactor_scout)
         ai_m.add_command(label="✓  Run checks…",
                          command=self._cmd_bar.cmd_run_checks)
+        ai_m.add_separator()
+        ai_m.add_command(label=handoff_ctrl.ON_LABEL, command=self.cmd_toggle_handoff)
+        self._handoff_entry = (ai_m, ai_m.index("end"))
         m.add_cascade(label="🤖  AI & docs", menu=ai_m)
 
         # ── Open ───────────────────────────────────────────────────────────
@@ -908,6 +914,7 @@ class ProjectsTabController:
         self._rebuild_menu_if_mode_changed()
         self._sync_strict_tree_label(paths[0] if paths else "")
         self._sync_bind_label(paths[0] if paths else "")
+        self._sync_handoff_label(paths[0] if paths else "")
         self._ctx_menu.tk_popup(event.x_root, event.y_root)
 
     def _open_cross_project_search(self, paths: list) -> None:
@@ -982,6 +989,20 @@ class ProjectsTabController:
             menu.entryconfigure(index, label=label)
         except tk.TclError:
             pass
+
+    def _sync_handoff_label(self, path: str) -> None:
+        """Restated at popup time: the menu is built once and reused per row."""
+        if not self._handoff_entry:
+            return
+        menu, index = self._handoff_entry
+        try:
+            menu.entryconfigure(index, label=handoff_ctrl.label_for(self._cfg, path))
+        except tk.TclError:
+            pass
+
+    def cmd_toggle_handoff(self) -> None:
+        handoff_ctrl.toggle(self._root, self._cfg, self._on_log,
+                            self._selected_path() or "")
 
     def _wrapper_reads_the_pin(self) -> bool:
         """Does Claude Desktop define the wrapper entry that reads the pin?

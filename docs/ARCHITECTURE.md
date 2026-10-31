@@ -89,7 +89,7 @@ Token Save Manager Source/
 │   │                              Runs beside a real Manager through scripts/drive/run_isolated.py
 │   │                              (scratch config, no lock, no request poller, no tray).
 │   │
-│   ├── helpers/                  147 modules of pure / IO helpers — no UI deps.
+│   ├── helpers/                  148 modules of pure / IO helpers — no UI deps.
 │   │   ├── config.py              _load_config, _save_config, _migrate_config
 │   │   ├── detection.py           _detect_git/_gh/_npm/_codegraph/_claude_cli,
 │   │   │                          _root_path/_label, _version_lt
@@ -202,6 +202,8 @@ Token Save Manager Source/
 │   │   ├── agent_rules.py         AGENTS.md + .cursor/rules/*.mdc writers. Marked-block
 │   │   │                          managed; Cursor cannot follow CLAUDE.md's @include,
 │   │   │                          so the baseline is INLINED into AGENTS.md (once; the .mdc points at it)
+│   │   ├── handoff_setup.py       Opt a project in/out of handoff for the Manager's windows; the one
+│   │   │                          definition of the command a rule names (shared with the CLI)
 │   │   ├── cursor_hooks.py        The Cursor `sessionEnd` hook entry + generated script. The edit to
 │   │   │                          ~/.cursor/hooks.json is a pure plan shown as a diff first; backup before
 │   │   │                          write, a file that does not parse is refused, others' hooks preserved
@@ -885,6 +887,8 @@ Token Save Manager Source/
 │       ├── pyscope_ctrl.py        PyScopeController (analyze/open/register/status).
 │       │                          cmd_register is the Manager's only mutation of
 │       │                          PyScope state and never runs automatically
+│       ├── handoff_project_ctrl.py The Projects tab's "agent handoff here" entry (label + confirm +
+│       │                          write), kept out of projects_tab.py near its size cap
 │       ├── doctor_ctrl.py         DoctorController — the SINGLE authority on running
 │       │                          `tokensave doctor` (one env helper, one subprocess
 │       │                          shape). scan_stale / purge_stale / verify_purge /
@@ -1190,7 +1194,7 @@ app.py
   ├── theme.py           — _Tooltip
   ├── helpers/*          — pure / IO helpers (no UI)
   ├── dialogs/*          — 59 tk.Toplevel / panel modules
-  └── controllers/*      — 28 tab and sub-controllers
+  └── controllers/*      — 29 tab and sub-controllers
         └── controllers/* each import the dialogs they instantiate
             (lazy in-handler imports for any cross-dialog cycle risk —
              see Rule 6 in CHANGELOG Round 4 Phase C decisions).

@@ -560,8 +560,9 @@ class TestContextMenuGrouping:
         # since the PyScope cascade added Analyze / Status / Register /
         # Open in PyScope; 41 with "Bind to Claude Code..."; 42 with
         # "Instructions..." (the instruction-chain fleet view); 43 with
-        # "Rename Project..." beside "Assign Category...".
-        assert len(cmds) == 43, f"expected 43 commands, found {len(cmds)}"
+        # "Rename Project..." beside "Assign Category..."; 44 with "Enable
+        # agent handoff here..." (opt a project into the shared ledger).
+        assert len(cmds) == 44, f"expected 44 commands, found {len(cmds)}"
 
     def test_the_everyday_actions_stay_one_click_away(self):
         """Burying Sync in a submenu would make the common case worse.

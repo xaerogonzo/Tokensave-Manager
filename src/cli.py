@@ -953,19 +953,16 @@ def _cmd_handoff(args) -> Result:
     so a claim about what changed is never the only record of it.
     """
     from helpers import handoff_ledger as ledger
-    from helpers import handoff_rules, vscode_tasks
-    from constants import _BASE_DIR, _CONFIG_PATH
+    from helpers import handoff_rules, handoff_setup
     project = _resolve_project(args.project)
     raw = _load_manager_config(args.config)
     git_exe = raw.get("git_exe") or ""
     enabled = raw.get("enable_agent_handoff") is True
     path = ledger.ledger_path(project, git_exe)
     in_git = ledger.in_git_dir(project, git_exe)
-    # The command a rule tells an agent to run is the one the Manager already
-    # uses for its own VS Code tasks, so the two cannot disagree about it.
-    runner = vscode_tasks.default_runner(_BASE_DIR, _is_frozen(), "python").argv
-    config_path = (os.path.abspath(os.path.expanduser(args.config))
-                   if args.config else _CONFIG_PATH)
+    # The same answer the Manager's windows use, so the CLI and the GUI cannot
+    # write two different rules.
+    runner, config_path = handoff_setup.runner_and_config(args.config)
 
     if args.action == "rule":
         if not enabled:
