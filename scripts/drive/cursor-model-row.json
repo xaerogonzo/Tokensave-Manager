@@ -1,0 +1,9 @@
+[
+  {"do": "wait",     "after_ms": 3000},
+  {"do": "settings", "page": "paths", "after_ms": 4000},
+  {"do": "scroll",   "to": "bottom", "after_ms": 800},
+  {"do": "click",    "text": "Refresh list", "after_ms": 15000},
+  {"do": "report",   "what": "geometry", "after_ms": 800},
+  {"do": "shot",     "path": "D:/_scratch/cursor-model-row.png", "after_ms": 500},
+  {"do": "quit"}
+]

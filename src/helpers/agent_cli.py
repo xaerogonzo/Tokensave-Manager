@@ -121,6 +121,11 @@ class AgentCLISpec:
     #: means "no way established to enforce it", which is NOT the same as "not
     #: needed": the caller can ask `read_only_args` and say so honestly.
     read_only_args: tuple = ()
+    #: Flags that let a headless run USE its MCP tools (tokensave). Cursor needs
+    #: both: `--approve-mcps` makes the tools visible at all, `--force` approves
+    #: each call. `--force` is "run everything", so these are only ever added
+    #: next to an enforced read-only mode -- see `build_print_argv`.
+    mcp_args: tuple = ()
 
     def probe_names_for_dirs(self) -> tuple:
         """Binary names to look for inside ``extra_dirs``."""
@@ -180,6 +185,11 @@ CURSOR = AgentCLISpec(
     # was measured to work together with -p.
     trust_args=("--trust",),
     read_only_args=("--mode", "ask"),
+    # Measured 2026-10-31: without these a headless turn could not reach
+    # tokensave; with them and --mode ask, a request to write a file and to run
+    # a shell command was refused and nothing was created (one model, one run:
+    # evidence, not a proof that the block is in the tool layer).
+    mcp_args=("--approve-mcps", "--force"),
 )
 
 AGENT_CLIS: dict = {CLAUDE.id: CLAUDE, CURSOR.id: CURSOR}
@@ -297,6 +307,7 @@ def build_print_argv(
     system_prompt: str = "",
     model: str = "",
     read_only: bool = True,
+    mcp_tools: bool = False,
 ) -> tuple:
     """Assemble the one-shot print invocation.
 
@@ -306,13 +317,26 @@ def build_print_argv(
     ``read_only`` defaults to True because every caller here wants text back,
     not an edit; an agent whose row declares no ``read_only_args`` simply has
     nothing to add (its enforcement is not established, not absent).
+
+    ``mcp_tools`` lets the run call its MCP tools. It is refused unless the run
+    is read-only AND the agent has a read-only mode to enforce: its flags
+    include an approve-everything switch, and approving everything with no
+    enforced limit would let a drafting call write files and run commands.
     """
     if not exe:
         return [], None, f"{spec.label} is not configured."
+    if mcp_tools and not (read_only and spec.read_only_args):
+        return [], None, (
+            f"{spec.label}: tool use in a print-mode call needs an enforced "
+            f"read-only mode, which "
+            + ("this call turned off." if not read_only
+               else "this agent's row does not have."))
 
     argv = [exe, *spec.print_args, *spec.trust_args]
     if read_only:
         argv += spec.read_only_args
+    if mcp_tools:
+        argv += spec.mcp_args
     if model:
         argv += [spec.model_flag, model]
 
@@ -396,8 +420,12 @@ def call_print(
     timeout: int = 45,
     model: str = "",
     cwd: "str | None" = None,
+    mcp_tools: bool = False,
 ) -> "str | None":
     """Run the agent non-interactively and return its stdout text.
+
+    ``mcp_tools=True`` lets the run use its MCP tools (see `build_print_argv`
+    for why that is only allowed read-only).
 
     Returns the stripped stdout, or None on timeout / error / empty output.
     The reason is recorded in this thread's `get_last_cli_error()`.
@@ -410,7 +438,8 @@ def call_print(
     """
     _tls.last_error = None
     argv, stdin_text, err = build_print_argv(
-        spec, exe, prompt, system_prompt=system_prompt, model=model)
+        spec, exe, prompt, system_prompt=system_prompt, model=model,
+        mcp_tools=mcp_tools)
     if err:
         _tls.last_error = err
         return None

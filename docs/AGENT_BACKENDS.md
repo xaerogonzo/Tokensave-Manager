@@ -81,6 +81,12 @@ of entering interactive mode.
 | an id this build does not know | `unknown_agent`, naming the feature and the `agent_overrides` key |
 | `agent_overrides` is not an object | `unknown_agent` with an explanation, never "inherit" |
 
+### Models, and tools in a headless call
+
+**Models.** `agent --list-models` (needs a login) is read by `helpers/cursor_models.py` when you click *Refresh list* in Settings → Paths & Tools. Measured on this account: 270 models. The list is what Cursor accepts as a name, **not** what a plan allows: `gpt-5.4-nano-none` is listed and was refused ("not included in your weekly usage"). A pinned model that is missing from the list is kept and reported; with no usable list (not signed in, CLI missing, unreadable output) membership is *unknown*, never "not listed".
+
+**Tools.** A headless Cursor call can reach tokensave only with `--approve-mcps` (the tools become visible) and `--force` (each call approved). `--force` is "run everything", so `build_print_argv(..., mcp_tools=True)` refuses to add it unless the run is read-only AND the agent's row has a read-only mode (`--mode ask`). Measured once, on one model: with all of those set, a request to write a file and to run a shell command was refused and nothing was created. That is evidence, not proof the block is in the tool layer. No Manager feature requests tools yet; this is the guarded capability the first one will use.
+
 There is no fallback policy yet. One is added when something needs it, as an explicit setting; running a job with an agent the person did not pick is the failure this table exists to prevent. Every print-mode call from the Manager still runs read-only for Cursor (`--mode ask`).
 
 ### Two asymmetries, stated rather than papered over

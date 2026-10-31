@@ -198,6 +198,43 @@ def test_read_only_can_be_switched_off_but_trust_stays():
     assert "--trust" in argv
 
 
+def test_mcp_tools_adds_the_approval_flags_beside_read_only_mode():
+    argv, _, err = build_print_argv(CURSOR, "agent.cmd", "hi", mcp_tools=True)
+    assert err == ""
+    assert "--approve-mcps" in argv and "--force" in argv
+    assert argv[argv.index("--mode") + 1] == "ask"
+
+
+def test_mcp_flags_are_absent_unless_asked_for():
+    argv, _, _ = build_print_argv(CURSOR, "agent.cmd", "hi")
+    assert "--force" not in argv and "--approve-mcps" not in argv
+
+
+def test_force_is_never_combined_with_a_write_capable_run():
+    """--force is 'run everything'; without ask mode it would let a drafting call
+    edit files and run commands."""
+    argv, stdin_text, err = build_print_argv(
+        CURSOR, "agent.cmd", "hi", read_only=False, mcp_tools=True)
+    assert argv == [] and stdin_text is None
+    assert "enforced read-only mode" in err and "turned off" in err
+
+
+def test_an_agent_with_no_read_only_mode_cannot_be_given_tools():
+    """Claude's row establishes no enforcement, so approve-everything is refused."""
+    argv, _, err = build_print_argv(CLAUDE, "claude.cmd", "hi", mcp_tools=True)
+    assert argv == [] and "does not have" in err
+
+
+def test_call_print_passes_the_refusal_through_without_spawning(monkeypatch):
+    from helpers import agent_cli
+    spawned = []
+    monkeypatch.setattr(agent_cli.subprocess, "run",
+                        lambda *a, **k: spawned.append(1))
+    assert agent_cli.call_print(CLAUDE, "claude.cmd", "hi", mcp_tools=True) is None
+    assert not spawned
+    assert "read-only" in agent_cli.get_last_cli_error()
+
+
 def test_an_agent_without_read_only_args_gets_nothing_added():
     """Empty means 'no enforcement established', and must not invent a flag."""
     assert CLAUDE.read_only_args == ()

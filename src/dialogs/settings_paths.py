@@ -74,6 +74,7 @@ class PathsSection:
         raw["claude_cli_exe"]   = self._claude_cli_var.get().strip()
         raw["claude_cli_model"] = self._var_claude_cli_model.get().strip()
         raw["cursor_cli_exe"]   = self._cursor_cli_var.get().strip()
+        raw["cursor_cli_model"] = self._var_cursor_cli_model.get().strip()
         return True
 
     def bind_dirty(self, callback) -> None:
@@ -200,7 +201,7 @@ class PathsSection:
         """
         ttk.Separator(body, orient="horizontal").pack(fill=tk.X, padx=20, pady=(12, 8))
         tk.Label(body,
-                 text="Cursor Agent CLI  ——  path to cursor-agent (installed to ~/.local/bin)",
+                 text="Cursor Agent CLI  ——  path to agent.cmd (installed to %LOCALAPPDATA%\\cursor-agent)",
                  bg=C["base"], fg=C["subtext"],
                  font=("Segoe UI", 9)).pack(anchor=tk.W, padx=20)
         row = tk.Frame(body, bg=C["base"])
@@ -213,7 +214,7 @@ class PathsSection:
             p = filedialog.askopenfilename(
                 title="Select cursor-agent",
                 filetypes=[("All files", "*.*")],
-                initialdir=os.path.expandvars(r"%USERPROFILE%\.local\bin"),
+                initialdir=os.path.expandvars(r"%LOCALAPPDATA%\cursor-agent"),
                 parent=self._host)
             if p:
                 self._cursor_cli_var.set(p)
@@ -234,9 +235,80 @@ class PathsSection:
                                            font=("Segoe UI", 8), fg=C["overlay0"])
         self._cursor_cli_status.pack(side=tk.LEFT, padx=(6, 0))
         tk.Label(body,
-                 text="  The Windows installer writes both `cursor-agent` and `agent` into ~/.local/bin.",
+                 text="  The Windows installer writes `agent` and `cursor-agent` into "
+                      "%LOCALAPPDATA%\\cursor-agent and adds it to your PATH for NEW windows.",
                  font=("Segoe UI", 8), bg=C["base"], fg=C["overlay0"]).pack(
                  anchor=tk.W, padx=20, pady=(2, 0))
+        self._build_cursor_model_row(body, raw)
+
+    def _build_cursor_model_row(self, body, raw):
+        """Cursor model: a free-text pin, plus the CLI's own list to pick from.
+
+        The list is fetched ONLY when the person asks (the CLI call takes
+        seconds and needs a login), never while the page builds. Listed is not
+        the same as allowed on a plan, and the status line says so. A stored
+        model that is not in the list is kept, never replaced.
+        """
+        current = raw.get("cursor_cli_model")
+        self._var_cursor_cli_model = tk.StringVar(
+            value="" if current is None else str(current))
+        row = tk.Frame(body, bg=C["base"])
+        row.pack(fill=tk.X, padx=20, pady=(4, 0))
+        tk.Label(row, text="Model:", width=8, anchor=tk.W,
+                 font=("Segoe UI", 9), bg=C["base"], fg=C["subtext"]).pack(side=tk.LEFT)
+        self._cursor_model_combo = ttk.Combobox(
+            row, textvariable=self._var_cursor_cli_model, values=[""],
+            state="normal", width=40)
+        self._cursor_model_combo.pack(side=tk.LEFT, padx=(0, 6))
+        self._cursor_models_btn = ttk.Button(
+            row, text="Refresh list", command=self._refresh_cursor_models)
+        self._cursor_models_btn.pack(side=tk.LEFT)
+        self._cursor_models_status = tk.Label(
+            body, text="", font=("Segoe UI", 8), bg=C["base"],
+            fg=C["overlay0"], justify=tk.LEFT, wraplength=620)
+        self._cursor_models_status.pack(anchor=tk.W, padx=28, pady=(2, 0))
+        tk.Label(body,
+                 text="  Empty = let Cursor choose (Auto). Used by the manager's automated\n"
+                      "  Cursor calls only. Anthropic model ids are not valid here.",
+                 font=("Segoe UI", 8), bg=C["base"], fg=C["overlay0"],
+                 justify=tk.LEFT).pack(anchor=tk.W, padx=20, pady=(2, 0))
+        self._cursor_models_result: list = []
+
+    def _refresh_cursor_models(self) -> None:
+        """Ask the CLI for its list on a worker; the Tk thread polls for it.
+
+        The worker never touches a widget: it appends to a list, and a timer
+        started HERE (on the Tk thread) notices. Calling `after` from the
+        worker is the cross-thread shape this project keeps paying for.
+        """
+        from helpers import cursor_models
+        exe = (self._cursor_cli_var.get().strip() or self._cfg.cursor_cli_exe)
+        self._cursor_models_btn.configure(state=tk.DISABLED)
+        self._cursor_models_status.configure(
+            text="Asking the Cursor CLI for its models...", fg=C["overlay0"])
+        self._cursor_models_result.clear()
+
+        def worker() -> None:
+            self._cursor_models_result.append(cursor_models.fetch(exe))
+
+        threading.Thread(target=worker, daemon=True).start()
+        self._host.after(150, self._poll_cursor_models)
+
+    def _poll_cursor_models(self) -> None:
+        if not self._host.winfo_exists():
+            return
+        if not self._cursor_models_result:
+            self._host.after(150, self._poll_cursor_models)
+            return
+        from helpers import cursor_models
+        catalogue = self._cursor_models_result[-1]
+        text, tone = cursor_models.describe(
+            catalogue, self._var_cursor_cli_model.get())
+        colour = {"ok": C["green"], "warn": C["peach"]}.get(tone, C["red"])
+        self._cursor_models_status.configure(text=text, fg=colour)
+        if catalogue.ok:
+            self._cursor_model_combo.configure(values=["", *catalogue.ids])
+        self._cursor_models_btn.configure(state=tk.NORMAL)
 
     def _build_claude_cli_row(self, body, raw):
         """Claude Code CLI path + Install button sub-section."""
