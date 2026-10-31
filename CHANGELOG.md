@@ -3,7 +3,7 @@
 
 ## [Unreleased]
 
-## [2.7.0] — 2026-10-28
+## [2.7.0] — 2026-10-31
 
 ### Added
 - (release) **A Windows installer beside the zip.** `Tokensave-Manager-v2.7.0-windows-setup.exe` installs all three executables per user (no administrator) or for all users, upgrades in place, and uninstalls with two unticked boxes for your settings and logs. It is built from the validated zip and proved by really installing, upgrading and uninstalling a test build of it. Unsigned, so SmartScreen will say "unknown publisher".
@@ -31,6 +31,7 @@
 - (extension) **The extension activates once VS Code has finished starting.**
 
 ### Fixed
+- (release) **The Release Wizard opened as an empty window whenever a project had changelog fragments.** The dialog handed its repository path to the fragment helpers as a string, they need a `Path`, and the resulting `TypeError` was raised in the constructor outside the try/except that guards the widgets, so the person saw only a title bar and no message. Every Wizard test stood a bare instance in for the dialog, so none had ever run the constructor; the first real use after fragments were wired in was this repository's own release. The dialog now converts the path, and anything that fails while it reads the repository's release state shows an error naming the cause and closes, instead of leaving a blank window behind. Two tests build the REAL dialog on a throwaway git repository (one with a fragment and a drafting workflow, one where reading the repository fails); three mutations (the string passed again, the failure not caught, the failure reported but the window left open) each fail them. (`src/dialogs/release_wizard.py`, `tests/test_release_wizard.py`)
 - (instructions) **The shared baseline had never loaded in any project, and 532 lines of load-bearing rules with it.** Claude Code does not follow an absolute include outside the project, so each project now carries a copy.
 - (mcp) **Claude Desktop's app-level tokensave entry shadowed every project's own.** The trust flag has to be read off the forward-slash spelling, and the retirement guard counted an untrusted project as ready.
 - (git) **Every PR draft ticked "Test suite passes locally" with a number no test run produced.**
