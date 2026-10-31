@@ -309,3 +309,63 @@ def test_unrule_works_even_when_handoff_is_off(capsys, project, tmp_path):
     code, env, _ = _go(capsys, project, off, "--action", "unrule")
     assert code == EXIT_OK and env["data"]["removed"] is True
     assert not os.path.exists(os.path.join(project, "CLAUDE.local.md"))
+
+
+# -- the session marker (called by the Cursor hook for every session) -------------------------------------
+
+MARKER = ["--action", "marker", "--agent", "cursor", "--session", "s1", "--reason", "completed",
+          "--final-status", "completed", "--transcript", "C:/t/s1.jsonl"]
+
+
+def _opt_in(capsys, project, cfg):
+    _go(capsys, project, cfg, "--action", "rule")
+
+
+def test_a_marker_is_not_written_while_handoff_is_off(capsys, project, tmp_path):
+    _repo(project)
+    code, env, _ = _go(capsys, project, _config(tmp_path), *MARKER)
+    assert code == EXIT_PREREQUISITE and env["data"]["recorded"] is False
+    assert hl.read(project).state == hl.STATE_ABSENT
+
+
+def test_a_project_that_has_not_opted_in_gets_no_marker_and_no_failure(capsys, project, tmp_path):
+    """The hook fires for every Cursor session on the machine; only opted-in
+    projects may be written to, and the rest must be a quiet, non-error refusal."""
+    _repo(project)
+    cfg = _config(tmp_path, enable_agent_handoff=True)          # on, but no rule here
+    code, env, _ = _go(capsys, project, cfg, *MARKER)
+    assert code == EXIT_PREREQUISITE and env["data"]["recorded"] is False
+    assert "not opted in" in env["error"]
+    assert hl.read(project).state == hl.STATE_ABSENT
+
+
+def test_an_opted_in_project_records_a_session_marker_with_paths_only(capsys, project, tmp_path):
+    _repo(project)
+    cfg = _config(tmp_path, enable_agent_handoff=True)
+    _opt_in(capsys, project, cfg)
+    code, env, _ = _go(capsys, project, cfg, *MARKER)
+    assert code == EXIT_OK and env["data"]["recorded"] is True
+    entry = hl.read(project).entries[0]
+    assert entry["kind"] == "session" and entry["agent"] == "cursor"
+    assert entry["session_id"] == "s1"
+    assert entry["provenance"] == {"source": "hook", "reason": "completed",
+                                   "final_status": "completed",
+                                   "transcript_path": "C:/t/s1.jsonl"}
+    assert entry["goal"] == "" and entry["decisions"] == []         # a hook has no summary
+
+
+def test_the_same_session_ending_twice_is_recorded_once(capsys, project, tmp_path):
+    _repo(project)
+    cfg = _config(tmp_path, enable_agent_handoff=True)
+    _opt_in(capsys, project, cfg)
+    _go(capsys, project, cfg, *MARKER)
+    _, again, _ = _go(capsys, project, cfg, *MARKER)
+    assert again["data"]["duplicate"] is True and len(hl.read(project).entries) == 1
+
+
+def test_a_marker_needs_an_agent(capsys, project, tmp_path):
+    _repo(project)
+    cfg = _config(tmp_path, enable_agent_handoff=True)
+    _opt_in(capsys, project, cfg)
+    code, env, _ = _go(capsys, project, cfg, "--action", "marker")
+    assert code == EXIT_USAGE and "--agent" in env["error"]

@@ -982,6 +982,37 @@ def _cmd_handoff(args) -> Result:
             f"{handoff_rules.RULE_FILE} updated" if done.changed
             else f"{handoff_rules.RULE_FILE} already current"))
 
+    if args.action == "marker":
+        # Called by the Cursor sessionEnd hook for EVERY Cursor session on the
+        # machine, so it is quiet by construction: it writes only for a project
+        # whose person opted in (the handoff rule is there), and reports a
+        # prerequisite exit, not a failure, for every other one.
+        if not enabled:
+            return Result(EXIT_PREREQUISITE, {"recorded": False, "enabled": False},
+                          error="agent handoff is off", human="handoff is off")
+        rule = handoff_rules.status(project, runner, config_path, git_exe)
+        if rule not in (handoff_rules.STATE_CURRENT, handoff_rules.STATE_STALE):
+            return Result(EXIT_PREREQUISITE, {"recorded": False, "rule": rule},
+                          error="this project has not opted in (no handoff rule); "
+                                "nothing was recorded",
+                          human="project has not opted in - no marker written")
+        if not args.agent:
+            return Result(EXIT_USAGE, error="--agent is required",
+                          human="--agent is required")
+        try:
+            done = ledger.record_session(
+                project, agent=args.agent, session_id=args.session,
+                reason=args.reason, final_status=args.final_status,
+                transcript_path=args.transcript, git_exe=git_exe)
+        except ledger.LedgerError as exc:
+            return Result(EXIT_USAGE, error=str(exc), human=f"refused: {exc}")
+        data = {"recorded": done.ok and not done.duplicate, "duplicate": done.duplicate,
+                "handoff_id": done.handoff_id, "path": done.path}
+        if not done.ok:
+            return Result(EXIT_FAILED, data, error=done.error, human=done.error)
+        return Result(EXIT_OK, data, human="session marker "
+                      + ("already recorded" if done.duplicate else "recorded"))
+
     if args.action == "unrule":
         gone = handoff_rules.remove(project, git_exe)
         if not gone.ok:
@@ -1238,7 +1269,8 @@ def _build_parser() -> argparse.ArgumentParser:
     # `status` is the default: every command must parse with only --project, and
     # the default of a command that can delete a ledger has to be the read.
     ho.add_argument("--action", default="status",
-                    choices=["publish", "list", "status", "clear", "rule", "unrule"],
+                    choices=["publish", "list", "status", "clear", "rule", "unrule",
+                             "marker"],
                     help="publish an entry, list recent ones, report the "
                          "ledger's state (default), delete it, or write / "
                          "remove the git-ignored CLAUDE.local.md rule that "
@@ -1256,6 +1288,12 @@ def _build_parser() -> argparse.ArgumentParser:
     ho.add_argument("--file", action="append", default=None,
                     help="a file you changed (your claim; git is asked "
                          "separately); repeatable")
+    ho.add_argument("--reason", default="",
+                    help="with --action marker: why the session ended")
+    ho.add_argument("--final-status", default="", dest="final_status",
+                    help="with --action marker: how the session finished")
+    ho.add_argument("--transcript", default="",
+                    help="with --action marker: the transcript's PATH (never its text)")
     ho.add_argument("--limit", type=int, default=10,
                     help="entries to show with --action list (newest)")
     ho.add_argument("--yes", action="store_true",

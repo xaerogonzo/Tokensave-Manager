@@ -89,7 +89,7 @@ Token Save Manager Source/
 │   │                              Runs beside a real Manager through scripts/drive/run_isolated.py
 │   │                              (scratch config, no lock, no request poller, no tray).
 │   │
-│   ├── helpers/                  146 modules of pure / IO helpers — no UI deps.
+│   ├── helpers/                  147 modules of pure / IO helpers — no UI deps.
 │   │   ├── config.py              _load_config, _save_config, _migrate_config
 │   │   ├── detection.py           _detect_git/_gh/_npm/_codegraph/_claude_cli,
 │   │   │                          _root_path/_label, _version_lt
@@ -202,6 +202,9 @@ Token Save Manager Source/
 │   │   ├── agent_rules.py         AGENTS.md + .cursor/rules/*.mdc writers. Marked-block
 │   │   │                          managed; Cursor cannot follow CLAUDE.md's @include,
 │   │   │                          so the baseline is INLINED into AGENTS.md (once; the .mdc points at it)
+│   │   ├── cursor_hooks.py        The Cursor `sessionEnd` hook entry + generated script. The edit to
+│   │   │                          ~/.cursor/hooks.json is a pure plan shown as a diff first; backup before
+│   │   │                          write, a file that does not parse is refused, others' hooks preserved
 │   │   ├── handoff_rules.py       The git-ignored `CLAUDE.local.md` block that tells an agent the
 │   │   │                          publish command (machine paths, so never committed). Ignored via
 │   │   │                          .git/info/exclude BEFORE it is written; a tracked file is refused

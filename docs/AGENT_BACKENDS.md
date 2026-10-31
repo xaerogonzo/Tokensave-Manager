@@ -93,6 +93,10 @@ Measured facts that other work relies on: Cursor writes a transcript for every r
 
 Measured 2026-10-31 with a canary line in each of two git-excluded files: Claude Code loaded `CLAUDE.local.md`; Cursor loaded **both** `CLAUDE.local.md` and `.cursor/rules/*.mdc`. So a single `CLAUDE.local.md` reaches both agents, and a second Cursor-specific file would load the same instruction twice (the same duplication the baseline had). Observed on one machine with one Cursor configuration; Cursor does not promise it. The file is hidden from git with `.git/info/exclude`, resolved by `git rev-parse --git-path` so a worktree finds the right one, and that file is local to the clone and changes nothing in the repository.
 
+### The Cursor `sessionEnd` hook
+
+`helpers/cursor_hooks.py` builds (and, only on a person's yes, writes) one `sessionEnd` entry in `~/.cursor/hooks.json` plus `~/.cursor/hooks/tokensave_session_marker.py`. Measured in a headless run: the payload's `workspace_roots` is a list of plain Windows paths, and `reason` / `final_status` are `completed`. **Not yet measured: a USER-level `hooks.json`.** The project-level one was exercised; the user-level one is documented to run from `~/.cursor/` and is exercised for the first time by the check made right after installing (one headless run in a scratch project, then read the ledger). It fires for every Cursor session on the machine, so the Manager's CLI refuses (quietly, with the prerequisite exit code) for any project without the handoff rule, and while `enable_agent_handoff` is off nothing is written anywhere.
+
 ### Models, and tools in a headless call
 
 **Models.** `agent --list-models` (needs a login) is read by `helpers/cursor_models.py` when you click *Refresh list* in Settings → Paths & Tools. Measured on this account: 270 models. The list is what Cursor accepts as a name, **not** what a plan allows: `gpt-5.4-nano-none` is listed and was refused ("not included in your weekly usage"). A pinned model that is missing from the list is kept and reported; with no usable list (not signed in, CLI missing, unreadable output) membership is *unknown*, never "not listed".

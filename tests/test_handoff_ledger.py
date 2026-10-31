@@ -498,3 +498,36 @@ def test_the_lock_and_temp_files_live_beside_the_ledger_inside_dot_git(project):
     publish(project, agent="claude", goal="g")
     leftovers = os.listdir(os.path.dirname(ledger_path(project)))
     assert leftovers == ["handoff.jsonl"]                # no .lock, no .tmp left behind
+
+
+# -- session markers are bounded on their own ----------------------------------------------------
+
+def test_a_session_marker_has_no_summary_and_carries_only_what_the_hook_was_told(project):
+    result = hl.record_session(project, agent="cursor", session_id="s1", reason="completed",
+                               final_status="completed", transcript_path="C:/t/s1.jsonl")
+    assert result.ok
+    entry = read(project).entries[0]
+    assert entry["kind"] == "session" and entry["provenance"]["source"] == "hook"
+    assert entry["goal"] == "" and entry["decisions"] == [] and entry["next_steps"] == []
+
+
+def test_markers_beyond_their_cap_lose_their_oldest_and_never_a_handoff(project, monkeypatch):
+    monkeypatch.setattr(hl, "MAX_SESSION_MARKERS", 3)
+    append(project, _entry(goal="a real handoff"))
+    for n in range(6):
+        hl.record_session(project, agent="cursor", session_id=f"s{n}")
+    entries = read(project).entries
+    markers = [e["session_id"] for e in entries if e["kind"] == "session"]
+    assert markers == ["s3", "s4", "s5"]
+    assert [e["goal"] for e in entries if e["kind"] == "handoff"] == ["a real handoff"]
+
+
+def test_a_flood_of_markers_cannot_push_a_handoff_out_through_the_entry_bound(project, monkeypatch):
+    monkeypatch.setattr(hl, "MAX_ENTRIES", 8)
+    monkeypatch.setattr(hl, "KEEP_ENTRIES", 5)
+    monkeypatch.setattr(hl, "MAX_SESSION_MARKERS", 4)
+    append(project, _entry(goal="keep me"))
+    for n in range(30):
+        hl.record_session(project, agent="cursor", session_id=f"s{n}")
+    goals = [e["goal"] for e in read(project).entries if e["kind"] == "handoff"]
+    assert goals == ["keep me"]

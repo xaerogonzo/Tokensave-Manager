@@ -92,6 +92,11 @@ MAX_PATH_CHARS = 300
 MAX_ENTRIES = 200
 KEEP_ENTRIES = 150
 MAX_BYTES = 512_000
+#: Session markers are bookkeeping a hook writes for EVERY session, including
+#: the Manager's own automated headless calls, so they are capped on their own.
+#: Without this a busy day of automation would push real handoffs out of the
+#: file through the entry-count bound.
+MAX_SESSION_MARKERS = 40
 
 LOCK_TIMEOUT_SECONDS = 5.0
 #: A lock older than this belongs to a writer that died. Appends take
@@ -372,19 +377,44 @@ def append(project: str, entry: dict, git_exe: str = "") -> AppendResult:
                             error=f"could not write the ledger: {exc}")
 
 
+def _kind_of(raw: bytes) -> str:
+    try:
+        record = json.loads(raw.decode("utf-8", "replace"))
+    except ValueError:
+        return ""
+    return record.get("kind", "") if isinstance(record, dict) else ""
+
+
 def _trim_if_needed(path: str) -> int:
-    """Cut to the newest KEEP_ENTRIES lines when over a bound. Lock held."""
+    """Cut to the newest entries when over a bound. Lock held.
+
+    Two bounds, applied in this order: session markers beyond
+    MAX_SESSION_MARKERS lose their OLDEST, so markers never displace handoffs;
+    then the whole file is cut to KEEP_ENTRIES if still over its size.
+    """
     lines = _read_lines(path)
-    if len(lines) <= MAX_ENTRIES and os.path.getsize(path) <= MAX_BYTES:
-        return 0
+    cut = 0
+    markers = [i for i, raw in enumerate(lines) if _kind_of(raw) == KIND_SESSION]
+    if len(markers) > MAX_SESSION_MARKERS:
+        drop = set(markers[:len(markers) - MAX_SESSION_MARKERS])
+        lines = [raw for i, raw in enumerate(lines) if i not in drop]
+        cut += len(drop)
+    if len(lines) <= MAX_ENTRIES and sum(len(r) + 1 for r in lines) <= MAX_BYTES:
+        if cut:
+            _rewrite(path, lines)
+        return cut
     kept = lines[-KEEP_ENTRIES:]
+    _rewrite(path, kept)
+    return cut + len(lines) - len(kept)
+
+
+def _rewrite(path: str, kept: list) -> None:
     tmp = path + ".tmp"
     with open(tmp, "wb") as fh:
         fh.write(b"\n".join(kept) + b"\n")
         fh.flush()
         os.fsync(fh.fileno())
     os.replace(tmp, path)
-    return len(lines) - len(kept)
 
 
 # ── reading and clearing ───────────────────────────────────────────────────────
@@ -488,3 +518,23 @@ def publish(project: str, *, agent: str, session_id: str = "", goal: str = "",
     if result.ok and result.trimmed:
         warnings.append(f"retention cut {result.trimmed} older line(s)")
     return result, warnings
+
+
+def record_session(project: str, *, agent: str, session_id: str, reason: str = "",
+                   final_status: str = "", transcript_path: str = "",
+                   git_exe: str = "") -> AppendResult:
+    """A hook's note that a session ended. No summary: a hook has none to give.
+
+    Carries only what the hook was told: the session id, why it ended and where
+    its transcript is (a PATH, never the contents). It is how a later reader can
+    see that a session happened and went to find it, and whether any handoff
+    followed it.
+    """
+    from helpers.agent_handoff import observe_repository
+    seen = observe_repository(project, git_exe)
+    entry = build_entry(
+        agent=agent, session_id=session_id, kind=KIND_SESSION, source=SOURCE_HOOK,
+        branch=seen["branch"],
+        extra={"reason": reason, "final_status": final_status,
+               "transcript_path": transcript_path})
+    return append(project, entry, git_exe)
