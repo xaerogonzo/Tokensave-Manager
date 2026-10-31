@@ -37,7 +37,8 @@ import subprocess
 
 from constants import CREATE_NO_WINDOW
 from helpers import agent_cli
-from helpers.session_context import scan_transcript
+from helpers.session_context import (find_cursor_transcript,
+                                     scan_cursor_transcript, scan_transcript)
 
 #: Prompts kept besides the first. The first is the original goal; the rest are
 #: the recent trail. A middle that is dropped is said to be dropped.
@@ -55,9 +56,16 @@ FRAGMENT_CHARS = 2000
 _SYSTEM_REMINDER = re.compile(r"<system-reminder>.*?</system-reminder>", re.DOTALL)
 _HARNESS_ONLY = ("<task-notification>",)
 
-#: Lines of a transcript searched for the working directory. It sits on the
-#: first user record, a handful of lines in.
-_CWD_SEARCH_LINES = 200
+#: (long name, short name) per source agent. The short name is what the brief
+#: calls the agent in prose; an unknown source is a typo in code, not a default.
+SOURCE_NAMES = {"claude": ("Claude Code", "Claude"), "cursor": ("Cursor", "Cursor")}
+
+
+def _names(source: str) -> tuple:
+    if source not in SOURCE_NAMES:
+        raise ValueError(f"unknown handoff source {source!r}")
+    return SOURCE_NAMES[source]
+
 
 #: Where briefs live, relative to the project. `.tokensave/` is git-ignored by
 #: the baseline, so a brief (which quotes the person's prompts) is machine-local
@@ -115,6 +123,8 @@ class Brief:
     commits: tuple = ()
     #: `""` when git answered; otherwise why the observed section is empty.
     git_error: str = ""
+    #: Which agent's session this came from; decides the wording, not the facts.
+    source: str = "claude"
 
 
 @dataclasses.dataclass(frozen=True)
@@ -128,24 +138,9 @@ class Prepared:
     error: str = ""
 
 
-def transcript_cwd(path: str) -> str:
-    """The working directory a transcript was recorded in, or `""`."""
-    try:
-        with open(path, encoding="utf-8", errors="replace") as fh:
-            for i, line in enumerate(fh):
-                if i >= _CWD_SEARCH_LINES:
-                    break
-                if '"cwd"' not in line:
-                    continue
-                try:
-                    cwd = json.loads(line).get("cwd")
-                except ValueError:
-                    continue
-                if isinstance(cwd, str) and cwd:
-                    return cwd
-    except OSError:
-        pass
-    return ""
+# Lives with the other transcript readers; re-exported so the handoff's callers
+# and tests keep one import.
+from helpers.claude_tasks import transcript_cwd  # noqa: E402,F401
 
 
 def _git(git_exe: str, project: str, *args: str) -> "tuple[bool, str]":
@@ -182,9 +177,11 @@ def observe_repository(project: str, git_exe: str = "") -> dict:
 
 
 def build_brief(row: dict, transcript_path: str, project_path: str,
-                git_exe: str = "") -> Brief:
-    """Assemble a brief from one Claude session. Never raises on a bad file."""
-    prompts, prose, partial = scan_transcript(
+                git_exe: str = "", source: str = "claude") -> Brief:
+    """Assemble a brief from one agent session. Never raises on a bad file."""
+    _names(source)
+    scan = scan_cursor_transcript if source == "cursor" else scan_transcript
+    prompts, prose, partial = scan(
         transcript_path, want_prose=True, fragment_chars=FRAGMENT_CHARS)
     texts = [redact(c) for c in (clean_prompt(f.text) for f in prompts) if c]
     first = texts[0] if texts else ""
@@ -208,23 +205,24 @@ def build_brief(row: dict, transcript_path: str, project_path: str,
         last_assistant=last_said, partial=partial,
         branch=seen["branch"], dirty=seen["dirty"],
         dirty_total=seen["dirty_total"], commits=seen["commits"],
-        git_error=seen["git_error"])
+        git_error=seen["git_error"], source=source)
 
 
 def render(brief: Brief) -> str:
     """The brief as markdown. The framing paragraph is the contract."""
     when = brief.last_active.strftime("%Y-%m-%d %H:%M") if brief.last_active else "unknown"
+    long_name, short = _names(brief.source)
     lines = [
-        "# Handoff from a Claude Code session",
+        f"# Handoff from a {long_name} session",
         "",
         f"- Session: `{brief.session_id}` ({brief.title or 'untitled'})",
         f"- Project: `{brief.project_path}`",
         f"- Last active: {when}",
         "",
         "> **These are notes, not a restored session.** The first two sections are",
-        "> what the person asked and what Claude last said: Claude's words are a",
+        f"> what the person asked and what {short} last said: {short}'s words are a",
         "> claim, not a fact. The third is measured from git at the moment this was",
-        "> written. Check the repository before acting on any of it. Claude's memory",
+        f"> written. Check the repository before acting on any of it. {short}'s memory",
         "> is not included; the project's shared rules are in `AGENTS.md`.",
         "",
         "## What the person asked (their words)",
@@ -246,7 +244,7 @@ def render(brief: Brief) -> str:
         if brief.partial:
             lines += ["_The transcript was too large to read whole, so earlier "
                       "prompts are missing._", ""]
-    lines += ["## What Claude last said (an excerpt, not verified)", ""]
+    lines += [f"## What {short} last said (an excerpt, not verified)", ""]
     lines += [_quote(brief.last_assistant) if brief.last_assistant
               else "_Nothing readable._", ""]
     lines += ["## Observed in the repository now", ""]
@@ -281,22 +279,32 @@ def _oneline(text: str) -> str:
     return flat if len(flat) <= 400 else flat[:397] + "..."
 
 
-def brief_path(project_path: str, session_id: str) -> str:
+def brief_path(project_path: str, session_id: str, source: str = "claude") -> str:
+    """Where a session's brief goes. Claude keeps its plain name; any other
+    source is prefixed, because two agents' session ids are not drawn from
+    disjoint spaces and one must never overwrite the other's brief."""
     safe = re.sub(r"[^A-Za-z0-9_\-]", "_", session_id) or "session"
+    if source != "claude":
+        safe = f"{source}-{safe}"
     return os.path.join(project_path, HANDOFF_DIR, f"{safe}.md")
 
 
-def prepare(row: dict, project_path: str, git_exe: str = "") -> Prepared:
+def prepare(row: dict, project_path: str, git_exe: str = "",
+            source: str = "claude") -> Prepared:
     """Read the session, write its brief, and say where. Never raises."""
+    _names(source)
     transcript = row.get("path") or ""
+    if not transcript and source == "cursor":
+        # Cursor rows come from meta.json, which does not name the transcript.
+        transcript = find_cursor_transcript(str(row.get("session_id") or ""))
     if not transcript or not os.path.isfile(transcript):
         return Prepared(False, error="The session's transcript file is gone.")
     if not project_path or not os.path.isdir(project_path):
         return Prepared(False, error=(
             f"The folder this session ran in no longer exists: "
             f"{project_path or '(unknown)'}"))
-    brief = build_brief(row, transcript, project_path, git_exe)
-    target = brief_path(project_path, brief.session_id)
+    brief = build_brief(row, transcript, project_path, git_exe, source)
+    target = brief_path(project_path, brief.session_id, source)
     try:
         os.makedirs(os.path.dirname(target), exist_ok=True)
         with open(target, "w", encoding="utf-8", newline="\n") as fh:
@@ -307,9 +315,9 @@ def prepare(row: dict, project_path: str, git_exe: str = "") -> Prepared:
     return Prepared(True, target, project_path, count)
 
 
-def instruction_for(path: str) -> str:
+def instruction_for(path: str, source: str = "claude") -> str:
     """The short launch instruction. Stays far under the cmd.exe budget."""
-    return (f"A person is moving work here from a Claude Code session. Read "
+    return (f"A person is moving work here from a {_names(source)[0]} session. Read "
             f"{path} for what was asked and where it stood. It is notes, not "
             f"verified fact: check the repository first, then continue.")
 
@@ -321,3 +329,17 @@ def launch_cursor(prepared: Prepared, exe: str, model: str = "") -> "tuple[bool,
     rel = os.path.relpath(prepared.brief_path, prepared.project_path)
     return agent_cli.spawn(agent_cli.CURSOR, exe, prepared.project_path,
                            instruction_for(rel), model)
+
+
+def launch_claude(prepared: Prepared, exe: str, source: str = "cursor") -> "tuple[bool, str]":
+    """Open Claude Code's interactive session in the project, pointed at the brief.
+
+    No `--model` is passed on purpose. The Manager's pinned Claude model is the
+    fast, cheap one its automated calls want (Haiku); a person continuing their
+    own work wants whatever they normally run, which is Claude's own default.
+    """
+    if not prepared.ok:
+        return False, prepared.error
+    rel = os.path.relpath(prepared.brief_path, prepared.project_path)
+    return agent_cli.spawn(agent_cli.CLAUDE, exe, prepared.project_path,
+                           instruction_for(rel, source), "")

@@ -366,3 +366,134 @@ def test_the_placeholder_title_is_not_rendered_as_a_name(transcript, project):
     text = render(build_brief({**ROW, "title": "(untitled)"}, transcript, project))
     assert "((untitled))" not in text
     assert "(untitled)" in text          # rendered once, as the fallback label
+
+
+# -- Cursor -> Claude: Cursor's transcript format, captured not assumed ---------------
+
+CURSOR_FIXTURES = os.path.join(os.path.dirname(__file__), "fixtures", "cursor_transcripts")
+
+
+def _cursor(name):
+    return os.path.join(CURSOR_FIXTURES, name)
+
+
+def test_a_plain_cursor_transcript_yields_the_question_and_the_answer():
+    from helpers.session_context import scan_cursor_transcript
+    prompts, prose, partial = scan_cursor_transcript(_cursor("plain.jsonl"), want_prose=True)
+    assert [p.text for p in prompts] == ["Reply with the single word PONG."]
+    assert [p.text for p in prose] == ["PONG"]
+    assert partial is False
+
+
+def test_the_timestamp_and_query_wrapper_are_not_part_of_the_prompt():
+    from helpers.session_context import scan_cursor_transcript
+    prompts, _, _ = scan_cursor_transcript(_cursor("plain.jsonl"))
+    assert "<user_query>" not in prompts[0].text and "<timestamp>" not in prompts[0].text
+
+
+def test_tool_calls_carry_no_text_and_turn_markers_are_ignored():
+    from helpers.session_context import scan_cursor_transcript
+    prompts, prose, _ = scan_cursor_transcript(_cursor("tool_use.jsonl"), want_prose=True)
+    assert len(prompts) == 1 and prompts[0].text.startswith("Call the tokensave_status tool")
+    assert len(prose) == 1                      # the two tool_use records said nothing
+    assert "GetDynamicTools" not in prose[0].text
+
+
+def test_cursor_fragments_have_their_own_provenance():
+    from helpers.session_context import scan_cursor_transcript
+    prompts, prose, _ = scan_cursor_transcript(_cursor("plain.jsonl"), want_prose=True)
+    assert prompts[0].source == "cursor:prompt" and prose[0].source == "cursor:prose"
+
+
+def test_a_user_message_without_the_wrapper_keeps_its_text_minus_the_timestamp(tmp_path):
+    from helpers.session_context import scan_cursor_transcript
+    path = str(tmp_path / "t.jsonl")
+    _write(path, [json.dumps({"role": "user", "message": {"content": [
+        {"type": "text", "text": "<timestamp>Sat</timestamp>\nplain words"}]}})])
+    prompts, _, _ = scan_cursor_transcript(path)
+    assert prompts[0].text == "plain words"
+
+
+def test_a_garbage_cursor_transcript_reads_as_nothing_not_a_crash(tmp_path):
+    from helpers.session_context import scan_cursor_transcript
+    path = str(tmp_path / "t.jsonl")
+    with open(path, "w", encoding="utf-8") as fh:
+        fh.write("not json\n[1,2]\n{\"role\": \"user\"}\n")
+    assert scan_cursor_transcript(path) == ((), (), False)
+    assert scan_cursor_transcript(str(tmp_path / "missing.jsonl")) == ((), (), False)
+
+
+def test_find_cursor_transcript_goes_by_id_not_by_a_guessed_folder_name(fake_home):
+    from helpers.session_context import find_cursor_transcript
+    folder = os.path.join(fake_home, ".cursor", "projects", "D-any-collapsed-name",
+                          "agent-transcripts", "abc-123")
+    os.makedirs(folder)
+    target = os.path.join(folder, "abc-123.jsonl")
+    open(target, "w").close()
+    assert find_cursor_transcript("abc-123") == target
+    assert find_cursor_transcript("nope") == ""
+
+
+@pytest.mark.parametrize("hostile", ["..\\x", "a/b", "../../etc", "", None, 5, "a b"])
+def test_a_hostile_session_id_never_reaches_a_path(hostile, fake_home):
+    from helpers.session_context import find_cursor_transcript
+    assert find_cursor_transcript(hostile) == ""
+
+
+def test_the_cursor_brief_names_cursor_not_claude(project):
+    brief = build_brief({"session_id": "s", "title": "t"}, _cursor("plain.jsonl"),
+                        project, source="cursor")
+    text = render(brief)
+    assert "# Handoff from a Cursor session" in text
+    assert "## What Cursor last said" in text and "Cursor's memory" in text
+    assert "Claude" not in text
+    assert "Reply with the single word PONG." in text and "PONG" in text
+
+
+def test_the_claude_brief_wording_is_unchanged(transcript, project):
+    text = render(build_brief(ROW, transcript, project))
+    assert "# Handoff from a Claude Code session" in text
+    assert "## What Claude last said" in text and "Claude's memory" in text
+
+
+def test_a_cursor_brief_never_overwrites_a_claude_brief_with_the_same_id(project):
+    assert brief_path(project, "same") != brief_path(project, "same", "cursor")
+    assert os.path.basename(brief_path(project, "same", "cursor")) == "cursor-same.md"
+    assert os.path.basename(brief_path(project, "same")) == "same.md"
+
+
+def test_prepare_finds_a_cursor_transcript_by_session_id(fake_home, project):
+    folder = os.path.join(fake_home, ".cursor", "projects", "x", "agent-transcripts", "sid1")
+    os.makedirs(folder)
+    with open(os.path.join(folder, "sid1.jsonl"), "wb") as fh, \
+            open(_cursor("plain.jsonl"), "rb") as src:
+        fh.write(src.read())
+    result = prepare({"session_id": "sid1", "title": "t"}, project, source="cursor")
+    assert result.ok, result.error
+    assert os.path.basename(result.brief_path) == "cursor-sid1.md"
+    assert "Handoff from a Cursor session" in open(result.brief_path, encoding="utf-8").read()
+
+
+def test_an_unknown_source_is_a_programming_error(project):
+    with pytest.raises(ValueError):
+        build_brief(ROW, "x", project, source="codex")
+    with pytest.raises(ValueError):
+        ah.instruction_for("p", "codex")
+
+
+def test_launch_claude_opens_claude_with_no_pinned_model(monkeypatch, project):
+    seen = {}
+    monkeypatch.setattr(ah.agent_cli, "spawn", lambda spec, exe, path, ins, model="":
+                        seen.update(spec=spec, path=path, ins=ins, model=model) or (True, ""))
+    prepared = Prepared(True, brief_path(project, "s", "cursor"), project, 1)
+    ok, err = ah.launch_claude(prepared, "claude.cmd")
+    assert ok, err
+    assert seen["spec"] is ah.agent_cli.CLAUDE and seen["path"] == project
+    assert seen["model"] == ""              # the Manager's cheap pin is for automated calls
+    assert "Cursor session" in seen["ins"] and HANDOFF_DIR in seen["ins"]
+
+
+def test_launch_claude_refuses_an_unprepared_handoff(monkeypatch):
+    monkeypatch.setattr(ah.agent_cli, "spawn", lambda *a, **k: pytest.fail("spawned"))
+    ok, err = ah.launch_claude(Prepared(False, error="nothing"), "claude.cmd")
+    assert not ok and err == "nothing"

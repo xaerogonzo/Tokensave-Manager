@@ -133,7 +133,7 @@ def handoff(monkeypatch):
     ctrl = object.__new__(TasksController)
     ctrl._tab = None
     ctrl._cfg = types.SimpleNamespace(cursor_cli_exe="agent.cmd", git_exe="git",
-                                      cursor_cli_model="")
+                                      cursor_cli_model="", claude_cli_exe="claude.cmd")
     ctrl._post = lambda fn, *a: fn(*a)
     ctrl._sess_tree = _SelTree(("sess:claude:abc",))
     ctrl._sess_rows = {"sess:claude:abc": {"session_id": "abc", "title": "T",
@@ -146,11 +146,15 @@ def handoff(monkeypatch):
                         lambda title, msg, **k: log.asked.append(msg) or log.answer)
     log.answer = True
     import helpers.agent_handoff as ah
-    monkeypatch.setattr(ah, "transcript_cwd", lambda p: log.cwd)
-    monkeypatch.setattr(ah, "prepare", lambda row, proj, git: (
-        log.prepared.append((row["session_id"], proj))
+    import helpers.claude_tasks as ct
+    # `_locate` reads the folder through claude_tasks, where the function lives.
+    monkeypatch.setattr(ct, "transcript_cwd", lambda p: log.cwd)
+    monkeypatch.setattr(ah, "prepare", lambda row, proj, git, source="claude": (
+        log.prepared.append((row["session_id"], proj, source))
         or ah.Prepared(True, "b.md", proj, 1)))
     monkeypatch.setattr(ah, "launch_cursor", lambda prep, exe, model="": (
+        log.launched.append((prep.project_path, exe)) or (True, "")))
+    monkeypatch.setattr(ah, "launch_claude", lambda prep, exe, source="cursor": (
         log.launched.append((prep.project_path, exe)) or (True, "")))
     log.cwd = ""
     return ctrl, log
@@ -174,7 +178,7 @@ def test_a_yes_prepares_then_launches_in_the_sessions_folder(handoff, tmp_path):
     ctrl, log = handoff
     log.cwd = str(tmp_path)
     ctrl._sess_continue_in_cursor()
-    assert log.prepared == [("abc", str(tmp_path))]
+    assert log.prepared == [("abc", str(tmp_path), "claude")]
     assert log.launched == [(str(tmp_path), "agent.cmd")]
     assert not log.errors
 
@@ -224,3 +228,91 @@ def test_only_claude_rows_are_offered_the_handoff():
     assert ctrl._sess_can_hand_off("sess:claude:a") is True
     assert ctrl._sess_can_hand_off("sess:cursor:b") is False
     assert ctrl._sess_can_hand_off("sess:claude:unknown") is False
+
+
+# ── The other direction, worktree folders, and the Cursor app ───────────────
+
+def test_cursor_rows_can_go_to_claude_and_not_to_cursor():
+    ctrl = _controller()
+    ctrl._update_sess_tree([_row("a", "p", 2.0), _row("b", "p", 1.0, agent="cursor")])
+    assert ctrl._sess_can_hand_off("sess:cursor:b", "claude") is True
+    assert ctrl._sess_can_hand_off("sess:cursor:b", "cursor") is False
+    assert ctrl._sess_can_hand_off("sess:claude:a", "claude") is False
+    assert ctrl._sess_can_hand_off("sess:claude:a", "cursor") is True
+
+
+def test_an_unknown_target_is_never_offered():
+    ctrl = _controller()
+    ctrl._update_sess_tree([_row("a", "p", 1.0)])
+    assert ctrl._sess_can_hand_off("sess:claude:a", "codex") is False
+
+
+def test_a_cursor_session_hands_off_to_claude_from_its_recorded_folder(handoff, tmp_path):
+    ctrl, log = handoff
+    ctrl._sess_rows = {"sess:cursor:c1": {"session_id": "c1", "title": "T",
+                                          "agent": "cursor", "cwd": str(tmp_path)}}
+    ctrl._sess_tree = _SelTree(("sess:cursor:c1",))
+    ctrl._sess_continue_in_claude()
+    # The row carried its folder, so no transcript was read to find it.
+    assert log.prepared == [("c1", str(tmp_path), "cursor")]
+    assert log.launched == [(str(tmp_path), "claude.cmd")]
+    text = log.asked[0]
+    assert "Claude's agent" in text and "Cursor" in text and "Anthropic" in text
+    assert "not an import" in text
+
+
+def test_the_claude_direction_needs_the_claude_cli_and_says_so(handoff):
+    ctrl, log = handoff
+    ctrl._cfg.claude_cli_exe = ""
+    ctrl._sess_rows = {"sess:cursor:c1": {"session_id": "c1", "agent": "cursor", "cwd": "x"}}
+    ctrl._sess_tree = _SelTree(("sess:cursor:c1",))
+    ctrl._sess_continue_in_claude()
+    assert log.errors and "Claude Code CLI" in log.errors[0][0]
+    assert not log.asked and not log.prepared
+
+
+def test_a_claude_row_is_not_handed_back_to_claude(handoff):
+    ctrl, log = handoff
+    ctrl._sess_continue_in_claude()          # the fixture's selected row is a Claude one
+    assert not log.asked and not log.errors and not log.prepared
+
+
+def test_a_rows_folder_is_its_recorded_cwd_only_while_it_exists(tmp_path):
+    ctrl = _controller()
+    ctrl._sess_rows = {"a": {"cwd": str(tmp_path)}, "b": {"cwd": str(tmp_path / "gone")},
+                       "c": {}, "d": {"cwd": ""}}
+    assert ctrl._sess_folder("a") == str(tmp_path)
+    assert ctrl._sess_folder("b") == "" and ctrl._sess_folder("c") == ""
+    assert ctrl._sess_folder("d") == "" and ctrl._sess_folder("missing") == ""
+
+
+def test_double_click_opens_the_rows_own_folder_even_for_an_unknown_worktree(monkeypatch, tmp_path):
+    opened = []
+    monkeypatch.setattr(tasks_tab.os, "startfile", lambda p: opened.append(p), raising=False)
+    ctrl = _controller()
+    ctrl._sess_tree = _SelTree(("sess:claude:w",))
+    ctrl._sess_rows = {"sess:claude:w": {"cwd": str(tmp_path)}}
+    ctrl._get_known_paths = lambda: []          # a worktree is not a known project
+    ctrl._sess_open_folder(None)
+    assert opened == [str(tmp_path)]
+
+
+def test_open_in_cursor_app_uses_the_rows_folder(monkeypatch, tmp_path):
+    seen = []
+    import helpers.cursor_ide as ide
+    monkeypatch.setattr(ide, "open_folder", lambda folder, exe="": seen.append(folder) or (True, ""))
+    ctrl = _controller()
+    ctrl._tab = None
+    ctrl._sess_tree = _SelTree(("sess:claude:w",))
+    ctrl._sess_rows = {"sess:claude:w": {"cwd": str(tmp_path)}}
+    ctrl._sess_open_in_cursor_app()
+    assert seen == [str(tmp_path)]
+
+
+def test_open_in_cursor_app_with_no_folder_does_nothing(monkeypatch):
+    import helpers.cursor_ide as ide
+    monkeypatch.setattr(ide, "open_folder", lambda *a, **k: pytest.fail("opened"))
+    ctrl = _controller()
+    ctrl._sess_tree = _SelTree(("sess:claude:w",))
+    ctrl._sess_rows = {"sess:claude:w": {"cwd": ""}}
+    ctrl._sess_open_in_cursor_app()

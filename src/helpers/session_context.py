@@ -39,6 +39,7 @@ import datetime
 import glob
 import json
 import os
+import re
 import subprocess
 
 from constants import CREATE_NO_WINDOW
@@ -49,6 +50,10 @@ from constants import CREATE_NO_WINDOW
 SOURCE_NOTE_PROMPT = "note:prompt"
 SOURCE_TRANSCRIPT_PROMPT = "transcript:prompt"
 SOURCE_TRANSCRIPT_PROSE = "transcript:prose"
+#: Cursor's transcripts are a different format from Claude's, so their
+#: fragments carry their own provenance rather than borrowing Claude's.
+SOURCE_CURSOR_PROMPT = "cursor:prompt"
+SOURCE_CURSOR_PROSE = "cursor:prose"
 
 #: Window fallbacks, each a distinct FACT rather than a shrug. A repository
 #: with no commits is not the same as one whose history could not be read, and
@@ -395,6 +400,84 @@ def scan_transcript(path: str, *, want_prose: bool = False,
     except OSError:
         return (), (), False
     return tuple(prompts), tuple(prose), bool(cut or tail_from)
+
+
+_USER_QUERY = re.compile(r"<user_query>\s*(.*?)\s*</user_query>", re.DOTALL)
+_TIMESTAMP = re.compile(r"<timestamp>.*?</timestamp>", re.DOTALL)
+_SESSION_ID = re.compile(r"[A-Za-z0-9_\-]+")
+
+
+def find_cursor_transcript(session_id: str) -> str:
+    """The transcript of one Cursor chat, or `""`.
+
+    Found by the chat id rather than by rebuilding the folder name: Cursor names
+    a project's transcript directory by collapsing every run of non-alphanumeric
+    characters to one dash (`D:\\_scratch\\hooks-test` is `D-scratch-hooks-test`),
+    which is not Claude's encoding, so a rule guessed from either would be wrong
+    for the other. The id is checked before it touches a path.
+    """
+    if not isinstance(session_id, str) or not _SESSION_ID.fullmatch(session_id):
+        return ""
+    pattern = os.path.join(os.path.expanduser("~"), ".cursor", "projects", "*",
+                           "agent-transcripts", session_id, session_id + ".jsonl")
+    matches = sorted(glob.glob(pattern), key=os.path.getmtime, reverse=True)
+    return matches[0] if matches else ""
+
+
+def _cursor_user_text(content) -> str:
+    """What the person typed, out of Cursor's `<user_query>` wrapper.
+
+    Measured shape: `<timestamp>...</timestamp>\n<user_query>\ntext\n</user_query>`.
+    A message without the wrapper is kept minus its timestamp, so an unseen
+    shape loses no real prompt.
+    """
+    text = _user_text(content)
+    found = _USER_QUERY.search(text)
+    if found:
+        return found.group(1).strip()
+    return _TIMESTAMP.sub("", text).strip()
+
+
+def scan_cursor_transcript(path: str, *, want_prose: bool = False,
+                           max_bytes: int = MAX_TRANSCRIPT_BYTES,
+                           fragment_chars: int = MAX_FRAGMENT_CHARS) -> tuple:
+    """`(prompts, prose, truncated)` for ONE Cursor transcript. Never raises.
+
+    Records are `{"role": "user"|"assistant", "message": {"content": [...]}}`
+    plus `{"type": "turn_ended"}` markers (captured, not assumed). Tool calls
+    are `tool_use` blocks inside assistant records and carry no text, so they
+    drop out. Same tail-read rule as the Claude scanner.
+    """
+    prompts: list = []
+    prose: list = []
+    try:
+        size = os.path.getsize(path)
+        tail_from = max(0, size - max_bytes)
+        handle = _open_at(path, tail_from)
+    except OSError:
+        return (), (), False
+    with handle:
+        for raw in handle:
+            line = raw.decode("utf-8", "replace")
+            try:
+                record = json.loads(line)
+            except ValueError:
+                continue
+            if not isinstance(record, dict):
+                continue
+            role = record.get("role")
+            content = (record.get("message") or {}).get("content")
+            if role == "user":
+                said = _cursor_user_text(content)
+                if said:
+                    prompts.append(Fragment(said[:fragment_chars],
+                                            SOURCE_CURSOR_PROMPT))
+            elif role == "assistant" and want_prose:
+                said = _assistant_text(content)
+                if said:
+                    prose.append(Fragment(said[:fragment_chars],
+                                          SOURCE_CURSOR_PROSE))
+    return tuple(prompts), tuple(prose), bool(tail_from)
 
 
 def gather(project_path: str, *, include_prompts: bool = True,

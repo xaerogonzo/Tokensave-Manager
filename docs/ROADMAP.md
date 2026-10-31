@@ -107,9 +107,9 @@ and Cursor CLI chats in the Tasks tab.
 machine this was built on. The open measurements are listed in
 `docs/AGENT_BACKENDS.md` under "Verification status".
 
-### ✅ Claude -> Cursor handoff (Tasks tab, right-click)
+### ✅ Claude <-> Cursor handoff (Tasks tab, right-click)
 
-Cursor's own Claude importer did not run on the machine this was built on, and is not something the Manager can switch on. `helpers/agent_handoff.py` builds a bounded brief from a Claude transcript and opens Cursor's agent on it. Live-verified: Cursor read the git-ignored brief and reported its branch, change count and opening words correctly. Not built: Cursor -> Claude (needs Cursor's transcript format), carrying Claude's memory, and the shared ledger in Phase 3.
+Cursor's own Claude importer did not run on the machine this was built on, and is not something the Manager can switch on. `helpers/agent_handoff.py` builds a bounded brief from a Claude transcript and opens Cursor's agent on it. Live-verified: Cursor read the git-ignored brief and reported its branch, change count and opening words correctly. Cursor -> Claude is built too, from Cursor's own transcripts (`~/.cursor/projects/<project>/agent-transcripts/<id>/<id>.jsonl`, captured not assumed). Not built: carrying either agent's memory, and the shared ledger in Phase 3.
 
 ### 🔮 Third agent (Codex CLI / Gemini CLI / opencode)
 

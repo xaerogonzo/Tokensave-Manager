@@ -175,8 +175,9 @@ def _project_display(meta: dict, known_paths: list) -> str:
         if isinstance(candidate, str) and _same_project(cwd, candidate):
             return os.path.basename(candidate.rstrip("/\\")) or candidate
     # A real directory we simply do not track — show its name, not a guess
-    # about which known project it might be.
-    return os.path.basename(cwd.rstrip("/\\")) or cwd
+    # about which known project it might be. A worktree reads as its repo.
+    from helpers.claude_tasks import worktree_label
+    return worktree_label(cwd)
 
 
 def _row_from_meta(meta_path: str, mtime: float, chat_id: str,
@@ -210,6 +211,9 @@ def _row_from_meta(meta_path: str, mtime: float, chat_id: str,
         "session_id": session_id,
         "title": title,
         "project_display": _project_display(meta, known_paths),
+        # The folder the chat ran in, as Cursor recorded it. A handoff needs
+        # the real path, and the display name is a lossy summary of it.
+        "cwd": meta["cwd"] if isinstance(meta.get("cwd"), str) else "",
         "last_activity": last_activity,
         "is_recent": (now - last_activity) < _RECENT_SECONDS,
         "agent": "cursor",

@@ -33,7 +33,7 @@ what that cost.
 | --- | --- |
 | `geometry-sweep.json` | Walks every main-window tab and reports laid-out geometry defects on each. The routine check. |
 | `dialog-sweep.json` | Opens the dialogs with a track record of geometry defects and reports each. **This is where the findings are** — the main window has no history of them. |
-| `continue-in-cursor.json` | Opens Tasks -> History, then reports (read-only) how many sessions loaded, whether each is offered "Continue in Cursor", whether its transcript was found, and which Cursor CLI the real config resolves. Never launches anything. Needs `--config` pointing at a real `manager-config.json` when run from a worktree. |
+| `continue-in-cursor.json` | Opens Tasks -> History, then reports (read-only) how many sessions loaded, whether each is offered "Continue in Cursor" and "Continue in Claude", whether its recorded folder exists, whether its transcript was found, how its project is named, and which Cursor CLI the real config resolves. Never launches anything. Needs `--config` pointing at a real `manager-config.json` when run from a worktree. |
 | `agent-per-feature.json` | Opens Settings -> AI, reports geometry and screenshots the Agent-per-feature rows. |
 | `cursor-model-row.json` | Opens Settings -> Paths & Tools, scrolls down, clicks **Refresh list** (a real, read-only `agent --list-models`) and screenshots the Cursor model row. Needs a signed-in Cursor CLI. |
 | `geometry-selftest.json` | Reports the Git tab twice — once normally, once with an impossible tolerance. **Run this whenever you doubt a clean result.** |

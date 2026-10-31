@@ -377,11 +377,15 @@ class _Driver:
         limit = int(step.get("limit", 8))
         for iid, row in list(rows.items())[:limit]:
             path = row.get("path") or ""
-            _say("drive: sessions:   %-40s agent=%-6s handoff=%-5s transcript=%s"
-                 % (iid[:40], row.get("agent") or "claude",
-                    ctrl._sess_can_hand_off(iid),
+            _say("drive: sessions:   %-30s agent=%-6s ->cursor=%-5s ->claude=%-5s "
+                 "folder=%-5s transcript=%s | %s"
+                 % (iid[:30], row.get("agent") or "claude",
+                    ctrl._sess_can_hand_off(iid, "cursor"),
+                    ctrl._sess_can_hand_off(iid, "claude"),
+                    bool(ctrl._sess_folder(iid)),
                     "found" if path and os.path.isfile(path) else "NOT FOUND"
-                    if path else "(none: cursor row)"))
+                    if path else "(cursor row)",
+                    row.get("project_display")))
         cfg = self._app._cfg
         _say("drive: sessions: cursor_cli_exe=%r" % (cfg.cursor_cli_exe,))
 

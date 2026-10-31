@@ -81,6 +81,14 @@ of entering interactive mode.
 | an id this build does not know | `unknown_agent`, naming the feature and the `agent_overrides` key |
 | `agent_overrides` is not an object | `unknown_agent` with an explanation, never "inherit" |
 
+### Cursor's own Claude importer, and why the Manager does not patch it
+
+Cursor ships a "Claude Code import" that, on this machine, listed nothing. A patch script the person wrote with Cursor's help (from a forum report) shows the cause: Cursor's importer encoded a project folder into Claude's directory name differently from Claude, and compared the recorded `cwd` case- and slash-sensitively. Claude turns **every** character outside `[A-Za-z0-9]` into `-` (`helpers/claude_tasks.encode_project_path`, verified against 23 real directories), so any path with a space or a `.claude/worktrees/` segment missed. The script fixes it by editing two strings in Cursor's installed `workbench.glass.main.js` and writing two flags into its `state.vscdb`.
+
+**The Manager does not run, ship or depend on that.** It rewrites another application's installed files, breaks on any Cursor update (the script stops with "pattern not found"), needs Cursor fully closed, and is tied to one version's code and one machine's paths. The handoff above needs none of it and works whether or not Cursor fixes the bug. The patched importer lists a session only when the folder it ran in is the **open workspace**, which is why a worktree's chats appear only after opening that worktree (Tasks tab: *Open folder in Cursor*).
+
+Measured facts that other work relies on: Cursor writes a transcript for every run, hooks or not, at `~/.cursor/projects/<name>/agent-transcripts/<id>/<id>.jsonl` where `<name>` collapses each run of non-alphanumerics to one dash (`D:\_scratch\hooks-test` is `D-scratch-hooks-test`, **unlike** Claude's encoding), so a transcript is found by its id, never by rebuilding the folder name. In a **headless** `agent -p` run only the `sessionStart` and `sessionEnd` hooks fired; `beforeSubmitPrompt`, `afterAgentResponse` and `stop` did not. `sessionEnd` carries `session_id`, `reason`, `final_status` and `transcript_path` (and `CURSOR_TRANSCRIPT_PATH` is set). Project hooks run with the project root as the working directory.
+
 ### Models, and tools in a headless call
 
 **Models.** `agent --list-models` (needs a login) is read by `helpers/cursor_models.py` when you click *Refresh list* in Settings → Paths & Tools. Measured on this account: 270 models. The list is what Cursor accepts as a name, **not** what a plan allows: `gpt-5.4-nano-none` is listed and was refused ("not included in your weekly usage"). A pinned model that is missing from the list is kept and reported; with no usable list (not signed in, CLI missing, unreadable output) membership is *unknown*, never "not listed".
