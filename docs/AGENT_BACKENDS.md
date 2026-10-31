@@ -89,6 +89,10 @@ Cursor ships a "Claude Code import" that, on this machine, listed nothing. A pat
 
 Measured facts that other work relies on: Cursor writes a transcript for every run, hooks or not, at `~/.cursor/projects/<name>/agent-transcripts/<id>/<id>.jsonl` where `<name>` collapses each run of non-alphanumerics to one dash (`D:\_scratch\hooks-test` is `D-scratch-hooks-test`, **unlike** Claude's encoding), so a transcript is found by its id, never by rebuilding the folder name. In a **headless** `agent -p` run only the `sessionStart` and `sessionEnd` hooks fired; `beforeSubmitPrompt`, `afterAgentResponse` and `stop` did not. `sessionEnd` carries `session_id`, `reason`, `final_status` and `transcript_path` (and `CURSOR_TRANSCRIPT_PATH` is set). Project hooks run with the project root as the working directory.
 
+### Local, git-ignored instructions
+
+Measured 2026-10-31 with a canary line in each of two git-excluded files: Claude Code loaded `CLAUDE.local.md`; Cursor loaded **both** `CLAUDE.local.md` and `.cursor/rules/*.mdc`. So a single `CLAUDE.local.md` reaches both agents, and a second Cursor-specific file would load the same instruction twice (the same duplication the baseline had). Observed on one machine with one Cursor configuration; Cursor does not promise it. The file is hidden from git with `.git/info/exclude`, resolved by `git rev-parse --git-path` so a worktree finds the right one, and that file is local to the clone and changes nothing in the repository.
+
 ### Models, and tools in a headless call
 
 **Models.** `agent --list-models` (needs a login) is read by `helpers/cursor_models.py` when you click *Refresh list* in Settings → Paths & Tools. Measured on this account: 270 models. The list is what Cursor accepts as a name, **not** what a plan allows: `gpt-5.4-nano-none` is listed and was refused ("not included in your weekly usage"). A pinned model that is missing from the list is kept and reported; with no usable list (not signed in, CLI missing, unreadable output) membership is *unknown*, never "not listed".

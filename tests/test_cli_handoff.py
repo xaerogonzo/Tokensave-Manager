@@ -222,3 +222,61 @@ def test_handoff_is_classified_as_mutating_and_needs_a_project():
     from helpers import commands
     cmd = commands.BY_ACTION["handoff"]
     assert cmd.side_effect == commands.MUTATING and cmd.requires_project
+
+
+# -- the local rule ----------------------------------------------------------------------------
+
+def test_the_rule_is_refused_while_handoff_is_off(capsys, project, tmp_path):
+    _repo(project)
+    code, env, _ = _go(capsys, project, _config(tmp_path), "--action", "rule")
+    assert code == EXIT_PREREQUISITE and env["data"]["enabled"] is False
+    assert not os.path.exists(os.path.join(project, "CLAUDE.local.md"))
+
+
+def test_the_rule_writes_one_ignored_file_naming_this_project_and_config(
+        capsys, project, tmp_path):
+    _repo(project)
+    cfg = _config(tmp_path, enable_agent_handoff=True)
+    code, env, _ = _go(capsys, project, cfg, "--action", "rule")
+    assert code == EXIT_OK and env["data"]["installed"] and env["data"]["changed"]
+    text = open(os.path.join(project, "CLAUDE.local.md"), encoding="utf-8").read()
+    assert project.replace("\\", "/") in text
+    assert cfg.replace("\\", "/") in text
+    assert "handoff --project" in text and "--action publish" in text
+    status = subprocess.run(["git", "-C", project, "status", "--short"],
+                            capture_output=True, text=True).stdout
+    assert status.strip() == ""                  # ignored: nothing for git to commit
+
+
+def test_status_reports_the_rule_state_and_it_follows_the_install(capsys, project, tmp_path):
+    _repo(project)
+    cfg = _config(tmp_path, enable_agent_handoff=True)
+    _, before, _ = _go(capsys, project, cfg)
+    assert before["data"]["rule"] == "absent"
+    _go(capsys, project, cfg, "--action", "rule")
+    _, after, _ = _go(capsys, project, cfg)
+    assert after["data"]["rule"] == "current"
+
+
+def test_a_committed_rule_file_is_refused_with_a_failure_not_overwritten(
+        capsys, project, tmp_path):
+    _repo(project)
+    with open(os.path.join(project, "CLAUDE.local.md"), "w") as fh:
+        fh.write("team file\n")
+    subprocess.run(["git", "-C", project, "add", "-A"], check=True, capture_output=True)
+    subprocess.run(["git", "-C", project, "commit", "-q", "-m", "x"], check=True,
+                   capture_output=True)
+    cfg = _config(tmp_path, enable_agent_handoff=True)
+    code, env, _ = _go(capsys, project, cfg, "--action", "rule")
+    assert code == EXIT_FAILED and "committed" in env["error"]
+    assert open(os.path.join(project, "CLAUDE.local.md")).read() == "team file\n"
+
+
+def test_unrule_works_even_when_handoff_is_off(capsys, project, tmp_path):
+    _repo(project)
+    on = _config(tmp_path, enable_agent_handoff=True)
+    _go(capsys, project, on, "--action", "rule")
+    off = _config(tmp_path, enable_agent_handoff=False)
+    code, env, _ = _go(capsys, project, off, "--action", "unrule")
+    assert code == EXIT_OK and env["data"]["removed"] is True
+    assert not os.path.exists(os.path.join(project, "CLAUDE.local.md"))

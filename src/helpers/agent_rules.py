@@ -79,12 +79,14 @@ _AGENTS_PREAMBLE = (
 )
 
 
-def _wrap(body: str) -> str:
-    """Put *body* inside the managed markers."""
-    return f"{BEGIN_MARKER}\n{body.strip()}\n{END_MARKER}\n"
+def _wrap(body: str, begin: str = BEGIN_MARKER, end: str = END_MARKER) -> str:
+    """Put *body* inside the managed markers (a different pair for another
+    managed block, such as the local handoff rule)."""
+    return f"{begin}\n{body.strip()}\n{end}\n"
 
 
-def _replace_block(existing: str, body: str) -> "tuple[str, bool]":
+def _replace_block(existing: str, body: str, begin: str = BEGIN_MARKER,
+                   end: str = END_MARKER) -> "tuple[str, bool]":
     """Swap the managed block inside *existing*, or append one.
 
     Returns ``(text, changed)``. ``changed`` is False when the file already
@@ -95,14 +97,14 @@ def _replace_block(existing: str, body: str) -> "tuple[str, bool]":
     content is appended rather than the file being mangled by a slice against
     a boundary that isn't there.
     """
-    block = _wrap(body)
-    start = existing.find(BEGIN_MARKER)
-    end = existing.find(END_MARKER)
-    if start == -1 or end == -1 or end < start:
+    block = _wrap(body, begin, end)
+    start = existing.find(begin)
+    stop = existing.find(end)
+    if start == -1 or stop == -1 or stop < start:
         base = existing.rstrip()
         new = (base + "\n\n" + block) if base else block
         return new, new != existing
-    tail_at = end + len(END_MARKER)
+    tail_at = stop + len(end)
     tail = existing[tail_at:]
     if tail.startswith("\n"):
         tail = tail[1:]

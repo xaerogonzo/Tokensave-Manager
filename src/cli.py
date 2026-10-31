@@ -953,11 +953,41 @@ def _cmd_handoff(args) -> Result:
     so a claim about what changed is never the only record of it.
     """
     from helpers import handoff_ledger as ledger
+    from helpers import handoff_rules, vscode_tasks
+    from constants import _BASE_DIR, _CONFIG_PATH
     project = _resolve_project(args.project)
     raw = _load_manager_config(args.config)
     git_exe = raw.get("git_exe") or ""
     enabled = raw.get("enable_agent_handoff") is True
     path = ledger.ledger_path(project)
+    # The command a rule tells an agent to run is the one the Manager already
+    # uses for its own VS Code tasks, so the two cannot disagree about it.
+    runner = vscode_tasks.default_runner(_BASE_DIR, _is_frozen(), "python").argv
+    config_path = (os.path.abspath(os.path.expanduser(args.config))
+                   if args.config else _CONFIG_PATH)
+
+    if args.action == "rule":
+        if not enabled:
+            return Result(EXIT_PREREQUISITE, {"enabled": False},
+                          error="agent handoff is off; turn it on first, so a "
+                                "rule is never written for a feature that is not",
+                          human="agent handoff is off - no rule was written")
+        done = handoff_rules.install(project, runner, config_path, git_exe)
+        data = {"installed": done.ok, "changed": done.changed,
+                "path": done.path, "state": done.state}
+        if not done.ok:
+            return Result(EXIT_FAILED, data, error=done.error, human=done.error)
+        return Result(EXIT_OK, data, human=(
+            f"{handoff_rules.RULE_FILE} updated" if done.changed
+            else f"{handoff_rules.RULE_FILE} already current"))
+
+    if args.action == "unrule":
+        gone = handoff_rules.remove(project, git_exe)
+        if not gone.ok:
+            return Result(EXIT_FAILED, {"path": gone.path}, error=gone.error,
+                          human=gone.error)
+        return Result(EXIT_OK, {"removed": gone.changed, "path": gone.path},
+                      human="rule removed" if gone.changed else "no rule was there")
 
     if args.action == "status":
         seen = ledger.read(project)
@@ -972,7 +1002,8 @@ def _cmd_handoff(args) -> Result:
             EXIT_OK,
             {"enabled": enabled, "state": seen.state, "entries": len(seen.entries),
              "bad_lines": seen.bad_lines, "ignored_by_git": ignored,
-             "path": path, "error": seen.error},
+             "path": path, "error": seen.error,
+             "rule": handoff_rules.status(project, runner, config_path, git_exe)},
             warnings,
             human=f"handoff {'on' if enabled else 'off'}; ledger {seen.state}, "
                   f"{len(seen.entries)} entr{'y' if len(seen.entries) == 1 else 'ies'}")
@@ -1203,9 +1234,11 @@ def _build_parser() -> argparse.ArgumentParser:
     # `status` is the default: every command must parse with only --project, and
     # the default of a command that can delete a ledger has to be the read.
     ho.add_argument("--action", default="status",
-                    choices=["publish", "list", "status", "clear"],
+                    choices=["publish", "list", "status", "clear", "rule", "unrule"],
                     help="publish an entry, list recent ones, report the "
-                         "ledger's state (default), or delete it")
+                         "ledger's state (default), delete it, or write / "
+                         "remove the git-ignored CLAUDE.local.md rule that "
+                         "tells agents about this command")
     ho.add_argument("--agent", default="",
                     help="who is publishing, e.g. claude or cursor")
     ho.add_argument("--session", default="", help="the agent's own session id")
