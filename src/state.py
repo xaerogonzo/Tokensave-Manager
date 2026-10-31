@@ -114,6 +114,16 @@ class ManagerConfig:
         return val if val is not None else ""
 
     @property
+    def enable_agent_handoff(self) -> bool:
+        """Whether agents may publish to the shared handoff ledger. OFF by default.
+
+        Strictly `True` enables it: the ledger holds a person's decisions and
+        their agents' words, so a truthy string or a stray `1` in a hand-edited
+        config is not consent.
+        """
+        return self.raw.get("enable_agent_handoff") is True
+
+    @property
     def agent_cli(self) -> str:
         """Which agent CLI the manager shells out to: "claude" | "cursor".
 

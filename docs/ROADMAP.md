@@ -111,6 +111,10 @@ machine this was built on. The open measurements are listed in
 
 Cursor's own Claude importer did not run on the machine this was built on, and is not something the Manager can switch on. `helpers/agent_handoff.py` builds a bounded brief from a Claude transcript and opens Cursor's agent on it. Live-verified: Cursor read the git-ignored brief and reported its branch, change count and opening words correctly. Cursor -> Claude is built too, from Cursor's own transcripts (`~/.cursor/projects/<project>/agent-transcripts/<id>/<id>.jsonl`, captured not assumed). Not built: carrying either agent's memory, and the shared ledger in Phase 3.
 
+### 🚧 Shared handoff ledger (Phase 3) - first slice shipped
+
+Built: `helpers/handoff_ledger.py` and `manager-cli handoff --action publish|list|status|clear`, opt-in via `enable_agent_handoff`. Not built yet, in this order: the Cursor `sessionEnd` hook that records a session marker (installing it edits `~/.cursor/hooks.json`, which needs the show-diff-and-ask step), a multi-source `session_context.gather` so a Cursor session's prompts are not hidden behind a Claude note, mirroring decisions into tokensave memory (`tokensave tool record_decision --project <p> --args <json>`, idempotent on the handoff id), a Doctor rule for an unreadable or un-ignored ledger, and a Settings switch. **Open decision:** how an agent is told the command exists without committing a machine path to `AGENTS.md`.
+
 ### 🔮 Third agent (Codex CLI / Gemini CLI / opencode)
 
 The registry exists so this is a table row. `AGENTS.md` already serves all three,

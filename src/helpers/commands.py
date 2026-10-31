@@ -202,6 +202,15 @@ COMMANDS: tuple = (
         # Writes into the project's own .tokensave-manager/requests inbox.
         side_effect=MUTATING),
     Command(
+        action="handoff", cli="handoff", vscode="",
+        label="Agent handoff",
+        detail="Publish to, read or clear the ledger agents share. Publishing "
+               "is opt-in.",
+        # Writes `.tokensave/handoff.jsonl` in the project. No `vscode` id:
+        # this is for agents and scripts to call, and an editor menu entry that
+        # asks for a goal and a decision is a different feature.
+        side_effect=MUTATING),
+    Command(
         action="commands", cli="commands", vscode="",
         label="Command vocabulary",
         detail="Emit this table, so no consumer has to restate it.",

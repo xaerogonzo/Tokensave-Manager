@@ -938,6 +938,95 @@ def _cmd_graph_trust(args) -> Result:
     return Result(EXIT_OK, data, human=report.summary())
 
 
+def _cmd_handoff(args) -> Result:
+    """The shared agent handoff ledger: publish to it, read it, or clear it.
+
+    **`publish` is opt-in.** It writes what a person's agents decided into a
+    file every other agent in the project can read, so it does nothing until
+    `enable_agent_handoff` is true in the Manager's config, and it says so with
+    the prerequisite exit code rather than quietly succeeding. Reading and
+    `status` work regardless: a person who turned it off should still be able to
+    see, and clear, what is already there.
+
+    **The agent supplies only its own words.** Branch, base commit and the
+    files git reports as changed are measured here (`handoff_ledger.publish`),
+    so a claim about what changed is never the only record of it.
+    """
+    from helpers import handoff_ledger as ledger
+    project = _resolve_project(args.project)
+    raw = _load_manager_config(args.config)
+    git_exe = raw.get("git_exe") or ""
+    enabled = raw.get("enable_agent_handoff") is True
+    path = ledger.ledger_path(project)
+
+    if args.action == "status":
+        seen = ledger.read(project)
+        ignored = ledger.is_ignored(project, git_exe)
+        warnings = []
+        if ignored is False and seen.state != ledger.STATE_ABSENT:
+            warnings.append(f"{ledger.LEDGER_DIR}/{ledger.LEDGER_BASENAME} is "
+                            f"not git-ignored in this project")
+        if seen.bad_lines:
+            warnings.append(f"{seen.bad_lines} line(s) in the ledger could not be read")
+        return Result(
+            EXIT_OK,
+            {"enabled": enabled, "state": seen.state, "entries": len(seen.entries),
+             "bad_lines": seen.bad_lines, "ignored_by_git": ignored,
+             "path": path, "error": seen.error},
+            warnings,
+            human=f"handoff {'on' if enabled else 'off'}; ledger {seen.state}, "
+                  f"{len(seen.entries)} entr{'y' if len(seen.entries) == 1 else 'ies'}")
+
+    if args.action == "list":
+        seen = ledger.read(project, limit=max(0, args.limit))
+        if seen.state == ledger.STATE_UNREADABLE:
+            return Result(EXIT_FAILED, {"state": seen.state, "path": path},
+                          error=seen.error, human=f"cannot read the ledger: {seen.error}")
+        warnings = ([f"{seen.bad_lines} line(s) could not be read"]
+                    if seen.bad_lines else [])
+        return Result(EXIT_OK,
+                      {"state": seen.state, "entries": list(seen.entries),
+                       "bad_lines": seen.bad_lines, "path": path},
+                      warnings, human=f"{len(seen.entries)} entr"
+                      f"{'y' if len(seen.entries) == 1 else 'ies'} shown")
+
+    if args.action == "clear":
+        if not args.yes:
+            return Result(EXIT_USAGE, error="clearing deletes the whole ledger; "
+                          "pass --yes to confirm",
+                          human="pass --yes to confirm clearing the ledger")
+        ok, err = ledger.clear(project)
+        if not ok:
+            return Result(EXIT_FAILED, error=err, human=err)
+        return Result(EXIT_OK, {"cleared": True, "path": path}, human="ledger cleared")
+
+    # publish
+    if not enabled:
+        return Result(EXIT_PREREQUISITE, {"enabled": False},
+                      error="agent handoff is off; turn it on in the Manager "
+                            "(enable_agent_handoff) first",
+                      human="agent handoff is off - nothing was written")
+    if not args.agent:
+        return Result(EXIT_USAGE, error="--agent is required to publish",
+                      human="--agent is required to publish")
+    try:
+        written, warnings = ledger.publish(
+            project, agent=args.agent, session_id=args.session, goal=args.goal,
+            decisions=args.decision, next_steps=args.next_step,
+            open_questions=args.question, files=args.file, git_exe=git_exe)
+    except ledger.LedgerError as exc:
+        return Result(EXIT_USAGE, error=str(exc), human=f"refused: {exc}")
+    data = {"written": written.ok and not written.duplicate,
+            "duplicate": written.duplicate, "handoff_id": written.handoff_id,
+            "path": written.path, "trimmed": written.trimmed}
+    if not written.ok:
+        return Result(EXIT_FAILED, data, warnings, error=written.error,
+                      human=written.error)
+    return Result(EXIT_OK, data, warnings,
+                  human=f"handoff {written.handoff_id} "
+                        f"{'already recorded' if written.duplicate else 'recorded'}")
+
+
 _COMMANDS = {
     "checks": _cmd_checks,
     "analyze": _cmd_analyze,
@@ -955,6 +1044,7 @@ _COMMANDS = {
     "cost": _cmd_cost,
     "focus": _cmd_focus,
     "request": _cmd_request,
+    "handoff": _cmd_handoff,
     "commands": _cmd_commands,
 }
 
@@ -1107,6 +1197,32 @@ def _build_parser() -> argparse.ArgumentParser:
                      help="the action's payload, as JSON")
     req.add_argument("--status", default="",
                      help="report what became of a request id instead")
+
+    ho = add("handoff", "publish to, read or clear the shared agent handoff "
+                        "ledger (publish is opt-in; mutating)")
+    # `status` is the default: every command must parse with only --project, and
+    # the default of a command that can delete a ledger has to be the read.
+    ho.add_argument("--action", default="status",
+                    choices=["publish", "list", "status", "clear"],
+                    help="publish an entry, list recent ones, report the "
+                         "ledger's state (default), or delete it")
+    ho.add_argument("--agent", default="",
+                    help="who is publishing, e.g. claude or cursor")
+    ho.add_argument("--session", default="", help="the agent's own session id")
+    ho.add_argument("--goal", default="", help="what the work was for")
+    ho.add_argument("--decision", action="append", default=None,
+                    help="a decision made; repeat for several")
+    ho.add_argument("--next-step", action="append", default=None,
+                    dest="next_step", help="what should happen next; repeatable")
+    ho.add_argument("--question", action="append", default=None,
+                    help="something still open; repeatable")
+    ho.add_argument("--file", action="append", default=None,
+                    help="a file you changed (your claim; git is asked "
+                         "separately); repeatable")
+    ho.add_argument("--limit", type=int, default=10,
+                    help="entries to show with --action list (newest)")
+    ho.add_argument("--yes", action="store_true",
+                    help="confirm --action clear")
 
     add("commands", "emit the Manager's command vocabulary (no project needed)",
         project=False)

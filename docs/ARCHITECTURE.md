@@ -89,7 +89,7 @@ Token Save Manager Source/
 │   │                              Runs beside a real Manager through scripts/drive/run_isolated.py
 │   │                              (scratch config, no lock, no request poller, no tray).
 │   │
-│   ├── helpers/                  144 modules of pure / IO helpers — no UI deps.
+│   ├── helpers/                  145 modules of pure / IO helpers — no UI deps.
 │   │   ├── config.py              _load_config, _save_config, _migrate_config
 │   │   ├── detection.py           _detect_git/_gh/_npm/_codegraph/_claude_cli,
 │   │   │                          _root_path/_label, _version_lt
@@ -202,6 +202,9 @@ Token Save Manager Source/
 │   │   ├── agent_rules.py         AGENTS.md + .cursor/rules/*.mdc writers. Marked-block
 │   │   │                          managed; Cursor cannot follow CLAUDE.md's @include,
 │   │   │                          so the baseline is INLINED into AGENTS.md (once; the .mdc points at it)
+│   │   ├── handoff_ledger.py      `.tokensave/handoff.jsonl`: append-only, content-hash ids,
+│   │   │                          locked append, bounded + trimmed, bad lines counted, agent
+│   │   │                          claims kept apart from git-observed facts, secrets masked
 │   │   ├── cursor_ide.py          Open a folder in the Cursor APP (Cursor.exe directly, never
 │   │   │                          the cmd shim: its quoting breaks on spaced paths)
 │   │   ├── agent_handoff.py       Claude <-> Cursor session -> brief for the other agent
