@@ -296,7 +296,7 @@ def test_illegal_transitions_are_refused_and_terminal_states_stay_put(repo):
 def test_a_damaged_record_is_counted_not_hidden(repo):
     rec = ot.new_task(project=repo, agent="fake", prompt="x")
     ot.save(repo, rec, GIT)
-    with open(os.path.join(ot.tasks_dir(repo, GIT), "tbroken.json"), "w") as fh:
+    with open(os.path.join(ot.tasks_dir(repo, GIT), "t0123456789ab.json"), "w") as fh:
         fh.write("{nope")
     seen = ot.list_tasks(repo, GIT)
     assert len(seen.tasks) == 1 and seen.bad_files == 1

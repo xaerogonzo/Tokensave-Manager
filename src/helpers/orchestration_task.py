@@ -28,6 +28,7 @@ import datetime
 import hashlib
 import json
 import os
+import re
 import threading
 
 from helpers import handoff_ledger
@@ -71,6 +72,11 @@ CANCEL_FAILED = "failed"
 MAX_PROMPT_CHARS = 8000
 
 TASKS_SUBDIR = "orchestration"
+
+#: A task record's file name. The folder also holds other files named after a
+#: task (`<id>.mcp.json`, `<id>.out`, `<id>.err`); only THIS shape is a record.
+#: Matching on ".json" alone counted the MCP config as a damaged record.
+_RECORD_NAME = re.compile(r"t[0-9a-f]{12}\.json")
 
 #: Serialises read-modify-write inside this process. Cross-process writers do not
 #: exist: the CLI only reads.
@@ -186,7 +192,7 @@ def list_tasks(project: str, git_exe: str = "") -> TaskList:
     if not os.path.isdir(folder):
         return TaskList()
     try:
-        names = sorted(n for n in os.listdir(folder) if n.endswith(".json"))
+        names = sorted(n for n in os.listdir(folder) if _RECORD_NAME.fullmatch(n))
     except OSError as exc:
         return TaskList(error=f"could not list {folder}: {exc}")
     tasks, bad = [], 0
