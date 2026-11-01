@@ -89,7 +89,7 @@ Token Save Manager Source/
 │   │                              Runs beside a real Manager through scripts/drive/run_isolated.py
 │   │                              (scratch config, no lock, no request poller, no tray).
 │   │
-│   ├── helpers/                  148 modules of pure / IO helpers — no UI deps.
+│   ├── helpers/                  149 modules of pure / IO helpers — no UI deps.
 │   │   ├── config.py              _load_config, _save_config, _migrate_config
 │   │   ├── detection.py           _detect_git/_gh/_npm/_codegraph/_claude_cli,
 │   │   │                          _root_path/_label, _version_lt
@@ -217,6 +217,10 @@ Token Save Manager Source/
 │   │   │                          untrackable); `.tokensave/` only outside a repo. Append-only, content-hash ids,
 │   │   │                          locked append, bounded + trimmed, bad lines counted, agent
 │   │   │                          claims kept apart from git-observed facts, secrets masked
+│   │   ├── handoff_memory.py      Ledger decisions -> tokensave `record_decision`, a DERIVED index.
+│   │   │                          No state file: each decision is tagged `handoff:<id>` and checked
+│   │   │                          against the memory itself, so a retry resumes, never duplicates;
+│   │   │                          a failed lookup is `pending`, never "nothing there"
 │   │   ├── cursor_ide.py          Open a folder in the Cursor APP (Cursor.exe directly, never
 │   │   │                          the cmd shim: its quoting breaks on spaced paths)
 │   │   ├── agent_handoff.py       Claude <-> Cursor session -> brief for the other agent

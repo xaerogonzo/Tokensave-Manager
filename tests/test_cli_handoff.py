@@ -150,7 +150,8 @@ def test_a_ledger_inside_a_repository_needs_no_ignore_rule_and_says_so(capsys, p
     os.remove(os.path.join(project, ".gitignore"))
     cfg = _config(tmp_path, enable_agent_handoff=True)
     code, env, _ = _go(capsys, project, cfg, *PUBLISH)
-    assert code == EXIT_OK and env["warnings"] == []
+    # The memory warning (no tokensave configured here) is a different matter.
+    assert code == EXIT_OK and not [w for w in env["warnings"] if "ignored" in w or "retention" in w]
     assert env["data"]["path"].endswith(os.path.join(".git", "tokensave", "handoff.jsonl"))
     _, status, _ = _go(capsys, project, cfg)
     assert status["data"]["location"] == "git" and status["data"]["ignored_by_git"] is True
@@ -369,3 +370,67 @@ def test_a_marker_needs_an_agent(capsys, project, tmp_path):
     _opt_in(capsys, project, cfg)
     code, env, _ = _go(capsys, project, cfg, "--action", "marker")
     assert code == EXIT_USAGE and "--agent" in env["error"]
+
+
+# -- the tokensave memory mirror ----------------------------------------------------------
+
+@pytest.fixture
+def memory(monkeypatch):
+    from helpers import handoff_memory
+    rows = []
+
+    def call(exe, tool, project, payload):
+        if not exe:
+            return None, "tokensave is not configured (no tokensave_exe)"
+        if tool == "session_recall":
+            needle = payload["query"].strip('"')
+            return {"decisions": [r for r in rows if needle in (r["reason"] or "")]}, ""
+        rows.append({"text": payload["text"], "reason": payload["reason"],
+                     "tags": payload["tags"]})
+        return {"status": "recorded"}, ""
+    monkeypatch.setattr(handoff_memory, "_call", call)
+    return rows
+
+
+def test_publish_mirrors_its_decisions_and_a_repeat_adds_nothing(capsys, project, tmp_path, memory):
+    _repo(project)
+    cfg = _config(tmp_path, enable_agent_handoff=True, tokensave_exe="ts.exe")
+    code, env, _ = _go(capsys, project, cfg, *PUBLISH)
+    assert code == EXIT_OK and env["warnings"] == []
+    assert env["data"]["memory"][0]["state"] == "mirrored" and len(memory) == 2
+    code, env, _ = _go(capsys, project, cfg, *PUBLISH)
+    assert code == EXIT_OK and env["data"]["duplicate"] is True
+    assert env["data"]["memory"][0]["state"] == "already" and len(memory) == 2
+
+
+def test_a_publish_survives_a_memory_that_cannot_be_reached(capsys, project, tmp_path, memory):
+    _repo(project)
+    cfg = _config(tmp_path, enable_agent_handoff=True)       # no tokensave_exe
+    code, env, _ = _go(capsys, project, cfg, *PUBLISH)
+    assert code == EXIT_OK and env["data"]["written"] is True
+    assert env["data"]["memory"][0]["state"] == "pending"
+    assert any("not yet in tokensave memory" in w for w in env["warnings"])
+    assert hl.read(project).entries                            # the ledger kept it
+
+
+def test_mirror_repairs_a_pending_entry_later(capsys, project, tmp_path, memory):
+    _repo(project)
+    _go(capsys, project, _config(tmp_path, enable_agent_handoff=True), *PUBLISH)
+    fixed = _config(tmp_path, enable_agent_handoff=True, tokensave_exe="ts.exe")
+    code, env, _ = _go(capsys, project, fixed, "--action", "mirror")
+    assert code == EXIT_OK and len(memory) == 2
+    code, env, _ = _go(capsys, project, fixed, "--action", "mirror")
+    assert code == EXIT_OK and len(memory) == 2
+
+
+def test_mirror_with_no_tokensave_reports_failure_not_success(capsys, project, tmp_path, memory):
+    _repo(project)
+    cfg = _config(tmp_path, enable_agent_handoff=True)
+    _go(capsys, project, cfg, *PUBLISH)
+    code, env, _ = _go(capsys, project, cfg, "--action", "mirror")
+    assert code == EXIT_FAILED and "not configured" in env["error"]
+
+
+def test_mirror_is_refused_while_handoff_is_off(capsys, project, tmp_path, memory):
+    code, env, _ = _go(capsys, project, _config(tmp_path), "--action", "mirror")
+    assert code == EXIT_PREREQUISITE and memory == []

@@ -1010,6 +1010,14 @@ def _cmd_handoff(args) -> Result:
         return Result(EXIT_OK, data, human="session marker "
                       + ("already recorded" if done.duplicate else "recorded"))
 
+    if args.action == "mirror":
+        # Reconcile: make tokensave's decision memory hold what the ledger holds.
+        if not enabled:
+            return Result(EXIT_PREREQUISITE, {"enabled": False},
+                          error="agent handoff is off; nothing was mirrored",
+                          human="agent handoff is off - nothing was mirrored")
+        return _mirror_result(project, raw, git_exe)
+
     if args.action == "unrule":
         gone = handoff_rules.remove(project, git_exe)
         if not gone.ok:
@@ -1085,9 +1093,40 @@ def _cmd_handoff(args) -> Result:
     if not written.ok:
         return Result(EXIT_FAILED, data, warnings, error=written.error,
                       human=written.error)
+    # The memory is a derived index of the ledger: a failure to update it is a
+    # warning on a publish that DID succeed, never a failed publish.
+    from helpers import handoff_memory
+    mirrored, mirror_error = handoff_memory.mirror(
+        project, raw.get("tokensave_exe") or "", git_exe, only=written.handoff_id)
+    data["memory"] = [dataclasses.asdict(m) for m in mirrored]
+    for m in mirrored:
+        if m.state == handoff_memory.STATE_PENDING:
+            warnings.append(f"decisions are in the ledger but not yet in tokensave "
+                            f"memory ({m.error}); `handoff --action mirror` retries")
     return Result(EXIT_OK, data, warnings,
                   human=f"handoff {written.handoff_id} "
                         f"{'already recorded' if written.duplicate else 'recorded'}")
+
+
+def _mirror_result(project: str, raw: dict, git_exe: str) -> Result:
+    from helpers import handoff_memory
+    results, error = handoff_memory.mirror(
+        project, raw.get("tokensave_exe") or "", git_exe)
+    data = {"results": [dataclasses.asdict(m) for m in results]}
+    if error:
+        return Result(EXIT_FAILED, data, error=error,
+                      human=f"cannot read the ledger: {error}")
+    pending = [m for m in results if m.state == handoff_memory.STATE_PENDING]
+    wrote = sum(m.recorded for m in results)
+    if pending:
+        return Result(EXIT_FAILED, data,
+                      error=f"{len(pending)} handoff(s) could not be mirrored: "
+                            f"{pending[0].error}",
+                      human=f"{wrote} decision(s) written, {len(pending)} handoff(s) "
+                            f"pending: {pending[0].error}")
+    return Result(EXIT_OK, data,
+                  human=f"{wrote} decision(s) written; "
+                        f"{len(results)} handoff(s) with decisions checked")
 
 
 _COMMANDS = {
@@ -1267,11 +1306,13 @@ def _build_parser() -> argparse.ArgumentParser:
     # the default of a command that can delete a ledger has to be the read.
     ho.add_argument("--action", default="status",
                     choices=["publish", "list", "status", "clear", "rule", "unrule",
-                             "marker"],
+                             "marker", "mirror"],
                     help="publish an entry, list recent ones, report the "
                          "ledger's state (default), delete it, or write / "
                          "remove the git-ignored CLAUDE.local.md rule that "
-                         "tells agents about this command")
+                         "tells agents about this command; mirror copies "
+                         "the ledger's decisions into tokensave's decision "
+                         "memory (safe to repeat)")
     ho.add_argument("--agent", default="",
                     help="who is publishing, e.g. claude or cursor")
     ho.add_argument("--session", default="", help="the agent's own session id")
