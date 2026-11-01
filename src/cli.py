@@ -938,6 +938,31 @@ def _cmd_graph_trust(args) -> Result:
     return Result(EXIT_OK, data, human=report.summary())
 
 
+def _memory_snapshot_result(action: str, project: str, git_exe: str) -> Result:
+    """Copy Claude's memory index into a git-ignored Cursor rule, or take it out.
+
+    Not gated by `enable_agent_handoff`: it writes nothing a ledger holds, and a
+    person who runs it by name has already asked for it. It is a one-time copy;
+    see `helpers/memory_snapshot.py` for why nothing refreshes it.
+    """
+    from helpers import memory_snapshot as snap
+    if action == "memory-remove":
+        gone = snap.remove(project)
+        if not gone.ok:
+            return Result(EXIT_FAILED, {"path": gone.path}, error=gone.error, human=gone.error)
+        return Result(EXIT_OK, {"removed": gone.changed, "path": gone.path},
+                      human="snapshot removed" if gone.changed else "no snapshot was there")
+    done = snap.write(project, git_exe=git_exe)
+    data = {"written": done.ok, "path": done.path, "source": done.source,
+            "entries": done.entries, "truncated": done.truncated, "state": done.state}
+    if not done.ok:
+        code = EXIT_PREREQUISITE if done.state in (snap.STATE_NO_SOURCE, snap.STATE_TRACKED) else EXIT_FAILED
+        return Result(code, data, error=done.error, human=done.error)
+    warnings = ["the memory index was longer than the snapshot keeps and was cut"] if done.truncated else []
+    return Result(EXIT_OK, data, warnings, human=(
+        f"snapshot of {done.entries} note(s) written to {snap.RULE_RELPATH}"))
+
+
 def _cmd_handoff(args) -> Result:
     """The shared agent handoff ledger: publish to it, read it, or clear it.
 
@@ -1009,6 +1034,9 @@ def _cmd_handoff(args) -> Result:
             return Result(EXIT_FAILED, data, error=done.error, human=done.error)
         return Result(EXIT_OK, data, human="session marker "
                       + ("already recorded" if done.duplicate else "recorded"))
+
+    if args.action in ("memory-import", "memory-remove"):
+        return _memory_snapshot_result(args.action, project, git_exe)
 
     if args.action == "mirror":
         # Reconcile: make tokensave's decision memory hold what the ledger holds.
@@ -1306,13 +1334,15 @@ def _build_parser() -> argparse.ArgumentParser:
     # the default of a command that can delete a ledger has to be the read.
     ho.add_argument("--action", default="status",
                     choices=["publish", "list", "status", "clear", "rule", "unrule",
-                             "marker", "mirror"],
+                             "marker", "mirror", "memory-import", "memory-remove"],
                     help="publish an entry, list recent ones, report the "
                          "ledger's state (default), delete it, or write / "
                          "remove the git-ignored CLAUDE.local.md rule that "
                          "tells agents about this command; mirror copies "
                          "the ledger's decisions into tokensave's decision "
-                         "memory (safe to repeat)")
+                         "memory (safe to repeat); memory-import copies Claude's memory "
+                         "index into a git-ignored Cursor rule, memory-remove "
+                         "deletes it")
     ho.add_argument("--agent", default="",
                     help="who is publishing, e.g. claude or cursor")
     ho.add_argument("--session", default="", help="the agent's own session id")

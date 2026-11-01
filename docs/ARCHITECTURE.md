@@ -89,7 +89,7 @@ Token Save Manager Source/
 │   │                              Runs beside a real Manager through scripts/drive/run_isolated.py
 │   │                              (scratch config, no lock, no request poller, no tray).
 │   │
-│   ├── helpers/                  155 modules of pure / IO helpers — no UI deps.
+│   ├── helpers/                  156 modules of pure / IO helpers — no UI deps.
 │   │   ├── config.py              _load_config, _save_config, _migrate_config
 │   │   ├── detection.py           _detect_git/_gh/_npm/_codegraph/_claude_cli,
 │   │   │                          _root_path/_label, _version_lt
@@ -213,6 +213,8 @@ Token Save Manager Source/
 │   │   ├── handoff_rules.py       The git-ignored `CLAUDE.local.md` block that tells an agent the
 │   │   │                          publish command (machine paths, so never committed). Ignored via
 │   │   │                          .git/info/exclude BEFORE it is written; a tracked file is refused
+│   │   ├── memory_snapshot.py     A one-time, git-ignored copy of Claude's memory INDEX as a Cursor rule
+│   │   │                          (`.cursor/rules/claude-memory.mdc`); a snapshot, never a link, never the notes.
 │   │   ├── handoff_ledger.py      handoff.jsonl in the git COMMON dir (shared by every worktree,
 │   │   │                          untrackable); `.tokensave/` only outside a repo. Append-only, content-hash ids,
 │   │   │                          locked append, bounded + trimmed, bad lines counted, agent
