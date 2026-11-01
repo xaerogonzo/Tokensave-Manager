@@ -40,19 +40,20 @@ Run in a scratch repo, one run per cell: **evidence, not proof**. Each was
 planned as an unknown (M1-M5) and is now a recorded fact or a named gap.
 
 - **M1. Cursor headless write.** `-p --trust` alone **creates files**; `--force`
-  is not needed for file edits (file written with and without it). Shell
-  commands were **refused in every variant** (`ls` included, with and without
-  `--force`), and the refusal is *not* Cursor's permission model: the tool
-  result says "Hook blocked", and the hook is **tokensave's own PreToolUse
-  entry in `~/.claude/settings.json` (lines 22, 35, 49)**, which Cursor's agent
-  also loads. It runs `D:/Claude Co worker/Token Save/tokensave.exe` with the
-  spaced path **unquoted**, so the shell parses it wrongly and rejects the call
-  (the known hook-quoting bug). So on this machine **no headless Cursor run can
-  use the shell until that hook command is quoted**. That file is an
-  agent-control config, so it is changed only through the show-diff-and-ask
-  protocol, not by the Manager or by this work. Shell *permission* behaviour
-  (the allowlist in `~/.cursor/cli-config.json`, a project `.cursor/cli.json`)
-  is therefore still **unmeasured**.
+  is not needed for file edits. **Shell commands need `--force`**: without it
+  the call is rejected by permissions (the allowlist is `~/.cursor/cli-config.json`;
+  a headless run cannot ask). With `--force`, `echo x > file` ran (exit 0, file
+  created). A first round of runs saw every shell call refused with "Hook
+  blocked ... eval: syntax error": **the cause was the environment the runs were
+  started from.** The harness's `SHELL=/bin/bash.exe` (Git Bash) made Cursor
+  `eval` its PowerShell hook wrapper in bash. Started with `SHELL`/`MSYSTEM`/
+  `BASH*` removed, the hook runs. **The orchestrator must strip those variables
+  when it spawns Cursor.** Separately, tokensave's `PreToolUse` hook in
+  `~/.claude/settings.json` had an unquoted spaced path and no `args` as Cursor
+  sees it; it was rewritten to one quoted string with the user's approval
+  (backup `settings.json.backup.1793504149747`). Whether that rewrite was
+  *necessary* was not isolated (the original was not re-tested with a clean
+  environment).
 - **M2. Claude headless.** Default `--print` **denies writes** and reports them in
   `permission_denials`. `--permission-mode acceptEdits` allows file edits
   (not shell). `--permission-mode plan` and
@@ -91,13 +92,14 @@ planned as an unknown (M1-M5) and is now a recorded fact or a named gap.
 - **Execution modes become flag sets, per agent, from the registry:**
   Claude WRITE = `--permission-mode acceptEdits` (edits only); Cursor WRITE =
   `-p --trust` (+ `--approve-mcps --force` when tokensave is used, with the
-  worktree as the boundary). Shell-capable runs are **not offered** until M1's
-  hook problem is fixed and permission behaviour is measured.
+  worktree as the boundary). Shell-capable runs need `--force` (measured),
+  so they are a separate, explicitly chosen mode inside the worktree boundary.
 - **Launch gains a step:** write the worktree's MCP config (M3) before the
   agent starts, and verify it with `agent mcp list`.
 - **Cancel is `taskkill /T` on the live root** (M5), recorded in the task.
-- **Prerequisite outside this work:** quote the tokensave hook command in
-  `~/.claude/settings.json`. Offered separately under the diff-and-ask rule.
+- **The spawn environment is part of the contract:** remove `SHELL`, `MSYSTEM`
+  and `BASH*` before starting Cursor; a Manager launched from Git Bash would
+  otherwise break every shell call in a way that looks like a hook bug.
 
 ## 4. The task record
 
