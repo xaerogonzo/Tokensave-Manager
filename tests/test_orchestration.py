@@ -546,3 +546,30 @@ def test_the_config_property_is_strictly_true():
     cfg = ManagerConfig.__new__(ManagerConfig)
     cfg.raw = {}
     assert cfg.enable_agent_orchestration is False
+
+
+@pytest.mark.tk
+def test_new_task_with_no_project_selected_says_so_instead_of_doing_nothing(
+        tk_root, mocker):
+    import types
+    from controllers.orchestration_ctrl import AgentTasksPanel
+    from tkinter import ttk
+    cfg = types.SimpleNamespace(raw={}, git_exe=GIT, tokensave_exe="ts",
+                                enable_agent_orchestration=True)
+    panel = AgentTasksPanel(ttk.LabelFrame(tk_root), cfg, get_project_path=lambda: None)
+    info = mocker.patch("controllers.orchestration_ctrl.messagebox.showinfo")
+    panel.new_task()
+    assert info.call_count == 1 and "Select a project" in info.call_args[0][1]
+
+
+@pytest.mark.tk
+def test_new_task_with_the_switch_off_says_so_instead_of_doing_nothing(tk_root, mocker):
+    import types
+    from controllers.orchestration_ctrl import AgentTasksPanel
+    from tkinter import ttk
+    cfg = types.SimpleNamespace(raw={}, git_exe=GIT, tokensave_exe="ts",
+                                enable_agent_orchestration=False)
+    panel = AgentTasksPanel(ttk.LabelFrame(tk_root), cfg, get_project_path=lambda: "x")
+    info = mocker.patch("controllers.orchestration_ctrl.messagebox.showinfo")
+    panel.new_task()
+    assert info.call_count == 1 and "off" in info.call_args[0][1]

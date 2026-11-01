@@ -440,6 +440,11 @@ class TasksController(UiPumpMixin):
         self._tab.after(AUTO_REFRESH_MS, self._maybe_refresh)
 
     def on_tab_selected(self) -> None:
+        # The selected project may have changed while this tab was hidden, and a
+        # list read from disk is cheap, so the agent view always re-reads.
+        if self._view() == VIEW_AGENT:
+            self.agent_tasks.refresh()
+            return
         if time.monotonic() - self._last_refresh_ts > 30:
             self._refresh()
 

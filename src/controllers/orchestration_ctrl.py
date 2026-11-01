@@ -210,7 +210,16 @@ class AgentTasksPanel(UiPumpMixin):
 
     def new_task(self) -> None:
         project = self._get_project_path()
-        if not self.enabled() or not project:
+        top = self._frame.winfo_toplevel()
+        # Never a silent no-op: a button that does nothing reads as a broken app.
+        if not self.enabled():
+            messagebox.showinfo("Agent tasks", "Delegated agent tasks are off. Turn "
+                                "them on in Settings -> AI.", parent=top)
+            return
+        if not project:
+            messagebox.showinfo("Agent tasks", "Select a project on the Projects tab "
+                                "first, then come back here.", parent=top)
+            self.refresh()
             return
         from dialogs.agent_task_dialog import AgentTaskDialog
         AgentTaskDialog(self._frame.winfo_toplevel(), self._cfg, project, self._start)
