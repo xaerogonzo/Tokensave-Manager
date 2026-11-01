@@ -189,8 +189,7 @@ class App(UiPumpMixin, tk.Tk):
             self.protocol("WM_DELETE_WINDOW", self._tray_mgr.hide)
         else:
             # No tray icon to hide to, so closing the window ends the run.
-            self.protocol("WM_DELETE_WINDOW",
-                          lambda: (self._on_tray_quit(), self.destroy()))
+            self.protocol("WM_DELETE_WINDOW", self._close_without_tray)
         # The three post-launch checks, and the stagger that keeps their
         # dialogs and log writes off each other, live together in one place.
         from controllers.startup_checks_ctrl import StartupChecksController
@@ -272,10 +271,32 @@ class App(UiPumpMixin, tk.Tk):
         """False cancels the quit. Runs on the Tk main thread -- see
         `helpers/tray_manager._quit`, which schedules it there precisely so
         this can show a dialog."""
+        running = self._running_agent_tasks()
+        if running:
+            from tkinter import messagebox
+            if not messagebox.askyesno(
+                    "Agent tasks running",
+                    f"{running} agent task(s) are still running. Quitting stops them "
+                    f"(their copies and branches are kept).\n\nQuit anyway?",
+                    parent=self):
+                return False
         if not self.has_unsaved_settings():
             return True
         from controllers.settings_tab import confirm_discard
         return confirm_discard(self)
+
+    def _close_without_tray(self) -> None:
+        """Closing the window ends the run, unless that would orphan an agent."""
+        if self._running_agent_tasks() and not self._confirm_quit():
+            return
+        self._on_tray_quit()
+        self.destroy()
+
+    def _running_agent_tasks(self) -> int:
+        try:
+            return self._tasks_ctrl.agent_tasks.running_count()
+        except AttributeError:
+            return 0      # the Tasks tab is not built yet (very early quit)
 
     def _on_tray_quit(self) -> None:
         # Release any worker threads waiting on open ProposalDialogs so they
@@ -287,6 +308,12 @@ class App(UiPumpMixin, tk.Tk):
             pass  # ask_ctrl not constructed yet (very early failure path)
         try:
             self._projects.cancel_ai_proposals()
+        except AttributeError:
+            pass
+        # An agent nobody is watching is the outcome to avoid: stop them and
+        # let each worker record how its task ended.
+        try:
+            self._tasks_ctrl.agent_tasks.stop_all()
         except AttributeError:
             pass
 

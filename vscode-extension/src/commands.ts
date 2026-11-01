@@ -237,6 +237,18 @@ export const COMMANDS: readonly ManagerCommand[] = [
     task: false,
   },
   {
+    action: "handoff",
+    cli: "handoff",
+    vscode: "",
+    label: "Agent handoff",
+    detail: "Publish to, read or clear the ledger agents share. Publishing is opt-in.",
+    sideEffect: "mutating",
+    requiresProject: true,
+    acceptsPaths: false,
+    acceptsTests: false,
+    task: false,
+  },
+  {
     action: "commands",
     cli: "commands",
     vscode: "",

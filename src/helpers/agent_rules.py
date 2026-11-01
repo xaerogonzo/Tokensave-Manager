@@ -29,13 +29,16 @@ around it survives. This is the same lesson as
 explicit boundary, because "find the bit that looks generated" is a guess and a
 guess eventually deletes someone's paragraph.
 
-One source, two outputs
------------------------
-`templates/project-baseline.md` is the single source. `AGENTS.md` is the
-portable form (plain markdown, also read by Codex/Gemini/opencode) and
-`.cursor/rules/tokensave.mdc` is Cursor's native form. They are rendered from
-the same text rather than maintained as two files, so there is nothing to keep
-in sync.
+One source, ONE copy of it
+--------------------------
+`templates/project-baseline.md` is the single source, and it is inlined into
+`AGENTS.md` only (plain markdown, read by Cursor, Codex, Gemini CLI, opencode).
+
+It used to be inlined into `.cursor/rules/tokensave.mdc` as well. Measured
+2026-10-31 with a canary line in both files: Cursor loads BOTH as always-applied
+rules, so every Cursor session carried the ~10.7 KB baseline twice. The `.mdc`
+is now a short Cursor-only addendum that points at `AGENTS.md`, and re-running
+the writer replaces an old full-baseline block with it.
 
 The `.mdc` frontmatter is the one Manager-owned exception: Cursor requires YAML
 frontmatter at the very top of the file, so it cannot sit inside a marker block.
@@ -60,6 +63,14 @@ _MDC_FRONTMATTER = (
     "---\n"
 )
 
+#: What the managed block of the Cursor rule says. Deliberately NOT the baseline:
+#: Cursor already loads `AGENTS.md`, and repeating it here doubled its cost.
+_CURSOR_ADDENDUM = (
+    "Shared project instructions live in `AGENTS.md`, which Cursor loads on "
+    "its own. They are not repeated here, so they are not loaded twice. "
+    "Put Cursor-only rules below this block."
+)
+
 _AGENTS_PREAMBLE = (
     "# Agent Instructions\n"
     "\n"
@@ -68,12 +79,14 @@ _AGENTS_PREAMBLE = (
 )
 
 
-def _wrap(body: str) -> str:
-    """Put *body* inside the managed markers."""
-    return f"{BEGIN_MARKER}\n{body.strip()}\n{END_MARKER}\n"
+def _wrap(body: str, begin: str = BEGIN_MARKER, end: str = END_MARKER) -> str:
+    """Put *body* inside the managed markers (a different pair for another
+    managed block, such as the local handoff rule)."""
+    return f"{begin}\n{body.strip()}\n{end}\n"
 
 
-def _replace_block(existing: str, body: str) -> "tuple[str, bool]":
+def _replace_block(existing: str, body: str, begin: str = BEGIN_MARKER,
+                   end: str = END_MARKER) -> "tuple[str, bool]":
     """Swap the managed block inside *existing*, or append one.
 
     Returns ``(text, changed)``. ``changed`` is False when the file already
@@ -84,14 +97,14 @@ def _replace_block(existing: str, body: str) -> "tuple[str, bool]":
     content is appended rather than the file being mangled by a slice against
     a boundary that isn't there.
     """
-    block = _wrap(body)
-    start = existing.find(BEGIN_MARKER)
-    end = existing.find(END_MARKER)
-    if start == -1 or end == -1 or end < start:
+    block = _wrap(body, begin, end)
+    start = existing.find(begin)
+    stop = existing.find(end)
+    if start == -1 or stop == -1 or stop < start:
         base = existing.rstrip()
         new = (base + "\n\n" + block) if base else block
         return new, new != existing
-    tail_at = end + len(END_MARKER)
+    tail_at = stop + len(end)
     tail = existing[tail_at:]
     if tail.startswith("\n"):
         tail = tail[1:]
@@ -118,15 +131,16 @@ def _compute_agents_md(existing: str, baseline_text: str,
     return _replace_block(existing, body)
 
 
-def _compute_cursor_rule(existing: str,
-                         baseline_text: str) -> "tuple[str, bool]":
+def _compute_cursor_rule(existing: str) -> "tuple[str, bool]":
     """Render `.cursor/rules/tokensave.mdc`. Pure — no filesystem access.
 
     The frontmatter is rewritten on every run (Cursor requires it at the top,
     so it cannot live inside the managed block); everything the user added
-    below it, outside the markers, is preserved.
+    below it, outside the markers, is preserved. The managed block is the
+    short addendum, so a file written by an older version (the whole baseline
+    inlined) is shrunk in place.
     """
-    body = baseline_text.strip()
+    body = _CURSOR_ADDENDUM
     if not existing.strip():
         return _MDC_FRONTMATTER + "\n" + _wrap(body), True
 
@@ -188,11 +202,13 @@ def write_agents_md(project_root: str, baseline_text: str,
     return ok, err, ok
 
 
-def write_cursor_rule(project_root: str,
-                      baseline_text: str) -> "tuple[bool, str, bool]":
-    """Create or update `.cursor/rules/tokensave.mdc`. ``(ok, error, changed)``."""
+def write_cursor_rule(project_root: str) -> "tuple[bool, str, bool]":
+    """Create or update `.cursor/rules/tokensave.mdc`. ``(ok, error, changed)``.
+
+    Takes no baseline: the baseline lives in `AGENTS.md` (see the module note).
+    """
     path = cursor_rule_path(project_root)
-    new, changed = _compute_cursor_rule(_read(path), baseline_text)
+    new, changed = _compute_cursor_rule(_read(path))
     if not changed:
         return True, "", False
     ok, err = _write_atomic(path, new)
@@ -200,7 +216,7 @@ def write_cursor_rule(project_root: str,
 
 
 def read_baseline(template_dir: str) -> str:
-    """The shared baseline text both outputs are rendered from.
+    """The shared baseline text `AGENTS.md` is rendered from.
 
     Returns "" when the template is missing, so callers can skip the step with
     a message instead of writing an empty rules file that looks configured.

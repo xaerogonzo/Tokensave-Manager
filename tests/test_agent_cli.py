@@ -19,7 +19,9 @@ tests because the budgets are Windows-only by design — a POSIX ARG_MAX is
 megabytes and enforcing a ceiling there would invent a failure the platform
 does not have.
 """
+import dataclasses
 import os
+import sys
 
 import pytest
 
@@ -44,6 +46,12 @@ from helpers.agent_cli import (
 )
 
 
+#: An argv-transport agent for the budget tests. Cursor used to be one; the guard
+#: must keep being exercised for the next agent that is, so it is built from the
+#: Cursor row rather than deleted with the only agent that needed it.
+ARGV_AGENT = dataclasses.replace(CURSOR, prompt_transport=TRANSPORT_ARGV)
+
+
 # ── The table itself ─────────────────────────────────────────────────────────
 
 def test_both_agents_registered():
@@ -60,7 +68,9 @@ def test_claude_and_cursor_have_opposite_capabilities():
     assert CLAUDE.system_prompt_mode == SYSTEM_PROMPT_NATIVE
     assert CLAUDE.prompt_transport == TRANSPORT_STDIN
     assert CURSOR.system_prompt_mode == SYSTEM_PROMPT_PREPEND
-    assert CURSOR.prompt_transport == TRANSPORT_ARGV
+    # Both carry the prompt on stdin since Cursor was measured (2026-10-31);
+    # the argv guard is still exercised through ARGV_AGENT below.
+    assert CURSOR.prompt_transport == TRANSPORT_STDIN
 
 
 def test_native_agent_has_a_system_flag_and_prepend_agent_does_not():
@@ -139,12 +149,12 @@ def test_native_agent_never_prepends():
     assert "be terse" in argv
 
 
-def test_prepend_agent_folds_system_into_the_positional_prompt():
+def test_prepend_agent_folds_system_into_the_prompt():
     argv, stdin_text, err = build_print_argv(
         CURSOR, "cursor-agent", "explain X", system_prompt="be terse")
     assert err == ""
-    assert stdin_text is None
-    assert argv[-1] == "[System instructions]\nbe terse\n\n[User request]\nexplain X"
+    assert stdin_text == "[System instructions]\nbe terse\n\n[User request]\nexplain X"
+    assert "be terse" not in " ".join(argv)
 
 
 # ── build_print_argv shape ───────────────────────────────────────────────────
@@ -157,8 +167,15 @@ def test_stdin_agent_keeps_the_prompt_out_of_argv():
     assert not any("aaaa" in part for part in argv)
 
 
+def test_cursor_carries_the_prompt_on_stdin():
+    argv, stdin_text, err = build_print_argv(CURSOR, "agent.cmd", "hello")
+    assert err == ""
+    assert stdin_text == "hello"
+    assert "hello" not in argv
+
+
 def test_argv_agent_carries_the_prompt_positionally():
-    argv, stdin_text, err = build_print_argv(CURSOR, "cursor-agent", "hello")
+    argv, stdin_text, err = build_print_argv(ARGV_AGENT, "cursor-agent", "hello")
     assert err == ""
     assert stdin_text is None
     assert argv[-1] == "hello"
@@ -167,6 +184,63 @@ def test_argv_agent_carries_the_prompt_positionally():
 def test_print_args_are_the_whole_fragment_not_one_flag():
     argv, _, _ = build_print_argv(CURSOR, "cursor-agent", "hi")
     assert argv[:4] == ["cursor-agent", "-p", "--output-format", "text"]
+
+
+def test_cursor_print_is_trusted_and_read_only_by_default():
+    """`-p` alone can write and run shell; headless also stops without --trust."""
+    argv, _, _ = build_print_argv(CURSOR, "cursor-agent", "hi")
+    assert "--trust" in argv
+    assert argv[argv.index("--mode") + 1] == "ask"
+
+
+def test_read_only_can_be_switched_off_but_trust_stays():
+    argv, _, _ = build_print_argv(CURSOR, "cursor-agent", "hi", read_only=False)
+    assert "--mode" not in argv
+    assert "--trust" in argv
+
+
+def test_mcp_tools_adds_the_approval_flags_beside_read_only_mode():
+    argv, _, err = build_print_argv(CURSOR, "agent.cmd", "hi", mcp_tools=True)
+    assert err == ""
+    assert "--approve-mcps" in argv and "--force" in argv
+    assert argv[argv.index("--mode") + 1] == "ask"
+
+
+def test_mcp_flags_are_absent_unless_asked_for():
+    argv, _, _ = build_print_argv(CURSOR, "agent.cmd", "hi")
+    assert "--force" not in argv and "--approve-mcps" not in argv
+
+
+def test_force_is_never_combined_with_a_write_capable_run():
+    """--force is 'run everything'; without ask mode it would let a drafting call
+    edit files and run commands."""
+    argv, stdin_text, err = build_print_argv(
+        CURSOR, "agent.cmd", "hi", read_only=False, mcp_tools=True)
+    assert argv == [] and stdin_text is None
+    assert "enforced read-only mode" in err and "turned off" in err
+
+
+def test_an_agent_with_no_read_only_mode_cannot_be_given_tools():
+    """Claude's row establishes no enforcement, so approve-everything is refused."""
+    argv, _, err = build_print_argv(CLAUDE, "claude.cmd", "hi", mcp_tools=True)
+    assert argv == [] and "does not have" in err
+
+
+def test_call_print_passes_the_refusal_through_without_spawning(monkeypatch):
+    from helpers import agent_cli
+    spawned = []
+    monkeypatch.setattr(agent_cli.subprocess, "run",
+                        lambda *a, **k: spawned.append(1))
+    assert agent_cli.call_print(CLAUDE, "claude.cmd", "hi", mcp_tools=True) is None
+    assert not spawned
+    assert "read-only" in agent_cli.get_last_cli_error()
+
+
+def test_an_agent_without_read_only_args_gets_nothing_added():
+    """Empty means 'no enforcement established', and must not invent a flag."""
+    assert CLAUDE.read_only_args == ()
+    argv, _, _ = build_print_argv(CLAUDE, "claude.cmd", "hi")
+    assert argv == ["claude.cmd", "--print"]
 
 
 def test_model_flag_omitted_when_model_is_empty():
@@ -198,7 +272,7 @@ def _posix(monkeypatch):
 def test_argv_agent_rejects_an_oversized_prompt_on_the_createprocess_route(monkeypatch):
     _win(monkeypatch)
     huge = "x" * (CREATEPROCESS_BUDGET + 1000)
-    argv, stdin_text, err = build_print_argv(CURSOR, "cursor-agent", huge)
+    argv, stdin_text, err = build_print_argv(ARGV_AGENT, "cursor-agent", huge)
     assert argv == []
     assert stdin_text is None
     assert "prompt too large" in err
@@ -210,7 +284,7 @@ def test_oversized_prompt_is_never_truncated(monkeypatch):
     """Silently sending a shortened prompt is worse than a clear failure."""
     _win(monkeypatch)
     huge = "x" * (CREATEPROCESS_BUDGET + 1000)
-    argv, _, err = build_print_argv(CURSOR, "cursor-agent", huge)
+    argv, _, err = build_print_argv(ARGV_AGENT, "cursor-agent", huge)
     assert err
     assert argv == []
 
@@ -232,7 +306,7 @@ def test_cmd_route_has_a_smaller_budget_than_the_createprocess_route():
 def test_spawn_rejects_an_instruction_over_the_cmd_budget(monkeypatch):
     _win(monkeypatch)
     huge = "x" * (CMDLINE_BUDGET + 100)
-    payload, err = build_spawn_cmdline(CURSOR, "cursor-agent.exe", huge)
+    payload, err = build_spawn_cmdline(ARGV_AGENT, "cursor-agent.exe", huge)
     assert payload is None
     assert "prompt too large" in err
 
@@ -241,8 +315,8 @@ def test_a_prompt_between_the_two_budgets_passes_print_but_fails_spawn(monkeypat
     """Proves the two routes are measured separately rather than sharing one limit."""
     _win(monkeypatch)
     mid = "x" * (CMDLINE_BUDGET + 500)
-    _, _, print_err = build_print_argv(CURSOR, "cursor-agent", mid)
-    _, spawn_err = build_spawn_cmdline(CURSOR, "cursor-agent", mid)
+    _, _, print_err = build_print_argv(ARGV_AGENT, "cursor-agent", mid)
+    _, spawn_err = build_spawn_cmdline(ARGV_AGENT, "cursor-agent", mid)
     assert print_err == ""
     assert "prompt too large" in spawn_err
 
@@ -255,7 +329,7 @@ def test_budget_measures_the_rendered_line_not_the_raw_prompt(monkeypatch):
     """
     _win(monkeypatch)
     quotes = '"' * (CREATEPROCESS_BUDGET - BUDGET_MARGIN - 100)
-    _, _, err = build_print_argv(CURSOR, "cursor-agent", quotes)
+    _, _, err = build_print_argv(ARGV_AGENT, "cursor-agent", quotes)
     assert "prompt too large" in err
 
 
@@ -263,7 +337,7 @@ def test_budgets_are_not_enforced_off_windows(monkeypatch):
     """POSIX ARG_MAX is megabytes; a ceiling here would be an invented failure."""
     _posix(monkeypatch)
     huge = "x" * (CREATEPROCESS_BUDGET + 1000)
-    argv, _, err = build_print_argv(CURSOR, "cursor-agent", huge)
+    argv, _, err = build_print_argv(ARGV_AGENT, "cursor-agent", huge)
     assert err == ""
     assert argv[-1] == huge
 
@@ -271,7 +345,7 @@ def test_budgets_are_not_enforced_off_windows(monkeypatch):
 def test_multiline_prompt_survives_the_argv_route(monkeypatch):
     _posix(monkeypatch)
     body = "line one\nline two\nline three"
-    argv, _, err = build_print_argv(CURSOR, "cursor-agent", body)
+    argv, _, err = build_print_argv(ARGV_AGENT, "cursor-agent", body)
     assert err == ""
     assert argv[-1] == body
 
@@ -279,7 +353,7 @@ def test_multiline_prompt_survives_the_argv_route(monkeypatch):
 def test_backtick_heavy_prompt_survives_the_argv_route(monkeypatch):
     _posix(monkeypatch)
     body = "explain ```python\nx = 1\n``` and `y`"
-    argv, _, err = build_print_argv(CURSOR, "cursor-agent", body)
+    argv, _, err = build_print_argv(ARGV_AGENT, "cursor-agent", body)
     assert err == ""
     assert argv[-1] == body
 
@@ -342,6 +416,19 @@ def test_detect_prefers_path_over_install_dir(monkeypatch, fake_home):
     monkeypatch.setattr("helpers.agent_cli.shutil.which",
                         lambda n: "/on/path/cursor-agent" if n == "cursor-agent.cmd" else None)
     assert detect(CURSOR) == "/on/path/cursor-agent"
+
+
+@pytest.mark.skipif(sys.platform != "win32",
+                    reason="the installer's %LOCALAPPDATA% folder is a Windows location")
+def test_detect_finds_cursor_in_its_localappdata_install_dir(monkeypatch, fake_home):
+    """Measured: the current Windows installer writes here, not ~/.local/bin."""
+    monkeypatch.setattr("helpers.agent_cli.shutil.which", lambda _n: None)
+    install = os.path.join(os.environ["LOCALAPPDATA"], "cursor-agent")
+    os.makedirs(install, exist_ok=True)
+    binary = os.path.join(install, "agent.cmd")
+    with open(binary, "w", encoding="utf-8") as fh:
+        fh.write("")
+    assert detect(CURSOR) == binary
 
 
 def test_detect_finds_cursor_in_local_bin(monkeypatch, fake_home):

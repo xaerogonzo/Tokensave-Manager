@@ -89,7 +89,7 @@ Token Save Manager Source/
 │   │                              Runs beside a real Manager through scripts/drive/run_isolated.py
 │   │                              (scratch config, no lock, no request poller, no tray).
 │   │
-│   ├── helpers/                  141 modules of pure / IO helpers — no UI deps.
+│   ├── helpers/                  155 modules of pure / IO helpers — no UI deps.
 │   │   ├── config.py              _load_config, _save_config, _migrate_config
 │   │   ├── detection.py           _detect_git/_gh/_npm/_codegraph/_claude_cli,
 │   │   │                          _root_path/_label, _version_lt
@@ -117,7 +117,10 @@ Token Save Manager Source/
 │   │   │                          authoritative prompt never blurs into heuristic
 │   │   │                          prose. Window bounded by the last commit, with
 │   │   │                          no-commits and unreadable named as their own
-│   │   │                          states rather than defaulted to now.
+│   │   │                          states rather than defaulted to now. Cursor's chats are a
+│   │   │                          second source (found by their recorded cwd), merged by time
+│   │   │                          under ONE size budget; `PROSE_SOURCES` says whose words are
+│   │   │                          the agent's, and the Manager's own composed prompts are dropped.
 │   │   ├── shadow_links.py        generate/remove_shadow_links, update_gitignore_for_shadows,
 │   │   │                          DEFAULT_SHADOW_EXT_MAP
 │   │   ├── housekeeping.py        PURE detection for the Housekeeping surface:
@@ -201,7 +204,47 @@ Token Save Manager Source/
 │   │   │                          signatures for ~12 existing call sites
 │   │   ├── agent_rules.py         AGENTS.md + .cursor/rules/*.mdc writers. Marked-block
 │   │   │                          managed; Cursor cannot follow CLAUDE.md's @include,
-│   │   │                          so the baseline is INLINED from one source
+│   │   │                          so the baseline is INLINED into AGENTS.md (once; the .mdc points at it)
+│   │   ├── handoff_setup.py       Opt a project in/out of handoff for the Manager's windows; the one
+│   │   │                          definition of the command a rule names (shared with the CLI)
+│   │   ├── cursor_hooks.py        The Cursor `sessionEnd` hook entry + generated script. The edit to
+│   │   │                          ~/.cursor/hooks.json is a pure plan shown as a diff first; backup before
+│   │   │                          write, a file that does not parse is refused, others' hooks preserved
+│   │   ├── handoff_rules.py       The git-ignored `CLAUDE.local.md` block that tells an agent the
+│   │   │                          publish command (machine paths, so never committed). Ignored via
+│   │   │                          .git/info/exclude BEFORE it is written; a tracked file is refused
+│   │   ├── handoff_ledger.py      handoff.jsonl in the git COMMON dir (shared by every worktree,
+│   │   │                          untrackable); `.tokensave/` only outside a repo. Append-only, content-hash ids,
+│   │   │                          locked append, bounded + trimmed, bad lines counted, agent
+│   │   │                          claims kept apart from git-observed facts, secrets masked
+│   │   ├── handoff_memory.py      Ledger decisions -> tokensave `record_decision`, a DERIVED index.
+│   │   │                          No state file: each decision is tagged `handoff:<id>` and checked
+│   │   │                          against the memory itself, so a retry resumes, never duplicates;
+│   │   │                          a failed lookup is `pending`, never "nothing there"
+│   │   ├── cursor_ide.py          Open a folder in the Cursor APP (Cursor.exe directly, never
+│   │   │                          the cmd shim: its quoting breaks on spaced paths)
+│   │   ├── orchestration_task.py  Delegated agent tasks (docs/ORCHESTRATION.md): the durable record
+│   │   │                          (one JSON per task, in the git common dir) and its lifecycle. Illegal
+│   │   │                          moves are errors; `lost` is proven, never guessed (pid + start time)
+│   │   ├── orchestration_limits.py The launch limits as pure checks; a refusal names its limit,
+│   │   │                          unmeasurable disk is not enough room, a bad value keeps its default
+│   │   ├── orchestration_worktree.py Preflight (tracked changes refused), create, index, give the agent
+│   │   │                          tokensave, MEASURE the diff with git, discard (branch kept)
+│   │   ├── orchestration_run.py   Launch, watch, cancel (whole process tree), read the agent's
+│   │   │                          structured output. Blocking: belongs on a worker thread, never touches Tk
+│   │   ├── agent_integration.py   Is the Claude/Cursor setup still standing? Free, three-valued
+│   │   │                          checks (+ UNKNOWN): CLI versions vs the dated VERIFIED table, routing,
+│   │   │                          tokensave hooks in ~/.claude/settings.json, the Cursor hook. Never repairs
+│   │   ├── agent_presets.py       Named combinations of the integration switches. A diff shown first,
+│   │   │                          detection DERIVED (never stored), never reaches outside the Manager's config
+│   │   ├── agent_handoff.py       Claude <-> Cursor session -> brief for the other agent
+│   │   │                          ("Continue in Cursor / Claude"). Three kinds of statement kept apart: what the
+│   │   │                          person said, what Claude said (a claim), what git reports
+│   │   │                          now. Strips harness text, masks secrets best-effort, writes
+│   │   │                          .tokensave/handoffs/<id>.md, launches via agent_cli.spawn
+│   │   ├── cursor_models.py       `agent --list-models` -> catalogue. Four states (ok /
+│   │   │                          unavailable / needs_login / failed), never an empty list for
+│   │   │                          a fault; membership is three-valued; listed != allowed by plan
 │   │   ├── mcp_cursor.py          .cursor/mcp.json (project + global). Five binding
 │   │   │                          states; malformed never collapses into absent. No
 │   │   │                          trust gate — Cursor has no equivalent
@@ -638,7 +681,7 @@ Token Save Manager Source/
 │   │   ├── io_utils.py            Shared IO helpers for the patcher modules.
 │   │   └── ui.py                  UI helpers shared across controllers and dialogs.
 │   │
-│   ├── dialogs/                   59 dialog / panel modules — a tk.Toplevel per file,
+│   ├── dialogs/                   61 dialog / panel modules — a tk.Toplevel per file,
 │   │                          plus the panels the bigger dialogs are built from.
 │   │   ├── release_wizard.py      ReleaseWizardDialog + _ReleaseCtx (paired)
 │   │   ├── mcp_config.py          MCPConfigDialog
@@ -793,6 +836,10 @@ Token Save Manager Source/
 │   │   ├── workspace_builder.py   WorkspaceBuilderDialog — assemble a VS Code
 │   │   │                          .code-workspace descriptor.
 │   │   ├── settings_ai.py         AISection — the AI blocks of the Settings dialog.
+│   │   ├── agent_task_dialog.py   AgentTaskDialog — hand a task to an agent; shows WHERE it will work,
+│   │   │                          WHAT it may do, and why a launch is refused (check_launch off-thread)
+│   │   ├── settings_integration.py  The preset picker + "Check Claude/Cursor setup" panel on the AI page;
+│   │   │                          presets write the FORM, not the config; the check runs off the Tk thread
 │   │   ├── settings_codegraph.py  CodegraphSection — the CodeGraph block.
 │   │   ├── settings_pyscope.py    PyScopeSection — the PyScope block. Three status
 │   │   │                          rows and no install action; UiPumpMixin, because
@@ -865,6 +912,8 @@ Token Save Manager Source/
 │       ├── pyscope_ctrl.py        PyScopeController (analyze/open/register/status).
 │       │                          cmd_register is the Manager's only mutation of
 │       │                          PyScope state and never runs automatically
+│       ├── handoff_project_ctrl.py The Projects tab's "agent handoff here" entry (label + confirm +
+│       │                          write), kept out of projects_tab.py near its size cap
 │       ├── doctor_ctrl.py         DoctorController — the SINGLE authority on running
 │       │                          `tokensave doctor` (one env helper, one subprocess
 │       │                          shape). scan_stale / purge_stale / verify_purge /
@@ -904,7 +953,9 @@ Token Save Manager Source/
 │                                  CLI briefing via temp .md file-handoff pattern
 │                                  (avoids cmd.exe /k newline-as-Enter quirk).
 │       ├── tasks_tab.py           TasksController — owns the Tasks tab (view dropdown:
-│       │                          active sessions, history & worktrees, MCP servers).
+│       │                          active sessions, history & worktrees, agent tasks, MCP servers).
+│       ├── orchestration_ctrl.py  AgentTasksPanel — the "Agent tasks" view: list, start, cancel,
+│       │                          accept / reject (merges nothing), discard copy (branch kept)
 │       ├── command_bar_ctrl.py    CommandBarCtrl sub-controller.
 │       ├── project_sync_ctrl.py   ProjectSyncCtrl sub-controller.
 │       ├── pr_draft_ctrl.py       PRDraftCtrl sub-controller — PR body generation and
@@ -1169,8 +1220,8 @@ app.py
   ├── constants.py       — palette, regex, paths
   ├── theme.py           — _Tooltip
   ├── helpers/*          — pure / IO helpers (no UI)
-  ├── dialogs/*          — 59 tk.Toplevel / panel modules
-  └── controllers/*      — 28 tab and sub-controllers
+  ├── dialogs/*          — 61 tk.Toplevel / panel modules
+  └── controllers/*      — 30 tab and sub-controllers
         └── controllers/* each import the dialogs they instantiate
             (lazy in-handler imports for any cross-dialog cycle risk —
              see Rule 6 in CHANGELOG Round 4 Phase C decisions).

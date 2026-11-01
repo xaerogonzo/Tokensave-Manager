@@ -45,10 +45,17 @@ if TYPE_CHECKING:
 
 AUTO_REFRESH_MS = 60_000  # 60 s between background refreshes
 
+#: handoff target -> (name, config attribute of its CLI path, CLI display name)
+_HANDOFF = {
+    "cursor": ("Cursor", "cursor_cli_exe", "Cursor Agent CLI"),
+    "claude": ("Claude", "claude_cli_exe", "Claude Code CLI"),
+}
+
 VIEW_LIVE = "Active sessions"
 VIEW_SESSIONS = "History & worktrees"
 VIEW_MCP = "MCP servers"
-_VIEWS = (VIEW_LIVE, VIEW_SESSIONS, VIEW_MCP)
+VIEW_AGENT = "Agent tasks"
+_VIEWS = (VIEW_LIVE, VIEW_SESSIONS, VIEW_AGENT, VIEW_MCP)
 
 
 class TasksController(UiPumpMixin):
@@ -133,6 +140,12 @@ class TasksController(UiPumpMixin):
         self._build_mcp_panel(self._mcp_view)
         self._mcp_req_id: int = 0
 
+        # Delegated agent tasks (built hidden; off until Settings turns it on).
+        from controllers.orchestration_ctrl import AgentTasksPanel
+        self._agent_view = ttk.LabelFrame(tab, text="Delegated agent tasks")
+        self.agent_tasks = AgentTasksPanel(
+            self._agent_view, self._cfg, get_project_path=self._get_project_path)
+
         # Active sessions view: the default, so it is the one packed now.
         self._live_view = ttk.LabelFrame(tab, text="Running Claude Code sessions")
         self._build_live_panel(self._live_view)
@@ -185,6 +198,18 @@ class TasksController(UiPumpMixin):
         self._sess_tree.pack(fill=tk.BOTH, expand=True)
 
         self._sess_tree.bind("<Double-1>", self._sess_open_folder)
+
+        # Scanned rows by iid: the Treeview holds display text only, and a
+        # handoff needs the transcript path the scanner found.
+        self._sess_rows: dict[str, dict] = {}
+        self._sess_menu = tk.Menu(self._sess_tree, tearoff=0)
+        self._sess_menu.add_command(label="Continue in Cursor…",
+                                    command=self._sess_continue_in_cursor)
+        self._sess_menu.add_command(label="Continue in Claude…",
+                                    command=self._sess_continue_in_claude)
+        self._sess_menu.add_command(label="Open folder in Cursor",
+                                    command=self._sess_open_in_cursor_app)
+        self._sess_tree.bind("<Button-3>", self._sess_right_click)
 
     def _build_mcp_panel(self, parent: tk.Widget) -> None:
         self._mcp_summary = tk.Label(
@@ -258,13 +283,14 @@ class TasksController(UiPumpMixin):
 
     def _on_view_changed(self, _event=None) -> None:
         view = self._view()
-        for frame in (self._sessions_view, self._mcp_view, self._live_view):
+        for frame in (self._sessions_view, self._mcp_view, self._live_view,
+                      self._agent_view):
             frame.pack_forget()
-        shown = {VIEW_LIVE: self._live_view, VIEW_MCP: self._mcp_view}.get(
-            view, self._sessions_view)
+        shown = {VIEW_LIVE: self._live_view, VIEW_MCP: self._mcp_view,
+                 VIEW_AGENT: self._agent_view}.get(view, self._sessions_view)
         shown.pack(fill=tk.BOTH, expand=True, padx=6, pady=6)
         # The daemon managers fit both views that are about running servers.
-        if view == VIEW_SESSIONS:
+        if view in (VIEW_SESSIONS, VIEW_AGENT):
             self._manage_btn.pack_forget()
         else:
             self._manage_btn.pack(side=tk.RIGHT, padx=(0, 6))
@@ -369,6 +395,9 @@ class TasksController(UiPumpMixin):
         if view == VIEW_LIVE:
             self._refresh_live()
             return
+        if view == VIEW_AGENT:
+            self.agent_tasks.refresh()
+            return
         self._tasks_refresh_id += 1
         my_id = self._tasks_refresh_id
         path = self._get_project_path()
@@ -411,6 +440,11 @@ class TasksController(UiPumpMixin):
         self._tab.after(AUTO_REFRESH_MS, self._maybe_refresh)
 
     def on_tab_selected(self) -> None:
+        # The selected project may have changed while this tab was hidden, and a
+        # list read from disk is cheap, so the agent view always re-reads.
+        if self._view() == VIEW_AGENT:
+            self.agent_tasks.refresh()
+            return
         if time.monotonic() - self._last_refresh_ts > 30:
             self._refresh()
 
@@ -497,6 +531,7 @@ class TasksController(UiPumpMixin):
                           running: frozenset = frozenset()) -> None:
         tree = self._sess_tree
         sessions = self._dedupe_sessions(sessions)
+        self._sess_rows = {self._sess_iid(s): s for s in sessions}
         current_iids = set(tree.get_children())
         new_iids = {self._sess_iid(s) for s in sessions}
 
@@ -753,9 +788,142 @@ class TasksController(UiPumpMixin):
 
     # ── Session actions ────────────────────────────────────────────────────────
 
+    def _sess_can_hand_off(self, iid: str, target: str = "cursor") -> bool:
+        """A session can go to the OTHER agent: Claude rows to Cursor, and
+        Cursor rows to Claude. Never to the agent it already belongs to."""
+        row = self._sess_rows.get(iid)
+        if not row or target not in _HANDOFF:
+            return False
+        return (row.get("agent") or "claude") != target
+
+    def _sess_folder(self, iid: str) -> str:
+        """The folder a session ran in, from its own record. `""` when the
+        record has none or the folder is gone: a name is never turned back
+        into a path (the encoded folder name is lossy)."""
+        cwd = (self._sess_rows.get(iid) or {}).get("cwd") or ""
+        return cwd if cwd and os.path.isdir(cwd) else ""
+
+    def _sess_right_click(self, event: tk.Event) -> None:
+        row = self._sess_tree.identify_row(event.y)
+        if not row:
+            return
+        self._sess_tree.selection_set(row)
+        for index, enabled in (
+                (0, self._sess_can_hand_off(row, "cursor")),
+                (1, self._sess_can_hand_off(row, "claude")),
+                (2, bool(self._sess_folder(row)))):
+            self._sess_menu.entryconfigure(
+                index, state=tk.NORMAL if enabled else tk.DISABLED)
+        try:
+            self._sess_menu.tk_popup(event.x_root, event.y_root)
+        finally:
+            self._sess_menu.grab_release()
+
+    def _sess_continue_in_cursor(self) -> None:
+        self._sess_hand_off("cursor")
+
+    def _sess_continue_in_claude(self) -> None:
+        self._sess_hand_off("claude")
+
+    def _sess_hand_off(self, target: str) -> None:
+        """Start a handoff of the selected session to the OTHER agent.
+
+        Three steps, each on the right thread: find where the session ran
+        (file read, worker), confirm with the person (dialog, Tk), then write
+        the brief (file + git, worker) and launch (Tk). Nothing is written
+        before the confirmation.
+        """
+        sel = self._sess_tree.selection()
+        iid = sel[0] if sel else ""
+        row = self._sess_rows.get(iid)
+        if not row or not self._sess_can_hand_off(iid, target):
+            return
+        _name, exe_key, cli_name = _HANDOFF[target]
+        if not getattr(self._cfg, exe_key):
+            messagebox.showerror(
+                f"{cli_name} not found",
+                f"Install the {cli_name}, or set its path in Settings, "
+                "then try again.", parent=self._tab)
+            return
+
+        def _locate() -> None:
+            from helpers.claude_tasks import transcript_cwd
+            # A row usually carries the folder already; a transcript read is
+            # the fallback for a Claude session whose first lines lacked it.
+            cwd = row.get("cwd") or transcript_cwd(row.get("path") or "")
+            self._post(self._sess_handoff_confirm, row, cwd, target)
+
+        threading.Thread(target=_locate, daemon=True).start()
+
+    def _sess_handoff_confirm(self, row: dict, project: str,
+                              target: str = "cursor") -> None:
+        from helpers.agent_handoff import HANDOFF_DIR
+        name = _HANDOFF[target][0]
+        source = "Cursor" if (row.get("agent") == "cursor") else "Claude"
+        service = "Cursor's service" if target == "cursor" else "Anthropic"
+        if not project or not os.path.isdir(project):
+            messagebox.showerror(
+                "Cannot continue this session",
+                "The folder this session ran in could not be found, so there "
+                f"is nowhere to open {name}.\n\n%s" % (project or "(unknown)"),
+                parent=self._tab)
+            return
+        if not messagebox.askyesno(
+                f"Continue in {name}",
+                f"Open {name}'s agent in:\n%s\n\nwith notes from the {source} "
+                "session \"%s\"?\n\nThis writes a brief to %s\\ (git-ignored, "
+                "this machine only) holding your prompts from that session, "
+                f"secrets masked on a best-effort basis, plus {source}'s last "
+                "message and the repository state now. "
+                f"{name} will read it, which sends its contents to {service}."
+                f"\n\nThis is a handoff, not an import: {source}'s memory and "
+                "the full transcript do not come across."
+                % (project, row.get("title") or "untitled", HANDOFF_DIR),
+                parent=self._tab):
+            return
+
+        git_exe = self._cfg.git_exe
+        origin = "cursor" if row.get("agent") == "cursor" else "claude"
+
+        def _prepare() -> None:
+            from helpers.agent_handoff import prepare
+            self._post(self._sess_handoff_launch,
+                       prepare(row, project, git_exe, origin), target)
+
+        threading.Thread(target=_prepare, daemon=True).start()
+
+    def _sess_handoff_launch(self, prepared, target: str = "cursor") -> None:
+        from helpers import agent_cli
+        from helpers.agent_handoff import launch_claude, launch_cursor
+        if target == "claude":
+            ok, err = launch_claude(prepared, self._cfg.claude_cli_exe)
+        else:
+            ok, err = launch_cursor(
+                prepared, self._cfg.cursor_cli_exe,
+                agent_cli.model_from(self._cfg, agent_cli.CURSOR))
+        if not ok:
+            messagebox.showerror(f"Could not continue in {_HANDOFF[target][0]}",
+                                 err, parent=self._tab)
+
+    def _sess_open_in_cursor_app(self) -> None:
+        """Open the session's folder as a workspace in the Cursor APP, which is
+        where its own importer lists a worktree's chats."""
+        sel = self._sess_tree.selection()
+        folder = self._sess_folder(sel[0]) if sel else ""
+        if not folder:
+            return
+        from helpers.cursor_ide import open_folder
+        ok, err = open_folder(folder)
+        if not ok:
+            messagebox.showerror("Could not open Cursor", err, parent=self._tab)
+
     def _sess_open_folder(self, event: tk.Event) -> None:
         sel = self._sess_tree.selection()
         if not sel:
+            return
+        folder = self._sess_folder(sel[0])
+        if folder:
+            os.startfile(folder)
             return
         vals = self._sess_tree.item(sel[0], "values")
         # vals: (status, agent, title, project_display, activity)

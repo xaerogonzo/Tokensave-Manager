@@ -114,6 +114,25 @@ class ManagerConfig:
         return val if val is not None else ""
 
     @property
+    def enable_agent_handoff(self) -> bool:
+        """Whether agents may publish to the shared handoff ledger. OFF by default.
+
+        Strictly `True` enables it: the ledger holds a person's decisions and
+        their agents' words, so a truthy string or a stray `1` in a hand-edited
+        config is not consent.
+        """
+        return self.raw.get("enable_agent_handoff") is True
+
+    @property
+    def enable_agent_orchestration(self) -> bool:
+        """Whether delegated agent tasks may start. OFF by default.
+
+        Strictly `True`, like handoff: this lets an agent edit files, so a
+        stray `1` or "yes" in a hand-edited config is not consent.
+        """
+        return self.raw.get("enable_agent_orchestration") is True
+
+    @property
     def agent_cli(self) -> str:
         """Which agent CLI the manager shells out to: "claude" | "cursor".
 
@@ -295,8 +314,22 @@ class ManagerConfig:
 
     # ── Agent-CLI resolution ──────────────────────────────────────────────
 
-    def resolve_agent_cli(self) -> "object":
+    @property
+    def agent_overrides(self) -> object:
+        """Per-feature agent choices, RAW as persisted.
+
+        A dict `{feature: agent id | "inherit"}` when well formed. Returned
+        unvalidated for the reason `agent_cli` is: the resolver reports a bad
+        value as a configuration error, and coercing it here would hide it.
+        """
+        return self.raw.get("agent_overrides")
+
+    def resolve_agent_cli(self, feature: str = "") -> "object":
         """Resolve the selected agent CLI to (spec, exe, state).
+
+        With a *feature* (see `helpers.agent_cli.FEATURES`) the per-feature
+        override applies; without one this is the default agent, exactly as
+        before routing existed.
 
         The single entry point for every feature that shells out to a coding
         agent. Returns an `AgentResolution` (see helpers/agent_cli) whose three
@@ -307,8 +340,12 @@ class ManagerConfig:
         Read at execution time, never snapshotted — a Settings save rebinds
         both the selector and the paths (Rule 3).
         """
-        from helpers.agent_cli import resolve
-        return resolve(self.agent_cli, lambda spec: self._agent_exe_for(spec))
+        from helpers.agent_cli import resolve, resolve_for_feature
+        lookup = lambda spec: self._agent_exe_for(spec)       # noqa: E731
+        if not feature:
+            return resolve(self.agent_cli, lookup)
+        return resolve_for_feature(self.agent_cli, self.agent_overrides,
+                                   feature, lookup)
 
     def _agent_exe_for(self, spec) -> str:
         """Configured-or-detected path for one agent spec."""

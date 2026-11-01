@@ -1,0 +1,9 @@
+[
+  {"do": "wait",              "after_ms": 3000},
+  {"do": "select",            "project": "D:/Claude Co worker/Token Save Manager Source", "after_ms": 1500},
+  {"do": "agent_tasks",       "after_ms": 2500},
+  {"do": "agent_tasks_report", "after_ms": 500},
+  {"do": "agent_dialog_report", "wait_ms": 6000, "after_ms": 8000},
+  {"do": "shot",              "path": "D:/_scratch/agent-tasks-ui.png", "after_ms": 500},
+  {"do": "quit"}
+]

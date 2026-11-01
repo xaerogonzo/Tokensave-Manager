@@ -349,6 +349,124 @@ class _Driver:
         fresh = [w for w in tops() if id(w) not in before]
         return fresh[-1] if fresh else None
 
+    def _do_menu_entries(self, step: "dict[str, Any]") -> None:
+        """List the Projects tab's context-menu entries matching `contains`.
+
+        Read-only and never pops the menu up: `tk_popup` is modal on Windows and
+        would freeze a driven run. Walks the cascades, so an entry inside a
+        submenu is found with the path of cascades it sits under.
+        """
+        want = str(step.get("contains", "")).lower()
+        menu = getattr(self._app._projects, "_ctx_menu", None)
+        if menu is None:
+            _say("drive: menu_entries: the Projects tab has no context menu")
+            return
+
+        def walk(m, trail):
+            for i in range((m.index("end") or -1) + 1):
+                kind = m.type(i)
+                if kind == "separator":
+                    continue
+                label = str(m.entrycget(i, "label"))
+                if kind == "cascade":
+                    walk(m.nametowidget(m.entrycget(i, "menu")), trail + [label.strip()])
+                elif want in label.lower():
+                    _say("drive: menu: %s > %s  [state=%s]" % (
+                        " > ".join(trail), label.strip(), m.entrycget(i, "state")))
+        walk(menu, [])
+
+    def _do_sessions(self, step: "dict[str, Any]") -> None:
+        """Show the Tasks tab's History view. Give the scan an `after_ms`.
+
+        The session list is filled by a worker, so a following
+        `sessions_report` wants a few seconds before it counts rows.
+        """
+        from controllers.tasks_tab import VIEW_SESSIONS
+        self._do_tab({"name": "Tasks"})
+        ctrl = self._app._tasks_ctrl
+        ctrl._view_var.set(VIEW_SESSIONS)
+        ctrl._on_view_changed()
+
+    def _do_sessions_report(self, step: "dict[str, Any]") -> None:
+        """What the History view offers, read from the live controller.
+
+        Reports the population first (a count of zero is not a pass), then per
+        row whether "Continue in Cursor" would be offered and whether the
+        scanner found the transcript file the handoff reads. Also the Cursor
+        CLI the REAL config resolves, because that is the lookup a fresh
+        install has to survive. Read-only: it never opens the confirmation and
+        never launches anything.
+        """
+        ctrl = self._app._tasks_ctrl
+        rows = dict(ctrl._sess_rows)
+        _say("drive: sessions: %d row(s) in the list" % len(rows))
+        limit = int(step.get("limit", 8))
+        for iid, row in list(rows.items())[:limit]:
+            path = row.get("path") or ""
+            _say("drive: sessions:   %-30s agent=%-6s ->cursor=%-5s ->claude=%-5s "
+                 "folder=%-5s transcript=%s | %s"
+                 % (iid[:30], row.get("agent") or "claude",
+                    ctrl._sess_can_hand_off(iid, "cursor"),
+                    ctrl._sess_can_hand_off(iid, "claude"),
+                    bool(ctrl._sess_folder(iid)),
+                    "found" if path and os.path.isfile(path) else "NOT FOUND"
+                    if path else "(cursor row)",
+                    row.get("project_display")))
+        cfg = self._app._cfg
+        _say("drive: sessions: cursor_cli_exe=%r" % (cfg.cursor_cli_exe,))
+
+    def _do_agent_tasks(self, step: "dict[str, Any]") -> None:
+        """Show the Tasks tab's Agent tasks view and report what it says.
+
+        Read-only: lists the rows, the note line and which buttons are enabled,
+        so "the Start path is reachable" and "it is off" are both observable
+        without starting an agent. Give it an `after_ms` for the refresh worker.
+        """
+        from controllers.tasks_tab import VIEW_AGENT
+        self._do_tab({"name": "Tasks"})
+        ctrl = self._app._tasks_ctrl
+        ctrl._view_var.set(VIEW_AGENT)
+        ctrl._on_view_changed()
+
+    def _do_agent_tasks_report(self, step: "dict[str, Any]") -> None:
+        panel = self._app._tasks_ctrl.agent_tasks
+        _say("drive: agent tasks: enabled=%s" % panel.enabled())
+        _say("drive: agent tasks: note: %s" % panel._note.cget("text"))
+        _say("drive: agent tasks: %d row(s)" % len(panel._rows))
+        for tid, rec in list(panel._rows.items())[:int(step.get("limit", 8))]:
+            _say("drive: agent tasks:   %s %-14s %s" % (tid, rec["status"], rec.get("prompt", "")[:50]))
+        states = {k: ("off" if "disabled" in b.state() else "on")
+                  for k, b in panel._buttons.items()}
+        _say("drive: agent tasks: buttons: %s" % states)
+
+    def _do_agent_dialog_report(self, step: "dict[str, Any]") -> None:
+        """Open the delegate-a-task dialog, let its check run, report, close it.
+
+        Reports the refusal/ready line and whether Start is enabled with a
+        non-empty task. It never presses Start.
+        """
+        from dialogs.agent_task_dialog import AgentTaskDialog
+        panel = self._app._tasks_ctrl.agent_tasks
+        project = panel._get_project_path()
+        if not project:
+            _say("drive: agent dialog: no project selected")
+            return
+        dlg = AgentTaskDialog(self._app, self._app._cfg, project, lambda *a: None)
+        dlg._text.insert("1.0", "drive probe")
+        self._pending_dialog = dlg
+        self._app.after(int(step.get("wait_ms", 4000)), self._finish_agent_dialog_report)
+
+    def _finish_agent_dialog_report(self) -> None:
+        dlg = getattr(self, "_pending_dialog", None)
+        if dlg is None:
+            return
+        dlg._sync_start()
+        _say("drive: agent dialog: %s" % dlg._refusal.cget("text").replace("\n", " | "))
+        _say("drive: agent dialog: start=%s agent=%s" % (dlg._start.cget("state"), dlg._agent.get()))
+        _say("drive: agent dialog: %s" % dlg._what.cget("text").replace("\n", " "))
+        dlg.destroy()
+        self._pending_dialog = None
+
     def _do_settings(self, step: "dict[str, Any]") -> None:
         """Select the Settings tab, optionally on a named page.
 
@@ -547,10 +665,18 @@ class _Driver:
     def _do_scroll(self, step: "dict[str, Any]") -> None:
         """Move a dialog's canvas to the top or the bottom."""
         where = str(step.get("to", "bottom")).lower()
+        # "top", "bottom", or a number from 0 to 1: how far down the page, for
+        # reaching a section in the middle of a long scrolling page.
+        try:
+            fraction = float(where)
+        except ValueError:
+            fraction = 0.0 if where == "top" else 1.0
         for widget in _walk(self._target(step)):
-            if isinstance(widget, tk.Canvas):
+            # Only a canvas that is on screen: Settings keeps one scroller per
+            # page, and the first one found belonged to a page nobody was on.
+            if isinstance(widget, tk.Canvas) and widget.winfo_ismapped():
                 widget.update_idletasks()
-                widget.yview_moveto(0.0 if where == "top" else 1.0)
+                widget.yview_moveto(min(1.0, max(0.0, fraction)))
                 _say("drive: scroll -> %s" % where)
                 return
         _say("drive: scroll: no canvas found")

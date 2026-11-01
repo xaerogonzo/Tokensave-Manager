@@ -33,6 +33,11 @@ what that cost.
 | --- | --- |
 | `geometry-sweep.json` | Walks every main-window tab and reports laid-out geometry defects on each. The routine check. |
 | `dialog-sweep.json` | Opens the dialogs with a track record of geometry defects and reports each. **This is where the findings are** — the main window has no history of them. |
+| `continue-in-cursor.json` | Opens Tasks -> History, then reports (read-only) how many sessions loaded, whether each is offered "Continue in Cursor" and "Continue in Claude", whether its recorded folder exists, whether its transcript was found, how its project is named, and which Cursor CLI the real config resolves. Never launches anything. Needs `--config` pointing at a real `manager-config.json` when run from a worktree. |
+| `agent-per-feature.json` | Opens Settings -> AI, reports geometry and screenshots the Agent-per-feature rows. |
+| `cursor-model-row.json` | Opens Settings -> Paths & Tools, scrolls down, clicks **Refresh list** (a real, read-only `agent --list-models`) and screenshots the Cursor model row. Needs a signed-in Cursor CLI. |
+| `agent-tasks-ui.json` | Selects a project, shows the Tasks tab's Agent tasks view (`agent_tasks`, `agent_tasks_report`: the note, rows and which buttons are enabled) and opens the delegate-a-task dialog read-only (`agent_dialog_report`: the refusal or ready line, whether Start is enabled; it never presses Start). Run it twice - with and without `enable_agent_orchestration` - to see both states. |
+| `agent-handoff-ui.json` | Lists the Projects context-menu entries mentioning handoff (without popping the menu up), then scrolls Settings -> AI (`scroll` takes `top`, `bottom` or a 0-1 fraction, and acts on the VISIBLE page) and screenshots the handoff switch. |
 | `geometry-selftest.json` | Reports the Git tab twice — once normally, once with an impossible tolerance. **Run this whenever you doubt a clean result.** |
 
 ## Why the self-test exists

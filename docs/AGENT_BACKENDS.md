@@ -50,13 +50,15 @@ re-create the cascade the table replaced.
 | Capability | Claude Code | Cursor Agent |
 |---|---|---|
 | `print_args` | `--print` | `-p --output-format text` |
-| `prompt_transport` | `stdin` | `argv` (see budgets) |
+| `trust_args` | none | `--trust` (headless stops at "Workspace Trust Required" without it) |
+| `read_only_args` | none established | `--mode ask` (`-p` alone can write files and run shell) |
+| `prompt_transport` | `stdin` | `stdin` (measured 2026-10-31; the argv budgets below still guard any argv-only agent) |
 | `system_prompt_mode` | `native` (`--append-system-prompt`) | `prepend` |
 | `model_flag` | `--model` | `--model` |
 | `interactive` | supported | supported |
 | default model | `claude-haiku-4-5-20251001` | `""` (let Cursor choose) |
-| binaries probed on PATH | `claude.cmd`, `claude` | `cursor-agent.{cmd,exe}`, `cursor-agent` |
-| extra install dirs | `%APPDATA%\npm` | `~/.local/bin` |
+| binaries probed on PATH | `claude.cmd`, `claude` | `cursor-agent.{cmd,exe}`, `cursor-agent` (never a bare `agent`) |
+| extra install dirs | `%APPDATA%\npm` | `%LOCALAPPDATA%\cursor-agent` (current installer), `~/.local/bin` |
 
 Three runners, deliberately NOT derived from one another: `call_print`
 (captured one-shot), `spawn` (terminal **with** an instruction) and
@@ -66,6 +68,42 @@ blank positional argument, which it treats as an empty one-shot prompt instead
 of entering interactive mode.
 
 `helpers/claude_cli.py` remains as a thin shim with unchanged signatures.
+
+### One default, optional overrides per feature
+
+`agent_cli` is still the default agent. `agent_overrides` (Settings → AI → Agent per feature) lets one job use another: commit message, Draft PR, code review, test generation, the Ask tab, the refactor scout and the integration audit. It is one table on purpose; the orchestration work extends this structure rather than adding a second key.
+
+| Situation | Result |
+|---|---|
+| no override, `""`, or `"inherit"` | the default agent |
+| a named agent that is installed | that agent, with that agent's own path and model |
+| a named agent that is NOT installed | `unavailable`, naming the feature. It does **not** fall back to the default |
+| an id this build does not know | `unknown_agent`, naming the feature and the `agent_overrides` key |
+| `agent_overrides` is not an object | `unknown_agent` with an explanation, never "inherit" |
+
+### Cursor's own Claude importer, and why the Manager does not patch it
+
+Cursor ships a "Claude Code import" that, on this machine, listed nothing. A patch script the person wrote with Cursor's help (from a forum report) shows the cause: Cursor's importer encoded a project folder into Claude's directory name differently from Claude, and compared the recorded `cwd` case- and slash-sensitively. Claude turns **every** character outside `[A-Za-z0-9]` into `-` (`helpers/claude_tasks.encode_project_path`, verified against 23 real directories), so any path with a space or a `.claude/worktrees/` segment missed. The script fixes it by editing two strings in Cursor's installed `workbench.glass.main.js` and writing two flags into its `state.vscdb`.
+
+**The Manager does not run, ship or depend on that.** It rewrites another application's installed files, breaks on any Cursor update (the script stops with "pattern not found"), needs Cursor fully closed, and is tied to one version's code and one machine's paths. The handoff above needs none of it and works whether or not Cursor fixes the bug. The patched importer lists a session only when the folder it ran in is the **open workspace**, which is why a worktree's chats appear only after opening that worktree (Tasks tab: *Open folder in Cursor*).
+
+Measured facts that other work relies on: Cursor writes a transcript for every run, hooks or not, at `~/.cursor/projects/<name>/agent-transcripts/<id>/<id>.jsonl` where `<name>` collapses each run of non-alphanumerics to one dash (`D:\_scratch\hooks-test` is `D-scratch-hooks-test`, **unlike** Claude's encoding), so a transcript is found by its id, never by rebuilding the folder name. In a **headless** `agent -p` run only the `sessionStart` and `sessionEnd` hooks fired; `beforeSubmitPrompt`, `afterAgentResponse` and `stop` did not. `sessionEnd` carries `session_id`, `reason`, `final_status` and `transcript_path` (and `CURSOR_TRANSCRIPT_PATH` is set). Project hooks run with the project root as the working directory.
+
+### Local, git-ignored instructions
+
+Measured 2026-10-31 with a canary line in each of two git-excluded files: Claude Code loaded `CLAUDE.local.md`; Cursor loaded **both** `CLAUDE.local.md` and `.cursor/rules/*.mdc`. So a single `CLAUDE.local.md` reaches both agents, and a second Cursor-specific file would load the same instruction twice (the same duplication the baseline had). Observed on one machine with one Cursor configuration; Cursor does not promise it. The file is hidden from git with `.git/info/exclude`, resolved by `git rev-parse --git-path` so a worktree finds the right one, and that file is local to the clone and changes nothing in the repository.
+
+### The Cursor `sessionEnd` hook
+
+`helpers/cursor_hooks.py` builds (and, only on a person's yes, writes) one `sessionEnd` entry in `~/.cursor/hooks.json` plus `~/.cursor/hooks/tokensave_session_marker.py`. Measured in a headless run: the payload's `workspace_roots` is a list of plain Windows paths, and `reason` / `final_status` are `completed`. **A USER-level `hooks.json` fires (measured 2026-10-31 after installing it):** a process poller caught `python.exe ./hooks/tokensave_session_marker.py` starting the instant a headless `agent -p` run ended, so the relative `./hooks/...` command from `~/.cursor/` resolves and `python` is found. What that check did NOT show is the script's child CLI call (too short-lived to catch) or a marker landing in a ledger: the person's config has handoff off, so the CLI refuses by design. A hand run of the script from `~/.cursor/` with a captured payload exited 0 with no output. It fires for every Cursor session on the machine, so the Manager's CLI refuses (quietly, with the prerequisite exit code) for any project without the handoff rule, and while `enable_agent_handoff` is off nothing is written anywhere.
+
+### Models, and tools in a headless call
+
+**Models.** `agent --list-models` (needs a login) is read by `helpers/cursor_models.py` when you click *Refresh list* in Settings → Paths & Tools. Measured on this account: 270 models. The list is what Cursor accepts as a name, **not** what a plan allows: `gpt-5.4-nano-none` is listed and was refused ("not included in your weekly usage"). A pinned model that is missing from the list is kept and reported; with no usable list (not signed in, CLI missing, unreadable output) membership is *unknown*, never "not listed".
+
+**Tools.** A headless Cursor call can reach tokensave only with `--approve-mcps` (the tools become visible) and `--force` (each call approved). `--force` is "run everything", so `build_print_argv(..., mcp_tools=True)` refuses to add it unless the run is read-only AND the agent's row has a read-only mode (`--mode ask`). Measured once, on one model: with all of those set, a request to write a file and to run a shell command was refused and nothing was created. That is evidence, not proof the block is in the tool layer. No Manager feature requests tools yet; this is the guarded capability the first one will use.
+
+There is no fallback policy yet. One is added when something needs it, as an explicit setting; running a job with an agent the person did not pick is the failure this table exists to prevent. Every print-mode call from the Manager still runs read-only for Cursor (`--mode ask`).
 
 ### Two asymmetries, stated rather than papered over
 
@@ -86,7 +124,7 @@ structures is invisible until their output quality diverges and nobody can say
 why. The fallback **never** fires for a `native` agent — Claude keeps using its
 flag, and prepending as well would duplicate the instructions.
 
-**Cursor carries the prompt in argv, so it has a size budget.** Claude uses
+**An argv-transport agent has a size budget.** (Cursor was one until it was measured to read stdin; the guard stays for the next agent that is.) Claude uses
 stdin precisely to dodge Windows argv mangling, and this manager's prompts are
 routinely multi-KB. The budget belongs to the **runner**, not the agent, because
 the two routes reach the OS differently:
@@ -104,7 +142,23 @@ a POSIX `ARG_MAX` ceiling would invent a failure the platform does not have.
 
 ### Verification status
 
-**Every Cursor path in this manager is fixture-verified, not live-verified.**
+**Live-verified 2026-10-31** against `agent` 2026.10.22-27dcf5f on the machine this was built on (installer, login, then headless turns with `cursor-grok-4.5-low`, the one model family this account's plan allowed):
+
+| Fact | Measured |
+|---|---|
+| Install location | `%LOCALAPPDATA%\cursor-agent\{agent,cursor-agent}.cmd`; nothing in `~/.local/bin`; the folder is added to the USER path, so a process started earlier does not see it |
+| stdin prompt with `-p` | accepted; the reply carried a unique token. An auth error would NOT have proved it (it arrives before parsing) |
+| `--mode ask` with `-p` | works |
+| headless trust | `-p` needs `--trust` or it stops at a prompt |
+| `--output-format json` | carries `usage` (input, output, cache tokens) |
+| models | `agent --list-models` / `agent models` need login; a listed model can still be refused by plan ("GPT-5.4 Nano is not included in your weekly usage") |
+| MCP | `.cursor/mcp.json` is seen; the server shows `needs approval` until `agent mcp enable tokensave`; `agent mcp list-tools tokensave` lists 12 tools |
+| MCP in a headless turn | needs `--approve-mcps` (tools visible) AND `--force` (per-call approval); with `--mode ask` the turn stays read-only. A headless tool call then answered from the worktree's own index |
+| worktrees | the CLI has `-w/--worktree` and `--worktree-base` |
+
+Still **fixture-verified only**: everything below the next paragraph.
+
+**Every other Cursor path in this manager is fixture-verified, not live-verified.**
 Cursor was not installed on the machine this was built on, and there is no
 Cursor subscription on the account. Those are two different blockers, and they
 gate different things, so the open items are split by what each actually needs.

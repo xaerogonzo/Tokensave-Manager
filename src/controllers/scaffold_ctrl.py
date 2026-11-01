@@ -456,9 +456,9 @@ class ScaffoldRetrofitController:
 
         CLAUDE.md gets a POINTER at the shared baseline; Cursor, Codex,
         Gemini CLI and opencode cannot resolve one, so they get the
-        baseline's CONTENT instead. Both outputs are rendered from the
-        same `templates/project-baseline.md`, and both manage only their
-        own marked block, so a re-run never touches the user's own text.
+        baseline's CONTENT instead, in `AGENTS.md` (the Cursor rule is a
+        short pointer to it; Cursor loads both). Both manage only their own
+        marked block, so a re-run never touches the user's own text.
         """
         from helpers.agent_rules import (read_baseline, write_agents_md,
                                          write_cursor_rule)
@@ -472,12 +472,15 @@ class ScaffoldRetrofitController:
             return []
         actions: list[str] = []
         targets = []
+        # The Cursor rule only points at AGENTS.md, so asking for it alone would
+        # leave Cursor with a pointer and no baseline.
+        want_agents = want_agents or want_cursor
         if want_agents:
             targets.append(("AGENTS.md",
                             lambda: write_agents_md(path, baseline, name)))
         if want_cursor:
             targets.append((".cursor/rules/tokensave.mdc",
-                            lambda: write_cursor_rule(path, baseline)))
+                            lambda: write_cursor_rule(path)))
         for label, run in targets:
             ok, err, changed = run()
             if not ok:

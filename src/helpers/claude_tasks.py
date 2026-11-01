@@ -8,6 +8,10 @@ import subprocess
 
 from constants import CREATE_NO_WINDOW
 
+#: Lines of a transcript searched for the working directory.
+_CWD_SEARCH_LINES = 200
+
+
 def _claude_projects_dir() -> str:
     """Return ``~/.claude/projects/`` resolved at call time (NOT import time).
 
@@ -41,6 +45,50 @@ def encode_project_path(path: str) -> str:
     ``.claude/worktrees/…`` paths that matter most.
     """
     return re.sub(r"[^A-Za-z0-9]", "-", path)
+
+
+def worktree_label(cwd: str) -> str:
+    """A readable name for a folder a session ran in.
+
+    A path under `<repo>/.claude/worktrees/<name>` reads as
+    `<repo> (worktree <name>)`; anything else is its last segment. The encoded
+    directory name is never shown: `D--Claude-Co-worker-...-claude-worktrees-x`
+    is lossy (every separator is a dash), so it cannot be turned back into
+    either part, which is why a session's own recorded `cwd` is used instead.
+    """
+    norm = (cwd or "").replace("\\", "/").rstrip("/")
+    marker = "/.claude/worktrees/"
+    at = norm.lower().find(marker)
+    if at != -1:
+        repo = os.path.basename(norm[:at])
+        name = norm[at + len(marker):].split("/")[0]
+        if repo and name:
+            return f"{repo} (worktree {name})"
+    return norm.rsplit("/", 1)[-1] or (cwd or "")
+
+
+def transcript_cwd(path: str) -> str:
+    """The working directory a transcript was recorded in, or `""`.
+
+    It sits on the first user record, a handful of lines in, so only the head
+    is read. Never guessed from the directory name (see `worktree_label`).
+    """
+    try:
+        with open(path, encoding="utf-8", errors="replace") as fh:
+            for i, line in enumerate(fh):
+                if i >= _CWD_SEARCH_LINES:
+                    break
+                if '"cwd"' not in line:
+                    continue
+                try:
+                    cwd = json.loads(line).get("cwd")
+                except ValueError:
+                    continue
+                if isinstance(cwd, str) and cwd:
+                    return cwd
+    except OSError:
+        pass
+    return ""
 
 
 def decode_project_path(encoded: str, known_paths: list[str]) -> str:
@@ -106,7 +154,9 @@ def scan_sessions(known_paths: list[str], limit: int = 50) -> list[dict]:
 
     Returned dicts have keys:
       session_id, title, project_encoded, project_display, last_activity (float),
-      is_recent (bool: mtime within last 5 minutes).
+      is_recent (bool: mtime within last 5 minutes), path (the transcript file --
+      a session id is not unique on disk, so a caller that needs THE file must
+      not rebuild its name from the id).
     """
     projects_dir = _claude_projects_dir()
     if not os.path.isdir(projects_dir):
@@ -141,6 +191,7 @@ def scan_sessions(known_paths: list[str], limit: int = 50) -> list[dict]:
 
     for file_path, mtime, encoded in candidates:
         session_id, title = _extract_session_meta(file_path)
+        cwd = transcript_cwd(file_path)
         if session_id is None:
             session_id = os.path.splitext(os.path.basename(file_path))[0]
         if title is None:
@@ -150,12 +201,27 @@ def scan_sessions(known_paths: list[str], limit: int = 50) -> list[dict]:
                 "session_id": session_id,
                 "title": title,
                 "project_encoded": encoded,
-                "project_display": decode_project_path(encoded, known_paths),
+                "project_display": _display_for(encoded, cwd, known_paths),
+                "cwd": cwd,
                 "last_activity": mtime,
                 "is_recent": (now - mtime) < 300,
+                "path": file_path,
             }
         )
     return sessions
+
+
+def _display_for(encoded: str, cwd: str, known_paths: list[str]) -> str:
+    """A known project's name, else a readable name from the session's `cwd`.
+
+    `decode_project_path` returns the encoded name unchanged on a miss, and a
+    worktree is exactly the folder that is never a known project, so those rows
+    used to read as `D--Claude-Co-worker-Token-Save-Manager-Source--claude-...`.
+    """
+    shown = decode_project_path(encoded, known_paths)
+    if shown == encoded and cwd:
+        return worktree_label(cwd)
+    return shown
 
 
 def _extract_session_meta(file_path: str) -> tuple[str | None, str | None]:

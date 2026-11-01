@@ -1,0 +1,2 @@
+### Fixed
+- (settings) **The "Draft PR" heading sits above the Draft PR backend choice again.** It had been placed above the Agent CLI selector, which applies to every feature, so the radios it names were a screen away from it once the per-feature agent rows were added. Found by reading a screenshot of the real Settings → AI page. (`src/dialogs/settings_ai.py`, `scripts/drive/agent-per-feature.json`)

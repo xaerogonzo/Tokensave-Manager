@@ -73,6 +73,16 @@ TRANSPORT_ARGV = "argv"
 INTERACTIVE_SUPPORTED = "supported"
 INTERACTIVE_UNSUPPORTED = "unsupported"
 
+#: The row has a measured way to run a headless task that EDITS FILES. Not the
+#: same as "not read-only": an agent with no `write_args` is not assumed able to
+#: write, it is `unsupported` until somebody measures it.
+WRITE_SUPPORTED = "supported"
+WRITE_UNSUPPORTED = "unsupported"
+
+#: How a delegated task's captured stdout is structured.
+OUTPUT_JSON = "json"                  # one object (Claude --output-format json)
+OUTPUT_STREAM_JSON = "stream-json"    # one object per line (Cursor)
+
 #: Exact serialization for SYSTEM_PROMPT_PREPEND. Frozen as a constant because
 #: two agents drifting into two different prompt structures is invisible until
 #: their output quality diverges and nobody can say why.
@@ -84,6 +94,33 @@ PREPEND_TEMPLATE = "[System instructions]\n{system}\n\n[User request]\n{user}"
 CREATEPROCESS_BUDGET = 32767
 CMDLINE_BUDGET = 8191
 BUDGET_MARGIN = 256
+
+
+# ── The environment an agent is started in ───────────────────────────────────
+
+#: Names removed from the environment of every agent the Manager starts on
+#: Windows. Measured 2026-10-31: a Manager (or a test run) launched from Git
+#: Bash carries `SHELL=/bin/bash.exe`, and Cursor's agent then `eval`s its own
+#: PowerShell hook wrapper in bash, so EVERY shell call is refused with "Hook
+#: blocked ... syntax error" - which reads exactly like a broken hook. They were
+#: removed together (`SHELL`, `MSYSTEM`, `BASH*`) and not isolated one by one.
+_BASH_LEAK_EXACT = ("SHELL", "MSYSTEM")
+_BASH_LEAK_PREFIX = "BASH"
+
+
+def agent_env(environ: "dict | None" = None) -> "dict | None":
+    """The environment to start an agent CLI with, or None to inherit.
+
+    None off Windows: the leak above is a Git-Bash-on-Windows artefact, and a
+    POSIX `SHELL` is real and wanted. Case-insensitive, because Windows
+    environment names are.
+    """
+    if sys.platform != "win32":
+        return None
+    source = os.environ if environ is None else environ
+    return {k: v for k, v in source.items()
+            if k.upper() not in _BASH_LEAK_EXACT
+            and not k.upper().startswith(_BASH_LEAK_PREFIX)}
 
 
 # ── The spec ─────────────────────────────────────────────────────────────────
@@ -114,6 +151,34 @@ class AgentCLISpec:
     config_key_model: str
     default_model: str
     dir_binaries: tuple = ()
+    #: Flags a headless one-shot run needs before it will start at all. Cursor
+    #: stops at a "Workspace Trust Required" prompt otherwise (measured).
+    trust_args: tuple = ()
+    #: Flags that make a one-shot run unable to edit files or run commands. Empty
+    #: means "no way established to enforce it", which is NOT the same as "not
+    #: needed": the caller can ask `read_only_args` and say so honestly.
+    read_only_args: tuple = ()
+    #: Flags that let a headless run USE its MCP tools (tokensave). Cursor needs
+    #: both: `--approve-mcps` makes the tools visible at all, `--force` approves
+    #: each call. `--force` is "run everything", so these are only ever added
+    #: next to an enforced read-only mode -- see `build_print_argv`.
+    mcp_args: tuple = ()
+    #: Delegated tasks (docs/ORCHESTRATION.md). All measured 2026-10-31.
+    #: `write`: this row can run a headless task that edits files (not shell).
+    write: str = WRITE_UNSUPPORTED
+    #: Flags that let that run edit. Empty is meaningful for Cursor: `-p --trust`
+    #: already writes, and its refusal flag (`--mode ask`) is simply left off.
+    write_args: tuple = ()
+    #: The print invocation with STRUCTURED output, so the run's session id and
+    #: usage can be read back instead of scraped from prose.
+    task_print_args: tuple = ()
+    task_output: str = ""
+    #: How a task reaches tokensave. A flag naming a config file (Claude:
+    #: `--strict-mcp-config --mcp-config <file>`, which also keeps a user-scope
+    #: tokensave entry from serving the WRONG project - measured) or, when empty,
+    #: a project file inside the worktree (`task_mcp_file`, Cursor).
+    task_mcp_flag: tuple = ()
+    task_mcp_file: str = ""
 
     def probe_names_for_dirs(self) -> tuple:
         """Binary names to look for inside ``extra_dirs``."""
@@ -138,15 +203,27 @@ CLAUDE = AgentCLISpec(
     # The Manager's automated calls need to be fast; the user's own default
     # (from ~/.claude/settings.json) would often be Opus.
     default_model="claude-haiku-4-5-20251001",
+    # Measured 2026-10-31 (Claude Code 2.1.261): default --print DENIES writes;
+    # `acceptEdits` allows file edits and not the shell.
+    write=WRITE_SUPPORTED,
+    write_args=("--permission-mode", "acceptEdits"),
+    task_print_args=("--print", "--output-format", "json"),
+    task_output=OUTPUT_JSON,
+    task_mcp_flag=("--strict-mcp-config", "--mcp-config"),
 )
 
 CURSOR = AgentCLISpec(
     id="cursor",
     label="Cursor Agent CLI",
     binaries=("cursor-agent.cmd", "cursor-agent.exe", "cursor-agent"),
-    # The Windows installer (`irm 'https://cursor.com/install?win32=true'`)
-    # writes to ~/.local/bin, NOT ~/.cursor/bin.
-    extra_dirs=(r"%USERPROFILE%\.local\bin", "~/.local/bin"),
+    # Measured 2026-10-31 (agent 2026.10.22): the Windows installer
+    # (`irm 'https://cursor.com/install?win32=true'`) writes agent.cmd AND
+    # cursor-agent.cmd to %LOCALAPPDATA%\cursor-agent and adds that folder to
+    # the USER path - which only reaches processes started afterwards, so a
+    # Manager launched earlier must find it here. ~/.local/bin is kept for
+    # older installs and other platforms.
+    extra_dirs=(r"%LOCALAPPDATA%\cursor-agent",
+                r"%USERPROFILE%\.local\bin", "~/.local/bin"),
     dir_binaries=("cursor-agent.cmd", "cursor-agent.exe", "cursor-agent",
                   "agent.cmd", "agent.exe", "agent"),
     print_args=("-p", "--output-format", "text"),
@@ -154,15 +231,32 @@ CURSOR = AgentCLISpec(
     # Cursor has no --append-system-prompt equivalent.
     system_prompt_mode=SYSTEM_PROMPT_PREPEND,
     system_flag="",
-    # Cursor's docs describe the prompt as a positional argument and say
-    # nothing about stdin. Assumed argv until measured against a live install;
-    # flip to TRANSPORT_STDIN once `echo hi | cursor-agent -p` is confirmed.
-    prompt_transport=TRANSPORT_ARGV,
+    # Measured 2026-10-31: `echo <prompt> | agent -p` is read from stdin (the
+    # reply carried a unique token). Judged on the reply, not on an auth error,
+    # which arrives before the prompt is parsed.
+    prompt_transport=TRANSPORT_STDIN,
     interactive=INTERACTIVE_SUPPORTED,
     config_key_exe="cursor_cli_exe",
     config_key_model="cursor_cli_model",
     # Empty: let Cursor pick. Claude's Haiku id is not a valid Cursor model.
     default_model="",
+    # `-p` alone "has access to all tools, including write and shell"; the
+    # Manager's captured calls want text back, so they run in ask mode, which
+    # was measured to work together with -p.
+    trust_args=("--trust",),
+    read_only_args=("--mode", "ask"),
+    # Measured 2026-10-31: without these a headless turn could not reach
+    # tokensave; with them and --mode ask, a request to write a file and to run
+    # a shell command was refused and nothing was created (one model, one run:
+    # evidence, not a proof that the block is in the tool layer).
+    mcp_args=("--approve-mcps", "--force"),
+    # `-p --trust` writes files with no further flag; shell needs --force and is
+    # not offered to a delegated task.
+    write=WRITE_SUPPORTED,
+    write_args=(),
+    task_print_args=("-p", "--output-format", "stream-json"),
+    task_output=OUTPUT_STREAM_JSON,
+    task_mcp_file=".cursor/mcp.json",
 )
 
 AGENT_CLIS: dict = {CLAUDE.id: CLAUDE, CURSOR.id: CURSOR}
@@ -279,16 +373,37 @@ def build_print_argv(
     prompt: str,
     system_prompt: str = "",
     model: str = "",
+    read_only: bool = True,
+    mcp_tools: bool = False,
 ) -> tuple:
     """Assemble the one-shot print invocation.
 
     Returns ``(argv, stdin_text, err)``. ``stdin_text`` is None when the agent
     carries its prompt in argv. A non-empty ``err`` means do not spawn.
+
+    ``read_only`` defaults to True because every caller here wants text back,
+    not an edit; an agent whose row declares no ``read_only_args`` simply has
+    nothing to add (its enforcement is not established, not absent).
+
+    ``mcp_tools`` lets the run call its MCP tools. It is refused unless the run
+    is read-only AND the agent has a read-only mode to enforce: its flags
+    include an approve-everything switch, and approving everything with no
+    enforced limit would let a drafting call write files and run commands.
     """
     if not exe:
         return [], None, f"{spec.label} is not configured."
+    if mcp_tools and not (read_only and spec.read_only_args):
+        return [], None, (
+            f"{spec.label}: tool use in a print-mode call needs an enforced "
+            f"read-only mode, which "
+            + ("this call turned off." if not read_only
+               else "this agent's row does not have."))
 
-    argv = [exe, *spec.print_args]
+    argv = [exe, *spec.print_args, *spec.trust_args]
+    if read_only:
+        argv += spec.read_only_args
+    if mcp_tools:
+        argv += spec.mcp_args
     if model:
         argv += [spec.model_flag, model]
 
@@ -372,8 +487,12 @@ def call_print(
     timeout: int = 45,
     model: str = "",
     cwd: "str | None" = None,
+    mcp_tools: bool = False,
 ) -> "str | None":
     """Run the agent non-interactively and return its stdout text.
+
+    ``mcp_tools=True`` lets the run use its MCP tools (see `build_print_argv`
+    for why that is only allowed read-only).
 
     Returns the stripped stdout, or None on timeout / error / empty output.
     The reason is recorded in this thread's `get_last_cli_error()`.
@@ -386,7 +505,8 @@ def call_print(
     """
     _tls.last_error = None
     argv, stdin_text, err = build_print_argv(
-        spec, exe, prompt, system_prompt=system_prompt, model=model)
+        spec, exe, prompt, system_prompt=system_prompt, model=model,
+        mcp_tools=mcp_tools)
     if err:
         _tls.last_error = err
         return None
@@ -400,6 +520,7 @@ def call_print(
             timeout=timeout,
             creationflags=CREATE_NO_WINDOW,
             cwd=cwd,
+            env=agent_env(),
         )
     except subprocess.TimeoutExpired:
         _tls.last_error = f"timed out after {timeout}s"
@@ -425,6 +546,45 @@ def call_print(
     return out
 
 
+def build_task_argv(spec: AgentCLISpec, exe: str, prompt: str, model: str = "",
+                    mcp_config: str = "", with_mcp: bool = True) -> tuple:
+    """The headless WRITE invocation for a delegated task.
+
+    Returns ``(argv, stdin_text, err)``; a non-empty ``err`` means do not spawn.
+    A row that has not measured a way to write **refuses** (the prompt asking an
+    agent not to edit is not enforcement, and neither is assuming it can).
+
+    ``with_mcp`` adds what the row needs for the agent to reach tokensave. For a
+    row that names a config file by flag, `mcp_config` is that file and is
+    required; for a row that reads a project file, the approval flags are added
+    (they include approve-everything, so the WORKTREE is the boundary).
+    """
+    if not exe:
+        return [], None, f"{spec.label} is not configured."
+    if spec.write != WRITE_SUPPORTED or not spec.task_print_args:
+        return [], None, (f"{spec.label} has no measured way to run a task that "
+                          f"edits files, so it cannot be given one.")
+    argv = [exe, *spec.task_print_args, *spec.trust_args, *spec.write_args]
+    if with_mcp:
+        if spec.task_mcp_flag:
+            if not mcp_config:
+                return [], None, f"{spec.label} needs an MCP config file for a task."
+            argv += [*spec.task_mcp_flag, mcp_config]
+        else:
+            argv += spec.mcp_args
+    if model:
+        argv += [spec.model_flag, model]
+    if spec.prompt_transport == TRANSPORT_STDIN:
+        stdin_text = prompt
+    else:
+        argv.append(prompt)
+        stdin_text = None
+    err = _over_budget(subprocess.list2cmdline(argv), CREATEPROCESS_BUDGET)
+    if err:
+        return [], None, err
+    return argv, stdin_text, ""
+
+
 def _spawn(spec, exe, project_path, instruction, model) -> tuple:
     """Shared body of spawn / spawn_interactive. Returns (ok, error_message)."""
     payload, err = build_spawn_cmdline(spec, exe, instruction, model)
@@ -433,7 +593,7 @@ def _spawn(spec, exe, project_path, instruction, model) -> tuple:
     try:
         if sys.platform == "win32":
             subprocess.Popen(payload, cwd=project_path,
-                             creationflags=CREATE_NEW_CONSOLE)
+                             creationflags=CREATE_NEW_CONSOLE, env=agent_env())
         else:
             subprocess.Popen(payload, cwd=project_path)
         return True, ""
@@ -503,6 +663,13 @@ class AgentResolution:
     exe: str
     state: str
     requested_id: str = ""
+    #: The feature whose override chose this agent, or "" when the default did.
+    #: Carried so a failure can say WHERE the choice came from -- a person who
+    #: set Cursor for one feature should not be told to fix "the agent CLI".
+    feature: str = ""
+    #: A ready-made explanation for faults that are not "this id is unknown"
+    #: (a malformed override table). Wins over the generic wording when set.
+    detail: str = ""
 
     @property
     def ok(self) -> bool:
@@ -517,15 +684,21 @@ class AgentResolution:
         """User-facing reason this cannot run, or "" when it can."""
         if self.state == RESOLUTION_OK:
             return ""
+        if self.detail:
+            return self.detail
+        where = (f" for {feature_label(self.feature)}" if self.feature else "")
+        pick = ("Settings → AI → Agent per feature" if self.feature
+                else "Settings → AI → Agent CLI")
         if self.state == RESOLUTION_UNKNOWN_AGENT:
             known = ", ".join(sorted(AGENT_CLIS))
-            return (f"Unknown agent CLI {self.requested_id!r} in settings. "
-                    f"Known agents: {known}. "
-                    f"Fix 'agent_cli' in manager-config.json or pick one in "
-                    f"Settings → AI → Agent CLI.")
-        return (f"{self.label} is not installed or its path is not set. "
-                f"Set it in Settings → Paths, or choose a different agent in "
-                f"Settings → AI → Agent CLI.")
+            key = "agent_overrides" if self.feature else "agent_cli"
+            return (f"Unknown agent CLI {self.requested_id!r}{where} in "
+                    f"settings. Known agents: {known}. "
+                    f"Fix '{key}' in manager-config.json or pick one in "
+                    f"{pick}.")
+        return (f"{self.label}{where} is not installed or its path is not "
+                f"set. Set it in Settings → Paths, or choose a different "
+                f"agent in {pick}.")
 
 
 def resolve(agent_id: str, exe_lookup) -> AgentResolution:
@@ -548,7 +721,78 @@ def resolve(agent_id: str, exe_lookup) -> AgentResolution:
     return AgentResolution(spec, exe, state, spec.id)
 
 
-def resolve_from(cfg) -> AgentResolution:
+# ── Per-feature routing ──────────────────────────────────────────────────────
+#
+# One default agent (`agent_cli`) plus an optional override per feature
+# (`agent_overrides`). There is deliberately ONE table: the orchestration work
+# that follows adds task-kind routing to this same structure rather than
+# growing a second config key that would have to be kept in step with it.
+#
+# Rules, each of which exists because the alternative was worse:
+#   * absent, "" and "inherit" all mean "use the default" -- an override that
+#     was never set must not behave differently from one set to inherit;
+#   * a NAMED agent that is missing is "unavailable". It does not fall through
+#     to the default: the person asked for that agent, and running another one
+#     while the settings said otherwise is the defect `resolve` already refuses;
+#   * an unrecognised id is an error naming the feature, never the default.
+# There is no fallback policy yet. One is added only when something needs it,
+# and it will be an explicit setting, never an implicit rescue.
+
+#: A feature's override meaning "use the default agent".
+INHERIT = "inherit"
+
+FEATURE_COMMIT_MESSAGE = "commit_message"
+FEATURE_DRAFT_PR = "draft_pr"
+FEATURE_REVIEW = "review"
+FEATURE_TEST_GENERATION = "test_generation"
+FEATURE_ASK = "ask"
+FEATURE_SCOUT = "scout"
+FEATURE_INTEGRATION_AUDIT = "integration_audit"
+
+#: (id, label) in the order Settings shows them. The id is persisted.
+FEATURES = (
+    (FEATURE_COMMIT_MESSAGE, "Commit message"),
+    (FEATURE_DRAFT_PR, "Draft PR"),
+    (FEATURE_REVIEW, "Code review"),
+    (FEATURE_TEST_GENERATION, "Test generation"),
+    (FEATURE_ASK, "Ask tab"),
+    (FEATURE_SCOUT, "Refactor scout"),
+    (FEATURE_INTEGRATION_AUDIT, "Integration audit"),
+)
+_FEATURE_LABELS = dict(FEATURES)
+
+
+def feature_label(feature: str) -> str:
+    return _FEATURE_LABELS.get(feature, feature)
+
+
+def resolve_for_feature(default_id: str, overrides, feature: str,
+                        exe_lookup) -> AgentResolution:
+    """`resolve`, honouring this feature's override when it has one.
+
+    Raises ValueError for a feature id that is not in FEATURES: that is a typo
+    in code, and silently treating it as "inherit" would hide it forever.
+    """
+    if feature not in _FEATURE_LABELS:
+        raise ValueError(f"unknown feature {feature!r}")
+    if overrides is None:
+        chosen = ""
+    elif isinstance(overrides, dict):
+        raw = overrides.get(feature)
+        chosen = "" if raw is None else str(raw).strip()
+    else:
+        return AgentResolution(
+            None, "", RESOLUTION_UNKNOWN_AGENT, "", feature,
+            detail=(f"'agent_overrides' in manager-config.json is a "
+                    f"{type(overrides).__name__}, not an object, so the agent "
+                    f"for {feature_label(feature)} cannot be read. Fix it or "
+                    f"pick agents in Settings → AI → Agent per feature."))
+    if not chosen or chosen.lower() == INHERIT:
+        return resolve(default_id, exe_lookup)
+    return dataclasses.replace(resolve(chosen, exe_lookup), feature=feature)
+
+
+def resolve_from(cfg, feature: str = "") -> AgentResolution:
     """Resolve the agent CLI from a ManagerConfig, or anything shaped like one.
 
     A real `ManagerConfig` answers `resolve_agent_cli()`. Several call sites are
@@ -560,7 +804,9 @@ def resolve_from(cfg) -> AgentResolution:
     """
     own = getattr(cfg, "resolve_agent_cli", None)
     if callable(own):
-        return own()
+        # Only a call that names a feature passes one, so a config double that
+        # predates routing keeps working for every call that does not.
+        return own(feature) if feature else own()
     exe = getattr(cfg, "claude_cli_exe", "") or ""
     return AgentResolution(
         CLAUDE, exe,

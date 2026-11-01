@@ -1,0 +1,18 @@
+claude-opus-4-8-xhigh - Claude Opus 4.8 1M Extra High
+claude-opus-4-8-xhigh-fast - Claude Opus 4.8 1M Extra High Fast
+claude-opus-4-8-thinking-medium - Claude Opus 4.8 1M Medium Thinking
+gemini-4-argon-low - Gemini 4 Argon Low
+muse-wonder-1.0-minimal - Muse Wonder  Minimal
+gpt-5.6-sol-medium - GPT-5.6 Sol 1M
+gpt-5.5-none-fast - GPT-5.5 None Fast
+claude-fable-5-1-high - Claude Fable 5.1 1M (NO ZDR)
+cursor-grok-4.5-low - Grok 4.5 Low
+claude-sonnet-5-5-medium - Claude Sonnet 5.5  Medium
+claude-4.6-sonnet-medium - Claude Sonnet 4.6 1M
+gpt-5.4-nano-none - GPT-5.4 Nano None
+gpt-5.1 - GPT-5.1
+claude-4-sonnet - Claude Sonnet 4
+kimi-k2.7-code - Kimi K2.7 Code
+deepseek-v41-flash-1017-max - DeepSeek V4.1 Flash 1017 Max
+
+Tip: use --model <id> (or /model <id> in interactive mode) to switch. Parameterized models also accept quoted overrides, e.g. --model 'claude-opus-4-8[context=1m,effort=high,fast=false]'.

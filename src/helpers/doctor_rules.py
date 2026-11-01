@@ -1205,6 +1205,59 @@ def audit_observations(project_path: str) -> list:
     return notes
 
 
+def audit_handoff_ledger(project_path: str, git_exe: str = "") -> list:
+    """Is this project's agent handoff ledger readable and safe from `git add`?
+
+    **Absent is silent.** Most projects never opt in, and a note about a file
+    nobody asked for would fire everywhere forever.
+
+    **Unknown says "could not determine".** A ledger that cannot be opened is
+    never phrased as an empty one: a reader would conclude nothing was handed
+    off when the truth is that nobody can tell.
+
+    **Lines that could not be read are counted, never skipped quietly.** The
+    ledger drops them on read; this is where a person finds out it did.
+
+    A ledger inside `.git` (the usual case) cannot be committed and needs no
+    ignore rule, so only the project-folder fallback is checked, and git not
+    answering there is reported as exactly that.
+
+    Imported lazily so this module's import surface stays ``ast``/``os``/``re``
+    for the CI one-liner in ``helpers/ci_workflow.py``.
+    """
+    try:
+        from helpers import handoff_ledger as ledger
+    except ImportError:
+        return []
+
+    seen = ledger.read(project_path, git_exe=git_exe)
+    if seen.state == ledger.STATE_ABSENT:
+        return []
+    if seen.state == ledger.STATE_UNREADABLE:
+        return ["  Could not determine what the agent handoff ledger holds: "
+                "%s (%s). Nothing was changed." % (seen.error or "reason unrecorded",
+                                                    seen.path)]
+    notes = []
+    if seen.bad_lines:
+        notes.append(
+            "  %d line(s) of the agent handoff ledger could not be read and "
+            "are left out of every listing (%d entr%s readable): %s"
+            % (seen.bad_lines, len(seen.entries),
+               "y" if len(seen.entries) == 1 else "ies", seen.path))
+    if not ledger.in_git_dir(project_path, git_exe):
+        ignored = ledger.is_ignored(project_path, git_exe)
+        if ignored is False:
+            notes.append(
+                "  The agent handoff ledger is NOT git-ignored here, so a "
+                "careless `git add -A` would commit your agents' decisions: "
+                "%s" % seen.path)
+        elif ignored is None:
+            notes.append(
+                "  Could not determine whether git ignores the agent handoff "
+                "ledger (git did not answer): %s" % seen.path)
+    return notes
+
+
 def audit_mcp_auto_approve() -> list:
     """Report blanket MCP auto-approval as posture, never as brokenness.
 

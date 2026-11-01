@@ -203,7 +203,9 @@ its current files destructively.
   and an existing index are both left alone. A project that already has a
   `BASIC_INSTRUCTIONS.md` keeps it and its current chain.
 - **Add AGENTS.md** and **Add .cursor/rules/tokensave.mdc** — the same rules for
-  agents that cannot follow an `@include`.
+  agents that cannot follow an `@include`. The rules are written into
+  `AGENTS.md` only; the Cursor rule is a short pointer to it, because Cursor
+  loads both files and would otherwise carry the baseline twice.
 - **Add Nuitka build files** — copies `build.ps1` + `build.bat`. Skipped
   silently if `build.ps1` already exists.
 - **Generate shadow extension links** and **Add auto-commit Stop hook** —

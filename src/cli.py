@@ -938,6 +938,197 @@ def _cmd_graph_trust(args) -> Result:
     return Result(EXIT_OK, data, human=report.summary())
 
 
+def _cmd_handoff(args) -> Result:
+    """The shared agent handoff ledger: publish to it, read it, or clear it.
+
+    **`publish` is opt-in.** It writes what a person's agents decided into a
+    file every other agent in the project can read, so it does nothing until
+    `enable_agent_handoff` is true in the Manager's config, and it says so with
+    the prerequisite exit code rather than quietly succeeding. Reading and
+    `status` work regardless: a person who turned it off should still be able to
+    see, and clear, what is already there.
+
+    **The agent supplies only its own words.** Branch, base commit and the
+    files git reports as changed are measured here (`handoff_ledger.publish`),
+    so a claim about what changed is never the only record of it.
+    """
+    from helpers import handoff_ledger as ledger
+    from helpers import handoff_rules, handoff_setup
+    project = _resolve_project(args.project)
+    raw = _load_manager_config(args.config)
+    git_exe = raw.get("git_exe") or ""
+    enabled = raw.get("enable_agent_handoff") is True
+    path = ledger.ledger_path(project, git_exe)
+    in_git = ledger.in_git_dir(project, git_exe)
+    # The same answer the Manager's windows use, so the CLI and the GUI cannot
+    # write two different rules.
+    runner, config_path = handoff_setup.runner_and_config(args.config)
+
+    if args.action == "rule":
+        if not enabled:
+            return Result(EXIT_PREREQUISITE, {"enabled": False},
+                          error="agent handoff is off; turn it on first, so a "
+                                "rule is never written for a feature that is not",
+                          human="agent handoff is off - no rule was written")
+        done = handoff_rules.install(project, runner, config_path, git_exe)
+        data = {"installed": done.ok, "changed": done.changed,
+                "path": done.path, "state": done.state}
+        if not done.ok:
+            return Result(EXIT_FAILED, data, error=done.error, human=done.error)
+        return Result(EXIT_OK, data, human=(
+            f"{handoff_rules.RULE_FILE} updated" if done.changed
+            else f"{handoff_rules.RULE_FILE} already current"))
+
+    if args.action == "marker":
+        # Called by the Cursor sessionEnd hook for EVERY Cursor session on the
+        # machine, so it is quiet by construction: it writes only for a project
+        # whose person opted in (the handoff rule is there), and reports a
+        # prerequisite exit, not a failure, for every other one.
+        if not enabled:
+            return Result(EXIT_PREREQUISITE, {"recorded": False, "enabled": False},
+                          error="agent handoff is off", human="handoff is off")
+        rule = handoff_rules.status(project, runner, config_path, git_exe)
+        if rule not in (handoff_rules.STATE_CURRENT, handoff_rules.STATE_STALE):
+            return Result(EXIT_PREREQUISITE, {"recorded": False, "rule": rule},
+                          error="this project has not opted in (no handoff rule); "
+                                "nothing was recorded",
+                          human="project has not opted in - no marker written")
+        if not args.agent:
+            return Result(EXIT_USAGE, error="--agent is required",
+                          human="--agent is required")
+        try:
+            done = ledger.record_session(
+                project, agent=args.agent, session_id=args.session,
+                reason=args.reason, final_status=args.final_status,
+                transcript_path=args.transcript, git_exe=git_exe)
+        except ledger.LedgerError as exc:
+            return Result(EXIT_USAGE, error=str(exc), human=f"refused: {exc}")
+        data = {"recorded": done.ok and not done.duplicate, "duplicate": done.duplicate,
+                "handoff_id": done.handoff_id, "path": done.path}
+        if not done.ok:
+            return Result(EXIT_FAILED, data, error=done.error, human=done.error)
+        return Result(EXIT_OK, data, human="session marker "
+                      + ("already recorded" if done.duplicate else "recorded"))
+
+    if args.action == "mirror":
+        # Reconcile: make tokensave's decision memory hold what the ledger holds.
+        if not enabled:
+            return Result(EXIT_PREREQUISITE, {"enabled": False},
+                          error="agent handoff is off; nothing was mirrored",
+                          human="agent handoff is off - nothing was mirrored")
+        return _mirror_result(project, raw, git_exe)
+
+    if args.action == "unrule":
+        gone = handoff_rules.remove(project, git_exe)
+        if not gone.ok:
+            return Result(EXIT_FAILED, {"path": gone.path}, error=gone.error,
+                          human=gone.error)
+        return Result(EXIT_OK, {"removed": gone.changed, "path": gone.path},
+                      human="rule removed" if gone.changed else "no rule was there")
+
+    if args.action == "status":
+        seen = ledger.read(project, git_exe=git_exe)
+        # Inside `.git` git cannot track it, which is a stronger answer than
+        # "ignored"; reported as ignored so one field still answers the question.
+        ignored = True if in_git else ledger.is_ignored(project, git_exe)
+        warnings = []
+        if ignored is False and seen.state != ledger.STATE_ABSENT:
+            warnings.append(f"{ledger.LEDGER_DIR}/{ledger.LEDGER_BASENAME} is "
+                            f"not git-ignored in this project")
+        if seen.bad_lines:
+            warnings.append(f"{seen.bad_lines} line(s) in the ledger could not be read")
+        return Result(
+            EXIT_OK,
+            {"enabled": enabled, "state": seen.state, "entries": len(seen.entries),
+             "bad_lines": seen.bad_lines, "ignored_by_git": ignored,
+             "path": path, "error": seen.error,
+             "location": "git" if in_git else "project",
+             "rule": handoff_rules.status(project, runner, config_path, git_exe)},
+            warnings,
+            human=f"handoff {'on' if enabled else 'off'}; ledger {seen.state}, "
+                  f"{len(seen.entries)} entr{'y' if len(seen.entries) == 1 else 'ies'}")
+
+    if args.action == "list":
+        seen = ledger.read(project, limit=max(0, args.limit), git_exe=git_exe)
+        if seen.state == ledger.STATE_UNREADABLE:
+            return Result(EXIT_FAILED, {"state": seen.state, "path": path},
+                          error=seen.error, human=f"cannot read the ledger: {seen.error}")
+        warnings = ([f"{seen.bad_lines} line(s) could not be read"]
+                    if seen.bad_lines else [])
+        return Result(EXIT_OK,
+                      {"state": seen.state, "entries": list(seen.entries),
+                       "bad_lines": seen.bad_lines, "path": path},
+                      warnings, human=f"{len(seen.entries)} entr"
+                      f"{'y' if len(seen.entries) == 1 else 'ies'} shown")
+
+    if args.action == "clear":
+        if not args.yes:
+            return Result(EXIT_USAGE, error="clearing deletes the whole ledger; "
+                          "pass --yes to confirm",
+                          human="pass --yes to confirm clearing the ledger")
+        ok, err = ledger.clear(project, git_exe)
+        if not ok:
+            return Result(EXIT_FAILED, error=err, human=err)
+        return Result(EXIT_OK, {"cleared": True, "path": path}, human="ledger cleared")
+
+    # publish
+    if not enabled:
+        return Result(EXIT_PREREQUISITE, {"enabled": False},
+                      error="agent handoff is off; turn it on in the Manager "
+                            "(enable_agent_handoff) first",
+                      human="agent handoff is off - nothing was written")
+    if not args.agent:
+        return Result(EXIT_USAGE, error="--agent is required to publish",
+                      human="--agent is required to publish")
+    try:
+        written, warnings = ledger.publish(
+            project, agent=args.agent, session_id=args.session, goal=args.goal,
+            decisions=args.decision, next_steps=args.next_step,
+            open_questions=args.question, files=args.file, git_exe=git_exe)
+    except ledger.LedgerError as exc:
+        return Result(EXIT_USAGE, error=str(exc), human=f"refused: {exc}")
+    data = {"written": written.ok and not written.duplicate,
+            "duplicate": written.duplicate, "handoff_id": written.handoff_id,
+            "path": written.path, "trimmed": written.trimmed}
+    if not written.ok:
+        return Result(EXIT_FAILED, data, warnings, error=written.error,
+                      human=written.error)
+    # The memory is a derived index of the ledger: a failure to update it is a
+    # warning on a publish that DID succeed, never a failed publish.
+    from helpers import handoff_memory
+    mirrored, mirror_error = handoff_memory.mirror(
+        project, raw.get("tokensave_exe") or "", git_exe, only=written.handoff_id)
+    data["memory"] = [dataclasses.asdict(m) for m in mirrored]
+    for m in mirrored:
+        if m.state == handoff_memory.STATE_PENDING:
+            warnings.append(f"decisions are in the ledger but not yet in tokensave "
+                            f"memory ({m.error}); `handoff --action mirror` retries")
+    return Result(EXIT_OK, data, warnings,
+                  human=f"handoff {written.handoff_id} "
+                        f"{'already recorded' if written.duplicate else 'recorded'}")
+
+
+def _mirror_result(project: str, raw: dict, git_exe: str) -> Result:
+    from helpers import handoff_memory
+    results, error = handoff_memory.mirror(
+        project, raw.get("tokensave_exe") or "", git_exe)
+    data = {"results": [dataclasses.asdict(m) for m in results]}
+    if error:
+        return Result(EXIT_FAILED, data, error=error,
+                      human=f"cannot read the ledger: {error}")
+    pending = [m for m in results if m.state == handoff_memory.STATE_PENDING]
+    wrote = sum(m.recorded for m in results)
+    if pending:
+        return Result(EXIT_FAILED, data,
+                      error=f"{len(pending)} handoff(s) could not be mirrored: "
+                            f"{pending[0].error}",
+                      human=f"{wrote} decision(s) written, {len(pending)} handoff(s) "
+                            f"pending: {pending[0].error}")
+    return Result(EXIT_OK, data,
+                  human=f"{wrote} decision(s) written; "
+                        f"{len(results)} handoff(s) with decisions checked")
+
+
 _COMMANDS = {
     "checks": _cmd_checks,
     "analyze": _cmd_analyze,
@@ -955,6 +1146,7 @@ _COMMANDS = {
     "cost": _cmd_cost,
     "focus": _cmd_focus,
     "request": _cmd_request,
+    "handoff": _cmd_handoff,
     "commands": _cmd_commands,
 }
 
@@ -1107,6 +1299,43 @@ def _build_parser() -> argparse.ArgumentParser:
                      help="the action's payload, as JSON")
     req.add_argument("--status", default="",
                      help="report what became of a request id instead")
+
+    ho = add("handoff", "publish to, read or clear the shared agent handoff "
+                        "ledger (publish is opt-in; mutating)")
+    # `status` is the default: every command must parse with only --project, and
+    # the default of a command that can delete a ledger has to be the read.
+    ho.add_argument("--action", default="status",
+                    choices=["publish", "list", "status", "clear", "rule", "unrule",
+                             "marker", "mirror"],
+                    help="publish an entry, list recent ones, report the "
+                         "ledger's state (default), delete it, or write / "
+                         "remove the git-ignored CLAUDE.local.md rule that "
+                         "tells agents about this command; mirror copies "
+                         "the ledger's decisions into tokensave's decision "
+                         "memory (safe to repeat)")
+    ho.add_argument("--agent", default="",
+                    help="who is publishing, e.g. claude or cursor")
+    ho.add_argument("--session", default="", help="the agent's own session id")
+    ho.add_argument("--goal", default="", help="what the work was for")
+    ho.add_argument("--decision", action="append", default=None,
+                    help="a decision made; repeat for several")
+    ho.add_argument("--next-step", action="append", default=None,
+                    dest="next_step", help="what should happen next; repeatable")
+    ho.add_argument("--question", action="append", default=None,
+                    help="something still open; repeatable")
+    ho.add_argument("--file", action="append", default=None,
+                    help="a file you changed (your claim; git is asked "
+                         "separately); repeatable")
+    ho.add_argument("--reason", default="",
+                    help="with --action marker: why the session ended")
+    ho.add_argument("--final-status", default="", dest="final_status",
+                    help="with --action marker: how the session finished")
+    ho.add_argument("--transcript", default="",
+                    help="with --action marker: the transcript's PATH (never its text)")
+    ho.add_argument("--limit", type=int, default=10,
+                    help="entries to show with --action list (newest)")
+    ho.add_argument("--yes", action="store_true",
+                    help="confirm --action clear")
 
     add("commands", "emit the Manager's command vocabulary (no project needed)",
         project=False)

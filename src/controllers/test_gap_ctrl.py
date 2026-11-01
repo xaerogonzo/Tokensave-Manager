@@ -485,8 +485,8 @@ class TestGapCtrl:
         ).pack(side=tk.LEFT)
 
         # AI master switch
-        from helpers.agent_cli import resolve_from
-        _agent = resolve_from(self._cfg)
+        from helpers.agent_cli import FEATURE_TEST_GENERATION, resolve_from
+        _agent = resolve_from(self._cfg, FEATURE_TEST_GENERATION)
         ai_available = bool(
             _agent.ok or
             self._cfg.raw.get("commit_message_llm", {}).get("provider")

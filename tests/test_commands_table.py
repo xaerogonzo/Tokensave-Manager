@@ -109,10 +109,12 @@ def test_the_mutating_set_is_pinned_by_name():
     """Adding one here is a claim that the command changes real state.
 
     `request` writes into the project's own inbox, which is a state change even
-    though nothing it queues can commit, apply or approve on its own.
+    though nothing it queues can commit, apply or approve on its own. `handoff`
+    writes (or deletes) `.tokensave/handoff.jsonl`; its default action is the
+    read-only `status`, and `publish` is refused unless the person opted in.
     """
     assert {c.action for c in commands.by_side_effect(MUTATING)} == {
-        "sync", "commit-request", "request"}
+        "sync", "commit-request", "request", "handoff"}
 
 
 def test_pure_read_members_touch_nothing():

@@ -55,14 +55,29 @@ class AISection:
         self._host = host
         self._cfg = cfg
         raw = cfg.raw
+        # Packed first, filled last: it reads variables the sections below create.
+        preset_host = tk.Frame(body, bg=C["base"])
+        preset_host.pack(fill=tk.X)
         self._build_backend_selection_section(body, raw)
+        self._build_handoff_section(body, raw)
+        self._build_orchestration_section(body, raw)
         self._build_ollama_section(body, raw)
         self._build_ai_section(body, raw)
         self._build_ask_ai_section(body, raw)
+        self._build_integration_panel(preset_host)
 
     def save_into(self, raw: dict) -> bool:
         """Write this section's fields into raw. Always succeeds."""
         raw["agent_cli"]               = self._var_agent_cli.get()
+        # Written only when it is ON or was already in the file: opening
+        # Settings and saving must not add a key to an install that never had it.
+        if self._var_enable_agent_handoff.get() or "enable_agent_handoff" in raw:
+            raw["enable_agent_handoff"] = bool(self._var_enable_agent_handoff.get())
+        if (self._var_enable_agent_orchestration.get()
+                or "enable_agent_orchestration" in raw):
+            raw["enable_agent_orchestration"] = bool(
+                self._var_enable_agent_orchestration.get())
+        self._save_agent_overrides(raw)
         raw["draft_pr_backend"]        = self._var_draft_pr_backend.get()
         raw["commit_message_backend"]  = self._var_commit_msg_backend.get()
         raw["enable_llm_grounding"]    = bool(self._var_enable_llm_grounding.get())
@@ -100,9 +115,68 @@ class AISection:
         raw["ollama_warmup"]    = self._var_ollama_warmup.get()
         return True
 
+    def _save_agent_overrides(self, raw: dict) -> None:
+        """Write `agent_overrides`: only features that DIFFER from the default.
+
+        An "inherit" row is removed rather than stored, so a config that was
+        never customised stays without the key, and an override somebody added
+        by hand for a feature this build does not list is carried through
+        untouched instead of being dropped by a save.
+        """
+        from helpers.agent_cli import FEATURES, INHERIT
+        kept = raw.get("agent_overrides")
+        kept = dict(kept) if isinstance(kept, dict) else {}
+        for fid, _label in FEATURES:
+            choice = getattr(self, "_var_override_" + fid).get()
+            if choice and choice != INHERIT:
+                kept[fid] = choice
+            else:
+                kept.pop(fid, None)
+        if kept:
+            raw["agent_overrides"] = kept
+        else:
+            raw.pop("agent_overrides", None)
+
     def bind_dirty(self, callback) -> None:
         from dialogs.settings_section import bind_vars
         bind_vars(self, callback)
+
+    # ── Claude and Cursor setup: presets read and write the form, not the config ──
+
+    def _form_as_raw(self) -> dict:
+        """The three integration settings as the FORM currently has them."""
+        from helpers.agent_cli import FEATURES, INHERIT
+        raw = {"agent_cli": self._var_agent_cli.get()}
+        if self._var_enable_agent_handoff.get():
+            raw["enable_agent_handoff"] = True
+        chosen = {fid: getattr(self, "_var_override_" + fid).get()
+                  for fid, _label in FEATURES}
+        chosen = {f: v for f, v in chosen.items() if v and v != INHERIT}
+        if chosen:
+            raw["agent_overrides"] = chosen
+        return raw
+
+    def _write_preset_change(self, change) -> None:
+        from helpers.agent_cli import FEATURES, INHERIT
+        from helpers.agent_presets import ABSENT
+        if change.key == "agent_cli":
+            self._var_agent_cli.set(change.new)
+        elif change.key == "enable_agent_handoff":
+            self._var_enable_agent_handoff.set(change.new is True)
+        elif change.key == "agent_overrides" and change.new is ABSENT:
+            for fid, _label in FEATURES:
+                getattr(self, "_var_override_" + fid).set(INHERIT)
+
+    def _build_integration_panel(self, host_frame) -> None:
+        from dialogs.settings_integration import IntegrationPanel
+        self._integration = IntegrationPanel(
+            self._host, host_frame, self._cfg,
+            self._form_as_raw, self._write_preset_change)
+        from helpers.agent_cli import FEATURES
+        watched = [self._var_agent_cli, self._var_enable_agent_handoff,
+                   *[getattr(self, "_var_override_" + f) for f, _l in FEATURES]]
+        for var in watched:
+            var.trace_add("write", lambda *_a: self._integration.refresh())
 
     # ── Section builders (original visual order) ─────────────────────────
 
@@ -138,6 +212,109 @@ class AISection:
                  justify=tk.LEFT).pack(anchor=tk.W, padx=24, pady=(0, 8))
         return var
 
+    def _build_handoff_section(self, body, raw):
+        """The machine-wide switch for agents leaving notes for each other.
+
+        Off by default and strictly `True` to enable (the config property says
+        why). A project still takes part only after it has the handoff rule, so
+        this says where that is done rather than implying the switch is enough.
+        """
+        lf = tk.LabelFrame(body, text="Shared agent handoff  (Claude and Cursor)",
+                           bg=C["base"], fg=C["subtext"],
+                           font=("Segoe UI", 9, "bold"), relief=tk.GROOVE, bd=1)
+        lf.pack(fill=tk.X, padx=20, pady=(0, 8))
+        self._var_enable_agent_handoff = tk.BooleanVar(
+            value=raw.get("enable_agent_handoff") is True)
+        chk = ttk.Checkbutton(
+            lf, text="Let agents leave notes for each other",
+            variable=self._var_enable_agent_handoff)
+        chk.pack(anchor=tk.W, padx=12, pady=(8, 2))
+        try:
+            from theme import _Tooltip
+            _Tooltip(chk, "Off by default.\n\nOn: an agent in a project that has the "
+                          "handoff rule can record decisions, next steps and open "
+                          "questions that the next agent (Claude or Cursor) reads.")
+        except Exception:
+            pass
+        tk.Label(lf,
+            text="  Notes live in the project's .git folder, so they are never committed and\n"
+                 "  every worktree of the project shares them. They stay on this machine;\n"
+                 "  secrets are masked on a best-effort basis. Turning this off stops new\n"
+                 "  notes; existing ones stay until cleared.\n"
+                 "  A project takes part only once you add its rule: Projects tab, right-click,\n"
+                 "  AI & docs, \"Enable agent handoff here…\".",
+            font=("Segoe UI", 8), bg=C["base"], fg=C["overlay0"],
+            justify=tk.LEFT).pack(anchor=tk.W, padx=24, pady=(0, 8))
+
+    def _build_orchestration_section(self, body, raw):
+        """The machine-wide switch for handing a task to an agent that EDITS FILES.
+
+        Off by default and strictly `True`. Kept apart from handoff on purpose:
+        notes between agents and an agent changing files are different consents.
+        """
+        lf = tk.LabelFrame(body, text="Delegated agent tasks  (experimental)",
+                           bg=C["base"], fg=C["subtext"],
+                           font=("Segoe UI", 9, "bold"), relief=tk.GROOVE, bd=1)
+        lf.pack(fill=tk.X, padx=20, pady=(0, 8))
+        self._var_enable_agent_orchestration = tk.BooleanVar(
+            value=raw.get("enable_agent_orchestration") is True)
+        chk = ttk.Checkbutton(lf, text="Let me hand a task to an agent that edits files",
+                              variable=self._var_enable_agent_orchestration)
+        chk.pack(anchor=tk.W, padx=12, pady=(8, 2))
+        try:
+            from theme import _Tooltip
+            _Tooltip(chk, "Off by default.\n\nOn: the Tasks tab's \"Agent tasks\" view can "
+                          "start Claude or Cursor on a task. The agent works in a separate "
+                          "copy of the project on its own branch, with permission to edit "
+                          "files (no shell). Nothing is merged or pushed.")
+        except Exception:
+            pass
+        tk.Label(lf,
+            text="  Each task gets its own branch and folder (next to the project, under\n"
+                 "  _scratch). Your own checkout is never touched, and a project with\n"
+                 "  uncommitted changes is refused. You review the result and decide.",
+            font=("Segoe UI", 8), bg=C["base"], fg=C["overlay0"],
+            justify=tk.LEFT).pack(anchor=tk.W, padx=24, pady=(0, 8))
+
+    def _build_agent_overrides(self, parent, raw) -> None:
+        """One dropdown per feature: Default, or a specific agent.
+
+        Each choice is its own StringVar ATTRIBUTE (`_var_override_<feature>`)
+        because `bind_vars` finds a section's variables by reading its
+        attributes, and a dict of them would not mark the page dirty.
+
+        A stored value this build does not list (a typo, a downgrade) is shown
+        as-is rather than as "Default": displaying it as the default would
+        make the next Save quietly erase it, which is the coercion the
+        resolver refuses to do.
+        """
+        from helpers.agent_cli import AGENT_CLIS, FEATURES, INHERIT
+        stored = raw.get("agent_overrides")
+        stored = stored if isinstance(stored, dict) else {}
+        tk.Label(parent, text="Agent per feature  —  override the default for one job",
+                 bg=C["base"], fg=C["subtext"],
+                 font=("Segoe UI", 9)).pack(anchor=tk.W, padx=12, pady=(2, 2))
+        grid = tk.Frame(parent, bg=C["base"])
+        grid.pack(anchor=tk.W, padx=24, pady=(0, 2))
+        choices = [INHERIT, *AGENT_CLIS]
+        for row, (fid, label) in enumerate(FEATURES):
+            current = str(stored.get(fid) or INHERIT)
+            var = tk.StringVar(value=current)
+            setattr(self, "_var_override_" + fid, var)
+            tk.Label(grid, text=label, bg=C["base"], fg=C["text"],
+                     font=("Segoe UI", 9), width=18, anchor=tk.W
+                     ).grid(row=row, column=0, sticky=tk.W, pady=1)
+            values = choices if current in choices else [*choices, current]
+            ttk.Combobox(grid, textvariable=var, values=values, width=14,
+                         state="readonly").grid(row=row, column=1, sticky=tk.W,
+                                                pady=1)
+        tk.Label(parent,
+            text="  \"inherit\" uses the Agent CLI above. A named agent that is not\n"
+                 "  installed is reported as unavailable; it never falls back to the\n"
+                 "  default, so a job is never run by an agent you did not pick.",
+            font=("Segoe UI", 8), bg=C["base"], fg=C["overlay0"],
+            justify=tk.LEFT).pack(anchor=tk.W, padx=24, pady=(2, 6))
+
     def _build_backend_selection_section(self, body, raw):
         """AI backend selection LabelFrame: Draft PR, commit message, grounding."""
         ttk.Separator(body, orient="horizontal").pack(fill=tk.X, padx=20, pady=(8, 8))
@@ -147,10 +324,6 @@ class AISection:
                            relief=tk.GROOVE, bd=1)
         lf.pack(fill=tk.X, padx=20, pady=(0, 8))
 
-        # Draft PR
-        tk.Label(lf, text="Draft PR",
-                 font=("Segoe UI", 9, "bold"),
-                 bg=C["base"], fg=C["text"]).pack(anchor=tk.W, padx=12, pady=(6, 2))
         # Agent CLI selector. This sits ABOVE the per-feature backend
         # radios because it changes what "Claude CLI" MEANS in every
         # one of them: those settings keep the persisted value
@@ -173,8 +346,14 @@ class AISection:
                  "  Claude Skills stay on Claude — they are a Claude Code feature.",
             font=("Segoe UI", 8), bg=C["base"], fg=C["overlay0"],
             justify=tk.LEFT).pack(anchor=tk.W, padx=24, pady=(0, 6))
+        self._build_agent_overrides(lf, raw)
         ttk.Separator(lf, orient="horizontal").pack(fill=tk.X, padx=8, pady=(0, 6))
 
+        # Draft PR: its heading belongs to ITS backend choice, not to the agent
+        # selector above, which applies to every feature.
+        tk.Label(lf, text="Draft PR",
+                 font=("Segoe UI", 9, "bold"),
+                 bg=C["base"], fg=C["text"]).pack(anchor=tk.W, padx=12, pady=(0, 2))
         self._var_draft_pr_backend = tk.StringVar(
             value=raw.get("draft_pr_backend") or "auto")
         pr_row = tk.Frame(lf, bg=C["base"])

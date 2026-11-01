@@ -1,0 +1,8 @@
+[
+  {"do": "wait",        "after_ms": 9000},
+  {"do": "select",      "project": "D:/_scratch/agent-demo-root/agent-demo", "after_ms": 1500},
+  {"do": "agent_tasks", "after_ms": 20000},
+  {"do": "select",      "project": "D:/_scratch/agent-demo-root/agent-demo", "after_ms": 800},
+  {"do": "agent_tasks", "after_ms": 500},
+  {"do": "agent_tasks_report"}
+]

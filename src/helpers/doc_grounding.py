@@ -393,7 +393,7 @@ def build_session_block(project_path: str, *, include_prompts: bool = True,
         return ""
     try:
         from helpers.session_context import (
-            SOURCE_TRANSCRIPT_PROSE, WINDOW_SINCE_COMMIT, gather,
+            WINDOW_SINCE_COMMIT, gather, is_prose,
         )
         context = gather(project_path, include_prompts=include_prompts,
                          include_prose=include_prose, git_exe=git_exe)
@@ -402,7 +402,11 @@ def build_session_block(project_path: str, *, include_prompts: bool = True,
     if not context.fragments:
         return ""
 
-    origin = "session notes" if context.from_note else "session transcripts"
+    # Said by what contributed, so a Cursor session is never described as a
+    # Claude note. Contexts built without `sources` (older callers, test doubles)
+    # keep the two-way wording they always had.
+    origin = (" + ".join(context.sources) if getattr(context, "sources", ())
+              else ("session notes" if context.from_note else "session transcripts"))
     lines = [
         "### What the human asked for in this window",
         "",
@@ -419,8 +423,8 @@ def build_session_block(project_path: str, *, include_prompts: bool = True,
                      "this is a floor rather than everything that was said")
     lines.append("")
 
-    asked = [f for f in context.fragments if f.source != SOURCE_TRANSCRIPT_PROSE]
-    said = [f for f in context.fragments if f.source == SOURCE_TRANSCRIPT_PROSE]
+    asked = [f for f in context.fragments if not is_prose(f)]
+    said = [f for f in context.fragments if is_prose(f)]
     if asked:
         lines.append("**Asked for:**")
         lines += ["- %s" % _one_line(f.text) for f in asked]

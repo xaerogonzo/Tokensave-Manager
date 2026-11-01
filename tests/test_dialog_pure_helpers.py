@@ -152,6 +152,8 @@ def test_health_does_not_treat_a_blank_destination_as_healthy():
 
 _AI_VARS = {
     "_var_agent_cli": "claude",
+    "_var_enable_agent_handoff": False,
+    "_var_enable_agent_orchestration": False,
     "_var_draft_pr_backend": "auto",
     "_var_commit_msg_backend": "llm_first",
     "_var_enable_llm_grounding": True,
@@ -178,6 +180,11 @@ def _ai_section(**overrides):
     section = object.__new__(AISection)
     values = dict(_AI_VARS)
     values.update(overrides)
+    # The per-feature agent rows: one variable each, as the real section builds
+    # them. Left on inherit unless a test says otherwise.
+    from helpers.agent_cli import FEATURES, INHERIT
+    for fid, _label in FEATURES:
+        values.setdefault("_var_override_" + fid, INHERIT)
     for name, value in values.items():
         setattr(section, name, _Var(value))
     return section

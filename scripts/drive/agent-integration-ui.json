@@ -1,0 +1,9 @@
+[
+  {"do": "wait",     "after_ms": 3000},
+  {"do": "settings", "page": "ai", "after_ms": 3500},
+  {"do": "scroll",   "to": "top", "after_ms": 600},
+  {"do": "click",    "text": "Check Claude/Cursor setup", "after_ms": 7000},
+  {"do": "report",   "what": "geometry", "after_ms": 800},
+  {"do": "shot",     "path": "D:/_scratch/agent-integration-ui.png", "after_ms": 500},
+  {"do": "quit"}
+]

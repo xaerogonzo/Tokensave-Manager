@@ -173,14 +173,15 @@ def _check_claude_review(diff: str, cfg: "ManagerConfig", cancelled: threading.E
     if cancelled.is_set():
         return True, "cancelled"
     try:
-        from helpers.agent_cli import call_print, model_from, resolve_from
+        from helpers.agent_cli import (FEATURE_REVIEW, call_print, model_from,
+                                       resolve_from)
         prompt = (
             "You are a code reviewer. Review the following git diff for the PR. "
             "Flag bugs, regressions, security issues, and significant style violations. "
             "Be concise. Summarise findings in 3–5 bullet points.\n\n"
             f"```diff\n{diff[:30_000]}\n```"
         )
-        agent = resolve_from(cfg)
+        agent = resolve_from(cfg, FEATURE_REVIEW)
         if not agent.ok:
             return True, "no agent CLI configured"
         output = call_print(

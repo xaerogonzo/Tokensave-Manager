@@ -357,6 +357,7 @@ class PRDraftCtrl:
         return context_step, context_path, grounded, _gap_suggestions
 
     def _draft_pr_via_cli(self, path: str):
+        from helpers.agent_cli import FEATURE_DRAFT_PR
         from helpers.agent_cli import spawn as spawn_agent_cli  # lazy import
         base = self._resolve_pr_base(path)
         if base is None:
@@ -411,7 +412,7 @@ class PRDraftCtrl:
             f"{gh_step}"
             f"{mcp_nudge}"
         )
-        res = self._cfg.resolve_agent_cli()
+        res = self._cfg.resolve_agent_cli(FEATURE_DRAFT_PR)
         if not res.ok:
             messagebox.showerror("Draft PR — no agent CLI",
                                  res.error_message(), parent=self._root)
