@@ -153,6 +153,7 @@ def test_health_does_not_treat_a_blank_destination_as_healthy():
 _AI_VARS = {
     "_var_agent_cli": "claude",
     "_var_enable_agent_handoff": False,
+    "_var_enable_agent_orchestration": False,
     "_var_draft_pr_backend": "auto",
     "_var_commit_msg_backend": "llm_first",
     "_var_enable_llm_grounding": True,

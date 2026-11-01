@@ -89,7 +89,7 @@ Token Save Manager Source/
 │   │                              Runs beside a real Manager through scripts/drive/run_isolated.py
 │   │                              (scratch config, no lock, no request poller, no tray).
 │   │
-│   ├── helpers/                  151 modules of pure / IO helpers — no UI deps.
+│   ├── helpers/                  155 modules of pure / IO helpers — no UI deps.
 │   │   ├── config.py              _load_config, _save_config, _migrate_config
 │   │   ├── detection.py           _detect_git/_gh/_npm/_codegraph/_claude_cli,
 │   │   │                          _root_path/_label, _version_lt
@@ -223,6 +223,15 @@ Token Save Manager Source/
 │   │   │                          a failed lookup is `pending`, never "nothing there"
 │   │   ├── cursor_ide.py          Open a folder in the Cursor APP (Cursor.exe directly, never
 │   │   │                          the cmd shim: its quoting breaks on spaced paths)
+│   │   ├── orchestration_task.py  Delegated agent tasks (docs/ORCHESTRATION.md): the durable record
+│   │   │                          (one JSON per task, in the git common dir) and its lifecycle. Illegal
+│   │   │                          moves are errors; `lost` is proven, never guessed (pid + start time)
+│   │   ├── orchestration_limits.py The launch limits as pure checks; a refusal names its limit,
+│   │   │                          unmeasurable disk is not enough room, a bad value keeps its default
+│   │   ├── orchestration_worktree.py Preflight (tracked changes refused), create, index, give the agent
+│   │   │                          tokensave, MEASURE the diff with git, discard (branch kept)
+│   │   ├── orchestration_run.py   Launch, watch, cancel (whole process tree), read the agent's
+│   │   │                          structured output. Blocking: belongs on a worker thread, never touches Tk
 │   │   ├── agent_integration.py   Is the Claude/Cursor setup still standing? Free, three-valued
 │   │   │                          checks (+ UNKNOWN): CLI versions vs the dated VERIFIED table, routing,
 │   │   │                          tokensave hooks in ~/.claude/settings.json, the Cursor hook. Never repairs
@@ -672,7 +681,7 @@ Token Save Manager Source/
 │   │   ├── io_utils.py            Shared IO helpers for the patcher modules.
 │   │   └── ui.py                  UI helpers shared across controllers and dialogs.
 │   │
-│   ├── dialogs/                   60 dialog / panel modules — a tk.Toplevel per file,
+│   ├── dialogs/                   61 dialog / panel modules — a tk.Toplevel per file,
 │   │                          plus the panels the bigger dialogs are built from.
 │   │   ├── release_wizard.py      ReleaseWizardDialog + _ReleaseCtx (paired)
 │   │   ├── mcp_config.py          MCPConfigDialog
@@ -827,6 +836,8 @@ Token Save Manager Source/
 │   │   ├── workspace_builder.py   WorkspaceBuilderDialog — assemble a VS Code
 │   │   │                          .code-workspace descriptor.
 │   │   ├── settings_ai.py         AISection — the AI blocks of the Settings dialog.
+│   │   ├── agent_task_dialog.py   AgentTaskDialog — hand a task to an agent; shows WHERE it will work,
+│   │   │                          WHAT it may do, and why a launch is refused (check_launch off-thread)
 │   │   ├── settings_integration.py  The preset picker + "Check Claude/Cursor setup" panel on the AI page;
 │   │   │                          presets write the FORM, not the config; the check runs off the Tk thread
 │   │   ├── settings_codegraph.py  CodegraphSection — the CodeGraph block.
@@ -942,7 +953,9 @@ Token Save Manager Source/
 │                                  CLI briefing via temp .md file-handoff pattern
 │                                  (avoids cmd.exe /k newline-as-Enter quirk).
 │       ├── tasks_tab.py           TasksController — owns the Tasks tab (view dropdown:
-│       │                          active sessions, history & worktrees, MCP servers).
+│       │                          active sessions, history & worktrees, agent tasks, MCP servers).
+│       ├── orchestration_ctrl.py  AgentTasksPanel — the "Agent tasks" view: list, start, cancel,
+│       │                          accept / reject (merges nothing), discard copy (branch kept)
 │       ├── command_bar_ctrl.py    CommandBarCtrl sub-controller.
 │       ├── project_sync_ctrl.py   ProjectSyncCtrl sub-controller.
 │       ├── pr_draft_ctrl.py       PRDraftCtrl sub-controller — PR body generation and
@@ -1207,8 +1220,8 @@ app.py
   ├── constants.py       — palette, regex, paths
   ├── theme.py           — _Tooltip
   ├── helpers/*          — pure / IO helpers (no UI)
-  ├── dialogs/*          — 60 tk.Toplevel / panel modules
-  └── controllers/*      — 29 tab and sub-controllers
+  ├── dialogs/*          — 61 tk.Toplevel / panel modules
+  └── controllers/*      — 30 tab and sub-controllers
         └── controllers/* each import the dialogs they instantiate
             (lazy in-handler imports for any cross-dialog cycle risk —
              see Rule 6 in CHANGELOG Round 4 Phase C decisions).

@@ -1,6 +1,6 @@
 # Orchestration: design (draft for review, no code yet)
 
-Status: **D1-D7 approved 2026-10-31; M1-M5 measured (section 3); nothing in this document is built yet.** It exists so the
+Status: **D1-D7 approved 2026-10-31; M1-M5 measured (section 3); stage A is built (section 14); B and C are not.** It exists so the
 decisions below are made by a person before any process-spawning code is
 written, because this is the first feature in the Manager that lets an agent
 change files without the person watching.
@@ -324,3 +324,43 @@ the module-layout guard, `BASIC_INSTRUCTIONS.md` (the new config keys),
 
 If any recommendation is wrong for how you actually work, say so before M1-M5:
 the measurements are cheap, the module plan is not.
+
+## 14. Stage A as built (2026-11-01), and where it differs from this document
+
+Built: `helpers/orchestration_task|limits|worktree|run.py`, the registry fields
+(`write`, `write_args`, `task_print_args`, `task_output`, `task_mcp_flag`,
+`task_mcp_file`, `agent_cli.build_task_argv`), `controllers/orchestration_ctrl.py`
+(the Tasks tab's "Agent tasks" view), `dialogs/agent_task_dialog.py`, the
+`enable_agent_orchestration` switch and the optional `orchestration_limits` dict.
+Tested with a fake agent for every lifecycle path (including a cancel that must
+leave no process, and a task recorded as running whose process is gone), and run
+live against the real Cursor and Claude CLIs on a scratch repo.
+
+Differences, each from something measured while building it:
+
+- **Preflight refuses TRACKED changes only.** Untracked files are counted and
+  reported, not refused: a worktree is made from a commit, so they are simply not
+  in the task's copy, and a scratch file should not forbid delegating. (Section 5
+  step 2 said "porcelain empty".)
+- **Claude reaches tokensave by `--strict-mcp-config --mcp-config <file>`, never by
+  a project `.mcp.json`.** Measured: with no project file at all Claude still had
+  tokensave tools, from a user-scope entry, which could serve the wrong project;
+  `--strict-mcp-config` with an empty config had none. So the task's config is a
+  file OUTSIDE the worktree naming one server with `-p .`, and nothing else can
+  serve it. Cursor reads `.cursor/mcp.json` inside the worktree, which the
+  Manager writes and excludes from the measured diff.
+- **The brief is a short list of recent handoff entries**, labelled as other
+  agents' claims, appended to the task text. The full `agent_handoff` brief is
+  written for a person handing a session over, not for a task.
+- **A non-zero exit, or an agent that reports an error, is `failed`** (its diff is
+  kept and its copy retained), never `result_ready`, so a half-done task cannot be
+  accepted by accident.
+- **Usage** is recorded exactly as the agent reported it, labelled
+  `agent-reported`; nothing is summed or converted to money.
+- **Quitting** with a task running asks, then cancels every task (whole tree) and
+  lets each worker record how it ended. Closing from the tray path is covered too.
+- **The Cursor task run is approve-everything inside its worktree** (`--approve-mcps
+  --force` are what lets it use tokensave headlessly). The worktree and the
+  edit-only scope of the prompt are the boundary; shell use is not offered.
+- **Model blank means the agent's own default**, not the Manager's cheap default,
+  because a delegated coding task is the wrong place to inherit "fast and cheap".

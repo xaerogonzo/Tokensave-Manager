@@ -54,7 +54,8 @@ _HANDOFF = {
 VIEW_LIVE = "Active sessions"
 VIEW_SESSIONS = "History & worktrees"
 VIEW_MCP = "MCP servers"
-_VIEWS = (VIEW_LIVE, VIEW_SESSIONS, VIEW_MCP)
+VIEW_AGENT = "Agent tasks"
+_VIEWS = (VIEW_LIVE, VIEW_SESSIONS, VIEW_AGENT, VIEW_MCP)
 
 
 class TasksController(UiPumpMixin):
@@ -138,6 +139,12 @@ class TasksController(UiPumpMixin):
         self._mcp_view = ttk.LabelFrame(tab, text="Running MCP servers")
         self._build_mcp_panel(self._mcp_view)
         self._mcp_req_id: int = 0
+
+        # Delegated agent tasks (built hidden; off until Settings turns it on).
+        from controllers.orchestration_ctrl import AgentTasksPanel
+        self._agent_view = ttk.LabelFrame(tab, text="Delegated agent tasks")
+        self.agent_tasks = AgentTasksPanel(
+            self._agent_view, self._cfg, get_project_path=self._get_project_path)
 
         # Active sessions view: the default, so it is the one packed now.
         self._live_view = ttk.LabelFrame(tab, text="Running Claude Code sessions")
@@ -276,13 +283,14 @@ class TasksController(UiPumpMixin):
 
     def _on_view_changed(self, _event=None) -> None:
         view = self._view()
-        for frame in (self._sessions_view, self._mcp_view, self._live_view):
+        for frame in (self._sessions_view, self._mcp_view, self._live_view,
+                      self._agent_view):
             frame.pack_forget()
-        shown = {VIEW_LIVE: self._live_view, VIEW_MCP: self._mcp_view}.get(
-            view, self._sessions_view)
+        shown = {VIEW_LIVE: self._live_view, VIEW_MCP: self._mcp_view,
+                 VIEW_AGENT: self._agent_view}.get(view, self._sessions_view)
         shown.pack(fill=tk.BOTH, expand=True, padx=6, pady=6)
         # The daemon managers fit both views that are about running servers.
-        if view == VIEW_SESSIONS:
+        if view in (VIEW_SESSIONS, VIEW_AGENT):
             self._manage_btn.pack_forget()
         else:
             self._manage_btn.pack(side=tk.RIGHT, padx=(0, 6))
@@ -386,6 +394,9 @@ class TasksController(UiPumpMixin):
             return
         if view == VIEW_LIVE:
             self._refresh_live()
+            return
+        if view == VIEW_AGENT:
+            self.agent_tasks.refresh()
             return
         self._tasks_refresh_id += 1
         my_id = self._tasks_refresh_id

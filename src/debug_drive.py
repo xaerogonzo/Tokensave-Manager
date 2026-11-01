@@ -415,6 +415,58 @@ class _Driver:
         cfg = self._app._cfg
         _say("drive: sessions: cursor_cli_exe=%r" % (cfg.cursor_cli_exe,))
 
+    def _do_agent_tasks(self, step: "dict[str, Any]") -> None:
+        """Show the Tasks tab's Agent tasks view and report what it says.
+
+        Read-only: lists the rows, the note line and which buttons are enabled,
+        so "the Start path is reachable" and "it is off" are both observable
+        without starting an agent. Give it an `after_ms` for the refresh worker.
+        """
+        from controllers.tasks_tab import VIEW_AGENT
+        self._do_tab({"name": "Tasks"})
+        ctrl = self._app._tasks_ctrl
+        ctrl._view_var.set(VIEW_AGENT)
+        ctrl._on_view_changed()
+
+    def _do_agent_tasks_report(self, step: "dict[str, Any]") -> None:
+        panel = self._app._tasks_ctrl.agent_tasks
+        _say("drive: agent tasks: enabled=%s" % panel.enabled())
+        _say("drive: agent tasks: note: %s" % panel._note.cget("text"))
+        _say("drive: agent tasks: %d row(s)" % len(panel._rows))
+        for tid, rec in list(panel._rows.items())[:int(step.get("limit", 8))]:
+            _say("drive: agent tasks:   %s %-14s %s" % (tid, rec["status"], rec.get("prompt", "")[:50]))
+        states = {k: ("off" if "disabled" in b.state() else "on")
+                  for k, b in panel._buttons.items()}
+        _say("drive: agent tasks: buttons: %s" % states)
+
+    def _do_agent_dialog_report(self, step: "dict[str, Any]") -> None:
+        """Open the delegate-a-task dialog, let its check run, report, close it.
+
+        Reports the refusal/ready line and whether Start is enabled with a
+        non-empty task. It never presses Start.
+        """
+        from dialogs.agent_task_dialog import AgentTaskDialog
+        panel = self._app._tasks_ctrl.agent_tasks
+        project = panel._get_project_path()
+        if not project:
+            _say("drive: agent dialog: no project selected")
+            return
+        dlg = AgentTaskDialog(self._app, self._app._cfg, project, lambda *a: None)
+        dlg._text.insert("1.0", "drive probe")
+        self._pending_dialog = dlg
+        self._app.after(int(step.get("wait_ms", 4000)), self._finish_agent_dialog_report)
+
+    def _finish_agent_dialog_report(self) -> None:
+        dlg = getattr(self, "_pending_dialog", None)
+        if dlg is None:
+            return
+        dlg._sync_start()
+        _say("drive: agent dialog: %s" % dlg._refusal.cget("text").replace("\n", " | "))
+        _say("drive: agent dialog: start=%s agent=%s" % (dlg._start.cget("state"), dlg._agent.get()))
+        _say("drive: agent dialog: %s" % dlg._what.cget("text").replace("\n", " "))
+        dlg.destroy()
+        self._pending_dialog = None
+
     def _do_settings(self, step: "dict[str, Any]") -> None:
         """Select the Settings tab, optionally on a named page.
 

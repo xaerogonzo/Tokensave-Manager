@@ -60,6 +60,7 @@ class AISection:
         preset_host.pack(fill=tk.X)
         self._build_backend_selection_section(body, raw)
         self._build_handoff_section(body, raw)
+        self._build_orchestration_section(body, raw)
         self._build_ollama_section(body, raw)
         self._build_ai_section(body, raw)
         self._build_ask_ai_section(body, raw)
@@ -72,6 +73,10 @@ class AISection:
         # Settings and saving must not add a key to an install that never had it.
         if self._var_enable_agent_handoff.get() or "enable_agent_handoff" in raw:
             raw["enable_agent_handoff"] = bool(self._var_enable_agent_handoff.get())
+        if (self._var_enable_agent_orchestration.get()
+                or "enable_agent_orchestration" in raw):
+            raw["enable_agent_orchestration"] = bool(
+                self._var_enable_agent_orchestration.get())
         self._save_agent_overrides(raw)
         raw["draft_pr_backend"]        = self._var_draft_pr_backend.get()
         raw["commit_message_backend"]  = self._var_commit_msg_backend.get()
@@ -238,6 +243,36 @@ class AISection:
                  "  notes; existing ones stay until cleared.\n"
                  "  A project takes part only once you add its rule: Projects tab, right-click,\n"
                  "  AI & docs, \"Enable agent handoff here…\".",
+            font=("Segoe UI", 8), bg=C["base"], fg=C["overlay0"],
+            justify=tk.LEFT).pack(anchor=tk.W, padx=24, pady=(0, 8))
+
+    def _build_orchestration_section(self, body, raw):
+        """The machine-wide switch for handing a task to an agent that EDITS FILES.
+
+        Off by default and strictly `True`. Kept apart from handoff on purpose:
+        notes between agents and an agent changing files are different consents.
+        """
+        lf = tk.LabelFrame(body, text="Delegated agent tasks  (experimental)",
+                           bg=C["base"], fg=C["subtext"],
+                           font=("Segoe UI", 9, "bold"), relief=tk.GROOVE, bd=1)
+        lf.pack(fill=tk.X, padx=20, pady=(0, 8))
+        self._var_enable_agent_orchestration = tk.BooleanVar(
+            value=raw.get("enable_agent_orchestration") is True)
+        chk = ttk.Checkbutton(lf, text="Let me hand a task to an agent that edits files",
+                              variable=self._var_enable_agent_orchestration)
+        chk.pack(anchor=tk.W, padx=12, pady=(8, 2))
+        try:
+            from theme import _Tooltip
+            _Tooltip(chk, "Off by default.\n\nOn: the Tasks tab's \"Agent tasks\" view can "
+                          "start Claude or Cursor on a task. The agent works in a separate "
+                          "copy of the project on its own branch, with permission to edit "
+                          "files (no shell). Nothing is merged or pushed.")
+        except Exception:
+            pass
+        tk.Label(lf,
+            text="  Each task gets its own branch and folder (next to the project, under\n"
+                 "  _scratch). Your own checkout is never touched, and a project with\n"
+                 "  uncommitted changes is refused. You review the result and decide.",
             font=("Segoe UI", 8), bg=C["base"], fg=C["overlay0"],
             justify=tk.LEFT).pack(anchor=tk.W, padx=24, pady=(0, 8))
 

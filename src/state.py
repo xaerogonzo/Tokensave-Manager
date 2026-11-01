@@ -124,6 +124,15 @@ class ManagerConfig:
         return self.raw.get("enable_agent_handoff") is True
 
     @property
+    def enable_agent_orchestration(self) -> bool:
+        """Whether delegated agent tasks may start. OFF by default.
+
+        Strictly `True`, like handoff: this lets an agent edit files, so a
+        stray `1` or "yes" in a hand-edited config is not consent.
+        """
+        return self.raw.get("enable_agent_orchestration") is True
+
+    @property
     def agent_cli(self) -> str:
         """Which agent CLI the manager shells out to: "claude" | "cursor".
 

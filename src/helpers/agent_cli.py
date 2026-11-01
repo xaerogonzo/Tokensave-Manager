@@ -73,6 +73,16 @@ TRANSPORT_ARGV = "argv"
 INTERACTIVE_SUPPORTED = "supported"
 INTERACTIVE_UNSUPPORTED = "unsupported"
 
+#: The row has a measured way to run a headless task that EDITS FILES. Not the
+#: same as "not read-only": an agent with no `write_args` is not assumed able to
+#: write, it is `unsupported` until somebody measures it.
+WRITE_SUPPORTED = "supported"
+WRITE_UNSUPPORTED = "unsupported"
+
+#: How a delegated task's captured stdout is structured.
+OUTPUT_JSON = "json"                  # one object (Claude --output-format json)
+OUTPUT_STREAM_JSON = "stream-json"    # one object per line (Cursor)
+
 #: Exact serialization for SYSTEM_PROMPT_PREPEND. Frozen as a constant because
 #: two agents drifting into two different prompt structures is invisible until
 #: their output quality diverges and nobody can say why.
@@ -153,6 +163,22 @@ class AgentCLISpec:
     #: each call. `--force` is "run everything", so these are only ever added
     #: next to an enforced read-only mode -- see `build_print_argv`.
     mcp_args: tuple = ()
+    #: Delegated tasks (docs/ORCHESTRATION.md). All measured 2026-10-31.
+    #: `write`: this row can run a headless task that edits files (not shell).
+    write: str = WRITE_UNSUPPORTED
+    #: Flags that let that run edit. Empty is meaningful for Cursor: `-p --trust`
+    #: already writes, and its refusal flag (`--mode ask`) is simply left off.
+    write_args: tuple = ()
+    #: The print invocation with STRUCTURED output, so the run's session id and
+    #: usage can be read back instead of scraped from prose.
+    task_print_args: tuple = ()
+    task_output: str = ""
+    #: How a task reaches tokensave. A flag naming a config file (Claude:
+    #: `--strict-mcp-config --mcp-config <file>`, which also keeps a user-scope
+    #: tokensave entry from serving the WRONG project - measured) or, when empty,
+    #: a project file inside the worktree (`task_mcp_file`, Cursor).
+    task_mcp_flag: tuple = ()
+    task_mcp_file: str = ""
 
     def probe_names_for_dirs(self) -> tuple:
         """Binary names to look for inside ``extra_dirs``."""
@@ -177,6 +203,13 @@ CLAUDE = AgentCLISpec(
     # The Manager's automated calls need to be fast; the user's own default
     # (from ~/.claude/settings.json) would often be Opus.
     default_model="claude-haiku-4-5-20251001",
+    # Measured 2026-10-31 (Claude Code 2.1.261): default --print DENIES writes;
+    # `acceptEdits` allows file edits and not the shell.
+    write=WRITE_SUPPORTED,
+    write_args=("--permission-mode", "acceptEdits"),
+    task_print_args=("--print", "--output-format", "json"),
+    task_output=OUTPUT_JSON,
+    task_mcp_flag=("--strict-mcp-config", "--mcp-config"),
 )
 
 CURSOR = AgentCLISpec(
@@ -217,6 +250,13 @@ CURSOR = AgentCLISpec(
     # a shell command was refused and nothing was created (one model, one run:
     # evidence, not a proof that the block is in the tool layer).
     mcp_args=("--approve-mcps", "--force"),
+    # `-p --trust` writes files with no further flag; shell needs --force and is
+    # not offered to a delegated task.
+    write=WRITE_SUPPORTED,
+    write_args=(),
+    task_print_args=("-p", "--output-format", "stream-json"),
+    task_output=OUTPUT_STREAM_JSON,
+    task_mcp_file=".cursor/mcp.json",
 )
 
 AGENT_CLIS: dict = {CLAUDE.id: CLAUDE, CURSOR.id: CURSOR}
@@ -504,6 +544,45 @@ def call_print(
         _tls.last_error = "returned empty output"
         return None
     return out
+
+
+def build_task_argv(spec: AgentCLISpec, exe: str, prompt: str, model: str = "",
+                    mcp_config: str = "", with_mcp: bool = True) -> tuple:
+    """The headless WRITE invocation for a delegated task.
+
+    Returns ``(argv, stdin_text, err)``; a non-empty ``err`` means do not spawn.
+    A row that has not measured a way to write **refuses** (the prompt asking an
+    agent not to edit is not enforcement, and neither is assuming it can).
+
+    ``with_mcp`` adds what the row needs for the agent to reach tokensave. For a
+    row that names a config file by flag, `mcp_config` is that file and is
+    required; for a row that reads a project file, the approval flags are added
+    (they include approve-everything, so the WORKTREE is the boundary).
+    """
+    if not exe:
+        return [], None, f"{spec.label} is not configured."
+    if spec.write != WRITE_SUPPORTED or not spec.task_print_args:
+        return [], None, (f"{spec.label} has no measured way to run a task that "
+                          f"edits files, so it cannot be given one.")
+    argv = [exe, *spec.task_print_args, *spec.trust_args, *spec.write_args]
+    if with_mcp:
+        if spec.task_mcp_flag:
+            if not mcp_config:
+                return [], None, f"{spec.label} needs an MCP config file for a task."
+            argv += [*spec.task_mcp_flag, mcp_config]
+        else:
+            argv += spec.mcp_args
+    if model:
+        argv += [spec.model_flag, model]
+    if spec.prompt_transport == TRANSPORT_STDIN:
+        stdin_text = prompt
+    else:
+        argv.append(prompt)
+        stdin_text = None
+    err = _over_budget(subprocess.list2cmdline(argv), CREATEPROCESS_BUDGET)
+    if err:
+        return [], None, err
+    return argv, stdin_text, ""
 
 
 def _spawn(spec, exe, project_path, instruction, model) -> tuple:
