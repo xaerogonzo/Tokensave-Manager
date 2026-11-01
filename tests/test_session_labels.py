@@ -6,6 +6,7 @@ and cannot be turned back into a path. The session's own recorded `cwd` can.
 """
 import json
 import os
+import sys
 
 import pytest
 
@@ -60,6 +61,8 @@ def test_an_unknown_worktree_row_is_named_from_its_cwd_not_its_encoded_folder(fa
     assert row["cwd"] == cwd
 
 
+@pytest.mark.skipif(sys.platform != "win32",
+                    reason="the paths in this test are Windows paths")
 def test_a_known_project_still_wins_over_the_cwd_label(fake_home):
     from helpers.claude_tasks import encode_project_path
     cwd = r"D:\Random Projects\Fortuna Lab"

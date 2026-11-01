@@ -21,6 +21,7 @@ does not have.
 """
 import dataclasses
 import os
+import sys
 
 import pytest
 
@@ -417,6 +418,8 @@ def test_detect_prefers_path_over_install_dir(monkeypatch, fake_home):
     assert detect(CURSOR) == "/on/path/cursor-agent"
 
 
+@pytest.mark.skipif(sys.platform != "win32",
+                    reason="the installer's %LOCALAPPDATA% folder is a Windows location")
 def test_detect_finds_cursor_in_its_localappdata_install_dir(monkeypatch, fake_home):
     """Measured: the current Windows installer writes here, not ~/.local/bin."""
     monkeypatch.setattr("helpers.agent_cli.shutil.which", lambda _n: None)

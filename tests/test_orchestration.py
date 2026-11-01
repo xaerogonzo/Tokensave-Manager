@@ -249,6 +249,8 @@ def _wait_until(pred, seconds=30):
     return False
 
 
+@pytest.mark.skipif(sys.platform != "win32",
+                    reason="tree-kill uses taskkill and process times use the Windows API")
 def test_cancel_kills_the_root_and_its_children_and_keeps_the_worktree(repo, spec, tmp_path):
     thread, result = _start_hanging(repo, spec, tmp_path)
     listed = lambda: ot.list_tasks(repo, GIT).tasks                      # noqa: E731
@@ -268,6 +270,8 @@ def test_cancel_kills_the_root_and_its_children_and_keeps_the_worktree(repo, spe
     assert os.path.isdir(final["worktree_root"])
 
 
+@pytest.mark.skipif(sys.platform != "win32",
+                    reason="tree-kill uses taskkill")
 def test_a_task_over_its_wall_clock_is_killed_and_failed(repo, spec, tmp_path):
     thread, result = _start_hanging(repo, spec, tmp_path, lim.Limits(wall_clock_seconds=1))
     thread.join(60)
@@ -309,6 +313,8 @@ def _running(repo, pid, started):
     return rec["task_id"]
 
 
+@pytest.mark.skipif(sys.platform != "win32",
+                    reason="process start times use the Windows API")
 def test_reconcile_loses_only_what_it_can_prove_is_gone(repo):
     gone = _running(repo, 99999999, "123")
     unknown = _running(repo, 4242, "")
@@ -321,6 +327,8 @@ def test_reconcile_loses_only_what_it_can_prove_is_gone(repo):
     assert status[gone] == ot.ST_LOST and "never recorded" in ot.load(repo, gone, GIT)[0]["error"]
 
 
+@pytest.mark.skipif(sys.platform != "win32",
+                    reason="process start times use the Windows API")
 def test_is_alive_is_three_valued():
     assert orun.is_alive(os.getpid(), orun.process_start_time(os.getpid())) is True
     assert orun.is_alive(os.getpid(), "1") is False
@@ -337,6 +345,8 @@ def test_discard_removes_the_worktree_and_keeps_the_branch(repo, spec, tmp_path)
     assert record["branch"] in _git(repo, "branch", "--list", record["branch"])
 
 
+@pytest.mark.skipif(sys.platform != "win32",
+                    reason="the convention is a Windows drive path")
 def test_the_worktree_lives_in_the_scratch_convention():
     got = wt.worktree_path(r"D:\Random Projects\Fortuna Lab", "tabc123")
     assert got == os.path.join("D:" + os.sep, "_scratch", "Fortuna Lab-tabc123")

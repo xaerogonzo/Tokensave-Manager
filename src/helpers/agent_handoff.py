@@ -30,7 +30,6 @@ from __future__ import annotations
 
 import dataclasses
 import datetime
-import json
 import os
 import re
 import subprocess
@@ -136,11 +135,6 @@ class Prepared:
     project_path: str = ""
     prompt_count: int = 0
     error: str = ""
-
-
-# Lives with the other transcript readers; re-exported so the handoff's callers
-# and tests keep one import.
-from helpers.claude_tasks import transcript_cwd  # noqa: E402,F401
 
 
 def _git(git_exe: str, project: str, *args: str) -> "tuple[bool, str]":

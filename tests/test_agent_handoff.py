@@ -24,8 +24,8 @@ from helpers.agent_handoff import (
     prepare,
     redact,
     render,
-    transcript_cwd,
 )
+from helpers.claude_tasks import transcript_cwd
 from helpers.session_context import scan_transcript
 
 

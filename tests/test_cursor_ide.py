@@ -5,6 +5,7 @@ strips the outer quotes of a line whose exe path and argument both contain
 spaces, and `D:\\Claude Co worker\\...` is exactly that.
 """
 import os
+import sys
 
 import pytest
 
@@ -18,6 +19,8 @@ def _make_exe(root):
     return path
 
 
+@pytest.mark.skipif(sys.platform != "win32",
+                    reason="Cursor's default install folder is a Windows location")
 def test_the_default_install_location_is_found(fake_home, monkeypatch):
     monkeypatch.setattr(ide.shutil, "which", lambda _n: None)
     exe = _make_exe(os.path.join(os.environ["LOCALAPPDATA"], "Programs", "cursor"))
