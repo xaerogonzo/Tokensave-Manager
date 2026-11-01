@@ -1,6 +1,6 @@
 # Orchestration: design (draft for review, no code yet)
 
-Status: **proposal.** Nothing in this document is built. It exists so the
+Status: **D1-D7 approved 2026-10-31; M1-M5 measured (section 3); nothing in this document is built yet.** It exists so the
 decisions below are made by a person before any process-spawning code is
 written, because this is the first feature in the Manager that lets an agent
 change files without the person watching.
@@ -28,36 +28,76 @@ commits to a branch the person is on. Completion is not acceptance
 | Run an agent headless and capture text | `agent_cli.call_print(cwd=, timeout=)` | Uses `subprocess.run`: cannot be cancelled, cannot kill a process tree, no pid recorded |
 | Run an agent visibly | `agent_cli.spawn` (new console, `/k`) | Output is not capturable; no exit code |
 | Tell the agent what the situation is | `agent_handoff.prepare` (the brief) and the ledger | Brief is written for a person-to-agent handover, not a task spec |
-| Read-only enforcement | `AgentCLISpec.read_only_args` | Cursor: `--mode ask`. **Claude: empty, i.e. not established** |
+| Read-only enforcement | `AgentCLISpec.read_only_args` | Cursor: `--mode ask`. Claude row is empty, but read-only IS enforceable (section 3, M2): add the measured flags |
 | Propose, then apply | `ProposalBridge` (`dialogs/proposal.py`) | Built for one file edit; a branch diff is a different payload |
 | Don't double-start | `AITasksController._running` | A UI guard only; lost on restart |
 | Find stray worktrees | `worktree_health`, `worktree_cleanup`, Doctor stray-checkouts | Knows nothing of task ownership |
 | See sessions | Tasks tab scanners for both agents | Reads transcripts, not Manager-launched tasks |
 
-## 3. Facts that are NOT established (measure before coding)
+## 3. Measurements (2026-10-31, Cursor agent 2026.10.22, Claude Code 2.1.261)
 
-Each is a prerequisite, not a footnote. The earlier phases kept paying for
-guesses of this kind (`~/.local/bin`, `-p` can write files).
+Run in a scratch repo, one run per cell: **evidence, not proof**. Each was
+planned as an unknown (M1-M5) and is now a recorded fact or a named gap.
 
-- **M1. What flags make a Cursor headless run WRITE?** Measured so far: `-p`
-  alone "has access to all tools"; `--mode ask` blocks writes; `--force`
-  approves everything. Not measured: whether a write run needs `--force`, what a
-  refused shell command looks like in output, and the exit code on refusal.
-- **M2. How does Claude Code write headless, and can it be made read-only?**
-  `--print` plus a permission mode or `--allowedTools`. Unmeasured. Until
-  measured, **Claude cannot be a reviewer** (section 7) and a write run for
-  Claude cannot be launched.
-- **M3. Does an agent started in a fresh worktree reach tokensave?** Cursor's
-  `.cursor/mcp.json` is per-project and git-ignored, so a new worktree has none.
-  Claude's `.mcp.json` may or may not be tracked. Measured only for the main
-  checkout.
-- **M4. What does a headless run leave behind?** Final text only, or also a
-  transcript path? Needed to link a task to its session.
-- **M5. Can a process tree be killed cleanly on Windows?** `agent.cmd` is a
-  shim; the real process is a child. Needs `taskkill /T` behaviour measured
-  against the real binaries.
-- **Usage/cost: unknown by design.** No supported source was found. The record
-  stores `usage: "unknown"`; nothing is estimated and no dollar figure appears.
+- **M1. Cursor headless write.** `-p --trust` alone **creates files**; `--force`
+  is not needed for file edits (file written with and without it). Shell
+  commands were **refused in every variant** (`ls` included, with and without
+  `--force`), and the refusal is *not* Cursor's permission model: the tool
+  result says "Hook blocked", and the hook is **tokensave's own PreToolUse
+  entry in `~/.claude/settings.json` (lines 22, 35, 49)**, which Cursor's agent
+  also loads. It runs `D:/Claude Co worker/Token Save/tokensave.exe` with the
+  spaced path **unquoted**, so the shell parses it wrongly and rejects the call
+  (the known hook-quoting bug). So on this machine **no headless Cursor run can
+  use the shell until that hook command is quoted**. That file is an
+  agent-control config, so it is changed only through the show-diff-and-ask
+  protocol, not by the Manager or by this work. Shell *permission* behaviour
+  (the allowlist in `~/.cursor/cli-config.json`, a project `.cursor/cli.json`)
+  is therefore still **unmeasured**.
+- **M2. Claude headless.** Default `--print` **denies writes** and reports them in
+  `permission_denials`. `--permission-mode acceptEdits` allows file edits
+  (not shell). `--permission-mode plan` and
+  `--disallowedTools Write Edit NotebookEdit` each prevented the write, and in
+  that default mode a Bash redirect was also denied. **So Claude *can* be made
+  read-only.** Gap: only a write was probed, not every tool.
+- **M3. Fresh worktree and MCP.** A new worktree has **no** `.cursor/mcp.json`
+  (git-ignored, so it is not checked out) and this machine has no global
+  `~/.cursor/mcp.json`: `agent mcp list` reports "No MCP servers configured".
+  Even in the bound checkout the server reads "not loaded (needs approval)".
+  The orchestrator must therefore **write the worktree's MCP config itself**
+  and pass `--approve-mcps`. Note `mcp_args` also carries `--force`
+  ("run everything"), so a Cursor WRITE run that uses tokensave is
+  approve-everything inside the worktree; the worktree is the containment.
+- **M4. What a run leaves behind.** Both agents return a `session_id`
+  (`--output-format json` for Claude, `stream-json` for Cursor), and Cursor's
+  `session_id` matches a folder under `~/.cursor/chats`, so a task can be linked
+  to its session. Both also report **usage**: Claude `total_cost_usd` and token
+  counts; Cursor token counts (`inputTokens`, `outputTokens`, `cacheReadTokens`,
+  no cost). Cursor's `stream-json` lists every tool call, including refused ones.
+- **M5. Killing a run.** `Popen.kill()` on the root left **7 descendant processes
+  alive** (node, powershell, cmd, conhost). `taskkill /PID <pid> /T /F` removed
+  them. Rule: kill the tree with `taskkill /T` **while the root still exists**;
+  a plain kill orphans the agent.
+
+### What the measurements change in this design
+
+- **Usage is no longer "unknown".** It is *reported by the agent when it says so*
+  (Claude: tokens and cost; Cursor: tokens), stored as `usage: {source:
+  "agent-reported", ...}`, never summed across agents and never converted to
+  money by the Manager. When absent, `"unknown"`.
+- **D3 loosens.** Claude read-only is enforceable (`--disallowedTools` /
+  `plan`), so Claude can review; the registry row gains `read_only_args` for
+  Claude as a measured fact. The "Cursor reviews" pairing stays a default, not a
+  requirement.
+- **Execution modes become flag sets, per agent, from the registry:**
+  Claude WRITE = `--permission-mode acceptEdits` (edits only); Cursor WRITE =
+  `-p --trust` (+ `--approve-mcps --force` when tokensave is used, with the
+  worktree as the boundary). Shell-capable runs are **not offered** until M1's
+  hook problem is fixed and permission behaviour is measured.
+- **Launch gains a step:** write the worktree's MCP config (M3) before the
+  agent starts, and verify it with `agent mcp list`.
+- **Cancel is `taskkill /T` on the live root** (M5), recorded in the task.
+- **Prerequisite outside this work:** quote the tokensave hook command in
+  `~/.claude/settings.json`. Offered separately under the diff-and-ask rule.
 
 ## 4. The task record
 
@@ -85,7 +125,7 @@ result_path    captured stdout
 diff           {files, insertions, deletions} measured by git, not by the agent
 review_status  none | pending | done
 cancel_state   none | requested | killed | failed
-usage          "unknown"
+usage          {source: "agent-reported", ...} or "unknown"
 error          string, or ""
 ```
 
@@ -128,8 +168,8 @@ headless write run needs: unmeasured, M1/M2).
 4. **Create the worktree** from the recorded `base_commit` on `tsm/<task_id>`,
    at `<drive>:\_scratch\<repo>-<task_id>` (the repo's existing convention for
    extra checkouts, so Doctor's stray-checkout scan already lists it).
-5. **Index it.** `tokensave init <worktree>`; then verify the agent's MCP config
-   in the worktree points at the worktree (M3). If tokensave is unreachable the
+5. **Index it.** `tokensave init <worktree>`; write the worktree's own MCP config
+   (a new worktree has none, M3); then verify it points at the worktree. If tokensave is unreachable the
    task is **refused**, not run blind: an agent without the graph reads whole
    files, which is the cost this project exists to avoid.
 6. **Brief.** The prompt is the task text plus a brief built from the ledger
@@ -182,9 +222,9 @@ Starts only after A has been used on real tasks.
   labelled as a claim**. Handing over the narrative first measurably anchors a
   reviewer on the author's framing.
 - The reviewer runs `READ_ONLY`. **If the chosen agent cannot enforce
-  read-only (Claude today), the review is refused**, not run on trust. When M2
-  is measured this may change. Because of that, the useful default pairing is
-  *Claude implements, Cursor reviews* until Claude's read-only mode is shown.
+  read-only, the review is refused**, not run on trust. Both current agents can
+  (section 3, M2). The default pairing is still *one implements, the other
+  reviews*, because that is the independent case.
 - Output is a fixed structure, parsed:
   `confirmed` (defect with file:line and why), `potential` (needs a check),
   `unverified` (reviewer could not tell), `not reviewed` (reviewer did not look).
@@ -226,7 +266,7 @@ A refusal always says which limit and what to do. Nothing queues silently.
 4. `running` is never inferred from a record alone; it is pid + start time.
 5. A lost task keeps its worktree. Discarding a worktree is only ever a click.
 6. The diff and file list are measured by git; agent reports are labelled claims.
-7. Unknown usage is `"unknown"`. No figure is derived.
+7. Usage is what the agent reported, labelled so, or `"unknown"`. The Manager derives no figure.
 8. A mode the agent's row cannot enforce is refused, not approximated.
 9. Quitting never leaves an unreported running process.
 10. Nothing here runs unless `enable_agent_orchestration` is literally `true`
@@ -274,10 +314,10 @@ the module-layout guard, `BASIC_INSTRUCTIONS.md` (the new config keys),
 |---|---|---|
 | D1 | Worktree location | `<drive>:\_scratch\<repo>-<task_id>`: matches the existing extra-checkout rule and Doctor already lists them |
 | D2 | What *Accept* does | Marks accepted, merges nothing; you merge in the Git tab |
-| D3 | Reviewer before M2 is measured | Cursor reviews, Claude implements; Claude-as-reviewer refused until its read-only mode is shown |
+| D3 | Reviewer | Approved; loosened by M2: either agent may review, default is the other one |
 | D4 | Launch surface | Window only for now; no CLI/agent-initiated launch |
 | D5 | Limits in section 9 | Accept as defaults, tune after use |
-| D6 | Order | Measure M1-M5 first (one session, no product code), then stage A |
+| D6 | Order | Done: M1-M5 measured (section 3). Stage A next |
 | D7 | Flag | New `enable_agent_orchestration`, separate from handoff, default false |
 
 If any recommendation is wrong for how you actually work, say so before M1-M5:
