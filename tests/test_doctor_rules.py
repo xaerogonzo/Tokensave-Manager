@@ -781,3 +781,84 @@ class TestAuditObservations:
         self._write(tmp_path, self._envelope([self._row()]))
         joined = " ".join(doctor_rules.audit_observations(str(tmp_path)))
         assert "other extensions rendered" in joined
+
+
+class TestAuditHandoffLedger:
+    """Doctor's view of the agent handoff ledger.
+
+    Silent when there is none, honest when it cannot be read, and the only place
+    a person learns that unreadable lines were dropped.
+    """
+
+    def _repo(self, tmp_path):
+        import subprocess
+        root = str(tmp_path / "proj")
+        os.makedirs(root)
+        subprocess.run(["git", "-C", root, "init", "-q"], check=True, capture_output=True)
+        return root
+
+    def _plain(self, tmp_path):
+        root = str(tmp_path / "plain")
+        os.makedirs(root)
+        return root
+
+    def _write(self, root, lines):
+        from helpers import handoff_ledger as hl
+        path = hl.ledger_path(root)
+        os.makedirs(os.path.dirname(path), exist_ok=True)
+        with open(path, "wb") as handle:
+            handle.write(b"\n".join(lines) + b"\n")
+        return path
+
+    def _good(self):
+        from helpers import handoff_ledger as hl
+        import json
+        return json.dumps(hl.build_entry(agent="claude", goal="g")).encode()
+
+    def test_no_ledger_is_silent(self, tmp_path):
+        assert doctor_rules.audit_handoff_ledger(self._repo(tmp_path)) == []
+
+    def test_a_clean_ledger_in_git_is_silent(self, tmp_path):
+        root = self._repo(tmp_path)
+        self._write(root, [self._good()])
+        assert doctor_rules.audit_handoff_ledger(root) == []
+
+    def test_dropped_lines_are_counted_not_hidden(self, tmp_path):
+        root = self._repo(tmp_path)
+        self._write(root, [self._good(), b"{broken", b"[1]"])
+        notes = doctor_rules.audit_handoff_ledger(root)
+        assert len(notes) == 1
+        assert "2 line(s)" in notes[0] and "1 entry readable" in notes[0]
+
+    def test_an_unopenable_ledger_says_could_not_determine(self, tmp_path, monkeypatch):
+        from helpers import handoff_ledger as hl
+        root = self._repo(tmp_path)
+        monkeypatch.setattr(hl, "read", lambda *a, **k: hl.LedgerRead(
+            hl.STATE_UNREADABLE, path="x.jsonl", error="access denied"))
+        joined = " ".join(doctor_rules.audit_handoff_ledger(root))
+        assert "Could not determine" in joined and "access denied" in joined
+        assert "empty" not in joined and "no entries" not in joined
+
+    def test_a_fallback_ledger_git_would_commit_is_flagged(self, tmp_path):
+        root = self._plain(tmp_path)
+        self._write(root, [self._good()])
+        from helpers import handoff_ledger as hl
+        notes = doctor_rules.audit_handoff_ledger(root)
+        # A plain folder: git cannot answer, which is its own statement and is
+        # never reported as "ignored".
+        assert len(notes) == 1 and "Could not determine whether git ignores" in notes[0]
+        assert hl.ledger_path(root) in notes[0]
+
+    def test_a_fallback_ledger_that_is_not_ignored_names_the_risk(self, tmp_path, monkeypatch):
+        from helpers import handoff_ledger as hl
+        root = self._plain(tmp_path)
+        self._write(root, [self._good()])
+        monkeypatch.setattr(hl, "is_ignored", lambda *a, **k: False)
+        assert "NOT git-ignored" in " ".join(doctor_rules.audit_handoff_ledger(root))
+
+    def test_a_fallback_ledger_that_is_ignored_is_silent(self, tmp_path, monkeypatch):
+        from helpers import handoff_ledger as hl
+        root = self._plain(tmp_path)
+        self._write(root, [self._good()])
+        monkeypatch.setattr(hl, "is_ignored", lambda *a, **k: True)
+        assert doctor_rules.audit_handoff_ledger(root) == []
