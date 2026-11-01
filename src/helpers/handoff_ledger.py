@@ -300,21 +300,32 @@ def build_entry(*, agent: str, session_id: str = "", kind: str = KIND_HANDOFF,
 @contextlib.contextmanager
 def _locked(project: str, timeout: float = LOCK_TIMEOUT_SECONDS,
             git_exe: str = ""):
-    """Hold the ledger lock. A stale lock is broken; a live one is waited on."""
+    """Hold the ledger lock. A stale lock is broken; a live one is waited on.
+
+    **`PermissionError` is contention on Windows, not only denial.** Creating a
+    file another process has just deleted (or is deleting) fails with EACCES
+    while the delete is pending. Measured 2026-11-01: 2 of 25 runs of five
+    processes appending eight entries each lost an entry, because that error
+    escaped as "could not write the ledger" and the writer carried on. It is
+    waited out like `FileExistsError`; one that outlasts the deadline with no
+    lock file present is a genuine denial and is raised as itself.
+    """
     path = ledger_path(project, git_exe) + LOCK_SUFFIX
     os.makedirs(os.path.dirname(path), exist_ok=True)
     deadline = time.monotonic() + timeout
     while True:
         try:
             fd = os.open(path, os.O_CREAT | os.O_EXCL | os.O_WRONLY)
-        except FileExistsError:
+        except (FileExistsError, PermissionError) as exc:
             try:
                 if time.time() - os.path.getmtime(path) > STALE_LOCK_SECONDS:
                     os.remove(path)
                     continue
             except OSError:
-                continue              # it vanished between the two calls: retry
+                pass                  # vanished, or delete-pending: wait and retry
             if time.monotonic() > deadline:
+                if isinstance(exc, PermissionError) and not os.path.exists(path):
+                    raise
                 raise LockTimeout("the handoff ledger is locked by another "
                                   "writer; try again")
             time.sleep(0.02)

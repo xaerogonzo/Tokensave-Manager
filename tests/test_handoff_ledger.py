@@ -531,3 +531,37 @@ def test_a_flood_of_markers_cannot_push_a_handoff_out_through_the_entry_bound(pr
         hl.record_session(project, agent="cursor", session_id=f"s{n}")
     goals = [e["goal"] for e in read(project).entries if e["kind"] == "handoff"]
     assert goals == ["keep me"]
+
+
+# -- the lock under Windows delete-pending ---------------------------------------------------
+
+def test_a_lock_file_that_is_briefly_denied_is_waited_out_not_lost(project, monkeypatch):
+    """Creating a file another process is deleting raises EACCES on Windows. That
+    is contention; treating it as a write failure silently lost entries (2 of 25
+    runs of five processes). Deterministic stand-in for the race."""
+    real_open = os.open
+    state = {"denied": 0}
+
+    def flaky(path, flags, *a, **k):
+        if str(path).endswith(hl.LOCK_SUFFIX) and state["denied"] < 3:
+            state["denied"] += 1
+            raise PermissionError(13, "Permission denied")
+        return real_open(path, flags, *a, **k)
+    monkeypatch.setattr(hl.os, "open", flaky)
+    result = hl.append(project, hl.build_entry(agent="claude", goal="g"))
+    assert result.ok and state["denied"] == 3
+    assert len(read(project).entries) == 1
+
+
+def test_a_lock_that_is_really_denied_fails_as_a_write_error_not_a_lock_timeout(
+        project, monkeypatch):
+    def denied(path, flags, *a, **k):
+        raise PermissionError(13, "Permission denied")
+    monkeypatch.setattr(hl.os, "open", denied)
+    orig = hl._locked
+    monkeypatch.setattr(hl, "_locked", lambda project, timeout=0.2, git_exe="":
+                        orig(project, timeout=0.2, git_exe=git_exe))
+    started = hl.time.monotonic()
+    result = hl.append(project, hl.build_entry(agent="claude", goal="g"))
+    assert not result.ok and "could not write" in result.error
+    assert hl.time.monotonic() - started < 3
