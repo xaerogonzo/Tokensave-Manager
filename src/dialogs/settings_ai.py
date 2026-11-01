@@ -55,11 +55,15 @@ class AISection:
         self._host = host
         self._cfg = cfg
         raw = cfg.raw
+        # Packed first, filled last: it reads variables the sections below create.
+        preset_host = tk.Frame(body, bg=C["base"])
+        preset_host.pack(fill=tk.X)
         self._build_backend_selection_section(body, raw)
         self._build_handoff_section(body, raw)
         self._build_ollama_section(body, raw)
         self._build_ai_section(body, raw)
         self._build_ask_ai_section(body, raw)
+        self._build_integration_panel(preset_host)
 
     def save_into(self, raw: dict) -> bool:
         """Write this section's fields into raw. Always succeeds."""
@@ -131,6 +135,43 @@ class AISection:
     def bind_dirty(self, callback) -> None:
         from dialogs.settings_section import bind_vars
         bind_vars(self, callback)
+
+    # ── Claude and Cursor setup: presets read and write the form, not the config ──
+
+    def _form_as_raw(self) -> dict:
+        """The three integration settings as the FORM currently has them."""
+        from helpers.agent_cli import FEATURES, INHERIT
+        raw = {"agent_cli": self._var_agent_cli.get()}
+        if self._var_enable_agent_handoff.get():
+            raw["enable_agent_handoff"] = True
+        chosen = {fid: getattr(self, "_var_override_" + fid).get()
+                  for fid, _label in FEATURES}
+        chosen = {f: v for f, v in chosen.items() if v and v != INHERIT}
+        if chosen:
+            raw["agent_overrides"] = chosen
+        return raw
+
+    def _write_preset_change(self, change) -> None:
+        from helpers.agent_cli import FEATURES, INHERIT
+        from helpers.agent_presets import ABSENT
+        if change.key == "agent_cli":
+            self._var_agent_cli.set(change.new)
+        elif change.key == "enable_agent_handoff":
+            self._var_enable_agent_handoff.set(change.new is True)
+        elif change.key == "agent_overrides" and change.new is ABSENT:
+            for fid, _label in FEATURES:
+                getattr(self, "_var_override_" + fid).set(INHERIT)
+
+    def _build_integration_panel(self, host_frame) -> None:
+        from dialogs.settings_integration import IntegrationPanel
+        self._integration = IntegrationPanel(
+            self._host, host_frame, self._cfg,
+            self._form_as_raw, self._write_preset_change)
+        from helpers.agent_cli import FEATURES
+        watched = [self._var_agent_cli, self._var_enable_agent_handoff,
+                   *[getattr(self, "_var_override_" + f) for f, _l in FEATURES]]
+        for var in watched:
+            var.trace_add("write", lambda *_a: self._integration.refresh())
 
     # ── Section builders (original visual order) ─────────────────────────
 

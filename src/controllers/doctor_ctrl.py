@@ -774,6 +774,7 @@ class DoctorController:
         self._log_graph_trust(project_path)
         self._log_pyscope_cache(project_path)
         self._log_mcp_posture()
+        self._log_agent_integration()
         self._log_read_nudge()
 
     def _log_instructions(self, project_path: str) -> None:
@@ -920,6 +921,23 @@ class DoctorController:
         self._on_log("=== MCP trust posture ===", C["mauve"])
         for note in notes:
             self._on_log(note, C["peach"])
+
+    def _log_agent_integration(self) -> None:
+        """Machine-wide. Warn-only, and silent when every check passes.
+
+        Never counted as a violation: a CLI newer than the one the integration
+        was verified against is a fact worth knowing, not a defect in a project.
+        """
+        from helpers import agent_integration as integ
+        notes = [c for c in integ.run_checks(self._cfg) if c.state != integ.PASS]
+        if not notes:
+            return
+        self._on_log("=== Claude / Cursor integration ===", C["mauve"])
+        for c in notes:
+            line = f"  [{c.state}] {c.label}: {c.detail}"
+            if c.fix:
+                line += f"  -> {c.fix}"
+            self._on_log(line, C["red"] if c.state == integ.FAIL else C["peach"])
 
     def _log_read_nudge(self) -> None:
         """Machine-wide. Warn-only, and silent unless the hook has drifted.

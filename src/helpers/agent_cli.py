@@ -86,6 +86,33 @@ CMDLINE_BUDGET = 8191
 BUDGET_MARGIN = 256
 
 
+# ── The environment an agent is started in ───────────────────────────────────
+
+#: Names removed from the environment of every agent the Manager starts on
+#: Windows. Measured 2026-10-31: a Manager (or a test run) launched from Git
+#: Bash carries `SHELL=/bin/bash.exe`, and Cursor's agent then `eval`s its own
+#: PowerShell hook wrapper in bash, so EVERY shell call is refused with "Hook
+#: blocked ... syntax error" - which reads exactly like a broken hook. They were
+#: removed together (`SHELL`, `MSYSTEM`, `BASH*`) and not isolated one by one.
+_BASH_LEAK_EXACT = ("SHELL", "MSYSTEM")
+_BASH_LEAK_PREFIX = "BASH"
+
+
+def agent_env(environ: "dict | None" = None) -> "dict | None":
+    """The environment to start an agent CLI with, or None to inherit.
+
+    None off Windows: the leak above is a Git-Bash-on-Windows artefact, and a
+    POSIX `SHELL` is real and wanted. Case-insensitive, because Windows
+    environment names are.
+    """
+    if sys.platform != "win32":
+        return None
+    source = os.environ if environ is None else environ
+    return {k: v for k, v in source.items()
+            if k.upper() not in _BASH_LEAK_EXACT
+            and not k.upper().startswith(_BASH_LEAK_PREFIX)}
+
+
 # ── The spec ─────────────────────────────────────────────────────────────────
 
 @dataclasses.dataclass(frozen=True)
@@ -453,6 +480,7 @@ def call_print(
             timeout=timeout,
             creationflags=CREATE_NO_WINDOW,
             cwd=cwd,
+            env=agent_env(),
         )
     except subprocess.TimeoutExpired:
         _tls.last_error = f"timed out after {timeout}s"
@@ -486,7 +514,7 @@ def _spawn(spec, exe, project_path, instruction, model) -> tuple:
     try:
         if sys.platform == "win32":
             subprocess.Popen(payload, cwd=project_path,
-                             creationflags=CREATE_NEW_CONSOLE)
+                             creationflags=CREATE_NEW_CONSOLE, env=agent_env())
         else:
             subprocess.Popen(payload, cwd=project_path)
         return True, ""

@@ -89,7 +89,7 @@ Token Save Manager Source/
 │   │                              Runs beside a real Manager through scripts/drive/run_isolated.py
 │   │                              (scratch config, no lock, no request poller, no tray).
 │   │
-│   ├── helpers/                  149 modules of pure / IO helpers — no UI deps.
+│   ├── helpers/                  151 modules of pure / IO helpers — no UI deps.
 │   │   ├── config.py              _load_config, _save_config, _migrate_config
 │   │   ├── detection.py           _detect_git/_gh/_npm/_codegraph/_claude_cli,
 │   │   │                          _root_path/_label, _version_lt
@@ -223,6 +223,11 @@ Token Save Manager Source/
 │   │   │                          a failed lookup is `pending`, never "nothing there"
 │   │   ├── cursor_ide.py          Open a folder in the Cursor APP (Cursor.exe directly, never
 │   │   │                          the cmd shim: its quoting breaks on spaced paths)
+│   │   ├── agent_integration.py   Is the Claude/Cursor setup still standing? Free, three-valued
+│   │   │                          checks (+ UNKNOWN): CLI versions vs the dated VERIFIED table, routing,
+│   │   │                          tokensave hooks in ~/.claude/settings.json, the Cursor hook. Never repairs
+│   │   ├── agent_presets.py       Named combinations of the integration switches. A diff shown first,
+│   │   │                          detection DERIVED (never stored), never reaches outside the Manager's config
 │   │   ├── agent_handoff.py       Claude <-> Cursor session -> brief for the other agent
 │   │   │                          ("Continue in Cursor / Claude"). Three kinds of statement kept apart: what the
 │   │   │                          person said, what Claude said (a claim), what git reports
@@ -667,7 +672,7 @@ Token Save Manager Source/
 │   │   ├── io_utils.py            Shared IO helpers for the patcher modules.
 │   │   └── ui.py                  UI helpers shared across controllers and dialogs.
 │   │
-│   ├── dialogs/                   59 dialog / panel modules — a tk.Toplevel per file,
+│   ├── dialogs/                   60 dialog / panel modules — a tk.Toplevel per file,
 │   │                          plus the panels the bigger dialogs are built from.
 │   │   ├── release_wizard.py      ReleaseWizardDialog + _ReleaseCtx (paired)
 │   │   ├── mcp_config.py          MCPConfigDialog
@@ -822,6 +827,8 @@ Token Save Manager Source/
 │   │   ├── workspace_builder.py   WorkspaceBuilderDialog — assemble a VS Code
 │   │   │                          .code-workspace descriptor.
 │   │   ├── settings_ai.py         AISection — the AI blocks of the Settings dialog.
+│   │   ├── settings_integration.py  The preset picker + "Check Claude/Cursor setup" panel on the AI page;
+│   │   │                          presets write the FORM, not the config; the check runs off the Tk thread
 │   │   ├── settings_codegraph.py  CodegraphSection — the CodeGraph block.
 │   │   ├── settings_pyscope.py    PyScopeSection — the PyScope block. Three status
 │   │   │                          rows and no install action; UiPumpMixin, because
@@ -1200,7 +1207,7 @@ app.py
   ├── constants.py       — palette, regex, paths
   ├── theme.py           — _Tooltip
   ├── helpers/*          — pure / IO helpers (no UI)
-  ├── dialogs/*          — 59 tk.Toplevel / panel modules
+  ├── dialogs/*          — 60 tk.Toplevel / panel modules
   └── controllers/*      — 29 tab and sub-controllers
         └── controllers/* each import the dialogs they instantiate
             (lazy in-handler imports for any cross-dialog cycle risk —
