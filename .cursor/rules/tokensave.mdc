@@ -1,0 +1,8 @@
+---
+description: TokenSave Manager project baseline
+alwaysApply: true
+---
+
+<!-- tokensave-manager:begin -->
+Shared project instructions live in `AGENTS.md`, which Cursor loads on its own. They are not repeated here, so they are not loaded twice. Put Cursor-only rules below this block.
+<!-- tokensave-manager:end -->
