@@ -49,11 +49,13 @@ that ship a Windows build, adopted by a developer), and it is listed so nobody a
 
 | Entry | Ships | Where / why not |
 |---|---|---|
+| `.cursor` | No | Cursor rules for developing this repository |
 | `.codegraph` | No | Local index configuration |
 | `.github` | No | CI and release workflows |
 | `.gitignore` | No | Repository metadata |
 | `BASIC_INSTRUCTIONS.md` | No | Development instructions for agent sessions |
 | `CHANGELOG.md` | Yes | Staged to the zip root |
+| `AGENTS.md` | No | Development instructions Cursor loads |
 | `CLAUDE.md` | No | Development instructions entry point |
 | `LICENSE` | Yes | Staged to the zip root |
 | `Launch TokenSave Manager.bat` | No | Source-checkout launcher; the zip has the exe |
