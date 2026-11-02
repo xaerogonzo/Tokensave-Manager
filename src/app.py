@@ -826,6 +826,8 @@ class App(UiPumpMixin, tk.Tk):
                     elif args and args[0] == "upgrade":
                         # Auto-run integration check immediately after upgrade
                         self._post(self._update_poller.cmd_integration_check)
+                        # The installer re-writes Cursor's hooks unquoted
+                        self._post(self._startup_checks.check_cursor_hooks)
                 else:
                     self._log(f"Exited with code {proc.returncode}", C["red"])
                     log.warning(f"DONE exit={proc.returncode}  [{elapsed:.1f}s]")

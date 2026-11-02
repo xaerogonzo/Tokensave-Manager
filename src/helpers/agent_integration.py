@@ -284,6 +284,23 @@ def check_cursor_tokensave_hooks(home: str) -> "Check | None":
                  f"{len(hooks)} tokensave hook(s), none needs quoting")
 
 
+def cursor_hooks_note(home: str = "") -> "tuple[str, str] | None":
+    """`(text, state)` for a log line when Cursor's tokensave hooks cannot run, else None.
+
+    The launch-time and after-upgrade alert. Silent for every healthy case, and for
+    a machine with no Cursor hooks file at all: a person who does not use Cursor is
+    never told about it. UNKNOWN (a hooks file that does not parse) is reported,
+    because "could not read it" is not "it is fine".
+    """
+    check = check_cursor_tokensave_hooks(home or os.path.expanduser("~"))
+    if check is None or check.state == PASS:
+        return None
+    text = f"Cursor hooks: {check.detail}"
+    if check.fix:
+        text += f" -> {check.fix} (Settings -> AI -> Claude and Cursor setup)"
+    return text, check.state
+
+
 def check_snapshots(rows: list) -> "Check | None":
     """Claude-memory snapshots that no longer match their source. None when no
     project has a snapshot or memory. Population-level, so the Settings panel runs
