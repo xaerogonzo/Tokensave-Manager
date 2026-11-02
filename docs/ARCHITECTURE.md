@@ -884,9 +884,11 @@ Token Save Manager Source/
 │   │   ├── requests_ctrl.py       RequestsController - the file-based IPC inbox.
 │   │   │                          _REQUEST_HANDLERS is an allowlist: an unknown
 │   │   │                          action is REJECTED, not ignored.
-│   │   ├── startup_checks_ctrl.py StartupChecksController - the three post-launch
+│   │   ├── startup_checks_ctrl.py StartupChecksController - the four post-launch
 │   │   │                          checks AND the stagger that keeps their dialogs
-│   │   │                          and log writes off each other.
+│   │   │                          and log writes off each other. The fourth,
+│   │   │                          `check_cursor_hooks`, is log-only and also runs
+│   │   │                          after a tokensave upgrade.
 │       ├── branch_mgmt_ctrl.py    BranchManagementController (P4 — new/switch/merge/
 │       │                          delete-branch cluster extracted from GitTabController;
 │       │                          merge orchestration decomposed into _prepare_merge_sources

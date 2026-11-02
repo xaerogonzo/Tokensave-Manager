@@ -295,3 +295,78 @@ def test_declining_the_diff_changes_nothing(tk_root, mock_config, mocker, tmp_pa
     mocker.patch("dialogs.settings_integration.messagebox.askyesno", return_value=False)
     ctl._ai._integration._repair_hooks()
     assert _read(str(home)) == original
+
+
+# -- the launch / after-upgrade alert -------------------------------------------------
+
+def test_the_note_names_the_broken_hooks_and_the_button(home):
+    _write(home, _hooks_json())
+    text, state = integ.cursor_hooks_note(home)
+    assert state == integ.FAIL
+    assert "Repair Cursor hooks" in text and "preToolUse" in text
+
+
+def test_the_note_is_silent_when_quoted_and_when_there_is_no_cursor(home, tmp_path):
+    _write(home, _hooks_json(quoted=True))
+    assert integ.cursor_hooks_note(home) is None
+    assert integ.cursor_hooks_note(str(tmp_path / "no-cursor-here")) is None
+
+
+def test_the_note_reports_an_unreadable_file_rather_than_saying_nothing(home):
+    _write(home, "{ not json")
+    text, state = integ.cursor_hooks_note(home)
+    assert state == integ.UNKNOWN and text.startswith("Cursor hooks:")
+
+
+def _controller(logged, ran):
+    from types import SimpleNamespace
+    from controllers.startup_checks_ctrl import StartupChecksController as S
+    stub = SimpleNamespace(_log=lambda m, c=None: logged.append((m, c)),
+                           _post=lambda fn: ran.append(fn))
+    return S, stub
+
+
+def test_the_controller_logs_a_failure_in_red_and_never_opens_a_dialog(monkeypatch):
+    import threading
+    from unittest import mock
+    from constants import C
+    logged, ran = [], []
+    S, stub = _controller(logged, ran)
+    done = threading.Event()
+    stub._post = lambda fn: (ran.append(fn), done.set())
+    note = ("Cursor hooks: broken -> Repair Cursor hooks", integ.FAIL)
+    with mock.patch("helpers.agent_integration.cursor_hooks_note", return_value=note):
+        S.check_cursor_hooks(stub)
+        assert done.wait(5)
+    ran[0]()
+    assert logged == [("⚠ " + note[0], C["red"])]
+
+
+def test_the_controller_says_nothing_when_the_hooks_are_fine():
+    import threading
+    from unittest import mock
+    logged, ran = [], []
+    S, stub = _controller(logged, ran)
+    with mock.patch("helpers.agent_integration.cursor_hooks_note", return_value=None):
+        S.check_cursor_hooks(stub)
+        for th in threading.enumerate():
+            if th is not threading.current_thread() and th.daemon:
+                th.join(2)
+    assert ran == [] and logged == []
+
+
+def test_the_check_is_scheduled_after_the_three_that_may_open_dialogs():
+    from types import SimpleNamespace
+    from controllers.startup_checks_ctrl import StartupChecksController as S
+    delays = []
+    def named(name):
+        fn = lambda: None                       # noqa: E731
+        fn.__name__ = name
+        return fn
+    names = ("_check_config", "_check_worktree_health", "_check_install_identity", "check_cursor_hooks")
+    stub = SimpleNamespace(
+        _root=SimpleNamespace(after=lambda ms, fn: delays.append((ms, fn.__name__))),
+        **{n: named(n) for n in names})
+    S.schedule(stub)
+    assert delays[-1] == (3500, "check_cursor_hooks")
+    assert delays[-1][0] > max(ms for ms, name in delays[:-1])

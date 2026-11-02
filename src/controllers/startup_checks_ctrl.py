@@ -4,13 +4,16 @@ Extracted from `App` (2026-09-11), which had 53 direct methods against a cap
 of 40. With the IPC inbox already out this was the last four, taking the
 class to 37 - comfortably under rather than exactly on the line.
 
-Three checks, and **the stagger between them is the point of the class**:
+Four checks, and **the stagger between them is the point of the class**:
 
   300 ms   config      may open Settings or the MCP dialog
  1200 ms   worktrees   staggered so the two checks' log lines do not
                        interleave mid-write
- 2500 ms   identity    last, so a relocation dialog does not land on top of
-                       whatever the earlier two opened
+ 2500 ms   identity    last of the ones that may open a dialog, so a relocation
+                       dialog does not land on top of whatever the earlier two
+                       opened
+ 3500 ms   cursor      log-only, never a dialog, so it can go after all three;
+                       also run after a tokensave upgrade, which is what breaks it
 
 That ordering used to live as three `self.after` calls and two comments in
 `App.__init__`, where it read as scheduling trivia. It is not: each delay is
@@ -63,10 +66,11 @@ class StartupChecksController:
         self._get_project_list  = get_project_list
 
     def schedule(self) -> None:
-        """Queue the three checks, staggered - see the module docstring."""
+        """Queue the checks, staggered - see the module docstring."""
         self._root.after(300, self._check_config)
         self._root.after(1200, self._check_worktree_health)
         self._root.after(2500, self._check_install_identity)
+        self._root.after(3500, self.check_cursor_hooks)
 
     def _check_config(self):
         problems = []
@@ -156,6 +160,29 @@ class StartupChecksController:
             self._log(
                 f"    {o['project_name']}: '{o['branch'] or o['head']}' "
                 f"at {o['worktree_path']}", C["overlay0"])
+
+    def check_cursor_hooks(self):
+        """Log (never dialog) a Cursor tokensave hook Windows cannot run.
+
+        `tokensave install --agent cursor` writes the hook paths unquoted and
+        writes them that way again on every upgrade, and a failing `preToolUse`
+        can stop Cursor's search and shell calls, so the break is silent until
+        someone is told. Public because it is also run when a tokensave upgrade
+        finishes. The repair is a deliberate button (Settings -> AI), never done
+        from here: it edits a file that controls an agent's tools.
+        """
+        def worker():
+            try:
+                from helpers.agent_integration import FAIL, cursor_hooks_note
+                note = cursor_hooks_note()
+            except Exception:       # noqa: BLE001 - never break startup
+                return
+            if note is not None:
+                self._post(lambda: self._log(
+                    "\u26a0 " + note[0],
+                    C["red"] if note[1] == FAIL else C["peach"]))
+
+        threading.Thread(target=worker, daemon=True).start()
 
     def _check_install_identity(self):
         """Where am I, and who owns the fleet? Two questions, one sweep.
