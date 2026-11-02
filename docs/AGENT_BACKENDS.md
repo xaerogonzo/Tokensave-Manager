@@ -156,32 +156,21 @@ a POSIX `ARG_MAX` ceiling would invent a failure the platform does not have.
 | MCP in a headless turn | needs `--approve-mcps` (tools visible) AND `--force` (per-call approval); with `--mode ask` the turn stays read-only. A headless tool call then answered from the worktree's own index |
 | worktrees | the CLI has `-w/--worktree` and `--worktree-base` |
 
-Still **fixture-verified only**: everything below the next paragraph.
+**Measured 2026-11-01 on the same machine, for the global tokensave install:**
 
-**Every other Cursor path in this manager is fixture-verified, not live-verified.**
-Cursor was not installed on the machine this was built on, and there is no
-Cursor subscription on the account. Those are two different blockers, and they
-gate different things, so the open items are split by what each actually needs.
+| Fact | Measured |
+|---|---|
+| `tokensave install --agent cursor` | writes a global `~/.cursor/mcp.json` entry (`tokensave serve`, no `-p`) and `~/.cursor/hooks.json` |
+| hook command form | the installer writes `<path>/tokensave.exe hook-...` UNQUOTED; with a space in the path Windows cuts it at the space. Cursor evaluates hooks through PowerShell, so a quoted program needs `& "<exe>" args`. `helpers/cursor_hooks_repair.py` applies that and RUNS each command before keeping it |
+| upgrades | the installer re-writes the unquoted form, so the repair is a button, not a one-off |
+| hooks in a headless run | only `sessionStart` and `sessionEnd` fire |
 
-**Answerable by installing the CLI alone** — no IDE, no login, no plan.
-Argument parsing happens before authentication, which is what makes the most
-important one free to settle:
+The stdin transport, binary names and `--help` spellings that an older version of
+this page listed as open are settled in the first table above.
 
-* **Whether `cursor-agent -p` reads the prompt from stdin.** Run
-  `echo hi | cursor-agent -p`. A *"missing prompt"* error means stdin is NOT
-  read, so `prompt_transport` stays `argv` and the command-line budget above is
-  load-bearing. An auth or credit error means the prompt WAS accepted from
-  stdin — flip `prompt_transport` to `stdin`, and the budget stops applying to
-  Cursor (the guard stays for any future argv-only agent). This governs whether
-  multi-KB prompts from code review and test generation silently hit a ceiling,
-  so it is the first thing to measure.
-* The exact binary filenames the Windows installer writes to `~/.local/bin`
-  (assumed `cursor-agent` and `agent`; only the former is trusted against PATH).
-  If these are wrong, `_detect_cursor_cli` returns "" forever and the feature is
-  invisible rather than broken.
-* The real `--help` spellings of `print_args`, `--model`, `--output-format`.
-* That `tokensave install --agent cursor` writes `~/.cursor/mcp.json`, and that
-  the MCP dialog's Cursor panel renders its populated branch rather than the
+**Still fixture-verified only**, and not re-checked in this pass:
+
+* That the MCP dialog's Cursor panel renders its populated branch rather than the
   "not detected" line.
 
 **Needs a working agent** — i.e. an account that can complete a turn. Cursor's

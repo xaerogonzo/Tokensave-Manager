@@ -482,6 +482,8 @@ Every manager setting, in five pages. It is a tab rather than a dialog: it is th
 | **AI** | backend selection, commit-message and Ask-tab providers, grounding toggles, the Ollama model manager |
 | **Integrations** | CodeGraph, PyScope, and the MCP wiring configurator |
 
+The **AI** page also holds **Claude and Cursor setup**: presets, **Check Claude/Cursor setup**, **Repair Cursor hooks…** (quotes the tokensave hooks `tokensave install` leaves broken, after showing the diff) and **Refresh snapshots…** (re-takes the Claude-memory copies Cursor reads). The order to do it in is in `docs/USER_GUIDE.md` under *Setting up Cursor alongside Claude Code*.
+
 **Save is explicit, and appears only when something changed.** A Save / Revert bar shows up the moment a value differs from what is on disk and disappears again if you change it back. Pending edits survive switching pages and switching tabs; quitting with unsaved settings asks first.
 
 Saving is all-or-nothing: every page writes into a staging copy, and a page that refuses — a `tokensave.exe` path that does not exist, say — aborts the whole save with your live configuration untouched.

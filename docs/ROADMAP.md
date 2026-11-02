@@ -103,9 +103,20 @@ Four surfaces: the agent-CLI registry (`helpers/agent_cli.py`), project-scoped
 `.cursor/mcp.json`, inlined rules files (`AGENTS.md` + `.cursor/rules/*.mdc`),
 and Cursor CLI chats in the Tasks tab.
 
-**Fixture-verified, not live-verified** — Cursor was not installed on the
-machine this was built on. The open measurements are listed in
-`docs/AGENT_BACKENDS.md` under "Verification status".
+**Live-verified 2026-10-31 and 2026-11-01** against the real Cursor CLI and IDE: the
+CLI flags, stdin prompts, global and project MCP, and which hooks fire headlessly.
+`docs/AGENT_BACKENDS.md` "Verification status" lists what was measured and what is
+still only fixture-checked.
+
+### ✅ Cursor setup check and repair (Settings -> AI)
+
+`helpers/cursor_hooks_repair.py` quotes the tokensave hooks `tokensave install`
+writes unquoted (it re-writes them on every upgrade), after a diff, a backup and a
+run of each command, and restores the file if one fails. `helpers/memory_snapshot.py`
+gained a survey so **Refresh snapshots…** can re-take stale Claude-memory copies. The
+check reports both. Not built: a startup alert when the hooks break (today it shows in
+the Settings check and in Doctor), editing Claude's own hooks, and running the repair
+by itself after a tokensave upgrade.
 
 ### ✅ Claude <-> Cursor handoff (Tasks tab, right-click)
 
