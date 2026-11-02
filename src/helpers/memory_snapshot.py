@@ -205,3 +205,42 @@ def remove(project: str) -> SnapshotResult:
     except OSError as exc:
         return SnapshotResult(False, path, error=f"could not remove {path}: {exc}")
     return SnapshotResult(True, path, True, STATE_ABSENT)
+
+
+# ── across projects: which snapshots are out of date? ───────────────────────────
+
+@dataclasses.dataclass(frozen=True)
+class Survey:
+    project: str
+    state: str
+
+    @property
+    def name(self) -> str:
+        return os.path.basename(self.project.rstrip("\\/")) or self.project
+
+
+def survey(projects: list, home: str = "", git_exe: str = "") -> list:
+    """One `Survey` per project that has Claude memory or a snapshot. Derived each
+    time; a project with neither is left out, since there is nothing to say."""
+    rows = []
+    for project in projects:
+        state = status(project, home, git_exe)
+        if state != STATE_NO_SOURCE:
+            rows.append(Survey(project, state))
+    return rows
+
+
+def stale(rows: list) -> list:
+    """Snapshots that exist and no longer match the memory index (or whose source is gone)."""
+    return [r for r in rows if r.state == STATE_STALE]
+
+
+def missing(rows: list) -> list:
+    """Projects with Claude memory and no snapshot. Taking one is a choice, not a repair."""
+    return [r for r in rows if r.state == STATE_ABSENT]
+
+
+def refresh(rows: list, home: str = "", git_exe: str = "") -> list:
+    """Re-take each snapshot in `rows`: `[(Survey, SnapshotResult)]`. Per project, never
+    a transaction: one refused project does not stop the others."""
+    return [(r, write(r.project, home, git_exe)) for r in rows]

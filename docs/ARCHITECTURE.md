@@ -89,7 +89,7 @@ Token Save Manager Source/
 │   │                              Runs beside a real Manager through scripts/drive/run_isolated.py
 │   │                              (scratch config, no lock, no request poller, no tray).
 │   │
-│   ├── helpers/                  156 modules of pure / IO helpers — no UI deps.
+│   ├── helpers/                  157 modules of pure / IO helpers — no UI deps.
 │   │   ├── config.py              _load_config, _save_config, _migrate_config
 │   │   ├── detection.py           _detect_git/_gh/_npm/_codegraph/_claude_cli,
 │   │   │                          _root_path/_label, _version_lt
@@ -210,11 +210,15 @@ Token Save Manager Source/
 │   │   ├── cursor_hooks.py        The Cursor `sessionEnd` hook entry + generated script. The edit to
 │   │   │                          ~/.cursor/hooks.json is a pure plan shown as a diff first; backup before
 │   │   │                          write, a file that does not parse is refused, others' hooks preserved
+│   │   ├── cursor_hooks_repair.py Finds tokensave hooks in ~/.cursor/hooks.json whose spaced exe path is
+│   │   │                          unquoted (`tokensave install` rewrites them every upgrade) and quotes them as
+│   │   │                          `& "exe" args`: diff first, verified backup, EACH command is run, file restored on any failure
 │   │   ├── handoff_rules.py       The git-ignored `CLAUDE.local.md` block that tells an agent the
 │   │   │                          publish command (machine paths, so never committed). Ignored via
 │   │   │                          .git/info/exclude BEFORE it is written; a tracked file is refused
 │   │   ├── memory_snapshot.py     A one-time, git-ignored copy of Claude's memory INDEX as a Cursor rule
 │   │   │                          (`.cursor/rules/claude-memory.mdc`); a snapshot, never a link, never the notes.
+│   │   │                          `survey`/`stale`/`missing`/`refresh` say which are out of date across projects
 │   │   ├── handoff_ledger.py      handoff.jsonl in the git COMMON dir (shared by every worktree,
 │   │   │                          untrackable); `.tokensave/` only outside a repo. Append-only, content-hash ids,
 │   │   │                          locked append, bounded + trimmed, bad lines counted, agent
@@ -841,7 +845,8 @@ Token Save Manager Source/
 │   │   ├── agent_task_dialog.py   AgentTaskDialog — hand a task to an agent; shows WHERE it will work,
 │   │   │                          WHAT it may do, and why a launch is refused (check_launch off-thread)
 │   │   ├── settings_integration.py  The preset picker + "Check Claude/Cursor setup" panel on the AI page;
-│   │   │                          presets write the FORM, not the config; the check runs off the Tk thread
+│   │   │                          presets write the FORM, not the config; the check runs off the Tk thread.
+│   │   │                          Also the "Repair Cursor hooks…" and "Refresh snapshots…" buttons (each asks first)
 │   │   ├── settings_codegraph.py  CodegraphSection — the CodeGraph block.
 │   │   ├── settings_pyscope.py    PyScopeSection — the PyScope block. Three status
 │   │   │                          rows and no install action; UiPumpMixin, because

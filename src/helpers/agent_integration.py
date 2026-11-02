@@ -17,8 +17,8 @@ Four rules, the same ones the MCP and ledger audits keep:
   is a `WARN` saying so, not a failure: it usually still works, and the point is
   that nobody is surprised if it does not.
 * **Nothing is repaired here.** A check names the fix; touching a file that
-  controls an agent's tools stays a reviewed diff with a yes (`cursor_hooks`
-  already does that).
+  controls an agent's tools stays a reviewed diff with a yes (`cursor_hooks` and
+  `cursor_hooks_repair` do that, behind buttons in Settings).
 * **No model calls.** Everything here is free to run on every Doctor pass.
   Proving the flags still *work* is a separate, opt-in, paid probe.
 
@@ -253,6 +253,57 @@ def check_cursor_hook(handoff_on: bool, hook_state: str) -> "Check | None":
     return None
 
 
+# ── the tokensave hooks in ~/.cursor/hooks.json ─────────────────────────────────
+
+def check_cursor_tokensave_hooks(home: str) -> "Check | None":
+    """Can Cursor run the hooks `tokensave install --agent cursor` wrote?
+
+    None when there is no hooks file or no tokensave hook in it. The installer
+    re-writes an unquoted spaced path on every upgrade, so this is a check that
+    can come back, and the repair (`helpers/cursor_hooks_repair`) is a button.
+    """
+    from helpers import cursor_hooks as ch
+    from helpers import cursor_hooks_repair as rep
+    label = "tokensave hooks in ~/.cursor/hooks.json"
+    path = ch.hooks_json_path(home)
+    if not os.path.exists(path):
+        return None
+    hooks, error = rep.scan(ch._read(path))
+    if error:
+        return Check("cursor_tokensave_hooks", label, UNKNOWN, error)
+    if not hooks:
+        return None
+    bad = sorted({h.event for h in hooks if h.shape == rep.SHAPE_BARE})
+    if bad:
+        return Check("cursor_tokensave_hooks", label, FAIL,
+                     "the command is a path with spaces and is not quoted, so "
+                     "Windows cuts it at the first space: " + ", ".join(bad),
+                     "press Repair Cursor hooks (shows the diff first, backs up, "
+                     "tests each command, rolls back if one fails)")
+    return Check("cursor_tokensave_hooks", label, PASS,
+                 f"{len(hooks)} tokensave hook(s), none needs quoting")
+
+
+def check_snapshots(rows: list) -> "Check | None":
+    """Claude-memory snapshots that no longer match their source. None when no
+    project has a snapshot or memory. Population-level, so the Settings panel runs
+    it, not the per-project Doctor."""
+    from helpers import memory_snapshot as ms
+    label = "Claude-memory snapshots for Cursor"
+    stale, missing = ms.stale(rows), ms.missing(rows)
+    current = sum(1 for r in rows if r.state == ms.STATE_CURRENT)
+    if not rows:
+        return None
+    if stale:
+        return Check("memory_snapshots", label, WARN,
+                     f"{len(stale)} out of date ({', '.join(r.name for r in stale[:4])}"
+                     f"{', ...' if len(stale) > 4 else ''}); {current} current"
+                     + (f"; {len(missing)} project(s) have memory and no snapshot" if missing else ""),
+                     "press Refresh snapshots")
+    note = f"; {len(missing)} project(s) have memory and no snapshot (optional)" if missing else ""
+    return Check("memory_snapshots", label, PASS, f"{current} current{note}")
+
+
 # ── the whole set ────────────────────────────────────────────────────────────────
 
 def run_checks(cfg, *, home: str = "", probe=probe_version) -> list:
@@ -270,6 +321,7 @@ def run_checks(cfg, *, home: str = "", probe=probe_version) -> list:
                                     cursor_present=bool(exes.get("cursor")))],
         lambda: [check_cursor_hook(cfg.raw.get("enable_agent_handoff") is True,
                                    ch.status(home))],
+        lambda: [check_cursor_tokensave_hooks(home)],
     ):
         try:
             checks += [c for c in build() if c is not None]
