@@ -114,9 +114,9 @@ still only fixture-checked.
 writes unquoted (it re-writes them on every upgrade), after a diff, a backup and a
 run of each command, and restores the file if one fails. `helpers/memory_snapshot.py`
 gained a survey so **Refresh snapshots…** can re-take stale Claude-memory copies. The
-check reports both. Not built: a startup alert when the hooks break (today it shows in
-the Settings check and in Doctor), editing Claude's own hooks, and running the repair
-by itself after a tokensave upgrade.
+check reports both, and a log-only startup check (at launch and after a tokensave
+upgrade) says when the hooks are broken. Not built: editing Claude's own hooks, and
+running the repair by itself after a tokensave upgrade.
 
 ### ✅ Claude <-> Cursor handoff (Tasks tab, right-click)
 

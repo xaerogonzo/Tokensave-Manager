@@ -769,9 +769,11 @@ file back if any fails. Your other hooks are not touched. Restart Cursor
 afterwards, because it reads hooks when it starts.
 
 **Do this again after every tokensave upgrade.** The installer writes the unquoted
-form again each time. The check reports it as a failure, and Doctor lists it under
-"Claude / Cursor integration" when it runs. Nothing alerts you when the Manager
-opens, so after an upgrade, press **Check Claude/Cursor setup**.
+form again each time. The Manager writes a warning line to the output log when it
+starts, and again when a tokensave upgrade finishes, if the hooks are broken. The
+**Check Claude/Cursor setup** button reports it as a failure, and Doctor lists it
+under "Claude / Cursor integration". It is a log line, not a pop-up, and it repairs
+nothing by itself.
 
 **3. Put the rules into each project.** Cursor loads `AGENTS.md`, which carries the
 same baseline Claude gets through `CLAUDE.md`, plus a short rule that points at it.
