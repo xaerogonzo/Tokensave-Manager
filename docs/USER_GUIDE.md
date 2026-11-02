@@ -743,6 +743,78 @@ capability difference rather than an oversight.
 
 ---
 
+<!-- help:cursor-setup -->
+## Setting up Cursor alongside Claude Code
+
+Cursor can work on the same projects as Claude Code, with the same tokensave
+tools, the same project rules and a copy of Claude's memory index. None of it
+switches itself on, and none of it is one button, so this is the order to do it
+in. Everything below is in **Settings → AI → "Claude and Cursor setup"** unless
+it says otherwise. **Check Claude/Cursor setup** there reads all of it and says
+what is missing; it changes nothing.
+
+**1. Give Cursor tokensave, once per machine.** `tokensave install --agent cursor
+--git-hook no` (the Manager's tokensave agent picker runs the same command) writes
+the tokensave server into `~/.cursor/mcp.json` and its hooks into
+`~/.cursor/hooks.json`. After that every Cursor window can use tokensave, in any
+project, with no per-project step.
+
+**2. Press Repair Cursor hooks…** If your tokensave folder has a space in its path
+(`D:\Claude Co worker\Token Save\tokensave.exe` does), the installer writes the
+hook commands unquoted and Windows cuts them at the first space. A broken
+`preToolUse` hook can stop Cursor's search and shell calls. The button shows the
+exact change to `hooks.json` first and asks. On yes it writes a timestamped
+backup, quotes only tokensave's own commands, then **runs each one** and puts the
+file back if any fails. Your other hooks are not touched. Restart Cursor
+afterwards, because it reads hooks when it starts.
+
+**Do this again after every tokensave upgrade.** The installer writes the unquoted
+form again each time. The Manager writes a warning line to the output log when it
+starts, and again when a tokensave upgrade finishes, if the hooks are broken. The
+**Check Claude/Cursor setup** button reports it as a failure, and Doctor lists it
+under "Claude / Cursor integration". It is a log line, not a pop-up, and it repairs
+nothing by itself.
+
+**3. Put the rules into each project.** Cursor loads `AGENTS.md`, which carries the
+same baseline Claude gets through `CLAUDE.md`, plus a short rule that points at it.
+In the Projects tab use **Generate agent rules…** for every wired project at once,
+or use **⚙ Add tokensave to a project** on one folder and tick **Add AGENTS.md** and
+**Add .cursor/rules/tokensave.mdc**. A project created through **New project** gets
+both if you tick them. A project you simply open in Cursor does not get them by
+itself. `.cursor/mcp.json` is git-ignored;
+`.cursor/rules/` is committed so the rules travel with the repository.
+
+**4. Optional: shared handoff.** Turn on **Settings → AI → Shared agent handoff**,
+then right-click a project → **Enable agent handoff here…**. Agents in that project
+can leave each other a note (what was decided, what is next, what is still open) in
+a ledger inside the project's `.git` folder, so every worktree shares it and git
+never tracks it. It is off until you turn it on, and each project opts in on its own.
+
+**5. Optional: a copy of Claude's memory for Cursor.** **Refresh snapshots…** copies
+Claude's memory **index** (the list of titles and one-line hooks, not the notes
+themselves) into `.cursor/rules/claude-memory.mdc` for each project that has Claude
+memory. It lists what it will do and asks first. The file is git-ignored, secrets
+are masked, it is capped at 20,000 bytes, and it is refused for a project that
+tracks that path. It is a copy taken at one moment: notes Claude saves later do not
+appear until you press the button again, and the check warns when a snapshot has
+fallen behind its source.
+
+**To see whether Cursor really has it,** open a new Cursor agent chat in the
+project and ask three things a guess cannot answer:
+
+1. *"List the titles in the Claude memory index you were given, and quote the line
+   about <a note you know exists>."* A made-up answer will not match your notes.
+2. *"Call `tokensave_status` and tell me when the index last synced."*
+3. *"Read the latest handoff for this project."* It should be empty, or show the
+   last note a Claude session left.
+
+**What this does not do.** A file existing is not proof an agent loaded it, which
+is why those questions are worth asking. The snapshot is the index only. Claude's own
+`~/.claude/settings.json` is only ever reported on, never edited. Cursor's hooks fire
+headlessly only for session start and end; the rest run in the editor.
+
+---
+
 <!-- help:testing-a-project -->
 ## Testing a project
 
