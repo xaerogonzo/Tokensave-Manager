@@ -49,7 +49,66 @@ AUTO_REFRESH_MS = 60_000  # 60 s between background refreshes
 _HANDOFF = {
     "cursor": ("Cursor", "cursor_cli_exe", "Cursor Agent CLI"),
     "claude": ("Claude", "claude_cli_exe", "Claude Code CLI"),
+    # The Cursor APP: no CLI, so no config attribute; the folder is opened and a
+    # message is put on the clipboard, because the app's agent cannot be launched.
+    "cursor_app": ("the Cursor app", "", "Cursor app"),
 }
+
+
+def _launcher_missing(cfg, target: str) -> str:
+    """Why the target cannot be launched, or "" when it can."""
+    _name, exe_key, cli_name = _HANDOFF[target]
+    if target == "cursor_app":
+        from helpers.cursor_ide import find_cursor_exe
+        if find_cursor_exe():
+            return ""
+        return ("Cursor.exe was not found where the Manager looks "
+                "(%LOCALAPPDATA%\\Programs\\cursor). Install the Cursor app, then try again.")
+    if getattr(cfg, exe_key):
+        return ""
+    return f"Install the {cli_name}, or set its path in Settings, then try again."
+
+
+def _handoff_prompt(target: str, source: str, project: str, title: str,
+                    moved: str) -> str:
+    """The confirmation text. The two Cursor launches differ in what happens
+    next, and the person is told which: a terminal agent starts by itself, the
+    app's agent starts when they paste a message."""
+    from helpers.agent_handoff import HANDOFF_DIR
+    name = _HANDOFF[target][0]
+    app = target == "cursor_app"
+    service = "Anthropic" if target == "claude" else "Cursor's service"
+    opening = (f"Open the Cursor app on:\n{project}\n\nand put a message on your "
+               f"clipboard that points a new chat there at notes from the {source} "
+               f"session \"{title}\"?" if app else
+               f"Open {name}'s agent in:\n{project}\n\nwith notes from the {source} "
+               f"session \"{title}\"?")
+    reads = ("Cursor's agent will read it when you send that message in a new chat, "
+             f"which sends its contents to {service}." if app else
+             f"{name} will read it, which sends its contents to {service}.")
+    return (moved + opening + f"\n\nThis writes a brief to {HANDOFF_DIR}\\ (git-ignored, "
+            "this machine only) holding your prompts from that session, "
+            f"secrets masked on a best-effort basis, plus {source}'s last "
+            f"message and the repository state now. {reads}"
+            f"\n\nThis is a handoff, not an import: {source}'s memory and "
+            "the full transcript do not come across.")
+
+
+def _show_app_message(tab, message: str) -> None:
+    """Clipboard first, and the same text in the dialog so a clipboard that
+    refuses (another program holding it) never loses it."""
+    try:
+        tab.clipboard_clear()
+        tab.clipboard_append(message)
+        copied = "It is on your clipboard."
+    except tk.TclError:
+        copied = "It could not be copied, so select it below."
+    messagebox.showinfo(
+        "Continue in the Cursor app",
+        "Cursor is opening on the project. Start a NEW chat there and paste "
+        f"this message (Ctrl+V). {copied}\n\n{message}\n\nIf Cursor was "
+        "already open on this folder, use a new chat in that window.",
+        parent=tab)
 
 VIEW_LIVE = "Active sessions"
 VIEW_SESSIONS = "History & worktrees"
@@ -203,8 +262,11 @@ class TasksController(UiPumpMixin):
         # handoff needs the transcript path the scanner found.
         self._sess_rows: dict[str, dict] = {}
         self._sess_menu = tk.Menu(self._sess_tree, tearoff=0)
-        self._sess_menu.add_command(label="Continue in Cursor…",
+        self._sess_menu.add_command(label="Continue in Cursor (terminal)…",
                                     command=self._sess_continue_in_cursor)
+        self._sess_menu.add_command(
+            label="Continue in Cursor app…",
+            command=lambda: self._sess_hand_off("cursor_app"))
         self._sess_menu.add_command(label="Continue in Claude…",
                                     command=self._sess_continue_in_claude)
         self._sess_menu.add_command(label="Open folder in Cursor",
@@ -794,7 +856,7 @@ class TasksController(UiPumpMixin):
         row = self._sess_rows.get(iid)
         if not row or target not in _HANDOFF:
             return False
-        return (row.get("agent") or "claude") != target
+        return (row.get("agent") or "claude") != target.removesuffix("_app")
 
     def _sess_folder(self, iid: str) -> str:
         """The folder a session ran in, from its own record. `""` when the
@@ -811,8 +873,9 @@ class TasksController(UiPumpMixin):
         self._sess_tree.selection_set(row)
         for index, enabled in (
                 (0, self._sess_can_hand_off(row, "cursor")),
-                (1, self._sess_can_hand_off(row, "claude")),
-                (2, bool(self._sess_folder(row)))):
+                (1, self._sess_can_hand_off(row, "cursor_app")),
+                (2, self._sess_can_hand_off(row, "claude")),
+                (3, bool(self._sess_folder(row)))):
             self._sess_menu.entryconfigure(
                 index, state=tk.NORMAL if enabled else tk.DISABLED)
         try:
@@ -839,12 +902,10 @@ class TasksController(UiPumpMixin):
         row = self._sess_rows.get(iid)
         if not row or not self._sess_can_hand_off(iid, target):
             return
-        _name, exe_key, cli_name = _HANDOFF[target]
-        if not getattr(self._cfg, exe_key):
-            messagebox.showerror(
-                f"{cli_name} not found",
-                f"Install the {cli_name}, or set its path in Settings, "
-                "then try again.", parent=self._tab)
+        missing = _launcher_missing(self._cfg, target)
+        if missing:
+            messagebox.showerror(f"{_HANDOFF[target][2]} not found", missing,
+                                 parent=self._tab)
             return
 
         def _locate() -> None:
@@ -858,17 +919,14 @@ class TasksController(UiPumpMixin):
 
     def _sess_handoff_confirm(self, row: dict, project: str,
                               target: str = "cursor") -> None:
-        from helpers.agent_handoff import HANDOFF_DIR
         from helpers.claude_tasks import FOLDER_REMOVED, resolve_session_folder
-        name = _HANDOFF[target][0]
         source = "Cursor" if (row.get("agent") == "cursor") else "Claude"
-        service = "Cursor's service" if target == "cursor" else "Anthropic"
         found = resolve_session_folder(project)
         if not found.path:
             messagebox.showerror(
                 "Cannot continue this session",
                 "The folder this session ran in could not be found, so there "
-                f"is nowhere to open {name}.\n\n%s" % (project or "(unknown)"),
+                f"is nowhere to open {_HANDOFF[target][0]}.\n\n%s" % (project or "(unknown)"),
                 parent=self._tab)
             return
         moved = ""
@@ -878,17 +936,9 @@ class TasksController(UiPumpMixin):
                      "that repository as it is now.\n\n" % found.recorded)
         project = found.path
         if not messagebox.askyesno(
-                f"Continue in {name}",
-                moved +
-                f"Open {name}'s agent in:\n%s\n\nwith notes from the {source} "
-                "session \"%s\"?\n\nThis writes a brief to %s\\ (git-ignored, "
-                "this machine only) holding your prompts from that session, "
-                f"secrets masked on a best-effort basis, plus {source}'s last "
-                "message and the repository state now. "
-                f"{name} will read it, which sends its contents to {service}."
-                f"\n\nThis is a handoff, not an import: {source}'s memory and "
-                "the full transcript do not come across."
-                % (project, row.get("title") or "untitled", HANDOFF_DIR),
+                f"Continue in {_HANDOFF[target][0]}",
+                _handoff_prompt(target, source, project,
+                                row.get("title") or "untitled", moved),
                 parent=self._tab):
             return
 
@@ -904,8 +954,14 @@ class TasksController(UiPumpMixin):
 
     def _sess_handoff_launch(self, prepared, target: str = "cursor") -> None:
         from helpers import agent_cli
-        from helpers.agent_handoff import launch_claude, launch_cursor
-        if target == "claude":
+        from helpers.agent_handoff import (
+            launch_claude, launch_cursor, open_in_cursor_app)
+        if target == "cursor_app":
+            ok, err, message = open_in_cursor_app(prepared)
+            if ok:
+                _show_app_message(self._tab, message)
+                return
+        elif target == "claude":
             ok, err = launch_claude(prepared, self._cfg.claude_cli_exe)
         else:
             ok, err = launch_cursor(
