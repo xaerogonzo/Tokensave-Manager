@@ -316,3 +316,49 @@ def test_open_in_cursor_app_with_no_folder_does_nothing(monkeypatch):
     ctrl._sess_tree = _SelTree(("sess:claude:w",))
     ctrl._sess_rows = {"sess:claude:w": {"cwd": ""}}
     ctrl._sess_open_in_cursor_app()
+
+
+# -- a session whose worktree was removed -----------------------------------------
+
+def _removed_worktree(tmp_path):
+    repo = tmp_path / "Repo"
+    (repo / ".git").mkdir(parents=True)
+    wt = repo / ".claude" / "worktrees" / "wt"
+    wt.mkdir(parents=True)                      # the empty leftover: it "exists"
+    return repo, wt
+
+
+def test_a_removed_worktree_continues_in_its_repository_and_says_so(handoff, tmp_path):
+    ctrl, log = handoff
+    repo, wt = _removed_worktree(tmp_path)
+    log.cwd = str(wt)
+    ctrl._sess_continue_in_cursor()
+    assert "was removed" in log.asked[0] and str(wt) in log.asked[0]
+    assert log.prepared == [("abc", str(repo), "claude")]
+    assert log.launched == [(str(repo), "agent.cmd")]
+    assert not log.errors
+
+
+def test_a_removed_worktree_asks_before_writing_anything(handoff, tmp_path):
+    ctrl, log = handoff
+    repo, wt = _removed_worktree(tmp_path)
+    log.cwd = str(wt)
+    log.answer = False
+    ctrl._sess_continue_in_cursor()
+    assert log.asked and not log.prepared and not log.launched
+
+
+def test_a_worktree_with_no_repository_behind_it_is_still_an_error(handoff, tmp_path):
+    ctrl, log = handoff
+    wt = tmp_path / "Repo" / ".claude" / "worktrees" / "wt"
+    wt.mkdir(parents=True)
+    log.cwd = str(wt)
+    ctrl._sess_continue_in_cursor()
+    assert log.errors and not log.asked and not log.prepared
+
+
+def test_the_empty_leftover_is_not_a_present_folder_for_the_row(tmp_path):
+    ctrl = _controller()
+    repo, wt = _removed_worktree(tmp_path)
+    ctrl._sess_rows = {"a": {"cwd": str(wt)}}
+    assert ctrl._sess_folder("a") == ""

@@ -800,8 +800,9 @@ class TasksController(UiPumpMixin):
         """The folder a session ran in, from its own record. `""` when the
         record has none or the folder is gone: a name is never turned back
         into a path (the encoded folder name is lossy)."""
-        cwd = (self._sess_rows.get(iid) or {}).get("cwd") or ""
-        return cwd if cwd and os.path.isdir(cwd) else ""
+        from helpers.claude_tasks import FOLDER_OK, resolve_session_folder
+        found = resolve_session_folder((self._sess_rows.get(iid) or {}).get("cwd") or "")
+        return found.path if found.state == FOLDER_OK else ""
 
     def _sess_right_click(self, event: tk.Event) -> None:
         row = self._sess_tree.identify_row(event.y)
@@ -858,18 +859,27 @@ class TasksController(UiPumpMixin):
     def _sess_handoff_confirm(self, row: dict, project: str,
                               target: str = "cursor") -> None:
         from helpers.agent_handoff import HANDOFF_DIR
+        from helpers.claude_tasks import FOLDER_REMOVED, resolve_session_folder
         name = _HANDOFF[target][0]
         source = "Cursor" if (row.get("agent") == "cursor") else "Claude"
         service = "Cursor's service" if target == "cursor" else "Anthropic"
-        if not project or not os.path.isdir(project):
+        found = resolve_session_folder(project)
+        if not found.path:
             messagebox.showerror(
                 "Cannot continue this session",
                 "The folder this session ran in could not be found, so there "
                 f"is nowhere to open {name}.\n\n%s" % (project or "(unknown)"),
                 parent=self._tab)
             return
+        moved = ""
+        if found.state == FOLDER_REMOVED:
+            moved = ("The checkout this session ran in was removed (%s), "
+                     "so its repository is used instead. The brief describes "
+                     "that repository as it is now.\n\n" % found.recorded)
+        project = found.path
         if not messagebox.askyesno(
                 f"Continue in {name}",
+                moved +
                 f"Open {name}'s agent in:\n%s\n\nwith notes from the {source} "
                 "session \"%s\"?\n\nThis writes a brief to %s\\ (git-ignored, "
                 "this machine only) holding your prompts from that session, "
