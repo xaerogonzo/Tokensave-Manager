@@ -208,8 +208,8 @@ def scan_sessions(known_paths: list[str], limit: int = 50) -> list[dict]:
     the top `limit` files (read first 30 lines each to find the ai-title event).
 
     Returned dicts have keys:
-      session_id, title, project_encoded, project_display, last_activity (float),
-      is_recent (bool: mtime within last 5 minutes), path (the transcript file --
+      session_id, title, project_encoded, project_display, branch, last_activity
+      (float), is_recent (bool: mtime within last 5 minutes), path (the transcript file --
       a session id is not unique on disk, so a caller that needs THE file must
       not rebuild its name from the id).
     """
@@ -244,19 +244,26 @@ def scan_sessions(known_paths: list[str], limit: int = 50) -> list[dict]:
     now = _time.time()
     sessions: list[dict] = []
 
+    # Lazy: live_sessions imports this module.
+    from helpers.live_sessions import read_tail_meta
+
     for file_path, mtime, encoded in candidates:
-        session_id, title = _extract_session_meta(file_path)
-        cwd = transcript_cwd(file_path)
+        session_id, head_title = _extract_session_meta(file_path)
+        # The tail first: the name the desktop app shows, the folder the session
+        # is in NOW and its branch. The head is the fallback, not the answer.
+        meta = read_tail_meta(file_path)
+        cwd = meta["cwd"] or transcript_cwd(file_path)
         if session_id is None:
             session_id = os.path.splitext(os.path.basename(file_path))[0]
-        if title is None:
-            title = "(untitled)"
+        title = meta["title"] or head_title or "(untitled)"
         sessions.append(
             {
                 "session_id": session_id,
                 "title": title,
                 "project_encoded": encoded,
-                "project_display": _display_for(encoded, cwd, known_paths),
+                "project_display": _with_branch(
+                    _display_for(encoded, cwd, known_paths), meta["branch"]),
+                "branch": meta["branch"],
                 "cwd": cwd,
                 "last_activity": mtime,
                 "is_recent": (now - mtime) < 300,
@@ -264,6 +271,12 @@ def scan_sessions(known_paths: list[str], limit: int = 50) -> list[dict]:
             }
         )
     return sessions
+
+
+def _with_branch(display: str, branch: str) -> str:
+    """`<project> @ <branch>`: the branch is what the desktop app's environment
+    panel shows, so it is the one thing that lets a row be matched to a session."""
+    return f"{display} @ {branch}" if branch else display
 
 
 def _display_for(encoded: str, cwd: str, known_paths: list[str]) -> str:
