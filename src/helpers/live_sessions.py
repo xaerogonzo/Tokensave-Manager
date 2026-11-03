@@ -387,14 +387,49 @@ def read_title(path: str) -> str:
 
     `customTitle` (a `custom-title` entry) is what the sidebar shows and is the
     newest rename; `aiTitle` is the generated one. The head-of-file title the
-    history list reads is only the last resort: in these transcripts it was
-    present for 1 of 8, which is why that list is mostly "(untitled)".
+    history list used to read was present for 1 of 8 transcripts, which made
+    that list mostly "(untitled)"; it now reads the tail too (`read_tail_meta`),
+    and the head is only the last resort.
     """
     for key in ("customTitle", "aiTitle"):
         found = _latest(path, key, _TITLE_TAIL_BYTES)
         if found:
             return found
     return _extract_session_meta(path)[1] or ""
+
+
+#: One read of the tail for the history list. `custom-title` records recur every
+#: few dozen lines in a long transcript (measured: every ~17), so this is ample.
+_META_TAIL_BYTES = 256 * 1024
+
+
+def read_tail_meta(path: str, tail_bytes: int = _META_TAIL_BYTES) -> dict:
+    """`{"title", "cwd", "branch"}` from ONE read of the tail of *path*; "" for any
+    the tail does not hold.
+
+    The newest of each, because a long session moves: the one measured started in
+    one worktree, continued in another from line 7,044 and passed through 28
+    branches. A head read gave the history list a folder that no longer exists, a
+    stale or missing title, and no way to tell the row from its sibling. `title` is
+    the newest `customTitle` (what the desktop app's sidebar shows), else the newest
+    `aiTitle`. `branch` skips `HEAD`, which a detached or mid-rebase record writes.
+    """
+    custom = ai = cwd = branch = ""
+    for line in _tail_lines(path, tail_bytes):
+        try:
+            obj = json.loads(line)
+        except ValueError:
+            continue
+        if not isinstance(obj, dict):
+            continue
+        custom = custom or str(obj.get("customTitle") or "")
+        ai = ai or str(obj.get("aiTitle") or "")
+        cwd = cwd or str(obj.get("cwd") or "")
+        named = str(obj.get("gitBranch") or "")
+        branch = branch or ("" if named == "HEAD" else named)
+        if custom and cwd and branch:
+            break
+    return {"title": custom or ai, "cwd": cwd, "branch": branch}
 
 
 # -- orchestration ---------------------------------------------------------
