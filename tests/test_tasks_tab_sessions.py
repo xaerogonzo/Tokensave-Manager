@@ -9,6 +9,7 @@ The list is the place that must not raise.
 No Tk window is created: the controller is built without `__init__` and given
 a stand-in tree that refuses a duplicate iid exactly as ttk.Treeview does.
 """
+import os
 import tkinter as tk
 
 from controllers.tasks_tab import TasksController
@@ -362,3 +363,93 @@ def test_the_empty_leftover_is_not_a_present_folder_for_the_row(tmp_path):
     repo, wt = _removed_worktree(tmp_path)
     ctrl._sess_rows = {"a": {"cwd": str(wt)}}
     assert ctrl._sess_folder("a") == ""
+
+
+# -- Continue in the Cursor APP: open the folder, hand back a message to paste ----
+
+@pytest.fixture
+def app_handoff(handoff, monkeypatch):
+    ctrl, log = handoff
+    import helpers.agent_handoff as ah
+    import helpers.cursor_ide as ci
+    log.infos, log.clip, log.opened = [], [], []
+    log.exe = "C:/Cursor/Cursor.exe"
+    # A real brief path is absolute and inside the project, as `prepare` returns it.
+    monkeypatch.setattr(ah, "prepare", lambda row, proj, git, source="claude": (
+        log.prepared.append((row["session_id"], proj, source)) or ah.Prepared(
+            True, os.path.join(proj, ".tokensave", "handoffs", "abc.md"), proj, 1)))
+    monkeypatch.setattr(ci, "find_cursor_exe", lambda: log.exe)
+    monkeypatch.setattr(ci, "open_folder", lambda folder, exe="": (
+        log.opened.append(folder) or (True, "")))
+    monkeypatch.setattr(tasks_tab.messagebox, "showinfo",
+                        lambda title, msg, **k: log.infos.append(msg))
+    ctrl._tab = types.SimpleNamespace(
+        clipboard_clear=lambda: log.clip.clear(),
+        clipboard_append=lambda text: log.clip.append(text))
+    return ctrl, log, ah
+
+
+def test_the_app_option_opens_the_folder_and_puts_the_message_on_the_clipboard(app_handoff, tmp_path):
+    ctrl, log, ah = app_handoff
+    log.cwd = str(tmp_path)
+    ctrl._sess_hand_off("cursor_app")
+    assert log.opened == [str(tmp_path)]
+    assert len(log.clip) == 1 and ".tokensave" in log.clip[0] and "abc.md" in log.clip[0]
+    assert log.clip[0] in log.infos[0]                    # also shown, so a refused clipboard loses nothing
+    assert not log.errors and not log.launched            # no terminal agent was started
+
+
+def test_the_app_confirmation_says_the_agent_starts_when_you_paste(app_handoff, tmp_path):
+    ctrl, log, ah = app_handoff
+    log.cwd = str(tmp_path)
+    ctrl._sess_hand_off("cursor_app")
+    text = log.asked[0]
+    assert "Cursor app" in text and "clipboard" in text and "new chat" in text
+    assert "not an import" in text and "Cursor's service" in text
+
+
+def test_declining_the_app_option_writes_and_opens_nothing(app_handoff, tmp_path):
+    ctrl, log, ah = app_handoff
+    log.cwd = str(tmp_path)
+    log.answer = False
+    ctrl._sess_hand_off("cursor_app")
+    assert not log.prepared and not log.opened and not log.clip
+
+
+def test_the_app_option_needs_the_app_not_the_cli(app_handoff, tmp_path):
+    ctrl, log, ah = app_handoff
+    log.cwd = str(tmp_path)
+    log.exe = ""
+    ctrl._cfg.cursor_cli_exe = "agent.cmd"                # the CLI being present does not help
+    ctrl._sess_hand_off("cursor_app")
+    assert log.errors and "Cursor.exe was not found" in log.errors[0][1]
+    assert not log.asked and not log.prepared
+
+
+def test_a_refused_clipboard_still_shows_the_message(app_handoff, tmp_path):
+    import tkinter as tk
+    ctrl, log, ah = app_handoff
+    log.cwd = str(tmp_path)
+
+    def refuse():
+        raise tk.TclError("clipboard busy")
+    ctrl._tab = types.SimpleNamespace(clipboard_clear=refuse, clipboard_append=lambda t: None)
+    ctrl._sess_hand_off("cursor_app")
+    assert "could not be copied" in log.infos[0] and "abc.md" in log.infos[0]
+
+
+def test_only_claude_rows_are_offered_the_app_option():
+    ctrl = _controller()
+    ctrl._update_sess_tree([_row("a", "p", 2.0), _row("b", "p", 1.0, agent="cursor")])
+    assert ctrl._sess_can_hand_off("sess:claude:a", "cursor_app") is True
+    assert ctrl._sess_can_hand_off("sess:cursor:b", "cursor_app") is False
+
+
+def test_a_failed_open_is_reported_and_leaves_the_clipboard_alone(app_handoff, tmp_path, monkeypatch):
+    ctrl, log, ah = app_handoff
+    import helpers.cursor_ide as ci
+    log.cwd = str(tmp_path)
+    monkeypatch.setattr(ci, "open_folder", lambda folder, exe="": (False, "could not start"))
+    ctrl._sess_hand_off("cursor_app")
+    assert log.errors and "could not start" in log.errors[0][1]
+    assert not log.clip and not log.infos

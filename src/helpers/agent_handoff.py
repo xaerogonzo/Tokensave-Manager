@@ -35,7 +35,7 @@ import re
 import subprocess
 
 from constants import CREATE_NO_WINDOW
-from helpers import agent_cli
+from helpers import agent_cli, cursor_ide
 from helpers.session_context import (find_cursor_transcript,
                                      scan_cursor_transcript, scan_transcript)
 
@@ -323,6 +323,23 @@ def launch_cursor(prepared: Prepared, exe: str, model: str = "") -> "tuple[bool,
     rel = os.path.relpath(prepared.brief_path, prepared.project_path)
     return agent_cli.spawn(agent_cli.CURSOR, exe, prepared.project_path,
                            instruction_for(rel), model)
+
+
+def open_in_cursor_app(prepared: Prepared, source: str = "claude",
+                       exe: str = "") -> "tuple[bool, str, str]":
+    """Open the project in the Cursor APP and return `(ok, error, message)`.
+
+    The app's agent cannot be started from outside, so this does what can be done:
+    open the folder, and hand back the one message to paste into a new chat there.
+    That message points the agent at the brief exactly as the terminal launch does.
+    """
+    if not prepared.ok:
+        return False, prepared.error, ""
+    ok, err = cursor_ide.open_folder(prepared.project_path, exe)
+    if not ok:
+        return False, err, ""
+    rel = os.path.relpath(prepared.brief_path, prepared.project_path)
+    return True, "", instruction_for(rel, source)
 
 
 def launch_claude(prepared: Prepared, exe: str, source: str = "cursor") -> "tuple[bool, str]":
