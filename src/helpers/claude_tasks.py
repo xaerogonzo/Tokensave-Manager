@@ -1,6 +1,7 @@
 """Pure functions for scanning Claude Code sessions and git worktrees."""
 from __future__ import annotations
 
+import dataclasses
 import json
 import os
 import re
@@ -65,6 +66,60 @@ def worktree_label(cwd: str) -> str:
         if repo and name:
             return f"{repo} (worktree {name})"
     return norm.rsplit("/", 1)[-1] or (cwd or "")
+
+
+#: `<repo>/.claude/worktrees/<name>`: where Claude Code makes a session's own checkout.
+_WORKTREE_PATH = re.compile(
+    r"^(?P<repo>.+?)[\\/]\.claude[\\/]worktrees[\\/][^\\/]+", re.IGNORECASE)
+
+#: The folder a session ran in is there and usable.
+FOLDER_OK = "ok"
+#: A Claude worktree that is no longer a checkout (finished and removed, so the
+#: path is gone or an empty leftover) while its repository is still there.
+FOLDER_REMOVED = "removed"
+#: Nothing usable, and nothing to say it moved: never guessed at.
+FOLDER_MISSING = "missing"
+
+
+@dataclasses.dataclass(frozen=True)
+class SessionFolder:
+    state: str
+    #: The folder to open: the session's own when OK, its repository when REMOVED,
+    #: else "".
+    path: str
+    recorded: str
+
+
+def _is_git_root(path: str) -> bool:
+    """`.git` is a directory in a clone and a file in a worktree, so it is existence
+    that counts (the project's rule for `_is_local_git_repo`)."""
+    return os.path.isdir(path) and os.path.exists(os.path.join(path, ".git"))
+
+
+def resolve_session_folder(cwd: str) -> SessionFolder:
+    """Where a session can be continued, from the folder it recorded.
+
+    `os.path.isdir` alone calls a removed worktree present: Claude leaves the
+    empty directory behind, git no longer lists it, and a handoff would open an
+    empty folder (with a "repository state now" read from whatever repository
+    sits above it). Inside `.claude/worktrees/<name>` a folder counts only while
+    it holds a `.git`. When it does not and the repository itself is still a git
+    checkout, the repository is the fallback, and the caller is told it is one.
+    Elsewhere nothing is inferred: a folder is there or it is MISSING.
+    """
+    if not cwd:
+        return SessionFolder(FOLDER_MISSING, "", "")
+    found = _WORKTREE_PATH.match(cwd)
+    if not found:
+        return (SessionFolder(FOLDER_OK, cwd, cwd) if os.path.isdir(cwd)
+                else SessionFolder(FOLDER_MISSING, "", cwd))
+    if _is_git_root(found.group(0)):
+        return (SessionFolder(FOLDER_OK, cwd, cwd) if os.path.isdir(cwd)
+                else SessionFolder(FOLDER_MISSING, "", cwd))
+    repo = found.group("repo")
+    if _is_git_root(repo):
+        return SessionFolder(FOLDER_REMOVED, repo, cwd)
+    return SessionFolder(FOLDER_MISSING, "", cwd)
 
 
 def transcript_cwd(path: str) -> str:
@@ -220,7 +275,10 @@ def _display_for(encoded: str, cwd: str, known_paths: list[str]) -> str:
     """
     shown = decode_project_path(encoded, known_paths)
     if shown == encoded and cwd:
-        return worktree_label(cwd)
+        label = worktree_label(cwd)
+        if resolve_session_folder(cwd).state == FOLDER_REMOVED:
+            label += " - checkout removed"
+        return label
     return shown
 
 
