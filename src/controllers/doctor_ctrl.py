@@ -929,6 +929,18 @@ class DoctorController:
         was verified against is a fact worth knowing, not a defect in a project.
         """
         from helpers import agent_integration as integ
+        from helpers import claude_pretooluse as cpt
+
+        restored = cpt.restore_after_doctor(self._cfg)
+        if restored.error:
+            self._on_log(
+                "  ⚠ could not restore quoted PreToolUse: " + restored.error,
+                C["peach"])
+        elif restored.changed:
+            self._on_log(
+                "  ✓ tokensave doctor rewrote PreToolUse to command+args; "
+                "put the quoted form back so Cursor sees the subcommand.",
+                C["green"])
         notes = [c for c in integ.run_checks(self._cfg) if c.state != integ.PASS]
         if not notes:
             return

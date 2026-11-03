@@ -89,7 +89,7 @@ Token Save Manager Source/
 │   │                              Runs beside a real Manager through scripts/drive/run_isolated.py
 │   │                              (scratch config, no lock, no request poller, no tray).
 │   │
-│   ├── helpers/                  157 modules of pure / IO helpers — no UI deps.
+│   ├── helpers/                  158 modules of pure / IO helpers — no UI deps.
 │   │   ├── config.py              _load_config, _save_config, _migrate_config
 │   │   ├── detection.py           _detect_git/_gh/_npm/_codegraph/_claude_cli,
 │   │   │                          _root_path/_label, _version_lt
@@ -241,6 +241,9 @@ Token Save Manager Source/
 │   │   ├── agent_integration.py   Is the Claude/Cursor setup still standing? Free, three-valued
 │   │   │                          checks (+ UNKNOWN): CLI versions vs the dated VERIFIED table, routing,
 │   │   │                          tokensave hooks in ~/.claude/settings.json, the Cursor hook. Never repairs
+│   │   ├── claude_pretooluse.py   After tokensave doctor rewrites Claude PreToolUse to command+args
+│   │   │                          (Cursor drops args), put one quoted command string back. Cursor CLI
+│   │   │                          configured only; Stop / UserPromptSubmit stay as args. Backup first.
 │   │   ├── agent_presets.py       Named combinations of the integration switches. A diff shown first,
 │   │   │                          detection DERIVED (never stored), never reaches outside the Manager's config
 │   │   ├── agent_handoff.py       Claude <-> Cursor session -> brief for the other agent

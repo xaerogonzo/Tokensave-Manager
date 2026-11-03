@@ -771,9 +771,12 @@ afterwards, because it reads hooks when it starts.
 **Do this again after every tokensave upgrade.** The installer writes the unquoted
 form again each time. The Manager writes a warning line to the output log when it
 starts, and again when a tokensave upgrade finishes, if the hooks are broken. The
-**Check Claude/Cursor setup** button reports it as a failure, and Doctor lists it
-under "Claude / Cursor integration". It is a log line, not a pop-up, and it repairs
-nothing by itself.
+**Check Claude/Cursor setup** button reports it as a failure.
+
+`tokensave doctor` also rewrites Claude's PreToolUse hook to `command` plus `args`,
+which Cursor's agent drops. When a Cursor CLI is configured, the Manager's Doctor
+puts the quoted one-string form back after that run so shell calls keep working.
+Restart Cursor afterwards, because it reads hooks when it starts.
 
 **3. Put the rules into each project.** Cursor loads `AGENTS.md`, which carries the
 same baseline Claude gets through `CLAUDE.md`, plus a short rule that points at it.
