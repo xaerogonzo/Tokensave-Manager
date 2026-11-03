@@ -175,6 +175,43 @@ def test_an_unreadable_settings_file_is_unknown(tmp_path):
     assert integ.check_claude_hooks(str(tmp_path / "absent.json"), True).state == integ.PASS
 
 
+def test_restore_quotes_pretooluse_args_form_and_leaves_other_events(tmp_path, spaced_exe):
+    from helpers import claude_pretooluse as cpt
+    path = _settings(tmp_path, {
+        "PreToolUse": [_entry(spaced_exe, ["hook-pre-tool-use"])],
+        "Stop": [_entry(spaced_exe, ["hook-stop"])],
+    })
+    got = cpt.restore_quoted_pretooluse(path)
+    assert got.ok and got.changed and os.path.exists(got.backup)
+    data = json.loads(open(path, encoding="utf-8").read())
+    pre = data["hooks"]["PreToolUse"][0]["hooks"][0]
+    assert "args" not in pre
+    assert pre["command"] == '"%s" hook-pre-tool-use' % spaced_exe
+    stop = data["hooks"]["Stop"][0]["hooks"][0]
+    assert stop.get("args") == ["hook-stop"]
+    assert integ.check_claude_hooks(path, cursor_present=True).state == integ.PASS
+
+
+def test_restore_is_a_no_op_when_pretooluse_is_already_quoted(tmp_path, spaced_exe):
+    from helpers import claude_pretooluse as cpt
+    path = _settings(tmp_path, {
+        "PreToolUse": [_entry('"%s" hook-pre-tool-use' % spaced_exe)],
+    })
+    before = open(path, encoding="utf-8").read()
+    got = cpt.restore_quoted_pretooluse(path)
+    assert got.ok and not got.changed and not got.backup
+    assert open(path, encoding="utf-8").read() == before
+
+
+def test_restore_refuses_malformed_settings(tmp_path):
+    from helpers import claude_pretooluse as cpt
+    path = tmp_path / "settings.json"
+    path.write_text("{broken", encoding="utf-8")
+    got = cpt.restore_quoted_pretooluse(str(path))
+    assert not got.ok and "unreadable" in got.error
+    assert path.read_text(encoding="utf-8") == "{broken"
+
+
 # -- the Cursor session-end hook -------------------------------------------------------
 
 def test_cursor_hook_states_against_the_handoff_switch():
@@ -384,3 +421,33 @@ def test_doctor_prints_only_what_is_not_passing_with_its_fix(monkeypatch):
     assert "alpha" not in joined
     assert "[warn] beta: drifted  -> re-run it" in joined
     assert "[unknown] gamma" in joined
+
+
+def _restore_calls(monkeypatch, cfg, checks=None):
+    from controllers.doctor_ctrl import DoctorController
+    from helpers import claude_pretooluse as cpt
+    called = []
+
+    def fake_restore(path=""):
+        called.append(path)
+        return cpt.RestoreResult(ok=True)
+
+    monkeypatch.setattr(cpt, "restore_quoted_pretooluse", fake_restore)
+    monkeypatch.setattr(integ, "run_checks", lambda _cfg: checks or [])
+    lines = []
+    stub = types.SimpleNamespace(
+        _cfg=cfg, _on_log=lambda text, colour=None: lines.append(text))
+    DoctorController._log_agent_integration(stub)
+    return called, lines
+
+
+def test_doctor_restores_quoted_pretooluse_only_when_cursor_is_configured(monkeypatch):
+    called, _lines = _restore_calls(
+        monkeypatch, types.SimpleNamespace(cursor_cli_exe="C:/cursor-agent.exe"))
+    assert len(called) == 1
+
+
+def test_doctor_skips_pretooluse_restore_without_a_cursor_cli(monkeypatch):
+    called, _lines = _restore_calls(
+        monkeypatch, types.SimpleNamespace(cursor_cli_exe=""))
+    assert called == []

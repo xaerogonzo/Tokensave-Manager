@@ -215,8 +215,9 @@ def check_claude_hooks(settings_path: str, cursor_present: bool) -> Check:
                      "the PreToolUse hook uses the command+args form, which "
                      "Claude Code runs but Cursor's agent reads without the "
                      "args; that was measured to break Cursor's shell calls",
-                     "put the arguments inside one quoted command string "
-                     "(a reviewed edit)")
+                     "Doctor puts the quoted form back after tokensave "
+                     "doctor; or put the arguments inside one quoted "
+                     "command string")
     note = (f"; {', '.join(a for a in args_only)} use the args form (no effect "
             f"observed)") if args_only and cursor_present else ""
     return Check("claude_hooks", label, PASS,
