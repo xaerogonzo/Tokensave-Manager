@@ -479,6 +479,8 @@ Every manager setting, in five pages. It is a tab rather than a dialog: it is th
 | **Paths & Tools** | tokensave, template dir, editor, git, Claude Code CLI, Cursor Agent CLI, GitHub CLI — plus the Tool, Extension and Test Managers |
 | **Projects** | search roots: the folders scanned for projects, and the label each one contributes as a category |
 | **Git & Policy** | auto-commit after sync, whether binding adds `.mcp.json` to `.gitignore`, the pre-commit smoke-test hook, and 🎛 Agent Policy |
+
+**Cursor rules are text-only.** Customize → Rules (Command Palette, not Settings → Agents) has no toggles. The sentence “only create commits when requested” is a Cursor **runtime default** (agent-exec, 3.29.x), not a card in that list, and it has overridden workspace `AGENTS.md`. Agent Policy still compiles git permission into the baseline / `AGENTS.md`; Apply also upserts a `TokenSave git policy` User Rule from the same policy, or pastes that card into the log when Cursor’s titled-rule store is not a writable local file. See `docs/superpowers/specs/2026-11-06-cursor-user-rules-policy-sync-design.md`.
 | **AI** | backend selection, commit-message and Ask-tab providers, grounding toggles, the Ollama model manager |
 | **Integrations** | CodeGraph, PyScope, and the MCP wiring configurator |
 
