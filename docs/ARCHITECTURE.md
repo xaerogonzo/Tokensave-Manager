@@ -89,7 +89,7 @@ Token Save Manager Source/
 │   │                              Runs beside a real Manager through scripts/drive/run_isolated.py
 │   │                              (scratch config, no lock, no request poller, no tray).
 │   │
-│   ├── helpers/                  158 modules of pure / IO helpers — no UI deps.
+│   ├── helpers/                  159 modules of pure / IO helpers — no UI deps.
 │   │   ├── config.py              _load_config, _save_config, _migrate_config
 │   │   ├── detection.py           _detect_git/_gh/_npm/_codegraph/_claude_cli,
 │   │   │                          _root_path/_label, _version_lt
@@ -207,6 +207,10 @@ Token Save Manager Source/
 │   │   │                          so the baseline is INLINED into AGENTS.md (once; the .mdc points at it)
 │   │   ├── handoff_setup.py       Opt a project in/out of handoff for the Manager's windows; the one
 │   │   │                          definition of the command a rule names (shared with the CLI)
+│   │   ├── cursor_user_rules.py   Compiles Agent Policy into one Cursor User Rule card
+│   │   │                          (`TokenSave git policy`). Upserts a local JSON store when
+│   │   │                          TOKENSAVE_CURSOR_USER_RULES points at one; otherwise skip +
+│   │   │                          paste. Never writes Cursor.exe or state.vscdb.
 │   │   ├── cursor_hooks.py        The Cursor `sessionEnd` hook entry + generated script. The edit to
 │   │   │                          ~/.cursor/hooks.json is a pure plan shown as a diff first; backup before
 │   │   │                          write, a file that does not parse is refused, others' hooks preserved
@@ -747,7 +751,8 @@ Token Save Manager Source/
 │   │   │                          toggles. Reads ownership FIRST and refuses a
 │   │   │                          foreign install; shows policy delta above
 │   │   │                          artifact delta, fleet exposure in fleet units,
-│   │   │                          and never recompiles on open.
+│   │   │                          and never recompiles on open. Apply also
+│   │   │                          upserts (or pastes) the Cursor User Rule once.
 │   │   ├── instructions_overview.py InstructionsDialog - fleet instruction-chain view.
 │   │   ├── batch_commit.py        BatchCommitDialog - ONE prompt for what a bulk action wrote.
 │   │   │                          Shows what is provably ours per project, the exact

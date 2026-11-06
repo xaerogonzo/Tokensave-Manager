@@ -34,6 +34,7 @@ from typing import TYPE_CHECKING
 from constants import C
 from theme import UiPumpMixin
 from helpers import baseline_blocks as bb
+from helpers import cursor_user_rules as cur
 from helpers.instruction_policy import RENDERED_KEYS
 
 if TYPE_CHECKING:                                    # pragma: no cover
@@ -290,7 +291,9 @@ class InstructionComposerDialog(UiPumpMixin, tk.Toplevel):
             lines += ["", "The superseded hand-written instruction is still "
                           "present outside the managed blocks; Apply removes "
                           "that one line and nothing else."]
-        if not changed and not drifted and not bb.findings(current):
+        lines += ["", *cur.preview_lines(self._staged)]
+        pending_cursor = cur.needs_write(self._staged)
+        if not changed and not drifted and not bb.findings(current) and not pending_cursor:
             lines += ["", "Nothing to apply — the baseline already matches."]
             return "\n".join(lines), False
         return "\n".join(lines), True
@@ -347,6 +350,7 @@ class InstructionComposerDialog(UiPumpMixin, tk.Toplevel):
                 "those blocks is not touched.\n\nApply now?" % path,
                 parent=self):
             return
+        cursor_result = None
         try:
             with open(path, encoding="utf-8-sig", newline="") as handle:
                 current = handle.read()
@@ -360,6 +364,9 @@ class InstructionComposerDialog(UiPumpMixin, tk.Toplevel):
                 return
             _write_atomic(path, compiled)
             hook_error = self._reconcile_hook()
+            # Once per apply, not per Retrofit project. A skip does not roll
+            # back the baseline: they are different stores.
+            cursor_result = cur.apply(self._staged)
             if hook_error:
                 # The policy and baseline DID land; only the hook did not.
                 # Saying so beats a blanket "not applied" that would send the
@@ -372,14 +379,27 @@ class InstructionComposerDialog(UiPumpMixin, tk.Toplevel):
             return
 
         self._on_log("Agent policy applied to %s" % path, C["green"])
+        if cursor_result is not None:
+            colour = (C["peach"] if cursor_result.status == cur.STATUS_SKIPPED
+                      else C["green"])
+            self._on_log(cur.log_line(cursor_result), colour)
+            if (cursor_result.status == cur.STATUS_SKIPPED
+                    and cursor_result.paste):
+                self._on_log(cursor_result.paste)
         self._refresh()          # re-read from disk and re-report
+        extra = ""
+        if cursor_result is not None:
+            extra = "\n\n" + cur.log_line(cursor_result)
+            if cursor_result.status == cur.STATUS_SKIPPED:
+                extra += ("\nThe User Rule card text is in the log "
+                          "(Cursor's titled-rule store was not writable).")
         messagebox.showinfo(
             "Applied",
             "Policy saved and the baseline template recompiled.\n\nProjects "
             "load their own copy of the baseline, so a copy only carries this "
             "once it is updated. Claude Code reads instructions when a session "
             "starts, so running sessions keep the previous text until they are "
-            "restarted.", parent=self)
+            "restarted." + extra, parent=self)
         self._offer_copy_update()
 
     def _offer_copy_update(self) -> None:
