@@ -23,6 +23,17 @@ this module:
   nothing rather than guessing, because a wrong title is worse than a missing
   row — the user acts on what the row says.
 
+Desktop chats are a second source
+---------------------------------
+The Cursor DESKTOP app keeps no `meta.json`: its chats exist only as transcripts
+under ``~/.cursor/projects/<workspace>/agent-transcripts/`` (`cursor_transcript`).
+Measured on one machine: 74 transcripts, and the meta-only scan listed 49, missing
+every recent desktop chat. Those rows are merged in by chat id. A transcript does
+not record the folder it ran in, and Cursor's workspace folder name is lossy, so a
+chat's folder is RESOLVED, never decoded (see `resolve_workspace`): exactly one
+known folder, an inferred project, no match, or an ambiguity that is reported and
+never broken by picking one.
+
 Failure is open, and logged
 ---------------------------
 Nothing here raises into the UI. But "fail silently" would mean Cursor sessions
@@ -35,8 +46,10 @@ from __future__ import annotations
 
 import json
 import os
+import re
 import time
 
+from helpers import cursor_transcript as ct
 from helpers.mcp_paths import _same_project
 from helpers.runtime import log
 
@@ -220,8 +233,188 @@ def _row_from_meta(meta_path: str, mtime: float, chat_id: str,
     }
 
 
-def scan_cursor_sessions(known_paths: list, limit: int = 50) -> list:
-    """Recent Cursor CLI chats, newest first.
+# -- Desktop chats: transcripts, and the folder each one ran in ---------------
+
+#: How a transcript's workspace folder was resolved.
+RES_MATCHED = "matched"            # exactly one known folder has that name
+RES_PROJECT_ONLY = "project_only"  # a `_scratch` checkout of one known project
+RES_UNMATCHED = "unmatched"        # nothing known has that name
+RES_AMBIGUOUS = "ambiguous"        # several do; none is chosen
+
+#: The project's documented place for extra checkouts: `<drive>:\_scratch\<repo>-<sha>`.
+#: The only layout a project is INFERRED from; elsewhere a name is matched or it is not.
+_SCRATCH = re.compile(r"^[a-z]-scratch-(?P<rest>.+)$")
+
+#: Newest `limit` Cursor chats; a desktop user has many more than 50.
+DEFAULT_LIMIT = 200
+
+_TITLE_CACHE: dict = {}
+_TITLE_CACHE_MAX = 1000
+
+
+def _known_folders(known_paths: list) -> dict:
+    """`{normalised path: (path, project path)}`: every known project and each
+    worktree git has registered for it. Plain file reads, no git process: a
+    worktree's `.git/worktrees/<name>/gitdir` names its own `.git` file."""
+    found: dict = {}
+    for project in known_paths or []:
+        if not isinstance(project, str) or not project.strip():
+            continue
+        norm = os.path.normpath(project)
+        found.setdefault(os.path.normcase(norm), (norm, project))
+        registry = os.path.join(project, ".git", "worktrees")
+        try:
+            names = os.listdir(registry)
+        except OSError:
+            continue
+        for name in names:
+            try:
+                with open(os.path.join(registry, name, "gitdir"), encoding="utf-8") as fh:
+                    dotgit = fh.read().strip()
+            except OSError:
+                continue
+            folder = os.path.normpath(os.path.dirname(dotgit)) if dotgit else ""
+            if folder and os.path.isdir(folder):
+                found.setdefault(os.path.normcase(folder), (folder, project))
+    return found
+
+
+def resolve_workspace(project_dir: str, folders: dict, known_paths: list) -> dict:
+    """Which folder a Cursor workspace directory name stands for.
+
+    `{"state", "cwd", "project_path", "candidates"}`. `cwd` is set ONLY for an
+    exact match: Cursor's name collapses every separator, so it is compared with
+    the same collapse of KNOWN folders and never turned back into a path. Several
+    matches are `ambiguous`; taking the first or the newest would make the answer
+    depend on enumeration order and could send a handoff into the wrong checkout.
+    """
+    key = ct.encode_name(project_dir)
+    hits = {norm: pair for norm, pair in folders.items()
+            if ct.encode_name(pair[0]) == key}
+    if len(hits) == 1:
+        path, project = next(iter(hits.values()))
+        return {"state": RES_MATCHED, "cwd": path, "project_path": project,
+                "candidates": ()}
+    if len(hits) > 1:
+        return {"state": RES_AMBIGUOUS, "cwd": "", "project_path": "",
+                "candidates": tuple(sorted(pair[0] for pair in hits.values()))}
+    scratch = _SCRATCH.match(key)
+    if scratch:
+        rest = scratch.group("rest")
+        named: dict = {}
+        for project in known_paths or []:
+            if not isinstance(project, str):
+                continue
+            base = ct.encode_name(os.path.basename(os.path.normpath(project)))
+            if base and (rest == base or rest.startswith(base + "-")):
+                named.setdefault(base, {})[os.path.normcase(os.path.normpath(project))] = project
+        if named:
+            projects = named[max(named, key=len)]      # the most specific name
+            if len(projects) == 1:
+                return {"state": RES_PROJECT_ONLY, "cwd": "",
+                        "project_path": next(iter(projects.values())),
+                        "candidates": ()}
+            return {"state": RES_AMBIGUOUS, "cwd": "", "project_path": "",
+                    "candidates": tuple(sorted(projects.values()))}
+    return {"state": RES_UNMATCHED, "cwd": "", "project_path": "", "candidates": ()}
+
+
+def _base(path: str) -> str:
+    return os.path.basename(os.path.normpath(path)) or path
+
+
+def _display_for_resolution(res: dict, project_dir: str) -> str:
+    """What the Project column says. An inference is worded as one."""
+    state, cwd, project = res["state"], res["cwd"], res["project_path"]
+    if state == RES_MATCHED:
+        if os.path.normcase(os.path.normpath(cwd)) == os.path.normcase(os.path.normpath(project)):
+            return _base(project)
+        return f"{_base(project)} (worktree {_base(cwd)})"
+    if state == RES_PROJECT_ONLY:
+        return f"{_base(project)} (checkout not identified)"
+    if state == RES_AMBIGUOUS:
+        return f"{project_dir} (several matching folders)"
+    return project_dir
+
+
+def _title_of(transcript) -> str:
+    """The list title for one transcript, cached on what could change it."""
+    key = (transcript.path, transcript.mtime_ns, transcript.size)
+    if key not in _TITLE_CACHE:
+        if len(_TITLE_CACHE) >= _TITLE_CACHE_MAX:
+            _TITLE_CACHE.clear()
+        _TITLE_CACHE[key] = ct.title_from_query(ct.first_user_query(transcript.path))
+    return _TITLE_CACHE[key] or "(untitled)"
+
+
+def scan_cursor_transcripts(known_paths: list, limit: int = DEFAULT_LIMIT) -> list:
+    """Cursor desktop chats from their transcripts, newest first.
+
+    The same row shape as `scan_cursor_sessions`, plus ``path`` (the transcript a
+    handoff reads), ``resolution`` (how the folder was resolved) and
+    ``project_path`` (the known project it belongs to, or ""). One unreadable
+    transcript is one row less, never an aborted scan.
+    """
+    now = time.time()
+    folders = _known_folders(known_paths)
+    listed = ct.list_transcripts()[:limit]
+    live_keys = {(t.path, t.mtime_ns, t.size) for t in listed}
+    for stale in [k for k in _TITLE_CACHE if k not in live_keys]:
+        del _TITLE_CACHE[stale]
+    rows = []
+    for transcript in listed:
+        res = resolve_workspace(transcript.project_dir, folders, known_paths)
+        rows.append({
+            "session_id": transcript.session_id,
+            "title": _title_of(transcript),
+            "project_display": _display_for_resolution(res, transcript.project_dir),
+            "cwd": res["cwd"],
+            "last_activity": transcript.mtime,
+            "is_recent": (now - transcript.mtime) < _RECENT_SECONDS,
+            "agent": "cursor",
+            "path": transcript.path,
+            "resolution": res["state"],
+            "project_path": res["project_path"],
+        })
+    return rows
+
+
+def _usable_dir(path) -> bool:
+    return isinstance(path, str) and os.path.isabs(path) and os.path.isdir(path)
+
+
+def _merge(meta_row: dict, chat: dict, folders: dict, now: float) -> dict:
+    """One chat seen by both sources. Field by field:
+
+    title: the metadata's unless it has none. cwd: the metadata's while it names a
+    real directory, else the transcript's exact match, else the metadata's stale
+    value kept (a handoff re-checks it and names it in the error). last_activity:
+    the metadata's, always: it is the chat's own recorded time, while a
+    transcript's file time moves with a copy or a touch (the context window and
+    the ordering of existing consumers read it). path: the transcript. agent:
+    always cursor.
+    """
+    row = dict(meta_row)
+    row["path"] = chat["path"]
+    if row.get("title") in (None, "", "(untitled)"):
+        row["title"] = chat["title"]
+    if not _usable_dir(row.get("cwd")) and chat["resolution"] == RES_MATCHED:
+        row["cwd"] = chat["cwd"]
+        row["project_display"] = chat["project_display"]
+    row["is_recent"] = (now - row["last_activity"]) < _RECENT_SECONDS
+    if _usable_dir(row.get("cwd")):
+        norm = os.path.normcase(os.path.normpath(row["cwd"]))
+        row["resolution"] = RES_MATCHED
+        row["project_path"] = (folders.get(norm) or ("", chat["project_path"]))[1]
+    else:
+        row["resolution"] = chat["resolution"]
+        row["project_path"] = chat["project_path"]
+    return row
+
+
+def scan_cursor_sessions(known_paths: list, limit: int = DEFAULT_LIMIT) -> list:
+    """Recent Cursor chats, newest first: the terminal agent's (`meta.json`) and
+    the desktop app's (transcripts), merged by chat id.
 
     Returns the same dict shape as `claude_tasks.scan_sessions`, plus
     ``agent: "cursor"``:
@@ -229,20 +422,34 @@ def scan_cursor_sessions(known_paths: list, limit: int = 50) -> list:
         session_id, title, project_display, last_activity (float),
         is_recent (bool), agent
 
+    and, for a chat with a transcript, ``path``, ``resolution`` and
+    ``project_path`` (see `scan_cursor_transcripts`).
+
     Returns ``[]`` when Cursor has never been run, which is the state of any
     machine without it — not an error.
     """
-    root = _cursor_chats_dir()
-    if not os.path.isdir(root):
-        return []
-
     now = time.time()
-    sessions = [
-        row for row in (
-            _row_from_meta(meta_path, mtime, chat_id, known_paths, now)
-            for meta_path, mtime, chat_id in _iter_meta_files(root, limit)
-        )
-        if row is not None
-    ]
-    sessions.sort(key=lambda s: s["last_activity"], reverse=True)
-    return sessions
+    meta_rows = []
+    root = _cursor_chats_dir()
+    if os.path.isdir(root):
+        meta_rows = [
+            row for row in (
+                _row_from_meta(meta_path, mtime, chat_id, known_paths, now)
+                for meta_path, mtime, chat_id in _iter_meta_files(root, limit)
+            )
+            if row is not None
+        ]
+    chats = {row["session_id"]: row
+             for row in scan_cursor_transcripts(known_paths, limit)}
+    if not chats:
+        meta_rows.sort(key=lambda s: s["last_activity"], reverse=True)
+        return meta_rows
+
+    folders = _known_folders(known_paths)
+    merged = []
+    for row in meta_rows:
+        chat = chats.pop(row["session_id"], None)
+        merged.append(_merge(row, chat, folders, now) if chat else row)
+    merged.extend(chats.values())
+    merged.sort(key=lambda s: s["last_activity"], reverse=True)
+    return merged[:limit]

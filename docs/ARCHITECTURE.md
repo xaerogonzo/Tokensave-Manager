@@ -89,7 +89,7 @@ Token Save Manager Source/
 │   │                              Runs beside a real Manager through scripts/drive/run_isolated.py
 │   │                              (scratch config, no lock, no request poller, no tray).
 │   │
-│   ├── helpers/                  159 modules of pure / IO helpers — no UI deps.
+│   ├── helpers/                  160 modules of pure / IO helpers — no UI deps.
 │   │   ├── config.py              _load_config, _save_config, _migrate_config
 │   │   ├── detection.py           _detect_git/_gh/_npm/_codegraph/_claude_cli,
 │   │   │                          _root_path/_label, _version_lt
@@ -261,8 +261,15 @@ Token Save Manager Source/
 │   │   ├── mcp_cursor.py          .cursor/mcp.json (project + global). Five binding
 │   │   │                          states; malformed never collapses into absent. No
 │   │   │                          trust gate — Cursor has no equivalent
-│   │   ├── cursor_tasks.py        Cursor CLI chat sessions for the Tasks tab. Reads
-│   │   │                          meta.json only, never store.db; bounded + symlink-safe
+│   │   ├── cursor_transcript.py   Bounded reads of Cursor agent transcripts
+│   │   │                          (~/.cursor/projects/*/agent-transcripts): lists them
+│   │   │                          without opening, reads a capped head for the first
+│   │   │                          prompt. The low-level layer shared by discovery and
+│   │   │                          (next) the handoff digest; imports no UI or session code.
+│   │   ├── cursor_tasks.py        Cursor chat sessions for the Tasks tab: meta.json (terminal
+│   │   │                          agent) merged by id with the desktop app's transcripts,
+│   │   │                          whose folder is RESOLVED (matched / project_only /
+│   │   │                          unmatched / ambiguous), never decoded. Never store.db; bounded + symlink-safe
 │   │   │                          with ""outer"" multi-quote fix + \r\n strip (TTY safety).
 │   │   │                          call_claude_cli_print(model="", cwd=None) — non-interactive
 │   │   │                          --print path; model="" omits --model flag; cwd=~ isolates
