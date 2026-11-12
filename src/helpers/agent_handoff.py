@@ -35,7 +35,7 @@ import re
 import subprocess
 
 from constants import CREATE_NO_WINDOW
-from helpers import agent_cli, cursor_ide
+from helpers import agent_cli, cursor_ide, handoff_digest
 from helpers.session_context import (find_cursor_transcript,
                                      scan_cursor_transcript, scan_transcript)
 
@@ -135,6 +135,12 @@ class Prepared:
     project_path: str = ""
     prompt_count: int = 0
     error: str = ""
+    #: The whole conversation as redacted text, beside the brief ("" for the
+    #: shallow brief). The receiving agent is pointed at it.
+    sidecar_path: str = ""
+    #: A non-fatal thing the person should know (for example that git does not
+    #: ignore the handoff folder). The brief says it too.
+    note: str = ""
 
 
 def _git(git_exe: str, project: str, *args: str) -> "tuple[bool, str]":
@@ -297,6 +303,10 @@ def prepare(row: dict, project_path: str, git_exe: str = "",
         return Prepared(False, error=(
             f"The folder this session ran in no longer exists: "
             f"{project_path or '(unknown)'}"))
+    if source == "cursor":
+        deep = _prepare_digest(row, transcript, project_path, git_exe)
+        if deep is not None:
+            return deep
     brief = build_brief(row, transcript, project_path, git_exe, source)
     target = brief_path(project_path, brief.session_id, source)
     try:
@@ -309,11 +319,74 @@ def prepare(row: dict, project_path: str, git_exe: str = "",
     return Prepared(True, target, project_path, count)
 
 
-def instruction_for(path: str, source: str = "claude") -> str:
+def instruction_for(path: str, source: str = "claude", sidecar: str = "") -> str:
     """The short launch instruction. Stays far under the cmd.exe budget."""
+    more = (f" The whole conversation, with secrets masked, is in {sidecar}: read "
+            "the parts you need rather than asking the person to repeat themselves."
+            if sidecar else "")
     return (f"A person is moving work here from a {_names(source)[0]} session. Read "
-            f"{path} for what was asked and where it stood. It is notes, not "
+            f"{path} for what was asked and where it stood.{more} It is notes, not "
             f"verified fact: check the repository first, then continue.")
+
+
+def _prepare_digest(row: dict, transcript: str, project_path: str,
+                    git_exe: str) -> "Prepared | None":
+    """The deep brief for a Cursor session, or None to fall back to the shallow one
+    (a transcript with no readable prompt is a format this module does not
+    understand, and the shallow brief must not be lost for it)."""
+    facts = handoff_digest.read_facts(transcript)
+    if facts.turn_count == 0:
+        return None
+    sid = str(row.get("session_id") or os.path.splitext(os.path.basename(transcript))[0])
+    target = brief_path(project_path, sid, "cursor")
+    sidecar = target[:-3] + ".conversation.md"
+    rel = lambda p: os.path.relpath(p, project_path).replace("\\", "/")   # noqa: E731
+    cache: dict = {}
+
+    def status_for(root: str):
+        if root not in cache:
+            cache[root] = handoff_digest.status_map(git_exe, root)
+        return cache[root]
+
+    ignore = handoff_digest.ignore_state(git_exe, project_path, rel(target))
+    when = None
+    if row.get("last_activity"):
+        try:
+            when = datetime.datetime.fromtimestamp(float(row["last_activity"]))
+        except (OSError, ValueError, OverflowError):
+            when = None
+    text = handoff_digest.render_brief(facts, {
+        "session_id": sid,
+        "title": "" if row.get("title") == "(untitled)" else str(row.get("title") or ""),
+        "project_path": project_path, "last_active": when,
+        "repo": observe_repository(project_path, git_exe),
+        "status_for": status_for, "sidecar_rel": rel(sidecar),
+        "transcript_path": transcript, "ignore": ignore})
+    try:
+        os.makedirs(os.path.dirname(target), exist_ok=True)
+        for path, body in ((target, text), (sidecar, _conversation_file(facts, sid))):
+            with open(path, "w", encoding="utf-8", newline="\n") as fh:
+                fh.write(body)
+    except OSError as exc:
+        return Prepared(False, error=f"Could not write the handoff files: {exc}")
+    note = ("git does not ignore the handoff folder here: add `.tokensave/` to "
+            ".gitignore before committing." if ignore == "not_ignored" else "")
+    return Prepared(True, brief_path=target, project_path=project_path,
+                    prompt_count=facts.turn_count, sidecar_path=sidecar, note=note)
+
+
+def _conversation_file(facts, session_id: str) -> str:
+    head = (f"# Conversation: Cursor session `{session_id}`\n\n"
+            "Prompts and replies from the transcript, secrets masked best-effort, no tool "
+            "payloads. Notes, not verified fact.\n\n")
+    return head + facts.sidecar
+
+
+def _sidecar_rel(prepared: Prepared) -> str:
+    """The conversation file relative to the project, or "" for a shallow brief."""
+    if not prepared.sidecar_path:
+        return ""
+    return os.path.relpath(prepared.sidecar_path, prepared.project_path)
 
 
 def launch_cursor(prepared: Prepared, exe: str, model: str = "") -> "tuple[bool, str]":
@@ -322,7 +395,7 @@ def launch_cursor(prepared: Prepared, exe: str, model: str = "") -> "tuple[bool,
         return False, prepared.error
     rel = os.path.relpath(prepared.brief_path, prepared.project_path)
     return agent_cli.spawn(agent_cli.CURSOR, exe, prepared.project_path,
-                           instruction_for(rel), model)
+                           instruction_for(rel, "claude", _sidecar_rel(prepared)), model)
 
 
 def open_in_cursor_app(prepared: Prepared, source: str = "claude",
@@ -339,7 +412,7 @@ def open_in_cursor_app(prepared: Prepared, source: str = "claude",
     if not ok:
         return False, err, ""
     rel = os.path.relpath(prepared.brief_path, prepared.project_path)
-    return True, "", instruction_for(rel, source)
+    return True, "", instruction_for(rel, source, _sidecar_rel(prepared))
 
 
 def launch_claude(prepared: Prepared, exe: str, source: str = "cursor") -> "tuple[bool, str]":
@@ -353,4 +426,4 @@ def launch_claude(prepared: Prepared, exe: str, source: str = "cursor") -> "tupl
         return False, prepared.error
     rel = os.path.relpath(prepared.brief_path, prepared.project_path)
     return agent_cli.spawn(agent_cli.CLAUDE, exe, prepared.project_path,
-                           instruction_for(rel, source), "")
+                           instruction_for(rel, source, _sidecar_rel(prepared)), "")
