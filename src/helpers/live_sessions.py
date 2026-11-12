@@ -68,6 +68,11 @@ UNVERIFIED = "unverified"    # a server exists; its project is not established
 NO_SERVER = "none"           # no tokensave process under this session
 MULTIPLE = "multiple"        # more than one tokensave process under it
 
+#: Why a server is UNVERIFIED when tokensave did not state its project. A
+#: constant because the wording is matched by `server_text`, which shows it as
+#: "inferred" rather than repeating the sentence on every row.
+GUESS_DETAIL = "the server's project is a guess, not stated by tokensave"
+
 _TAIL_BYTES = 256 * 1024
 #: A title is written when set or renamed, not on every turn, so it can sit
 #: further from the end than the last folder does. Measured: present in the last
@@ -75,6 +80,7 @@ _TAIL_BYTES = 256 * 1024
 _TITLE_TAIL_BYTES = 1024 * 1024
 _MAX_DEPTH = 8
 _SESSION_FLAGS = ("--output-format stream-json", "--input-format stream-json")
+_WORKTREE = re.compile(r"^(.*?)[\\/]\.claude[\\/]worktrees[\\/][^\\/]+", re.IGNORECASE)
 _RESUME = re.compile(r"--resume=([0-9a-fA-F-]{36})")
 _MODEL = re.compile(r"--model=(\S+)")
 _EFFORT = re.compile(r"--effort=(\S+)")
@@ -141,8 +147,7 @@ class LiveSnapshot:
                     % (n, "" if n == 1 else "s", c[SERVING], c[OTHER_FOLDER],
                        c[UNVERIFIED] + c[MULTIPLE], c[NO_SERVER]))
         if self.strays:
-            line += "  ·  %d tokensave server%s under no running session" % (
-                len(self.strays), "" if len(self.strays) == 1 else "s")
+            line += "  ·  " + strays_text(len(self.strays))
         if self.servers_failed:
             line += "  ·  server list unavailable (%s)" % self.servers_failed
         return line
@@ -261,7 +266,7 @@ def classify_server(session_project: str, server_rows: list,
         return UNVERIFIED, pids, "", "the server list did not include this process"
     if info.attribution != AUTHORITATIVE or not info.project:
         return UNVERIFIED, pids, info.project or "", \
-            "the server's project is a guess, not stated by tokensave"
+            GUESS_DETAIL
     if not session_project:
         return UNVERIFIED, pids, info.project, "the session's folder could not be read"
     here, served = canonical(session_project), canonical(info.project)
@@ -310,7 +315,77 @@ def server_text(session: "LiveSession") -> str:
         return "✗ no tokensave server"
     if session.state == MULTIPLE:
         return "? %d servers" % len(session.server_pids)
+    if session.state == UNVERIFIED and session.detail == GUESS_DETAIL:
+        return "? " + serving_label(session.server_project, inferred=True)
     return "? %s" % (session.detail or "unconfirmed")
+
+
+def project_root(folder: str) -> str:
+    """The repository a session's folder belongs to; "" when the folder is unknown.
+
+    A Claude worktree (`<repo>/.claude/worktrees/<name>`) is reported under its
+    repository, because to a person it is the same project. Lexical: nothing is
+    read from disk, so a folder that no longer exists still groups.
+    """
+    if not folder:
+        return ""
+    hit = _WORKTREE.match(folder)
+    return (hit.group(1) if hit else folder).rstrip("\\/")
+
+
+def project_name(folder: str) -> str:
+    """The last path segment of the project, or "" when there is no folder."""
+    root = project_root(folder)
+    return os.path.basename(root) or root
+
+
+def serving_label(project: str, inferred: bool = False) -> str:
+    """`Serving - <project>`, never a bare "serving".
+
+    *inferred* is set when tokensave did not state the project: the Manager worked
+    it out, so the label says so. An unknown project says "folder unknown".
+    """
+    text = "Serving - %s" % (project_name(project) or "folder unknown")
+    return text + " (inferred)" if inferred else text
+
+
+def stray_text(stray: "StrayServer") -> str:
+    return serving_label(stray.project, inferred=stray.attribution != AUTHORITATIVE)
+
+
+def strays_text(count: int) -> str:
+    """Neutral: such a server may be idle, not orphaned."""
+    return "%d tokensave server%s not linked to a detected running session" % (
+        count, "" if count == 1 else "s")
+
+
+@dataclass(frozen=True)
+class LiveGroup:
+    key: str                 # canonical project root; "" for unknown folders
+    name: str                # what the group row shows
+    sessions: tuple = ()
+
+
+def group_sessions(sessions) -> list:
+    """Sessions grouped by project, groups by name (unknown last), oldest first.
+
+    Grouped on the canonical project root, so two spellings of one folder are one
+    group and two projects that share a basename stay two.
+    """
+    buckets: dict = {}
+    for session in sessions:
+        root = project_root(session.project)
+        buckets.setdefault(canonical(root) if root else "", []).append(session)
+    groups = [LiveGroup(key, project_name(items[0].project) or "(folder unknown)",
+                        tuple(sorted(items, key=lambda s: s.started_at)))
+              for key, items in buckets.items()]
+    groups.sort(key=lambda g: (g.key == "", g.name.lower(), g.key))
+    return groups
+
+
+def group_label(group: "LiveGroup") -> str:
+    n = len(group.sessions)
+    return "%s  ·  %d session%s" % (group.name, n, "" if n == 1 else "s")
 
 
 def running_session_ids() -> "frozenset | None":
