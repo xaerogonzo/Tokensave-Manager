@@ -12,6 +12,9 @@ Six stages stacked top-to-bottom in a scrollable canvas:
   6. CHANGELOG sync   — checkbox (only if CHANGELOG.md exists with the
                         `## [Unreleased]` anchor)
 
+README fragments (readme.d/) have no step of their own: when any exist, Publish folds them
+into README.md first and commits README.md plus their removal with the CHANGELOG.
+
 Publish runs everything locally in one threaded worker — zero LLM calls.
 Errors short-circuit with copy-pasteable recovery commands so any
 partial state can be cleaned up by hand.
@@ -47,6 +50,7 @@ from helpers.release import (
 )
 from helpers.changelog_patch import insert_changelog_release
 from helpers import changelog_fragments as cf
+from helpers import readme_fragments as rf
 from helpers.git import _fetch_tags, _git_tag, _git_push_with_tags
 
 if TYPE_CHECKING:
@@ -80,6 +84,25 @@ def _release_workflow_drafts(path: str) -> bool:
         return False
     return (bool(re.search(r"^\s*tags:", text, re.MULTILINE))
             and "gh release create" in text and "--draft" in text)
+
+
+def unrelated_dirty_files(status_porcelain: str, readme_fragments_pending: bool) -> list[str]:
+    """Paths in `git status --porcelain` that the Wizard may NOT carry into its release-prep commit.
+
+    CHANGELOG.md is the Wizard's own. README.md is too, but only while README fragments are
+    pending, because only then does the Wizard rewrite it (a dirty README with no fragments is
+    somebody's edit and stays refused). The same exemption is what lets a re-run after a failed
+    publish start: the first run left README.md folded and uncommitted.
+    """
+    own = {"CHANGELOG.md"} | ({rf.README} if readme_fragments_pending else set())
+    dirty = []
+    for line in status_porcelain.splitlines():
+        if len(line) < 4:
+            continue
+        name = line[3:].strip()
+        if name and name not in own:
+            dirty.append(name)
+    return dirty
 
 
 @dataclasses.dataclass
@@ -126,6 +149,11 @@ class ReleaseWizardDialog(UiPumpMixin, tk.Toplevel):
     #: Then the Wizard stops after the push: one tag, one release, one source for its files.
     #: A class default so a bare instance (and every older caller) keeps the whole pipeline.
     _release_workflow = False
+
+    #: README fragments (readme.d/). A class default so a bare instance has none; set by
+    #: `_discover_state`. Unlike the changelog's, README folding has no checkbox: a fragment
+    #: left in place is simply folded next time, so there is nothing to opt out of.
+    _readme = rf.Inspection()
 
     def __init__(self, parent, path: str, cfg: "ManagerConfig"):
         super().__init__(parent)
@@ -228,6 +256,7 @@ class ReleaseWizardDialog(UiPumpMixin, tk.Toplevel):
         self._frag = (cf.collect(Path(path))
                       if os.path.isdir(os.path.join(path, cf.FRAGMENT_DIR))
                       else cf.Collected())
+        self._readme = rf.inspect(Path(path))
 
     def _abort_open(self, error: Exception) -> None:
         """Tell the person why the wizard could not open, and close it instead of leaving it blank."""
@@ -537,6 +566,9 @@ class ReleaseWizardDialog(UiPumpMixin, tk.Toplevel):
     def _notes_source_text(self) -> str:
         """One line saying where the draft came from: fragments replace commit-derived notes."""
         frag = self._frag
+        if self._readme.errors:
+            return ("readme.d has problems, so Publish is blocked until they are fixed:\n  "
+                    + "\n  ".join(self._readme.errors[:4]))
         if frag.errors:
             return ("changelog.d has problems, so the draft is from commits and Publish is "
                     "blocked until they are fixed:\n  " + "\n  ".join(frag.errors[:4]))
@@ -714,6 +746,13 @@ class ReleaseWizardDialog(UiPumpMixin, tk.Toplevel):
                 + "\n  ".join(self._frag.errors[:8]), parent=self)
             return
 
+        if self._readme.errors:
+            messagebox.showwarning(
+                "README fragments need fixing",
+                "readme.d has problems; nothing was changed:\n\n  "
+                + "\n  ".join(self._readme.errors[:8]), parent=self)
+            return
+
         if self._release_workflow and not (self._sync_cl_var.get() and self._has_changelog):
             messagebox.showwarning(
                 "CHANGELOG sync is required",
@@ -731,6 +770,7 @@ class ReleaseWizardDialog(UiPumpMixin, tk.Toplevel):
                 f"This will:\n"
                 f"  • check that {tag} matches the project's version\n"
                 f"  • {'Update CHANGELOG.md, commit, ' if self._sync_cl_var.get() else ''}"
+                f"{self._readme_consumption_note()}"
                 f"{self._fragment_consumption_note()}"
                 f"create local tag {tag} and push.\n\n"
                 "The release workflow then builds it and creates a DRAFT release on GitHub. Nothing is "
@@ -744,6 +784,7 @@ class ReleaseWizardDialog(UiPumpMixin, tk.Toplevel):
                 f"  • Run the build  ({'yes' if self._run_build_var.get() else 'no'})\n"
                 f"  • Zip dist/ as the release artefact\n"
                 f"  • {'Update CHANGELOG.md, commit, ' if self._sync_cl_var.get() else ''}"
+                f"{self._readme_consumption_note()}"
                 f"{self._fragment_consumption_note()}"
                 f"create local tag {tag}, push, then call gh release create.",
                 parent=self)
@@ -768,6 +809,18 @@ class ReleaseWizardDialog(UiPumpMixin, tk.Toplevel):
             return f"remove {pending} changelog fragment(s) in the same commit, "
         return (f"leave {pending} changelog fragment(s) in place (CHANGELOG sync is off, "
                 "so they will be released again next time), ")
+
+    def _readme_consumption_note(self) -> str:
+        """What the confirmation says about readme.d. Folded whatever the CHANGELOG checkbox says."""
+        fold, stale = len(self._readme.fold), len(self._readme.stale)
+        parts = []
+        if fold:
+            parts.append(f"fold {fold} README fragment(s) into README.md")
+        if stale:
+            parts.append(f"remove {stale} README fragment(s) already folded")
+        if not parts:
+            return ""
+        return " and ".join(parts) + " (in the release-prep commit), "
 
     def _set_status(self, text: str, fg: str = None):
         """Thread-safe status update."""
@@ -888,6 +941,46 @@ class ReleaseWizardDialog(UiPumpMixin, tk.Toplevel):
         ctx.notes_file = notes_file
         return True
 
+    def _pub_fold_readme(self, ctx: "_ReleaseCtx") -> bool:
+        """Fold readme.d/ into README.md; the commit and the `git rm` come later, with the CHANGELOG.
+
+        Runs BEFORE the build on purpose: a built Manager compiles README.md into its Help, and a
+        build made before the fold would ship the unfolded text. Nothing is deleted here, so a
+        failure of any later step leaves every fragment on disk, and a re-run reads them as already
+        folded and changes nothing. Independent of the CHANGELOG checkbox.
+        """
+        if not self._readme.pending:
+            return True
+        self._set_status("Folding README fragments…", fg=C["peach"])
+        try:
+            result = rf.apply_readme(Path(self._path))
+        except (rf.ReadmeFragmentError, OSError) as exc:
+            self._fail(f"README fold failed: {exc}\n\n"
+                       "README.md and the fragments are untouched or restorable.\n"
+                       f"Recover: {self._restore_command(ctx, readme=True)}",
+                       keep_temp=True, temp_path=ctx.notes_file)
+            return False
+        # README.md is staged even when nothing was folded now: a fragment that reads as already
+        # folded means an earlier run wrote README.md and never committed it, and the commit that
+        # removes the fragment must carry that file or the tree is left dirty.
+        ctx.staged_files.append(rf.README)
+        if result.folded:
+            self._app._log(f"  README.md: folded {len(result.folded)} fragment(s)", C["green"])
+        ctx.remove_files += [f"{rf.FRAGMENT_DIR}/{p.name}" for p in result.folded + result.stale]
+        return True
+
+    @staticmethod
+    def _restore_command(ctx: "_ReleaseCtx", readme: bool = False) -> str:
+        """The `git restore` that undoes whatever this run staged or wrote, named from the context."""
+        paths = list(ctx.staged_files)
+        if readme and rf.README not in paths:
+            paths.append(rf.README)
+        for directory in (cf.FRAGMENT_DIR, rf.FRAGMENT_DIR):
+            if any(f.startswith(directory + "/") for f in ctx.remove_files) or (
+                    readme and directory == rf.FRAGMENT_DIR):
+                paths.append(directory)
+        return "git restore --staged --worktree " + " ".join(paths)
+
     def _pub_patch_changelog(self, ctx: "_ReleaseCtx") -> bool:
         """Step 4: optionally stamp CHANGELOG.md with the release version."""
         if not (self._sync_cl_var.get() and self._has_changelog):
@@ -904,21 +997,23 @@ class ReleaseWizardDialog(UiPumpMixin, tk.Toplevel):
             return False
         self._app._log(f"  CHANGELOG.md {msg}", C["green"])
         ctx.staged_files.append("CHANGELOG.md")
-        ctx.remove_files = [f"{cf.FRAGMENT_DIR}/{p.name}"
-                            for p in self._frag.folded + self._frag.stale]
+        ctx.remove_files += [f"{cf.FRAGMENT_DIR}/{p.name}"
+                             for p in self._frag.folded + self._frag.stale]
         return True
 
     def _pub_stage_commit(self, ctx: "_ReleaseCtx") -> bool:
         """Step 5: stage and commit only the files we touched (e.g. CHANGELOG)."""
-        if not ctx.staged_files:
+        if not ctx.staged_files and not ctx.remove_files:
             return True
         sh   = self._app._shell_capture
         path = self._path
         git  = self._cfg.git_exe
         self._set_status("Committing release-prep changes…", fg=C["peach"])
-        out, rc = sh([git, "-C", path, "add", "--"] + ctx.staged_files, path)
+        restore = self._restore_command(ctx)
+        out, rc = sh([git, "-C", path, "add", "--"] + ctx.staged_files, path) if ctx.staged_files else ("", 0)
         if rc != 0:
-            self._fail(f"git add CHANGELOG.md failed (rc={rc}).\n{out[-300:]}",
+            self._fail(f"git add {' '.join(ctx.staged_files)} failed (rc={rc}).\n{out[-300:]}\n\n"
+                       f"Recover: {restore}",
                        keep_temp=True, temp_path=ctx.notes_file)
             return False
         if ctx.remove_files:
@@ -926,9 +1021,10 @@ class ReleaseWizardDialog(UiPumpMixin, tk.Toplevel):
             # failure leaves every fragment on disk and a re-run regenerates the same notes.
             out, rc = sh([git, "-C", path, "rm", "--quiet", "--"] + ctx.remove_files, path)
             if rc != 0:
-                self._fail(f"git rm of changelog fragments failed (rc={rc}).\n{out[-300:]}\n\n"
-                           "CHANGELOG.md already has the new section; the fragments are untouched.\n"
-                           "Recover: git restore --staged --worktree CHANGELOG.md changelog.d",
+                self._fail(f"git rm of release fragments failed (rc={rc}).\n{out[-300:]}\n\n"
+                           f"{' and '.join(ctx.staged_files) or 'The release files'} already changed; "
+                           "the fragments are untouched.\n"
+                           f"Recover: {restore}",
                            keep_temp=True, temp_path=ctx.notes_file)
                 return False
         commit_cmd = ([git, "-C", path, "commit",
@@ -937,7 +1033,7 @@ class ReleaseWizardDialog(UiPumpMixin, tk.Toplevel):
         out, rc = sh(commit_cmd, path)
         if rc != 0:
             self._fail(f"Commit failed (rc={rc}).\n{out[-300:]}\n\n"
-                       "Recover: git restore --staged --worktree CHANGELOG.md changelog.d",
+                       f"Recover: {restore}",
                        keep_temp=True, temp_path=ctx.notes_file)
             return False
         self._app._log("  committed release-prep changes", C["green"])
@@ -1002,11 +1098,15 @@ class ReleaseWizardDialog(UiPumpMixin, tk.Toplevel):
         building, zipping and creating the release belong to the workflow, and doing them here too
         would make two sources for one version's files (and `gh release create` fails on a tag the
         workflow has already drafted)."""
+        # The README fold goes first, and only when there is something to fold: it must precede the
+        # build (a built Manager compiles README.md into its Help) and a project without readme.d
+        # keeps exactly the pipeline it always had.
+        fold = [self._pub_fold_readme] if self._readme.pending else []
         if self._release_workflow:
-            return [self._pub_check_tag, self._pub_patch_changelog, self._pub_stage_commit,
-                    self._pub_tag, self._pub_push]
-        return [self._pub_build, self._pub_zip, self._pub_write_notes, self._pub_patch_changelog,
-                self._pub_stage_commit, self._pub_tag, self._pub_push, self._pub_gh_release]
+            return fold + [self._pub_check_tag, self._pub_patch_changelog, self._pub_stage_commit,
+                           self._pub_tag, self._pub_push]
+        return fold + [self._pub_build, self._pub_zip, self._pub_write_notes, self._pub_patch_changelog,
+                       self._pub_stage_commit, self._pub_tag, self._pub_push, self._pub_gh_release]
 
     def _publish_worker(self, tag: str, title: str, notes: str):
         """Sequenced publish pipeline. Runs entirely on a background thread."""

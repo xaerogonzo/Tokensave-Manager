@@ -24,6 +24,7 @@ import shutil
 import subprocess
 import threading
 import tkinter as tk
+from pathlib import Path
 from tkinter import messagebox, ttk
 from typing import TYPE_CHECKING
 
@@ -34,7 +35,8 @@ from dialogs.set_remote import SetRemoteDialog
 from dialogs.github_setup import GitHubSetupDialog
 from dialogs.merge_pr import MergePRDialog
 from helpers.merge_body import build_merge_body
-from dialogs.release_wizard import ReleaseWizardDialog
+from dialogs.release_wizard import ReleaseWizardDialog, unrelated_dirty_files
+from helpers import readme_fragments as rf
 
 if TYPE_CHECKING:
     from typing import Callable
@@ -1103,13 +1105,8 @@ class GitTabController(UiPumpMixin):
         status_out, src = self._on_shell(
             [self._cfg.git_exe, "-C", path, "status", "--porcelain"], path)
         if src == 0 and status_out.strip():
-            dirty_files = []
-            for line in status_out.splitlines():
-                if len(line) < 4:
-                    continue
-                fname = line[3:].strip()
-                if fname and fname != "CHANGELOG.md":
-                    dirty_files.append(fname)
+            dirty_files = unrelated_dirty_files(
+                status_out, bool(rf.fragment_paths(Path(path))))
             if dirty_files:
                 preview = "\n".join(f"  • {f}" for f in dirty_files[:6])
                 if len(dirty_files) > 6:

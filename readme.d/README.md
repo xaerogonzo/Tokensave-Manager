@@ -34,8 +34,9 @@ A paragraph, a list or a table, written exactly as it should read in the README.
   everything first, writes the README completely before deleting anything, and makes no commit. If a deletion
   fails, run it again: a fragment whose paragraphs are all already in the README is recognised as folded and
   only removed. A fragment only partly present is an error (a hand edit).
-- **Until `build` runs, `README.md` does not show a pending fragment**, and neither does the in-app Help
-  when run from a checkout (the Help reads `README.md`). That is the price of never conflicting. Run
-  `build` when preparing a release, and commit the result before the Release Wizard (its pre-flight refuses
-  a dirty tree).
+- **Until the fold runs, `README.md` does not show a pending fragment**, and neither does the in-app Help
+  when run from a checkout (the Help reads `README.md`). That is the price of never conflicting. The
+  **Release Wizard folds them for you**: validated first (an invalid fragment blocks Publish), written
+  into `README.md` before the build, and committed with every `git rm`'d fragment in the same
+  `chore: release prep` commit as the CHANGELOG. `build` is only for folding by hand outside a release.
 - This folder is development material and is not shipped (`docs/RELEASE_CONTENTS.md`).
