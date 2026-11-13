@@ -22,7 +22,9 @@ No UI imports.
 
 from __future__ import annotations
 
+import ntpath
 import os
+import posixpath
 import sys
 from urllib.parse import quote
 
@@ -41,7 +43,9 @@ def new_session_url(folder: str, message: str) -> str:
     message cannot change what the link means. Raises ValueError rather than build a link that
     would be cut or that has nothing to open.
     """
-    if not folder or not os.path.isabs(folder):
+    # Either style: the Manager runs on Windows, but a path's absoluteness must not depend on the
+    # platform doing the checking (CI is Linux, where `os.path.isabs("D:\x")` is False).
+    if not folder or not (ntpath.isabs(folder) or posixpath.isabs(folder)):
         raise ValueError(f"the folder must be an absolute path, not {folder!r}")
     if not message.strip():
         raise ValueError("there is no message to put in the composer")
