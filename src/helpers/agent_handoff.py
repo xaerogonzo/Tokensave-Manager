@@ -415,6 +415,15 @@ def open_in_cursor_app(prepared: Prepared, source: str = "claude",
     return True, "", instruction_for(rel, source, _sidecar_rel(prepared))
 
 
+def claude_app_message(prepared: Prepared, source: str = "cursor") -> str:
+    """The one message for a new Claude desktop session: the short instruction the terminal
+    launch uses (it names the brief and the conversation file; it never carries them). Paths are
+    written with forward slashes so the message reads the same wherever it is pasted."""
+    rel = os.path.relpath(prepared.brief_path, prepared.project_path).replace("\\", "/")
+    side = _sidecar_rel(prepared).replace("\\", "/")
+    return instruction_for(rel, source, side)
+
+
 def launch_claude(prepared: Prepared, exe: str, source: str = "cursor") -> "tuple[bool, str]":
     """Open Claude Code's interactive session in the project, pointed at the brief.
 
