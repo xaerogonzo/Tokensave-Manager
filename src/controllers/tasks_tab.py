@@ -23,6 +23,7 @@ import threading
 import time
 import tkinter as tk
 from tkinter import messagebox, ttk
+from types import SimpleNamespace
 from typing import TYPE_CHECKING, Callable
 
 from constants import C, CREATE_NO_WINDOW
@@ -310,30 +311,61 @@ class TasksController(UiPumpMixin):
         tk.Label(
             parent, anchor="w", justify=tk.LEFT, bg=C["base"], fg=C["overlay0"],
             wraplength=1200,
-            text="Sessions started by the Claude desktop app. A session started "
+            text="Sessions started by the Claude desktop app, grouped by project "
+                 "(a worktree counts under its repository). A session started "
                  "from a terminal is not detected yet. “serving this folder” "
                  "means tokensave's own registry says its server is on the "
-                 "session's folder; “?” means that could not be established.",
+                 "session's folder; “?” means that could not be established; "
+                 "“inferred” means tokensave did not state which project a "
+                 "server serves, so the Manager worked it out and it may be wrong.",
         ).pack(fill=tk.X, padx=8, pady=(0, 4))
 
-        cols = ("project", "title", "started", "model", "tokensave", "pid")
-        self._live_tree = ttk.Treeview(parent, columns=cols, show="headings")
+        # Packed first so the table, which expands, cannot push it out of view.
+        bottom = tk.Frame(parent, bg=C["base"])
+        bottom.pack(side=tk.BOTTOM, fill=tk.X)
+        bar = tk.Frame(bottom, bg=C["base"])
+        strays_label = tk.Label(bar, anchor="w", bg=C["base"], fg=C["overlay0"])
+        strays_label.pack(side=tk.LEFT, padx=(8, 4))
+        strays_btn = ttk.Button(bar, text="Show", width=6)
+        strays_btn.pack(side=tk.LEFT)
+        strays_tree = ttk.Treeview(
+            bottom, columns=("server", "started", "pid"), show="headings", height=4)
         for col, text, width, stretch in (
-                ("project", "Folder", 380, True), ("title", "Title", 200, True),
+                ("server", "tokensave server", 380, True),
+                ("started", "Running for", 90, False), ("pid", "PID", 60, False)):
+            strays_tree.heading(col, text=text)
+            strays_tree.column(col, width=width, minwidth=50, stretch=stretch)
+        strays_tree.tag_configure("unsure", foreground=C["yellow"])
+
+        cols = ("project", "title", "started", "model", "tokensave", "pid")
+        tree = ttk.Treeview(parent, columns=cols, show="tree headings")
+        tree.heading("#0", text="Project")
+        tree.column("#0", width=220, minwidth=120, stretch=False)
+        for col, text, width, stretch in (
+                ("project", "Folder", 340, True), ("title", "Title", 200, True),
                 ("started", "Running for", 90, False),
                 ("model", "Model · effort", 150, False),
                 ("tokensave", "tokensave server", 300, True),
                 ("pid", "PID", 60, False)):
-            self._live_tree.heading(col, text=text)
-            self._live_tree.column(col, width=width, minwidth=50, stretch=stretch)
-        self._live_tree.tag_configure("other", foreground=C["peach"])
-        self._live_tree.tag_configure("unsure", foreground=C["yellow"])
-        self._live_tree.tag_configure("none", foreground=C["overlay0"])
-        vsb = ttk.Scrollbar(parent, orient=tk.VERTICAL,
-                            command=self._live_tree.yview)
-        self._live_tree.configure(yscrollcommand=vsb.set)
+            tree.heading(col, text=text)
+            tree.column(col, width=width, minwidth=50, stretch=stretch)
+        tree.tag_configure("other", foreground=C["peach"])
+        tree.tag_configure("unsure", foreground=C["yellow"])
+        tree.tag_configure("none", foreground=C["overlay0"])
+        tree.tag_configure("group", foreground=C["blue"])
+        vsb = ttk.Scrollbar(parent, orient=tk.VERTICAL, command=tree.yview)
+        tree.configure(yscrollcommand=vsb.set)
         vsb.pack(side=tk.RIGHT, fill=tk.Y)
-        self._live_tree.pack(fill=tk.BOTH, expand=True)
+        tree.pack(fill=tk.BOTH, expand=True)
+        self._live_tree = tree
+        # What must outlive a refresh lives here, not in the widgets that a
+        # refresh rebuilds: which groups were collapsed, and the strays toggle.
+        ui = SimpleNamespace(
+            tree=tree, strays_tree=strays_tree, strays_bar=bar,
+            strays_label=strays_label, strays_btn=strays_btn,
+            open_groups={}, show_strays=False, n_strays=0)
+        strays_btn.configure(command=lambda: _toggle_strays(ui))
+        self._live_ui = ui
 
     # ── View switching ─────────────────────────────────────────────────────────
 
@@ -412,27 +444,7 @@ class TasksController(UiPumpMixin):
 
     def _apply_live(self, snap) -> None:
         self._live_summary.configure(text=snap.summary)
-        tree = self._live_tree
-        tree.delete(*tree.get_children())
-        now = time.time()
-        for s in snap.sessions:
-            tag = {live.OTHER_FOLDER: "other", live.NO_SERVER: "none",
-                   live.UNVERIFIED: "unsure", live.MULTIPLE: "unsure"}.get(s.state, "")
-            tree.insert(
-                "", tk.END, iid="live:%d" % s.pid,
-                values=(s.project or "(folder unknown)", s.title or "(untitled)",
-                        live.age_text(s.started_at, now), live.model_text(s),
-                        live.server_text(s), s.pid),
-                tags=(tag,) if tag else ())
-        for stray in snap.strays:
-            where = os.path.basename(stray.project) if stray.project \
-                else "project unknown"
-            tree.insert(
-                "", tk.END, iid="stray:%d" % stray.pid,
-                values=("(under no running session)", "",
-                        live.age_text(stray.started_at, now), "",
-                        "tokensave server — serving %s" % where, stray.pid),
-                tags=("unsure",))
+        _fill_live(self._live_ui, snap, time.time())
         # A failed scan leaves the history marks alone; a real zero clears them.
         if not snap.failed:
             self._live_ids = frozenset(s.session_id for s in snap.sessions
@@ -1006,3 +1018,81 @@ class TasksController(UiPumpMixin):
             "Folder not found",
             f"Could not locate the project folder for '{proj_display}'.",
         )
+
+
+# ── Active sessions view: rendering that must survive a refresh ───────────────
+# Module-level on purpose: TasksController is already past the method cap.
+
+def _is_open(tree, iid: str) -> bool:
+    return bool(tree.tk.getboolean(tree.item(iid, "open")))
+
+
+def _fill_live(ui, snap, now: float) -> None:
+    """Rebuild both tables from *snap*, keeping what the person had set.
+
+    Expansion, selection and scroll position are read from the old rows before
+    they are deleted and put back on the new ones; the strays toggle lives in
+    *ui*. A group that was never seen is open, a collapsed one stays collapsed.
+    """
+    tree, strays_tree = ui.tree, ui.strays_tree
+    for iid in tree.get_children():
+        ui.open_groups[iid] = _is_open(tree, iid)
+    selected, strays_selected = tree.selection(), strays_tree.selection()
+    top = tree.yview()[0]
+
+    tree.delete(*tree.get_children())
+    for group in live.group_sessions(snap.sessions):
+        gid = "grp:" + group.key
+        tree.insert("", tk.END, iid=gid, text=live.group_label(group),
+                    open=ui.open_groups.get(gid, True), tags=("group",))
+        for s in group.sessions:
+            tag = {live.OTHER_FOLDER: "other", live.NO_SERVER: "none",
+                   live.UNVERIFIED: "unsure",
+                   live.MULTIPLE: "unsure"}.get(s.state, "")
+            tree.insert(
+                gid, tk.END, iid="live:%d" % s.pid,
+                values=(s.project or "(folder unknown)", s.title or "(untitled)",
+                        live.age_text(s.started_at, now), live.model_text(s),
+                        live.server_text(s), s.pid),
+                tags=(tag,) if tag else ())
+    # Groups that are gone are forgotten, so a project that returns after a
+    # real absence starts open again rather than inheriting an old collapse.
+    ui.open_groups = {k: v for k, v in ui.open_groups.items() if tree.exists(k)}
+    keep = [i for i in selected if tree.exists(i)]
+    if keep:
+        tree.selection_set(keep)
+    tree.yview_moveto(top)
+
+    strays_tree.delete(*strays_tree.get_children())
+    for stray in snap.strays:
+        strays_tree.insert(
+            "", tk.END, iid="stray:%d" % stray.pid,
+            values=(live.stray_text(stray), live.age_text(stray.started_at, now),
+                    stray.pid),
+            tags=("unsure",))
+    keep = [i for i in strays_selected if strays_tree.exists(i)]
+    if keep:
+        strays_tree.selection_set(keep)
+    ui.n_strays = len(snap.strays)
+    _sync_strays(ui)
+
+
+def _sync_strays(ui) -> None:
+    """Show or hide the one-line strays notice and, if toggled on, the list."""
+    if not ui.n_strays:
+        ui.strays_bar.pack_forget()
+        ui.strays_tree.pack_forget()
+        return
+    ui.strays_label.configure(text=live.strays_text(ui.n_strays))
+    ui.strays_btn.configure(text="Hide" if ui.show_strays else "Show")
+    ui.strays_bar.pack(fill=tk.X, pady=(4, 0))
+    if ui.show_strays:
+        ui.strays_tree.configure(height=min(ui.n_strays, 6))
+        ui.strays_tree.pack(fill=tk.X, padx=(0, 0), pady=(2, 0))
+    else:
+        ui.strays_tree.pack_forget()
+
+
+def _toggle_strays(ui) -> None:
+    ui.show_strays = not ui.show_strays
+    _sync_strays(ui)
