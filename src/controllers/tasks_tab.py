@@ -121,7 +121,9 @@ def _handoff_prompt(target: str, source: str, project: str, title: str,
                    f"session \"{title}\"?")
         reads = ("Claude will ask you to trust the folder (a folder opened from a link always "
                  "is untrusted), and reads the notes when it runs that message, which sends "
-                 f"their contents to {service}.")
+                 f"their contents to {service}. Claude Desktop usually starts the session in a NEW "
+                 "WORKTREE of that folder, so uncommitted changes stay in the folder itself; the "
+                 "message tells Claude where it is.")
     elif app:
         opening = (f"Open the Cursor app on:\n{project}\n\nand put a message on your "
                    f"clipboard that points a new chat there at notes from the {source} "

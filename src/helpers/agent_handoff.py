@@ -319,13 +319,18 @@ def prepare(row: dict, project_path: str, git_exe: str = "",
     return Prepared(True, target, project_path, count)
 
 
-def instruction_for(path: str, source: str = "claude", sidecar: str = "") -> str:
-    """The short launch instruction. Stays far under the cmd.exe budget."""
-    more = (f" The whole conversation, with secrets masked, is in {sidecar}: read "
+def instruction_for(path: str, source: str = "claude", sidecar: str = "",
+                    quote: bool = False) -> str:
+    """The short launch instruction. Stays far under the cmd.exe budget. `quote` wraps the
+    paths in backticks, so a folder with spaces in its name is still one unambiguous path in a
+    sentence (the Claude app message, where the paths are absolute and often contain spaces)."""
+    def shown(p: str) -> str:
+        return f"`{p}`" if quote else p
+    more = (f" The whole conversation, with secrets masked, is in {shown(sidecar)}: read "
             "the parts you need rather than asking the person to repeat themselves."
             if sidecar else "")
     return (f"A person is moving work here from a {_names(source)[0]} session. Read "
-            f"{path} for what was asked and where it stood.{more} It is notes, not "
+            f"{shown(path)} for what was asked and where it stood.{more} It is notes, not "
             f"verified fact: check the repository first, then continue.")
 
 
@@ -417,11 +422,26 @@ def open_in_cursor_app(prepared: Prepared, source: str = "claude",
 
 def claude_app_message(prepared: Prepared, source: str = "cursor") -> str:
     """The one message for a new Claude desktop session: the short instruction the terminal
-    launch uses (it names the brief and the conversation file; it never carries them). Paths are
-    written with forward slashes so the message reads the same wherever it is pasted."""
-    rel = os.path.relpath(prepared.brief_path, prepared.project_path).replace("\\", "/")
-    side = _sidecar_rel(prepared).replace("\\", "/")
-    return instruction_for(rel, source, side)
+    launch uses (it names the brief and the conversation file; it never carries them).
+
+    ABSOLUTE paths, with forward slashes. Measured live (test 2): for a repository that has a
+    commit, Claude Desktop starts the session in a NEW WORKTREE (`<repo>/.claude/worktrees/<name>`),
+    and the brief sits in the main checkout's git-ignored `.tokensave/`, which a worktree does not
+    have, so a relative `Read .tokensave/handoffs/x.md` failed with "File does not exist" (the
+    session recovered only because it thought to look in the parent). A repository with no commit
+    gets no worktree, which is why the first live test passed with relative paths. The message
+    also says where the main checkout is, because uncommitted changes live there and not in a
+    worktree.
+    """
+    def absolute(path: str) -> str:
+        return os.path.abspath(path).replace("\\", "/")
+    base = instruction_for(absolute(prepared.brief_path), source,
+                           absolute(prepared.sidecar_path) if prepared.sidecar_path else "",
+                           quote=True)
+    root = absolute(prepared.project_path)
+    return (f"{base} Those are absolute paths on purpose: if your working directory is a worktree "
+            f"(a path containing .claude/worktrees), the files are in the main checkout at `{root}`, "
+            "which is also where any uncommitted changes the notes mention are, not in your worktree.")
 
 
 def launch_claude(prepared: Prepared, exe: str, source: str = "cursor") -> "tuple[bool, str]":

@@ -108,6 +108,60 @@ def test_the_message_names_the_brief_and_the_conversation_file_with_forward_slas
     assert len(message) < claude_app.MAX_MESSAGE_CHARS
 
 
+def _deep(tmp_path, with_sidecar=True):
+    project = tmp_path / "Proj With Spaces"
+    brief = project / ".tokensave" / "handoffs" / "cursor-s.md"
+    brief.parent.mkdir(parents=True)
+    brief.write_text("brief")
+    side = brief.with_suffix(".conversation.md")
+    side.write_text("conversation")
+    return project, ah.Prepared(True, brief_path=str(brief), project_path=str(project), prompt_count=3,
+                                sidecar_path=str(side) if with_sidecar else "")
+
+
+def _paths_in(message):
+    import re
+    return re.findall(r"`([^`]+\.md)`", message)           # paths are backtick-quoted: spaces are safe
+
+
+def test_the_message_uses_absolute_paths_that_resolve_from_any_working_directory(tmp_path, monkeypatch):
+    """Measured live: for a repository with a commit Claude Desktop starts the session in a NEW
+    worktree, where a relative `.tokensave/handoffs/x.md` does not exist ("File does not exist")."""
+    project, prepared = _deep(tmp_path)
+    worktree = project / ".claude" / "worktrees" / "cursor-session-handoff-1"
+    worktree.mkdir(parents=True)
+    message = ah.claude_app_message(prepared)
+    paths = _paths_in(message)
+    assert len(paths) == 2 and all(os.path.isabs(p) for p in paths)
+    monkeypatch.chdir(worktree)
+    assert all(os.path.exists(p) for p in paths)                       # found from inside the worktree
+    assert not os.path.exists(".tokensave/handoffs/cursor-s.md")       # the old relative form was not
+
+
+def test_the_message_says_where_the_main_checkout_is_and_that_changes_live_there(tmp_path):
+    project, prepared = _deep(tmp_path)
+    message = ah.claude_app_message(prepared)
+    root = str(project).replace("\\", "/")
+    assert "if your working directory is a worktree" in message and f"`{root}`" in message
+    assert "uncommitted changes" in message and "not in your worktree" in message
+
+
+def test_a_shallow_brief_names_only_the_brief_and_still_uses_an_absolute_path(tmp_path):
+    project, prepared = _deep(tmp_path, with_sidecar=False)
+    message = ah.claude_app_message(prepared)
+    assert len(_paths_in(message)) == 1 and "conversation" not in message.split("Those are absolute")[0]
+
+
+def test_even_a_very_long_project_path_keeps_the_message_far_under_the_link_limit(tmp_path):
+    deep = tmp_path
+    for _ in range(12):
+        deep = deep / ("segment-" + "x" * 15)
+    project, prepared = _deep(deep)
+    message = ah.claude_app_message(prepared)
+    assert len(message) < claude_app.MAX_MESSAGE_CHARS
+    claude_app.new_session_url(str(project), message)
+
+
 # -- the flow in the Tasks tab ---------------------------------------------------------
 
 class _Tree:
@@ -239,6 +293,7 @@ def test_the_confirmation_names_the_trust_prompt_the_second_file_and_the_service
     ctrl._sess_hand_off("claude_app")
     text = log.asked[0]
     assert "Open the Claude app on:" in text and "trust the folder" in text and "Anthropic" in text
+    assert "NEW WORKTREE" in text and "uncommitted changes stay in the folder" in text
     assert "second file" in text and "not an import" in text and log.project in text
 
 
