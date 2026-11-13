@@ -89,7 +89,7 @@ Token Save Manager Source/
 │   │                              Runs beside a real Manager through scripts/drive/run_isolated.py
 │   │                              (scratch config, no lock, no request poller, no tray).
 │   │
-│   ├── helpers/                  162 modules of pure / IO helpers — no UI deps.
+│   ├── helpers/                  163 modules of pure / IO helpers — no UI deps.
 │   │   ├── config.py              _load_config, _save_config, _migrate_config
 │   │   ├── detection.py           _detect_git/_gh/_npm/_codegraph/_claude_cli,
 │   │   │                          _root_path/_label, _version_lt
@@ -256,6 +256,12 @@ Token Save Manager Source/
 │   │   │                          configured only; Stop / UserPromptSubmit stay as args. Backup first.
 │   │   ├── agent_presets.py       Named combinations of the integration switches. A diff shown first,
 │   │   │                          detection DERIVED (never stored), never reaches outside the Manager's config
+│   │   ├── claude_app.py          Open a new Claude Code session in the Claude DESKTOP app from the
+│   │   │                          documented `claude://code/new?folder=&q=` link: every value
+│   │   │                          encoded alone, an absolute folder required, a message over 2000
+│   │   │                          characters refused (the link carries an instruction, never a
+│   │   │                          brief), the protocol handler checked in the registry, and
+│   │   │                          `open_url` reporting only that the OS ACCEPTED the link
 │   │   ├── handoff_digest.py      The deep brief for a Cursor session: streams the whole
 │   │   │                          transcript once (bounded; a bad record is skipped and counted),
 │   │   │                          keeps every prompt with its turn's outcome, the agent-recorded

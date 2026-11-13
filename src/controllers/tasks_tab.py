@@ -53,6 +53,9 @@ _HANDOFF = {
     # The Cursor APP: no CLI, so no config attribute; the folder is opened and a
     # message is put on the clipboard, because the app's agent cannot be launched.
     "cursor_app": ("the Cursor app", "", "Cursor app"),
+    # The Claude APP: opened by a claude:// link and a message on the clipboard
+    # (`helpers/claude_app`), because the app's agent cannot be launched either.
+    "claude_app": ("the Claude app", "", "Claude app"),
 }
 
 
@@ -65,9 +68,42 @@ def _launcher_missing(cfg, target: str) -> str:
             return ""
         return ("Cursor.exe was not found where the Manager looks "
                 "(%LOCALAPPDATA%\\Programs\\cursor). Install the Cursor app, then try again.")
+    if target == "claude_app":
+        from helpers import claude_app
+        if claude_app.registered():
+            return ""
+        return ("The claude:// link is not registered on this machine, so Windows would not know "
+                "which program to open. Install or start the Claude desktop app once, then try again.")
     if getattr(cfg, exe_key):
         return ""
     return f"Install the {cli_name}, or set its path in Settings, then try again."
+
+
+def _handoff_folder(row: dict) -> "tuple[str, str, str]":
+    """`(folder, note, error)` for a session row. A row with a recorded folder gives it (the
+    caller still checks it is there). A Cursor chat whose folder was RESOLVED rather than
+    recorded says how: `project_only` uses the project root, and says the chat's own checkout was
+    not identified; `ambiguous` and `unmatched` have no folder and give the reason. Anything
+    else returns nothing, and the caller falls back to reading the transcript."""
+    cwd = row.get("cwd") or ""
+    if cwd:
+        return cwd, "", ""
+    state = row.get("resolution") or ""
+    if state == "project_only" and row.get("project_path"):
+        return row["project_path"], (
+            "This chat's own checkout was not identified: its workspace name looks like a "
+            "scratch checkout of this project, but no known folder has that exact name (it may "
+            "have been removed). The project folder is used instead, and the brief describes "
+            "that folder as it is now.\n\n"), ""
+    if state == "ambiguous":
+        return "", "", ("Several of your known folders match this chat's workspace name, so none "
+                        "is picked for you: choosing one could send the handoff into the wrong "
+                        "checkout.")
+    if state == "unmatched":
+        return "", "", ("This chat's workspace is not one of your known projects or their "
+                        "registered worktrees, so there is no folder to open. If you know where "
+                        "it ran, open that folder yourself and paste the brief's path.")
+    return "", "", ""
 
 
 def _handoff_prompt(target: str, source: str, project: str, title: str,
@@ -77,20 +113,35 @@ def _handoff_prompt(target: str, source: str, project: str, title: str,
     app's agent starts when they paste a message."""
     from helpers.agent_handoff import HANDOFF_DIR
     name = _HANDOFF[target][0]
-    app = target == "cursor_app"
-    service = "Anthropic" if target == "claude" else "Cursor's service"
-    opening = (f"Open the Cursor app on:\n{project}\n\nand put a message on your "
-               f"clipboard that points a new chat there at notes from the {source} "
-               f"session \"{title}\"?" if app else
-               f"Open {name}'s agent in:\n{project}\n\nwith notes from the {source} "
-               f"session \"{title}\"?")
-    reads = ("Cursor's agent will read it when you send that message in a new chat, "
-             f"which sends its contents to {service}." if app else
-             f"{name} will read it, which sends its contents to {service}.")
+    app = target.endswith("_app")
+    service = "Anthropic" if target in ("claude", "claude_app") else "Cursor's service"
+    if target == "claude_app":
+        opening = (f"Open the Claude app on:\n{project}\n\nwith a new session, and put a "
+                   f"message on your clipboard that points it at notes from the {source} "
+                   f"session \"{title}\"?")
+        reads = ("Claude will ask you to trust the folder (a folder opened from a link always "
+                 "is untrusted), and reads the notes when it runs that message, which sends "
+                 f"their contents to {service}. Claude Desktop usually starts the session in a NEW "
+                 "WORKTREE of that folder, so uncommitted changes stay in the folder itself; the "
+                 "message tells Claude where it is.")
+    elif app:
+        opening = (f"Open the Cursor app on:\n{project}\n\nand put a message on your "
+                   f"clipboard that points a new chat there at notes from the {source} "
+                   f"session \"{title}\"?")
+        reads = ("Cursor's agent will read it when you send that message in a new chat, "
+                 f"which sends its contents to {service}.")
+    else:
+        opening = (f"Open {name}'s agent in:\n{project}\n\nwith notes from the {source} "
+                   f"session \"{title}\"?")
+        reads = f"{name} will read it, which sends its contents to {service}."
+    deep = (f" For a {source} chat the notes cover every prompt and how each turn ended, the "
+            "plans and files the agent recorded (as attempts) and the last turn's ending, and "
+            "the whole conversation is written beside them as a second file."
+            if source == "Cursor" and target in ("claude", "claude_app") else "")
     return (moved + opening + f"\n\nThis writes a brief to {HANDOFF_DIR}\\ (git-ignored, "
             "this machine only) holding your prompts from that session, "
             f"secrets masked on a best-effort basis, plus {source}'s last "
-            f"message and the repository state now. {reads}"
+            f"message and the repository state now.{deep} {reads}"
             f"\n\nThis is a handoff, not an import: {source}'s memory and "
             "the full transcript do not come across.")
 
@@ -110,6 +161,37 @@ def _show_app_message(tab, message: str) -> None:
         f"this message (Ctrl+V). {copied}\n\n{message}\n\nIf Cursor was "
         "already open on this folder, use a new chat in that window.",
         parent=tab)
+
+def _continue_in_claude_app(tab, prepared, folder: str) -> None:
+    """Clipboard FIRST, then the link, then an honest dialog.
+
+    The message goes on the clipboard before anything can fail, so a link Windows will not open
+    leaves the person one paste from where they wanted to be. `os.startfile` returning means the
+    OS accepted the link: it does not mean Claude opened, opened this folder, or filled the box,
+    and the dialog says so instead of reporting success.
+    """
+    from helpers import claude_app
+    from helpers.agent_handoff import claude_app_message
+    message = claude_app_message(prepared, "cursor")
+    try:
+        tab.clipboard_clear()
+        tab.clipboard_append(message)
+        copied = "The message is on your clipboard."
+    except tk.TclError:
+        copied = "The message could not be copied, so select it below."
+    try:
+        opened, why = claude_app.open_url(claude_app.new_session_url(folder, message))
+    except ValueError as exc:
+        opened, why = False, f"No link was built: {exc}"
+    head = ("Windows was asked to open a new Claude session on:\n%s\n\nClaude may ask you to "
+            "trust the folder. If the composer is not already filled in, start a new session "
+            "there and paste the message (Ctrl+V)." % folder if opened else
+            f"Claude could not be opened from here ({why}).\n\nOpen the Claude app, start a "
+            f"new session in:\n{folder}\nand paste the message (Ctrl+V).")
+    note = f"\n\n{prepared.note}" if prepared.note else ""
+    messagebox.showinfo("Continue in the Claude app",
+                        f"{head}\n\n{copied}\n\n{message}{note}", parent=tab)
+
 
 VIEW_LIVE = "Active sessions"
 VIEW_SESSIONS = "History & worktrees"
@@ -268,8 +350,11 @@ class TasksController(UiPumpMixin):
         self._sess_menu.add_command(
             label="Continue in Cursor app…",
             command=lambda: self._sess_hand_off("cursor_app"))
-        self._sess_menu.add_command(label="Continue in Claude…",
+        self._sess_menu.add_command(label="Continue in Claude (terminal)…",
                                     command=self._sess_continue_in_claude)
+        self._sess_menu.add_command(
+            label="Continue in Claude app…",
+            command=lambda: self._sess_hand_off("claude_app"))
         self._sess_menu.add_command(label="Open folder in Cursor",
                                     command=self._sess_open_in_cursor_app)
         self._sess_tree.bind("<Button-3>", self._sess_right_click)
@@ -887,7 +972,8 @@ class TasksController(UiPumpMixin):
                 (0, self._sess_can_hand_off(row, "cursor")),
                 (1, self._sess_can_hand_off(row, "cursor_app")),
                 (2, self._sess_can_hand_off(row, "claude")),
-                (3, bool(self._sess_folder(row)))):
+                (3, self._sess_can_hand_off(row, "claude_app")),
+                (4, bool(self._sess_folder(row)))):
             self._sess_menu.entryconfigure(
                 index, state=tk.NORMAL if enabled else tk.DISABLED)
         try:
@@ -922,15 +1008,22 @@ class TasksController(UiPumpMixin):
 
         def _locate() -> None:
             from helpers.claude_tasks import transcript_cwd
-            # A row usually carries the folder already; a transcript read is
-            # the fallback for a Claude session whose first lines lacked it.
-            cwd = row.get("cwd") or transcript_cwd(row.get("path") or "")
-            self._post(self._sess_handoff_confirm, row, cwd, target)
+            # A row usually carries the folder already; a Cursor chat's folder may
+            # have been resolved rather than recorded (`_handoff_folder` says how);
+            # a transcript read is the fallback for a Claude session whose first
+            # lines lacked it.
+            cwd, note, error = _handoff_folder(row)
+            if error:
+                self._post(lambda e=error: messagebox.showerror(
+                    "Cannot continue this session", e, parent=self._tab))
+                return
+            cwd = cwd or transcript_cwd(row.get("path") or "")
+            self._post(self._sess_handoff_confirm, row, cwd, target, note)
 
         threading.Thread(target=_locate, daemon=True).start()
 
     def _sess_handoff_confirm(self, row: dict, project: str,
-                              target: str = "cursor") -> None:
+                              target: str = "cursor", note: str = "") -> None:
         from helpers.claude_tasks import FOLDER_REMOVED, resolve_session_folder
         source = "Cursor" if (row.get("agent") == "cursor") else "Claude"
         found = resolve_session_folder(project)
@@ -941,11 +1034,11 @@ class TasksController(UiPumpMixin):
                 f"is nowhere to open {_HANDOFF[target][0]}.\n\n%s" % (project or "(unknown)"),
                 parent=self._tab)
             return
-        moved = ""
+        moved = note
         if found.state == FOLDER_REMOVED:
-            moved = ("The checkout this session ran in was removed (%s), "
-                     "so its repository is used instead. The brief describes "
-                     "that repository as it is now.\n\n" % found.recorded)
+            moved += ("The checkout this session ran in was removed (%s), "
+                      "so its repository is used instead. The brief describes "
+                      "that repository as it is now.\n\n" % found.recorded)
         project = found.path
         if not messagebox.askyesno(
                 f"Continue in {_HANDOFF[target][0]}",
@@ -968,7 +1061,12 @@ class TasksController(UiPumpMixin):
         from helpers import agent_cli
         from helpers.agent_handoff import (
             launch_claude, launch_cursor, open_in_cursor_app)
-        if target == "cursor_app":
+        if target == "claude_app":
+            if prepared.ok:
+                _continue_in_claude_app(self._tab, prepared, prepared.project_path)
+                return
+            ok, err = False, prepared.error
+        elif target == "cursor_app":
             ok, err, message = open_in_cursor_app(prepared)
             if ok:
                 _show_app_message(self._tab, message)
