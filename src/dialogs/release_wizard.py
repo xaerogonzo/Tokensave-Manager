@@ -564,6 +564,14 @@ class ReleaseWizardDialog(UiPumpMixin, tk.Toplevel):
         self._refresh_resolved_tag()
 
     def _notes_source_text(self) -> str:
+        """Where the draft came from, plus what Publish will do with readme.d (if anything)."""
+        text = self._changelog_source_text()
+        readme = self._readme_consumption_note().rstrip(", ")
+        if readme and not self._readme.errors:
+            text += f"\nPublishing will also {readme}."
+        return text
+
+    def _changelog_source_text(self) -> str:
         """One line saying where the draft came from: fragments replace commit-derived notes."""
         frag = self._frag
         if self._readme.errors:
