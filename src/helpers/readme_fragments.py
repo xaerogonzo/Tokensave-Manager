@@ -34,8 +34,10 @@ Contracts worth knowing:
     fragments. If a deletion fails, a re-run recognises a fragment whose paragraphs are ALL already
     in README.md as folded and only removes it. A fragment that is only partly present is an
     error: that is a hand edit, not a crash.
-  * Until ``build`` runs (at release preparation) README.md, and therefore the in-app Help in a
-    checkout, does not show a pending fragment. That is the price of never conflicting.
+  * Until the fold runs (at release preparation) README.md, and therefore the in-app Help in a
+    checkout, does not show a pending fragment. That is the price of never conflicting. The Release
+    Wizard runs the fold itself (``apply_readme``, then ``git rm`` of the fragments, in one commit
+    with the CHANGELOG), so ``build`` is for folding by hand outside a release.
   * Nothing enforces that a PR adds a fragment. ``check`` validates the ones that exist.
 
 Pure functions plus file IO, standard library only, no UI imports.
@@ -86,6 +88,19 @@ class BuildResult:
     text: str
     folded: list[Path] = field(default_factory=list)   # inserted into README.md
     stale: list[Path] = field(default_factory=list)    # already in README.md; only removed
+
+
+@dataclass
+class Inspection:
+    """A read-only look at ``readme.d`` for a caller that must decide before it writes anything."""
+
+    fold: list[Path] = field(default_factory=list)
+    stale: list[Path] = field(default_factory=list)
+    errors: list[str] = field(default_factory=list)
+
+    @property
+    def pending(self) -> list[Path]:
+        return self.fold + self.stale
 
 
 def _norm(text: str) -> str:
@@ -291,17 +306,45 @@ def _write_atomically(root: Path, path: Path, text: str) -> None:
         raise
 
 
-def build(root: Path, write: bool) -> BuildResult:
-    """Validate everything first; write only if ``write``; delete only after the write."""
+def inspect(root: Path) -> Inspection:
+    """What ``build`` would do, without doing it. No ``readme.d`` is an empty inspection; an unreadable
+    README.md with fragments present is an error, never silence."""
+    if not (root / FRAGMENT_DIR).is_dir():
+        return Inspection()
+    try:
+        readme = _read(root)[1]
+    except ReadmeFragmentError as exc:
+        return Inspection(errors=[str(exc)])
+    fold, stale, errors = classify(root, readme)
+    return Inspection([f.path for f in fold], [f.path for f in stale], errors)
+
+
+def _plan(root: Path) -> tuple[Path, BuildResult]:
     path, readme = _read(root)
     fold, stale, errors = classify(root, readme)
     if errors:
         raise ReadmeFragmentError("invalid fragments, nothing changed:\n  " + "\n  ".join(errors))
-    result = BuildResult(render(readme, fold), [f.path for f in fold], [f.path for f in stale])
-    if write:
-        if fold:
-            _write_atomically(root, path, result.text)
-        _delete_all(result.folded + result.stale)
+    return path, BuildResult(render(readme, fold), [f.path for f in fold], [f.path for f in stale])
+
+
+def apply_readme(root: Path) -> BuildResult:
+    """Validate everything, then write README.md. Delete nothing: the caller removes the fragments
+    (the Release Wizard does it with ``git rm``, in the same commit as the README).
+
+    Idempotent: afterwards the fragments read as already folded, so a second call changes nothing.
+    """
+    path, result = _plan(root)
+    if result.folded:
+        _write_atomically(root, path, result.text)
+    return result
+
+
+def build(root: Path, write: bool) -> BuildResult:
+    """Validate everything first; write only if ``write``; delete only after the write."""
+    if not write:
+        return _plan(root)[1]
+    result = apply_readme(root)
+    _delete_all(result.folded + result.stale)
     return result
 
 
