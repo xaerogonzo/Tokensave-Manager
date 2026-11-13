@@ -14,7 +14,7 @@ GitHub has no other template here; these headings are copied from merged PRs
 
 ## Verification
 
-<!-- What you actually ran. Tests (file, count, mutations if any). `changelog.py check` if you added a fragment. Say what you did not run (full suite, live GUI) rather than implying CI already did. -->
+<!-- What you actually ran. Tests (file, count, mutations if any). `changelog.py check` / `readme_fragments.py check` if you added a fragment. Say what you did not run (full suite, live GUI) rather than implying CI already did. -->
 
 ## Not verified
 

@@ -53,7 +53,10 @@ Naming alone never grants immunity. A 200-line `_build_database_section` with 8 
 - changes a persistence format (`.gitignore` layout, `CHANGELOG.md` anchors, `.claude/settings.json` hook shape)
 
 For any big change, in the SAME commit you must update:
-- `CHANGELOG.md` — entry under `[Unreleased]` with one-line summary
+- `CHANGELOG.md` — entry under `[Unreleased]` with one-line summary (a `changelog.d/` fragment, not a direct edit)
+- `README.md` — a user-visible feature or behaviour change goes in a `readme.d/` fragment, never a direct
+  edit, so two PRs documenting one section cannot conflict (`python scripts/readme_fragments.py targets` /
+  `new` / `check`; rules in `readme.d/README.md`). `build` folds them in when a release is prepared
 - `docs/ARCHITECTURE.md` — if file count, controller list, or helper list changed
 - `BASIC_INSTRUCTIONS.md` — if a new project-rule emerged
 - `docs/ROADMAP.md` — mark items shipped, add follow-ups

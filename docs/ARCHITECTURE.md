@@ -89,7 +89,7 @@ Token Save Manager Source/
 │   │                              Runs beside a real Manager through scripts/drive/run_isolated.py
 │   │                              (scratch config, no lock, no request poller, no tray).
 │   │
-│   ├── helpers/                  161 modules of pure / IO helpers — no UI deps.
+│   ├── helpers/                  162 modules of pure / IO helpers — no UI deps.
 │   │   ├── config.py              _load_config, _save_config, _migrate_config
 │   │   ├── detection.py           _detect_git/_gh/_npm/_codegraph/_claude_cli,
 │   │   │                          _root_path/_label, _version_lt
@@ -177,6 +177,12 @@ Token Save Manager Source/
 │   │   ├── changelog_fragments.py Changelog fragments (changelog.d/): new / check / preview / build;
 │   │   │                          fold per-category bullets into [Unreleased], recover from a
 │   │   │                          half-finished delete. Stdlib only; launcher scripts/changelog.py
+│   │   ├── readme_fragments.py    README fragments (readme.d/): the changelog-fragment design for README.md.
+│   │   │                          A fragment's first line names a `<!-- help:KEY -->` section, the body is
+│   │   │                          appended to the END of it (before the first `---` followed by an anchor,
+│   │   │                          a heading or EOF). new / targets / check / preview / build; validates
+│   │   │                          everything first, writes before deleting, keeps CRLF. Stdlib only;
+│   │   │                          launcher scripts/readme_fragments.py
 │   │   ├── changelog_patch.py     insert_changelog_release (versioned release patcher);
 │   │   │                          update_unreleased (replaces [Unreleased] body, EOF-safe);
 │   │   │                          read_unreleased / read_unreleased_from_text (returns
@@ -998,6 +1004,7 @@ Token Save Manager Source/
 │
 ├── scripts/                       Source-only developer tools (NOT shipped in dist\)
 │   ├── changelog.py               Launcher for helpers/changelog_fragments.py
+│   ├── readme_fragments.py        Launcher for helpers/readme_fragments.py
 │   ├── adopt_release.py           Launcher for helpers/release_starters.py (list / tokens / adopt)
 │   ├── release_info.py            Rendered from the release-info starter for this repo: tag must equal
 │   │                              constants.APP_VERSION; notes are that version's CHANGELOG section
