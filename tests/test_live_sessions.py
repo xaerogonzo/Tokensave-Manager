@@ -466,12 +466,20 @@ def _history_row(sid, agent=None, recent=False):
     return row
 
 
+def _session_iids(tree):
+    """Every session row, whether the list is flat or grouped under project headers (the default)."""
+    found = []
+    for iid in tree.get_children():
+        found += tree.get_children(iid) if iid.startswith("grp:") else (iid,)
+    return found
+
+
 @pytest.mark.tk
 def test_a_running_session_is_marked_in_the_history_list(ctrl):
     ctrl._update_sess_tree([_history_row(SID_A), _history_row(SID_B, recent=True)],
                            frozenset({SID_A}))
     tree = ctrl._sess_tree
-    status = {iid: tree.item(iid, "values")[0] for iid in tree.get_children()}
+    status = {iid: tree.item(iid, "values")[0] for iid in _session_iids(tree)}
     assert status["sess:claude:%s" % SID_A] == "▶"
     assert status["sess:claude:%s" % SID_B] != "▶"
 
@@ -480,7 +488,7 @@ def test_a_running_session_is_marked_in_the_history_list(ctrl):
 def test_a_cursor_chat_is_never_marked_running_by_a_claude_id(ctrl):
     ctrl._update_sess_tree([_history_row(SID_A, agent="cursor")],
                            frozenset({SID_A}))
-    iid = ctrl._sess_tree.get_children()[0]
+    iid = _session_iids(ctrl._sess_tree)[0]
     assert ctrl._sess_tree.item(iid, "values")[0] != "▶"
 
 

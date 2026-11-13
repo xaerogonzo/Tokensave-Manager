@@ -89,7 +89,7 @@ Token Save Manager Source/
 │   │                              Runs beside a real Manager through scripts/drive/run_isolated.py
 │   │                              (scratch config, no lock, no request poller, no tray).
 │   │
-│   ├── helpers/                  163 modules of pure / IO helpers — no UI deps.
+│   ├── helpers/                  164 modules of pure / IO helpers — no UI deps.
 │   │   ├── config.py              _load_config, _save_config, _migrate_config
 │   │   ├── detection.py           _detect_git/_gh/_npm/_codegraph/_claude_cli,
 │   │   │                          _root_path/_label, _version_lt
@@ -256,6 +256,11 @@ Token Save Manager Source/
 │   │   │                          configured only; Stop / UserPromptSubmit stay as args. Backup first.
 │   │   ├── agent_presets.py       Named combinations of the integration switches. A diff shown first,
 │   │   │                          detection DERIVED (never stored), never reaches outside the Manager's config
+│   │   ├── session_groups.py      The History list's filters and grouping, no Tk: project_of (stable
+│   │   │                          repository-root identity, worktrees by their .git file, never by
+│   │   │                          folder name), build_plan (agent/project filter, flat or grouped),
+│   │   │                          apply_plan (rebuild only when the structure changed; keeps open
+│   │   │                          groups, selection and scroll), summary (what is shown, the scan cap)
 │   │   ├── claude_app.py          Open a new Claude Code session in the Claude DESKTOP app from the
 │   │   │                          documented `claude://code/new?folder=&q=` link: every value
 │   │   │                          encoded alone, an absolute folder required, a message over 2000

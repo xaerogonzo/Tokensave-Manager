@@ -217,7 +217,7 @@ def scan_sessions(known_paths: list[str], limit: int = 50) -> list[dict]:
     if not os.path.isdir(projects_dir):
         return []
 
-    candidates: list[tuple[str, float, str]] = []
+    candidates: list[tuple[str, float, str, tuple]] = []
     try:
         with os.scandir(projects_dir) as outer:
             for proj_entry in outer:
@@ -228,8 +228,9 @@ def scan_sessions(known_paths: list[str], limit: int = 50) -> list[dict]:
                         for f in inner:
                             if f.name.endswith(".jsonl"):
                                 try:
-                                    mtime = f.stat().st_mtime
-                                    candidates.append((f.path, mtime, proj_entry.name))
+                                    st = f.stat()
+                                    candidates.append((f.path, st.st_mtime, proj_entry.name,
+                                                       (f.path, st.st_mtime_ns, st.st_size)))
                                 except OSError:
                                     pass
                 except OSError:
@@ -247,12 +248,21 @@ def scan_sessions(known_paths: list[str], limit: int = 50) -> list[dict]:
     # Lazy: live_sessions imports this module.
     from helpers.live_sessions import read_tail_meta
 
-    for file_path, mtime, encoded in candidates:
-        session_id, head_title = _extract_session_meta(file_path)
-        # The tail first: the name the desktop app shows, the folder the session
-        # is in NOW and its branch. The head is the fallback, not the answer.
-        meta = read_tail_meta(file_path)
-        cwd = meta["cwd"] or transcript_cwd(file_path)
+    for file_path, mtime, encoded, cache_key in candidates:
+        # What a transcript says about itself changes only when the file does, so it is read
+        # once per (path, mtime, size): a refresh every minute over 200 sessions rereads only
+        # the few that moved. The folder's EXISTENCE is not cached (it is checked below).
+        held = _SESSION_CACHE.get(cache_key)
+        if held is None:
+            session_id, head_title = _extract_session_meta(file_path)
+            # The tail first: the name the desktop app shows, the folder the session
+            # is in NOW and its branch. The head is the fallback, not the answer.
+            meta = read_tail_meta(file_path)
+            held = (session_id, head_title, meta, meta["cwd"] or transcript_cwd(file_path))
+            if len(_SESSION_CACHE) >= _SESSION_CACHE_MAX:
+                _SESSION_CACHE.clear()
+            _SESSION_CACHE[cache_key] = held
+        session_id, head_title, meta, cwd = held
         if session_id is None:
             session_id = os.path.splitext(os.path.basename(file_path))[0]
         title = meta["title"] or head_title or "(untitled)"
@@ -271,6 +281,12 @@ def scan_sessions(known_paths: list[str], limit: int = 50) -> list[dict]:
             }
         )
     return sessions
+
+
+#: `(path, mtime_ns, size) -> (session_id, head title, tail meta, cwd)`. Bounded: cleared when it
+#: reaches the limit, which at a few hundred sessions never happens in practice.
+_SESSION_CACHE: dict = {}
+_SESSION_CACHE_MAX = 2000
 
 
 def _with_branch(display: str, branch: str) -> str:

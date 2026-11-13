@@ -321,8 +321,40 @@ class TasksController(UiPumpMixin):
         self._wt_tree.bind("<Button-3>", self._wt_right_click)
 
     def _build_sessions_panel(self, parent: tk.Widget) -> None:
+        # Filters: which agent, which project, and whether rows sit under their project.
+        # Session-only state (no config key); a change re-lays the rows already read.
+        from helpers import session_groups as sg
+        bar = tk.Frame(parent, bg=C["base"])
+        bar.pack(fill=tk.X, padx=6, pady=(4, 2))
+        again = lambda *_: self._update_sess_tree(self._sess_raw, self._live_ids)  # noqa: E731
+        self._sess_agent_var = tk.StringVar(value=sg.AGENT_ALL)
+        self._sess_project_var = tk.StringVar(value=sg.PROJECT_ALL)
+        self._sess_group_var = tk.BooleanVar(value=True)
+        tk.Label(bar, text="Agent:", bg=C["base"], fg=C["subtext"]).pack(side=tk.LEFT)
+        agent_box = ttk.Combobox(bar, textvariable=self._sess_agent_var, values=sg.AGENTS,
+                                 state="readonly", width=12)
+        agent_box.pack(side=tk.LEFT, padx=(4, 10))
+        agent_box.bind("<<ComboboxSelected>>", again)
+        tk.Label(bar, text="Project:", bg=C["base"], fg=C["subtext"]).pack(side=tk.LEFT)
+        self._sess_project_combo = ttk.Combobox(
+            bar, textvariable=self._sess_project_var, values=(sg.PROJECT_ALL,),
+            state="readonly", width=26)
+        self._sess_project_combo.pack(side=tk.LEFT, padx=(4, 10))
+        self._sess_project_combo.bind("<<ComboboxSelected>>", again)
+        ttk.Checkbutton(bar, text="Group by project", variable=self._sess_group_var,
+                        command=again).pack(side=tk.LEFT)
+        self._sess_note = tk.Label(bar, text="", bg=C["base"], fg=C["overlay0"], anchor="w")
+        self._sess_note.pack(side=tk.LEFT, padx=(12, 0))
+        _Tooltip(agent_box, "Show only Claude or only Cursor sessions.")
+        _Tooltip(self._sess_project_combo,
+                 "Show one project. A worktree counts under its repository.")
+        self._sess_raw: list = []
+        self._sess_structure: tuple = ()
+
         cols = ("status", "agent", "title", "project", "activity")
-        self._sess_tree = ttk.Treeview(parent, columns=cols, show="headings")
+        self._sess_tree = ttk.Treeview(parent, columns=cols, show="tree headings")
+        self._sess_tree.heading("#0", text="Project")
+        self._sess_tree.column("#0", width=260, minwidth=0, stretch=False)
         self._sess_tree.heading("status", text="")
         self._sess_tree.heading("agent", text="Agent")
         self._sess_tree.heading("title", text="Title")
@@ -574,7 +606,8 @@ class TasksController(UiPumpMixin):
         # Two scanners, one list. `scan_cursor_sessions` returns the same dict
         # shape plus an "agent" key, so this is a concatenation rather than a
         # second rendering path. It returns [] on a machine without Cursor.
-        sess = scan_sessions(known) + scan_cursor_sessions(known)
+        from helpers.session_groups import SCAN_LIMIT
+        sess = scan_sessions(known, SCAN_LIMIT) + scan_cursor_sessions(known, SCAN_LIMIT)
         sess.sort(key=lambda row: row.get("last_activity") or 0, reverse=True)
 
         # None = could not look, which must not clear the marks already shown.
@@ -688,33 +721,41 @@ class TasksController(UiPumpMixin):
 
     def _update_sess_tree(self, sessions: list[dict],
                           running: frozenset = frozenset()) -> None:
+        """Lay the rows out under the current filters. `self._sess_rows` keeps EVERY scanned
+        row (a handoff needs the transcript path of one the filter hides from view), and the
+        raw list is kept so a filter change re-lays rows already read instead of rescanning."""
+        from helpers import session_groups as sg
         tree = self._sess_tree
+        self._sess_raw = sessions
         sessions = self._dedupe_sessions(sessions)
         self._sess_rows = {self._sess_iid(s): s for s in sessions}
-        current_iids = set(tree.get_children())
-        new_iids = {self._sess_iid(s) for s in sessions}
 
-        for iid in current_iids - new_iids:
-            tree.delete(iid)
-
-        for s in sessions:
-            iid = self._sess_iid(s)
+        def values_of(s: dict) -> tuple:
             is_live = (s.get("agent") != "cursor"
                        and str(s.get("session_id", "")).lower() in running)
             status = "▶" if is_live else ("🟢" if s["is_recent"] else "⚫")
             agent = "Cursor" if s.get("agent") == "cursor" else "Claude"
-            ts = s["last_activity"]
             try:
                 import datetime
-                dt = datetime.datetime.fromtimestamp(ts)
-                activity = dt.strftime("%d %b %H:%M")
+                activity = datetime.datetime.fromtimestamp(s["last_activity"]).strftime("%d %b %H:%M")
             except Exception:
                 activity = ""
-            vals = (status, agent, s["title"], s["project_display"], activity)
-            if iid in current_iids:
-                tree.item(iid, values=vals)
-            else:
-                tree.insert("", tk.END, iid=iid, values=vals)
+            return (status, agent, s["title"], s["project_display"], activity)
+
+        # The controls exist only in the built window; without them the list is flat and unfiltered.
+        agent = getattr(getattr(self, "_sess_agent_var", None), "get", lambda: sg.AGENT_ALL)()
+        project = getattr(getattr(self, "_sess_project_var", None), "get", lambda: sg.PROJECT_ALL)()
+        grouped = bool(getattr(getattr(self, "_sess_group_var", None), "get", lambda: False)())
+        plan = sg.build_plan(sessions, agent, project, grouped, self._sess_iid, values_of)
+        self._sess_structure = sg.apply_plan(
+            tree, plan.entries, getattr(self, "_sess_structure", ()))
+        combo = getattr(self, "_sess_project_combo", None)
+        if combo is not None:
+            combo.configure(values=(sg.PROJECT_ALL,) + plan.projects)
+            if project not in plan.projects:
+                self._sess_project_var.set(sg.PROJECT_ALL)       # its sessions aged out: show all
+            tree.column("#0", width=260 if grouped else 0, stretch=False)
+            self._sess_note.configure(text=sg.summary(plan))
 
     # ── Worktree actions ───────────────────────────────────────────────────────
 
@@ -965,7 +1006,7 @@ class TasksController(UiPumpMixin):
 
     def _sess_right_click(self, event: tk.Event) -> None:
         row = self._sess_tree.identify_row(event.y)
-        if not row:
+        if not row or row.startswith("grp:"):         # a group header is not a session
             return
         self._sess_tree.selection_set(row)
         for index, enabled in (
@@ -1095,7 +1136,7 @@ class TasksController(UiPumpMixin):
 
     def _sess_open_folder(self, event: tk.Event) -> None:
         sel = self._sess_tree.selection()
-        if not sel:
+        if not sel or sel[0].startswith("grp:"):      # a double-click on a group just expands it
             return
         folder = self._sess_folder(sel[0])
         if folder:
