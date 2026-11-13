@@ -89,7 +89,7 @@ Token Save Manager Source/
 │   │                              Runs beside a real Manager through scripts/drive/run_isolated.py
 │   │                              (scratch config, no lock, no request poller, no tray).
 │   │
-│   ├── helpers/                  160 modules of pure / IO helpers — no UI deps.
+│   ├── helpers/                  161 modules of pure / IO helpers — no UI deps.
 │   │   ├── config.py              _load_config, _save_config, _migrate_config
 │   │   ├── detection.py           _detect_git/_gh/_npm/_codegraph/_claude_cli,
 │   │   │                          _root_path/_label, _version_lt
@@ -250,6 +250,13 @@ Token Save Manager Source/
 │   │   │                          configured only; Stop / UserPromptSubmit stay as args. Backup first.
 │   │   ├── agent_presets.py       Named combinations of the integration switches. A diff shown first,
 │   │   │                          detection DERIVED (never stored), never reaches outside the Manager's config
+│   │   ├── handoff_digest.py      The deep brief for a Cursor session: streams the whole
+│   │   │                          transcript once (bounded; a bad record is skipped and counted),
+│   │   │                          keeps every prompt with its turn's outcome, the agent-recorded
+│   │   │                          plans/checkpoints/questions, files and shell commands as
+│   │   │                          ATTEMPTS cross-checked with git per checkout, and how the last
+│   │   │                          turn ended. 60 KiB hard cap enforced per section; every
+│   │   │                          omission reported. Also builds the redacted conversation file.
 │   │   ├── agent_handoff.py       Claude <-> Cursor session -> brief for the other agent
 │   │   │                          ("Continue in Cursor / Claude"). Three kinds of statement kept apart: what the
 │   │   │                          person said, what Claude said (a claim), what git reports
