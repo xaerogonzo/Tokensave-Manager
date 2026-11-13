@@ -1,0 +1,3 @@
+### Changed
+- (tasks) **Active sessions lists detected sessions only, grouped by project.** Group rows are collapsible and carry a count; a worktree counts under its repository. Tokensave servers that no detected session owns moved behind one line ("N tokensave servers not linked to a detected running session" with Show/Hide), worded neutrally because they may be idle rather than orphaned. Expansion, selection and the Show toggle survive the periodic refresh.
+- (tasks) **Server labels name the project.** "Serving - <project>" or "Serving - folder unknown", with "(inferred)" when tokensave did not state the project; the repeated "the server's project is a guess" warning became one note for the section.

@@ -200,7 +200,7 @@ def test_a_server_under_no_running_session_is_listed_as_a_stray(folders):
             proc(40, 5, "tokensave.exe")]
     snap = run(rows, [server(11, root), server(40, other)], project=root)
     assert [s.pid for s in snap.strays] == [40]
-    assert "1 tokensave server under no running session" in snap.summary
+    assert "1 tokensave server not linked to a detected running session" in snap.summary
 
 
 def test_the_summary_counts_each_state_and_gives_no_single_verdict(folders):
@@ -334,6 +334,73 @@ def test_running_session_ids_is_none_not_empty_when_the_scan_fails(monkeypatch):
     assert ls.running_session_ids() is None
 
 
+# -- grouping and wording of the tidied Active sessions view ------------------------
+
+def test_a_worktree_folder_groups_under_its_repository():
+    wt = os.path.join("D:" + os.sep, "work", "Repo", ".claude", "worktrees", "calm-fox-1")
+    assert ls.project_root(wt) == os.path.join("D:" + os.sep, "work", "Repo")
+    assert ls.project_name(wt) == "Repo"
+    assert ls.project_name("D:/work/Repo/") == "Repo"
+    assert ls.project_name("D:/work/Repo/.claude/worktrees/x/sub") == "Repo"
+    assert ls.project_root("") == "" and ls.project_name("") == ""
+
+
+def test_group_sessions_merges_worktrees_orders_by_name_and_puts_unknown_last():
+    a = _live(pid=1, project="D:/w/Alpha", started_at=5.0)
+    a_wt = _live(pid=2, project="D:/w/Alpha/.claude/worktrees/x", started_at=1.0)
+    b = _live(pid=3, project="D:/w/beta", started_at=2.0)
+    unknown = _live(pid=4, project="", started_at=0.0)
+    groups = ls.group_sessions([unknown, b, a, a_wt])
+    assert [g.name for g in groups] == ["Alpha", "beta", "(folder unknown)"]
+    assert [s.pid for s in groups[0].sessions] == [2, 1], "oldest first"
+    assert ls.group_label(groups[0]) == "Alpha  ·  2 sessions"
+    assert ls.group_label(groups[1]) == "beta  ·  1 session"
+
+
+def test_two_projects_with_one_basename_stay_two_groups():
+    one = _live(pid=1, project="D:/a/app")
+    two = _live(pid=2, project="D:/b/app")
+    assert len(ls.group_sessions([one, two])) == 2
+
+
+def test_a_serving_label_is_never_bare_and_says_when_inferred():
+    assert ls.serving_label("D:/w/Repo") == "Serving - Repo"
+    assert ls.serving_label("D:/w/Repo", inferred=True) == "Serving - Repo (inferred)"
+    assert ls.serving_label("") == "Serving - folder unknown"
+    assert ls.serving_label("", inferred=True) == "Serving - folder unknown (inferred)"
+
+
+def test_a_stray_is_inferred_unless_tokensave_stated_its_project():
+    stated = ls.StrayServer(1, 0.0, "D:/w/Repo", AUTHORITATIVE)
+    guessed = ls.StrayServer(2, 0.0, "D:/w/Repo", HEURISTIC)
+    unknown = ls.StrayServer(3, 0.0, "", UNATTRIBUTED)
+    assert ls.stray_text(stated) == "Serving - Repo"
+    assert ls.stray_text(guessed) == "Serving - Repo (inferred)"
+    assert ls.stray_text(unknown) == "Serving - folder unknown (inferred)"
+
+
+def test_the_strays_line_is_neutral_about_why_they_are_unlinked():
+    assert ls.strays_text(1) == "1 tokensave server not linked to a detected running session"
+    assert ls.strays_text(11).startswith("11 tokensave servers not linked")
+    assert "orphan" not in ls.strays_text(2) and "no running" not in ls.strays_text(2)
+
+
+def test_the_guess_warning_is_not_repeated_on_every_row():
+    text = ls.server_text(_live(state=ls.UNVERIFIED, detail=ls.GUESS_DETAIL,
+                                server_project="D:/w/Repo"))
+    assert text == "? Serving - Repo (inferred)"
+    assert "guess" not in text
+    assert ls.server_text(_live(state=ls.UNVERIFIED, detail=ls.GUESS_DETAIL)) \
+        == "? Serving - folder unknown (inferred)"
+
+
+def test_the_classifier_still_emits_the_guess_detail(folders):
+    root, _wt, _other = folders
+    snap = run([session_row(10), proc(11, 10, "tokensave.exe")],
+               [server(11, root, HEURISTIC)], project=root)
+    assert snap.sessions[0].detail == ls.GUESS_DETAIL
+
+
 # -- the Tasks tab ----------------------------------------------------------------
 
 @pytest.fixture
@@ -351,7 +418,7 @@ def ctrl(tk_root):
 def _rows(ctrl):
     tree = ctrl._live_tree
     return {iid: (tree.item(iid, "values"), tree.item(iid, "tags"))
-            for iid in tree.get_children()}
+            for group in tree.get_children() for iid in tree.get_children(group)}
 
 
 @pytest.mark.tk
@@ -365,10 +432,11 @@ def test_the_live_view_renders_sessions_and_strays(ctrl, folders):
         strays=(ls.StrayServer(99, 1.0, other, "authoritative"),))
     ctrl._apply_live(snap)
     rows = _rows(ctrl)
-    assert set(rows) == {"live:10", "live:11", "stray:99"}
+    assert set(rows) == {"live:10", "live:11"}, "strays are not primary rows"
     assert rows["live:10"][0][4] == "✓ serving this folder"
     assert "other" in rows["live:11"][1], "a different folder is tinted, not green"
-    assert rows["stray:99"][0][0] == "(under no running session)"
+    assert ctrl._live_ui.strays_tree.item("stray:99", "values")[0] == \
+        "Serving - " + os.path.basename(other)
     assert ctrl._live_summary.cget("text") == snap.summary
 
 
@@ -459,3 +527,87 @@ def test_the_title_is_found_beyond_the_folder_tail(tmp_path):
                        + [filler] * 300)
     assert ls.read_last_cwd(path, tail_bytes=4096) == "D:\\x"
     assert ls.read_title(path) == "Old but current"
+
+
+def _all(tree, parent=""):
+    out = {}
+    for iid in tree.get_children(parent):
+        out[iid] = (tree.item(iid, "values"), tree.item(iid, "tags"))
+        out.update(_all(tree, iid))
+    return out
+
+
+def _snap(folders, strays=1):
+    root, wt, other = folders
+    return ls.LiveSnapshot(
+        sessions=(_live(pid=10, project=root, state=ls.SERVING, started_at=1.0),
+                  _live(pid=11, project=wt, state=ls.OTHER_FOLDER,
+                        server_project=root, detail="inside", started_at=2.0),
+                  _live(pid=12, project=other, state=ls.NO_SERVER, started_at=3.0)),
+        strays=tuple(ls.StrayServer(90 + i, 1.0, other, HEURISTIC)
+                     for i in range(strays)))
+
+
+@pytest.mark.tk
+def test_sessions_sit_under_project_groups_and_strays_are_not_in_the_table(ctrl, folders):
+    ctrl._apply_live(_snap(folders))
+    tree = ctrl._live_tree
+    groups = tree.get_children()
+    assert all(g.startswith("grp:") for g in groups) and len(groups) == 2
+    rows = _all(tree)
+    assert not any(i.startswith("stray:") for i in rows), "strays are not primary rows"
+    assert {"live:10", "live:11", "live:12"} <= set(rows)
+    root_group = [g for g in groups if "live:10" in tree.get_children(g)][0]
+    assert set(tree.get_children(root_group)) == {"live:10", "live:11"}
+    assert "2 sessions" in tree.item(root_group, "text")
+
+
+@pytest.mark.tk
+def test_strays_hide_behind_one_line_and_show_expands_them_in_place(ctrl, folders):
+    ui = ctrl._live_ui
+    ctrl._apply_live(_snap(folders, strays=3))
+    assert ui.strays_label.cget("text") == \
+        "3 tokensave servers not linked to a detected running session"
+    assert ui.strays_btn.cget("text") == "Show"
+    assert not ui.strays_tree.winfo_manager(), "collapsed by default"
+    ui.strays_btn.invoke()
+    assert ui.strays_tree.winfo_manager() and ui.strays_btn.cget("text") == "Hide"
+    assert set(ui.strays_tree.get_children()) == {"stray:90", "stray:91", "stray:92"}
+    assert ui.strays_tree.item("stray:90", "values")[0] == "Serving - " + \
+        os.path.basename(folders[2]) + " (inferred)"
+    ui.strays_btn.invoke()
+    assert not ui.strays_tree.winfo_manager()
+
+
+@pytest.mark.tk
+def test_no_strays_means_no_strays_line(ctrl, folders):
+    ctrl._apply_live(_snap(folders, strays=0))
+    assert not ctrl._live_ui.strays_bar.winfo_manager()
+
+
+@pytest.mark.tk
+def test_a_refresh_keeps_collapse_selection_and_the_strays_toggle(ctrl, folders):
+    ui, tree = ctrl._live_ui, ctrl._live_tree
+    ctrl._apply_live(_snap(folders))
+    root_group = [g for g in tree.get_children() if "live:10" in tree.get_children(g)][0]
+    other_group = [g for g in tree.get_children() if g != root_group][0]
+    tree.item(root_group, open=False)
+    tree.selection_set("live:12")
+    ui.strays_btn.invoke()
+
+    ctrl._apply_live(_snap(folders))      # the periodic refresh
+
+    assert not tree.item(root_group, "open"), "a collapsed group stays collapsed"
+    assert tree.item(other_group, "open"), "an open one stays open"
+    assert tree.selection() == ("live:12",)
+    assert ui.show_strays and ui.strays_tree.winfo_manager()
+    assert ui.strays_btn.cget("text") == "Hide"
+
+
+@pytest.mark.tk
+def test_a_selection_whose_row_vanished_is_dropped_not_kept_as_a_ghost(ctrl, folders):
+    tree = ctrl._live_tree
+    ctrl._apply_live(_snap(folders))
+    tree.selection_set("live:12")
+    ctrl._apply_live(ls.LiveSnapshot(sessions=_snap(folders).sessions[:1]))
+    assert tree.selection() == ()
