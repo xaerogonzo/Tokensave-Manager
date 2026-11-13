@@ -241,3 +241,11 @@ def test_the_preflight_lets_readme_differ_only_while_it_is_being_folded():
     # No pending fragments: a changed README is somebody's edit, so it is refused as it always was.
     assert unrelated_dirty_files(status, readme_fragments_pending=False) == ["README.md", "src/app.py", "notes.txt"]
     assert unrelated_dirty_files("", True) == []
+
+
+def test_the_notes_source_label_says_publish_will_fold_readme_fragments(tmp_path, mocker):
+    repo = _repo(tmp_path)
+    d = _dialog(repo, mocker)
+    assert "Publishing will also fold 2 README fragment(s) into README.md" in d._notes_source_text()
+    shutil.rmtree(repo / "readme.d")
+    assert "README" not in _dialog(repo, mocker)._notes_source_text()

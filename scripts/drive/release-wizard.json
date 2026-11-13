@@ -1,0 +1,7 @@
+[
+  {"do": "wait",   "after_ms": 3000},
+  {"do": "dialog", "name": "release", "project": "D:/_scratch/rel-drive/repo", "after_ms": 5000},
+  {"do": "report", "what": "text", "after_ms": 500},
+  {"do": "shot",   "path": "D:/_scratch/rel-drive/wizard.png", "target": "dialog", "after_ms": 500},
+  {"do": "quit"}
+]

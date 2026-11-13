@@ -558,6 +558,13 @@ class _Driver:
             self._dialog = self._capture_new_window(
                 lambda: ctrl._open_test_gaps_window(
                     self._project(step), base, suggestions=[]))
+        elif name in ("release", "releasewizard", "release_wizard"):
+            # READ-ONLY: opening the Wizard changes nothing; only Publish does,
+            # and no drive step presses it. Discovery runs in a worker, so a
+            # `report` needs an `after_ms` long enough for the notes to land.
+            from dialogs.release_wizard import ReleaseWizardDialog
+            self._dialog = ReleaseWizardDialog(
+                self._app, self._project(step), self._app._cfg)
         elif name in ("prdraft", "pr", "pr_draft"):
             ctrl = getattr(getattr(self._app, "_git", None), "_pr_draft", None)
             if ctrl is None:
