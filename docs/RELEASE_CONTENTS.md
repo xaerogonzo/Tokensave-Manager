@@ -66,6 +66,7 @@ that ship a Windows build, adopted by a developer), and it is listed so nobody a
 | `build.bat` | No | Build tooling |
 | `build.ps1` | No | Build tooling |
 | `changelog.d` | No | Unreleased fragments, folded into a release by the Release Wizard |
+| `readme.d` | No | Unreleased README fragments, folded in by `scripts/readme_fragments.py build` |
 | `docs` | Partial | A fixed list of seven user-facing documents |
 | `manager-config.example.json` | Yes | Staged to the zip root |
 | `project-baseline.md` | No | This repository's own managed copy of the baseline; the shipped template is `templates/project-baseline.md` |
