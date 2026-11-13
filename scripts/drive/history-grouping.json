@@ -1,0 +1,7 @@
+[
+  {"do": "wait",            "after_ms": 3000},
+  {"do": "sessions",        "after_ms": 9000},
+  {"do": "sessions_report", "limit": 14, "after_ms": 500},
+  {"do": "shot", "path": "D:/_scratch/history-grouping.png", "after_ms": 500},
+  {"do": "quit"}
+]

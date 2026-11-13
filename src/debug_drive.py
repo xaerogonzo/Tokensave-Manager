@@ -401,6 +401,14 @@ class _Driver:
         rows = dict(ctrl._sess_rows)
         _say("drive: sessions: %d row(s) in the list" % len(rows))
         limit = int(step.get("limit", 8))
+        tree = ctrl._sess_tree
+        groups = [i for i in tree.get_children() if i.startswith("grp:")]
+        _say("drive: sessions: agent=%r project=%r grouped=%s, %d group(s) | %s"
+             % (ctrl._sess_agent_var.get(), ctrl._sess_project_var.get(),
+                bool(ctrl._sess_group_var.get()), len(groups), ctrl._sess_note.cget("text")))
+        for gid in groups[:limit]:
+            _say("drive: sessions:   group %-34s %3d row(s) open=%s"
+                 % (tree.item(gid, "text"), len(tree.get_children(gid)), bool(tree.item(gid, "open"))))
         for iid, row in list(rows.items())[:limit]:
             path = row.get("path") or ""
             _say("drive: sessions:   %-30s agent=%-6s ->cursor=%-5s ->claude=%-5s "

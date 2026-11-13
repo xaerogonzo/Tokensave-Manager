@@ -354,7 +354,7 @@ class TasksController(UiPumpMixin):
         cols = ("status", "agent", "title", "project", "activity")
         self._sess_tree = ttk.Treeview(parent, columns=cols, show="tree headings")
         self._sess_tree.heading("#0", text="Project")
-        self._sess_tree.column("#0", width=200, minwidth=0, stretch=False)
+        self._sess_tree.column("#0", width=260, minwidth=0, stretch=False)
         self._sess_tree.heading("status", text="")
         self._sess_tree.heading("agent", text="Agent")
         self._sess_tree.heading("title", text="Title")
@@ -754,7 +754,7 @@ class TasksController(UiPumpMixin):
             combo.configure(values=(sg.PROJECT_ALL,) + plan.projects)
             if project not in plan.projects:
                 self._sess_project_var.set(sg.PROJECT_ALL)       # its sessions aged out: show all
-            tree.column("#0", width=200 if grouped else 0, stretch=False)
+            tree.column("#0", width=260 if grouped else 0, stretch=False)
             self._sess_note.configure(text=sg.summary(plan))
 
     # ── Worktree actions ───────────────────────────────────────────────────────
