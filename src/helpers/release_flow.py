@@ -246,6 +246,14 @@ def _tail(text: str, n: int = 300) -> str:
     return text.strip()[-n:]
 
 
+def _brief(text: str, lines: int = 3, width: int = 110) -> str:
+    """The first few non-blank lines of a script's output on one line, cut per line, not mid-word."""
+    parts = [" ".join(line.split()) for line in text.splitlines() if line.strip()]
+    shown = [p if len(p) <= width else p[:width - 1] + "…" for p in parts[:lines]]
+    more = f" (+{len(parts) - lines} more line(s))" if len(parts) > lines else ""
+    return " | ".join(shown) + more
+
+
 def _json(res: RunResult):
     try:
         return json.loads(res.out or "null")
@@ -273,7 +281,7 @@ def _script_check(env: Env, path: str, cid: str, label: str, argv: "tuple[str, .
     res = env.call(path, _fill(argv, **values))
     if res.rc == 0:
         return Check(cid, label, OK, "passed")
-    return Check(cid, label, FAIL, _tail(res.text) or f"exit {res.rc}")
+    return Check(cid, label, FAIL, _brief(res.text) or f"exit {res.rc}")
 
 
 def _default_branch(env: Env, path: str, cfg: FlowConfig) -> str:

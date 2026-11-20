@@ -393,6 +393,16 @@ def test_a_tag_that_matches_the_version_passes_and_asks_the_projects_own_script(
     assert argv[0] == "python" and argv[2:] == ["check-tag", "v2.7.0"] and argv[1].endswith("release_info.py")
 
 
+def test_a_projects_script_in_tools_is_asked_too(mocker, tmp_path):
+    dialog, fail = _check_dialog(mocker, tmp_path, script=False, result=("v2.7.0\n", 0))
+    (tmp_path / "tools").mkdir()
+    (tmp_path / "tools" / "release_info.py").write_text("# stand-in", encoding="utf-8")
+    assert dialog._pub_check_tag(_ReleaseCtx("v2.7.0", "t", "n")) is True
+    argv = dialog._app._shell_capture.call_args[0][0]
+    assert argv[1].replace("\\", "/").endswith("tools/release_info.py")
+    fail.assert_not_called()
+
+
 def test_a_tag_that_is_not_the_version_stops_before_anything_is_changed(mocker, tmp_path):
     out = "release_info: tag v2.8.0 does not match the project version 2.7.0\n"
     dialog, fail = _check_dialog(mocker, tmp_path, script=True, result=(out, 1))

@@ -43,6 +43,8 @@ Token Save Manager Source/
 │   │                            ONE class object to raise and catch.
 │   ├── cli_test_commands.py        tests / test-run / test-gaps, with the RUN_*
 │   │                            constants and parsers only they use.
+│   ├── cli_release_command.py      release-guide: the Wizard's pre-flight / plan / post-build check as an
+│   │                            envelope; exit 0 ready, 1 blocked, 4 not confirmed. Runs none of the planned commands.
 │   ├── app.py                     Entry point — App(tk.Tk) + main(). Constructs the
 │   │                              single ManagerConfig instance and passes it down to
 │   │                              every controller/dialog. ~1,640 lines after v6

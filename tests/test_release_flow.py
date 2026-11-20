@@ -148,6 +148,15 @@ def test_project_script_failure_is_the_projects_verdict(project):
     assert pre.verdict == rf.BLOCKED
 
 
+def test_a_long_script_failure_is_shown_per_line_not_cut_mid_word(project):
+    noisy = "changelog: 2 fragment(s) pending\n" + "\n".join(f"  changelog.d/{n}-{'x' * 130}.md: pending" for n in range(5))
+    pre, _ = _gather(World({("python", "tools/changelog.py"): rf.RunResult("", noisy, 1)}), project)
+    detail = pre.get("fragments").detail
+    assert pre.get("fragments").status == rf.FAIL
+    assert detail.startswith("changelog: 2 fragment(s) pending | ") and "(+3 more line(s))" in detail
+    assert len(detail) < 400
+
+
 def test_missing_script_is_unknown_not_ok(tmp_path):
     (tmp_path / "pyproject.toml").write_text('[project]\nversion = "1.0.0"\n', encoding="utf-8")
     cfg, _ = rf.load_config(str(tmp_path))
