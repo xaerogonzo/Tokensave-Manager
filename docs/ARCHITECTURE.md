@@ -89,7 +89,7 @@ Token Save Manager Source/
 │   │                              Runs beside a real Manager through scripts/drive/run_isolated.py
 │   │                              (scratch config, no lock, no request poller, no tray).
 │   │
-│   ├── helpers/                  164 modules of pure / IO helpers — no UI deps.
+│   ├── helpers/                  167 modules of pure / IO helpers — no UI deps.
 │   │   ├── config.py              _load_config, _save_config, _migrate_config
 │   │   ├── detection.py           _detect_git/_gh/_npm/_codegraph/_claude_cli,
 │   │   │                          _root_path/_label, _version_lt
@@ -170,6 +170,13 @@ Token Save Manager Source/
 │   │   │                          setup .exe to SHA256SUMS.txt. Launcher scripts/make_installer.py
 │   │   ├── installer_drive.py     Really install / upgrade / uninstall a TEST build (own AppId + data folder), refuses
 │   │   │                          if the real AppId is registered. Launcher scripts/drive_installer.py
+│   │   ├── release_profile.py     Detect build system (Nuitka/PyInstaller rows), installer (Inno) and release profile
+│   │   │                          (`ci_draft` | `local_build`) from marker files, with the evidence for each
+│   │   ├── release_flow.py        Tag-only release flow: `release-flow.json` config, `gather` pre-flight (ok/warn/fail/
+│   │   │                          unknown), `make_plan` (whitelisted tag/push/delete shapes pinned to origin's tip),
+│   │   │                          `run_step` (re-reads the tip, typed confirmation). Never publishes
+│   │   ├── release_postcheck.py   `verify_draft` (workflow run, draft, tag commit, assets, SHA256SUMS) + manual checklist
+│   │   │                          and per-tag ticks under the git common dir
 │   │   ├── release_starters.py    Opt-in release starters (templates/release/*.tmpl): explicit STARTERS
 │   │   │                          inventory, <<TOKEN>> catalogue with defaults, fail-closed render, per-kind
 │   │   │                          checks (Python compiles; workflow draft-only + SHA-pinned + no expression in
@@ -725,9 +732,11 @@ Token Save Manager Source/
 │   │   ├── io_utils.py            Shared IO helpers for the patcher modules.
 │   │   └── ui.py                  UI helpers shared across controllers and dialogs.
 │   │
-│   ├── dialogs/                   61 dialog / panel modules — a tk.Toplevel per file,
+│   ├── dialogs/                   62 dialog / panel modules — a tk.Toplevel per file,
 │   │                          plus the panels the bigger dialogs are built from.
 │   │   ├── release_wizard.py      ReleaseWizardDialog + _ReleaseCtx (paired)
+│   │   ├── release_ci_panel.py    ReleaseCiPanel: pre-flight, tag commands (Copy/Run), Check draft, checklist; hosted by the
+│   │   │                          Wizard when `rfl.is_tag_only(path)` (drafting workflow AND release-flow.json)
 │   │   ├── mcp_config.py          MCPConfigDialog
 │   │   ├── ai_code_review.py      AICodeReviewDialog
 │   │   ├── git_commit.py          GitCommitDialog
@@ -1269,7 +1278,7 @@ app.py
   ├── constants.py       — palette, regex, paths
   ├── theme.py           — _Tooltip
   ├── helpers/*          — pure / IO helpers (no UI)
-  ├── dialogs/*          — 61 tk.Toplevel / panel modules
+  ├── dialogs/*          — 62 tk.Toplevel / panel modules
   └── controllers/*      — 30 tab and sub-controllers
         └── controllers/* each import the dialogs they instantiate
             (lazy in-handler imports for any cross-dialog cycle risk —
