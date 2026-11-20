@@ -382,6 +382,23 @@ had those files (Fortuna Lab: a `project-baseline.md` and no gotchas at all).
 - **Lifecycles differ, on purpose.** The baseline is compiled and synced; the
   gotchas are synced to the existing fleet.
 
+### D1h2. The release flow reads and plans; it never publishes, and unknown is never a tick
+
+`helpers/release_flow.py`, `release_postcheck.py`, `release_profile.py`,
+`dialogs/release_ci_panel.py`. Opt-in per project by a `release-flow.json`.
+
+- **Who makes the release files decides the flow, not the compiler.** Build
+  systems are rows of marker files (`release_profile`); never an `if nuitka`.
+- **Every check is ok/warn/fail/unknown/info and READY needs none of the middle
+  three.** No `gh`, offline or a missing script is `unknown`. A script run in a tree
+  that is not the tip is `unknown`, because it would judge other files.
+- **The plan is a whitelist** (create/move a LOCAL tag, push one tag, delete one
+  remote tag, delete one DRAFT release), pinned to origin's tip. `run_step`
+  re-reads the tip, re-checks the draft, and needs the tag typed for anything that
+  leaves the machine. No publish, force, branch push or `--cleanup-tag` exists to
+  be reached; a published release is refused.
+- **The project's own scripts are the authority** on version and changelog rules.
+
 ### D1i. A Manager commit stages only what it can PROVE is its own
 
 `helpers/manager_changes.py`, `helpers/batch_commit.py`. Paid for by the shape of

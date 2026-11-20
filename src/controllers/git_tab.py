@@ -36,6 +36,7 @@ from dialogs.github_setup import GitHubSetupDialog
 from dialogs.merge_pr import MergePRDialog
 from helpers.merge_body import build_merge_body
 from dialogs.release_wizard import ReleaseWizardDialog, unrelated_dirty_files
+from helpers.release_flow import is_tag_only
 from helpers import readme_fragments as rf
 
 if TYPE_CHECKING:
@@ -1104,7 +1105,9 @@ class GitTabController(UiPumpMixin):
 
         status_out, src = self._on_shell(
             [self._cfg.git_exe, "-C", path, "status", "--porcelain"], path)
-        if src == 0 and status_out.strip():
+        # The tag-only flow (a project with release-flow.json) tags origin's tip, not this working
+        # tree, and reports a dirty tree itself as a warning; the prep-commit rule does not apply.
+        if src == 0 and status_out.strip() and not is_tag_only(path):
             dirty_files = unrelated_dirty_files(
                 status_out, bool(rf.fragment_paths(Path(path))))
             if dirty_files:

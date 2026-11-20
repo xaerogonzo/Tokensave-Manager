@@ -51,6 +51,8 @@ from helpers.release import (
 from helpers.changelog_patch import insert_changelog_release
 from helpers import changelog_fragments as cf
 from helpers import readme_fragments as rf
+from helpers import release_flow as rfl
+from helpers import release_profile as rprof
 from helpers.git import _fetch_tags, _git_tag, _git_push_with_tags
 
 if TYPE_CHECKING:
@@ -77,13 +79,7 @@ def _release_workflow_drafts(path: str) -> bool:
     with `--draft`. A workflow that does not draft is not one the Wizard may hand the release to
     (it might publish by itself, or create nothing), so the Wizard keeps doing the whole job.
     """
-    try:
-        with open(os.path.join(path, RELEASE_WORKFLOW), encoding="utf-8") as handle:
-            text = handle.read()
-    except (OSError, UnicodeDecodeError):
-        return False
-    return (bool(re.search(r"^\s*tags:", text, re.MULTILINE))
-            and "gh release create" in text and "--draft" in text)
+    return rprof.workflow_drafts(path)
 
 
 def unrelated_dirty_files(status_porcelain: str, readme_fragments_pending: bool) -> list[str]:
@@ -149,6 +145,12 @@ class ReleaseWizardDialog(UiPumpMixin, tk.Toplevel):
     #: Then the Wizard stops after the push: one tag, one release, one source for its files.
     #: A class default so a bare instance (and every older caller) keeps the whole pipeline.
     _release_workflow = False
+
+    #: True when that workflow is paired with a `release-flow.json`: the project's own PR carries the
+    #: version and changelog, so the Wizard only checks, plans and (on a click) runs the TAG
+    #: commands. Its body is `ReleaseCiPanel`; none of the notes/build/changelog steps exist then.
+    _tag_only = False
+    _profile = rprof.Profile()
 
     #: README fragments (readme.d/). A class default so a bare instance has none; set by
     #: `_discover_state`. Unlike the changelog's, README folding has no checkbox: a fragment
@@ -216,7 +218,8 @@ class ReleaseWizardDialog(UiPumpMixin, tk.Toplevel):
 
         try:
             self._build_ui()
-            self._regenerate_notes()
+            if not self._tag_only:
+                self._regenerate_notes()
         except Exception as ex:
             import traceback
             messagebox.showerror(
@@ -248,6 +251,8 @@ class ReleaseWizardDialog(UiPumpMixin, tk.Toplevel):
         self._suggested_kind = _suggest_bump_kind(self._commits)
         self._build_script   = self._detect_build_script()
         self._release_workflow = _release_workflow_drafts(path)
+        self._profile = rprof.detect(path)
+        self._tag_only = rfl.is_tag_only(path)
         self._changelog_path = os.path.join(path, "CHANGELOG.md")
         self._has_changelog  = (os.path.isfile(self._changelog_path)
                                 and self._changelog_has_unreleased())
@@ -313,6 +318,11 @@ class ReleaseWizardDialog(UiPumpMixin, tk.Toplevel):
         """
         body = self._body
         self._build_header_section(body)
+        if self._tag_only:
+            from dialogs.release_ci_panel import ReleaseCiPanel
+            self._ci_panel = ReleaseCiPanel(body, self._path, self._cfg, self._profile)
+            self._ci_panel.pack(fill=tk.X)
+            return
         self._build_version_section(body)
         self._build_title_section(body)
         self._build_notes_section(body)
