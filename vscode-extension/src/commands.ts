@@ -117,6 +117,18 @@ export const COMMANDS: readonly ManagerCommand[] = [
     task: false,
   },
   {
+    action: "release-guide",
+    cli: "release-guide",
+    vscode: "",
+    label: "Release guide",
+    detail: "Pre-flight, exact tag commands and post-build check for a tag-triggered release.",
+    sideEffect: "observe_refresh",
+    requiresProject: true,
+    acceptsPaths: false,
+    acceptsTests: false,
+    task: false,
+  },
+  {
     action: "tests",
     cli: "tests",
     vscode: "tokensaveManager.tests",

@@ -61,6 +61,7 @@ from cli_support import (
 )
 
 from cli_test_commands import _cmd_test_gaps, _cmd_test_run, _cmd_tests
+from cli_release_command import _cmd_release_guide, STAGES as RELEASE_STAGES
 
 def _cmd_checks(args) -> Result:
     """Syntax + pyflakes over the project. Read-only."""
@@ -1163,6 +1164,7 @@ _COMMANDS = {
     "observations": _cmd_observations,
     "doctor": _cmd_doctor,
     "scout": _cmd_scout,
+    "release-guide": _cmd_release_guide,
     "status": _cmd_status,
     "tests": _cmd_tests,
     "test-run": _cmd_test_run,
@@ -1262,6 +1264,14 @@ def _build_parser() -> argparse.ArgumentParser:
 
     add("scout", "refactor-scout findings from the tokensave index "
                  "(read-only, no LLM)")
+
+    rg = add("release-guide", "pre-flight, tag plan and post-build check for a tag-triggered "
+                              "release (reads origin; runs none of the planned commands)")
+    rg.add_argument("--stage", default="preflight", choices=list(RELEASE_STAGES),
+                    help="preflight: the checks; plan: + the exact commands; post: + the "
+                         "drafted release's files")
+    rg.add_argument("--tag", default="",
+                    help="the tag to judge; default v<version from the project's version file>")
 
     add("status", "one cheap roll-up: git, index, MCP, pending request "
                   "(read-only, never probes)")

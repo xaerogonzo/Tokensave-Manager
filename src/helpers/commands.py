@@ -142,6 +142,14 @@ COMMANDS: tuple = (
         detail="Refactor candidates from the tokensave index. No LLM.",
         side_effect=PURE_READ),
     Command(
+        action="release-guide", cli="release-guide", vscode="",
+        label="Release guide",
+        detail="Pre-flight, exact tag commands and post-build check for a tag-triggered release.",
+        # Reads git and GitHub and runs none of the commands it prints; `git fetch origin` refreshes
+        # remote-tracking refs, which is bookkeeping, not project state. No `vscode` id: running a
+        # step is the Wizard's Run button, behind a typed confirmation.
+        side_effect=OBSERVE_REFRESH),
+    Command(
         action="tests", cli="tests", vscode="tokensaveManager.tests",
         label="Tests",
         detail="What exists, what is uncovered, what looks stale.",

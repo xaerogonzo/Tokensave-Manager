@@ -882,10 +882,12 @@ class ReleaseWizardDialog(UiPumpMixin, tk.Toplevel):
         keeps that failure local. A check that could not run is a failure, not a pass: "could not
         verify" must not read as "verified".
         """
-        script = os.path.join(self._path, "scripts", "release_info.py")
-        if not os.path.isfile(script):
-            self._app._log("  (no scripts/release_info.py: not checking the tag against the version)",
-                           C["overlay0"])
+        # The helper lives in `scripts/` in some projects and `tools/` in others (OpenChem Studio).
+        script = next((p for p in (os.path.join(self._path, folder, "release_info.py")
+                                   for folder in ("scripts", "tools")) if os.path.isfile(p)), "")
+        if not script:
+            self._app._log("  (no scripts/release_info.py or tools/release_info.py: not checking the tag "
+                           "against the version)", C["overlay0"])
             return True
         self._set_status(f"Checking {ctx.tag} against the project version…", fg=C["peach"])
         out, rc = self._app._shell_capture(["python", script, "check-tag", ctx.tag], self._path)
@@ -898,7 +900,7 @@ class ReleaseWizardDialog(UiPumpMixin, tk.Toplevel):
         else:
             self._fail("Could not check the tag against the project version, so nothing was changed.\n\n"
                        f"{out.strip()[-300:]}\n\n"
-                       f"Run it yourself: python scripts/release_info.py check-tag {ctx.tag}")
+                       f"Run it yourself: python {os.path.relpath(script, self._path)} check-tag {ctx.tag}")
         return False
 
     def _pub_build(self, ctx: "_ReleaseCtx") -> bool:
