@@ -58,6 +58,7 @@ from helpers.git import _find_tracked_but_ignored, _is_git_repo, _is_local_git_r
 from helpers.index_provenance import begin_full_index, report_full_index
 from helpers.isolated_run import DRIVE_TITLE_SUFFIX, is_isolated
 from helpers.project_discovery import find_projects, get_pinned
+from helpers.missing_projects import remember as remember_projects, find_missing
 from helpers.source_watch import (
     changed_files,
     describe_changes,
@@ -638,6 +639,11 @@ class App(UiPumpMixin, tk.Tk):
 
     def refresh(self):
         self.projects = find_projects(self._cfg.search_roots)
+        # Remember what was listed so a repo that moves out of every search
+        # root shows up as "Not found" instead of silently disappearing.
+        if remember_projects(self._cfg.raw, self.projects):
+            self._cfg.save()
+        missing = find_missing(self._cfg.raw, self.projects)
         # The pin is read either way: `active_path` is what the Git tab opens
         # when nothing is selected, and that convenience is unrelated to MCP.
         # What IS gated is every visible claim about it.
@@ -649,7 +655,8 @@ class App(UiPumpMixin, tk.Tk):
         # starred row is what removes the ★ column entirely when nothing reads
         # the pin -- there is no setting for it to be showing.
         self._projects.rebuild_tree(
-            self.projects, self.active_path if pin_live else None, pinned)
+            self.projects, self.active_path if pin_live else None, pinned,
+            missing)
 
         self._update_active_badge(pin_live)
 

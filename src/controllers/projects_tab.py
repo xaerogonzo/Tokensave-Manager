@@ -36,6 +36,8 @@ from helpers.git import (
 from helpers.project_discovery import (
     fmt_age,
 )
+from controllers import missing_rows
+from helpers.missing_projects import forget as forget_project
 from helpers.project_sort import (
     DEFAULT_KEY as DEFAULT_SORT_KEY,
     SORTABLE,
@@ -429,7 +431,7 @@ class ProjectsTabController:
     # ── Tree population (called by App.refresh) ───────────────────────────────
 
     def rebuild_tree(self, projects: list, active_path: str | None,
-                     pinned: str | None) -> None:
+                     pinned: str | None, missing: list | None = None) -> None:
         """Clear and repopulate the Treeview from a fresh project list.
 
         Called by App.refresh() after it has computed projects / active_path.
@@ -437,7 +439,7 @@ class ProjectsTabController:
         """
         if self._tree is None:
             return
-        self._last_tree_args = (projects, active_path, pinned)
+        self._last_tree_args = (projects, active_path, pinned, missing)
         # The 60 s auto-refresh rebuilds the tree; keep what the user had selected.
         keep = [i for i in self._tree.selection() if i.startswith("proj:")]
         for item in self._tree.get_children():
@@ -500,9 +502,20 @@ class ProjectsTabController:
                                           "✔" if has_scaffold else "—"),
                                   tags=tags)
 
+        missing_rows.insert_missing(self._tree, missing or [])
         present = [i for i in keep if self._tree.exists(i)]
         if present:
             self._tree.selection_set(present)
+
+    def _show_missing_menu(self, event) -> None:
+        missing_rows.show_menu(self._tree, event, self._submenu(self._tree),
+                               self._on_settings, self._forget_missing)
+
+    def _forget_missing(self, paths: list) -> None:
+        for p in paths:
+            forget_project(self._cfg.raw, p)
+        self._cfg.save()
+        self._on_refresh()
 
     _HEADINGS = {"#0": "Project", "path": "Path", "synced": "Last Synced",
                  "cg": "CodeGraph", "git": "Git", "scaffold": "Scaffold"}
@@ -766,6 +779,7 @@ class ProjectsTabController:
         self._tree.tag_configure("git_mixed",   foreground=C["peach"])
         self._tree.tag_configure("git_pending", foreground=C["overlay0"])
         self._tree.tag_configure("git_none",    foreground=C["overlay0"])
+        self._tree.tag_configure("missing",     foreground=C["red"])
         self._tree.tag_configure("category",    foreground=C["blue"],
                                                font=("Segoe UI", 9, "bold"))
         self._tree.tag_configure("subcategory", foreground=C["lavender"])
@@ -935,6 +949,9 @@ class ProjectsTabController:
         # selection to one row, making multi-select unusable via the menu.
         if row not in self._tree.selection():
             self._tree.selection_set(row)
+        if row.startswith("missing:"):
+            self._show_missing_menu(event)
+            return
         if not row.startswith("proj:"):
             return
         paths = self.get_selected_paths()

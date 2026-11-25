@@ -91,7 +91,7 @@ Token Save Manager Source/
 │   │                              Runs beside a real Manager through scripts/drive/run_isolated.py
 │   │                              (scratch config, no lock, no request poller, no tray).
 │   │
-│   ├── helpers/                  167 modules of pure / IO helpers — no UI deps.
+│   ├── helpers/                  169 modules of pure / IO helpers — no UI deps.
 │   │   ├── config.py              _load_config, _save_config, _migrate_config
 │   │   ├── detection.py           _detect_git/_gh/_npm/_codegraph/_claude_cli,
 │   │   │                          _root_path/_label, _version_lt
@@ -104,6 +104,7 @@ Token Save Manager Source/
 │   │   │                          and no defects are the same empty list otherwise.
 │   │   ├── project_discovery.py   find_projects(roots), get/set/clear_pinned, fmt_age
 │   │   ├── project_sort.py        sort_projects / next_direction -- Projects-tab header-click order
+│   │   ├── missing_projects.py    remember / find_missing / forget -- the "Not found" memory (known_projects)
 │   │   ├── git.py                 _is_git_repo, _parse_git_status_v2, _format_git_status_cell,
 │   │   │                          _find_tracked_but_ignored, _fetch_tags, _git_tag, _git_push_with_tags
 │   │   ├── gitignore.py           _ensure_gitignore, _read/_write_gitignore_lines,
@@ -1017,6 +1018,7 @@ Token Save Manager Source/
 │       ├── orchestration_ctrl.py  AgentTasksPanel — the "Agent tasks" view: list, start, cancel,
 │       │                          accept / reject (merges nothing), discard copy (branch kept)
 │       ├── command_bar_ctrl.py    CommandBarCtrl sub-controller.
+│       ├── missing_rows.py        Projects-tab "Not found" group: rows + right-click menu
 │       ├── project_sync_ctrl.py   ProjectSyncCtrl sub-controller.
 │       ├── pr_draft_ctrl.py       PRDraftCtrl sub-controller — PR body generation and
 │       │                          the base-branch override.
@@ -1282,7 +1284,7 @@ app.py
   ├── theme.py           — _Tooltip
   ├── helpers/*          — pure / IO helpers (no UI)
   ├── dialogs/*          — 62 tk.Toplevel / panel modules
-  └── controllers/*      — 30 tab and sub-controllers
+  └── controllers/*      — 31 tab and sub-controllers
         └── controllers/* each import the dialogs they instantiate
             (lazy in-handler imports for any cross-dialog cycle risk —
              see Rule 6 in CHANGELOG Round 4 Phase C decisions).
