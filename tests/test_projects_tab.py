@@ -661,8 +661,8 @@ class TestColumnLegibility:
 
     def test_cg_column_is_not_a_two_letter_mystery(self):
         src = self._source()
-        assert 'text="CodeGraph"' in src
-        assert 'text="CG"' not in src
+        assert '"cg": "CodeGraph"' in src     # the _HEADINGS label table
+        assert '"CG"' not in src
 
     def test_the_retrofit_button_says_what_it_does(self):
         src = self._source()
@@ -941,3 +941,29 @@ class TestBindToggle:
         ctrl._sync_bind_label(str(tmp_path))
 
         assert seen["label"] == _BIND_OFF_LABEL
+
+
+class TestNotFoundGroup:
+    """A project that left every search root is shown, never silently dropped."""
+
+    def test_missing_rows_are_shown_and_are_not_projects(self, controller):
+        proj = {"path": "D:/r/a", "name": "a", "mtime": 1, "root_label": "R",
+                "has_tokensave": True, "has_git": False, "has_codegraph": False}
+        missing = [{"path": "C:/moved/b", "name": "b", "reason": "gone"}]
+        controller.rebuild_tree([proj], None, None, missing)
+        tree = controller._tree
+        assert tree.exists("missing:C:/moved/b")
+        assert "gone" in tree.set("missing:C:/moved/b", "path")
+        tree.selection_set("missing:C:/moved/b")
+        assert controller.get_selected_paths() == []
+
+    def test_group_disappears_when_nothing_is_missing(self, controller):
+        controller.rebuild_tree([], None, None, [{"path": "x", "name": "x", "reason": "r"}])
+        controller.rebuild_tree([], None, None, [])
+        assert not controller._tree.exists("cat:__missing__")
+
+    def test_forget_removes_the_memory_and_refreshes(self, controller, mock_config):
+        from helpers.mcp_projects import normalize_project_key as nk
+        mock_config.raw["known_projects"] = {nk("C:/moved/b"): {"path": "C:/moved/b"}}
+        controller._forget_missing(["C:/moved/b"])
+        assert mock_config.raw["known_projects"] == {}

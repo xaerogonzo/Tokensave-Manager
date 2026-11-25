@@ -1,0 +1,2 @@
+### Fixed
+- (projects) **A repo moved out of every search root no longer vanishes.** The Manager now remembers the projects it has listed (`known_projects` in `manager-config.json`) and shows the ones it no longer finds under a "⚠ Not found" group, saying whether the folder is gone, its drive is unavailable, or it exists outside every search root. Right-click offers "Add a search root… (Settings)" and "Forget". Nothing is forgotten automatically, so an unplugged drive loses nothing.

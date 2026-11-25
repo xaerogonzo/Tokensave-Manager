@@ -109,6 +109,7 @@ def find_projects(roots: list) -> list:
                 "db":            db,
                 "mtime":         mtime,
                 "root_label":    rlabel,
+                "root":          rpath,
                 "has_tokensave": has_ts,
                 "has_git":       has_git,
                 "has_codegraph": has_cg,

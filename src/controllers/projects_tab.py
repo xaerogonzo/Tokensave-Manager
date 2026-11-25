@@ -36,6 +36,14 @@ from helpers.git import (
 from helpers.project_discovery import (
     fmt_age,
 )
+from controllers import missing_rows
+from helpers.missing_projects import forget as forget_project
+from helpers.project_sort import (
+    DEFAULT_KEY as DEFAULT_SORT_KEY,
+    SORTABLE,
+    next_direction,
+    sort_projects,
+)
 from controllers import handoff_project_ctrl as handoff_ctrl
 from controllers.codegraph_ctrl import CodeGraphController
 from controllers.pyscope_ctrl import PyScopeController
@@ -207,6 +215,11 @@ class ProjectsTabController:
         self._git_status_refresh_running: bool = False  # kept for compat
 
         self._tree: ttk.Treeview | None = None
+        # Header-click sort, applied inside each category group. Session
+        # state only: rebuild_tree runs every refresh, so it lives here.
+        self._sort_key = DEFAULT_SORT_KEY
+        self._sort_desc = False
+        self._last_tree_args: tuple | None = None
         self._ctx_menu: tk.Menu | None = None
         self._tab = tk.Frame(notebook, bg=C["base"])
         notebook.add(self._tab, text="  Projects  ")
@@ -418,7 +431,7 @@ class ProjectsTabController:
     # ── Tree population (called by App.refresh) ───────────────────────────────
 
     def rebuild_tree(self, projects: list, active_path: str | None,
-                     pinned: str | None) -> None:
+                     pinned: str | None, missing: list | None = None) -> None:
         """Clear and repopulate the Treeview from a fresh project list.
 
         Called by App.refresh() after it has computed projects / active_path.
@@ -426,6 +439,9 @@ class ProjectsTabController:
         """
         if self._tree is None:
             return
+        self._last_tree_args = (projects, active_path, pinned, missing)
+        # The 60 s auto-refresh rebuilds the tree; keep what the user had selected.
+        keep = [i for i in self._tree.selection() if i.startswith("proj:")]
         for item in self._tree.get_children():
             self._tree.delete(item)
 
@@ -455,7 +471,8 @@ class ProjectsTabController:
                                       open=True, tags=("subcategory",))
                 parent = siid
 
-            for p in projs:
+            for p in sort_projects(projs, self._sort_key, self._sort_desc,
+                                   self._has_scaffold):
                 is_active    = (p["path"] == active_path)
                 has_scaffold = self._has_scaffold(p["path"])
                 has_ts       = p.get("has_tokensave", True)
@@ -484,6 +501,40 @@ class ProjectsTabController:
                                           git_text,
                                           "✔" if has_scaffold else "—"),
                                   tags=tags)
+
+        missing_rows.insert_missing(self._tree, missing or [])
+        present = [i for i in keep if self._tree.exists(i)]
+        if present:
+            self._tree.selection_set(present)
+
+    def _show_missing_menu(self, event) -> None:
+        missing_rows.show_menu(self._tree, event, self._submenu(self._tree),
+                               self._on_settings, self._forget_missing)
+
+    def _forget_missing(self, paths: list) -> None:
+        for p in paths:
+            forget_project(self._cfg.raw, p)
+        self._cfg.save()
+        self._on_refresh()
+
+    _HEADINGS = {"#0": "Project", "path": "Path", "synced": "Last Synced",
+                 "cg": "CodeGraph", "git": "Git", "scaffold": "Scaffold"}
+
+    def _refresh_headings(self) -> None:
+        """(Re)label the sortable headings; the active one carries ▲ / ▼."""
+        for col, label in self._HEADINGS.items():
+            if SORTABLE[col] == self._sort_key:
+                label += " ▼" if self._sort_desc else " ▲"
+            self._tree.heading(col, text=label,
+                               command=lambda c=col: self._sort_by(c))
+
+    def _sort_by(self, col: str) -> None:
+        """Header click: sort by that column, or flip it if already active."""
+        self._sort_key, self._sort_desc = next_direction(
+            self._sort_key, self._sort_desc, SORTABLE[col])
+        self._refresh_headings()
+        if self._last_tree_args is not None:
+            self.rebuild_tree(*self._last_tree_args)
 
     def refresh_git_status_column(self, projects: list) -> None:
         """Delegate to ProjectSyncCtrl (Phase C3 extraction)."""
@@ -700,13 +751,8 @@ class ProjectsTabController:
         # behaviour is unchanged for every command that needs one path.
         selectmode="extended",
         )
-        self._tree.heading("#0",       text="Project")
-        self._tree.heading("active",   text="")
-        self._tree.heading("path",     text="Path")
-        self._tree.heading("synced",   text="Last Synced")
-        self._tree.heading("cg",       text="CodeGraph")
-        self._tree.heading("git",      text="Git")
-        self._tree.heading("scaffold", text="Scaffold")
+        self._tree.heading("active", text="")
+        self._refresh_headings()
 
         self._tree.column("#0",       width=170, stretch=False)
         self._tree.column("active",   width=28,  stretch=False, anchor=tk.CENTER)
@@ -733,6 +779,7 @@ class ProjectsTabController:
         self._tree.tag_configure("git_mixed",   foreground=C["peach"])
         self._tree.tag_configure("git_pending", foreground=C["overlay0"])
         self._tree.tag_configure("git_none",    foreground=C["overlay0"])
+        self._tree.tag_configure("missing",     foreground=C["red"])
         self._tree.tag_configure("category",    foreground=C["blue"],
                                                font=("Segoe UI", 9, "bold"))
         self._tree.tag_configure("subcategory", foreground=C["lavender"])
@@ -902,6 +949,9 @@ class ProjectsTabController:
         # selection to one row, making multi-select unusable via the menu.
         if row not in self._tree.selection():
             self._tree.selection_set(row)
+        if row.startswith("missing:"):
+            self._show_missing_menu(event)
+            return
         if not row.startswith("proj:"):
             return
         paths = self.get_selected_paths()
