@@ -661,8 +661,8 @@ class TestColumnLegibility:
 
     def test_cg_column_is_not_a_two_letter_mystery(self):
         src = self._source()
-        assert 'text="CodeGraph"' in src
-        assert 'text="CG"' not in src
+        assert '"cg": "CodeGraph"' in src     # the _HEADINGS label table
+        assert '"CG"' not in src
 
     def test_the_retrofit_button_says_what_it_does(self):
         src = self._source()

@@ -103,6 +103,7 @@ Token Save Manager Source/
 │   │   │                          findings WITH the population measured — no widgets
 │   │   │                          and no defects are the same empty list otherwise.
 │   │   ├── project_discovery.py   find_projects(roots), get/set/clear_pinned, fmt_age
+│   │   ├── project_sort.py        sort_projects / next_direction -- Projects-tab header-click order
 │   │   ├── git.py                 _is_git_repo, _parse_git_status_v2, _format_git_status_cell,
 │   │   │                          _find_tracked_but_ignored, _fetch_tags, _git_tag, _git_push_with_tags
 │   │   ├── gitignore.py           _ensure_gitignore, _read/_write_gitignore_lines,
